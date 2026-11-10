@@ -11,12 +11,17 @@
 # The message guards (MESSAGES, NET_GUARDS) keep a list in a message inside the buffer its handler has for it.
 # Every site and cave carries a group; the mod writes the groups its build has switched on:
 #   0 counts, 1 guards, 2 message guards (always); 3 only in a build for eight players (EIGHT_SITES, EIGHT_CAVES);
-#   4 only with the test option that hands out slots and indexes from a later number (TEST_CAVES).
+#   4 only with the test option that hands out slots and indexes from a later number (TEST_CAVES);
+#   5 only for eight players: the loadout screen with eight records and cards (sites/loadout_sites.py);
+#   6 only for four players: the loadout screen's guards that group 5 replaces (loadout_sites.MOD_OFF);
+#   7 only for eight players: the bounds of the per-peer loadout table, which the mod moves to room for eight first.
 # An instruction of a moved array carries a distance the session step rewrites; those four bytes are not compared.
 import os, re, struct, subprocess, sys, tempfile
 
-G_COUNT, G_GUARD, G_NET, G_EIGHT, G_TEST = range(5)
+G_COUNT, G_GUARD, G_NET, G_EIGHT, G_TEST, G_LOADOUT, G_GUARD4, G_SYNCED = range(8)
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE + '/sites')
+import loadout_sites
 dump = open(sys.argv[1], 'rb').read()
 out = sys.argv[2] if len(sys.argv) > 2 else HERE + '/../src/co_count_sites.h'
 
@@ -278,11 +283,17 @@ MIRROR_CAPS = [
 ]
 # With the cave above: the friends post takes numLobbyMembers from the members, no longer from the entries.
 RECORD_SITES = [(0x12CB379, '44 8b 87 d0 05 00 00', '44 8b 87 48 03 00 00')]
-for group, rows in ((G_GUARD, GUARD_SITES), (G_EIGHT, EIGHT_SITES), (G_COUNT, MIRROR_CAPS), (G_COUNT, RECORD_SITES)):
+# The loadout screen for eight: its sites and caves, and the guards of the build for four they replace.
+LOADOUT_SITES, LOADOUT_CAVES = loadout_sites.build(dump)
+OFF = set(loadout_sites.MOD_OFF)
+assert OFF <= {rva for rva, _, _ in GUARD_SITES} | {rva for rva, _, _ in GUARDS}
+rows_by_group = ((G_GUARD, GUARD_SITES), (G_EIGHT, EIGHT_SITES), (G_COUNT, MIRROR_CAPS), (G_COUNT, RECORD_SITES),
+                 (G_LOADOUT, [(r, o, n) for r, o, n, _ in LOADOUT_SITES]), (G_SYNCED, [(r, o, n) for r, o, n, _ in loadout_sites.SYNCED_SITES]))
+for group, rows in rows_by_group:
     for rva, old, new in rows:
         old = bytes.fromhex(old); new = bytes.fromhex(new)
-        assert len(old) == len(new) <= 12 and dump[rva:rva + len(old)] == old and skip_of(rva, len(old)) == 0xFF, hex(rva)
-        sites.append((rva, old, new, 0xFF, group))
+        assert len(old) == len(new) <= 16 and dump[rva:rva + len(old)] == old and skip_of(rva, len(old)) == 0xFF, hex(rva)
+        sites.append((rva, old, new, 0xFF, G_GUARD4 if group == G_GUARD and rva in OFF else group))
 
 # Message guards. A handler copies each list of a message into a fixed buffer on its stack and trusts the count
 # from the wire, which can be higher than the buffer (and is, once a session has more than four peers). A cave at
@@ -327,8 +338,10 @@ TEST_CAVES = [
 ]
 # Only in a build for eight players: a friend's lobby shows eight places. edx stays four, the record's inline members.
 EIGHT_CAVES = [(0x103D11D, 'ba 04 00 00 00 41 89 96 4c 03 00 00', 'mov edx, 4\n mov dword ptr [r14+0x34c], 8\n jmp game+0x103D129')]
-cave_groups = [G_COUNT] * len(CAVES) + [G_GUARD] * len(GUARDS) + [G_NET] * len(NET_GUARDS) + [G_EIGHT] * len(EIGHT_CAVES) + [G_TEST] * len(TEST_CAVES)
-CAVES += GUARDS + NET_GUARDS + EIGHT_CAVES + TEST_CAVES
+LOADOUT_CAVES = [(rva, replaced, text) for rva, replaced, text, _ in LOADOUT_CAVES]
+cave_groups = ([G_COUNT] * len(CAVES) + [G_GUARD4 if rva in OFF else G_GUARD for rva, _, _ in GUARDS] + [G_NET] * len(NET_GUARDS) +
+               [G_EIGHT] * len(EIGHT_CAVES) + [G_TEST] * len(TEST_CAVES) + [G_LOADOUT] * len(LOADOUT_CAVES))
+CAVES += GUARDS + NET_GUARDS + EIGHT_CAVES + TEST_CAVES + LOADOUT_CAVES
 # In place, with the cave above: the first loop's count is a copy of that constant.
 sites.append((0x108D2DD, bytes.fromhex('8b ef 90'), bytes.fromhex('8d 6f 04'), 0xFF, G_COUNT))
 assert dump[0x108D2DD:0x108D2E0] == bytes.fromhex('8b ef 90')
@@ -348,11 +361,14 @@ taken = [(rva, rva + size) for rva, size in stubs]
 taken += [(rva + at, rva + at + 4) for rva, at in rows('co_session_sites.h') if (rva, at) not in stubs]
 taken += [(rva + at, rva + at + 4) for rva, at in rows('co_manager_sites.h') + rows('co_pod_sites.h')]
 assert len(taken) > 1400
-own = [(rva, rva + len(old), skip != 0xFF) for rva, old, _, skip, _ in sites] + [(rva, rva + 8, True) for rva, _, _ in CLEARS]
-own += [(rva, rva + len(bytes.fromhex(replaced)), False) for rva, replaced, _ in CAVES]
+# The build for four leaves out groups 5 and 7, the build for eight group 6: they may share bytes, a build may not.
+own = [(rva, rva + len(old), skip != 0xFF, group) for rva, old, _, skip, group in sites] + [(rva, rva + 8, True, G_COUNT) for rva, _, _ in CLEARS]
+own += [(rva, rva + len(bytes.fromhex(replaced)), False, group) for (rva, replaced, _), group in zip(CAVES, cave_groups)]
 own.sort()
-for (a, b, _), (c, _, _) in zip(own, own[1:]): assert b <= c, (hex(a), hex(c))
-for a, b, shared in own:
+for left_out in ((G_LOADOUT, G_SYNCED), (G_GUARD4,)):
+    build = [o for o in own if o[3] not in left_out]
+    for (a, b, _, _), (c, _, _, _) in zip(build, build[1:]): assert b <= c, (hex(a), hex(c))
+for a, b, shared, _ in own:
     if not shared: assert all(b <= c or d <= a for c, d in taken), hex(a)
 
 def assemble(text, game):
@@ -387,7 +403,7 @@ for rva, replaced, text in CAVES:
     code = bytearray(a)
     for at in jumps: struct.pack_into('<i', code, at, struct.unpack_from('<i', a, at)[0] - 0x10000000)
     calls = []
-    for m in re.finditer(rb'(.)\x00\x00\x00\xde\xc0\x00\x00', bytes(code)):
+    for m in re.finditer(rb'(.)\x00\x00\x00\xde\xc0\x00\x00', bytes(code), re.S):
         if m.start() % 8 == 0: calls.append((m.start(), m.group(1)[0]))
     assert len(calls) == len(re.findall(r'CALL\(', text)), hex(rva)
     caves.append((rva, replaced, bytes(code), jumps, calls))
@@ -415,8 +431,16 @@ for _, _, _, _, shape in MESSAGES:
     assert len(shape) < SHAPE_ROOM and all(0 <= n < 0xFF for n in shape)
     h.append('    {%s},\n' % ', '.join(str(n) for n in shape + [0xFF]))
 h.append('};\nstatic const uint32_t kCoMessageHandlers[] = {%s};\n' % ', '.join('0x%Xu' % m[0] for m in MESSAGES))
+# The per-peer loadout table the mod moves before group 7 is written (loadout_sites.SYNCED_MOVE).
+m = loadout_sites.SYNCED_MOVE
+assert m['new_size'] == 2 * m['old_size'] == 8 * m['entry'] and len(m['registry_lists']) == 3
+h.append('#define CO_SYNCED_POINTER 0x%Xu\n#define CO_SYNCED_ENGINE 0x%Xu\n#define CO_SYNCED_MEMBER 0x%Xu\n#define CO_SYNCED_REGISTRY 0x%Xu\n'
+         % (m['pointer'], m['engine'], m['member'], m['registry']))
+h.append('#define CO_SYNCED_TYPE 0x%Xu\n#define CO_SYNCED_OLD_SIZE 0x%Xu\n#define CO_SYNCED_NEW_SIZE 0x%Xu\n' % (m['registry_type'], m['old_size'], m['new_size']))
+h.append('static const uint32_t kCoSyncedLists[] = {%s};\n' % ', '.join('0x%Xu' % x for x in m['registry_lists']))
 assert len(cave_groups) == len(caves) == len(CAVES)
 open(out, 'w').writelines(h)
 print('%d sites, %d clears, %d caves (%d bytes)' % (len(sites), len(CLEARS), len(caves), len(blob)))
-for group, name in enumerate(('counts', 'guards', 'message guards', 'eight players only', 'test option only')):
+for group, name in enumerate(('counts', 'guards', 'message guards', 'eight players only', 'test option only', 'loadout (eight only)',
+                               'guards (four only)', 'loadout table (eight)')):
     print('  %-20s %3d sites, %2d caves' % (name, sum(s[4] == group for s in sites), cave_groups.count(group)))

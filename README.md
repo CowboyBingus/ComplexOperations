@@ -45,7 +45,8 @@ Other tables of the game stay at four entries and are indexed by a player index 
 galactic map's cursors, the game state's player rows, the loadout screen's cards, the score slots and the mission
 summary's rows. 70 guards cover the accesses to them: an index of four or more skips the access, and for 0 to 3 nothing
 changes. 61 guards are code beside the game's; 9 are a compare changed in place. The guards go in and out together
-with the counts.
+with the counts. A build for eight keeps 51 of them; the loadout screen's 19 make way for its eight cards (see Loadout
+screen).
 
 Some message handlers copy a list from the wire into a buffer of fixed size and trust the count. Nine guards keep
 such lists inside their buffers: the handler ignores a message whose list is too long, and two senders stop at what
@@ -57,7 +58,7 @@ makes the SOS beacon count to eight. Its lobby takes eight too (see Lobby).
 Limits that remain:
 
 - The hostability scores stay at four entries. Their message carries five at most, so peers 5 to 8 get no score.
-- A guarded table has no entry for players 5 to 8: no map cursor, no loadout card, no row in the mission summary.
+- A guarded table has no entry for players 5 to 8: no map cursor, no row in the mission summary.
 
 ## Lobby
 
@@ -83,6 +84,26 @@ Limits that remain:
 - A lobby's entry in a message to other players lists four members at most.
 - A friend's full lobby without the mod shows four of eight places; Steam refuses the join.
 - Joining another lobby with the squad takes only the players in host slots 0 to 3 along; slots 4 to 7 stay behind.
+
+## Loadout screen
+
+The loadout screen keeps four arrays by player or card: the players' records, a map from player to card, its reverse
+and the cards. A build for eight allocates the screen bigger and moves the four arrays to arrays of eight at its end.
+430 code sites address the new places or count to eight; 41 more go through code beside the game's. Among those are
+15 guards rebuilt for eight: an index of eight or more, or none, skips the access as before.
+
+The engine keeps one more loadout table, outside the screen: one entry for each peer, four of them. The build for
+eight moves it to the mod's memory with room for eight, when it writes its count sites. The four entries go along,
+and the game's pointer and its three registry entries lead to the new place. Then 11 sites let the table's searches
+and its clear count to eight. When the table is not where the game keeps it, the counts stay at four.
+
+A build for four leaves the screen and the table as the game has them and keeps the screen's 19 guards.
+
+Limits that remain:
+
+- Cards 5 to 8 show no 3D figure: the preview's figure slots stay at four.
+- The eight cards are spread evenly at the width of four, so they probably overlap.
+- The cards' width comes from the game's data, not from code the mod changes.
 
 ## Engine
 
@@ -166,8 +187,9 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `src/co_counts.c` | The session lists' counts: sites, code caves, the hooks for entries 4 to 7. The guards too. |
 | `src/co_count_sites.h` | Their code sites and the caves' code. Generated; do not edit. |
 | `scripts/sites/count_sites.tsv` | The reviewed count sites: one row for each instruction. |
+| `scripts/sites/loadout_sites.py` | The loadout screen's sites and caves for eight, and the per-peer loadout table's move and bounds. |
 | `scripts/gen_count_sites.py` | Writes `co_count_sites.h`; assembles the caves with GNU `as`. Holds the guards, the member lists' caps and the lobby's size. |
-| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. |
+| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. |
 | `tests/engine_test.c` | The engine's sites: written, refused on changed code, taken back on a failed write. |
 | `tests/harness/` | The stand-in loader and game image the tests run against. |
 
@@ -177,6 +199,8 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
   game as it is.
 - Rows for the new pods are added only when the level's four units carry their pod names.
 - A write that fails part-way sets every site written before it back to the game's bytes.
+- The per-peer loadout table moves only when the game's pointer and registry lead to the game's own place for it. Its
+  bounds go back before it does.
 - A failed step is logged in plain words, for example "four pods as before".
 
 ## Log
@@ -194,6 +218,9 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `a message with a list of ... entries was ignored` | A peer sent a longer list than the handler holds; once a handler. |
 | `player indexes 4 to 7 are valid` | A build for eight players: the lobby takes eight too. |
 | `the lobby search lists lobbies with up to 7 members` | A build for eight players: the search's site is in place. |
+| `the loadout screen has eight records and cards` | A build for eight players: the loadout screen's arrays moved. |
+| `the per-peer loadout table moved to room for eight peers` | A build for eight players: that table is in the mod's memory. |
+| `the per-peer loadout table is not where the game keeps it` | Something else moved or changed it: the counts stay at four. |
 | `TEST BUILD, not for play` | Built with `--test-first-slot`. |
 | `the session lists count to four as before` | The count change is off; the reason stands before it. |
 | `the bridge is not the one with the eight-pod bay` | The level data is missing: four pods. |

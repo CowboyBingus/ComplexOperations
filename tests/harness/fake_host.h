@@ -6,6 +6,14 @@
 
 #define FAKE_IMAGE_SIZE 0x3500000u
 #define FAKE_HOOKS 16
+/* The engine's per-peer loadout table (four entries of 0x9F8, 8 modulo 16 as in the game) and the registry that lists
+ * it, at free places in the image. The globals that lead to them are set as the game sets them at startup. */
+#define FAKE_SYNCED_TABLE 0x3490008u
+#define FAKE_REGISTRY 0x34A0000u
+#define FAKE_SYNCED_POINTER 0x346D5F0u
+#define FAKE_ENGINE_GLOBAL 0x3326340u
+#define FAKE_REGISTRY_GLOBAL 0x3326E68u
+#define FAKE_SYNCED_IN_ENGINE 0x710B428u
 
 typedef struct FakeHost
 {

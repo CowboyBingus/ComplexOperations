@@ -9,7 +9,7 @@
 
 #include "co.h"
 
-typedef struct CoCountSite { uint32_t rva; uint8_t size, skip, group; uint8_t old[12], now[12]; } CoCountSite;
+typedef struct CoCountSite { uint32_t rva; uint8_t size, skip, group; uint8_t old[16], now[16]; } CoCountSite;
 typedef struct CoCountClear { uint32_t rva; uint8_t mov, land; } CoCountClear;
 typedef struct CoCountCave
 {
@@ -30,8 +30,10 @@ typedef struct CoRegs { uint64_t r15, r14, r13, r12, r11, r10, r9, r8, rdi, rsi,
 #define CO_CAVE_ROOM 0x2000u
 _Static_assert(sizeof kCoCountCode <= CO_CAVE_ROOM, "the caves' code must fit their room");
 /* A site's or cave's group. Guards go in and out with the counts: a table that stays at four entries is safe only
- * while every access to it is guarded. The last two depend on the build. */
-enum { CO_G_COUNT, CO_G_GUARD, CO_G_NET, CO_G_EIGHT, CO_G_TEST };
+ * while every access to it is guarded. The rest depend on the build. The loadout screen's eight records and cards
+ * (CO_G_LOADOUT) replace the guards that keep a player index above 3 off its four-entry arrays (CO_G_GUARD4). The
+ * per-peer loadout table's bounds (CO_G_SYNCED) are safe only while the table is in the mod's room for eight. */
+enum { CO_G_COUNT, CO_G_GUARD, CO_G_NET, CO_G_EIGHT, CO_G_TEST, CO_G_LOADOUT, CO_G_GUARD4, CO_G_SYNCED };
 /* Test builds only (--test-first-slot): the host gives joining peers slots and player indexes from this number on,
  * so that two game instances reach the code for players 5 to 8. Zero is off. */
 #ifndef CO_TEST_FIRST_SLOT
@@ -61,10 +63,12 @@ static PeerGoneFn g_peerGone;
 static uintptr_t g_game, g_context, g_extension, g_caves;
 static int g_on, g_hooks = -1;
 static uint32_t g_ignored;        /* a bit for each message shape that was logged as ignored */
+static uintptr_t g_syncedOld, g_syncedNew, g_syncedBlock;
 
 static int Active(uint8_t group)
 {
-    return group <= CO_G_NET || (group == CO_G_EIGHT && CO_PLAYERS == 8) || (group == CO_G_TEST && CO_TEST_FIRST_SLOT != 0);
+    return group <= CO_G_NET || ((group == CO_G_EIGHT || group == CO_G_LOADOUT || group == CO_G_SYNCED) && CO_PLAYERS == 8) ||
+           (group == CO_G_GUARD4 && CO_PLAYERS == 4) || (group == CO_G_TEST && CO_TEST_FIRST_SLOT != 0);
 }
 
 static uint64_t* Slot(uintptr_t sync, uint32_t slot) { return (uint64_t*)(sync + 0x20u + slot * CO_SLOT); }
@@ -220,7 +224,7 @@ static uint64_t PeerGoneDetour(uintptr_t sync, uint64_t key, uint64_t a3, uint64
 /* A site's bytes as the game has them now: the reviewed ones, but for the distance the session step wrote. */
 static int SiteMatches(const CoCountSite* s)
 {
-    uint8_t bytes[12];
+    uint8_t bytes[16];
     if (g_coApi->read(g_game + s->rva, bytes, s->size) != 0) return 0;
     for (uint8_t i = 0; i < s->size; i++)
         if (!(s->skip != 0xFF && i >= s->skip && i < s->skip + 4) && bytes[i] != s->old[i]) return 0;
@@ -274,12 +278,98 @@ static unsigned InGroup(uint8_t group, unsigned* caves)
     return sites + found;
 }
 
-/* The session step undoes its sites by writing distances back; this goes first, so they are where it expects them. */
+/* The engine's per-peer loadout table: four entries of 0x9F8 (a record, the peer's id behind it) inline in the engine
+ * object, so it cannot grow where it is. The game reaches it by one pointer and three registry entries, all set at
+ * startup before the first apply; this gives them a block of eight entries with the four copied, at the old address's
+ * place modulo 16. They are written through the API so that taking the mod out puts them back with the sites. */
+typedef struct CoRegistryEntry { uint64_t at; uint32_t type, pad; } CoRegistryEntry;
+_Static_assert(sizeof(CoRegistryEntry) == 16, "a registry entry is 16 bytes");
+#define CO_REGISTRY_ROOM 0x51Bu   /* entries the largest list has room for; a higher count is not the reviewed registry */
+
+/* The registry entries of the table at `table`: one in each list, or 0. */
+static int FindEntries(uintptr_t table, uintptr_t entries[3])
+{
+    uintptr_t registry = 0;
+    if (g_coApi->read(g_game + CO_SYNCED_REGISTRY, &registry, sizeof registry) != 0 || registry == 0) return 0;
+    for (size_t list = 0; list < 3; list++)
+    {
+        uint32_t count = 0;
+        entries[list] = 0;
+        if (g_coApi->read(registry + kCoSyncedLists[list], &count, 4) != 0 || count > CO_REGISTRY_ROOM) return 0;
+        for (uint32_t i = 0; i < count; i++)
+        {
+            CoRegistryEntry entry;
+            const uintptr_t at = registry + kCoSyncedLists[list] + 8u + i * (uintptr_t)sizeof entry;
+            if (g_coApi->read(at, &entry, sizeof entry) != 0) return 0;
+            if (entry.at != table || entry.type != CO_SYNCED_TYPE) continue;
+            if (entries[list] != 0) return 0;
+            entries[list] = at;
+        }
+        if (entries[list] == 0) return 0;
+    }
+    return 1;
+}
+
+/* The pointer and the registry entries lead from `from` to `to`; a failed write puts back the ones before it. */
+static int Repoint(uintptr_t from, uintptr_t to, const uintptr_t entries[3])
+{
+    const uint64_t old = from, now = to;
+    if (g_coApi->write(g_game + CO_SYNCED_POINTER, &now, 8) != 0) return 0;
+    for (size_t i = 0; i < 3; i++)
+        if (g_coApi->write(entries[i], &now, 8) != 0)
+        {
+            while (i--) g_coApi->write(entries[i], &old, 8);
+            g_coApi->write(g_game + CO_SYNCED_POINTER, &old, 8);
+            return 0;
+        }
+    return 1;
+}
+
+static int SyncedMove(void)
+{
+    uintptr_t table = 0, engine = 0, entries[3];
+    if (g_coApi->read(g_game + CO_SYNCED_POINTER, &table, sizeof table) != 0 || g_coApi->read(g_game + CO_SYNCED_ENGINE, &engine, sizeof engine) != 0 ||
+        table == 0 || engine == 0 || table != engine + CO_SYNCED_MEMBER || !FindEntries(table, entries))
+    { co_log("players: the per-peer loadout table is not where the game keeps it"); return 0; }
+    g_syncedBlock = (uintptr_t)VirtualAlloc(NULL, CO_SYNCED_NEW_SIZE + 16u, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (g_syncedBlock == 0) { co_log("players: no memory for the per-peer loadout table"); return 0; }
+    g_syncedNew = g_syncedBlock + (table & 15u);
+    if (g_coApi->read(table, (void*)g_syncedNew, CO_SYNCED_OLD_SIZE) != 0 || !Repoint(table, g_syncedNew, entries))
+    {
+        VirtualFree((void*)g_syncedBlock, 0, MEM_RELEASE);
+        g_syncedBlock = g_syncedNew = 0;
+        co_log("players: the per-peer loadout table could not be moved");
+        return 0;
+    }
+    g_syncedOld = table;
+    return 1;
+}
+
+/* Entries 0 to 3 go back to the game's table; a pointer or entry that no longer leads to the mod's block is left. */
+static void SyncedBack(void)
+{
+    uintptr_t table = 0, entries[3];
+    const uint64_t old = g_syncedOld;
+    if (g_syncedBlock == 0) return;
+    if (g_coApi->read(g_game + CO_SYNCED_POINTER, &table, sizeof table) == 0 && table == g_syncedNew)
+    {
+        memcpy((void*)g_syncedOld, (const void*)g_syncedNew, CO_SYNCED_OLD_SIZE);
+        g_coApi->write(g_game + CO_SYNCED_POINTER, &old, 8);
+    }
+    if (FindEntries(g_syncedNew, entries))
+        for (size_t i = 0; i < 3; i++) g_coApi->write(entries[i], &old, 8);
+    VirtualFree((void*)g_syncedBlock, 0, MEM_RELEASE);
+    g_syncedBlock = g_syncedNew = g_syncedOld = 0;
+}
+
+/* The session step undoes its sites by writing distances back; this goes first, so they are where it expects them.
+ * The table goes back behind the sites that bound it. */
 void co_counts_undo(void)
 {
     if (!g_on) return;
     g_on = 0;
     Back(CO_COUNT_SITES, CO_COUNT_CLEARS, CO_COUNT_CAVES);
+    SyncedBack();
     if (g_caves) VirtualFree((void*)g_caves, 0, MEM_RELEASE);
     g_caves = 0;
 }
@@ -327,6 +417,9 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
     DWORD before;
     if (!VirtualProtect((void*)g_caves, CO_CAVE_ROOM, PAGE_EXECUTE_READ, &before))
     { VirtualFree((void*)g_caves, 0, MEM_RELEASE); g_caves = 0; co_log("session: the caves could not be made executable; %s", kStays); return; }
+    /* The table moves before any site bounds it by eight. */
+    if (Active(CO_G_SYNCED) && !SyncedMove())
+    { VirtualFree((void*)g_caves, 0, MEM_RELEASE); g_caves = 0; co_log("session: %s", kStays); return; }
     g_context = context;
     g_extension = extension;
     /* The game cannot run on a mix: whatever is written goes back when one write fails. */
@@ -354,14 +447,20 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
         const unsigned counts = InGroup(CO_G_COUNT, &caves) + (unsigned)CO_COUNT_CLEARS;
         co_log("session: the session lists count to eight (%u code sites changed, %u through caves); a session %s %u players",
                counts, caves, CO_PLAYERS == 8 ? "takes" : "still takes", CO_JOIN_LIMIT);
-        co_log("players: %u accesses to four-entry tables of the game skip a player index above 3", InGroup(CO_G_GUARD, NULL));
+        co_log("players: %u accesses to four-entry tables of the game skip a player index above 3",
+               InGroup(CO_G_GUARD, NULL) + (Active(CO_G_GUARD4) ? InGroup(CO_G_GUARD4, NULL) : 0u));
         co_log("session: %u guards keep the lists in messages inside the game's buffers", InGroup(CO_G_NET, NULL));
         if (Active(CO_G_EIGHT))
             co_log("session: player indexes 4 to 7 are valid, the SOS beacon counts to eight and the lobby takes eight (%u code sites changed)",
                    InGroup(CO_G_EIGHT, NULL));
+        if (Active(CO_G_LOADOUT))
+            co_log("players: the loadout screen has eight records and cards (%u code sites changed)", InGroup(CO_G_LOADOUT, NULL));
+        if (Active(CO_G_SYNCED))
+            co_log("players: the per-peer loadout table moved to room for eight peers (%u code sites changed)", InGroup(CO_G_SYNCED, NULL));
     }
     return;
 failed:
+    SyncedBack();
     VirtualFree((void*)g_caves, 0, MEM_RELEASE);
     g_caves = 0;
     co_log("session: a count site could not be written; %s", kStays);
@@ -404,6 +503,8 @@ void co_counts_test_fill(uint8_t* image)
 
 void co_counts_test_reset(void)
 {
+    if (g_syncedBlock) VirtualFree((void*)g_syncedBlock, 0, MEM_RELEASE);
+    g_syncedBlock = g_syncedNew = g_syncedOld = 0;
     if (g_caves) VirtualFree((void*)g_caves, 0, MEM_RELEASE);
     g_caves = g_game = 0;
     g_on = 0;
@@ -425,12 +526,16 @@ int co_counts_test_reviewed(const uint8_t* image)
     return 1;
 }
 
-unsigned co_counts_test_guards(void) { return InGroup(CO_G_GUARD, NULL); }
+unsigned co_counts_test_guards(void) { return InGroup(CO_G_GUARD, NULL) + (Active(CO_G_GUARD4) ? InGroup(CO_G_GUARD4, NULL) : 0u); }
+unsigned co_counts_test_loadout(void) { return InGroup(CO_G_LOADOUT, NULL); }
+unsigned co_counts_test_synced(void) { return InGroup(CO_G_SYNCED, NULL); }
+/* Where the per-peer loadout table is now: the mod's block, or 0 while it is the game's. */
+uintptr_t co_counts_test_synced_table(void) { return g_syncedNew; }
 /* The sites, clears and caves this build writes. */
 unsigned co_counts_test_sites(void)
 {
     unsigned n = (unsigned)CO_COUNT_CLEARS;
-    for (uint8_t group = CO_G_COUNT; group <= CO_G_TEST; group++)
+    for (uint8_t group = CO_G_COUNT; group <= CO_G_SYNCED; group++)
         if (Active(group)) n += InGroup(group, NULL);
     return n;
 }
@@ -459,11 +564,13 @@ uint32_t co_counts_test_join_index(uint8_t* flags)
     JoinIndex(&regs);
     return (uint32_t)regs.r8;
 }
-/* The number of the write that changes the site or cave at rva, from the first of the counts; -1 when this build
- * does not write it. */
+/* The number of the write that changes the site or cave at rva, from the first of the counts (the table move's
+ * writes first); -1 when this build does not write it. */
+/* The writes of the table move (the pointer and three registry entries), made before the first site. */
+int co_counts_test_move_writes(void) { return Active(CO_G_SYNCED) ? 4 : 0; }
 int co_counts_test_write_of(uint32_t rva)
 {
-    int n = 0;
+    int n = co_counts_test_move_writes();
     for (size_t i = 0; i < CO_COUNT_SITES; i++)
     {
         const CoCountSite* s = &kCoCountSites[i];

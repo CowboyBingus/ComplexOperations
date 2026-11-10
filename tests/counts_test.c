@@ -4,7 +4,9 @@
  * guards are run with lists that fit and lists that do not. The build's player count decides which sites belong to
  * it, and the test option's slot and index search is checked against a stand-in synchronizer. The lobby's member
  * lists fill eight in every build; the lobby takes eight only in a build for eight. The own lobby's record stops its
- * entries at four in every build. */
+ * entries at four in every build. A build for eight gives the loadout screen eight records and cards in place of the
+ * guards that kept players 5 to 8 off it, and moves the per-peer loadout table to room for eight before it writes that
+ * table's bounds; a failed write or a changed byte leaves all of it as the game has it. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +39,10 @@ int co_counts_test_fits(uint32_t shape, const void* arguments);
 int co_counts_test_join_slot(uintptr_t sync);
 uint32_t co_counts_test_join_index(uint8_t* flags);
 int co_counts_test_write_of(uint32_t rva);
+unsigned co_counts_test_loadout(void);
+unsigned co_counts_test_synced(void);
+uintptr_t co_counts_test_synced_table(void);
+int co_counts_test_move_writes(void);
 void co_pods_test_reset(void);
 void co_managers_test_reset(void);
 
@@ -77,6 +83,14 @@ void co_managers_test_reset(void);
 #define RECORD_COUNT 0x133EF93u     /* mov [rbx+0x5D0],esi: the own lobby record's entries */
 #define RECORD_POST 0x12CB379u      /* mov r8d,[rdi+0x5D0]: numLobbyMembers in the friends post */
 #define RECORD_ENTER 0x133EFA0u     /* free in the stand-in: the test's way into the record's cave */
+#define LOADOUT_SIZE 0x1498AE8u     /* mov edx,size: the loadout screen's allocation */
+#define LOADOUT_BOUND 0x14674BBu    /* mov edi,4: a loop over the loadout screen's cards */
+#define LOADOUT_MAP 0xB901EBu       /* mov eax,[r9+0x27d8]: the loadout screen's card of a player */
+#define LOADOUT_CAVE 0x1471848u     /* lea rbx,[rsi+0x53a78]: the cards, with the loop count set in the cave */
+#define SYNCED_CLEAR 0x1381254u     /* mov r8d,0x27e0: the memset of the per-peer loadout table */
+#define SYNCED_SEARCH 0x1395221u    /* cmp ecx,4: a search of that table by peer id */
+#define SYNCED_GONE 0x1087122u      /* cmp eax,4: the search for a peer that left */
+#define SYNCED_ENTRY 0x9F8u         /* a record of 0x9F0 and the peer's id */
 
 typedef uint64_t (*InitFn)(uint64_t, uint64_t, uint64_t, uint64_t);
 typedef uint32_t (*CardFn)(void*, uint32_t);
@@ -130,6 +144,57 @@ static void Init(uint32_t at)
     if (init != NULL) init(0, 0, 0, 0);
 }
 
+static uint64_t Qword(uint32_t rva)
+{
+    uint64_t value;
+    memcpy(&value, g_fake.image + rva, 8);
+    return value;
+}
+
+/* The table's entry in each of the stand-in's registry lists leads to `table`; the other systems' entries stay. */
+static int RegistryLeadsTo(uintptr_t table)
+{
+    const uint8_t* registry = g_fake.image + FAKE_REGISTRY;
+    const uint64_t old = (uint64_t)(uintptr_t)(g_fake.image + FAKE_SYNCED_TABLE);
+    uint64_t at[5];
+    memcpy(&at[0], registry + 0x2078 + 8, 8);
+    memcpy(&at[1], registry + 0x2078 + 8 + 16, 8);
+    memcpy(&at[2], registry + 0x2078 + 8 + 32, 8);
+    memcpy(&at[3], registry + 0x7230 + 8, 8);
+    memcpy(&at[4], registry + 0x7248 + 8, 8);
+    return at[0] == old + 0x100000u && at[2] == old + 0x300000u && at[1] == table && at[3] == table && at[4] == table;
+}
+
+/* Four entries as the game keeps them: a record of one byte value and the peer's id behind it. */
+static void FillTable(uint8_t* table)
+{
+    for (uint32_t i = 0; i < 4; i++)
+    {
+        const uint64_t peer = 0x7000u + i;
+        memset(table + i * SYNCED_ENTRY, 0x40 + (int)i, 0x9F0);
+        memcpy(table + i * SYNCED_ENTRY + 0x9F0, &peer, 8);
+    }
+}
+
+static int TableHolds(const uint8_t* table)
+{
+    for (uint32_t i = 0; i < 4; i++)
+    {
+        uint64_t peer;
+        memcpy(&peer, table + i * SYNCED_ENTRY + 0x9F0, 8);
+        if (peer != 0x7000u + i) return 0;
+        for (uint32_t at = 0; at < 0x9F0; at++)
+            if (table[i * SYNCED_ENTRY + at] != 0x40 + i) return 0;
+    }
+    return 1;
+}
+
+static int TableAsTheGameHasIt(void)
+{
+    const uintptr_t old = (uintptr_t)(g_fake.image + FAKE_SYNCED_TABLE);
+    return co_counts_test_synced_table() == 0 && Qword(FAKE_SYNCED_POINTER) == old && RegistryLeadsTo(old);
+}
+
 static int AsTheGameHasIt(void)
 {
     const uint8_t* image = g_fake.image;
@@ -140,7 +205,7 @@ static int AsTheGameHasIt(void)
            image[GUARD_INPUT + 2] == 0xFF && image[EIGHT_INDEX + 2] == 4 && image[EIGHT_SOS + 2] == 4 && image[NET_SCORES] == 0x40 &&
            image[NET_SENDER] == 0x41 && image[TEST_SLOT] == 0x41 && image[TEST_INDEX] == 0x49 && image[MIRROR_CAP + 2] == 4 &&
            image[LOBBY_FULL + 2] == 4 && image[LOBBY_SIZE + 1] == 4 && image[LOBBY_FRIEND] == 0xBA && image[RECORD_COUNT] == 0x89 &&
-           image[RECORD_POST + 3] == 0xD0 && co_counts_test_reviewed(image);
+           image[RECORD_POST + 3] == 0xD0 && co_counts_test_reviewed(image) && TableAsTheGameHasIt();
 }
 
 /* The jump at a cave's site, the rest of the replaced bytes as nops; the cave it leads to. */
@@ -181,13 +246,14 @@ int main(void)
 
     Start("the reviewed game");
     CHECK(g_fake.writes == 0 && AsTheGameHasIt());
+    FillTable(g_fake.image + FAKE_SYNCED_TABLE);
     Init(CONTEXT);
     CHECK(co_session_test_state() == 1 && co_counts_test_on() == 1);
     CHECK(fake_host_logged("session: the session lists count to eight (143 code sites changed, 15 through caves)"));
     {
         static char line[96];
         snprintf(line, sizeof line, "players: %u accesses to four-entry tables of the game skip a player index above 3", co_counts_test_guards());
-        CHECK(co_counts_test_guards() >= 70 && fake_host_logged(line));
+        CHECK(co_counts_test_guards() >= (players == 4 ? 70u : 51u) && fake_host_logged(line));
         snprintf(line, sizeof line, "session: %u guards keep the lists in messages inside the game's buffers", co_counts_test_net());
         CHECK(co_counts_test_net() >= 9 && fake_host_logged(line));
     }
@@ -270,11 +336,12 @@ int main(void)
         CHECK(*(uint64_t*)(cave + 0x98) != 0 && (*(uint64_t*)(cave + 0x98) >> 40) != 0xC0DE00u >> 8);
     }
     {
-        /* In place: cmp ecx,4; jae to where the game goes without an own index. The slot loop goes on to its next slot. */
-        static const uint8_t kOwn[] = {0x83, 0xF9, 0x04, 0x0F, 0x83};
+        /* In place, in a build for four: cmp ecx,4; jae to where the game goes without an own index. A build for eight
+         * keeps the game's test of -1 there. The slot loop goes on to its next slot in both. */
+        static const uint8_t kOwn[] = {0x83, 0xF9, 0x04, 0x0F, 0x83}, kNone[] = {0x83, 0xF9, 0xFF, 0x0F, 0x84};
         const uint8_t* image = g_fake.image;
         const uint8_t* cave;
-        CHECK(memcmp(image + GUARD_SITE, kOwn, sizeof kOwn) == 0 && Leads(image + GUARD_SITE + 5, 0x1466F9Du));
+        CHECK(memcmp(image + GUARD_SITE, players == 4 ? kOwn : kNone, sizeof kOwn) == 0 && Leads(image + GUARD_SITE + 5, 0x1466F9Du));
         CHECK(image[GUARD_NEXT] == 0x0F && image[GUARD_NEXT + 1] == 0x83 && Leads(image + GUARD_NEXT + 2, 0x146C6B4u));
 
         /* cmp eax,4; jae the loop's next round; the replaced movsd; jmp back behind it */
@@ -285,28 +352,35 @@ int main(void)
             CHECK(memcmp(cave, kRow, sizeof kRow) == 0 && Leads(cave + 5, 0xB8F723u) && memcmp(cave + 9, kMoved, sizeof kMoved) == 0 &&
                   Leads(cave + 16, 0xB8F687u));
 
-        /* Two ways out: back behind the replaced load for 0 to 3, into the loop's tail (with r13d loaded again and
-         * eax zero) for the rest. The short jae leads to the second. */
+        /* Two ways out: back behind the replaced load for an index below the build's player count, into the loop's
+         * tail (with r13d loaded again and eax zero) for the rest. The short jae leads to the second. A build for eight
+         * reads the moved map. */
         static const uint8_t kTail[] = {0x44, 0x8B, 0xAC, 0x24, 0xE8, 0x00, 0x00, 0x00, 0x31, 0xC0, 0xE9};
         cave = Cave(GUARD_PEER, 10);
         CHECK(cave != NULL);
         if (cave != NULL)
+        {
+            uint32_t map;
+            memcpy(&map, cave + 12, 4);
+            CHECK(cave[6] == players && map == (players == 8 ? 0x278968u : 0x27D8u));
             CHECK(cave[7] == 0x73 && cave + 9 + cave[8] == cave + 21 && cave[16] == 0xE9 && Leads(cave + 17, 0x146CC0Fu) &&
                   memcmp(cave + 21, kTail, sizeof kTail) == 0 && Leads(cave + 32, 0x146CF99u));
+        }
         CHECK(Cave(LAST_GUARD, 10) != NULL);
 
-        /* Run: the card function's cave with a ret where it goes back. 0 to 3 arrive there with the index in eax, as
-         * the replaced mov leaves it; the rest get the function's "none" without going there. */
+        /* Run: the card function's cave with a ret where it goes back. An index below the build's player count arrives
+         * there in eax, as the replaced mov leaves it; the rest get the function's "none" without going there. */
         static const uint8_t kRet[] = {0xC3};
         cave = Cave(GUARD_CARD, 5);
         CHECK(cave != NULL);
         if (cave != NULL)
         {
-            static const uint32_t kNone[] = {4, 5, 6, 7, 8, 0x80000000u, 0xFFFFFFFFu};
+            static const uint32_t kOver[] = {4, 5, 6, 7, 8, 9, 0x80000000u, 0xFFFFFFFFu};
             const CardFn card = (CardFn)(uintptr_t)cave;
             Landing(0x146D325u, kRet, sizeof kRet);
-            for (uint32_t i = 0; i < 4; i++) CHECK(card(NULL, i) == i);
-            for (size_t i = 0; i < sizeof kNone / sizeof kNone[0]; i++) CHECK(card(NULL, kNone[i]) == 0xFFFFFFFFu);
+            for (uint32_t i = 0; i < (uint32_t)players; i++) CHECK(card(NULL, i) == i);
+            for (size_t i = 0; i < sizeof kOver / sizeof kOver[0]; i++)
+                if (kOver[i] >= (uint32_t)players) CHECK(card(NULL, kOver[i]) == 0xFFFFFFFFu);
         }
 
         /* Run: the cursor function's cave. Where it goes back the test undoes the replaced push and sub and notes the
@@ -325,6 +399,47 @@ int main(void)
                 CHECK(seen == (i < 4 ? i : 99));
             }
         }
+    }
+    {
+        /* A build for eight gives the loadout screen eight records and cards in a bigger allocation; a build for four
+         * leaves the screen as the game has it. */
+        const uint8_t* image = g_fake.image;
+        static char line[96];
+        uint32_t value;
+        snprintf(line, sizeof line, "players: the loadout screen has eight records and cards (%u code sites changed)", co_counts_test_loadout());
+        CHECK(co_counts_test_loadout() == 471u && fake_host_logged(line) == (players == 8));
+        memcpy(&value, image + LOADOUT_SIZE + 1, 4);
+        CHECK(image[LOADOUT_SIZE] == 0xBA && value == (players == 8 ? 0x36FA70u : 0x2739D0u));
+        CHECK(image[LOADOUT_BOUND] == 0xBF && image[LOADOUT_BOUND + 1] == players);
+        memcpy(&value, image + LOADOUT_MAP + 3, 4);
+        CHECK(value == (players == 8 ? 0x278968u : 0x27D8u));
+        /* mov edi,8; lea rbx,[rsi+the new cards]; jmp back behind the replaced lea */
+        static const uint8_t kCount[] = {0xBF, 0x08, 0x00, 0x00, 0x00, 0x48, 0x8D, 0x9E, 0xA8, 0x89, 0x27, 0x00, 0xE9};
+        const uint8_t* cave = Cave(LOADOUT_CAVE, 7);
+        CHECK((cave != NULL) == (players == 8));
+        if (cave != NULL) CHECK(memcmp(cave, kCount, sizeof kCount) == 0 && Leads(cave + 13, 0x147184Fu));
+        else CHECK(image[LOADOUT_CAVE] == 0x48);
+    }
+    {
+        /* The per-peer loadout table. A build for eight leads its pointer and its three registry entries to the mod's
+         * room for eight, with the four entries copied and the other four empty; its memset and bounds say eight. A
+         * build for four leaves all of it as the game has it. */
+        const uint8_t* image = g_fake.image;
+        const uintptr_t old = (uintptr_t)(image + FAKE_SYNCED_TABLE), table = co_counts_test_synced_table();
+        static char line[96];
+        uint32_t size;
+        snprintf(line, sizeof line, "players: the per-peer loadout table moved to room for eight peers (%u code sites changed)", co_counts_test_synced());
+        CHECK(co_counts_test_synced() == 11u && fake_host_logged(line) == (players == 8));
+        memcpy(&size, image + SYNCED_CLEAR + 2, 4);
+        CHECK(size == (players == 8 ? 0x4FC0u : 0x27E0u) && image[SYNCED_SEARCH + 2] == players && image[SYNCED_GONE + 2] == players);
+        CHECK((table != 0) == (players == 8) && TableHolds(image + FAKE_SYNCED_TABLE));
+        if (table != 0)
+        {
+            int empty = 1;
+            for (uint32_t at = 4 * SYNCED_ENTRY; at < 8 * SYNCED_ENTRY; at++) empty &= ((const uint8_t*)table)[at] == 0;
+            CHECK(Qword(FAKE_SYNCED_POINTER) == table && RegistryLeadsTo(table) && table % 16 == old % 16 && TableHolds((const uint8_t*)table) && empty);
+        }
+        else CHECK(Qword(FAKE_SYNCED_POINTER) == old && RegistryLeadsTo(old));
     }
     {
         /* The guards for player indexes 4 to 7 that came with the join limit. In place: cmp edi,4; jae. */
@@ -520,10 +635,29 @@ int main(void)
         *(uint32_t*)(sync + 0x40 + 6 * 0x38) = 9;
         CHECK(co_counts_test_last((uintptr_t)context) == 0);
     }
-    /* Another context: counts and move are taken back and made again for it. */
-    Init(CONTEXT + 0x100000u);
-    CHECK(co_session_test_state() == 1 && co_counts_test_on() == 1 && g_fake.image[LOOP_SITE + 2] == 8 && g_fake.image[CAVE_SITE] == 0xE9);
-    CHECK(g_fake.image[GUARD_SITE + 2] == 4 && Cave(GUARD_ROW, 6) != NULL && Cave(LAST_GUARD, 10) != NULL);
+    /* Another context: counts and move are taken back and made again for it. The per-peer table goes back with
+     * entries 0 to 3 and moves again; entry 5 has no place in the game's table. */
+    {
+        uint8_t* table = (uint8_t*)co_counts_test_synced_table();
+        if (table != NULL) { table[2 * SYNCED_ENTRY + 7] = 0x99; table[5 * SYNCED_ENTRY + 7] = 0x98; }
+        Init(CONTEXT + 0x100000u);
+        CHECK(co_session_test_state() == 1 && co_counts_test_on() == 1 && g_fake.image[LOOP_SITE + 2] == 8 && g_fake.image[CAVE_SITE] == 0xE9);
+        CHECK(g_fake.image[GUARD_INPUT + 2] == 4 && Cave(GUARD_ROW, 6) != NULL && Cave(LAST_GUARD, 10) != NULL);
+        table = (uint8_t*)co_counts_test_synced_table();
+        CHECK((table != NULL) == (players == 8));
+        if (table != NULL)
+            CHECK(Qword(FAKE_SYNCED_POINTER) == (uint64_t)(uintptr_t)table && RegistryLeadsTo((uintptr_t)table) && table[2 * SYNCED_ENTRY + 7] == 0x99 &&
+                  table[5 * SYNCED_ENTRY + 7] == 0);
+    }
+    /* Undo: every site, the pointer and the registry entries as the game has them; the game's table holds what the
+     * mod's held. */
+    {
+        uint8_t* table = (uint8_t*)co_counts_test_synced_table();
+        if (table != NULL) table[3 * SYNCED_ENTRY + 9] = 0x97;
+        co_counts_undo();
+        CHECK(co_counts_test_on() == 0 && AsTheGameHasIt());
+        if (players == 8) CHECK(g_fake.image[FAKE_SYNCED_TABLE + 2 * SYNCED_ENTRY + 7] == 0x99 && g_fake.image[FAKE_SYNCED_TABLE + 3 * SYNCED_ENTRY + 9] == 0x97);
+    }
 
     Start("one changed count site");
     g_fake.image[LOOP_SITE + 1] ^= 0x01;
@@ -538,17 +672,90 @@ int main(void)
     CHECK(fake_host_logged("game+0x108D368 is not the reviewed one"));
 
     Start("one changed guard site");
-    g_fake.image[GUARD_SITE + 4] ^= 0x01;
+    g_fake.image[GUARD_INPUT + 1] ^= 0x01;
     Init(CONTEXT);
     CHECK(co_session_test_state() == 1 && co_counts_test_on() == 0 && g_fake.writes == moves);
-    CHECK(fake_host_logged("session: the code at game+0x14670B8 is not the reviewed one; the session lists count to four as before"));
+    CHECK(fake_host_logged("session: the code at game+0x18C0F2F is not the reviewed one; the session lists count to four as before"));
     CHECK(!fake_host_logged("accesses to four-entry tables"));
 
     Start("one changed guard cave site");
     g_fake.image[GUARD_ROW + 5] ^= 0x01;
     Init(CONTEXT);
     CHECK(co_session_test_state() == 1 && co_counts_test_on() == 0 && g_fake.writes == moves);
-    CHECK(fake_host_logged("game+0xB8F681 is not the reviewed one") && Cave(GUARD_CARD, 5) == NULL);
+    CHECK(fake_host_logged("game+0xB8F681 is not the reviewed one") && Cave(GUARD_CARD, 5) == NULL && Cave(LOADOUT_CAVE, 7) == NULL);
+    CHECK(TableAsTheGameHasIt());
+
+    /* The loadout screen's guards are only the build for four's concern; its sites and the table's bounds only the
+     * build for eight's. */
+    {
+        static const struct { const char* name; uint32_t rva, at; int eight; } kOwn[] = {
+            {"one changed loadout guard", GUARD_SITE, 4, 0},
+            {"one changed loadout site", LOADOUT_MAP, 1, 1},
+            {"one changed loadout cave site", LOADOUT_CAVE, 2, 1},
+            {"one changed site of the per-peer table", SYNCED_SEARCH, 1, 1},
+        };
+        for (size_t i = 0; i < sizeof kOwn / sizeof kOwn[0]; i++)
+        {
+            static char line[96];
+            const int concern = kOwn[i].eight == (players == 8);
+            Start(kOwn[i].name);
+            g_fake.image[kOwn[i].rva + kOwn[i].at] ^= 0x01;
+            Init(CONTEXT);
+            CHECK(co_session_test_state() == 1 && co_counts_test_on() == !concern);
+            snprintf(line, sizeof line, "game+0x%X is not the reviewed one", kOwn[i].rva);
+            CHECK(fake_host_logged(line) == concern);
+            if (concern) CHECK(g_fake.writes == moves && TableAsTheGameHasIt());
+        }
+    }
+
+    /* The per-peer table where the mod does not expect it: a build for eight leaves the counts at four and writes
+     * nothing; a build for four does not look. */
+    for (int how = 0; how < 4; how++)
+    {
+        static const char* const kHow[] = {"the per-peer table elsewhere", "a registry list without the table", "a registry list with the table twice",
+                                           "no registry"};
+        uint8_t* registry = g_fake.image + FAKE_REGISTRY;
+        Start(kHow[how]);
+        if (how == 0) { const uint64_t elsewhere = Qword(FAKE_SYNCED_POINTER) + 0x10u; memcpy(g_fake.image + FAKE_SYNCED_POINTER, &elsewhere, 8); }
+        if (how == 1) memset(registry + 0x7248, 0, 4);
+        if (how == 2) { const uint32_t two = 2; memcpy(registry + 0x7230, &two, 4); memcpy(registry + 0x7230 + 8 + 16, registry + 0x7230 + 8, 16); }
+        if (how == 3) memset(g_fake.image + FAKE_REGISTRY_GLOBAL, 0, 8);
+        Init(CONTEXT);
+        CHECK(co_session_test_state() == 1 && co_counts_test_on() == (players == 4) && co_counts_test_synced_table() == 0);
+        CHECK(fake_host_logged("players: the per-peer loadout table is not where the game keeps it") == (players == 8));
+        if (players == 8) CHECK(g_fake.writes == moves && fake_host_logged("session: the session lists count to four as before"));
+    }
+
+    /* A failed write while the table moves puts back the writes before it; one at a loadout site or a bound of the
+     * table takes back every site and then the table. */
+    for (int k = 0; k < co_counts_test_move_writes(); k++)
+    {
+        static char name[64];
+        snprintf(name, sizeof name, "move write %d fails", k);
+        Start(name);
+        FillTable(g_fake.image + FAKE_SYNCED_TABLE);
+        g_fake.failWriteAt = moves + k;
+        Init(CONTEXT);
+        CHECK(co_session_test_state() == 1 && co_counts_test_on() == 0 && AsTheGameHasIt() && TableHolds(g_fake.image + FAKE_SYNCED_TABLE));
+        CHECK(fake_host_logged("players: the per-peer loadout table could not be moved") && !fake_host_logged("a count site could not be written"));
+    }
+    {
+        const uint32_t kEight[] = {LOADOUT_SIZE, LOADOUT_MAP, SYNCED_CLEAR, SYNCED_GONE, LOADOUT_CAVE};
+        for (size_t i = 0; i < sizeof kEight / sizeof kEight[0]; i++)
+        {
+            static char name[64];
+            const int at = co_counts_test_write_of(kEight[i]);
+            CHECK((at >= 0) == (players == 8));
+            if (at < 0) continue;
+            snprintf(name, sizeof name, "the write at game+0x%X fails", kEight[i]);
+            Start(name);
+            FillTable(g_fake.image + FAKE_SYNCED_TABLE);
+            g_fake.failWriteAt = moves + at;
+            Init(CONTEXT);
+            CHECK(co_session_test_state() == 1 && co_counts_test_on() == 0 && AsTheGameHasIt() && TableHolds(g_fake.image + FAKE_SYNCED_TABLE));
+            CHECK(fake_host_logged("a count site could not be written; the session lists count to four as before"));
+        }
+    }
 
     Start("one changed message guard site");
     g_fake.image[NET_SENDER + 3] ^= 0x01;
@@ -616,12 +823,13 @@ int main(void)
     for (int at = moves; at < writes; at += (at < moves + 2 || at >= writes - 9) ? 1 : 13)
     {
         static char name[64];
+        const int moving = at < moves + co_counts_test_move_writes();
         snprintf(name, sizeof name, "write %d fails", at);
         Start(name);
         g_fake.failWriteAt = at;
         Init(CONTEXT);
         CHECK(co_session_test_state() == 1 && co_counts_test_on() == 0 && AsTheGameHasIt());
-        CHECK(fake_host_logged("a count site could not be written; the session lists count to four as before"));
+        CHECK(fake_host_logged(moving ? "the per-peer loadout table could not be moved" : "a count site could not be written; the session lists count to four as before"));
     }
 
     Start("a function is other code");

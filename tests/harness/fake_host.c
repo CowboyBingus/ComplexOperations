@@ -73,6 +73,30 @@ static int Hook(HfMod* mod, uintptr_t target, void* detour, void** original)
     return 0;
 }
 
+/* The registry's first list holds two other systems around the table's entry; the other two lists hold its entry only.
+ * {list, count, the table's entry} */
+static void Registry(uint8_t* image)
+{
+    static const struct { uint32_t list, count, table; } kLists[] = {{0x2078u, 3, 1}, {0x7230u, 1, 0}, {0x7248u, 1, 0}};
+    const uint64_t table = (uint64_t)(uintptr_t)(image + FAKE_SYNCED_TABLE), registry = (uint64_t)(uintptr_t)(image + FAKE_REGISTRY);
+    const uint64_t engine = table - FAKE_SYNCED_IN_ENGINE;
+    for (size_t i = 0; i < sizeof kLists / sizeof kLists[0]; i++)
+    {
+        uint8_t* list = image + FAKE_REGISTRY + kLists[i].list;
+        memcpy(list, &kLists[i].count, 4);
+        for (uint32_t j = 0; j < kLists[i].count; j++)
+        {
+            const uint64_t at = j == kLists[i].table ? table : table + 0x100000u * (j + 1);
+            const uint32_t type = j == kLists[i].table ? 0x11Du : 0x85u + j;
+            memcpy(list + 8 + j * 16, &at, 8);
+            memcpy(list + 8 + j * 16 + 8, &type, 4);
+        }
+    }
+    memcpy(image + FAKE_SYNCED_POINTER, &table, 8);
+    memcpy(image + FAKE_ENGINE_GLOBAL, &engine, 8);
+    memcpy(image + FAKE_REGISTRY_GLOBAL, &registry, 8);
+}
+
 const HfApi* fake_host_reset(const char* build)
 {
     uint8_t* image = g_fake.image;
@@ -81,6 +105,7 @@ const HfApi* fake_host_reset(const char* build)
     memset(&g_fake, 0, sizeof g_fake);
     g_fake.image = image;
     g_fake.build = build;
+    Registry(image);
     g_fake.failWriteAt = -1;
     memset(&g_api, 0, sizeof g_api);
     g_api.version = HF_MOD_SDK_VERSION;
