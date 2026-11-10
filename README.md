@@ -26,7 +26,8 @@ Every player in the session needs the mod.
 
 The game keeps one record for each player in seven managers: player, score, customization, kill streak, ship
 inventory, ship customization and ship modules. Each has four slots. The mod builds all seven in its own memory with
-eight slots and changes the 1,053 code sites that address them.
+eight slots and changes the 1,115 code sites that address them, the score manager's loot rows among them (see
+Mission).
 
 This alone lets no fifth player join: the session's own lists still hold four. It is the base the later parts need.
 
@@ -41,19 +42,20 @@ With the room made, the lists count to eight: 119 sites that loop, compare or cl
 In 17 places the game's compiler wrote the code out for exactly four entries; there the mod adds the other four, with
 code of its own beside the game's (14) or a hook of the function (3).
 
-Other tables of the game stay at four entries and are indexed by a player index with no check. Among them are the
-galactic map's cursors, the game state's player rows, the loadout screen's cards, the score slots and the mission
-summary's rows. 70 guards cover the accesses to them: an index of four or more skips the access, and for 0 to 3 nothing
-changes. 61 guards are code beside the game's; 9 are a compare changed in place. The guards go in and out together
-with the counts. A build for eight keeps 51 of them; the loadout screen's 19 make way for its eight cards (see Loadout
-screen).
+Other tables of the game stay at four entries and are indexed by a player index with no check, or filled with no
+bound. Among them are the galactic map's cursors, the game state's player rows, the loadout screen's cards, the mission
+result's and the mission summary's rows, and the Activity record's lists (see Mission). 70 guards cover the accesses to
+them: an index past the table's end skips the access, and for 0 to 3 nothing changes. 61 guards are code beside the
+game's; 9 are a compare changed in place. The guards go in and out together with the counts. A build for eight keeps
+51 of them; the loadout screen's 19 make way for its eight cards (see Loadout screen).
 
 Some message handlers copy a list from the wire into a buffer of fixed size and trust the count. Nine guards keep
 such lists inside their buffers: the handler ignores a message whose list is too long, and two senders stop at what
 the receiver holds. Every build has them.
 
 A build for eight players also lets a client's player index 4 to 7 count as valid, opens the join gate to eight, and
-makes the SOS beacon count to eight. Its lobby takes eight too (see Lobby).
+makes the SOS beacon count to eight. Its lobby takes eight too (see Lobby). When the player managers could not get
+eight slots, its join gate stays at four.
 
 Limits that remain:
 
@@ -105,6 +107,27 @@ Limits that remain:
 - The eight cards are spread evenly at the width of four, so they probably overlap.
 - The cards' width comes from the game's data, not from code the mod changes.
 
+## Mission
+
+A build for eight players lets the mission result take one to eight players, where the game stops at four. 1 site.
+
+The score manager keeps the loot each player carries in two tables of four rows, one by score slot and one by player
+index. The player managers' step moves both behind the score manager with eight rows each: 54 code sites get the new
+places and 7 loops count to eight. That loop count is also the mission report's outcome code; 1 site keeps the code
+at four.
+
+In 9 places the game clears the rows, adds them up or checks an index, with code written out for four rows. Code of
+the mod's beside it asks whether the managers moved and works on the rows where they are. Every build has these.
+
+The Activity record lists its participants (four) and the peers it waits for (three), filled from the session's ready
+list with no bound. 3 of the guards leave out a peer beyond them, in every build.
+
+Limits that remain:
+
+- The mission result holds four loot rows: score slots 5 to 8 get none there.
+- With five to eight players the Activity record lists four participants and waits for three answers.
+- The avatar manager's eight places, which dead players' bodies may also hold, are not covered yet.
+
 ## Engine
 
 The engine sends a session's peers as a count and a list. The sender writes the count as a whole byte; the readers
@@ -116,6 +139,7 @@ the game drops four and more. It goes in on its own: when it cannot, the peer li
 
 ## State
 
+- The mission and Activity record changes are checked against the game's code and in the unit tests only.
 - Tested with one player: all eight pods are entered on foot, launch, and are there again after the return; missions
   and returns work with the lists counting to eight. A mission from a new pod after a completed mission's summary
   works; the mission was ended through the game's own handler, not by flying an extraction.
@@ -182,14 +206,14 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `src/co_session.c` | The session lists and the lobby's member lists: the extension block, code sites and stubs. |
 | `src/co_session_sites.h` | Their code sites. Generated; do not edit. |
 | `scripts/gen_session_sites.py` | Writes `co_session_sites.h` from the site list and a dump of the game's code. Holds the lobby's member lists' sites; assembles their stubs with GNU `as`. |
-| `tests/managers_test.c` | The same refusals for the player managers. |
+| `tests/managers_test.c` | The same refusals for the player managers, the loot rows' sites among them. |
 | `tests/session_test.c` | The same for the session lists, and that sites and stubs lead to the new place. Runs the lobby copies' stubs. |
-| `src/co_counts.c` | The session lists' counts: sites, code caves, the hooks for entries 4 to 7. The guards too. |
+| `src/co_counts.c` | The session lists' counts: sites, code caves, the hooks for entries 4 to 7. The guards and the loot rows' code too. |
 | `src/co_count_sites.h` | Their code sites and the caves' code. Generated; do not edit. |
 | `scripts/sites/count_sites.tsv` | The reviewed count sites: one row for each instruction. |
 | `scripts/sites/loadout_sites.py` | The loadout screen's sites and caves for eight, and the per-peer loadout table's move and bounds. |
-| `scripts/gen_count_sites.py` | Writes `co_count_sites.h`; assembles the caves with GNU `as`. Holds the guards, the member lists' caps and the lobby's size. |
-| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. |
+| `scripts/gen_count_sites.py` | Writes `co_count_sites.h`; assembles the caves with GNU `as`. Holds the guards, the member lists' caps, the lobby's size and the loot rows' caves. |
+| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' code in both managers' states, and the join limit without the managers. |
 | `tests/engine_test.c` | The engine's sites: written, refused on changed code, taken back on a failed write. |
 | `tests/harness/` | The stand-in loader and game image the tests run against. |
 
@@ -201,6 +225,8 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 - A write that fails part-way sets every site written before it back to the game's bytes.
 - The per-peer loadout table moves only when the game's pointer and registry lead to the game's own place for it. Its
   bounds go back before it does.
+- A build for eight takes no fifth player while the player managers have four slots. The loot rows' code asks their
+  state each time it runs.
 - A failed step is logged in plain words, for example "four pods as before".
 
 ## Log
@@ -221,6 +247,8 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `the loadout screen has eight records and cards` | A build for eight players: the loadout screen's arrays moved. |
 | `the per-peer loadout table moved to room for eight peers` | A build for eight players: that table is in the mod's memory. |
 | `the per-peer loadout table is not where the game keeps it` | Something else moved or changed it: the counts stay at four. |
+| `the score manager's loot rows are cleared, added and bounded where the managers keep them` | The loot rows' code is in place. |
+| `the session is full at four players: the player managers have four slots` | A build for eight whose managers have four slots: four players. |
 | `TEST BUILD, not for play` | Built with `--test-first-slot`. |
 | `the session lists count to four as before` | The count change is off; the reason stands before it. |
 | `the bridge is not the one with the eight-pod bay` | The level data is missing: four pods. |

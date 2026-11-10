@@ -1,7 +1,8 @@
 /* Eight players: the session's peer lists, second step. With the neighbours moved (co_session.c) the lists can hold
  * eight entries; this makes the code count to eight. Most sites are one instruction with a four in it. Code the
  * compiler unrolled for four entries gets the other four from the mod: a cave beside the game's code, or a hook of the
- * whole function. The join gate counts to CO_JOIN_LIMIT, the build's player count.
+ * whole function. The join gate counts to the build's player count while the player managers have eight slots, else
+ * to four.
  * The same sites carry the guards: tables the game keeps at four entries skip a player index of four or more, and a
  * message whose list is longer than its handler's buffer is ignored. */
 #include <string.h>
@@ -32,8 +33,9 @@ _Static_assert(sizeof kCoCountCode <= CO_CAVE_ROOM, "the caves' code must fit th
 /* A site's or cave's group. Guards go in and out with the counts: a table that stays at four entries is safe only
  * while every access to it is guarded. The rest depend on the build. The loadout screen's eight records and cards
  * (CO_G_LOADOUT) replace the guards that keep a player index above 3 off its four-entry arrays (CO_G_GUARD4). The
- * per-peer loadout table's bounds (CO_G_SYNCED) are safe only while the table is in the mod's room for eight. */
-enum { CO_G_COUNT, CO_G_GUARD, CO_G_NET, CO_G_EIGHT, CO_G_TEST, CO_G_LOADOUT, CO_G_GUARD4, CO_G_SYNCED };
+ * per-peer loadout table's bounds (CO_G_SYNCED) are safe only while the table is in the mod's room for eight. The score
+ * manager's loot caves (CO_G_LOOT) ask the player managers' state each time, so they fit both of its states. */
+enum { CO_G_COUNT, CO_G_GUARD, CO_G_NET, CO_G_EIGHT, CO_G_TEST, CO_G_LOADOUT, CO_G_GUARD4, CO_G_SYNCED, CO_G_LOOT };
 /* Test builds only (--test-first-slot): the host gives joining peers slots and player indexes from this number on,
  * so that two game instances reach the code for players 5 to 8. Zero is off. */
 #ifndef CO_TEST_FIRST_SLOT
@@ -43,7 +45,6 @@ _Static_assert(CO_PLAYERS == 4 || CO_PLAYERS == 8, "a session takes four or eigh
 _Static_assert(CO_TEST_FIRST_SLOT == 0 || (CO_PLAYERS == 8 && CO_TEST_FIRST_SLOT >= 1 && CO_TEST_FIRST_SLOT <= 7),
                "the test option needs a build for eight players and a slot from 1 to 7");
 #define CO_PEERS 8u
-#define CO_JOIN_LIMIT ((uint32_t)CO_PLAYERS)       /* peers a session takes */
 #define CO_PLAYER_INDEXES ((uint32_t)CO_PLAYERS)   /* player indexes that count as valid */
 #define CO_FIRST_SLOT ((uint32_t)(CO_TEST_FIRST_SLOT ? CO_TEST_FIRST_SLOT : 1))
 #define CO_FIRST_INDEX ((uint32_t)CO_TEST_FIRST_SLOT)
@@ -55,6 +56,14 @@ _Static_assert(CO_TEST_FIRST_SLOT == 0 || (CO_PLAYERS == 8 && CO_TEST_FIRST_SLOT
 #define CO_SLOTS_READY 0x108B600u
 #define CO_SLOTS_FREE 0x108B670u
 #define CO_PEER_GONE 0x108B6B0u
+/* The score manager's loot rows of 0x18 bytes: by score slot and by player index, four each in the game's place, eight
+ * each behind the manager once it has moved (gen_manager_sites.py). */
+#define CO_LOOT_ROW 0x18u
+#define CO_LOOT_SLOTS 0xC440u
+#define CO_LOOT_INDEXES 0xC4A0u
+#define CO_LOOT_SLOTS_MOVED 0x37F20u
+#define CO_LOOT_INDEXES_MOVED 0x37FE0u
+#define CO_LOOT_COUNT 0xCu        /* in a row: the count the sums add */
 
 typedef uint32_t (*SlotsFn)(uintptr_t);
 typedef uint64_t (*PeerGoneFn)(uintptr_t, uint64_t, uint64_t, uint64_t);
@@ -63,11 +72,12 @@ static PeerGoneFn g_peerGone;
 static uintptr_t g_game, g_context, g_extension, g_caves;
 static int g_on, g_hooks = -1;
 static uint32_t g_ignored;        /* a bit for each message shape that was logged as ignored */
+static int g_toldFour;            /* the join limit's fall back to four was logged */
 static uintptr_t g_syncedOld, g_syncedNew, g_syncedBlock;
 
 static int Active(uint8_t group)
 {
-    return group <= CO_G_NET || ((group == CO_G_EIGHT || group == CO_G_LOADOUT || group == CO_G_SYNCED) && CO_PLAYERS == 8) ||
+    return group <= CO_G_NET || group == CO_G_LOOT || ((group == CO_G_EIGHT || group == CO_G_LOADOUT || group == CO_G_SYNCED) && CO_PLAYERS == 8) ||
            (group == CO_G_GUARD4 && CO_PLAYERS == 4) || (group == CO_G_TEST && CO_TEST_FIRST_SLOT != 0);
 }
 
@@ -88,6 +98,9 @@ static uint64_t FindRecord(uint64_t key)
 static void FindByRsi(CoRegs* regs) { if (regs->rcx == 0) regs->rcx = FindRecord(regs->rsi); }
 static void FindByR11(CoRegs* regs) { if (regs->rcx == 0) regs->rcx = FindRecord(regs->r11); }
 
+/* Peers a session takes. Players 5 to 8 need the managers' eight slots; without them a build for eight takes four. */
+static uint32_t JoinLimit(void) { return CO_PLAYERS == 8 && co_managers_moved() ? 8u : 4u; }
+
 /* The host's own slot always counts as used. A joining peer gets a slot from CO_FIRST_SLOT on, so only those are
  * open to it. */
 static uint32_t FreeSlots(uintptr_t sync)
@@ -98,7 +111,13 @@ static uint32_t FreeSlots(uintptr_t sync)
         if (*Slot(sync, i) != 0) used++;
         else if (i >= CO_FIRST_SLOT) open++;
     }
-    const uint32_t left = used < CO_JOIN_LIMIT ? CO_JOIN_LIMIT - used : 0;
+    const uint32_t limit = JoinLimit();
+    const uint32_t left = used < limit ? limit - used : 0;
+    if (left == 0 && limit < (uint32_t)CO_PLAYERS && !g_toldFour)
+    {
+        g_toldFour = 1;
+        co_log("session: the session is full at four players: the player managers have four slots");
+    }
     return left < open ? left : open;
 }
 
@@ -173,7 +192,42 @@ static void JoinIndex(CoRegs* regs)
     }
 }
 
-static void (*const kCountCallbacks[])(CoRegs*) = {FindByRsi, FindByR11, JoinGate, ClearValueKeys, LastSlotState, MessageFits, JoinSlot, JoinIndex};
+static uint32_t LootRows(void) { return co_managers_moved() ? 8u : 4u; }
+
+/* rax is the score manager plus the old place of the rows: every row is cleared where the rows are now. */
+static void ClearLootSlots(CoRegs* regs)
+{
+    const uintptr_t manager = (uintptr_t)regs->rax - CO_LOOT_SLOTS;
+    memset((void*)(manager + (co_managers_moved() ? CO_LOOT_SLOTS_MOVED : CO_LOOT_SLOTS)), 0, LootRows() * CO_LOOT_ROW);
+}
+
+static void ClearLootIndexes(CoRegs* regs)
+{
+    const uintptr_t manager = (uintptr_t)regs->rax - CO_LOOT_INDEXES;
+    memset((void*)(manager + (co_managers_moved() ? CO_LOOT_INDEXES_MOVED : CO_LOOT_INDEXES)), 0, LootRows() * CO_LOOT_ROW);
+}
+
+/* rax is the score manager; the game's code wrote this sum out for four rows. It goes back in eax. */
+static void SumLoot(CoRegs* regs)
+{
+    const uintptr_t rows = (uintptr_t)regs->rax + (co_managers_moved() ? CO_LOOT_SLOTS_MOVED : CO_LOOT_SLOTS);
+    uint32_t sum = 0;
+    for (uint32_t i = 0; i < LootRows(); i++) sum += *(const uint32_t*)(rows + i * CO_LOOT_ROW + CO_LOOT_COUNT);
+    regs->rax = sum;
+}
+
+/* eax is a score slot or a player index: the carry flag says it has a loot row, for the cave's jae. */
+static void LootIndex(CoRegs* regs)
+{
+    regs->flags = (regs->flags & ~(uint64_t)1) | ((uint32_t)regs->rax < LootRows());
+}
+
+/* By the numbers in gen_count_sites.py; 8 to 13 are kept for other caves. */
+static void (*const kCountCallbacks[])(CoRegs*) = {
+    FindByRsi, FindByR11, JoinGate, ClearValueKeys, LastSlotState, MessageFits, JoinSlot, JoinIndex,
+    [14] = ClearLootSlots, ClearLootIndexes, SumLoot, LootIndex,
+};
+#define CO_CALLBACKS (sizeof kCountCallbacks / sizeof kCountCallbacks[0])
 
 /* The session init clears the keys 1 to 3 itself; its hook (co_session.c) calls this behind it. */
 void co_counts_session_init(void) { if (g_on) ClearValueKeys(NULL); }
@@ -390,6 +444,8 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
         if (!Active(c->group)) continue;
         if (g_coApi->read(g_game + c->rva, bytes, c->size) != 0 || memcmp(bytes, c->replaced, c->size) != 0)
         { co_log("session: the code at game+0x%X is not the reviewed one; %s", c->rva, kStays); return; }
+        if (c->callback != 0xFF && (c->callback >= CO_CALLBACKS || kCountCallbacks[c->callback] == NULL))
+        { co_log("session: the cave at game+0x%X has no callback %u; %s", c->rva, (unsigned)c->callback, kStays); return; }
     }
     g_caves = co_alloc_near(g_game + 0x1000000u, CO_CAVE_ROOM);
     if (g_caves == 0 || sizeof kCoCountCode > CO_CAVE_ROOM) { co_log("session: no free memory near the game's code; %s", kStays); return; }
@@ -447,10 +503,12 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
         unsigned caves;
         const unsigned counts = InGroup(CO_G_COUNT, &caves) + (unsigned)CO_COUNT_CLEARS;
         co_log("session: the session lists count to eight (%u code sites changed, %u through caves); a session %s %u players",
-               counts, caves, CO_PLAYERS == 8 ? "takes" : "still takes", CO_JOIN_LIMIT);
+               counts, caves, CO_PLAYERS == 8 ? "takes" : "still takes", (unsigned)CO_PLAYERS);
         co_log("players: %u accesses to four-entry tables of the game skip a player index above 3",
                InGroup(CO_G_GUARD, NULL) + (Active(CO_G_GUARD4) ? InGroup(CO_G_GUARD4, NULL) : 0u));
         co_log("session: %u guards keep the lists in messages inside the game's buffers", InGroup(CO_G_NET, NULL));
+        co_log("players: the score manager's loot rows are cleared, added and bounded where the managers keep them (%u caves)",
+               InGroup(CO_G_LOOT, NULL));
         if (Active(CO_G_EIGHT))
             co_log("session: player indexes 4 to 7 are valid, the SOS beacon counts to eight and the lobby takes eight (%u code sites changed)",
                    InGroup(CO_G_EIGHT, NULL));
@@ -511,6 +569,7 @@ void co_counts_test_reset(void)
     g_on = 0;
     g_hooks = -1;
     g_ignored = 0;
+    g_toldFour = 0;
 }
 
 /* Every site, clear and cave site holds the game's bytes (a moved array's distance aside). */
@@ -536,7 +595,7 @@ uintptr_t co_counts_test_synced_table(void) { return g_syncedNew; }
 unsigned co_counts_test_sites(void)
 {
     unsigned n = (unsigned)CO_COUNT_CLEARS;
-    for (uint8_t group = CO_G_COUNT; group <= CO_G_SYNCED; group++)
+    for (uint8_t group = CO_G_COUNT; group <= CO_G_LOOT; group++)
         if (Active(group)) n += InGroup(group, NULL);
     return n;
 }
@@ -595,4 +654,13 @@ uint32_t co_counts_test_free(uintptr_t sync) { return SlotsFreeDetour(sync); }
 uint64_t co_counts_test_find(uint64_t key) { return FindRecord(key); }
 void co_counts_test_gone(uintptr_t sync, uint64_t key) { PeerGoneDetour(sync, key, 0, 0); }
 uint64_t co_counts_test_last(uintptr_t context) { CoRegs regs = {0}; regs.rbx = context; LastSlotState(&regs); return regs.rax; }
+/* The score manager's loot callbacks, as their caves call them. */
+void co_counts_test_clear_loot(uintptr_t manager, int byIndex)
+{
+    CoRegs regs = {0};
+    regs.rax = manager + (byIndex ? CO_LOOT_INDEXES : CO_LOOT_SLOTS);
+    (byIndex ? ClearLootIndexes : ClearLootSlots)(&regs);
+}
+uint32_t co_counts_test_sum_loot(uintptr_t manager) { CoRegs regs = {0}; regs.rax = manager; SumLoot(&regs); return (uint32_t)regs.rax; }
+uint64_t co_counts_test_loot_index(uint32_t index, uint64_t flags) { CoRegs regs = {0}; regs.rax = index; regs.flags = flags; LootIndex(&regs); return regs.flags; }
 #endif

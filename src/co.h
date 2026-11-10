@@ -29,6 +29,8 @@ uintptr_t co_alloc_near(uintptr_t target, size_t size);
  * the state constructor's hook with the component block, before the game's constructor runs. */
 void co_managers_install(uintptr_t game);
 void co_managers_state(uintptr_t block);
+/* 1 while the managers have eight slots. The join limit and the score manager's caves follow it. */
+int co_managers_moved(void);
 #ifdef CO_CANARY
 void co_managers_canary(int fill);
 void co_session_canary(int fill);

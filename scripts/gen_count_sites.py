@@ -14,11 +14,12 @@
 #   4 only with the test option that hands out slots and indexes from a later number (TEST_CAVES);
 #   5 only for eight players: the loadout screen with eight records and cards (sites/loadout_sites.py);
 #   6 only for four players: the loadout screen's guards that group 5 replaces (loadout_sites.MOD_OFF);
-#   7 only for eight players: the bounds of the per-peer loadout table, which the mod moves to room for eight first.
+#   7 only for eight players: the bounds of the per-peer loadout table, which the mod moves to room for eight first;
+#   8 the score manager's loot rows (always): clears, sums and bounds that follow the player managers' state (LOOT).
 # An instruction of a moved array carries a distance the session step rewrites; those four bytes are not compared.
 import os, re, struct, subprocess, sys, tempfile
 
-G_COUNT, G_GUARD, G_NET, G_EIGHT, G_TEST, G_LOADOUT, G_GUARD4, G_SYNCED = range(8)
+G_COUNT, G_GUARD, G_NET, G_EIGHT, G_TEST, G_LOADOUT, G_GUARD4, G_SYNCED, G_LOOT = range(9)
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE + '/sites')
 import loadout_sites
@@ -104,8 +105,9 @@ CALL = '''
     pop rax
     popfq
 '''
-# Callbacks, by number (the same order as kCountCallbacks in co_counts.c).
+# Callbacks, by number (the index in kCountCallbacks in co_counts.c). 8 to 13 are kept for the wire and extraction caves.
 FIND_RSI, FIND_R11, GATE, VALUES, LAST_SLOT, MESSAGE, TEST_SLOT, TEST_INDEX = range(8)
+SCORE_CLEAR_L, SCORE_CLEAR_B, SCORE_SUM, SCORE_INDEX = range(14, 18)
 # (rva, bytes the jump replaces, code; `game+0x..` is an address in the game, CALL(n) the call of callback n)
 def HIGH(r): return ''.join(' movups [%s+0x%x], xmm0\n' % (r, o) for o in range(0x150, 0x1D0, 0x10))
 CAVES = [
@@ -141,10 +143,6 @@ CAVES = [
 # of four or more skips the access, so players 5 to 8 are missing from that table instead of overrunning it; for 0 to
 # 3 nothing changes. Each cave runs the instructions its jump replaced.
 GUARDS = [
-    # Score manager, +0xC4A0 by player index and +0xC440 by score slot (both stay in the game's part of the manager).
-    (0x6311D4, '3b c3 0f 84 2f 01 00 00', 'cmp eax, 4\n jae game+0x63130B\n jmp game+0x6311DC'),
-    (0x631514, '8b c1 48 8d 0c 40', 'mov eax, ecx\n lea rcx, [rax+rax*2]\n cmp eax, 4\n jae game+0x63155B\n jmp game+0x63151A'),
-    (0x631693, '41 3b ae 0c 7d 03 00', 'cmp ebp, 4\n jae game+0x6316A0\n cmp ebp, dword ptr [r14+0x37d0c]\n jmp game+0x63169A'),
     # Customization, every frame: four pairs on the stack, the stack cookie right behind them.
     (0x874E26, '8d 14 00 8b 43 c0', 'cmp eax, 4\n jae game+0x874E3A\n lea edx, [rax+rax*1]\n mov eax, dword ptr [rbx-0x40]\n jmp game+0x874E2C'),
     # Clan tags and names (two copies of each message handler).
@@ -216,9 +214,16 @@ GUARDS = [
     # Four entries of 0x1320 by player index: entry 4 would be the object's own members, a called pointer among
     # them. The function gives no value (its four callers read none), so 4 and more return at once.
     (0x139D300, '48 89 5c 24 10', 'cmp r8d, 4\n jae 1f\n mov qword ptr [rsp+0x10], rbx\n jmp game+0x139D305\n1: ret'),
-    # Mission result: four rows of 0x18 by score slot, the next table right behind. Slot 4 and up goes the
-    # function's own way for a slot without row values.
-    (0x62F2E5, '4b 8b 84 cc 40 c4 00 00', 'cmp r13d, 4\n jae game+0x62F358\n mov rax, qword ptr [r12+r9*8+0xc440]\n jmp game+0x62F2ED'),
+    # Mission result: it copies the loot rows by score slot into room for four rows of 0x18, a table of objectives
+    # right behind. Slot 4 and up goes the function's own way for a slot without row values. The guard stands before
+    # the load, whose offset the managers move.
+    (0x62F2DB, '4d 03 cd 89 44 24 3c 44 8b d0', 'add r9, r13\n mov dword ptr [rsp+0x3c], eax\n mov r10d, eax\n cmp r13d, 4\n jae game+0x62F358\n'
+                                                ' jmp game+0x62F2E5'),
+    # Activity record: the participants (four, the count right behind) and the peers whose answer it waits for (three)
+    # are filled from the ready list with no bound. A peer beyond them is left out.
+    (0xA56D88, '48 89 54 c5 98', 'cmp eax, 4\n jae game+0xA56D95\n mov qword ptr [rbp+rax*8-0x68], rdx\n jmp game+0xA56D8D'),
+    (0xA56E91, '48 89 4c c5 e8', 'cmp eax, 3\n jae game+0xA56E9E\n mov qword ptr [rbp+rax*8-0x18], rcx\n jmp game+0xA56E96'),
+    (0x12E67B1, '48 89 4c c5 bf', 'cmp eax, 3\n jae game+0x12E67BE\n mov qword ptr [rbp+rax*8-0x41], rcx\n jmp game+0x12E67B6'),
     # Galactic map cursors again: the functions that write a cursor by the index in edx. None gives a value: no
     # caller reads one, and four of the eight have no caller in the game's code.
     (0x142FF90, '89 54 24 10 53', 'cmp edx, 4\n jae 1f\n mov dword ptr [rsp+0x10], edx\n push rbx\n jmp game+0x142FF95\n1: ret'),
@@ -233,6 +238,25 @@ GUARDS = [
     # them. An index of -1 goes on as the game has it.
     (0x13D1119, '44 8b 4d 6f 41 b8 04 00 00 00', 'cmp eax, 4\n jb 1f\n cmp eax, -1\n jne game+0x13D173E\n1: mov r9d, dword ptr [rbp+0x6f]\n mov r8d, 4\n'
                                                  ' jmp game+0x13D1123'),
+]
+# The score manager's loot rows: B (+0xC4A0) by player index, L (+0xC440) by score slot, four of 0x18 each. Once the
+# managers have moved (gen_manager_sites.py) there are eight of each behind the manager, else four in the game's place.
+# These caves ask the mod which; they go in and out with the counts, the rows' own sites with the managers.
+LOOT = [
+    # A guard: an index without a row skips the access (the callback sets CF for an index with one).
+    (0x6311D4, '3b c3 0f 84 2f 01 00 00', 'CALL(%d)\n jae game+0x63130B\n jmp game+0x6311DC' % SCORE_INDEX),
+    (0x631514, '8b c1 48 8d 0c 40', 'mov eax, ecx\n lea rcx, [rax+rax*2]\n CALL(%d)\n jae game+0x63155B\n jmp game+0x63151A' % SCORE_INDEX),
+    (0x631693, '41 3b ae 0c 7d 03 00', 'push rax\n mov eax, ebp\n CALL(%d)\n pop rax\n jae game+0x6316A0\n cmp ebp, dword ptr [r14+0x37d0c]\n'
+                                        ' jmp game+0x63169A' % SCORE_INDEX),
+    # The clears of the loot rows: the callback clears all rows where they are; the game's other stores clear the first
+    # four again. The sums written out for four rows: the callback adds the rows where they are (in eax). The sum at
+    # 0x6309B0 returns at once; the cave of 0x126EC60 goes on behind the three adds it leaves out.
+    (0x62D24F, '0f 11 83 40 c4 00 00', 'push rax\n lea rax, [rbx+0xc440]\n CALL(%d)\n pop rax\n jmp game+0x62D256' % SCORE_CLEAR_L),
+    (0x63132D, '0f 11 81 40 c4 00 00', 'push rax\n lea rax, [rcx+0xc440]\n CALL(%d)\n pop rax\n jmp game+0x631334' % SCORE_CLEAR_L),
+    (0xAC5F22, '0f 11 83 40 c4 00 00', 'push rax\n lea rax, [rbx+0xc440]\n CALL(%d)\n pop rax\n jmp game+0xAC5F29' % SCORE_CLEAR_L),
+    (0x6316C1, '41 0f 11 86 a0 c4 00 00', 'push rax\n lea rax, [r14+0xc4a0]\n CALL(%d)\n pop rax\n jmp game+0x6316C9' % SCORE_CLEAR_B),
+    (0x6309B7, '8b 81 94 c4 00 00', 'mov rax, rcx\n CALL(%d)\n ret' % SCORE_SUM),
+    (0x126EC60, '8b 87 94 c4 00 00', 'mov rax, rdi\n CALL(%d)\n jmp game+0x126EC78' % SCORE_SUM),
 ]
 # Guards in place: the game tests the index against -1 ("none") only. cmp reg,-1; je becomes cmp reg,4; jae, which
 # sends 4 to 7 the way "none" goes and leaves -1 going there. (rva, bytes, new bytes)
@@ -268,6 +292,7 @@ EIGHT_SITES = [
     (0x133B272, '41 b8 04 00 00 00', '41 b8 08 00 00 00'),                           # lobby search: members up to 8 less the party
     (0x12CB9BA, '74 22', 'eb 22'),       # the host's friends-list post keeps the session's count, no re-post capped at 4
     (0x1338699, 'c7 84 24 b0 00 00 00 04 00 00 00', 'c7 84 24 b0 00 00 00 08 00 00 00'),   # the lobby's size the UI shows
+    (0x1347AC0, '83 f8 03', '83 f8 07'),         # the mission result for player counts 1 to 8 (lea eax,[rbx-1]; cmp; ja)
 ]
 # The lobby's member lists (moved by the session step) take eight ids. Without the move eight would overrun the lobby
 # object, so these are counts: the session step's sites are all in before any of them. (rva, bytes, new bytes)
@@ -340,8 +365,8 @@ TEST_CAVES = [
 EIGHT_CAVES = [(0x103D11D, 'ba 04 00 00 00 41 89 96 4c 03 00 00', 'mov edx, 4\n mov dword ptr [r14+0x34c], 8\n jmp game+0x103D129')]
 LOADOUT_CAVES = [(rva, replaced, text) for rva, replaced, text, _ in LOADOUT_CAVES]
 cave_groups = ([G_COUNT] * len(CAVES) + [G_GUARD4 if rva in OFF else G_GUARD for rva, _, _ in GUARDS] + [G_NET] * len(NET_GUARDS) +
-               [G_EIGHT] * len(EIGHT_CAVES) + [G_TEST] * len(TEST_CAVES) + [G_LOADOUT] * len(LOADOUT_CAVES))
-CAVES += GUARDS + NET_GUARDS + EIGHT_CAVES + TEST_CAVES + LOADOUT_CAVES
+               [G_EIGHT] * len(EIGHT_CAVES) + [G_TEST] * len(TEST_CAVES) + [G_LOADOUT] * len(LOADOUT_CAVES) + [G_LOOT] * len(LOOT))
+CAVES += GUARDS + NET_GUARDS + EIGHT_CAVES + TEST_CAVES + LOADOUT_CAVES + LOOT
 # In place, with the cave above: the first loop's count is a copy of that constant.
 sites.append((0x108D2DD, bytes.fromhex('8b ef 90'), bytes.fromhex('8d 6f 04'), 0xFF, G_COUNT))
 assert dump[0x108D2DD:0x108D2E0] == bytes.fromhex('8b ef 90')
@@ -442,5 +467,5 @@ assert len(cave_groups) == len(caves) == len(CAVES)
 open(out, 'w').writelines(h)
 print('%d sites, %d clears, %d caves (%d bytes)' % (len(sites), len(CLEARS), len(caves), len(blob)))
 for group, name in enumerate(('counts', 'guards', 'message guards', 'eight players only', 'test option only', 'loadout (eight only)',
-                               'guards (four only)', 'loadout table (eight)')):
+                               'guards (four only)', 'loadout table (eight)', 'loot rows')):
     print('  %-20s %3d sites, %2d caves' % (name, sum(s[4] == group for s in sites), cave_groups.count(group)))

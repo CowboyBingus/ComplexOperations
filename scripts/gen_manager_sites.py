@@ -3,17 +3,18 @@
 # reviewed lists in scripts/sites/ and a dump of the game's code:
 #   scripts/gen_manager_sites.py <game.dll image dump> [out]
 # A manager is a struct inside the game's component block with four slots and the next manager right behind it. The
-# mod builds each one in its own memory with eight slots. Three kinds of site:
+# mod builds each one in its own memory with eight slots. Four kinds of site:
 #   BLOCK  reaches the manager from the block (block + displacement): gets the distance to the new struct
 #   ARRAY  reaches a per-slot array that eight slots of its neighbour would overrun: the array has a new offset
-#   CAP    the capacity check `cmp eax,4`
+#   CAP    the capacity check `cmp eax,4`, or another four in a loop over a moved array
+#   CODE   four bytes of code replaced
 # Every row is checked against the dump here, and again by the mod against the running game before it writes.
 import struct, sys, os
 
 HERE = os.path.dirname(os.path.abspath(__file__)) + '/sites/'
 # name: (global, offset in the block, size, new size, [(old start, old end, new start) of each array that moves])
 MANAGERS = {
-    'score':              (0x3326AE0, 0x7C7368, 0x37E38, 0x37F20, [(0x37D70, 0x37D90, 0x37EE0)]),
+    'score':              (0x3326AE0, 0x7C7368, 0x37E38, 0x380A0, [(0x37D70, 0x37D90, 0x37EE0), (0xC440, 0xC4A0, 0x37F20), (0xC4A0, 0xC500, 0x37FE0)]),
     'customization':      (0x33264F8, 0xE9FC98, 0xB80,   0xEA8,   [(0x968, 0x96C, 0xC80), (0x96C, 0xA7C, 0xC88)]),
     'kill_streak':        (0x3326AF0, 0x2A988,  0x4A8,   0xCE8,   [(0x88, 0x4A8, 0x4A8)]),
     'ship_inventory':     (0x33266D0, 0xEB5178, 0x168,   0x318,   [(0x90, 0x160, 0x170), (0x160, 0x164, 0x310)]),
@@ -23,6 +24,18 @@ MANAGERS = {
 }
 # Sites the lists miss, found later: (manager, rva, offset of the disp32, old value)
 EXTRA = [('player', 0xACC65B, 3, 0x2C8)]
+# More site lists of a manager. Score's loot tables (four rows of 0x18 by score slot at +0xC440, four by player index at
+# +0xC4A0) move behind the manager, so that eight rows of each fit.
+LISTS = {'score': ['patch_sites_score.tsv', 'patch_sites_score_loot.tsv']}
+LOOT_ROWS = 54
+# The loops over the loot rows by score slot count to eight once the rows have moved: (manager, rva, instruction, offset
+# of the four)
+LOOPS = [('score', 0x63090B, '83 f9 04', 2), ('score', 0x63095B, '83 f8 04', 2), ('score', 0x630980, '44 8d 40 04', 3),
+         ('score', 0x126EBFC, '83 f8 04', 2), ('score', 0x1347C1D, '83 f9 04', 2), ('score', 0x1380C68, '41 be 04 00 00 00', 2),
+         ('score', 0x19940EB, '83 f9 04', 2)]
+# r14d of the loop at 0x1380C68 is also the mission end report's outcome code, read at 0x1380F0B: mov eax,r14d becomes
+# push 4; pop rax, the value it had. (manager, rva, four bytes, four new bytes)
+CODE = [('score', 0x1380F0B, '41 8b c6 89', '6a 04 58 89')]
 # classb_final.tsv lists every instruction with a fitting value. In these functions the base register is not the block
 # (another object, or the manager itself, which patch_sites covers), except at the sites of BLOCK_ONLY.
 NOT_BLOCK = {('ship_modules_sync', 'fn 0x569490'), ('ship_modules_sync', 'fn 0x571250'), ('ship_modules_sync', 'fn 0xbc2d30')}
@@ -44,7 +57,7 @@ def delta(m, field):
 
 for mi, m in enumerate(names):
     g, off, size, new_size, moved = MANAGERS[m]
-    for line in open(HERE + f'patch_sites_{m}.tsv').read().splitlines()[1:]:
+    for line in [l for f in LISTS.get(m, [f'patch_sites_{m}.tsv']) for l in open(HERE + f).read().splitlines()[1:]]:
         c = line.split('\t'); rva, at, raw = int(c[0], 16), int(c[5]), bytes.fromhex(c[6])
         old = struct.unpack_from('<I', raw, at)[0]; assert dump[rva:rva + len(raw)] == raw, (m, hex(rva))
         assert old == int(c[4], 16) and delta(m, old) is not None, (m, line)
@@ -69,6 +82,17 @@ for mi, m in enumerate(names):
         if c[0] != m: continue
         rva = int(c[3], 16); assert dump[rva:rva + 3] == bytes([0x83, 0xF8, 0x04]), hex(rva); rows.append((rva, 2, 4, mi, 0, 'CO_MGR_CAP')); caps += 1
     assert caps == 4, (m, caps)
+    for em, rva, raw, at in LOOPS:
+        raw = bytes.fromhex(raw)
+        if em == m:
+            assert dump[rva:rva + len(raw)] == raw and raw[at] == 4, hex(rva); rows.append((rva, at, 4, mi, 0, 'CO_MGR_CAP'))
+    for em, rva, raw, new in CODE:
+        if em == m:
+            assert dump[rva:rva + 4] == bytes.fromhex(raw)
+            rows.append((rva, 0, struct.unpack('<I', bytes.fromhex(raw))[0], mi, struct.unpack('<i', bytes.fromhex(new))[0], 'CO_MGR_CODE'))
+if only is None:
+    loot = sum(1 for r in rows if r[5] == 'CO_MGR_ARRAY' and names[r[3]] == 'score' and 0xC440 <= r[2] < 0xC500)
+    assert loot == LOOT_ROWS, loot
 from collections import Counter
 dup = [r for r in sorted(rows) if Counter(x[0] for x in rows)[r[0]] > 1]
 for r in dup: print('DUP %x at %d old %x %s add %x %s' % (r[0], r[1], r[2], names[r[3]], r[4], r[5]))
@@ -81,7 +105,7 @@ out += ['    {"%s", 0x%Xu, 0x%Xu, 0x%Xu, 0x%Xu},' % (m, *MANAGERS[m][:4]) for m 
 out += ['};', '', '/* {rva, offset of the value in the instruction, its vanilla value, manager, what the new array offset adds,',
         ' * kind, the instruction bytes before the value} */', 'static const CoManagerSite kCoManagerSites[] = {']
 for rva, at, old, mi, add, kind in sorted(rows):
-    pin = ', '.join('0x%02X' % b for b in dump[rva:rva + at])
+    pin = ', '.join('0x%02X' % b for b in dump[rva:rva + at]) or '0'
     out.append('    {0x%Xu, %d, 0x%Xu, %d, %d, %s, {%s}},' % (rva, at, old, mi, add, kind, pin))
 out += ['};', '', '#endif', '']
 open(args[1] if len(args) > 1 else 'src/co_manager_sites.h', 'w').write('\n'.join(out))

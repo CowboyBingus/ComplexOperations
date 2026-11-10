@@ -1,0 +1,55 @@
+site	fn	region	form	disp	disp_offset_in_insn	bytes	insn
+0x62d259	0x62d210	L loot by score slot	direct	0xc450	3	0f118350c40000	movups XMMWORD PTR [rbx+0xc450],xmm0
+0x62d260	0x62d210	L loot by score slot	direct	0xc460	3	0f118360c40000	movups XMMWORD PTR [rbx+0xc460],xmm0
+0x62d267	0x62d210	L loot by score slot	direct	0xc470	3	0f118370c40000	movups XMMWORD PTR [rbx+0xc470],xmm0
+0x62d26e	0x62d210	L loot by score slot	direct	0xc480	3	0f118380c40000	movups XMMWORD PTR [rbx+0xc480],xmm0
+0x62d275	0x62d210	L loot by score slot	direct	0xc490	3	0f118390c40000	movups XMMWORD PTR [rbx+0xc490],xmm0
+0x62f2e5	0x62ec20	L loot by score slot	direct	0xc440	4	4b8b84cc40c40000	mov rax,QWORD PTR [r12+r9*8+0xc440]
+0x62f30a	0x62ec20	L loot by score slot	direct	0xc448	4	458b849448c40000	mov r8d,DWORD PTR [r12+rdx*4+0xc448]
+0x62f317	0x62ec20	L loot by score slot	direct	0xc44c	4	418b8c944cc40000	mov ecx,DWORD PTR [r12+rdx*4+0xc44c]
+0x62f323	0x62ec20	L loot by score slot	direct	0xc450	4	418b849450c40000	mov eax,DWORD PTR [r12+rdx*4+0xc450]
+0x62f338	0x62ec20	L loot by score slot	direct	0xc454	5	430fb684cc54c40000	movzx eax,BYTE PTR [r12+r9*8+0xc454]
+0x6308f9	0x6308f0	L loot by score slot	direct	0xc440	3	4d8d8140c40000	lea r8,[r9+0xc440]
+0x63091a	0x6308f0	L loot by score slot	direct	0xc448	4	418b848948c40000	mov eax,DWORD PTR [r9+rcx*4+0xc448]
+0x630922	0x6308f0	L loot by score slot	direct	0xc450	4	4103848950c40000	add eax,DWORD PTR [r9+rcx*4+0xc450]
+0x63092a	0x6308f0	L loot by score slot	direct	0xc44c	4	410384894cc40000	add eax,DWORD PTR [r9+rcx*4+0xc44c]
+0x630949	0x630940	L loot by score slot	direct	0xc440	3	498d8840c40000	lea rcx,[r8+0xc440]
+0x630967	0x630940	L loot by score slot	direct	0xc448	4	418b84c048c40000	mov eax,DWORD PTR [r8+rax*8+0xc448]
+0x630979	0x630970	L loot by score slot	immediate	0xc44c	3	4881c14cc40000	add rcx,0xc44c
+0x63133b	0x631320	L loot by score slot	direct	0xc450	3	0f118150c40000	movups XMMWORD PTR [rcx+0xc450],xmm0
+0x631342	0x631320	L loot by score slot	direct	0xc460	3	0f118160c40000	movups XMMWORD PTR [rcx+0xc460],xmm0
+0x631349	0x631320	L loot by score slot	direct	0xc470	3	0f118170c40000	movups XMMWORD PTR [rcx+0xc470],xmm0
+0x631350	0x631320	L loot by score slot	direct	0xc480	3	0f118180c40000	movups XMMWORD PTR [rcx+0xc480],xmm0
+0x631357	0x631320	L loot by score slot	direct	0xc490	3	0f118190c40000	movups XMMWORD PTR [rcx+0xc490],xmm0
+0x631434	0x631320	L loot by score slot	direct	0xc440	3	4d89bd40c40000	mov QWORD PTR [r13+0xc440],r15
+0x63152d	0x631320	L loot by score slot	direct	0xc440	4	410f118540c40000	movups XMMWORD PTR [r13+0xc440],xmm0
+0x63153f	0x631320	L loot by score slot	direct	0xc450	5	f2410f118d50c40000	movsd QWORD PTR [r13+0xc450],xmm1
+0x63161d	0x631320	L loot by score slot	direct	0xc448	3	41018848c40000	add DWORD PTR [r8+0xc448],ecx
+0x631686	0x631320	L loot by score slot	direct	0xc454	3	41888554c40000	mov BYTE PTR [r13+0xc454],al
+0xac5f29	0xac5d40	L loot by score slot	direct	0xc450	3	0f118350c40000	movups XMMWORD PTR [rbx+0xc450],xmm0
+0xac5f30	0xac5d40	L loot by score slot	direct	0xc460	3	0f118360c40000	movups XMMWORD PTR [rbx+0xc460],xmm0
+0xac5f37	0xac5d40	L loot by score slot	direct	0xc470	3	0f118370c40000	movups XMMWORD PTR [rbx+0xc470],xmm0
+0xac5f3e	0xac5d40	L loot by score slot	direct	0xc480	3	0f118380c40000	movups XMMWORD PTR [rbx+0xc480],xmm0
+0xac5f48	0xac5d40	L loot by score slot	direct	0xc490	3	0f118390c40000	movups XMMWORD PTR [rbx+0xc490],xmm0
+0x126ebe7	0x126eab0	L loot by score slot	direct	0xc440	3	488d8f40c40000	lea rcx,[rdi+0xc440]
+0x126ec07	0x126eab0	L loot by score slot	direct	0xc448	3	83bccf48c400000f	cmp DWORD PTR [rdi+rcx*8+0xc448],0xf
+0x1347c09	0x1347a10	L loot by score slot	direct	0xc440	3	498d8740c40000	lea rax,[r15+0xc440]
+0x1347c2d	0x1347a10	L loot by score slot	direct	0xc450	4	458b848f50c40000	mov r8d,DWORD PTR [r15+rcx*4+0xc450]
+0x1347c35	0x1347a10	L loot by score slot	direct	0xc44c	4	4503848f4cc40000	add r8d,DWORD PTR [r15+rcx*4+0xc44c]
+0x1347c3d	0x1347a10	L loot by score slot	direct	0xc448	4	4503848f48c40000	add r8d,DWORD PTR [r15+rcx*4+0xc448]
+0x1380c76	0x1380960	L loot by score slot	direct	0xc44c	3	498d8f4cc40000	lea rcx,[r15+0xc44c]
+0x19940d3	0x1993e30	L loot by score slot	direct	0xc440	3	488d8640c40000	lea rax,[rsi+0xc440]
+0x19940fb	0x1993e30	L loot by score slot	direct	0xc448	4	448b848e48c40000	mov r8d,DWORD PTR [rsi+rcx*4+0xc448]
+0x1994103	0x1993e30	L loot by score slot	direct	0xc450	4	4403848e50c40000	add r8d,DWORD PTR [rsi+rcx*4+0xc450]
+0x199410b	0x1993e30	L loot by score slot	direct	0xc44c	4	4403848e4cc40000	add r8d,DWORD PTR [rsi+rcx*4+0xc44c]
+0x6312a2	0x631130	B loot by player index	direct	0xc4a0	3	4889b5a0c40000	mov QWORD PTR [rbp+0xc4a0],rsi
+0x6312d1	0x631130	B loot by player index	direct	0xc4a8	2	0181a8c40000	add DWORD PTR [rcx+0xc4a8],eax
+0x631305	0x631130	B loot by player index	direct	0xc4b4	2	889db4c40000	mov BYTE PTR [rbp+0xc4b4],bl
+0x63151a	0x631320	B loot by player index	direct	0xc4a0	4	4d3bbccea0c40000	cmp r15,QWORD PTR [r14+rcx*8+0xc4a0]
+0x631524	0x631320	B loot by player index	direct	0xc4a0	5	410f1084cea0c40000	movups xmm0,XMMWORD PTR [r14+rcx*8+0xc4a0]
+0x631535	0x631320	B loot by player index	direct	0xc4b0	6	f2410f108cceb0c40000	movsd xmm1,QWORD PTR [r14+rcx*8+0xc4b0]
+0x6316c9	0x631320	B loot by player index	direct	0xc4b0	4	410f1186b0c40000	movups XMMWORD PTR [r14+0xc4b0],xmm0
+0x6316d1	0x631320	B loot by player index	direct	0xc4c0	4	410f1186c0c40000	movups XMMWORD PTR [r14+0xc4c0],xmm0
+0x6316d9	0x631320	B loot by player index	direct	0xc4d0	4	410f1186d0c40000	movups XMMWORD PTR [r14+0xc4d0],xmm0
+0x6316e1	0x631320	B loot by player index	direct	0xc4e0	4	410f1186e0c40000	movups XMMWORD PTR [r14+0xc4e0],xmm0
+0x6316e9	0x631320	B loot by player index	direct	0xc4f0	4	410f1186f0c40000	movups XMMWORD PTR [r14+0xc4f0],xmm0

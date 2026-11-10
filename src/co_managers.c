@@ -10,7 +10,7 @@
 
 #include "co.h"
 
-typedef enum CoManagerKind { CO_MGR_BLOCK, CO_MGR_ARRAY, CO_MGR_CAP } CoManagerKind;
+typedef enum CoManagerKind { CO_MGR_BLOCK, CO_MGR_ARRAY, CO_MGR_CAP, CO_MGR_CODE } CoManagerKind;
 typedef struct CoManager { const char* name; uint32_t global, offset, size, newSize; } CoManager;
 typedef struct CoManagerSite
 {
@@ -18,7 +18,7 @@ typedef struct CoManagerSite
     uint8_t at;       /* offset of the value in the instruction */
     uint32_t old;     /* its vanilla value */
     uint8_t manager;
-    int32_t add;      /* what the array's new offset adds */
+    int32_t add;      /* what the array's new offset adds; for code, the four new bytes */
     CoManagerKind kind;
     uint8_t pin[8];   /* the instruction bytes before the value */
 } CoManagerSite;
@@ -40,6 +40,7 @@ static int SiteValue(const CoManagerSite* s, uint32_t* value)
 {
     if (s->kind == CO_MGR_CAP) { *value = CO_MANAGER_SLOTS; return 1; }
     if (s->kind == CO_MGR_ARRAY) { *value = s->old + (uint32_t)s->add; return 1; }
+    if (s->kind == CO_MGR_CODE) { *value = (uint32_t)s->add; return 1; }
     const CoManager* m = &kCoManagers[s->manager];
     int64_t v = (int64_t)(g_memory + g_place[s->manager]) - (int64_t)(g_block + m->offset) + (int64_t)s->old + s->add;
     *value = (uint32_t)(int32_t)v;
@@ -134,6 +135,8 @@ void co_managers_state(uintptr_t block)
 
 void co_managers_install(uintptr_t game) { g_game = game; }
 
+int co_managers_moved(void) { return g_state == 1; }
+
 #ifdef CO_TEST
 void co_managers_test_fill(uint8_t* image)
 {
@@ -155,4 +158,13 @@ int co_managers_test_state(void) { return g_state; }
 uintptr_t co_managers_test_memory(void) { return g_memory; }
 uintptr_t co_managers_test_place(unsigned i) { return g_memory + g_place[i]; }
 unsigned co_managers_test_sites(void) { return (unsigned)CO_MANAGER_SITES; }
+/* Sets the state the other steps see, without memory: for their tests only. */
+void co_managers_test_force(int state) { g_state = state; }
+/* The number of the write that changes the site at rva; -1 for none. */
+int co_managers_test_write_of(uint32_t rva)
+{
+    for (size_t i = 0; i < CO_MANAGER_SITES; i++)
+        if (kCoManagerSites[i].rva == rva) return (int)i;
+    return -1;
+}
 #endif
