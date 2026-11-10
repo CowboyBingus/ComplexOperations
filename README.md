@@ -47,8 +47,8 @@ bound. Among them are the galactic map's cursors, the game state's player rows, 
 result's and the mission summary's rows, the Activity record's lists (see Mission), the clan records and the clan
 station's rows. 77 guards cover the accesses to them: an index past the table's end skips the access, and for 0 to 3
 nothing changes. 66 guards are code beside the game's; 11 are a compare changed in place. The guards go in and out
-together with the counts. A build for eight keeps 58 of them; the loadout screen's 19 make way for its eight cards
-(see Loadout screen).
+together with the counts. A build for eight keeps 54 of them; the loadout screen's 19 and the mission summary's 4 make
+way for their eight cards and rows (see Loadout screen and Mission).
 
 Some message handlers copy a list from the wire into a buffer of fixed size and trust the count. Nine guards keep
 such lists inside their buffers: the handler ignores a message whose list is too long, and two senders stop at what
@@ -61,7 +61,8 @@ eight slots, its join gate stays at four.
 Limits that remain:
 
 - The hostability scores stay at four entries. Their message carries five at most, so peers 5 to 8 get no score.
-- A guarded table has no entry for players 5 to 8: no map cursor, no row in the mission summary, no clan record.
+- A guarded table has no entry for players 5 to 8: no map cursor and no clan record. In a build for four the mission
+  summary has no row for them either.
 
 ## Lobby
 
@@ -136,12 +137,22 @@ session's ready list with no bound:
 - The mod keeps participants 5 to 8 for the record. A hook of the post lists them behind the four. The post writes a
   list of any length; HellForge's backend takes up to 16.
 
+A build for eight gives the mission summary screen eight rows and cards. The game packs two row blocks of four rows,
+four cards and four navigation entries into one allocation of 0x8A540 bytes. The build allocates 0x120C70 bytes and
+puts copies with eight entries in the new part; the old places stay unused. 49 code sites address the new places or
+count to eight, and 10 more go through code beside the game's. The 4 guards on the rows by player index stop at eight
+instead of four. The screen exists only at a mission's end, long after the counts are written at startup. A build for
+four keeps the screen and its 4 guards.
+
 Limits that remain:
 
 - The mission result's loot rows hold score slots 1 to 4 only.
 - With five to eight players the Activity record waits for the answers of three other players. The others are paid
   without it.
 - The avatar manager's eight places, which dead players' bodies may also hold, are not covered yet.
+- The summary's cards 5 to 8 use the game's layout for four (a layout mode, not a count): where they appear on screen
+  is not known.
+- The summary's list of best entries keeps four.
 
 ## Engine
 
@@ -154,7 +165,7 @@ the game drops four and more. It goes in on its own: when it cannot, the peer li
 
 ## State
 
-- The mission, Activity record and clan changes are checked against the game's code and in the unit tests only.
+- The mission, mission summary, Activity record and clan changes are checked against the game's code and in the unit tests only.
 - Tested with one player: all eight pods are entered on foot, launch, and are there again after the return; missions
   and returns work with the lists counting to eight. A mission from a new pod after a completed mission's summary
   works; the mission was ended through the game's own handler, not by flying an extraction.
@@ -227,8 +238,9 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `src/co_count_sites.h` | Their code sites and the caves' code. Generated; do not edit. |
 | `scripts/sites/count_sites.tsv` | The reviewed count sites: one row for each instruction. |
 | `scripts/sites/loadout_sites.py` | The loadout screen's sites and caves for eight, and the per-peer loadout table's move and bounds. |
+| `scripts/sites/summary_sites.py` | The mission summary's sites and caves for eight, and its guards for four. |
 | `scripts/gen_count_sites.py` | Writes `co_count_sites.h`; assembles the caves with GNU `as`. Holds the guards, the member lists' caps, the lobby's size and the loot rows' guards. |
-| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards and the mission result's slots in both managers' states, the Activity record's participants and post, and the join limit without the managers. |
+| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards and the mission result's slots in both managers' states, the Activity record's participants and post, and the join limit without the managers. The mission summary in each build. |
 | `tests/engine_test.c` | The engine's sites: written, refused on changed code, taken back on a failed write. |
 | `tests/harness/` | The stand-in loader and game image the tests run against. |
 
@@ -261,6 +273,7 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `the lobby search lists lobbies with up to 7 members` | A build for eight players: the search's site is in place. |
 | `the loadout screen has eight records and cards` | A build for eight players: the loadout screen's arrays moved. |
 | `the per-peer loadout table moved to room for eight peers` | A build for eight players: that table is in the mod's memory. |
+| `the mission summary has eight rows and cards` | A build for eight players: the summary screen's rows and cards moved. |
 | `the per-peer loadout table is not where the game keeps it` | Something else moved or changed it: the counts stay at four. |
 | `the score manager's loot rows are cleared and added for eight rows` | The loot rows' code moved with the managers. |
 | `the score manager's loot rows by index are bounded where the managers keep them` | The loot rows' guards are in place. |

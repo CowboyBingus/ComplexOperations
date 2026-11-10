@@ -37,8 +37,9 @@ _Static_assert(sizeof kCoCountCode <= CO_CAVE_ROOM, "the caves' code must fit th
  * while every access to it is guarded. The rest depend on the build. The loadout screen's eight records and cards
  * (CO_G_LOADOUT) replace the guards that keep a player index above 3 off its four-entry arrays (CO_G_GUARD4). The
  * per-peer loadout table's bounds (CO_G_SYNCED) are safe only while the table is in the mod's room for eight. The score
- * manager's loot guards (CO_G_LOOT) ask the player managers' state each time, so they fit both of its states. */
-enum { CO_G_COUNT, CO_G_GUARD, CO_G_NET, CO_G_EIGHT, CO_G_TEST, CO_G_LOADOUT, CO_G_GUARD4, CO_G_SYNCED, CO_G_LOOT };
+ * manager's loot guards (CO_G_LOOT) ask the player managers' state each time, so they fit both of its states. The mission
+ * summary's eight rows and cards (CO_G_SUMMARY) replace its guards for four rows, as the loadout screen's do. */
+enum { CO_G_COUNT, CO_G_GUARD, CO_G_NET, CO_G_EIGHT, CO_G_TEST, CO_G_LOADOUT, CO_G_GUARD4, CO_G_SYNCED, CO_G_LOOT, CO_G_SUMMARY };
 /* Test builds only (--test-first-slot): the host gives joining peers slots and player indexes from this number on,
  * so that two game instances reach the code for players 5 to 8. Zero is off. */
 #ifndef CO_TEST_FIRST_SLOT
@@ -88,7 +89,7 @@ static uintptr_t g_syncedOld, g_syncedNew, g_syncedBlock;
 
 static int Active(uint8_t group)
 {
-    return group <= CO_G_NET || group == CO_G_LOOT || ((group == CO_G_EIGHT || group == CO_G_LOADOUT || group == CO_G_SYNCED) && CO_PLAYERS == 8) ||
+    return group <= CO_G_NET || group == CO_G_LOOT || ((group == CO_G_EIGHT || group == CO_G_LOADOUT || group == CO_G_SYNCED || group == CO_G_SUMMARY) && CO_PLAYERS == 8) ||
            (group == CO_G_GUARD4 && CO_PLAYERS == 4) || (group == CO_G_TEST && CO_TEST_FIRST_SLOT != 0);
 }
 
@@ -603,6 +604,8 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
             co_log("players: the loadout screen has eight records and cards (%u code sites changed)", InGroup(CO_G_LOADOUT, NULL));
         if (Active(CO_G_SYNCED))
             co_log("players: the per-peer loadout table moved to room for eight peers (%u code sites changed)", InGroup(CO_G_SYNCED, NULL));
+        if (Active(CO_G_SUMMARY))
+            co_log("players: the mission summary has eight rows and cards (%u code sites changed)", InGroup(CO_G_SUMMARY, NULL));
     }
     return;
 failed:
@@ -682,13 +685,14 @@ int co_counts_test_reviewed(const uint8_t* image)
 unsigned co_counts_test_guards(void) { return InGroup(CO_G_GUARD, NULL) + (Active(CO_G_GUARD4) ? InGroup(CO_G_GUARD4, NULL) : 0u); }
 unsigned co_counts_test_loadout(void) { return InGroup(CO_G_LOADOUT, NULL); }
 unsigned co_counts_test_synced(void) { return InGroup(CO_G_SYNCED, NULL); }
+unsigned co_counts_test_summary(void) { return InGroup(CO_G_SUMMARY, NULL); }
 /* Where the per-peer loadout table is now: the mod's block, or 0 while it is the game's. */
 uintptr_t co_counts_test_synced_table(void) { return g_syncedNew; }
 /* The sites, clears and caves this build writes. */
 unsigned co_counts_test_sites(void)
 {
     unsigned n = (unsigned)CO_COUNT_CLEARS;
-    for (uint8_t group = CO_G_COUNT; group <= CO_G_LOOT; group++)
+    for (uint8_t group = CO_G_COUNT; group <= CO_G_SUMMARY; group++)
         if (Active(group)) n += InGroup(group, NULL);
     return n;
 }

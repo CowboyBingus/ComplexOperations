@@ -10,7 +10,8 @@
  * are bounded where the managers keep them now, the mission result adds the loot of slots 4 to 7 without a row for them,
  * the Activity record's lists stop at their room while its post lists every participant with the local peer in the
  * record, and a build for eight takes four players while the managers have four slots. The clan records' and the clan station's
- * handlers skip a player index of four or more in every build. */
+ * handlers skip a player index of four or more in every build. A build for eight gives the mission summary eight rows
+ * and cards and bounds its rows at eight; a build for four bounds them at four. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,6 +49,7 @@ unsigned co_counts_test_synced(void);
 uintptr_t co_counts_test_synced_table(void);
 int co_counts_test_move_writes(void);
 unsigned co_counts_test_room(void);
+unsigned co_counts_test_summary(void);
 void co_pods_test_reset(void);
 void co_managers_test_reset(void);
 void co_managers_test_force(int state);
@@ -118,7 +120,11 @@ void co_counts_test_post_original(PostFn original);
 #define CLAN_OWN 0x1291BEFu         /* cmp ecx,-1; je: the own clan pair */
 #define CLAN_OWN_NAME 0x1291C7Fu    /* cmp ecx,-1; je: the own clan record's second string */
 #define CLAN_ROW 0xB65880u          /* a function: the clan station's row by the player index in edx */
-#define CLAN_ROW_AGAIN 0xFEC3E8u    /* mov eax,r8d; lea r9,[rax+rax*4]: the same row, inside the function */
+#define CLAN_ROW_AGAIN 0xFEC3E8u
+#define SUMMARY_SIZE 0x14989FBu     /* mov edx,size: the mission summary screen's allocation */
+#define SUMMARY_ROWS 0x1498A3Bu     /* mov ebp,4: the rows of both row blocks */
+#define SUMMARY_GUARD 0x199422Cu    /* imul rdx,rax,0x24C: the own row by player index */
+#define SUMMARY_CARDS 0x1993578u    /* cmp [rsi+card 0 + 0x12538],1: four card stores written out */    /* mov eax,r8d; lea r9,[rax+rax*4]: the same row, inside the function */
 
 typedef uint64_t (*InitFn)(uint64_t, uint64_t, uint64_t, uint64_t);
 typedef uint32_t (*CardFn)(void*, uint32_t);
@@ -469,6 +475,27 @@ int main(void)
         CHECK((cave != NULL) == (players == 8));
         if (cave != NULL) CHECK(memcmp(cave, kCount, sizeof kCount) == 0 && Leads(cave + 13, 0x147184Fu));
         else CHECK(image[LOADOUT_CAVE] == 0x48);
+    }
+    {
+        /* A build for eight gives the mission summary eight rows and cards in a bigger allocation and bounds the rows'
+         * guards at eight; a build for four keeps the screen and bounds them at four. */
+        const uint8_t* image = g_fake.image;
+        static char line[96];
+        uint32_t value;
+        snprintf(line, sizeof line, "players: the mission summary has eight rows and cards (%u code sites changed)", co_counts_test_summary());
+        CHECK(co_counts_test_summary() == 63u && fake_host_logged(line) == (players == 8));
+        memcpy(&value, image + SUMMARY_SIZE + 1, 4);
+        CHECK(image[SUMMARY_SIZE] == 0xBA && value == (players == 8 ? 0x120C70u : 0x8A540u));
+        CHECK(image[SUMMARY_ROWS] == 0xBD && image[SUMMARY_ROWS + 1] == players);
+        /* cmp eax,4 or 8; jae the row's skip; the replaced imul rdx,rax,0x24C; jmp back */
+        static const uint8_t kImul[] = {0x48, 0x69, 0xD0, 0x4C, 0x02, 0x00, 0x00, 0xE9};
+        const uint8_t* cave = Cave(SUMMARY_GUARD, 7);
+        CHECK(cave != NULL);
+        if (cave != NULL)
+            CHECK(cave[0] == 0x83 && cave[1] == 0xF8 && cave[2] == players && cave[3] == 0x0F && cave[4] == 0x83 && Leads(cave + 5, 0x19943B7u) &&
+                  memcmp(cave + 9, kImul, sizeof kImul) == 0 && Leads(cave + 17, 0x1994233u));
+        CHECK((Cave(SUMMARY_CARDS, 7) != NULL) == (players == 8));
+        if (players != 8) CHECK(image[SUMMARY_CARDS] == 0x83);
     }
     {
         /* The per-peer loadout table. A build for eight leads its pointer and its three registry entries to the mod's
@@ -1018,6 +1045,7 @@ int main(void)
             {"one changed loadout site", LOADOUT_MAP, 1, 1},
             {"one changed loadout cave site", LOADOUT_CAVE, 2, 1},
             {"one changed site of the per-peer table", SYNCED_SEARCH, 1, 1},
+            {"one changed mission summary site", SUMMARY_SIZE, 1, 1},
         };
         for (size_t i = 0; i < sizeof kOwn / sizeof kOwn[0]; i++)
         {
@@ -1065,7 +1093,7 @@ int main(void)
         CHECK(fake_host_logged("players: the per-peer loadout table could not be moved") && !fake_host_logged("a count site could not be written"));
     }
     {
-        const uint32_t kEight[] = {LOADOUT_SIZE, LOADOUT_MAP, SYNCED_CLEAR, SYNCED_GONE, LOADOUT_CAVE};
+        const uint32_t kEight[] = {LOADOUT_SIZE, LOADOUT_MAP, SYNCED_CLEAR, SYNCED_GONE, LOADOUT_CAVE, SUMMARY_SIZE, SUMMARY_CARDS};
         for (size_t i = 0; i < sizeof kEight / sizeof kEight[0]; i++)
         {
             static char name[64];
@@ -1094,6 +1122,7 @@ int main(void)
             {"one changed clan handler", CLAN_PAIR, 4, 0},
             {"one changed clan getter", CLAN_OWN_NAME, 2, 0},
             {"one changed clan station row", CLAN_ROW_AGAIN, 6, 0},
+            {"one changed mission summary guard", SUMMARY_GUARD, 3, 0},
         };
         for (size_t i = 0; i < sizeof kMission / sizeof kMission[0]; i++)
         {
@@ -1107,7 +1136,7 @@ int main(void)
             CHECK(fake_host_logged(line) == concern);
             if (concern) CHECK(g_fake.writes == moves && Cave(LOOT_INDEX, 8) == NULL && g_fake.image[RESULT_GATE + 2] == 3);
         }
-        const uint32_t kWrites[] = {LOOT_INDEX, LOOT_RESULT, ACTIVITY, 0x12E67B1u, ACTIVITY_MADE, RESULT_GATE, CLAN_RECORD, CLAN_OWN, CLAN_ROW_AGAIN};
+        const uint32_t kWrites[] = {LOOT_INDEX, LOOT_RESULT, ACTIVITY, 0x12E67B1u, ACTIVITY_MADE, RESULT_GATE, CLAN_RECORD, CLAN_OWN, CLAN_ROW_AGAIN, SUMMARY_GUARD};
         for (size_t i = 0; i < sizeof kWrites / sizeof kWrites[0]; i++)
         {
             static char name[64];
