@@ -7,7 +7,8 @@
  * entries at four in every build. A build for eight gives the loadout screen eight records and cards in place of the
  * guards that kept players 5 to 8 off it, and moves the per-peer loadout table to room for eight before it writes that
  * table's bounds; a failed write or a changed byte leaves all of it as the game has it. The score manager's loot rows
- * are bounded where the managers keep them now, the Activity record's lists stop at their room, and
+ * are bounded where the managers keep them now, the mission result adds the loot of slots 4 to 7 without a row for them,
+ * the Activity record's lists stop at their room, and
  * a build for eight takes four players while the managers have four slots. The clan records' and the clan station's
  * handlers skip a player index of four or more in every build. */
 #include <stdio.h>
@@ -49,6 +50,7 @@ int co_counts_test_move_writes(void);
 void co_pods_test_reset(void);
 void co_managers_test_reset(void);
 void co_managers_test_force(int state);
+uint32_t co_counts_test_loot_row(uintptr_t manager, uint32_t slot);
 uint64_t co_counts_test_loot_index(uint32_t index, uint64_t flags);
 
 #define SESSION_INIT 0x134D740u
@@ -117,6 +119,7 @@ typedef void (*EntryFn)(uint32_t*, void*, uint32_t, uint32_t);
 typedef uint32_t (*HandlerFn)(void*, const void*);
 typedef void (*RecordFn)(void*, uint32_t, const void*);
 typedef uint32_t (*IndexFn)(uint32_t, const void*);
+typedef uint32_t (*ResultFn)(const void*, uint32_t, uint32_t, uint32_t);
 typedef uint32_t (*StoreFn)(void*, uint32_t, uint64_t, const void*);
 typedef void (*ClanFn)(uint32_t*, void*, uint32_t);
 typedef void (*RowFn)(uint32_t*, uint32_t);
@@ -695,26 +698,67 @@ int main(void)
         if (cave != NULL) CHECK(memcmp(cave, kPending, sizeof kPending) == 0 && Leads(cave + 5, 0xA56E9Eu));
         cave = Cave(0x12E67B1u, 5);
         if (cave != NULL) CHECK(memcmp(cave, kPending, sizeof kPending) == 0 && Leads(cave + 5, 0x12E67BEu));
-        /* cmp r13d,4; jae the next slot, behind the three replaced instructions */
-        static const uint8_t kSlot[] = {0x4D, 0x01, 0xE9, 0x89, 0x44, 0x24, 0x3C, 0x41, 0x89, 0xC2, 0x41, 0x83, 0xFD, 0x04, 0x0F, 0x83};
+        /* the three replaced instructions, then cmp r13d,4; jb the load; test dl,dl; je the slot without row values */
+        static const uint8_t kSlot[] = {0x4D, 0x01, 0xE9, 0x89, 0x44, 0x24, 0x3C, 0x41, 0x89, 0xC2, 0x41, 0x83, 0xFD, 0x04, 0x0F, 0x82};
+        static const uint8_t kFlagged[] = {0x84, 0xD2, 0x0F, 0x84};
         cave = Cave(LOOT_RESULT, 10);
-        if (cave != NULL) CHECK(memcmp(cave, kSlot, sizeof kSlot) == 0 && Leads(cave + 16, 0x62F358u) && Leads(cave + 21, LOOT_LOAD));
+        if (cave != NULL)
+            CHECK(memcmp(cave, kSlot, sizeof kSlot) == 0 && Leads(cave + 16, LOOT_LOAD) && memcmp(cave + 20, kFlagged, sizeof kFlagged) == 0 &&
+                  Leads(cave + 24, 0x62F358u));
     }
     {
-        /* The loot guard's callback. Four rows of 0x18 by player index at +0xC4A0 while the managers keep four slots;
-         * eight at +0x37FE0 once they have moved. Run as the game reaches it: the cave goes on for an index with a row
-         * and skips the rest. */
+        /* The loot callbacks. Four rows of 0x18 by score slot at +0xC440 and four by player index at +0xC4A0 while the
+         * managers keep four slots; eight of each at +0x37F20 and +0x37FE0 once they have moved. A row's counts are at
+         * +8, +0xC and +0x10. Run as the game reaches them: the index guard's cave goes on for an index with a row and
+         * skips the rest. The mission result's cave goes to the load for slots 0 to 3; for 4 and up it skips the row,
+         * and a flagged slot adds its row's counts to the total at [rsp+0x34], which edx carries on. */
+        static uint8_t manager[MANAGER_SIZE + 0x40];
         static const uint8_t kIndex[] = {0x89, 0xC8, 0xFF, 0xE2};                      /* mov eax,ecx; jmp rdx */
         static const uint8_t kSkip[] = {0x31, 0xC0, 0xC3}, kOn[] = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3};
+        /* push r12; push r13; sub rsp,0x48; mov r12,rcx; mov r13d,edx; mov edx,r8d; mov [rsp+0x34],r9d; xor eax,eax;
+         * jmp [the cave] */
+        static uint8_t kResult[] = {0x41, 0x54, 0x41, 0x55, 0x48, 0x83, 0xEC, 0x48, 0x49, 0x89, 0xCC, 0x41, 0x89, 0xD5, 0x44, 0x89, 0xC2,
+                                    0x44, 0x89, 0x4C, 0x24, 0x34, 0x31, 0xC0, 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0};
+        /* the load: mov eax,0xE5; the slot without row values: mov al,0x58 and on to the end; the next slot: edx must be
+         * [rsp+0x34], then eax = edx (else -1); the end: add rsp,0x48; pop r13; pop r12; ret */
+        static const uint8_t kLoad[] = {0xB8, 0xE5, 0x00, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x48, 0x41, 0x5D, 0x41, 0x5C, 0xC3};
+        static const uint8_t kNoRow[] = {0xB0, 0x58, 0xEB, 0x0F};
+        static const uint8_t kNext[] = {0x3B, 0x54, 0x24, 0x34, 0x75, 0x04, 0x89, 0xD0, 0xEB, 0x05, 0xB8, 0xFF, 0xFF, 0xFF, 0xFF,
+                                        0x48, 0x83, 0xC4, 0x48, 0x41, 0x5D, 0x41, 0x5C, 0xC3};
         const uint8_t* index = Cave(LOOT_INDEX, 8);
-        CHECK(index != NULL);
+        const uint8_t* result = Cave(LOOT_RESULT, 10);
+        CHECK(index != NULL && result != NULL);
         Landing(ENTER, kIndex, sizeof kIndex);
         Landing(0x63130Bu, kSkip, sizeof kSkip);
         Landing(0x6311DCu, kOn, sizeof kOn);
+        if (result != NULL) memcpy(kResult + 30, &result, 8);
+        Landing(ENTER + 0x40u, kResult, sizeof kResult);
+        Landing(LOOT_LOAD, kLoad, sizeof kLoad);
+        Landing(0x62F358u, kNoRow, sizeof kNoRow);
+        Landing(0x62F35Cu, kNext, sizeof kNext);
+        CHECK(0x62F358u + 4u + 0x0Fu == 0x62F35Cu + 15u);   /* kNoRow's jump lands on kNext's end */
         for (int moved = 0; moved < 2; moved++)
         {
-            const uint32_t rows = moved ? 8u : 4u;
+            const uint32_t rows = moved ? 8u : 4u, slots = moved ? 0x37F20u : 0xC440u;
             co_managers_test_force(moved);
+            /* row i counts i+1, 0x100 << i and 0x10000 at +8, +0xC and +0x10 where the rows are now; the old place's rows
+             * after the fourth (the rows by index) hold 0x5000000 to show they are not read */
+            memset(manager, 0, sizeof manager);
+            for (uint32_t i = 0; i < 8; i++)
+            {
+                uint32_t* counts = (uint32_t*)(manager + slots + i * 0x18u + 8u);
+                if (moved || i < 4) { counts[0] = i + 1; counts[1] = 0x100u << i; counts[2] = 0x10000u; }
+                else counts[0] = counts[1] = counts[2] = 0x5000000u;
+            }
+            for (uint32_t slot = 0; slot < 10; slot++)
+            {
+                const uint32_t row = slot < rows ? (slot + 1) + (0x100u << slot) + 0x10000u : 0u;
+                CHECK(co_counts_test_loot_row((uintptr_t)manager, slot) == row);
+                if (result == NULL || slot >= 9) continue;
+                const ResultFn run = (ResultFn)(uintptr_t)(g_fake.image + ENTER + 0x40u);
+                CHECK(run(manager, slot, 0, 7) == (slot < 4 ? 0xE5u : 0x58u));
+                CHECK(run(manager, slot, 1, 7) == (slot < 4 ? 0xE5u : 7u + row));
+            }
             for (uint32_t i = 0; i < 11; i++)
             {
                 const uint32_t n = i == 10 ? 0xFFFFFFFFu : i;

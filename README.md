@@ -124,12 +124,15 @@ the rows and their code always match.
 In 3 places the game uses a player index to find a row. Code of the mod's there asks whether the managers moved and
 skips an index without a row. These go in and out with the counts, in every build.
 
+The mission result copies the loot rows by score slot into room for four rows. A guard skips the copy for slots 5 to
+8; their loot still counts in the result's loot total.
+
 The Activity record lists its participants (four) and the peers it waits for (three), filled from the session's ready
 list with no bound. 3 of the guards leave out a peer beyond them, in every build.
 
 Limits that remain:
 
-- The mission result holds four loot rows: score slots 5 to 8 get none there.
+- The mission result's loot rows hold score slots 1 to 4 only.
 - With five to eight players the Activity record lists four participants and waits for three answers.
 - The avatar manager's eight places, which dead players' bodies may also hold, are not covered yet.
 
@@ -218,7 +221,7 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `scripts/sites/count_sites.tsv` | The reviewed count sites: one row for each instruction. |
 | `scripts/sites/loadout_sites.py` | The loadout screen's sites and caves for eight, and the per-peer loadout table's move and bounds. |
 | `scripts/gen_count_sites.py` | Writes `co_count_sites.h`; assembles the caves with GNU `as`. Holds the guards, the member lists' caps, the lobby's size and the loot rows' guards. |
-| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards in both managers' states, and the join limit without the managers. |
+| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards and the mission result's slots in both managers' states, and the join limit without the managers. |
 | `tests/engine_test.c` | The engine's sites: written, refused on changed code, taken back on a failed write. |
 | `tests/harness/` | The stand-in loader and game image the tests run against. |
 

@@ -56,6 +56,12 @@ _Static_assert(CO_TEST_FIRST_SLOT == 0 || (CO_PLAYERS == 8 && CO_TEST_FIRST_SLOT
 #define CO_SLOTS_READY 0x108B600u
 #define CO_SLOTS_FREE 0x108B670u
 #define CO_PEER_GONE 0x108B6B0u
+/* The score manager's loot rows of 0x18 bytes: by score slot and by player index, four each in the game's place, eight
+ * each behind the manager once it has moved (gen_manager_sites.py). */
+#define CO_LOOT_ROW 0x18u
+#define CO_LOOT_SLOTS 0xC440u
+#define CO_LOOT_SLOTS_MOVED 0x37F20u
+#define CO_LOOT_COUNTS 0x8u       /* in a row: three counts of 4 bytes */
 
 typedef uint32_t (*SlotsFn)(uintptr_t);
 typedef uint64_t (*PeerGoneFn)(uintptr_t, uint64_t, uint64_t, uint64_t);
@@ -186,6 +192,18 @@ static void JoinIndex(CoRegs* regs)
 
 static uint32_t LootRows(void) { return co_managers_moved() ? 8u : 4u; }
 
+/* r12 is the score manager, r13d a score slot of 4 or more: its row's three counts, added as the game adds them for slots
+ * 0 to 3; 0 for a slot without a row. */
+static void LootRow(CoRegs* regs)
+{
+    const uint32_t slot = (uint32_t)regs->r13;
+    const uintptr_t rows = (uintptr_t)regs->r12 + (co_managers_moved() ? CO_LOOT_SLOTS_MOVED : CO_LOOT_SLOTS);
+    regs->rax = 0;
+    if (slot >= LootRows()) return;
+    const uint32_t* counts = (const uint32_t*)(rows + slot * CO_LOOT_ROW + CO_LOOT_COUNTS);
+    regs->rax = (uint32_t)(counts[0] + counts[1] + counts[2]);
+}
+
 /* eax is a score slot or a player index: the carry flag says it has a loot row, for the cave's jae. */
 static void LootIndex(CoRegs* regs)
 {
@@ -195,7 +213,7 @@ static void LootIndex(CoRegs* regs)
 /* By the numbers in gen_count_sites.py; 8 to 13 are kept for other caves. */
 static void (*const kCountCallbacks[])(CoRegs*) = {
     FindByRsi, FindByR11, JoinGate, ClearValueKeys, LastSlotState, MessageFits, JoinSlot, JoinIndex,
-    [14] = LootIndex,
+    [14] = LootIndex, LootRow,
 };
 #define CO_CALLBACKS (sizeof kCountCallbacks / sizeof kCountCallbacks[0])
 
@@ -624,6 +642,7 @@ uint32_t co_counts_test_free(uintptr_t sync) { return SlotsFreeDetour(sync); }
 uint64_t co_counts_test_find(uint64_t key) { return FindRecord(key); }
 void co_counts_test_gone(uintptr_t sync, uint64_t key) { PeerGoneDetour(sync, key, 0, 0); }
 uint64_t co_counts_test_last(uintptr_t context) { CoRegs regs = {0}; regs.rbx = context; LastSlotState(&regs); return regs.rax; }
-/* The score manager's loot guard's callback, as its caves call it. */
+/* The score manager's loot callbacks, as their caves call them. */
+uint32_t co_counts_test_loot_row(uintptr_t manager, uint32_t slot) { CoRegs regs = {0}; regs.r12 = manager; regs.r13 = slot; LootRow(&regs); return (uint32_t)regs.rax; }
 uint64_t co_counts_test_loot_index(uint32_t index, uint64_t flags) { CoRegs regs = {0}; regs.rax = index; regs.flags = flags; LootIndex(&regs); return regs.flags; }
 #endif

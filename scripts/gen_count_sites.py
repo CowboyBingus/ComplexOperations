@@ -107,7 +107,7 @@ CALL = '''
 '''
 # Callbacks, by number (the index in kCountCallbacks in co_counts.c). 8 to 13 are kept for the wire and extraction caves.
 FIND_RSI, FIND_R11, GATE, VALUES, LAST_SLOT, MESSAGE, TEST_SLOT, TEST_INDEX = range(8)
-SCORE_INDEX = 14
+SCORE_INDEX, SCORE_ROW = 14, 15
 # (rva, bytes the jump replaces, code; `game+0x..` is an address in the game, CALL(n) the call of callback n)
 def HIGH(r): return ''.join(' movups [%s+0x%x], xmm0\n' % (r, o) for o in range(0x150, 0x1D0, 0x10))
 CAVES = [
@@ -215,10 +215,12 @@ GUARDS = [
     # them. The function gives no value (its four callers read none), so 4 and more return at once.
     (0x139D300, '48 89 5c 24 10', 'cmp r8d, 4\n jae 1f\n mov qword ptr [rsp+0x10], rbx\n jmp game+0x139D305\n1: ret'),
     # Mission result: it copies the loot rows by score slot into room for four rows of 0x18, a table of objectives
-    # right behind. Slot 4 and up goes the function's own way for a slot without row values. The guard stands before
-    # the load, whose offset the managers move.
-    (0x62F2DB, '4d 03 cd 89 44 24 3c 44 8b d0', 'add r9, r13\n mov dword ptr [rsp+0x3c], eax\n mov r10d, eax\n cmp r13d, 4\n jae game+0x62F358\n'
-                                                ' jmp game+0x62F2E5'),
+    # right behind. Slot 4 and up skips the copy (the guard stands before the load, whose offset the managers move); a
+    # flagged slot (dl) still adds its row's three counts to the loot total at [rsp+0x34], which edx carries on, as the
+    # game's own add does. The callback gives that sum, 0 for a slot without a row.
+    (0x62F2DB, '4d 03 cd 89 44 24 3c 44 8b d0', 'add r9, r13\n mov dword ptr [rsp+0x3c], eax\n mov r10d, eax\n cmp r13d, 4\n jb game+0x62F2E5\n'
+                                                ' test dl, dl\n je game+0x62F358\n CALL(%d)\n add dword ptr [rsp+0x34], eax\n mov edx, dword ptr [rsp+0x34]\n'
+                                                ' jmp game+0x62F35C' % SCORE_ROW),
     # Activity record: the participants (four, the count right behind) and the peers whose answer it waits for (three)
     # are filled from the ready list with no bound. A peer beyond them is left out.
     (0xA56D88, '48 89 54 c5 98', 'cmp eax, 4\n jae game+0xA56D95\n mov qword ptr [rbp+rax*8-0x68], rdx\n jmp game+0xA56D8D'),
