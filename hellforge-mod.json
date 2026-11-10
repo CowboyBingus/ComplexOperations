@@ -1,0 +1,12 @@
+{
+  "format": 1,
+  "id": "cowboybingus.complex-operations",
+  "name": "Complex Operations",
+  "version": "0.0.1",
+  "description": "Work in progress: eight hellpods on the ship bridge. Every player in the session needs it.",
+  "gameplay": true,
+  "code": {
+    "dll": "complex_operations.dll",
+    "sdk": 15
+  }
+}
