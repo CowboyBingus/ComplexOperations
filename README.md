@@ -40,10 +40,17 @@ With the room made, the lists count to eight: 120 sites that loop, compare or cl
 In 17 places the game's compiler wrote the code out for exactly four entries; there the mod adds the other four, with
 code of its own beside the game's (14) or a hook of the function (3).
 
-Two limits remain:
+Other tables of the game stay at four entries and are indexed by a player index with no check. Among them are the
+galactic map's cursors, the game state's player rows, the loadout screen's cards, the score slots and the mission
+summary's rows. 57 guards cover the accesses to them: an index of four or more skips the access, and for 0 to 3 nothing
+changes. 50 guards are code beside the game's; 7 are a compare changed in place. The guards go in and out together
+with the counts.
+
+Three limits remain:
 
 - The join gate still lets four players in. The parts that follow must hold eight first.
 - The hostability scores stay at four entries. Their message carries five at most, so peers 5 to 8 get no score.
+- A guarded table has no entry for players 5 to 8: no map cursor, no loadout card, no row in the mission summary.
 
 ## Engine
 
@@ -112,11 +119,11 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `scripts/gen_session_sites.py` | Writes `co_session_sites.h` from the site list and a dump of the game's code. |
 | `tests/managers_test.c` | The same refusals for the player managers. |
 | `tests/session_test.c` | The same for the session lists, and that sites and stubs lead to the new place. |
-| `src/co_counts.c` | The session lists' counts: sites, code caves, the hooks for entries 4 to 7. |
+| `src/co_counts.c` | The session lists' counts: sites, code caves, the hooks for entries 4 to 7. The guards too. |
 | `src/co_count_sites.h` | Their code sites and the caves' code. Generated; do not edit. |
 | `scripts/sites/count_sites.tsv` | The reviewed count sites: one row for each instruction. |
-| `scripts/gen_count_sites.py` | Writes `co_count_sites.h`; assembles the caves with GNU `as`. |
-| `tests/counts_test.c` | The counts: written behind the move, taken back on a failed write, entries 4 to 7. |
+| `scripts/gen_count_sites.py` | Writes `co_count_sites.h`; assembles the caves with GNU `as`. Holds the guards. |
+| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. |
 | `tests/harness/` | The stand-in loader and game image the tests run against. |
 
 ## How it stays safe

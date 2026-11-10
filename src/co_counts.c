@@ -1,7 +1,8 @@
 /* Eight players: the session's peer lists, second step. With the neighbours moved (co_session.c) the lists can hold
  * eight entries; this makes the code count to eight. Most sites are one instruction with a four in it. Code the
  * compiler unrolled for four entries gets the other four from the mod: a cave beside the game's code, or a hook of the
- * whole function. No fifth peer gets in yet: the join gate still counts to CO_JOIN_LIMIT. */
+ * whole function. No fifth peer gets in yet: the join gate still counts to CO_JOIN_LIMIT.
+ * The same sites carry the guards: tables the game keeps at four entries skip a player index of four or more. */
 #include <string.h>
 #include <windows.h>
 
@@ -26,6 +27,10 @@ typedef struct CoRegs { uint64_t r15, r14, r13, r12, r11, r10, r9, r8, rdi, rsi,
 #define CO_COUNT_CLEARS (sizeof kCoCountClears / sizeof kCoCountClears[0])
 #define CO_COUNT_CAVES (sizeof kCoCountCaves / sizeof kCoCountCaves[0])
 #define CO_CAVE_ROOM 0x2000u
+/* The guards are the last CO_COUNT_GUARDS caves and CO_COUNT_GUARD_SITES of the sites. They go in and out with the
+ * counts: a table that stays at four entries is safe only while every access to it is guarded. */
+#define CO_GUARDS (CO_COUNT_GUARDS + CO_COUNT_GUARD_SITES)
+_Static_assert(sizeof kCoCountCode <= CO_CAVE_ROOM, "the caves' code must fit their room");
 #define CO_PEERS 8u
 #define CO_JOIN_LIMIT 4u          /* peers a session takes; eight once every per-player part holds eight */
 #define CO_PLAYER_INDEXES 4u      /* player indexes the game hands out */
@@ -256,7 +261,8 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
     }
     g_on = 1;
     co_log("session: the session lists count to eight (%u code sites changed, %u through caves); a session still takes %u players",
-           (unsigned)(CO_COUNT_SITES + CO_COUNT_CLEARS + CO_COUNT_CAVES), (unsigned)CO_COUNT_CAVES, CO_JOIN_LIMIT);
+           (unsigned)(CO_COUNT_SITES + CO_COUNT_CLEARS + CO_COUNT_CAVES - CO_GUARDS), (unsigned)(CO_COUNT_CAVES - CO_COUNT_GUARDS), CO_JOIN_LIMIT);
+    co_log("players: %u accesses to four-entry tables of the game skip a player index above 3", CO_GUARDS);
     return;
 failed:
     VirtualFree((void*)g_caves, 0, MEM_RELEASE);
@@ -305,6 +311,21 @@ void co_counts_test_reset(void)
     g_hooks = -1;
 }
 
+/* Every site, clear and cave site holds the game's bytes (a moved array's distance aside). */
+int co_counts_test_reviewed(const uint8_t* image)
+{
+    for (size_t i = 0; i < CO_COUNT_SITES; i++)
+        for (uint8_t j = 0; j < kCoCountSites[i].size; j++)
+            if (!(kCoCountSites[i].skip != 0xFF && j >= kCoCountSites[i].skip && j < kCoCountSites[i].skip + 4) &&
+                image[kCoCountSites[i].rva + j] != kCoCountSites[i].old[j]) return 0;
+    for (size_t i = 0; i < CO_COUNT_CLEARS; i++)
+        if (image[kCoCountClears[i].rva] != 0x33 || image[kCoCountClears[i].rva + 2] != 0x89) return 0;
+    for (size_t i = 0; i < CO_COUNT_CAVES; i++)
+        if (memcmp(image + kCoCountCaves[i].rva, kCoCountCaves[i].replaced, kCoCountCaves[i].size) != 0) return 0;
+    return 1;
+}
+
+unsigned co_counts_test_guards(void) { return CO_GUARDS; }
 int co_counts_test_on(void) { return g_on; }
 uintptr_t co_counts_test_caves(void) { return g_caves; }
 unsigned co_counts_test_sites(void) { return (unsigned)(CO_COUNT_SITES + CO_COUNT_CLEARS + CO_COUNT_CAVES); }
