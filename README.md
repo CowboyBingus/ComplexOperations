@@ -44,10 +44,11 @@ code of its own beside the game's (14) or a hook of the function (3).
 
 Other tables of the game stay at four entries and are indexed by a player index with no check, or filled with no
 bound. Among them are the galactic map's cursors, the game state's player rows, the loadout screen's cards, the mission
-result's and the mission summary's rows, and the Activity record's lists (see Mission). 70 guards cover the accesses to
-them: an index past the table's end skips the access, and for 0 to 3 nothing changes. 61 guards are code beside the
-game's; 9 are a compare changed in place. The guards go in and out together with the counts. A build for eight keeps
-51 of them; the loadout screen's 19 make way for its eight cards (see Loadout screen).
+result's and the mission summary's rows, the Activity record's lists (see Mission), the clan records and the clan
+station's rows. 76 guards cover the accesses to them: an index past the table's end skips the access, and for 0 to 3
+nothing changes. 65 guards are code beside the game's; 11 are a compare changed in place. The guards go in and out
+together with the counts. A build for eight keeps 57 of them; the loadout screen's 19 make way for its eight cards
+(see Loadout screen).
 
 Some message handlers copy a list from the wire into a buffer of fixed size and trust the count. Nine guards keep
 such lists inside their buffers: the handler ignores a message whose list is too long, and two senders stop at what
@@ -60,7 +61,7 @@ eight slots, its join gate stays at four.
 Limits that remain:
 
 - The hostability scores stay at four entries. Their message carries five at most, so peers 5 to 8 get no score.
-- A guarded table has no entry for players 5 to 8: no map cursor, no row in the mission summary.
+- A guarded table has no entry for players 5 to 8: no map cursor, no row in the mission summary, no clan record.
 
 ## Lobby
 
@@ -139,7 +140,7 @@ the game drops four and more. It goes in on its own: when it cannot, the peer li
 
 ## State
 
-- The mission and Activity record changes are checked against the game's code and in the unit tests only.
+- The mission, Activity record and clan changes are checked against the game's code and in the unit tests only.
 - Tested with one player: all eight pods are entered on foot, launch, and are there again after the return; missions
   and returns work with the lists counting to eight. A mission from a new pod after a completed mission's summary
   works; the mission was ended through the game's own handler, not by flying an extraction.

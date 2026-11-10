@@ -8,7 +8,8 @@
  * guards that kept players 5 to 8 off it, and moves the per-peer loadout table to room for eight before it writes that
  * table's bounds; a failed write or a changed byte leaves all of it as the game has it. The score manager's loot rows
  * are cleared, summed and bounded where the managers keep them now, the Activity record's lists stop at their room, and
- * a build for eight takes four players while the managers have four slots. */
+ * a build for eight takes four players while the managers have four slots. The clan records' and the clan station's
+ * handlers skip a player index of four or more in every build. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -106,6 +107,12 @@ uint64_t co_counts_test_loot_index(uint32_t index, uint64_t flags);
 #define ACTIVITY 0xA56D88u          /* mov [rbp+rax*8-0x68],rdx: the Activity record's participants */
 #define ENTER 0x34C0000u            /* free in the stand-in: the test's ways into the caves */
 #define MANAGER_SIZE 0x380A0u       /* the score manager with its loot rows moved */
+#define CLAN_PAIR 0x12919A0u        /* a function: a clan pair by the player index in r8d */
+#define CLAN_RECORD 0x1291AB0u      /* a function: a clan record by the player index in r8d */
+#define CLAN_OWN 0x1291BEFu         /* cmp ecx,-1; je: the own clan pair */
+#define CLAN_OWN_NAME 0x1291C7Fu    /* cmp ecx,-1; je: the own clan record's second string */
+#define CLAN_ROW 0xB65880u          /* a function: the clan station's row by the player index in edx */
+#define CLAN_ROW_AGAIN 0xFEC3E8u    /* mov eax,r8d; lea r9,[rax+rax*4]: the same row, inside the function */
 
 typedef uint64_t (*InitFn)(uint64_t, uint64_t, uint64_t, uint64_t);
 typedef uint32_t (*CardFn)(void*, uint32_t);
@@ -117,6 +124,9 @@ typedef uint32_t (*SumFn)(const void*);
 typedef uint32_t (*IndexFn)(uint32_t, const void*);
 typedef void (*ClearFn)(void*, const void*);
 typedef uint32_t (*StoreFn)(void*, uint32_t, uint64_t, const void*);
+typedef void (*ClanFn)(uint32_t*, void*, uint32_t);
+typedef void (*RowFn)(uint32_t*, uint32_t);
+typedef void (*RowAgainFn)(uint32_t*, const void*, uint32_t);
 
 /* A handler's arguments as the game hands them over: 16 bytes each, the value at +8. `lists` are the counts of the
  * lists in order; `lead` values stand before the first list. Every list's elements follow its count. */
@@ -233,6 +243,7 @@ static int AsTheGameHasIt(void)
            image[NET_SENDER] == 0x41 && image[TEST_SLOT] == 0x41 && image[TEST_INDEX] == 0x49 && image[MIRROR_CAP + 2] == 4 &&
            image[LOBBY_FULL + 2] == 4 && image[LOBBY_SIZE + 1] == 4 && image[LOBBY_FRIEND] == 0xBA && image[RECORD_COUNT] == 0x89 &&
            image[RECORD_POST + 3] == 0xD0 && image[RESULT_GATE + 2] == 3 && image[LOOT_SUM] == 0x8B && image[ACTIVITY] == 0x48 &&
+           image[CLAN_PAIR] == 0x40 && image[CLAN_OWN + 2] == 0xFF && image[CLAN_OWN + 3] == 0x74 &&
            co_counts_test_reviewed(image) && TableAsTheGameHasIt();
 }
 
@@ -776,6 +787,40 @@ int main(void)
             }
         }
     }
+    {
+        /* The clan guards, in every build. In place: cmp ecx,4; jae to the getters' "none". Run: where each function's
+         * cave goes back the test undoes what the replaced bytes did and notes the index; 4 and more, -1 too, return
+         * before that. The row's second copy leaves by the function's own pop rbx; ret. */
+        static const uint8_t kOwn[] = {0x83, 0xF9, 0x04, 0x73, 0x11}, kOwnName[] = {0x83, 0xF9, 0x04, 0x73, 0xEC};
+        static const uint8_t kPair[] = {0x41, 0x5E, 0x5F, 0x5D, 0x44, 0x89, 0x01, 0xC3};   /* pop r14; pop rdi; pop rbp; mov [rcx],r8d; ret */
+        static const uint8_t kNoteR8[] = {0x44, 0x89, 0x01, 0xC3}, kNoteEdx[] = {0x89, 0x11, 0xC3};
+        static const uint8_t kEnter[] = {0x53, 0xFF, 0xE2}, kLeave[] = {0x5B, 0xC3}, kNoteAgain[] = {0x5B, 0x44, 0x89, 0x01, 0xC3};
+        const uint8_t* pair = Cave(CLAN_PAIR, 5);
+        const uint8_t* record = Cave(CLAN_RECORD, 5);
+        const uint8_t* row = Cave(CLAN_ROW, 5);
+        const uint8_t* again = Cave(CLAN_ROW_AGAIN, 7);
+        CHECK(memcmp(g_fake.image + CLAN_OWN, kOwn, sizeof kOwn) == 0 && memcmp(g_fake.image + CLAN_OWN_NAME, kOwnName, sizeof kOwnName) == 0);
+        CHECK(pair != NULL && record != NULL && row != NULL && again != NULL);
+        if (pair != NULL && record != NULL && row != NULL && again != NULL)
+        {
+            Landing(0x12919A5u, kPair, sizeof kPair);
+            Landing(0x1291AB5u, kNoteR8, sizeof kNoteR8);
+            Landing(0xB65885u, kNoteEdx, sizeof kNoteEdx);
+            Landing(ENTER + 0x40u, kEnter, sizeof kEnter);
+            Landing(0xFEC437u, kLeave, sizeof kLeave);
+            Landing(0xFEC3EFu, kNoteAgain, sizeof kNoteAgain);
+            for (uint32_t i = 0; i < 10; i++)
+            {
+                const uint32_t n = i == 9 ? 0xFFFFFFFFu : i, want = n < 4 ? n : 99;
+                uint32_t seen[4] = {99, 99, 99, 99};
+                ((ClanFn)(uintptr_t)pair)(&seen[0], NULL, n);
+                ((ClanFn)(uintptr_t)record)(&seen[1], NULL, n);
+                ((RowFn)(uintptr_t)row)(&seen[2], n);
+                ((RowAgainFn)(uintptr_t)(g_fake.image + ENTER + 0x40u))(&seen[3], again, n);
+                CHECK(seen[0] == want && seen[1] == want && seen[2] == want && seen[3] == want);
+            }
+        }
+    }
     /* Another context: counts and move are taken back and made again for it. The per-peer table goes back with
      * entries 0 to 3 and moves again; entry 5 has no place in the game's table. */
     {
@@ -898,7 +943,8 @@ int main(void)
         }
     }
 
-    /* The loot guards and the Activity record's bounds are in every build; the result gate only in a build for eight. */
+    /* The loot guards, the Activity record's and the clan guards are in every build; the result gate only in a build for
+     * eight. */
     {
         static const struct { const char* name; uint32_t rva, at; int eight; } kMission[] = {
             {"one changed loot sum site", LOOT_SUM, 2, 0},
@@ -906,6 +952,9 @@ int main(void)
             {"one changed site before the result's load", LOOT_RESULT, 9, 0},
             {"one changed Activity record site", ACTIVITY, 4, 0},
             {"one changed result gate", RESULT_GATE, 1, 1},
+            {"one changed clan handler", CLAN_PAIR, 4, 0},
+            {"one changed clan getter", CLAN_OWN_NAME, 2, 0},
+            {"one changed clan station row", CLAN_ROW_AGAIN, 6, 0},
         };
         for (size_t i = 0; i < sizeof kMission / sizeof kMission[0]; i++)
         {
@@ -919,7 +968,7 @@ int main(void)
             CHECK(fake_host_logged(line) == concern);
             if (concern) CHECK(g_fake.writes == moves && Cave(LOOT_CLEAR, 7) == NULL && g_fake.image[RESULT_GATE + 2] == 3);
         }
-        const uint32_t kWrites[] = {LOOT_INDEX, LOOT_SUM, LOOT_RESULT, ACTIVITY, 0x12E67B1u, RESULT_GATE};
+        const uint32_t kWrites[] = {LOOT_INDEX, LOOT_SUM, LOOT_RESULT, ACTIVITY, 0x12E67B1u, RESULT_GATE, CLAN_RECORD, CLAN_OWN, CLAN_ROW_AGAIN};
         for (size_t i = 0; i < sizeof kWrites / sizeof kWrites[0]; i++)
         {
             static char name[64];

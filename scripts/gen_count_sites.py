@@ -238,6 +238,14 @@ GUARDS = [
     # them. An index of -1 goes on as the game has it.
     (0x13D1119, '44 8b 4d 6f 41 b8 04 00 00 00', 'cmp eax, 4\n jb 1f\n cmp eax, -1\n jne game+0x13D173E\n1: mov r9d, dword ptr [rbp+0x6f]\n mov r8d, 4\n'
                                                  ' jmp game+0x13D1123'),
+    # Clan records ([game+0x347CDC8]: four pairs of 8 bytes, then four records of 0x4A, then the object's own fields) and
+    # the clan station's four rows of 0x28 by player index: the copies of the handlers above. The pair and record
+    # handlers and the rows' refresh give no value, so 4 and more return at once; the second refresh leaves by its own
+    # pop rbx; ret.
+    (0x12919A0, '40 55 57 41 56', 'cmp r8d, 4\n jae 1f\n push rbp\n push rdi\n push r14\n jmp game+0x12919A5\n1: ret'),
+    (0x1291AB0, '48 89 5c 24 08', 'cmp r8d, 4\n jae 1f\n mov qword ptr [rsp+8], rbx\n jmp game+0x1291AB5\n1: ret'),
+    (0xB65880, '48 89 5c 24 08', 'cmp edx, 4\n jae 1f\n mov qword ptr [rsp+8], rbx\n jmp game+0xB65885\n1: ret'),
+    (0xFEC3E8, '41 8b c0 4c 8d 0c 80', 'cmp r8d, 4\n jae game+0xFEC437\n mov eax, r8d\n lea r9, [rax+rax*4]\n jmp game+0xFEC3EF'),
 ]
 # The score manager's loot rows: B (+0xC4A0) by player index, L (+0xC440) by score slot, four of 0x18 each. Once the
 # managers have moved (gen_manager_sites.py) there are eight of each behind the manager, else four in the game's place.
@@ -271,6 +279,8 @@ GUARD_SITES = [
     (0x146C3D5, '0f 83 30 0f 00 00', '0f 83 d9 02 00 00'),
     (0x18C0F2F, '83 ff ff 0f 84 a2 03 00 00', '83 ff 04 0f 83 a2 03 00 00'),         # map input: the own cursor moved
     (0x18C0C1A, '83 fa ff 0f 84 8c 02 00 00', '83 fa 04 0f 83 8c 02 00 00'),         # and a drop point chosen with it
+    (0x1291BEF, '83 f9 ff 74 11', '83 f9 04 73 11'),                                 # the own clan pair: none (NULL) for 4 to 7
+    (0x1291C7F, '83 f9 ff 74 ec', '83 f9 04 73 ec'),                                 # the own clan record's second string
 ]
 # Only in a build for eight players: what the game tests against its four. The client's own player index (below 4:
 # else it stays in "joining" and never spawns), the SOS beacon's "the squad is full" and the lobby's size. A build
