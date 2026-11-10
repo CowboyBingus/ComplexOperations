@@ -10,7 +10,8 @@
  * are bounded where the managers keep them now, the mission result adds the loot of slots 4 to 7 without a row for them,
  * the Activity record's lists stop at their room while its post lists every participant with the local peer in the
  * record, and a build for eight takes four players while the managers have four slots. The clan records' and the clan station's
- * handlers skip a player index of four or more in every build. A build for eight gives the mission summary eight rows
+ * handlers skip a player index of four or more in every build; the galactic map's cursors do in a build for four (a
+ * build for eight moves them, tests/ui_test.c). A build for eight gives the mission summary eight rows
  * and cards and bounds its rows at eight; a build for four bounds them at four. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,6 +54,8 @@ unsigned co_counts_test_summary(void);
 void co_pods_test_reset(void);
 void co_managers_test_reset(void);
 void co_managers_test_force(int state);
+void co_ui_test_reset(void);
+void co_ui_test_force(int layout);
 uint32_t co_counts_test_loot_row(uintptr_t manager, uint32_t slot);
 uint64_t co_counts_test_loot_index(uint32_t index, uint64_t flags);
 typedef uint64_t (*PostFn)(uint64_t, uint64_t, uint64_t, const uint64_t*, uint32_t);
@@ -76,6 +79,8 @@ void co_counts_test_post_original(PostFn original);
 #define GUARD_CURSOR 0x72F700u      /* a function: the map cursor of the player index in edx */
 #define LAST_GUARD 0x1471D30u
 #define GUARD_ENTRY 0x139D300u      /* a function: an entry of 0x1320 for the player index in r8d */
+#define CURSOR_EDX 0x72F5F0u       /* a function: writes the map cursor of the player index in edx */
+#define CURSOR_R8 0x730080u         /* the same with the index in r8d */
 #define GUARD_MAP 0x14335F0u        /* a function: a map cursor's position for the player index in edx */
 #define GUARD_BITS 0x13D1119u       /* a record's bits by the player index in eax */
 #define GUARD_INPUT 0x18C0F2Fu      /* cmp edi,-1; je: the own map cursor */
@@ -170,6 +175,7 @@ static void Start(const char* name)
     co_managers_test_reset();
     co_session_test_reset();
     co_counts_test_reset();
+    co_ui_test_reset();
     api = fake_host_reset(CO_GAME_BUILD);
     co_session_test_fill(g_fake.image);
     co_counts_test_fill(g_fake.image);
@@ -304,12 +310,13 @@ int main(void)
     FillTable(g_fake.image + FAKE_SYNCED_TABLE);
     Init(CONTEXT);
     co_managers_test_force(1);
+    co_ui_test_force(1);
     CHECK(co_session_test_state() == 1 && co_counts_test_on() == 1);
     CHECK(fake_host_logged("session: the session lists count to eight (143 code sites changed, 15 through caves)"));
     {
         static char line[96];
         snprintf(line, sizeof line, "players: %u accesses to four-entry tables of the game skip a player index above 3", co_counts_test_guards());
-        CHECK(co_counts_test_guards() >= (players == 4 ? 70u : 51u) && fake_host_logged(line));
+        CHECK(co_counts_test_guards() >= (players == 4 ? 78u : 31u) && fake_host_logged(line));
         snprintf(line, sizeof line, "session: %u guards keep the lists in messages inside the game's buffers", co_counts_test_net());
         CHECK(co_counts_test_net() >= 9 && fake_host_logged(line));
     }
@@ -440,10 +447,12 @@ int main(void)
         }
 
         /* Run: the cursor function's cave. Where it goes back the test undoes the replaced push and sub and notes the
-         * index (add rsp,0x20; pop rbx; mov [rcx],edx; ret); 4 and more return before that. */
+         * index (add rsp,0x20; pop rbx; mov [rcx],edx; ret); 4 and more return before that. In a build for eight the
+         * map's guards are co_ui.c's (tests/ui_test.c). */
         static const uint8_t kNote[] = {0x48, 0x83, 0xC4, 0x20, 0x5B, 0x89, 0x11, 0xC3};
         cave = Cave(GUARD_CURSOR, 6);
-        CHECK(cave != NULL);
+        CHECK((cave != NULL) == (players == 4));
+        if (players == 8) CHECK(g_fake.image[GUARD_CURSOR] == 0x40);
         if (cave != NULL)
         {
             const CursorFn cursor = (CursorFn)(uintptr_t)cave;
@@ -453,6 +462,25 @@ int main(void)
                 uint32_t seen = 99;
                 cursor(&seen, i);
                 CHECK(seen == (i < 4 ? i : 99));
+            }
+        }
+        /* The two cursor writers that had no guard: index in edx and in r8d. Each returns before the replaced store
+         * for 4 and more; behind it the test notes the index (mov [rcx],edx or r8d; ret). */
+        static const uint8_t kEdx[] = {0x89, 0x11, 0xC3}, kR8[] = {0x44, 0x89, 0x01, 0xC3};
+        const uint8_t* byEdx = Cave(CURSOR_EDX, 5);
+        const uint8_t* byR8 = Cave(CURSOR_R8, 5);
+        CHECK((byEdx != NULL) == (players == 4) && (byR8 != NULL) == (players == 4));
+        if (byEdx != NULL && byR8 != NULL)
+        {
+            Landing(CURSOR_EDX + 5u, kEdx, sizeof kEdx);
+            Landing(CURSOR_R8 + 5u, kR8, sizeof kR8);
+            for (uint32_t i = 0; i < 10; i++)
+            {
+                const uint32_t n = i == 9 ? 0xFFFFFFFFu : i;
+                uint32_t seen[2] = {99, 99};
+                ((CursorFn)(uintptr_t)byEdx)(&seen[0], n);
+                ((EntryFn)(uintptr_t)byR8)(&seen[1], NULL, n, 0);
+                CHECK(seen[0] == (n < 4 ? n : 99) && seen[1] == (n < 4 ? n : 99));
             }
         }
     }
@@ -519,11 +547,13 @@ int main(void)
         else CHECK(Qword(FAKE_SYNCED_POINTER) == old && RegistryLeadsTo(old));
     }
     {
-        /* The guards for player indexes 4 to 7 that came with the join limit. In place: cmp edi,4; jae. */
+        /* The guards for player indexes 4 to 7 that came with the join limit. In place: cmp edi,4; jae (a build for
+         * four; a build for eight leaves the map's to co_ui.c). */
         static const uint8_t kInput[] = {0x83, 0xFF, 0x04, 0x0F, 0x83};
         const uint8_t* image = g_fake.image;
         const uint8_t* cave;
-        CHECK(memcmp(image + GUARD_INPUT, kInput, sizeof kInput) == 0 && Leads(image + GUARD_INPUT + 5, 0x18C12DAu));
+        if (players == 4) CHECK(memcmp(image + GUARD_INPUT, kInput, sizeof kInput) == 0 && Leads(image + GUARD_INPUT + 5, 0x18C12DAu));
+        else CHECK(image[GUARD_INPUT + 2] == 0xFF);
 
         /* Run: where each cave goes back the test notes the index (mov [rcx],r8d or edx; ret). 4 and more, -1 too,
          * return before that. */
@@ -542,7 +572,7 @@ int main(void)
             }
         }
         cave = Cave(GUARD_MAP, 5);
-        CHECK(cave != NULL);
+        CHECK((cave != NULL) == (players == 4));
         if (cave != NULL)
         {
             const CursorFn map = (CursorFn)(uintptr_t)cave;
@@ -994,7 +1024,7 @@ int main(void)
         if (table != NULL) { table[2 * SYNCED_ENTRY + 7] = 0x99; table[5 * SYNCED_ENTRY + 7] = 0x98; }
         Init(CONTEXT + 0x100000u);
         CHECK(co_session_test_state() == 1 && co_counts_test_on() == 1 && g_fake.image[LOOP_SITE + 2] == 8 && g_fake.image[CAVE_SITE] == 0xE9);
-        CHECK(g_fake.image[GUARD_INPUT + 2] == 4 && Cave(GUARD_ROW, 6) != NULL && Cave(LAST_GUARD, 10) != NULL);
+        CHECK(g_fake.image[CLAN_OWN + 2] == 4 && Cave(GUARD_ROW, 6) != NULL && Cave(LAST_GUARD, 10) != NULL);
         table = (uint8_t*)co_counts_test_synced_table();
         CHECK((table != NULL) == (players == 8));
         if (table != NULL)
@@ -1024,10 +1054,10 @@ int main(void)
     CHECK(fake_host_logged("game+0x108D368 is not the reviewed one"));
 
     Start("one changed guard site");
-    g_fake.image[GUARD_INPUT + 1] ^= 0x01;
+    g_fake.image[CLAN_OWN + 1] ^= 0x01;
     Init(CONTEXT);
     CHECK(co_session_test_state() == 1 && co_counts_test_on() == 0 && g_fake.writes == moves);
-    CHECK(fake_host_logged("session: the code at game+0x18C0F2F is not the reviewed one; the session lists count to four as before"));
+    CHECK(fake_host_logged("session: the code at game+0x1291BEF is not the reviewed one; the session lists count to four as before"));
     CHECK(!fake_host_logged("accesses to four-entry tables"));
 
     Start("one changed guard cave site");

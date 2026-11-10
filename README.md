@@ -45,10 +45,11 @@ code of its own beside the game's (14) or a hook of the function (3).
 Other tables of the game stay at four entries and are indexed by a player index with no check, or filled with no
 bound. Among them are the galactic map's cursors, the game state's player rows, the loadout screen's cards, the mission
 result's and the mission summary's rows, the Activity record's lists (see Mission), the clan records and the clan
-station's rows. 77 guards cover the accesses to them: an index past the table's end skips the access, and for 0 to 3
-nothing changes. 66 guards are code beside the game's; 11 are a compare changed in place. The guards go in and out
-together with the counts. A build for eight keeps 54 of them; the loadout screen's 19 and the mission summary's 4 make
-way for their eight cards and rows (see Loadout screen and Mission).
+station's rows. 79 guards cover the accesses to them: an index past the table's end skips the access, and for 0 to 3
+nothing changes. 68 guards are code beside the game's; 11 are a compare changed in place. The guards go in and out
+together with the counts. A build for eight keeps 32 of them. The loadout screen's 19 and the mission summary's 4 make
+way for their eight cards and rows (see Loadout screen and Mission); the galactic map's 24 are its own (see Galactic
+map).
 
 Some message handlers copy a list from the wire into a buffer of fixed size and trust the count. Nine guards keep
 such lists inside their buffers: the handler ignores a message whose list is too long, and two senders stop at what
@@ -61,8 +62,8 @@ eight slots, its join gate stays at four.
 Limits that remain:
 
 - The hostability scores stay at four entries. Their message carries five at most, so peers 5 to 8 get no score.
-- A guarded table has no entry for players 5 to 8: no map cursor and no clan record. In a build for four the mission
-  summary has no row for them either.
+- A guarded table has no entry for players 5 to 8: no clan record. In a build for four they have no map cursor and no
+  row in the mission summary either.
 
 ## Lobby
 
@@ -154,6 +155,29 @@ Limits that remain:
   is not known.
 - The summary's list of best entries keeps four.
 
+## Galactic map
+
+The map object keeps the players' cursors (four of 0x298 bytes) and two lists of four for what each one hovers over.
+It sits in a system packed between others in the component block, so it cannot grow.
+
+A build for eight puts the map's 24 guards in at startup: 20 caves and 4 compares in place keep an index of four or
+more off the four cursors. When the game builds its state, before the map object exists, the build moves the three
+arrays to a block of the mod's with eight entries each, within 2 GB of the component block and at the old arrays'
+alignment. 140 code sites get the distance to the block, 23 count or bound to eight in place and 23 go through code
+beside the game's, the guards for eight among them. A state built somewhere else gets the sites written again. The
+block is zeroed with each new state, as the game zeroes its own.
+
+When the move cannot happen (other code, no memory in reach), the map keeps four cursors with the guards. When the
+guards cannot go in either, the session takes four players.
+
+A build for four keeps four cursors and has the 24 guards in its counts (see Session lists).
+
+Limits that remain:
+
+- The game has sounds for three other players' cursors: the fourth to seventh other player reuse them (n mod 3).
+- Where a cursor's colour comes from for players 5 to 8 is not known.
+- The map's tweens share a pool of 256 nodes; eight cursors take more of it.
+
 ## Engine
 
 The engine sends a session's peers as a count and a list. The sender writes the count as a whole byte; the readers
@@ -165,7 +189,7 @@ the game drops four and more. It goes in on its own: when it cannot, the peer li
 
 ## State
 
-- The mission, mission summary, Activity record and clan changes are checked against the game's code and in the unit tests only.
+- The galactic map, mission, mission summary, Activity record and clan changes are checked against the game's code and in the unit tests only.
 - Tested with one player: all eight pods are entered on foot, launch, and are there again after the return; missions
   and returns work with the lists counting to eight. A mission from a new pod after a completed mission's summary
   works; the mission was ended through the game's own handler, not by flying an extraction.
@@ -241,6 +265,12 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `scripts/sites/summary_sites.py` | The mission summary's sites and caves for eight, and its guards for four. |
 | `scripts/gen_count_sites.py` | Writes `co_count_sites.h`; assembles the caves with GNU `as`. Holds the guards, the member lists' caps, the lobby's size and the loot rows' guards. |
 | `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards and the mission result's slots in both managers' states, the Activity record's participants and post, and the join limit without the managers. The mission summary in each build. |
+| `src/co_ui.c` | The tables a build for eight moves at run time: the galactic map's cursors. Guards for four, the move, its undo. |
+| `src/co_ui_sites.h` | Their code sites and caves. Generated; do not edit. |
+| `scripts/sites/map_sites.py` | The galactic map's sites and caves for eight, and its guards for four. |
+| `scripts/gen_ui_sites.py` | Writes `co_ui_sites.h`; checks that no site shares a byte with the other steps' in a build for eight. |
+| `scripts/sites/cave_asm.py` | Assembles the caves with GNU `as` for both generators. |
+| `tests/ui_test.c` | The map's guards for four, its move with the state, refusal on changed code and rollback of a failed write. |
 | `tests/engine_test.c` | The engine's sites: written, refused on changed code, taken back on a failed write. |
 | `tests/harness/` | The stand-in loader and game image the tests run against. |
 
@@ -252,8 +282,11 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 - A write that fails part-way sets every site written before it back to the game's bytes.
 - The per-peer loadout table moves only when the game's pointer and registry lead to the game's own place for it. Its
   bounds go back before it does.
-- A build for eight takes no fifth player while the player managers have four slots. The loot rows' code goes in and
-  out with their move; their guards ask the managers' state each time they run.
+- A build for eight takes no fifth player while the player managers have four slots, or while a table with four
+  entries lacks its guards. The loot rows' code goes in and out with their move; their guards ask the managers' state
+  each time they run.
+- A table moves at run time only before the game's code first touches it, and only into memory within reach of every
+  instruction that addresses it.
 - A failed step is logged in plain words, for example "four pods as before".
 
 ## Log
@@ -278,6 +311,9 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `the score manager's loot rows are cleared and added for eight rows` | The loot rows' code moved with the managers. |
 | `the score manager's loot rows by index are bounded where the managers keep them` | The loot rows' guards are in place. |
 | `the session is full at four players: the player managers have four slots` | A build for eight whose managers have four slots: four players. |
+| `the session is full at four players: tables of four entries are not guarded` | A build for eight without the map's guards: four players. |
+| `the galactic map has eight cursors` | A build for eight players: the map's cursors are in the mod's memory. |
+| `the galactic map keeps four cursors` | The move did not happen; the reason stands before it. |
 | `TEST BUILD, not for play` | Built with `--test-first-slot`. |
 | `the session lists count to four as before` | The count change is off; the reason stands before it. |
 | `the bridge is not the one with the eight-pod bay` | The level data is missing: four pods. |

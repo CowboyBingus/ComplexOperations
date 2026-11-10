@@ -253,6 +253,7 @@ static uint64_t StateCtorDetour(uint64_t state, uint64_t a2, uint64_t a3, uint64
     if (g_state == 1) { memset((void*)g_manager, 0, CO_ALLOC_USED); memset(g_cameras.units, 0, sizeof g_cameras.units); }
     co_managers_state((uintptr_t)state + CO_STATE_BLOCK);
     co_session_state();
+    co_ui_state((uintptr_t)state + CO_STATE_BLOCK);
 #ifdef CO_CANARY
     uint64_t result = g_stateCtor(state, a2, a3, a4, a5, a6);
     co_managers_canary(0);

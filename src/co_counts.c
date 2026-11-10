@@ -110,8 +110,9 @@ static uint64_t FindRecord(uint64_t key)
 static void FindByRsi(CoRegs* regs) { if (regs->rcx == 0) regs->rcx = FindRecord(regs->rsi); }
 static void FindByR11(CoRegs* regs) { if (regs->rcx == 0) regs->rcx = FindRecord(regs->r11); }
 
-/* Peers a session takes. Players 5 to 8 need the managers' eight slots; without them a build for eight takes four. */
-static uint32_t JoinLimit(void) { return CO_PLAYERS == 8 && co_managers_moved() ? 8u : 4u; }
+/* Peers a session takes. Players 5 to 8 need the managers' eight slots and the guards of the tables co_ui.c moves;
+ * without them a build for eight takes four. */
+static uint32_t JoinLimit(void) { return CO_PLAYERS == 8 && co_managers_moved() && co_ui_guarded() ? 8u : 4u; }
 
 /* The host's own slot always counts as used. A joining peer gets a slot from CO_FIRST_SLOT on, so only those are
  * open to it. */
@@ -128,7 +129,8 @@ static uint32_t FreeSlots(uintptr_t sync)
     if (left == 0 && limit < (uint32_t)CO_PLAYERS && !g_toldFour)
     {
         g_toldFour = 1;
-        co_log("session: the session is full at four players: the player managers have four slots");
+        co_log("session: the session is full at four players: %s",
+               co_managers_moved() ? "tables of four entries are not guarded" : "the player managers have four slots");
     }
     return left < open ? left : open;
 }

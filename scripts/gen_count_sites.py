@@ -19,12 +19,12 @@
 #   9 only for eight players: the mission summary with eight rows and cards (sites/summary_sites.py); its guards for
 #     four rows are group 6.
 # An instruction of a moved array carries a distance the session step rewrites; those four bytes are not compared.
-import os, re, struct, subprocess, sys, tempfile
+import os, re, struct, sys
 
 G_COUNT, G_GUARD, G_NET, G_EIGHT, G_TEST, G_LOADOUT, G_GUARD4, G_SYNCED, G_LOOT, G_SUMMARY = range(10)
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE + '/sites')
-import loadout_sites, summary_sites
+import cave_asm, loadout_sites, map_sites, summary_sites
 dump = open(sys.argv[1], 'rb').read()
 out = sys.argv[2] if len(sys.argv) > 2 else HERE + '/../src/co_count_sites.h'
 
@@ -162,21 +162,6 @@ GUARDS = [
     # HUD: the samples panel's four avatars, the in-world tags' four rows.
     (0x18437DD, '42 89 44 ad 40', 'cmp r13d, 4\n jae 1f\n mov dword ptr [rbp+r13*4+0x40], eax\n1: jmp game+0x18437E2'),
     (0x18AF049, '41 83 bd 84 00 00 00 00', 'cmp dword ptr [rsp+0x20], 4\n jae game+0x18AEDB9\n cmp dword ptr [r13+0x84], 0\n jmp game+0x18AF051'),
-    # Galactic map cursors, four of 0x298 by player index. Message handlers (two copies each) leave by their own
-    # empty-list exit; the member versions return at once: the call they end in gives no value either.
-    (0xB8CAE3, '45 39 be 20 5e 00 00', 'cmp ebp, 4\n jae game+0xB8CC50\n cmp dword ptr [r14+0x5e20], r15d\n jmp game+0xB8CAEA'),
-    (0xBACED1, '45 39 be 20 5e 00 00', 'cmp ebp, 4\n jae game+0xBAD04D\n cmp dword ptr [r14+0x5e20], r15d\n jmp game+0xBACED8'),
-    (0xB8CC8A, '39 be 38 5e 00 00', 'cmp ebp, 4\n jae game+0xB8CCF6\n cmp dword ptr [rsi+0x5e38], edi\n jmp game+0xB8CC90'),
-    (0xBB494E, '39 be 38 5e 00 00', 'cmp ebp, 4\n jae game+0xBB49B6\n cmp dword ptr [rsi+0x5e38], edi\n jmp game+0xBB4954'),
-    (0xB8CDDA, '39 be 68 5e 00 00', 'cmp ebp, 4\n jae game+0xB8CE6E\n cmp dword ptr [rsi+0x5e68], edi\n jmp game+0xB8CDE0'),
-    (0xBB1B9E, '39 be 68 5e 00 00', 'cmp ebp, 4\n jae game+0xBB1C2E\n cmp dword ptr [rsi+0x5e68], edi\n jmp game+0xBB1BA4'),
-    (0x72F700, '40 53 48 83 ec 20', 'cmp edx, 4\n jae 1f\n push rbx\n sub rsp, 0x20\n jmp game+0x72F706\n1: ret'),
-    (0x72F780, '40 53 48 83 ec 20', 'cmp edx, 4\n jae 1f\n push rbx\n sub rsp, 0x20\n jmp game+0x72F786\n1: ret'),
-    (0x730190, '40 53 48 83 ec 20', 'cmp r8d, 4\n jae 1f\n push rbx\n sub rsp, 0x20\n jmp game+0x730196\n1: ret'),
-    # The map's every-frame update numbers the other players into four dwords on the stack; the numbers index tables
-    # of three, so a fourth other player gets none.
-    (0x142EB70, '8b 02 41 3b c7 74 0a', 'mov eax, dword ptr [rdx]\n cmp eax, r15d\n je 1f\n cmp eax, 4\n jae 1f\n cmp r8d, 3\n jae 1f\n'
-                                        ' jmp game+0x142EB77\n1: jmp game+0x142EB81'),
     # The game state's four rows of 0x90 by player index. Each skip target loads again what the loop keeps in a
     # register the index lookup overwrites.
     (0xB8F681, 'f2 41 0f 10 45 00', 'cmp eax, 4\n jae game+0xB8F723\n movsd xmm0, qword ptr [r13+0]\n jmp game+0xB8F687'),
@@ -226,16 +211,6 @@ GUARDS = [
     (0xA56F0E, 'ff 86 00 11 00 00', 'inc dword ptr [rsi+0x1100]\n CALL(%d)\n jmp game+0xA56F14' % RECORD),
     (0xA56E91, '48 89 4c c5 e8', 'cmp eax, 3\n jae game+0xA56E9E\n mov qword ptr [rbp+rax*8-0x18], rcx\n jmp game+0xA56E96'),
     (0x12E67B1, '48 89 4c c5 bf', 'cmp eax, 3\n jae game+0x12E67BE\n mov qword ptr [rbp+rax*8-0x41], rcx\n jmp game+0x12E67B6'),
-    # Galactic map cursors again: the functions that write a cursor by the index in edx. None gives a value: no
-    # caller reads one, and four of the eight have no caller in the game's code.
-    (0x142FF90, '89 54 24 10 53', 'cmp edx, 4\n jae 1f\n mov dword ptr [rsp+0x10], edx\n push rbx\n jmp game+0x142FF95\n1: ret'),
-    (0x1433020, '48 8b c4 48 89 58 10', 'cmp edx, 4\n jae 1f\n mov rax, rsp\n mov qword ptr [rax+0x10], rbx\n jmp game+0x1433027\n1: ret'),
-    (0x14332E0, '40 53 48 83 ec 20', 'cmp edx, 4\n jae 1f\n push rbx\n sub rsp, 0x20\n jmp game+0x14332E6\n1: ret'),
-    (0x1433380, '48 89 5c 24 08', 'cmp edx, 4\n jae 1f\n mov qword ptr [rsp+8], rbx\n jmp game+0x1433385\n1: ret'),
-    (0x14335F0, '48 89 5c 24 10', 'cmp edx, 4\n jae 1f\n mov qword ptr [rsp+0x10], rbx\n jmp game+0x14335F5\n1: ret'),
-    (0x72F7F0, '48 8b c4 48 89 58 08', 'cmp edx, 4\n jae 1f\n mov rax, rsp\n mov qword ptr [rax+8], rbx\n jmp game+0x72F7F7\n1: ret'),
-    (0x142F860, '48 89 5c 24 08', 'cmp edx, 4\n jae 1f\n mov qword ptr [rsp+8], rbx\n jmp game+0x142F865\n1: ret'),
-    (0x142F810, '48 89 5c 24 08', 'cmp edx, 4\n jae 1f\n mov qword ptr [rsp+8], rbx\n jmp game+0x142F815\n1: ret'),
     # A record's bits 0 to 3 and 4 to 7 by player index: index 4 would set a bit of the other half or a flag above
     # them. An index of -1 goes on as the game has it.
     (0x13D1119, '44 8b 4d 6f 41 b8 04 00 00 00', 'cmp eax, 4\n jb 1f\n cmp eax, -1\n jne game+0x13D173E\n1: mov r9d, dword ptr [rbp+0x6f]\n mov r8d, 4\n'
@@ -262,16 +237,12 @@ LOOT = [
 # Guards in place: the game tests the index against -1 ("none") only. cmp reg,-1; je becomes cmp reg,4; jae, which
 # sends 4 to 7 the way "none" goes and leaves -1 going there. (rva, bytes, new bytes)
 GUARD_SITES = [
-    (0x142EA5C, '41 83 ff ff 0f 84 9f 00 00 00', '41 83 ff 04 0f 83 9f 00 00 00'),   # map update: the own cursor
-    (0x142EF50, '83 f9 ff 0f 84 9f 01 00 00', '83 f9 04 0f 83 9f 01 00 00'),         # map camera: the own cursor
     (0x14670B8, '83 f9 ff 0f 84 dc fe ff ff', '83 f9 04 0f 83 dc fe ff ff'),         # loadout: the own index at setup
     (0x14697C1, '83 f8 ff 0f 84 9d 00 00 00', '83 f8 04 0f 83 9d 00 00 00'),         # and found later
     (0x146C46A, '41 83 fd ff 0f 84 38 02 00 00', '41 83 fd 04 0f 83 38 02 00 00'),   # a player's card
     (0x14716AD, '83 f8 ff 0f 84 b7 00 00 00', '83 f8 04 0f 83 b7 00 00 00'),         # the own card
     # Four bytes on the stack by manager slot: the game stops the process at slot 4; this goes on to the next slot.
     (0x146C3D5, '0f 83 30 0f 00 00', '0f 83 d9 02 00 00'),
-    (0x18C0F2F, '83 ff ff 0f 84 a2 03 00 00', '83 ff 04 0f 83 a2 03 00 00'),         # map input: the own cursor moved
-    (0x18C0C1A, '83 fa ff 0f 84 8c 02 00 00', '83 fa 04 0f 83 8c 02 00 00'),         # and a drop point chosen with it
     (0x1291BEF, '83 f9 ff 74 11', '83 f9 04 73 11'),                                 # the own clan pair: none (NULL) for 4 to 7
     (0x1291C7F, '83 f9 ff 74 ec', '83 f9 04 73 ec'),                                 # the own clan record's second string
 ]
@@ -313,9 +284,11 @@ MIRROR_CAPS = [
 RECORD_SITES = [(0x12CB379, '44 8b 87 d0 05 00 00', '44 8b 87 48 03 00 00')]
 # The loadout screen for eight: its sites and caves, and the guards of the build for four they replace.
 LOADOUT_SITES, LOADOUT_CAVES = loadout_sites.build(dump)
-# The mission summary's four-row guards (build for four) and its eight rows and cards (build for eight).
-GUARDS += summary_sites.GUARD4
-OFF = set(loadout_sites.MOD_OFF) | {rva for rva, _, _ in summary_sites.GUARD4}
+# The guards of tables that a build for eight gives eight entries: the mission summary's rows here (group 9), the map's
+# cursors in co_ui.c, which keeps them at four until the cursors move. Here they are the build for four's.
+GUARDS += summary_sites.GUARD4 + map_sites.GUARD4
+GUARD_SITES += map_sites.GUARD4_SITES
+OFF = set(loadout_sites.MOD_OFF) | {rva for rva, _, _ in summary_sites.GUARD4 + map_sites.GUARD4 + map_sites.GUARD4_SITES}
 assert OFF <= {rva for rva, _, _ in GUARD_SITES} | {rva for rva, _, _ in GUARDS}
 rows_by_group = ((G_GUARD, GUARD_SITES), (G_EIGHT, EIGHT_SITES), (G_COUNT, MIRROR_CAPS), (G_COUNT, RECORD_SITES),
                  (G_LOADOUT, [(r, o, n) for r, o, n, _ in LOADOUT_SITES]), (G_SYNCED, [(r, o, n) for r, o, n, _ in loadout_sites.SYNCED_SITES]),
@@ -407,42 +380,23 @@ for left_out in ((G_LOADOUT, G_SYNCED, G_SUMMARY), (G_GUARD4,)):
 for a, b, shared, _ in own:
     if not shared: assert all(b <= c or d <= a for c, d in taken), hex(a)
 
-def assemble(text, game):
-    src = '.intel_syntax noprefix\n.text\n'
+def source(text, game):
     used = sorted({int(n) for n in re.findall(r'CALL\((\d+)\)', text)})
-    text = re.sub(r'CALL\((\d+)\)', lambda m: CALL % int(m.group(1)), text)
-    text = re.sub(r'game\+0x([0-9A-Fa-f]+)', lambda m: '0x%x' % (game + int(m.group(1), 16)), text)
-    src += text + '\n'
+    src = cave_asm.at_game(re.sub(r'CALL\((\d+)\)', lambda m: CALL % int(m.group(1)), text), game) + '\n'
     for n in used: src += '.balign 8\ncallback%d: .quad 0x%x\n' % (n, 0xC0DE00000000 + n)
-    with tempfile.TemporaryDirectory() as tmp:
-        open(tmp + '/c.s', 'w').write(src)
-        subprocess.run(['as', '--64', '-o', tmp + '/c.o', tmp + '/c.s'], check=True)
-        subprocess.run(['ld', '-Ttext=0', '-o', tmp + '/c.elf', tmp + '/c.o'], check=True, stderr=subprocess.DEVNULL)
-        subprocess.run(['objcopy', '-O', 'binary', '-j', '.text', tmp + '/c.elf', tmp + '/c.bin'], check=True)
-        return open(tmp + '/c.bin', 'rb').read()
+    return src
 
 caves = []
 for rva, replaced, text in CAVES:
     replaced = bytes.fromhex(replaced)
     assert dump[rva:rva + len(replaced)] == replaced and 5 <= len(replaced) <= 12, hex(rva)
     assert skip_of(rva, len(replaced)) == 0xFF, hex(rva)
-    # Assembled twice with the game at two addresses: the bytes that differ are the jumps into the game.
-    a = assemble(text, 0x10000000); b = assemble(text, 0x20000000)
-    assert len(a) == len(b)
-    jumps = []; i = 0
-    while i < len(a):
-        if a[i] != b[i]:
-            at = i - 3 if a[i - 3:i] == b[i - 3:i] and i >= 3 and struct.unpack_from('<i', b, i - 3)[0] - struct.unpack_from('<i', a, i - 3)[0] == 0x10000000 else None
-            assert at is not None, (hex(rva), i)
-            jumps.append(at); i = at + 4
-        else: i += 1
-    code = bytearray(a)
-    for at in jumps: struct.pack_into('<i', code, at, struct.unpack_from('<i', a, at)[0] - 0x10000000)
+    code, jumps = cave_asm.relocatable(lambda game: source(text, game), hex(rva))
     calls = []
-    for m in re.finditer(rb'(.)\x00\x00\x00\xde\xc0\x00\x00', bytes(code), re.S):
+    for m in re.finditer(rb'(.)\x00\x00\x00\xde\xc0\x00\x00', code, re.S):
         if m.start() % 8 == 0: calls.append((m.start(), m.group(1)[0]))
     assert len(calls) == len(re.findall(r'CALL\(', text)), hex(rva)
-    caves.append((rva, replaced, bytes(code), jumps, calls))
+    caves.append((rva, replaced, code, jumps, calls))
 
 def c_bytes(b): return ', '.join('0x%02X' % x for x in b)
 h = ['/* Generated by scripts/gen_count_sites.py from scripts/sites/count_sites.tsv; do not edit. */\n']

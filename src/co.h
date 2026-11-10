@@ -51,4 +51,11 @@ void co_counts_apply(uintptr_t context, uintptr_t extension);
 void co_counts_undo(void);
 void co_counts_session_init(void);
 
+/* Tables a build for eight moves at run time (co_ui.c). `install` once with game.dll's base, before the state
+ * constructor's hook goes in; `state` in that hook with the component block. `guarded` is 0 while a table with four
+ * entries lacks its guards: then no player index above 3 may exist. */
+void co_ui_install(uintptr_t game);
+void co_ui_state(uintptr_t block);
+int co_ui_guarded(void);
+
 #endif
