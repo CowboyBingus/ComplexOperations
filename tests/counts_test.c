@@ -429,7 +429,7 @@ int main(void)
         static char line[96];
         uint32_t size;
         snprintf(line, sizeof line, "players: the per-peer loadout table moved to room for eight peers (%u code sites changed)", co_counts_test_synced());
-        CHECK(co_counts_test_synced() == 11u && fake_host_logged(line) == (players == 8));
+        CHECK(co_counts_test_synced() == 12u && fake_host_logged(line) == (players == 8));
         memcpy(&size, image + SYNCED_CLEAR + 2, 4);
         CHECK(size == (players == 8 ? 0x4FC0u : 0x27E0u) && image[SYNCED_SEARCH + 2] == players && image[SYNCED_GONE + 2] == players);
         CHECK((table != 0) == (players == 8) && TableHolds(image + FAKE_SYNCED_TABLE));

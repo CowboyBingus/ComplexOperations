@@ -644,6 +644,7 @@ SYNCED_MOVE = {'pointer': 0x346D5F0, 'registry_type': 0x11D, 'registry_lists': (
 SYNCED_SITES = [
     (0x1381254, '41b8e0270000', '41b8' + le32(8 * 0x9F8), '1381220 (loadout init): memset of the table'),
     (0x146C7C8, '83f904', '83f908', '146c2f0 hot-join pass: peer search'),
+    (0x13951A9, '83fd04', '83fd08', '1394fd0: player index 4..7 look up their own peer, not the local one'),
     (0x1395221, '83f904', '83f908', '1394fd0: peer search'),
     (0xB9E790, '83f904', '83f908', 'b9e670 store: peer search'),
     (0xB9E7F4, '4183fa04', '4183fa08', 'b9e670 store: free entry search'),

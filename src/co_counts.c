@@ -281,7 +281,8 @@ static unsigned InGroup(uint8_t group, unsigned* caves)
 /* The engine's per-peer loadout table: four entries of 0x9F8 (a record, the peer's id behind it) inline in the engine
  * object, so it cannot grow where it is. The game reaches it by one pointer and three registry entries, all set at
  * startup before the first apply; this gives them a block of eight entries with the four copied, at the old address's
- * place modulo 16. They are written through the API so that taking the mod out puts them back with the sites. */
+ * place modulo 16. Undo puts the pointer and the entries back after the sites; the loader keeps no record of
+ * these writes for a mod that is not live. */
 typedef struct CoRegistryEntry { uint64_t at; uint32_t type, pad; } CoRegistryEntry;
 _Static_assert(sizeof(CoRegistryEntry) == 16, "a registry entry is 16 bytes");
 #define CO_REGISTRY_ROOM 0x51Bu   /* entries the largest list has room for; a higher count is not the reviewed registry */
