@@ -4,7 +4,8 @@
  * whole function. The join gate counts to the build's player count while the player managers have eight slots, else
  * to four.
  * The same sites carry the guards: tables the game keeps at four entries skip a player index of four or more, and a
- * message whose list is longer than its handler's buffer is ignored. */
+ * message whose list is longer than its handler's buffer is ignored. The Activity record's post lists participants 5 to
+ * 8, which the record has no room for. */
 #include <string.h>
 #include <windows.h>
 
@@ -56,6 +57,14 @@ _Static_assert(CO_TEST_FIRST_SLOT == 0 || (CO_PLAYERS == 8 && CO_TEST_FIRST_SLOT
 #define CO_SLOTS_READY 0x108B600u
 #define CO_SLOTS_FREE 0x108B670u
 #define CO_PEER_GONE 0x108B6B0u
+#define CO_ACTIVITY_POST 0x12C2940u   /* posts an Activity record: its participants in r9, their count fifth */
+#define CO_ACTIVITY_TABLE 0x346D5C8u  /* the records: 32 of 0x88, key first, the participants at +0x50, their count +0x70 */
+#define CO_ACTIVITY_RECORDS 32u
+#define CO_ACTIVITY_RECORD 0x88u
+#define CO_ACTIVITY_IDS 0x50u
+#define CO_ACTIVITY_COUNT 0x70u
+#define CO_ACTIVITY_ROOM 4u           /* participants a record holds */
+#define CO_LOCAL_PEER 0xB398u         /* in the session context: the local peer's id */
 /* The score manager's loot rows of 0x18 bytes: by score slot and by player index, four each in the game's place, eight
  * each behind the manager once it has moved (gen_manager_sites.py). */
 #define CO_LOOT_ROW 0x18u
@@ -65,8 +74,10 @@ _Static_assert(CO_TEST_FIRST_SLOT == 0 || (CO_PLAYERS == 8 && CO_TEST_FIRST_SLOT
 
 typedef uint32_t (*SlotsFn)(uintptr_t);
 typedef uint64_t (*PeerGoneFn)(uintptr_t, uint64_t, uint64_t, uint64_t);
+typedef uint64_t (*ActivityPostFn)(uint64_t, uint64_t, uint64_t, const uint64_t*, uint32_t);
 static SlotsFn g_slotsReady, g_slotsFree;
 static PeerGoneFn g_peerGone;
+static ActivityPostFn g_activityPost;
 static uintptr_t g_game, g_context, g_extension, g_caves;
 static int g_on, g_hooks = -1;
 static uint32_t g_ignored;        /* a bit for each message shape that was logged as ignored */
@@ -210,10 +221,77 @@ static void LootIndex(CoRegs* regs)
     regs->flags = (regs->flags & ~(uint64_t)1) | ((uint32_t)regs->rax < LootRows());
 }
 
+/* The Activity record being made holds four participants. The ones the ready list has behind them wait here until the
+ * record is in the table, then wait under its key for its post. */
+typedef struct CoActivityExtras { uint64_t key; uint32_t count; uint64_t ids[CO_PEERS - CO_ACTIVITY_ROOM]; } CoActivityExtras;
+static uint64_t g_further[CO_PEERS - CO_ACTIVITY_ROOM];
+static uint32_t g_furtherCount;
+static CoActivityExtras g_extras[CO_ACTIVITY_RECORDS];
+
+/* eax is the participant's place in the list (the count so far), rdx its id, rbp the frame with the four at -0x68, r14
+ * the session context. The first participant starts a new list. The local peer always gets a place in the record: it
+ * takes the fourth, whose id waits with the rest. */
+static void Participant(CoRegs* regs)
+{
+    const uint32_t place = (uint32_t)regs->rax;
+    uint64_t id = regs->rdx;
+    if (place == 0) g_furtherCount = 0;
+    if (place < CO_ACTIVITY_ROOM) return;
+    uint64_t* fourth = (uint64_t*)(uintptr_t)(regs->rbp - 0x68u + (CO_ACTIVITY_ROOM - 1u) * 8u);
+    if (id == *(const uint64_t*)(uintptr_t)(regs->r14 + CO_LOCAL_PEER))
+    {
+        const uint64_t listed = *fourth;
+        *fourth = id;
+        id = listed;
+    }
+    if (g_furtherCount < CO_PEERS - CO_ACTIVITY_ROOM) g_further[g_furtherCount++] = id;
+}
+
+static CoActivityExtras* FindExtras(uint64_t key)
+{
+    for (uint32_t i = 0; i < CO_ACTIVITY_RECORDS; i++)
+        if (g_extras[i].count != 0 && g_extras[i].key == key) return &g_extras[i];
+    return NULL;
+}
+
+static int InTable(uintptr_t table, uint64_t key)
+{
+    const uint32_t count = *(const uint32_t*)(table + CO_ACTIVITY_RECORDS * CO_ACTIVITY_RECORD);
+    for (uint32_t i = 0; i < count && i < CO_ACTIVITY_RECORDS; i++)
+        if (*(const uint64_t*)(table + i * CO_ACTIVITY_RECORD) == key) return 1;
+    return 0;
+}
+
+/* rsi is the table (its count at +0x1100), rsi + rcx the new record. Keys are unique in the table: the game makes no
+ * second record for a key. A record that timed out leaves the table without a post; its entry is free again then, so
+ * one is always free (32 entries, at most 31 other records). */
+static void Record(CoRegs* regs)
+{
+    const uintptr_t table = (uintptr_t)regs->rsi;
+    const uint8_t* record = (const uint8_t*)(uintptr_t)(regs->rsi + regs->rcx);
+    const uint64_t key = *(const uint64_t*)record;
+    CoActivityExtras* extras = FindExtras(key);
+    if (*(const uint32_t*)(record + CO_ACTIVITY_COUNT) != CO_ACTIVITY_ROOM || g_furtherCount == 0)
+    {
+        if (extras != NULL) extras->count = 0;
+        g_furtherCount = 0;
+        return;
+    }
+    for (uint32_t i = 0; extras == NULL && i < CO_ACTIVITY_RECORDS; i++)
+        if (g_extras[i].count == 0 || !InTable(table, g_extras[i].key)) extras = &g_extras[i];
+    if (extras != NULL)
+    {
+        extras->key = key;
+        extras->count = g_furtherCount;
+        memcpy(extras->ids, g_further, g_furtherCount * sizeof g_further[0]);
+    }
+    g_furtherCount = 0;
+}
+
 /* By the numbers in gen_count_sites.py; 8 to 13 are kept for other caves. */
 static void (*const kCountCallbacks[])(CoRegs*) = {
     FindByRsi, FindByR11, JoinGate, ClearValueKeys, LastSlotState, MessageFits, JoinSlot, JoinIndex,
-    [14] = LootIndex, LootRow,
+    [14] = LootIndex, LootRow, Participant, Record,
 };
 #define CO_CALLBACKS (sizeof kCountCallbacks / sizeof kCountCallbacks[0])
 
@@ -231,6 +309,25 @@ static uint32_t SlotsReadyDetour(uintptr_t sync)
 }
 
 static uint32_t SlotsFreeDetour(uintptr_t sync) { return g_on ? FreeSlots(sync) : g_slotsFree(sync); }
+
+/* Every caller passes a record of the table: its participants at +0x50 and their count. The post writes a list of any
+ * length; a full record's waiting participants follow its four. */
+static uint64_t ActivityPostDetour(uint64_t unused, uint64_t activity, uint64_t object, const uint64_t* ids, uint32_t count)
+{
+    static uint64_t all[CO_PEERS];
+    uintptr_t table = 0;
+    const uintptr_t record = (uintptr_t)ids - CO_ACTIVITY_IDS;
+    if (!g_on || count != CO_ACTIVITY_ROOM || g_coApi->read(g_game + CO_ACTIVITY_TABLE, &table, sizeof table) != 0 || table == 0 ||
+        record < table || record >= table + CO_ACTIVITY_RECORDS * CO_ACTIVITY_RECORD || (record - table) % CO_ACTIVITY_RECORD != 0)
+        return g_activityPost(unused, activity, object, ids, count);
+    CoActivityExtras* extras = FindExtras(*(const uint64_t*)record);
+    if (extras == NULL) return g_activityPost(unused, activity, object, ids, count);
+    memcpy(all, ids, CO_ACTIVITY_ROOM * sizeof all[0]);
+    memcpy(all + CO_ACTIVITY_ROOM, extras->ids, extras->count * sizeof all[0]);
+    count = CO_ACTIVITY_ROOM + extras->count;
+    extras->count = 0;
+    return g_activityPost(unused, activity, object, all, count);
+}
 
 /* A peer left: the game takes it out of the party records 0 to 3; the same for records 4 to 7. A record lists peer
  * keys (count at +8, keys from +0x10) and 32-byte entries (count at +0x38, entries from +0x40, key first); a record
@@ -519,11 +616,13 @@ void co_counts_install(uintptr_t game)
     g_game = game;
     if (g_coApi->code_matches(game + CO_SLOTS_READY, "33 C0 48 39 41 20 74 12 83 79 40 05") != 1 ||
         g_coApi->code_matches(game + CO_SLOTS_FREE, "33 C0 4C 8B C1 48 39 41 58 0F 95 C0") != 1 ||
-        g_coApi->code_matches(game + CO_PEER_GONE, "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 81 EC E0 01 00 00") != 1)
+        g_coApi->code_matches(game + CO_PEER_GONE, "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 81 EC E0 01 00 00") != 1 ||
+        g_coApi->code_matches(game + CO_ACTIVITY_POST, "4C 8B DC 49 89 5B 08 55 56 57 41 56 41 57 48 81 EC D0 0C 00 00") != 1)
     { g_hooks = 0; co_log("session: this is not the game code the mod was made for (a game update or another mod); the session lists count to four as before"); return; }
     if (g_coApi->hook(g_coMod, game + CO_SLOTS_READY, (void*)SlotsReadyDetour, (void**)&g_slotsReady) != 0 ||
         g_coApi->hook(g_coMod, game + CO_SLOTS_FREE, (void*)SlotsFreeDetour, (void**)&g_slotsFree) != 0 ||
-        g_coApi->hook(g_coMod, game + CO_PEER_GONE, (void*)PeerGoneDetour, (void**)&g_peerGone) != 0)
+        g_coApi->hook(g_coMod, game + CO_PEER_GONE, (void*)PeerGoneDetour, (void**)&g_peerGone) != 0 ||
+        g_coApi->hook(g_coMod, game + CO_ACTIVITY_POST, (void*)ActivityPostDetour, (void**)&g_activityPost) != 0)
     { g_hooks = 0; co_log("session: a function of the session lists could not be hooked; the session lists count to four as before"); return; }
     g_hooks = 1;
     if (CO_TEST_FIRST_SLOT != 0)
@@ -543,6 +642,8 @@ void co_counts_test_fill(uint8_t* image)
     static const uint8_t kReady[] = {0x33, 0xC0, 0x48, 0x39, 0x41, 0x20, 0x74, 0x12, 0x83, 0x79, 0x40, 0x05};
     static const uint8_t kFree[] = {0x33, 0xC0, 0x4C, 0x8B, 0xC1, 0x48, 0x39, 0x41, 0x58, 0x0F, 0x95, 0xC0};
     static const uint8_t kGone[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x48, 0x81, 0xEC, 0xE0, 0x01, 0x00, 0x00};
+    static const uint8_t kPost[] = {0x4C, 0x8B, 0xDC, 0x49, 0x89, 0x5B, 0x08, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x81, 0xEC, 0xD0, 0x0C, 0x00, 0x00};
+    memcpy(image + CO_ACTIVITY_POST, kPost, sizeof kPost);
     memcpy(image + CO_SLOTS_READY, kReady, sizeof kReady);
     memcpy(image + CO_SLOTS_FREE, kFree, sizeof kFree);
     memcpy(image + CO_PEER_GONE, kGone, sizeof kGone);
@@ -558,6 +659,8 @@ void co_counts_test_reset(void)
     g_hooks = -1;
     g_ignored = 0;
     g_toldFour = 0;
+    g_furtherCount = 0;
+    memset(g_extras, 0, sizeof g_extras);
 }
 
 /* Every site, clear and cave site holds the game's bytes (a moved array's distance aside). */
@@ -645,4 +748,14 @@ uint64_t co_counts_test_last(uintptr_t context) { CoRegs regs = {0}; regs.rbx = 
 /* The score manager's loot callbacks, as their caves call them. */
 uint32_t co_counts_test_loot_row(uintptr_t manager, uint32_t slot) { CoRegs regs = {0}; regs.r12 = manager; regs.r13 = slot; LootRow(&regs); return (uint32_t)regs.rax; }
 uint64_t co_counts_test_loot_index(uint32_t index, uint64_t flags) { CoRegs regs = {0}; regs.rax = index; regs.flags = flags; LootIndex(&regs); return regs.flags; }
+/* The Activity record's callbacks: one participant of the list (frame as rbp, context as r14), the record made at
+ * table + offset. The post's original is the test's. */
+void co_counts_test_participant(uintptr_t frame, uintptr_t context, uint32_t place, uint64_t id)
+{
+    CoRegs regs = {0};
+    regs.rbp = frame; regs.r14 = context; regs.rax = place; regs.rdx = id;
+    Participant(&regs);
+}
+void co_counts_test_record(uintptr_t table, uint32_t offset) { CoRegs regs = {0}; regs.rsi = table; regs.rcx = offset; Record(&regs); }
+void co_counts_test_post_original(ActivityPostFn original) { g_activityPost = original; }
 #endif

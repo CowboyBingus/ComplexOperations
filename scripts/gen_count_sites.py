@@ -107,7 +107,7 @@ CALL = '''
 '''
 # Callbacks, by number (the index in kCountCallbacks in co_counts.c). 8 to 13 are kept for the wire and extraction caves.
 FIND_RSI, FIND_R11, GATE, VALUES, LAST_SLOT, MESSAGE, TEST_SLOT, TEST_INDEX = range(8)
-SCORE_INDEX, SCORE_ROW = 14, 15
+SCORE_INDEX, SCORE_ROW, PARTICIPANT, RECORD = range(14, 18)
 # (rva, bytes the jump replaces, code; `game+0x..` is an address in the game, CALL(n) the call of callback n)
 def HIGH(r): return ''.join(' movups [%s+0x%x], xmm0\n' % (r, o) for o in range(0x150, 0x1D0, 0x10))
 CAVES = [
@@ -222,8 +222,11 @@ GUARDS = [
                                                 ' test dl, dl\n je game+0x62F358\n CALL(%d)\n add dword ptr [rsp+0x34], eax\n mov edx, dword ptr [rsp+0x34]\n'
                                                 ' jmp game+0x62F35C' % SCORE_ROW),
     # Activity record: the participants (four, the count right behind) and the peers whose answer it waits for (three)
-    # are filled from the ready list with no bound. A peer beyond them is left out.
-    (0xA56D88, '48 89 54 c5 98', 'cmp eax, 4\n jae game+0xA56D95\n mov qword ptr [rbp+rax*8-0x68], rdx\n jmp game+0xA56D8D'),
+    # are filled from the ready list with no bound. A peer beyond them stays out of the record; the callback keeps
+    # participants 5 to 8 for the record that is being made, and the record's post lists them (co_counts.c).
+    (0xA56D88, '48 89 54 c5 98', 'CALL(%d)\n cmp eax, 4\n jae game+0xA56D95\n mov qword ptr [rbp+rax*8-0x68], rdx\n jmp game+0xA56D8D' % PARTICIPANT),
+    # The record is in the table now (rsi the table, rcx its offset): the kept participants go with its key.
+    (0xA56F0E, 'ff 86 00 11 00 00', 'inc dword ptr [rsi+0x1100]\n CALL(%d)\n jmp game+0xA56F14' % RECORD),
     (0xA56E91, '48 89 4c c5 e8', 'cmp eax, 3\n jae game+0xA56E9E\n mov qword ptr [rbp+rax*8-0x18], rcx\n jmp game+0xA56E96'),
     (0x12E67B1, '48 89 4c c5 bf', 'cmp eax, 3\n jae game+0x12E67BE\n mov qword ptr [rbp+rax*8-0x41], rcx\n jmp game+0x12E67B6'),
     # Galactic map cursors again: the functions that write a cursor by the index in edx. None gives a value: no

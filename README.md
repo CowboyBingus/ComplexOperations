@@ -45,9 +45,9 @@ code of its own beside the game's (14) or a hook of the function (3).
 Other tables of the game stay at four entries and are indexed by a player index with no check, or filled with no
 bound. Among them are the galactic map's cursors, the game state's player rows, the loadout screen's cards, the mission
 result's and the mission summary's rows, the Activity record's lists (see Mission), the clan records and the clan
-station's rows. 76 guards cover the accesses to them: an index past the table's end skips the access, and for 0 to 3
-nothing changes. 65 guards are code beside the game's; 11 are a compare changed in place. The guards go in and out
-together with the counts. A build for eight keeps 57 of them; the loadout screen's 19 make way for its eight cards
+station's rows. 77 guards cover the accesses to them: an index past the table's end skips the access, and for 0 to 3
+nothing changes. 66 guards are code beside the game's; 11 are a compare changed in place. The guards go in and out
+together with the counts. A build for eight keeps 58 of them; the loadout screen's 19 make way for its eight cards
 (see Loadout screen).
 
 Some message handlers copy a list from the wire into a buffer of fixed size and trust the count. Nine guards keep
@@ -127,13 +127,20 @@ skips an index without a row. These go in and out with the counts, in every buil
 The mission result copies the loot rows by score slot into room for four rows. A guard skips the copy for slots 5 to
 8; their loot still counts in the result's loot total.
 
-The Activity record lists its participants (four) and the peers it waits for (three), filled from the session's ready
-list with no bound. 3 of the guards leave out a peer beyond them, in every build.
+The Activity record pays a pickup to every participant: the game posts the record to the backend once the peers it
+waits for have answered. The record has room for four participants and three of those peers, filled from the
+session's ready list with no bound:
+
+- 3 guards stop both lists at their room, in every build.
+- The local player always gets a place among the four participants.
+- The mod keeps participants 5 to 8 for the record. A hook of the post lists them behind the four. The post writes a
+  list of any length; HellForge's backend takes up to 16.
 
 Limits that remain:
 
 - The mission result's loot rows hold score slots 1 to 4 only.
-- With five to eight players the Activity record lists four participants and waits for three answers.
+- With five to eight players the Activity record waits for the answers of three other players. The others are paid
+  without it.
 - The avatar manager's eight places, which dead players' bodies may also hold, are not covered yet.
 
 ## Engine
@@ -216,12 +223,12 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `scripts/gen_session_sites.py` | Writes `co_session_sites.h` from the site list and a dump of the game's code. Holds the lobby's member lists' sites; assembles their stubs with GNU `as`. |
 | `tests/managers_test.c` | The same refusals for the player managers, the loot rows' sites and caves among them. Runs the caves. |
 | `tests/session_test.c` | The same for the session lists, and that sites and stubs lead to the new place. Runs the lobby copies' stubs. |
-| `src/co_counts.c` | The session lists' counts: sites, code caves, the hooks for entries 4 to 7. The guards and the loot rows' guards too. |
+| `src/co_counts.c` | The session lists' counts: sites, code caves, the hooks for entries 4 to 7. The guards, the loot rows' guards and the Activity record's participants too. |
 | `src/co_count_sites.h` | Their code sites and the caves' code. Generated; do not edit. |
 | `scripts/sites/count_sites.tsv` | The reviewed count sites: one row for each instruction. |
 | `scripts/sites/loadout_sites.py` | The loadout screen's sites and caves for eight, and the per-peer loadout table's move and bounds. |
 | `scripts/gen_count_sites.py` | Writes `co_count_sites.h`; assembles the caves with GNU `as`. Holds the guards, the member lists' caps, the lobby's size and the loot rows' guards. |
-| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards and the mission result's slots in both managers' states, and the join limit without the managers. |
+| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards and the mission result's slots in both managers' states, the Activity record's participants and post, and the join limit without the managers. |
 | `tests/engine_test.c` | The engine's sites: written, refused on changed code, taken back on a failed write. |
 | `tests/harness/` | The stand-in loader and game image the tests run against. |
 
