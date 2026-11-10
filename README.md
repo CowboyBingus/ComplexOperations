@@ -68,6 +68,10 @@ The session step moves the three lists to the mod's memory, with room for eight.
 In 4 places the game copies a whole lobby object; a stub copies the moved list first. Behind the move, 8 sites let the
 lists fill to eight. Every build has this.
 
+The record of the lobby a player is in holds four members, with two counts: members and entries. The game writes the
+session's count to both. A cave stops the entries at four, the bound of the record's loops; the friends post reads
+the members. 1 site and 1 cave, in every build.
+
 A build for four closes the lobby at four players: Steam marks it not joinable, PlayFab makes it private.
 
 A build for eight makes the lobby take eight. The Steam lobby is made for eight and the PlayFab lobby for twelve (the
@@ -78,6 +82,7 @@ Limits that remain:
 
 - A lobby's entry in a message to other players lists four members at most.
 - A friend's full lobby without the mod shows four of eight places; Steam refuses the join.
+- Joining another lobby with the squad takes only the players in host slots 0 to 3 along; slots 4 to 7 stay behind.
 
 ## Engine
 

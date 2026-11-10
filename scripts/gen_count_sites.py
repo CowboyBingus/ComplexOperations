@@ -127,6 +127,10 @@ CAVES = [
                                   ' mov [rbp+0x194], edi\n mov [rbp+0x1cc], edi\n jmp game+0x13506DC'),
     # The second slot loop of the peer-left broadcast counts rdi down from a constant that must stay four above.
     (0x108D368, '48 8b ac 24 98 00 00 00', 'mov rbp, [rsp+0x98]\n mov edi, 8\n jmp game+0x108D370'),
+    # The own lobby's record (0x678 bytes) holds four members at +0x350; key 4 writes the session's count to +0x348
+    # (members) and +0x5D0 (entries, the bound of the record's loops). The entries stop at four, as a friend's record has.
+    (0x133EF93, '89 b3 d0 05 00 00', 'mov dword ptr [rbx+0x5d0], esi\n cmp esi, 4\n jbe game+0x133EF99\n'
+                                     ' mov dword ptr [rbx+0x5d0], 4\n jmp game+0x133EF99'),
 ]
 # Guards: tables of the game's with four entries, indexed by a player index or a player slot with no check. An index
 # of four or more skips the access, so players 5 to 8 are missing from that table instead of overrunning it; for 0 to
@@ -272,7 +276,9 @@ MIRROR_CAPS = [
     (0x1092ED0, 'c7 83 b0 1b 00 00 04 00 00 00', 'c7 83 b0 1b 00 00 08 00 00 00'),
     (0x1092F31, '41 b8 04 00 00 00', '41 b8 08 00 00 00'),
 ]
-for group, rows in ((G_GUARD, GUARD_SITES), (G_EIGHT, EIGHT_SITES), (G_COUNT, MIRROR_CAPS)):
+# With the cave above: the friends post takes numLobbyMembers from the members, no longer from the entries.
+RECORD_SITES = [(0x12CB379, '44 8b 87 d0 05 00 00', '44 8b 87 48 03 00 00')]
+for group, rows in ((G_GUARD, GUARD_SITES), (G_EIGHT, EIGHT_SITES), (G_COUNT, MIRROR_CAPS), (G_COUNT, RECORD_SITES)):
     for rva, old, new in rows:
         old = bytes.fromhex(old); new = bytes.fromhex(new)
         assert len(old) == len(new) <= 12 and dump[rva:rva + len(old)] == old and skip_of(rva, len(old)) == 0xFF, hex(rva)

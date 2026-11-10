@@ -3,7 +3,8 @@
  * of the game's four-entry tables go the same way; some of them are run with player indexes 0 to 7. The message
  * guards are run with lists that fit and lists that do not. The build's player count decides which sites belong to
  * it, and the test option's slot and index search is checked against a stand-in synchronizer. The lobby's member
- * lists fill eight in every build; the lobby takes eight only in a build for eight. */
+ * lists fill eight in every build; the lobby takes eight only in a build for eight. The own lobby's record stops its
+ * entries at four in every build. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -73,12 +74,16 @@ void co_managers_test_reset(void);
 #define LOBBY_SIZE 0x10919D1u       /* mov ecx,4: the Steam lobby's size */
 #define LOBBY_POST 0x12CB9BAu       /* je: the friends-list post's re-post of a count of at most four */
 #define LOBBY_FRIEND 0x103D11Du     /* mov edx,4; mov [r14+0x34C],edx: a friend's lobby size */
+#define RECORD_COUNT 0x133EF93u     /* mov [rbx+0x5D0],esi: the own lobby record's entries */
+#define RECORD_POST 0x12CB379u      /* mov r8d,[rdi+0x5D0]: numLobbyMembers in the friends post */
+#define RECORD_ENTER 0x133EFA0u     /* free in the stand-in: the test's way into the record's cave */
 
 typedef uint64_t (*InitFn)(uint64_t, uint64_t, uint64_t, uint64_t);
 typedef uint32_t (*CardFn)(void*, uint32_t);
 typedef void (*CursorFn)(uint32_t*, uint32_t);
 typedef void (*EntryFn)(uint32_t*, void*, uint32_t, uint32_t);
 typedef uint32_t (*HandlerFn)(void*, const void*);
+typedef void (*RecordFn)(void*, uint32_t, const void*);
 
 /* A handler's arguments as the game hands them over: 16 bytes each, the value at +8. `lists` are the counts of the
  * lists in order; `lead` values stand before the first list. Every list's elements follow its count. */
@@ -134,7 +139,8 @@ static int AsTheGameHasIt(void)
            image[GUARD_ROW] == 0xF2 && image[GUARD_CARD] == 0x8B && image[LAST_GUARD] == 0x41 && image[GUARD_ENTRY] == 0x48 &&
            image[GUARD_INPUT + 2] == 0xFF && image[EIGHT_INDEX + 2] == 4 && image[EIGHT_SOS + 2] == 4 && image[NET_SCORES] == 0x40 &&
            image[NET_SENDER] == 0x41 && image[TEST_SLOT] == 0x41 && image[TEST_INDEX] == 0x49 && image[MIRROR_CAP + 2] == 4 &&
-           image[LOBBY_FULL + 2] == 4 && image[LOBBY_SIZE + 1] == 4 && image[LOBBY_FRIEND] == 0xBA && co_counts_test_reviewed(image);
+           image[LOBBY_FULL + 2] == 4 && image[LOBBY_SIZE + 1] == 4 && image[LOBBY_FRIEND] == 0xBA && image[RECORD_COUNT] == 0x89 &&
+           image[RECORD_POST + 3] == 0xD0 && co_counts_test_reviewed(image);
 }
 
 /* The jump at a cave's site, the rest of the replaced bytes as nops; the cave it leads to. */
@@ -177,7 +183,7 @@ int main(void)
     CHECK(g_fake.writes == 0 && AsTheGameHasIt());
     Init(CONTEXT);
     CHECK(co_session_test_state() == 1 && co_counts_test_on() == 1);
-    CHECK(fake_host_logged("session: the session lists count to eight (141 code sites changed, 14 through caves)"));
+    CHECK(fake_host_logged("session: the session lists count to eight (143 code sites changed, 15 through caves)"));
     {
         static char line[96];
         snprintf(line, sizeof line, "players: %u accesses to four-entry tables of the game skip a player index above 3", co_counts_test_guards());
@@ -205,6 +211,37 @@ int main(void)
         CHECK((cave != NULL) == (players == 8));
         if (cave != NULL) CHECK(memcmp(cave, kFriend, sizeof kFriend) == 0 && Leads(cave + 17, 0x103D129u));
         if (players != 8) CHECK(g_fake.image[LOBBY_FRIEND] == 0xBA);
+    }
+    {
+        /* The own lobby's record, in every build: the post reads the members (+0x348); the cave stores the entries
+         * (+0x5D0) and stops them at four. Run: a stub loads rbx and esi and jumps to the cave; where the cave goes
+         * back, the test returns (pop rsi; pop rbx; ret). */
+        static const uint8_t kPost[] = {0x44, 0x8B, 0x87, 0x48, 0x03, 0x00, 0x00};
+        static const uint8_t kStore[] = {0x89, 0xB3, 0xD0, 0x05, 0x00, 0x00, 0x83, 0xFE, 0x04, 0x0F, 0x86};
+        static const uint8_t kFour[] = {0xC7, 0x83, 0xD0, 0x05, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0xE9};
+        static const uint8_t kBack[] = {0x5E, 0x5B, 0xC3};
+        /* push rbx; push rsi; mov rbx,rcx; mov esi,edx; jmp r8 */
+        static const uint8_t kEnter[] = {0x53, 0x56, 0x48, 0x89, 0xCB, 0x89, 0xD6, 0x41, 0xFF, 0xE0};
+        static const uint32_t kCounts[] = {0, 1, 3, 4, 5, 7, 8, 0x80000000u, 0xFFFFFFFFu};
+        static uint8_t record[0x680];
+        const uint8_t* cave = Cave(RECORD_COUNT, 6);
+        CHECK(memcmp(g_fake.image + RECORD_POST, kPost, sizeof kPost) == 0 && cave != NULL);
+        if (cave != NULL)
+        {
+            const RecordFn enter = (RecordFn)(uintptr_t)(g_fake.image + RECORD_ENTER);
+            CHECK(memcmp(cave, kStore, sizeof kStore) == 0 && Leads(cave + 11, 0x133EF99u) && memcmp(cave + 15, kFour, sizeof kFour) == 0 &&
+                  Leads(cave + 26, 0x133EF99u));
+            Landing(0x133EF99u, kBack, sizeof kBack);
+            Landing(RECORD_ENTER, kEnter, sizeof kEnter);
+            for (size_t i = 0; i < sizeof kCounts / sizeof kCounts[0]; i++)
+            {
+                memset(record, 0xC5, sizeof record);
+                *(uint32_t*)(record + 0x348) = kCounts[i];
+                enter(record, kCounts[i], cave);
+                CHECK(*(uint32_t*)(record + 0x5D0) == (kCounts[i] < 4 ? kCounts[i] : 4u) && *(uint32_t*)(record + 0x348) == kCounts[i]);
+                CHECK(record[0x5CF] == 0xC5 && record[0x5D4] == 0xC5);
+            }
+        }
     }
     writes = g_fake.writes;
     CHECK(writes >= moves + (int)co_counts_test_sites());
@@ -542,14 +579,22 @@ int main(void)
     CHECK(fake_host_logged("game+0x103D11D is not the reviewed one") == (players == 8));
     CHECK(g_fake.image[LOBBY_FULL + 2] == 4 && g_fake.image[LOBBY_SIZE + 1] == 4);
 
-    /* A failed write at a member list's cap or a lobby site takes every count back. */
+    /* The own lobby's record is in every build: a changed byte there leaves the counts off. */
+    Start("one changed site of the own lobby's record");
+    g_fake.image[RECORD_COUNT + 2] ^= 0x01;
+    Init(CONTEXT);
+    CHECK(co_session_test_state() == 1 && co_counts_test_on() == 0 && g_fake.writes == moves);
+    CHECK(fake_host_logged("game+0x133EF93 is not the reviewed one") && g_fake.image[RECORD_POST + 3] == 0xD0);
+
+    /* A failed write at a member list's cap, a lobby site or the own lobby's record takes every count back. */
     {
-        const uint32_t kLobby[] = {MIRROR_CAP, MIRROR_COUNT, LOBBY_FULL, LOBBY_SIZE, LOBBY_POST, LOBBY_FRIEND};
+        const uint32_t kLobby[] = {MIRROR_CAP, MIRROR_COUNT, LOBBY_FULL, LOBBY_SIZE, LOBBY_POST, LOBBY_FRIEND, RECORD_POST, RECORD_COUNT};
         for (size_t i = 0; i < sizeof kLobby / sizeof kLobby[0]; i++)
         {
             static char name[64];
             const int at = co_counts_test_write_of(kLobby[i]);
-            CHECK((at >= 0) == (players == 8 || kLobby[i] == MIRROR_CAP || kLobby[i] == MIRROR_COUNT));
+            const int always = kLobby[i] == MIRROR_CAP || kLobby[i] == MIRROR_COUNT || kLobby[i] == RECORD_POST || kLobby[i] == RECORD_COUNT;
+            CHECK((at >= 0) == (players == 8 || always));
             if (at < 0) continue;
             snprintf(name, sizeof name, "the write at game+0x%X fails", kLobby[i]);
             Start(name);
