@@ -25,6 +25,7 @@ static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
     uintptr_t game = g_coApi->module_base("game.dll", &size);
     if (game == 0) { co_log("game.dll was not found; nothing changed"); return; }
     co_pods_install(game);
+    co_counts_install(game);
     co_session_install(game);
     co_engine_install(g_coApi->module_base("helldivers2.exe", &size));
 }

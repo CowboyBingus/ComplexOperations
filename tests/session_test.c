@@ -44,6 +44,7 @@ static void Start(const char* name)
     co_session_test_reset();
     api = fake_host_reset(CO_GAME_BUILD);
     co_session_test_fill(g_fake.image);
+    g_fake.noMatch[1] = 0x108B600u;                      /* the counts stay off: this is the move alone */
     memcpy(g_fake.image + SESSION_GLOBAL, &context, 8);
     if (hellforge_mod_init(api, g_mod) == 0 && g_fake.loaded != NULL) g_fake.loaded(g_mod, HF_EVENT_GAME_LOADED, NULL);
     memcpy(g_before, g_fake.image, FAKE_IMAGE_SIZE);

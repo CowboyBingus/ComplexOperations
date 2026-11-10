@@ -36,7 +36,14 @@ The six arrays behind them move to the mod's memory: index flags, party records,
 peer values and hostability. 281 code sites get the new distance; 20 of them through a short stub, because the
 instruction has no room for it.
 
-The counts are still four: this step changes where the arrays are, not how many peers they hold.
+With the room made, the lists count to eight: 120 sites that loop, compare or clear for four entries do so for eight.
+In 17 places the game's compiler wrote the code out for exactly four entries; there the mod adds the other four, with
+code of its own beside the game's (14) or a hook of the function (3).
+
+Two limits remain:
+
+- The join gate still lets four players in. The parts that follow must hold eight first.
+- The hostability scores stay at four entries. Their message carries five at most, so peers 5 to 8 get no score.
 
 ## Engine
 
@@ -46,7 +53,8 @@ bits. With up to seven peers the message is unchanged.
 
 ## State
 
-- Tested with one player: all eight pods are entered on foot, launch, and are there again after the return.
+- Tested with one player: all eight pods are entered on foot, launch, and are there again after the return; missions
+  and returns work with the lists counting to eight.
 - Not tested: two or more players in one session, and the launch cutscene for four or more.
 - The launch sound for a lone player in pods 5 to 8 is hooked; the mod logs once when it answers for such a pod.
 
@@ -103,6 +111,11 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `scripts/gen_session_sites.py` | Writes `co_session_sites.h` from the site list and a dump of the game's code. |
 | `tests/managers_test.c` | The same refusals for the player managers. |
 | `tests/session_test.c` | The same for the session lists, and that sites and stubs lead to the new place. |
+| `src/co_counts.c` | The session lists' counts: sites, code caves, the hooks for entries 4 to 7. |
+| `src/co_count_sites.h` | Their code sites and the caves' code. Generated; do not edit. |
+| `scripts/sites/count_sites.tsv` | The reviewed count sites: one row for each instruction. |
+| `scripts/gen_count_sites.py` | Writes `co_count_sites.h`; assembles the caves with GNU `as`. |
+| `tests/counts_test.c` | The counts: written behind the move, taken back on a failed write, entries 4 to 7. |
 | `tests/harness/` | The stand-in loader and game image the tests run against. |
 
 ## How it stays safe
@@ -123,5 +136,7 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `the pod manager and the ship's pod table have 8 slots` | The code is in place. |
 | `7 component managers have 8 slots` | The player managers are in place. |
 | `7 arrays of the session lists moved` | The session lists' arrays are in the mod's memory. |
+| `the session lists count to eight` | The lists' code counts to eight; the line says how many players get in. |
+| `the session lists count to four as before` | The count change is off; the reason stands before it. |
 | `the bridge is not the one with the eight-pod bay` | The level data is missing: four pods. |
 | `... is not the reviewed one` | The game's code differs from the reviewed build: that part is off. |

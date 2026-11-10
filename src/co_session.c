@@ -152,11 +152,16 @@ void co_session_canary(int fill)
 }
 #endif
 
-/* What the arrays held goes along, so the move may come at any time before a fifth peer exists. */
+/* What the arrays held goes along, so the move may come at any time before a fifth peer exists. The old places are
+ * zeroed: the lists that stay grow into them, and an empty entry is all zeros. */
 static void CopyOld(void)
 {
     for (size_t i = 0; i < sizeof kOldEnd / sizeof kOldEnd[0]; i++)
-        memcpy((void*)(g_extension + kCoSessionArrays[i].place), (void*)(g_context + kCoSessionArrays[i].old), kOldEnd[i] - kCoSessionArrays[i].old);
+    {
+        void* old = (void*)(g_context + kCoSessionArrays[i].old);
+        memcpy((void*)(g_extension + kCoSessionArrays[i].place), old, kOldEnd[i] - kCoSessionArrays[i].old);
+        memset(old, 0, kOldEnd[i] - kCoSessionArrays[i].old);
+    }
 }
 
 /* Runs in the state constructor's hook and at the session init, whichever comes first with the context's global set.
@@ -165,7 +170,7 @@ void co_session_state(void)
 {
     uintptr_t context = 0;
     if (g_state == -1 || g_game == 0 || g_coApi->read(g_game + CO_SESSION_GLOBAL, &context, sizeof context) != 0 || context == 0) return;
-    if (g_state == 1 && context != g_context) { Undo(CO_SESSION_SITES, CO_SESSION_STUBS); Release(); g_state = 0; }
+    if (g_state == 1 && context != g_context) { co_counts_undo(); Undo(CO_SESSION_SITES, CO_SESSION_STUBS); Release(); g_state = 0; }
     if (g_state == 0)
     {
         g_state = -1;
@@ -173,6 +178,8 @@ void co_session_state(void)
         if (g_state == 1) CopyOld();
 #ifdef CO_CANARY
         co_session_canary(1);
+#else
+        if (g_state == 1) co_counts_apply(g_context, g_extension);
 #endif
     }
 }
@@ -183,6 +190,7 @@ static uint64_t SessionInitDetour(uint64_t a1, uint64_t a2, uint64_t a3, uint64_
     co_session_state();
     if (g_state == 1 && *(uint8_t*)(g_context + CO_SESSION_READY) == 0) memset((void*)g_extension, 0, CO_EXTENSION);
     uint64_t result = g_sessionInit(a1, a2, a3, a4);
+    co_counts_session_init();
 #ifdef CO_CANARY
     co_session_canary(0);
 #endif

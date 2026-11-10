@@ -37,4 +37,11 @@ void co_engine_install(uintptr_t engine);
 void co_session_install(uintptr_t game);
 void co_session_state(void);
 
+/* The session lists' counts (co_counts.c). `install` once with game.dll's base, before the session's; `apply` when the
+ * arrays are moved, `undo` before they move back, `session_init` behind the game's session init. */
+void co_counts_install(uintptr_t game);
+void co_counts_apply(uintptr_t context, uintptr_t extension);
+void co_counts_undo(void);
+void co_counts_session_init(void);
+
 #endif

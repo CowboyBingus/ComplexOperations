@@ -1,0 +1,119 @@
+# The session lists' count sites (game build 25480438): one instruction each, changed in place.
+# rva	instruction bytes	its bytes for eight	list	instruction
+# Not here, and four on purpose: the hostability scores (0x108ABDD the sender's slot lookup, 0x108989B and 0x1089D7B
+# the readers). Their message carries five entries at most; the sender's and the receiver's buffers hold five.
+AC613B	bf 03 00 00 00	bf 07 00 00 00	A1	mov edi,0x3
+AD58EF	bf 03 00 00 00	bf 07 00 00 00	A1	mov edi,0x3
+B67132	83 f8 04	83 f8 08	A1	cmp eax,0x4
+B910C0	83 f9 04	83 f9 08	B3	cmp ecx,0x4
+B92BE7	83 fa 04	83 fa 08	B3	cmp edx,0x4
+B92CF6	83 f9 04	83 f9 08	B5	cmp ecx,0x4
+B92E86	83 f9 04	83 f9 08	B5	cmp ecx,0x4
+B935E0	bd 04 00 00 00	bd 08 00 00 00	A3	mov ebp,0x4
+B9394C	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+B93A3B	83 f8 04	83 f8 08	A1	cmp eax,0x4
+B93E4E	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+B93FA1	83 f8 04	83 f8 08	A1	cmp eax,0x4
+B940AD	83 f8 04	83 f8 08	A1	cmp eax,0x4
+B94140	41 83 f8 04	41 83 f8 08	A3	cmp r8d,0x4
+B94386	41 be 04 00 00 00	41 be 08 00 00 00	A1	mov r14d,0x4
+B946A0	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+B9480B	83 f8 04	83 f8 08	A1	cmp eax,0x4
+B9A0C2	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+BA0702	83 f8 04	83 f8 08	A1	cmp eax,0x4
+BA7EA1	83 f8 04	83 f8 08	A1	cmp eax,0x4
+BAA632	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+BAC95B	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+BAE762	bd 04 00 00 00	bd 08 00 00 00	A3	mov ebp,0x4
+BB4B2F	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+BB9FC6	83 f9 04	83 f9 08	B5	cmp ecx,0x4
+BBE9DB	83 f8 04	83 f8 08	A1	cmp eax,0x4
+BBEA6E	41 83 f8 04	41 83 f8 08	A3	cmp r8d,0x4
+BC0576	83 f9 04	83 f9 08	B5	cmp ecx,0x4
+1083BFF	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+1084DD3	83 f8 04	83 f8 08	B5	cmp eax,0x4
+1084F83	83 fa 04	83 fa 08	B5	cmp edx,0x4
+1087730	83 f8 04	83 f8 08	B3	cmp eax,0x4
+1088147	83 fa 04	83 fa 08	B3	cmp edx,0x4
+1088A0B	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+1088AFC	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+1088BC5	41 b8 00 07 00 00	41 b8 00 0e 00 00	A3	mov r8d,0x700
+1088E1F	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+108967E	83 fa 04	83 fa 08	A1	cmp edx,0x4
+1089833	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+108983F	41 b8 00 07 00 00	41 b8 00 0e 00 00	A3	mov r8d,0x700
+108984C	41 89 8d 00 01 00 00	49 89 8d 00 01 00 00	A2	mov DWORD PTR [r13+0x100],ecx
+1089D3D	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+1089FBB	83 f8 04	83 f8 08	A1	cmp eax,0x4
+1089FEA	83 f8 04	83 f8 08	A2	cmp eax,0x4
+108A02D	41 bf 04 00 00 00	41 bf 08 00 00 00	A1	mov r15d,0x4
+108A05E	bf 04 00 00 00	bf 08 00 00 00	A1	mov edi,0x4
+108A38C	41 83 fa 04	41 83 fa 08	A1	cmp r10d,0x4
+108A421	83 f8 04	83 f8 08	A3	cmp eax,0x4
+108A60E	be 04 00 00 00	be 08 00 00 00	A1	mov esi,0x4
+108A72B	41 bf 04 00 00 00	41 bf 08 00 00 00	A3	mov r15d,0x4
+108A7EE	41 be 03 00 00 00	41 be 07 00 00 00	A1	mov r14d,0x3
+108AA56	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+108AE3F	bf 04 00 00 00	bf 08 00 00 00	A1	mov edi,0x4
+108AEE7	83 f8 04	83 f8 08	A1	cmp eax,0x4
+108B25F	83 f8 04	83 f8 08	A3	cmp eax,0x4
+108B53B	83 f8 04	83 f8 08	A1	cmp eax,0x4
+108B5E0	41 83 fa 04	41 83 fa 08	A3	cmp r10d,0x4
+108BB62	83 f8 04	83 f8 08	A1	cmp eax,0x4
+108BBFB	83 f8 04	83 f8 08	A1	cmp eax,0x4
+108BC3E	41 83 f8 04	41 83 f8 08	A2	cmp r8d,0x4
+108C2CB	83 f8 04	83 f8 08	A1	cmp eax,0x4
+108C393	83 f8 04	83 f8 08	A1	cmp eax,0x4
+108C3E2	83 f9 04	83 f9 08	A2	cmp ecx,0x4
+108C608	bd 04 00 00 00	bd 08 00 00 00	A3	mov ebp,0x4
+108C7EB	83 f8 04	83 f8 08	A1	cmp eax,0x4
+108C8E7	41 bc 04 00 00 00	41 bc 08 00 00 00	A1	mov r12d,0x4
+108C9BC	8d 77 04	8d 77 08	B5	lea esi,[rdi+0x4]
+108CE41	83 f8 04	83 f8 08	A1	cmp eax,0x4
+108CECB	83 f8 04	83 f8 08	A1	cmp eax,0x4
+108D459	41 be 04 00 00 00	41 be 08 00 00 00	A1	mov r14d,0x4
+108D73E	83 f8 04	83 f8 08	A1	cmp eax,0x4
+108D8AA	bf 04 00 00 00	bf 08 00 00 00	A1	mov edi,0x4
+108D8B3	44 8d 77 fe	44 8d 77 fa	A1	lea r14d,[rdi-0x2]
+108DA2F	83 f8 04	83 f8 08	A1	cmp eax,0x4
+108DABB	83 f8 04	83 f8 08	A1	cmp eax,0x4
+108DECB	83 f8 04	83 f8 08	A1	cmp eax,0x4
+108DF0B	83 f8 04	83 f8 08	A1	cmp eax,0x4
+108E28B	83 ff 04	83 ff 08	A1	cmp edi,0x4
+108E3B2	be 03 00 00 00	be 07 00 00 00	A1	mov esi,0x3
+108E43E	bf 03 00 00 00	bf 07 00 00 00	A1	mov edi,0x3
+108E4CD	bf 03 00 00 00	bf 07 00 00 00	A1	mov edi,0x3
+108E565	bf 03 00 00 00	bf 07 00 00 00	A1	mov edi,0x3
+108E618	bf 03 00 00 00	bf 07 00 00 00	A1	mov edi,0x3
+108E6AD	bf 03 00 00 00	bf 07 00 00 00	A1	mov edi,0x3
+108E7C0	bf 03 00 00 00	bf 07 00 00 00	A1	mov edi,0x3
+108E8BD	8d 75 04	8d 75 08	A1	lea esi,[rbp+0x4]
+108F53B	83 f8 04	83 f8 08	A1	cmp eax,0x4
+109025B	83 f8 04	83 f8 08	A1	cmp eax,0x4
+134DCFB	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+134F0BB	83 f8 04	83 f8 08	B5	cmp eax,0x4
+134FBB3	83 f8 04	83 f8 08	A1	cmp eax,0x4
+135022F	be 03 00 00 00	be 07 00 00 00	A1	mov esi,0x3
+13502C1	bf 03 00 00 00	bf 07 00 00 00	A1	mov edi,0x3
+1350360	bf 03 00 00 00	bf 07 00 00 00	A1	mov edi,0x3
+1350408	bf 03 00 00 00	bf 07 00 00 00	A1	mov edi,0x3
+13504C6	bf 03 00 00 00	bf 07 00 00 00	A1	mov edi,0x3
+1350613	bf 03 00 00 00	bf 07 00 00 00	A1	mov edi,0x3
+1350731	8d 77 04	8d 77 08	A1	lea esi,[rdi+0x4]
+135BBB1	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+135BBE6	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+135BC21	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+135BC56	83 f9 04	83 f9 08	A1	cmp ecx,0x4
+1387E7B	83 f8 04	83 f8 08	B5	cmp eax,0x4
+1387EBB	83 f8 04	83 f8 08	B5	cmp eax,0x4
+14726D5	83 f8 04	83 f8 08	A1	cmp eax,0x4
+1473B4B	83 f8 04	83 f8 08	B5	cmp eax,0x4
+14D084B	83 f8 04	83 f8 08	B5	cmp eax,0x4
+14D7622	83 f8 04	83 f8 08	B5	cmp eax,0x4
+17823CD	83 f8 04	83 f8 08	B5	cmp eax,0x4
+178EFFB	83 f9 04	83 f9 08	B5	cmp ecx,0x4
+179E98B	83 f8 04	83 f8 08	B5	cmp eax,0x4
+199218B	83 f8 04	83 f8 08	B5	cmp eax,0x4
+19922FB	83 f8 04	83 f8 08	B5	cmp eax,0x4
+199245D	83 f8 04	83 f8 08	B5	cmp eax,0x4
+108D99C	48 8b f7	8d 77 04	A1	mov rsi,rdi -> lea esi,[rdi+4]

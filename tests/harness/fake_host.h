@@ -5,7 +5,7 @@
 #include "co.h"
 
 #define FAKE_IMAGE_SIZE 0x3500000u
-#define FAKE_HOOKS 8
+#define FAKE_HOOKS 16
 
 typedef struct FakeHost
 {

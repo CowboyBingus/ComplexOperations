@@ -1,0 +1,316 @@
+/* Eight players: the session's peer lists, second step. With the neighbours moved (co_session.c) the lists can hold
+ * eight entries; this makes the code count to eight. Most sites are one instruction with a four in it. Code the
+ * compiler unrolled for four entries gets the other four from the mod: a cave beside the game's code, or a hook of the
+ * whole function. No fifth peer gets in yet: the join gate still counts to CO_JOIN_LIMIT. */
+#include <string.h>
+#include <windows.h>
+
+#include "co.h"
+
+typedef struct CoCountSite { uint32_t rva; uint8_t size, skip; uint8_t old[12], now[12]; } CoCountSite;
+typedef struct CoCountClear { uint32_t rva; uint8_t mov, land; } CoCountClear;
+typedef struct CoCountCave
+{
+    uint32_t rva;
+    uint8_t size, replaced[12];
+    uint16_t code, length;
+    uint16_t jumps[3];        /* where the cave's jumps into the game have their rel32; 0 ends the list */
+    uint16_t callAt;          /* where the callback's address goes */
+    uint8_t callback;         /* its number in kCountCallbacks; 0xFF for none */
+} CoCountCave;
+/* What a cave's callback sees: the registers as the game had them, in the order the cave pushed them. */
+typedef struct CoRegs { uint64_t r15, r14, r13, r12, r11, r10, r9, r8, rdi, rsi, rbp, rbx, rdx, rcx, rax, flags; } CoRegs;
+#include "co_count_sites.h"
+
+#define CO_COUNT_SITES (sizeof kCoCountSites / sizeof kCoCountSites[0])
+#define CO_COUNT_CLEARS (sizeof kCoCountClears / sizeof kCoCountClears[0])
+#define CO_COUNT_CAVES (sizeof kCoCountCaves / sizeof kCoCountCaves[0])
+#define CO_CAVE_ROOM 0x2000u
+#define CO_PEERS 8u
+#define CO_JOIN_LIMIT 4u          /* peers a session takes; eight once every per-player part holds eight */
+#define CO_PLAYER_INDEXES 4u      /* player indexes the game hands out */
+#define CO_HOST_SYNC 0x159B0u     /* in the session context: the host's synchronizer, peer slots at +0x20 */
+#define CO_SLOT 0x38u
+#define CO_RECORDS 0x200u         /* in the extension: party records, 0x1C0 each */
+#define CO_RECORD 0x1C0u
+#define CO_VALUES 0xD8u           /* in the extension: peer values, 16 bytes each with the key first */
+#define CO_SLOTS_READY 0x108B600u
+#define CO_SLOTS_FREE 0x108B670u
+#define CO_PEER_GONE 0x108B6B0u
+
+typedef uint32_t (*SlotsFn)(uintptr_t);
+typedef uint64_t (*PeerGoneFn)(uintptr_t, uint64_t, uint64_t, uint64_t);
+static SlotsFn g_slotsReady, g_slotsFree;
+static PeerGoneFn g_peerGone;
+static uintptr_t g_game, g_context, g_extension, g_caves;
+static int g_on, g_hooks = -1;
+
+static uint64_t* Slot(uintptr_t sync, uint32_t slot) { return (uint64_t*)(sync + 0x20u + slot * CO_SLOT); }
+static uint32_t SlotField(uintptr_t sync, uint32_t slot, uint32_t field) { return *(uint32_t*)(sync + 0x20u + slot * CO_SLOT + field); }
+
+/* A party record whose key is the peer: the game looked through records 0 to 3 and found none. */
+static uint64_t FindRecord(uint64_t key)
+{
+    for (uint32_t i = 4; i < CO_PEERS; i++)
+    {
+        uintptr_t record = g_extension + CO_RECORDS + i * CO_RECORD;
+        if (*(uint64_t*)record == key) return record + 8u;
+    }
+    return 0;
+}
+
+static void FindByRsi(CoRegs* regs) { if (regs->rcx == 0) regs->rcx = FindRecord(regs->rsi); }
+static void FindByR11(CoRegs* regs) { if (regs->rcx == 0) regs->rcx = FindRecord(regs->r11); }
+
+/* The host's own slot always counts as used. */
+static uint32_t FreeSlots(uintptr_t sync)
+{
+    uint32_t used = 1;
+    for (uint32_t i = 1; i < CO_PEERS; i++) used += *Slot(sync, i) != 0;
+    return used < CO_JOIN_LIMIT ? CO_JOIN_LIMIT - used : 0;
+}
+
+/* r9 is the host's synchronizer here; the game goes on with the free slots in ecx. */
+static void JoinGate(CoRegs* regs) { regs->rcx = FreeSlots((uintptr_t)regs->r9); }
+
+static void ClearValueKeys(CoRegs* regs)
+{
+    (void)regs;
+    for (uint32_t i = 4; i < CO_PEERS; i++) *(uint64_t*)(g_extension + CO_VALUES + i * 16u) = 0;
+}
+
+/* rbx is the session context. The game's chain over slots 0 to 3 leaves the answer of the last occupied one. */
+static void LastSlotState(CoRegs* regs)
+{
+    uintptr_t sync = (uintptr_t)regs->rbx + CO_HOST_SYNC;
+    uint64_t answer = 0;
+    for (uint32_t i = 0; i < CO_PEERS; i++)
+        if (*Slot(sync, i) != 0) answer = SlotField(sync, i, 0x20) - 6u <= 2u;
+    regs->rax = answer;
+}
+
+static void (*const kCountCallbacks[])(CoRegs*) = {FindByRsi, FindByR11, JoinGate, ClearValueKeys, LastSlotState};
+
+/* The session init clears the keys 1 to 3 itself; its hook (co_session.c) calls this behind it. */
+void co_counts_session_init(void) { if (g_on) ClearValueKeys(NULL); }
+
+/* Slots with a peer in state 5 or later and a player index. */
+static uint32_t SlotsReadyDetour(uintptr_t sync)
+{
+    if (!g_on) return g_slotsReady(sync);
+    uint32_t ready = 0;
+    for (uint32_t i = 0; i < CO_PEERS; i++)
+        ready += *Slot(sync, i) != 0 && SlotField(sync, i, 0x20) >= 5 && SlotField(sync, i, 0x14) < CO_PLAYER_INDEXES;
+    return ready;
+}
+
+static uint32_t SlotsFreeDetour(uintptr_t sync) { return g_on ? FreeSlots(sync) : g_slotsFree(sync); }
+
+/* A peer left: the game takes it out of the party records 0 to 3; the same for records 4 to 7. A record lists peer
+ * keys (count at +8, keys from +0x10) and 32-byte entries (count at +0x38, entries from +0x40, key first); a record
+ * without keys is zeroed. */
+static uint64_t PeerGoneDetour(uintptr_t sync, uint64_t key, uint64_t a3, uint64_t a4)
+{
+    uint64_t result = g_peerGone(sync, key, a3, a4);
+    if (!g_on) return result;
+    for (uint32_t i = 4; i < CO_PEERS; i++)
+    {
+        uint8_t* record = (uint8_t*)(g_extension + CO_RECORDS + i * CO_RECORD);
+        uint32_t* keys = (uint32_t*)(record + 8);
+        uint32_t* entries = (uint32_t*)(record + 0x38);
+        for (uint32_t j = 0; j < *keys; j++)
+            if (*(uint64_t*)(record + 0x10 + j * 8u) == key)
+            {
+                --*keys;
+                *(uint64_t*)(record + 0x10 + j * 8u) = *(uint64_t*)(record + 0x10 + *keys * 8u);
+                j--;
+            }
+        for (uint32_t j = 0; j < *entries; j++)
+            if (*(uint64_t*)(record + 0x40 + j * 0x20u) == key)
+            {
+                --*entries;
+                memmove(record + 0x40 + j * 0x20u, record + 0x40 + *entries * 0x20u, 0x20);
+                j--;
+            }
+        if (*keys == 0) memset(record, 0, CO_RECORD);
+    }
+    return result;
+}
+
+/* A site's bytes as the game has them now: the reviewed ones, but for the distance the session step wrote. */
+static int SiteMatches(const CoCountSite* s)
+{
+    uint8_t bytes[12];
+    if (g_coApi->read(g_game + s->rva, bytes, s->size) != 0) return 0;
+    for (uint8_t i = 0; i < s->size; i++)
+        if (!(s->skip != 0xFF && i >= s->skip && i < s->skip + 4) && bytes[i] != s->old[i]) return 0;
+    return 1;
+}
+
+static int WriteSite(const CoCountSite* s, const uint8_t* to)
+{
+    if (s->skip == 0xFF) return g_coApi->write(g_game + s->rva, to, s->size);
+    if (s->skip && g_coApi->write(g_game + s->rva, to, s->skip) != 0) return -1;
+    return s->skip + 4 < s->size ? g_coApi->write(g_game + s->rva + s->skip + 4u, to + s->skip + 4, s->size - s->skip - 4u) : 0;
+}
+
+/* xor eax,eax; mov [reg+d],eax <-> and qword [reg+d],0: the distance moves one byte forward. */
+static int WriteClear(const CoCountClear* c, int eight)
+{
+    uint8_t bytes[8], to[8];
+    if (g_coApi->read(g_game + c->rva, bytes, 8) != 0) return -1;
+    if (eight)
+    {
+        if (bytes[0] != 0x33 || bytes[1] != 0xC0 || bytes[2] != 0x89 || bytes[3] != c->mov) return -1;
+        to[0] = 0x48; to[1] = 0x83; to[2] = c->land;
+        memcpy(to + 3, bytes + 4, 4);
+        to[7] = 0;
+    }
+    else
+    {
+        if (bytes[0] != 0x48 || bytes[1] != 0x83 || bytes[2] != c->land || bytes[7] != 0) return -1;
+        to[0] = 0x33; to[1] = 0xC0; to[2] = 0x89; to[3] = c->mov;
+        memcpy(to + 4, bytes + 3, 4);
+    }
+    return g_coApi->write(g_game + c->rva, to, 8);
+}
+
+static void Back(size_t sites, size_t clears, size_t caves)
+{
+    for (size_t i = 0; i < caves; i++) g_coApi->write(g_game + kCoCountCaves[i].rva, kCoCountCaves[i].replaced, kCoCountCaves[i].size);
+    for (size_t i = 0; i < clears; i++) WriteClear(&kCoCountClears[i], 0);
+    for (size_t i = 0; i < sites; i++) WriteSite(&kCoCountSites[i], kCoCountSites[i].old);
+}
+
+/* The session step undoes its sites by writing distances back; this goes first, so they are where it expects them. */
+void co_counts_undo(void)
+{
+    if (!g_on) return;
+    g_on = 0;
+    Back(CO_COUNT_SITES, CO_COUNT_CLEARS, CO_COUNT_CAVES);
+    if (g_caves) VirtualFree((void*)g_caves, 0, MEM_RELEASE);
+    g_caves = 0;
+}
+
+/* Called by the session step once the arrays are moved and their old places zeroed. */
+void co_counts_apply(uintptr_t context, uintptr_t extension)
+{
+    static const char kStays[] = "the session lists count to four as before";
+    if (g_on || g_hooks != 1 || g_game == 0) return;
+    for (size_t i = 0; i < CO_COUNT_SITES; i++)
+        if (!SiteMatches(&kCoCountSites[i]))
+        { co_log("session: the code at game+0x%X is not the reviewed one; %s", kCoCountSites[i].rva, kStays); return; }
+    for (size_t i = 0; i < CO_COUNT_CAVES; i++)
+    {
+        uint8_t bytes[12];
+        const CoCountCave* c = &kCoCountCaves[i];
+        if (g_coApi->read(g_game + c->rva, bytes, c->size) != 0 || memcmp(bytes, c->replaced, c->size) != 0)
+        { co_log("session: the code at game+0x%X is not the reviewed one; %s", c->rva, kStays); return; }
+    }
+    g_caves = co_alloc_near(g_game + 0x1000000u, CO_CAVE_ROOM);
+    if (g_caves == 0 || sizeof kCoCountCode > CO_CAVE_ROOM) { co_log("session: no free memory near the game's code; %s", kStays); return; }
+    memcpy((void*)g_caves, kCoCountCode, sizeof kCoCountCode);
+    for (size_t i = 0; i < CO_COUNT_CAVES; i++)
+    {
+        const CoCountCave* c = &kCoCountCaves[i];
+        uint8_t* cave = (uint8_t*)(g_caves + c->code);
+        /* Assembled with the cave and the game both at zero: a jump into the game is off by their real distance. */
+        for (size_t j = 0; j < 3 && c->jumps[j]; j++)
+        {
+            int32_t rel;
+            memcpy(&rel, cave + c->jumps[j], 4);
+            int64_t real = (int64_t)rel + (int64_t)g_game - (int64_t)(uintptr_t)cave;
+            if (real < INT32_MIN || real > INT32_MAX)
+            { VirtualFree((void*)g_caves, 0, MEM_RELEASE); g_caves = 0; co_log("session: the game's code is out of reach; %s", kStays); return; }
+            rel = (int32_t)real;
+            memcpy(cave + c->jumps[j], &rel, 4);
+        }
+        if (c->callback != 0xFF)
+        {
+            uint64_t callback = (uint64_t)(uintptr_t)kCountCallbacks[c->callback];
+            memcpy(cave + c->callAt, &callback, 8);
+        }
+    }
+    DWORD before;
+    if (!VirtualProtect((void*)g_caves, CO_CAVE_ROOM, PAGE_EXECUTE_READ, &before))
+    { VirtualFree((void*)g_caves, 0, MEM_RELEASE); g_caves = 0; co_log("session: the caves could not be made executable; %s", kStays); return; }
+    g_context = context;
+    g_extension = extension;
+    /* The game cannot run on a mix: whatever is written goes back when one write fails. */
+    for (size_t i = 0; i < CO_COUNT_SITES; i++)
+        if (WriteSite(&kCoCountSites[i], kCoCountSites[i].now) != 0)
+        { Back(i, 0, 0); goto failed; }
+    for (size_t i = 0; i < CO_COUNT_CLEARS; i++)
+        if (WriteClear(&kCoCountClears[i], 1) != 0)
+        { Back(CO_COUNT_SITES, i, 0); goto failed; }
+    for (size_t i = 0; i < CO_COUNT_CAVES; i++)
+    {
+        const CoCountCave* c = &kCoCountCaves[i];
+        uint8_t jump[12];
+        int32_t to = (int32_t)((int64_t)(g_caves + c->code) - (int64_t)(g_game + c->rva + 5u));
+        memset(jump, 0x90, sizeof jump);
+        jump[0] = 0xE9;
+        memcpy(jump + 1, &to, 4);
+        if (g_coApi->write(g_game + c->rva, jump, c->size) != 0)
+        { Back(CO_COUNT_SITES, CO_COUNT_CLEARS, i); goto failed; }
+    }
+    g_on = 1;
+    co_log("session: the session lists count to eight (%u code sites changed, %u through caves); a session still takes %u players",
+           (unsigned)(CO_COUNT_SITES + CO_COUNT_CLEARS + CO_COUNT_CAVES), (unsigned)CO_COUNT_CAVES, CO_JOIN_LIMIT);
+    return;
+failed:
+    VirtualFree((void*)g_caves, 0, MEM_RELEASE);
+    g_caves = 0;
+    co_log("session: a count site could not be written; %s", kStays);
+}
+
+/* The hooks stay for good and pass through while the counts are off. */
+void co_counts_install(uintptr_t game)
+{
+    g_game = game;
+    if (g_coApi->code_matches(game + CO_SLOTS_READY, "33 C0 48 39 41 20 74 12 83 79 40 05") != 1 ||
+        g_coApi->code_matches(game + CO_SLOTS_FREE, "33 C0 4C 8B C1 48 39 41 58 0F 95 C0") != 1 ||
+        g_coApi->code_matches(game + CO_PEER_GONE, "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 81 EC E0 01 00 00") != 1)
+    { g_hooks = 0; co_log("session: this is not the game code the mod was made for (a game update or another mod); the session lists count to four as before"); return; }
+    if (g_coApi->hook(g_coMod, game + CO_SLOTS_READY, (void*)SlotsReadyDetour, (void**)&g_slotsReady) != 0 ||
+        g_coApi->hook(g_coMod, game + CO_SLOTS_FREE, (void*)SlotsFreeDetour, (void**)&g_slotsFree) != 0 ||
+        g_coApi->hook(g_coMod, game + CO_PEER_GONE, (void*)PeerGoneDetour, (void**)&g_peerGone) != 0)
+    { g_hooks = 0; co_log("session: a function of the session lists could not be hooked; the session lists count to four as before"); return; }
+    g_hooks = 1;
+}
+
+#ifdef CO_TEST
+void co_counts_test_fill(uint8_t* image)
+{
+    for (size_t i = 0; i < CO_COUNT_SITES; i++) memcpy(image + kCoCountSites[i].rva, kCoCountSites[i].old, kCoCountSites[i].size);
+    for (size_t i = 0; i < CO_COUNT_CAVES; i++) memcpy(image + kCoCountCaves[i].rva, kCoCountCaves[i].replaced, kCoCountCaves[i].size);
+    for (size_t i = 0; i < CO_COUNT_CLEARS; i++)
+    {
+        const uint8_t head[] = {0x33, 0xC0, 0x89, kCoCountClears[i].mov};
+        memcpy(image + kCoCountClears[i].rva, head, sizeof head);
+    }
+    static const uint8_t kReady[] = {0x33, 0xC0, 0x48, 0x39, 0x41, 0x20, 0x74, 0x12, 0x83, 0x79, 0x40, 0x05};
+    static const uint8_t kFree[] = {0x33, 0xC0, 0x4C, 0x8B, 0xC1, 0x48, 0x39, 0x41, 0x58, 0x0F, 0x95, 0xC0};
+    static const uint8_t kGone[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x48, 0x81, 0xEC, 0xE0, 0x01, 0x00, 0x00};
+    memcpy(image + CO_SLOTS_READY, kReady, sizeof kReady);
+    memcpy(image + CO_SLOTS_FREE, kFree, sizeof kFree);
+    memcpy(image + CO_PEER_GONE, kGone, sizeof kGone);
+}
+
+void co_counts_test_reset(void)
+{
+    if (g_caves) VirtualFree((void*)g_caves, 0, MEM_RELEASE);
+    g_caves = g_game = 0;
+    g_on = 0;
+    g_hooks = -1;
+}
+
+int co_counts_test_on(void) { return g_on; }
+uintptr_t co_counts_test_caves(void) { return g_caves; }
+unsigned co_counts_test_sites(void) { return (unsigned)(CO_COUNT_SITES + CO_COUNT_CLEARS + CO_COUNT_CAVES); }
+uint32_t co_counts_test_ready(uintptr_t sync) { return SlotsReadyDetour(sync); }
+uint32_t co_counts_test_free(uintptr_t sync) { return SlotsFreeDetour(sync); }
+uint64_t co_counts_test_find(uint64_t key) { return FindRecord(key); }
+void co_counts_test_gone(uintptr_t sync, uint64_t key) { PeerGoneDetour(sync, key, 0, 0); }
+uint64_t co_counts_test_last(uintptr_t context) { CoRegs regs = {0}; regs.rbx = context; LastSlotState(&regs); return regs.rax; }
+#endif
