@@ -31,10 +31,23 @@ for start in (0xB67177, 0xBA0747): EXTRA += [(start, 0x158, 'B5'), (start + 0xD,
 EXTRA += [(0xB64A1A, 0x158, 'B5'), (0xB64A26, 0x15C, 'B5'), (0xB64A31, 0x158, 'B5'), (0xB64A3E, 0x15C, 'B5'),
           (0xB6B57A, 0x158, 'B5'), (0xB6B586, 0x15C, 'B5'), (0xB6B591, 0x158, 'B5'), (0xB6B5A0, 0x15C, 'B5'),
           (0x13713CA, 0x158, 'B5'), (0x13713D6, 0x15C, 'B5'), (0x13713E1, 0x158, 'B5'), (0x13713EE, 0x15C, 'B5')]
+# Sites the earlier list lacks, from an independent tracker's list of every access (client members without a caller in
+# the image, the host migration's index flags). (rva, offset of the value, value, array)
+MORE = [(0x1082F86, 3, 0x150, 'B5'), (0x1082F8D, 3, 0x160, 'B5'), (0x1082F94, 3, 0x170, 'B5'), (0x1082F9B, 3, 0x180, 'B5'),
+        (0x1084DC1, 3, 0x150, 'B5'), (0x1084DE7, 4, 0x158, 'B5'), (0x1084DF9, 4, 0x15C, 'B5'),
+        (0x1084EFA, 3, 0x160, 'B5'), (0x1084F04, 3, 0x170, 'B5'), (0x1084F0F, 3, 0x180, 'B5'),
+        (0x108823B, 3, 0x190, 'B6'), (0x1088246, 2, 0x198, 'B6'), (0x1088255, 3, 0x1A0, 'B6'), (0x1088260, 2, 0x1A8, 'B6'),
+        (0x108826F, 3, 0x1B0, 'B6'), (0x108827A, 2, 0x1B8, 'B6'), (0x1088289, 3, 0x1C0, 'B6'), (0x1088294, 2, 0x1C8, 'B6'),
+        (0x108829E, 3, 0x190, 'B6'), (0x10882A8, 3, 0x1A0, 'B6'), (0x10882B2, 3, 0x1B0, 'B6'), (0x10882BC, 3, 0x1C0, 'B6'),
+        (0x1089EAB, 4, 0x100, 'A2'), (0x1089FD7, 3, 0x100, 'A2'), (0x1089FF4, 4, 0x100, 'A2')]
+# A stub's own jump: stub rva -> (offset of its rel32 in the stub, target rva)
+JUMPS = {0x108506A: (2, 0x1085081)}
 # Stubs: (rva, the bytes a jump replaces, the stub's code with zeros for the value, offset of the value, old value,
 # array, shift). No branch leads into the replaced bytes behind their first (checked against a full disassembly).
 STUBS = [
     (0x1085E7E, '41 c7 47 10 01 00 00 00 4d 89 67 18', '41 c7 47 10 01 00 00 00 4d 89 a7 00 00 00 00', 11, 0x18, 'B1', 0),
+    # je +0x15; lea rax,[rcx+0x18]: the lea's successor is a loop head, so the jump before it goes into the stub
+    (0x108506A, '74 15 48 8d 41 18', '0f 84 00 00 00 00 48 8d 81 00 00 00 00', 9, 0x18, 'B1', 0),
     (0xB910D6, '48 83 c0 15 8b cd', '48 05 00 00 00 00 8b cd', 2, 0x15, 'B5', 4),
     (0x108773E, '48 83 c0 15 48 03 c0', '48 05 00 00 00 00 48 03 c0', 2, 0x15, 'B5', 4),
     (0xB92C14, '48 83 c1 09 48 03 c9', '48 81 c1 00 00 00 00 48 03 c9', 3, 0x9, 'B3', 4),
@@ -66,6 +79,10 @@ for rva, at, k, t in INDEX:
 for rva, value, t in EXTRA:
     at = [a for a in (2, 3) if struct.unpack_from('<I', dump, rva + a)[0] == value]; assert len(at) == 1 and dump[rva + at[0] - 2] in (0x89, 0x8B), hex(rva)
     rows.append((rva, at[0], value, order.index(t), 0, dump[rva:rva + at[0]]))
+for rva, at, value, t in MORE:
+    assert struct.unpack_from('<I', dump, rva + at)[0] == value, hex(rva); rows.append((rva, at, value, order.index(t), 0, dump[rva:rva + at]))
+for rva, raw in ((0x1086FD0, '4c 39 44 d1 18'), (0x1086FDE, '4e 89 44 c9 18')):
+    raw = bytes.fromhex(raw); assert dump[rva:rva + 5] == raw; short.append((rva, raw, bytes([raw[0], raw[1], raw[2] ^ 0xC0, raw[3], 0, 0, 0, 0]), 4, 0x18, 'B1', 0))
 for rva, old, code, at, value, t, shift in STUBS:
     old = bytes.fromhex(old); assert dump[rva:rva + len(old)] == old, hex(rva); short.append((rva, old, bytes.fromhex(code), at, value, t, shift))
 assert len({r[0] for r in rows} | {c[0] for c in short}) == len(rows) + len(short)
@@ -77,9 +94,9 @@ out += ['};', '', '/* {rva, offset of the value in the instruction, its vanilla 
         'static const CoSessionSite kCoSessionSites[] = {']
 out += ['    {0x%Xu, %d, 0x%Xu, %d, %d, {%s}},' % (r, a, v, i, sh, ', '.join('0x%02X' % b for b in p)) for r, a, v, i, sh, p in sorted(rows)]
 hexes = lambda b: ', '.join('0x%02X' % x for x in b)
-out += ['};', '', '/* {rva, bytes replaced, stub length, offset of the value in the stub, its vanilla value, array, shift, the', ' * replaced bytes, the stub} */',
+out += ['};', '', '/* {rva, bytes replaced, stub length, offset of the value in the stub, its vanilla value, array, shift, offset of', ' * a jump\'s rel32 in the stub (0: none) and its target, the replaced bytes, the stub} */',
         'static const CoSessionStub kCoSessionStubs[] = {']
-out += ['    {0x%Xu, %d, %d, %d, 0x%Xu, %d, %d, {%s}, {%s}},' % (r, len(o), len(c), a, v, order.index(t), sh, hexes(o), hexes(c)) for r, o, c, a, v, t, sh in sorted(short)]
+out += ['    {0x%Xu, %d, %d, %d, 0x%Xu, %d, %d, %d, 0x%Xu, {%s}, {%s}},' % ((r, len(o), len(c), a, v, order.index(t), sh) + JUMPS.get(r, (0, 0)) + (hexes(o), hexes(c))) for r, o, c, a, v, t, sh in sorted(short)]
 out += ['};', '', '#endif', '']
 open(sys.argv[2] if len(sys.argv) > 2 else 'src/co_session_sites.h', 'w').write('\n'.join(out))
 print(len(rows), 'sites;', ', '.join('%s %d' % (t, sum(1 for r in rows if r[3] == i)) for i, t in enumerate(order)))

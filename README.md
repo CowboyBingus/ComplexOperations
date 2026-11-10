@@ -33,7 +33,7 @@ This alone lets no fifth player join: the session's own lists still hold four. I
 
 The session keeps its peers in arrays of four, packed in one object. The lists that will hold eight stay in place.
 The six arrays behind them move to the mod's memory: index flags, party records, ready peers, a third peer list,
-peer values and hostability. 253 code sites get the new distance; 17 of them through a short stub, because the
+peer values and hostability. 281 code sites get the new distance; 20 of them through a short stub, because the
 instruction has no room for it.
 
 The counts are still four: this step changes where the arrays are, not how many peers they hold.

@@ -16,6 +16,8 @@ typedef struct CoSessionStub
     uint8_t size, length, at;
     uint32_t old;
     uint8_t array, shift;
+    uint8_t jumpAt;   /* a conditional jump in the stub: where its rel32 is, 0 for none */
+    uint32_t jumpTo;  /* and the rva it leads to */
     uint8_t replaced[12], code[16];
 } CoSessionStub;
 #include "co_session_sites.h"
@@ -90,6 +92,11 @@ static void Move(uintptr_t context)
         { Release(); co_log("session: the extension is out of reach for game+0x%X; the session lists stay as they are", s->rva); return; }
         memcpy(stub, s->code, s->length);
         memcpy(stub + s->at, &value, 4);
+        if (s->jumpAt)
+        {
+            int32_t to = (int32_t)((int64_t)(g_game + s->jumpTo) - (int64_t)((uintptr_t)stub + s->jumpAt + 4u));
+            memcpy(stub + s->jumpAt, &to, 4);
+        }
         stub[s->length] = 0xE9;
         int32_t back = (int32_t)((int64_t)(g_game + s->rva + s->size) - (int64_t)((uintptr_t)stub + s->length + 5u));
         memcpy(stub + s->length + 1, &back, 4);
