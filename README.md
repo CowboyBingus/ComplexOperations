@@ -26,8 +26,8 @@ Every player in the session needs the mod.
 
 The game keeps one record for each player in seven managers: player, score, customization, kill streak, ship
 inventory, ship customization and ship modules. Each has four slots. The mod builds all seven in its own memory with
-eight slots and changes the 1,115 code sites that address them, the score manager's loot rows among them (see
-Mission).
+eight slots and changes the 1,115 code sites that address them, the score manager's loot rows among them. 6 caves do
+the loot rows' code that the game wrote out for four rows (see Mission).
 
 This alone lets no fifth player join: the session's own lists still hold four. It is the base the later parts need.
 
@@ -117,8 +117,12 @@ index. The player managers' step moves both behind the score manager with eight 
 places and 7 loops count to eight. That loop count is also the mission report's outcome code; 1 site keeps the code
 at four.
 
-In 9 places the game clears the rows, adds them up or checks an index, with code written out for four rows. Code of
-the mod's beside it asks whether the managers moved and works on the rows where they are. Every build has these.
+In 6 places the game clears the rows or adds them up with code written out for four rows. The managers' step puts
+code of the mod's beside each that does all eight rows at the new place. It goes in and out with the rows' move, so
+the rows and their code always match.
+
+In 3 places the game uses a player index to find a row. Code of the mod's there asks whether the managers moved and
+skips an index without a row. These go in and out with the counts, in every build.
 
 The Activity record lists its participants (four) and the peers it waits for (three), filled from the session's ready
 list with no bound. 3 of the guards leave out a peer beyond them, in every build.
@@ -195,10 +199,10 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `src/co_mod.c` | The entry point: the build check and the game-loaded event. |
 | `src/co_pods.c` | The eight pods: memory, code sites, hooks. |
 | `src/co_pod_sites.h` | The code sites that address the manager and the pod table. Generated; do not edit. |
-| `src/co_managers.c` | The seven player managers: memory and code sites. |
-| `src/co_manager_sites.h` | Their code sites. Generated; do not edit. |
+| `src/co_managers.c` | The seven player managers: memory, code sites and the loot rows' caves. |
+| `src/co_manager_sites.h` | Their code sites and caves. Generated; do not edit. |
 | `scripts/sites/` | The reviewed site lists of the seven managers. |
-| `scripts/gen_manager_sites.py` | Writes `co_manager_sites.h` from those lists and a dump of the game's code. |
+| `scripts/gen_manager_sites.py` | Writes `co_manager_sites.h` from those lists and a dump of the game's code; assembles the loot rows' caves with GNU `as`. |
 | `hellforge-recipe.json`, `.literals` | The bay's level, geometry and collision data as a HellForge recipe. |
 | `scripts/pod_sites.tsv` | The reviewed site list of the pod manager: one row for each instruction. |
 | `scripts/gen_pod_sites.py` | Writes `co_pod_sites.h` from the site list and a dump of the game's code. |
@@ -207,14 +211,14 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `src/co_session.c` | The session lists and the lobby's member lists: the extension block, code sites and stubs. |
 | `src/co_session_sites.h` | Their code sites. Generated; do not edit. |
 | `scripts/gen_session_sites.py` | Writes `co_session_sites.h` from the site list and a dump of the game's code. Holds the lobby's member lists' sites; assembles their stubs with GNU `as`. |
-| `tests/managers_test.c` | The same refusals for the player managers, the loot rows' sites among them. |
+| `tests/managers_test.c` | The same refusals for the player managers, the loot rows' sites and caves among them. Runs the caves. |
 | `tests/session_test.c` | The same for the session lists, and that sites and stubs lead to the new place. Runs the lobby copies' stubs. |
-| `src/co_counts.c` | The session lists' counts: sites, code caves, the hooks for entries 4 to 7. The guards and the loot rows' code too. |
+| `src/co_counts.c` | The session lists' counts: sites, code caves, the hooks for entries 4 to 7. The guards and the loot rows' guards too. |
 | `src/co_count_sites.h` | Their code sites and the caves' code. Generated; do not edit. |
 | `scripts/sites/count_sites.tsv` | The reviewed count sites: one row for each instruction. |
 | `scripts/sites/loadout_sites.py` | The loadout screen's sites and caves for eight, and the per-peer loadout table's move and bounds. |
-| `scripts/gen_count_sites.py` | Writes `co_count_sites.h`; assembles the caves with GNU `as`. Holds the guards, the member lists' caps, the lobby's size and the loot rows' caves. |
-| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' code in both managers' states, and the join limit without the managers. |
+| `scripts/gen_count_sites.py` | Writes `co_count_sites.h`; assembles the caves with GNU `as`. Holds the guards, the member lists' caps, the lobby's size and the loot rows' guards. |
+| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards in both managers' states, and the join limit without the managers. |
 | `tests/engine_test.c` | The engine's sites: written, refused on changed code, taken back on a failed write. |
 | `tests/harness/` | The stand-in loader and game image the tests run against. |
 
@@ -226,8 +230,8 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 - A write that fails part-way sets every site written before it back to the game's bytes.
 - The per-peer loadout table moves only when the game's pointer and registry lead to the game's own place for it. Its
   bounds go back before it does.
-- A build for eight takes no fifth player while the player managers have four slots. The loot rows' code asks their
-  state each time it runs.
+- A build for eight takes no fifth player while the player managers have four slots. The loot rows' code goes in and
+  out with their move; their guards ask the managers' state each time they run.
 - A failed step is logged in plain words, for example "four pods as before".
 
 ## Log
@@ -248,7 +252,8 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `the loadout screen has eight records and cards` | A build for eight players: the loadout screen's arrays moved. |
 | `the per-peer loadout table moved to room for eight peers` | A build for eight players: that table is in the mod's memory. |
 | `the per-peer loadout table is not where the game keeps it` | Something else moved or changed it: the counts stay at four. |
-| `the score manager's loot rows are cleared, added and bounded where the managers keep them` | The loot rows' code is in place. |
+| `the score manager's loot rows are cleared and added for eight rows` | The loot rows' code moved with the managers. |
+| `the score manager's loot rows by index are bounded where the managers keep them` | The loot rows' guards are in place. |
 | `the session is full at four players: the player managers have four slots` | A build for eight whose managers have four slots: four players. |
 | `TEST BUILD, not for play` | Built with `--test-first-slot`. |
 | `the session lists count to four as before` | The count change is off; the reason stands before it. |

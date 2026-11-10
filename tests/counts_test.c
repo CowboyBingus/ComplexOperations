@@ -7,7 +7,7 @@
  * entries at four in every build. A build for eight gives the loadout screen eight records and cards in place of the
  * guards that kept players 5 to 8 off it, and moves the per-peer loadout table to room for eight before it writes that
  * table's bounds; a failed write or a changed byte leaves all of it as the game has it. The score manager's loot rows
- * are cleared, summed and bounded where the managers keep them now, the Activity record's lists stop at their room, and
+ * are bounded where the managers keep them now, the Activity record's lists stop at their room, and
  * a build for eight takes four players while the managers have four slots. The clan records' and the clan station's
  * handlers skip a player index of four or more in every build. */
 #include <stdio.h>
@@ -49,8 +49,6 @@ int co_counts_test_move_writes(void);
 void co_pods_test_reset(void);
 void co_managers_test_reset(void);
 void co_managers_test_force(int state);
-void co_counts_test_clear_loot(uintptr_t manager, int byIndex);
-uint32_t co_counts_test_sum_loot(uintptr_t manager);
 uint64_t co_counts_test_loot_index(uint32_t index, uint64_t flags);
 
 #define SESSION_INIT 0x134D740u
@@ -99,8 +97,6 @@ uint64_t co_counts_test_loot_index(uint32_t index, uint64_t flags);
 #define SYNCED_GONE 0x1087122u      /* cmp eax,4: the search for a peer that left */
 #define SYNCED_ENTRY 0x9F8u         /* a record of 0x9F0 and the peer's id */
 #define RESULT_GATE 0x1347AC0u      /* cmp eax,3: the mission result for player counts 1 to 4 */
-#define LOOT_CLEAR 0x62D24Fu        /* movups [rbx+0xC440],xmm0: the first store of the loot rows' clear */
-#define LOOT_SUM 0x6309B7u          /* mov eax,[rcx+0xC494]: a sum written out for four rows */
 #define LOOT_INDEX 0x6311D4u        /* cmp eax,ebx; je: a loot row by player index, -1 for none */
 #define LOOT_RESULT 0x62F2DBu       /* the mission result's rows by score slot, before the load */
 #define LOOT_LOAD 0x62F2E5u         /* that load: the managers move its offset */
@@ -120,9 +116,7 @@ typedef void (*CursorFn)(uint32_t*, uint32_t);
 typedef void (*EntryFn)(uint32_t*, void*, uint32_t, uint32_t);
 typedef uint32_t (*HandlerFn)(void*, const void*);
 typedef void (*RecordFn)(void*, uint32_t, const void*);
-typedef uint32_t (*SumFn)(const void*);
 typedef uint32_t (*IndexFn)(uint32_t, const void*);
-typedef void (*ClearFn)(void*, const void*);
 typedef uint32_t (*StoreFn)(void*, uint32_t, uint64_t, const void*);
 typedef void (*ClanFn)(uint32_t*, void*, uint32_t);
 typedef void (*RowFn)(uint32_t*, uint32_t);
@@ -225,13 +219,6 @@ static int TableAsTheGameHasIt(void)
 }
 
 /* Every byte of [from, to) holds `value`. */
-static int Filled(const uint8_t* at, size_t from, size_t to, uint8_t value)
-{
-    for (size_t i = from; i < to; i++)
-        if (at[i] != value) return 0;
-    return 1;
-}
-
 static int AsTheGameHasIt(void)
 {
     const uint8_t* image = g_fake.image;
@@ -242,7 +229,7 @@ static int AsTheGameHasIt(void)
            image[GUARD_INPUT + 2] == 0xFF && image[EIGHT_INDEX + 2] == 4 && image[EIGHT_SOS + 2] == 4 && image[NET_SCORES] == 0x40 &&
            image[NET_SENDER] == 0x41 && image[TEST_SLOT] == 0x41 && image[TEST_INDEX] == 0x49 && image[MIRROR_CAP + 2] == 4 &&
            image[LOBBY_FULL + 2] == 4 && image[LOBBY_SIZE + 1] == 4 && image[LOBBY_FRIEND] == 0xBA && image[RECORD_COUNT] == 0x89 &&
-           image[RECORD_POST + 3] == 0xD0 && image[RESULT_GATE + 2] == 3 && image[LOOT_SUM] == 0x8B && image[ACTIVITY] == 0x48 &&
+           image[RECORD_POST + 3] == 0xD0 && image[RESULT_GATE + 2] == 3 && image[LOOT_INDEX] == 0x3B && image[ACTIVITY] == 0x48 &&
            image[CLAN_PAIR] == 0x40 && image[CLAN_OWN + 2] == 0xFF && image[CLAN_OWN + 3] == 0x74 &&
            co_counts_test_reviewed(image) && TableAsTheGameHasIt();
 }
@@ -692,18 +679,18 @@ int main(void)
         CHECK(co_counts_test_free((uintptr_t)sync) == (players == 8 ? open : 0u));
     }
     {
-        /* The mission result takes player counts 1 to 8 in a build for eight. The score manager's loot caves and the
-         * Activity record's bounds are in every build; the result's load by score slot is the managers' site, no jump. */
+        /* The mission result takes player counts 1 to 8 in a build for eight. The score manager's loot guards and the
+         * Activity record's bounds are in every build; the result's load by score slot is the managers' site, no jump.
+         * The loot rows' clears and sums are the managers' caves, not these. */
         static const struct { uint32_t rva, size; } kLoot[] = {
-            {0x6311D4u, 8}, {0x631514u, 6}, {0x631693u, 7}, {0x62D24Fu, 7}, {0x63132Du, 7}, {0xAC5F22u, 7}, {0x6316C1u, 8},
-            {0x6309B7u, 6}, {0x126EC60u, 6}, {LOOT_RESULT, 10}, {ACTIVITY, 5}, {0xA56E91u, 5}, {0x12E67B1u, 5},
+            {0x6311D4u, 8}, {0x631514u, 6}, {0x631693u, 7}, {LOOT_RESULT, 10}, {ACTIVITY, 5}, {0xA56E91u, 5}, {0x12E67B1u, 5},
         };
         /* cmp eax,3; jae on to the next id: the two lists of the peers whose answer the record waits for */
         static const uint8_t kPending[] = {0x83, 0xF8, 0x03, 0x0F, 0x83};
         CHECK(g_fake.image[RESULT_GATE] == 0x83 && g_fake.image[RESULT_GATE + 2] == (players == 8 ? 7 : 3));
-        CHECK(fake_host_logged("players: the score manager's loot rows are cleared, added and bounded where the managers keep them (9 caves)"));
+        CHECK(fake_host_logged("players: the score manager's loot rows by index are bounded where the managers keep them (3 caves)"));
         for (size_t i = 0; i < sizeof kLoot / sizeof kLoot[0]; i++) CHECK(Cave(kLoot[i].rva, kLoot[i].size) != NULL);
-        CHECK(g_fake.image[LOOT_LOAD] != 0xE9);
+        CHECK(g_fake.image[LOOT_LOAD] != 0xE9 && g_fake.image[0x62D24Fu] != 0xE9 && g_fake.image[0x6309B7u] != 0xE9);
         const uint8_t* cave = Cave(0xA56E91u, 5);
         if (cave != NULL) CHECK(memcmp(cave, kPending, sizeof kPending) == 0 && Leads(cave + 5, 0xA56E9Eu));
         cave = Cave(0x12E67B1u, 5);
@@ -714,48 +701,20 @@ int main(void)
         if (cave != NULL) CHECK(memcmp(cave, kSlot, sizeof kSlot) == 0 && Leads(cave + 16, 0x62F358u) && Leads(cave + 21, LOOT_LOAD));
     }
     {
-        /* The loot callbacks. Four rows of 0x18 by score slot at +0xC440 and four by player index at +0xC4A0 while the
-         * managers keep four slots; eight of each at +0x37F20 and +0x37FE0 once they have moved. A row's count that
-         * the sums add is at +0xC. Run as the game reaches them: the sum's cave returns the sum; the index guard's
-         * cave goes on for an index with a row and skips the rest; the clear's cave clears every row. */
-        static uint8_t manager[MANAGER_SIZE + 0x40];
+        /* The loot guard's callback. Four rows of 0x18 by player index at +0xC4A0 while the managers keep four slots;
+         * eight at +0x37FE0 once they have moved. Run as the game reaches it: the cave goes on for an index with a row
+         * and skips the rest. */
         static const uint8_t kIndex[] = {0x89, 0xC8, 0xFF, 0xE2};                      /* mov eax,ecx; jmp rdx */
-        static const uint8_t kClear[] = {0x53, 0x48, 0x89, 0xCB, 0xFF, 0xE2};          /* push rbx; mov rbx,rcx; jmp rdx */
-        static const uint8_t kSkip[] = {0x31, 0xC0, 0xC3}, kOn[] = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3}, kBack[] = {0x5B, 0xC3};
-        const SumFn sum = (SumFn)(uintptr_t)Cave(LOOT_SUM, 6);
+        static const uint8_t kSkip[] = {0x31, 0xC0, 0xC3}, kOn[] = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3};
         const uint8_t* index = Cave(LOOT_INDEX, 8);
-        const uint8_t* clear = Cave(LOOT_CLEAR, 7);
-        CHECK(sum != NULL && index != NULL && clear != NULL);
+        CHECK(index != NULL);
         Landing(ENTER, kIndex, sizeof kIndex);
-        Landing(ENTER + 0x10u, kClear, sizeof kClear);
         Landing(0x63130Bu, kSkip, sizeof kSkip);
         Landing(0x6311DCu, kOn, sizeof kOn);
-        Landing(0x62D256u, kBack, sizeof kBack);
         for (int moved = 0; moved < 2; moved++)
         {
-            const uint32_t rows = moved ? 8u : 4u, slots = moved ? 0x37F20u : 0xC440u, indexes = moved ? 0x37FE0u : 0xC4A0u;
-            const uint32_t total = moved ? 0xFF00u : 0xFu;
+            const uint32_t rows = moved ? 8u : 4u;
             co_managers_test_force(moved);
-            for (int byIndex = 0; byIndex < 2; byIndex++)
-            {
-                const uint32_t at = byIndex ? indexes : slots;
-                memset(manager, 0xC5, sizeof manager);
-                co_counts_test_clear_loot((uintptr_t)manager, byIndex);
-                CHECK(Filled(manager, 0, at, 0xC5) && Filled(manager, at, at + rows * 0x18u, 0) && Filled(manager, at + rows * 0x18u, sizeof manager, 0xC5));
-            }
-            memset(manager, 0xC5, sizeof manager);
-            if (clear != NULL) ((ClearFn)(uintptr_t)(g_fake.image + ENTER + 0x10u))(manager, clear);
-            CHECK(Filled(manager, 0, slots, 0xC5) && Filled(manager, slots, slots + rows * 0x18u, 0) && Filled(manager, slots + rows * 0x18u, sizeof manager, 0xC5));
-            /* The old rows count 1, 2, 4, 8, the moved ones 0x100 to 0x8000; the fields beside the count are not added. */
-            memset(manager, 0, sizeof manager);
-            for (uint32_t i = 0; i < 8; i++)
-            {
-                if (i < 4) *(uint32_t*)(manager + 0xC44Cu + i * 0x18u) = 1u << i;
-                *(uint32_t*)(manager + 0x37F2Cu + i * 0x18u) = 0x100u << i;
-                *(uint32_t*)(manager + 0x37F28u + i * 0x18u) = *(uint32_t*)(manager + 0x37F30u + i * 0x18u) = 0x1000000u;
-            }
-            CHECK(co_counts_test_sum_loot((uintptr_t)manager) == total);
-            if (sum != NULL) CHECK(sum(manager) == total);
             for (uint32_t i = 0; i < 11; i++)
             {
                 const uint32_t n = i == 10 ? 0xFFFFFFFFu : i;
@@ -947,7 +906,6 @@ int main(void)
      * eight. */
     {
         static const struct { const char* name; uint32_t rva, at; int eight; } kMission[] = {
-            {"one changed loot sum site", LOOT_SUM, 2, 0},
             {"one changed loot index site", LOOT_INDEX, 6, 0},
             {"one changed site before the result's load", LOOT_RESULT, 9, 0},
             {"one changed Activity record site", ACTIVITY, 4, 0},
@@ -966,9 +924,9 @@ int main(void)
             CHECK(co_session_test_state() == 1 && co_counts_test_on() == !concern);
             snprintf(line, sizeof line, "game+0x%X is not the reviewed one", kMission[i].rva);
             CHECK(fake_host_logged(line) == concern);
-            if (concern) CHECK(g_fake.writes == moves && Cave(LOOT_CLEAR, 7) == NULL && g_fake.image[RESULT_GATE + 2] == 3);
+            if (concern) CHECK(g_fake.writes == moves && Cave(LOOT_INDEX, 8) == NULL && g_fake.image[RESULT_GATE + 2] == 3);
         }
-        const uint32_t kWrites[] = {LOOT_INDEX, LOOT_SUM, LOOT_RESULT, ACTIVITY, 0x12E67B1u, RESULT_GATE, CLAN_RECORD, CLAN_OWN, CLAN_ROW_AGAIN};
+        const uint32_t kWrites[] = {LOOT_INDEX, LOOT_RESULT, ACTIVITY, 0x12E67B1u, RESULT_GATE, CLAN_RECORD, CLAN_OWN, CLAN_ROW_AGAIN};
         for (size_t i = 0; i < sizeof kWrites / sizeof kWrites[0]; i++)
         {
             static char name[64];

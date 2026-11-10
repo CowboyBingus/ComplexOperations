@@ -15,7 +15,7 @@
 #   5 only for eight players: the loadout screen with eight records and cards (sites/loadout_sites.py);
 #   6 only for four players: the loadout screen's guards that group 5 replaces (loadout_sites.MOD_OFF);
 #   7 only for eight players: the bounds of the per-peer loadout table, which the mod moves to room for eight first;
-#   8 the score manager's loot rows (always): clears, sums and bounds that follow the player managers' state (LOOT).
+#   8 the score manager's loot rows (always): the bounds by index that follow the player managers' state (LOOT).
 # An instruction of a moved array carries a distance the session step rewrites; those four bytes are not compared.
 import os, re, struct, subprocess, sys, tempfile
 
@@ -107,7 +107,7 @@ CALL = '''
 '''
 # Callbacks, by number (the index in kCountCallbacks in co_counts.c). 8 to 13 are kept for the wire and extraction caves.
 FIND_RSI, FIND_R11, GATE, VALUES, LAST_SLOT, MESSAGE, TEST_SLOT, TEST_INDEX = range(8)
-SCORE_CLEAR_L, SCORE_CLEAR_B, SCORE_SUM, SCORE_INDEX = range(14, 18)
+SCORE_INDEX = 14
 # (rva, bytes the jump replaces, code; `game+0x..` is an address in the game, CALL(n) the call of callback n)
 def HIGH(r): return ''.join(' movups [%s+0x%x], xmm0\n' % (r, o) for o in range(0x150, 0x1D0, 0x10))
 CAVES = [
@@ -249,22 +249,13 @@ GUARDS = [
 ]
 # The score manager's loot rows: B (+0xC4A0) by player index, L (+0xC440) by score slot, four of 0x18 each. Once the
 # managers have moved (gen_manager_sites.py) there are eight of each behind the manager, else four in the game's place.
-# These caves ask the mod which; they go in and out with the counts, the rows' own sites with the managers.
+# These guards ask the mod which; they go in and out with the counts, the rows' own sites and caves with the managers.
 LOOT = [
-    # A guard: an index without a row skips the access (the callback sets CF for an index with one).
+    # An index without a row skips the access (the callback sets CF for an index with one).
     (0x6311D4, '3b c3 0f 84 2f 01 00 00', 'CALL(%d)\n jae game+0x63130B\n jmp game+0x6311DC' % SCORE_INDEX),
     (0x631514, '8b c1 48 8d 0c 40', 'mov eax, ecx\n lea rcx, [rax+rax*2]\n CALL(%d)\n jae game+0x63155B\n jmp game+0x63151A' % SCORE_INDEX),
     (0x631693, '41 3b ae 0c 7d 03 00', 'push rax\n mov eax, ebp\n CALL(%d)\n pop rax\n jae game+0x6316A0\n cmp ebp, dword ptr [r14+0x37d0c]\n'
                                         ' jmp game+0x63169A' % SCORE_INDEX),
-    # The clears of the loot rows: the callback clears all rows where they are; the game's other stores clear the first
-    # four again. The sums written out for four rows: the callback adds the rows where they are (in eax). The sum at
-    # 0x6309B0 returns at once; the cave of 0x126EC60 goes on behind the three adds it leaves out.
-    (0x62D24F, '0f 11 83 40 c4 00 00', 'push rax\n lea rax, [rbx+0xc440]\n CALL(%d)\n pop rax\n jmp game+0x62D256' % SCORE_CLEAR_L),
-    (0x63132D, '0f 11 81 40 c4 00 00', 'push rax\n lea rax, [rcx+0xc440]\n CALL(%d)\n pop rax\n jmp game+0x631334' % SCORE_CLEAR_L),
-    (0xAC5F22, '0f 11 83 40 c4 00 00', 'push rax\n lea rax, [rbx+0xc440]\n CALL(%d)\n pop rax\n jmp game+0xAC5F29' % SCORE_CLEAR_L),
-    (0x6316C1, '41 0f 11 86 a0 c4 00 00', 'push rax\n lea rax, [r14+0xc4a0]\n CALL(%d)\n pop rax\n jmp game+0x6316C9' % SCORE_CLEAR_B),
-    (0x6309B7, '8b 81 94 c4 00 00', 'mov rax, rcx\n CALL(%d)\n ret' % SCORE_SUM),
-    (0x126EC60, '8b 87 94 c4 00 00', 'mov rax, rdi\n CALL(%d)\n jmp game+0x126EC78' % SCORE_SUM),
 ]
 # Guards in place: the game tests the index against -1 ("none") only. cmp reg,-1; je becomes cmp reg,4; jae, which
 # sends 4 to 7 the way "none" goes and leaves -1 going there. (rva, bytes, new bytes)
@@ -394,7 +385,9 @@ def rows(name, part=None):
 stubs = rows('co_session_sites.h', 'kCoSessionStubs')
 taken = [(rva, rva + size) for rva, size in stubs]
 taken += [(rva + at, rva + at + 4) for rva, at in rows('co_session_sites.h') if (rva, at) not in stubs]
-taken += [(rva + at, rva + at + 4) for rva, at in rows('co_manager_sites.h') + rows('co_pod_sites.h')]
+manager_caves = rows('co_manager_sites.h', 'kCoManagerCaves')
+taken += [(rva, rva + size) for rva, size in manager_caves]
+taken += [(rva + at, rva + at + 4) for rva, at in rows('co_manager_sites.h') + rows('co_pod_sites.h') if (rva, at) not in manager_caves]
 assert len(taken) > 1400
 # The build for four leaves out groups 5 and 7, the build for eight group 6: they may share bytes, a build may not.
 own = [(rva, rva + len(old), skip != 0xFF, group) for rva, old, _, skip, group in sites] + [(rva, rva + 8, True, G_COUNT) for rva, _, _ in CLEARS]

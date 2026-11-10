@@ -8,8 +8,9 @@
 #   ARRAY  reaches a per-slot array that eight slots of its neighbour would overrun: the array has a new offset
 #   CAP    the capacity check `cmp eax,4`, or another four in a loop over a moved array
 #   CODE   four bytes of code replaced
+# and caves: code the game wrote out for four rows of a moved array, done for eight in code of the mod's (CAVES).
 # Every row is checked against the dump here, and again by the mod against the running game before it writes.
-import struct, sys, os
+import re, struct, subprocess, sys, os, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__)) + '/sites/'
 # name: (global, offset in the block, size, new size, [(old start, old end, new start) of each array that moves])
@@ -36,6 +37,35 @@ LOOPS = [('score', 0x63090B, '83 f9 04', 2), ('score', 0x63095B, '83 f8 04', 2),
 # r14d of the loop at 0x1380C68 is also the mission end report's outcome code, read at 0x1380F0B: mov eax,r14d becomes
 # push 4; pop rax, the value it had. (manager, rva, four bytes, four new bytes)
 CODE = [('score', 0x1380F0B, '41 8b c6 89', '6a 04 58 89')]
+# The loot rows' clears and sums, written out for four rows. With the rows moved, a jump replaces the first instruction
+# and the mod's code does the eight rows at their new place: a clear stores the replaced instruction's 16 bytes and rows
+# 4 to 7 (the game's other stores are ARRAY rows and clear the rest; xmm0 is zero there), a sum adds the count at +0xC of
+# all eight (it replaces the whole sum: the adds it skips are not rows). The caves exist exactly while the rows are
+# moved. (manager, rva, bytes the jump replaces, where the code goes back to (0: it returns), code)
+ROW, COUNT = 0x18, 0xC
+def moved(m, old): return [new for lo, _, new in MANAGERS[m][4] if lo == old][0]
+def clear(reg, old): return ''.join(' movups xmmword ptr [%s+0x%x], xmm0\n' % (reg, moved('score', old) + at) for at in [0] + list(range(4 * ROW, 8 * ROW, 16)))
+def total(reg): return ' mov eax, dword ptr [%s+0x%x]\n' % (reg, moved('score', 0xC440) + COUNT) + ''.join(
+    ' add eax, dword ptr [%s+0x%x]\n' % (reg, moved('score', 0xC440) + i * ROW + COUNT) for i in range(1, 8))
+CAVES = [
+    ('score', 0x62D24F, '0f 11 83 40 c4 00 00', 0x62D256, clear('rbx', 0xC440)),       # mission start
+    ('score', 0x63132D, '0f 11 81 40 c4 00 00', 0x631334, clear('rcx', 0xC440)),       # the loot rows' refill by slot
+    ('score', 0xAC5F22, '0f 11 83 40 c4 00 00', 0xAC5F29, clear('rbx', 0xC440)),       # mission start, a second copy
+    ('score', 0x6316C1, '41 0f 11 86 a0 c4 00 00', 0x6316C9, clear('r14', 0xC4A0)),   # and the rows by index behind it
+    ('score', 0x6309B7, '8b 81 94 c4 00 00', 0, total('rcx') + ' ret'),                 # a leaf: the sum is its value
+    ('score', 0x126EC60, '8b 87 94 c4 00 00', 0x126EC78, total('rdi')),                # the team's sum
+]
+# The bytes each cave leaves dead: the replaced ones, and the skipped adds up to where it goes back or the sum's ret.
+DEAD = {0x6309B7: 0x6309D0, 0x126EC60: 0x126EC78}
+CAVE_CODE = 64      # CoManagerCave.code; a cave's room (CO_MGR_CAVE_ROOM) also holds the jump back
+
+def assemble(text):
+    with tempfile.TemporaryDirectory() as tmp:
+        open(tmp + '/c.s', 'w').write('.intel_syntax noprefix\n.text\n%s\n' % text)
+        subprocess.run(['as', '--64', '-o', tmp + '/c.o', tmp + '/c.s'], check=True)
+        subprocess.run(['objcopy', '-O', 'binary', '-j', '.text', tmp + '/c.o', tmp + '/c.bin'], check=True)
+        return open(tmp + '/c.bin', 'rb').read()
+
 # classb_final.tsv lists every instruction with a fitting value. In these functions the base register is not the block
 # (another object, or the manager itself, which patch_sites covers), except at the sites of BLOCK_ONLY.
 NOT_BLOCK = {('ship_modules_sync', 'fn 0x569490'), ('ship_modules_sync', 'fn 0x571250'), ('ship_modules_sync', 'fn 0xbc2d30')}
@@ -93,6 +123,26 @@ for mi, m in enumerate(names):
 if only is None:
     loot = sum(1 for r in rows if r[5] == 'CO_MGR_ARRAY' and names[r[3]] == 'score' and 0xC440 <= r[2] < 0xC500)
     assert loot == LOOT_ROWS, loot
+caves = []
+for em, rva, raw, back, text in CAVES:
+    if em not in names: continue
+    raw = bytes.fromhex(raw); code = assemble(text)
+    # the replaced instruction addresses the old place of the array it does for eight rows
+    old = struct.unpack_from('<I', raw, len(raw) - 4)[0]
+    assert dump[rva:rva + len(raw)] == raw and 5 <= len(raw) <= 12 and old in (0xC440, 0xC4A0, 0xC494), hex(rva)
+    assert len(code) <= CAVE_CODE and (back == 0) == code.endswith(b'\xc3'), hex(rva)
+    caves.append((rva, raw, back, code))
+# No row of this step, the session's or the pods' lies in the bytes a cave replaces or leaves dead.
+def listed(name, part=None):
+    text = open(os.path.dirname(HERE[:-1]) + '/../src/' + name).read()
+    if part: text = text[text.index(part):]
+    return [(int(a, 16), int(b)) for a, b in re.findall(r'^    \{0x([0-9A-F]+)u, (\d+),', text, re.M)]
+stubs = listed('co_session_sites.h', 'kCoSessionStubs')
+taken = [(rva, rva + size) for rva, size in stubs] + [(rva + at, rva + at + 4) for rva, at in listed('co_session_sites.h') if (rva, at) not in stubs]
+taken += [(rva + at, rva + at + 4) for rva, at in listed('co_pod_sites.h')] + [(r[0] + r[1], r[0] + r[1] + (1 if r[5] == 'CO_MGR_CAP' else 4)) for r in rows]
+for rva, raw, back, _ in caves:
+    end = max(rva + len(raw), DEAD.get(rva, 0))
+    assert all(b <= rva or a >= end for a, b in taken), hex(rva)
 from collections import Counter
 dup = [r for r in sorted(rows) if Counter(x[0] for x in rows)[r[0]] > 1]
 for r in dup: print('DUP %x at %d old %x %s add %x %s' % (r[0], r[1], r[2], names[r[3]], r[4], r[5]))
@@ -107,6 +157,10 @@ out += ['};', '', '/* {rva, offset of the value in the instruction, its vanilla 
 for rva, at, old, mi, add, kind in sorted(rows):
     pin = ', '.join('0x%02X' % b for b in dump[rva:rva + at]) or '0'
     out.append('    {0x%Xu, %d, 0x%Xu, %d, %d, %s, {%s}},' % (rva, at, old, mi, add, kind, pin))
+hexes = lambda b: ', '.join('0x%02X' % x for x in b)
+out += ['};', '', '/* {rva, bytes the jump replaces, where the cave goes back to (0: its code returns), the code\'s length, the replaced',
+        ' * bytes, the code} */', 'static const CoManagerCave kCoManagerCaves[] = {']
+out += ['    {0x%Xu, %d, 0x%Xu, %d, {%s}, {%s}},' % (rva, len(raw), back, len(code), hexes(raw), hexes(code)) for rva, raw, back, code in sorted(caves)]
 out += ['};', '', '#endif', '']
 open(args[1] if len(args) > 1 else 'src/co_manager_sites.h', 'w').write('\n'.join(out))
-print(len(rows), 'sites;', ', '.join('%s %d' % (m, sum(1 for r in rows if r[3] == i)) for i, m in enumerate(names)))
+print(len(rows), 'sites,', len(caves), 'caves;', ', '.join('%s %d' % (m, sum(1 for r in rows if r[3] == i)) for i, m in enumerate(names)))
