@@ -1,5 +1,6 @@
 /* Eight players: tables a build for eight moves at run time, because their owner is packed between other objects and
  * cannot grow. The galactic map's cursors live in a system of the component block: they move when the state is built.
+ * The squad HUD's teammate panel and the name tags' rows live in H2, the HUD's second part: they move at H2's init.
  *
  * Each table has three layouts. OFF is the game's code. KEPT keeps four entries and guards them: an index of four or
  * more skips the access. MOVED gives the table eight entries in a block of the mod's: the displacements that reach it
@@ -39,6 +40,8 @@ enum { CO_UI_OFF, CO_UI_KEPT, CO_UI_MOVED };
 /* What a layout means for the player, by block. */
 static const struct { const char* four; const char* eight; } kCoUiSays[] = {
     {"the galactic map keeps four cursors", "the galactic map has eight cursors"},
+    {"the squad HUD keeps three teammate panels", "the squad HUD has seven teammate panels"},
+    {"four players have name tags", "eight players have name tags"},
 };
 _Static_assert(sizeof kCoUiSays / sizeof kCoUiSays[0] == CO_UI_BLOCKS, "every block says what it does");
 
@@ -50,6 +53,15 @@ typedef struct CoUiState
 } CoUiState;
 static CoUiState g_ui[CO_UI_BLOCKS];
 static uintptr_t g_game, g_keptRoom;
+static int g_toldHud;
+
+#define CO_UI_STATE_GLOBAL 0x346BF98u   /* the entity state, as co_pods.c reads it */
+#define CO_UI_HUD_GLOBAL 0x346D538u
+#define CO_UI_H2 0x24E340u              /* H2 in the HUD */
+#define CO_UI_HUD_INIT 0x12E96D0u       /* H2's init: rcx is H2 */
+static const char kHudInitPin[] = "48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 55 41 54 41 55 41 56 41 57 48 8B EC 48 83 EC 70";
+typedef uint64_t (*HudInitFn)(uint64_t, uint64_t, uint64_t, uint64_t);
+static HudInitFn g_hudInit;
 
 static int64_t Distance(unsigned block)
 {
@@ -183,18 +195,21 @@ static void Move(unsigned block, uintptr_t owner)
     co_log("players: %s (%u code sites changed)", kCoUiSays[block].eight, sites);
 }
 
-/* Back to four entries before the owner is built again somewhere else. */
+/* Back to four entries before the owner is built again somewhere else. The HUD's blocks stay allocated: widgets of
+ * the old HUD may still point into them. */
 static int Back(unsigned block)
 {
+    CoUiState* b = &g_ui[block];
     if (!Switch(block, CO_UI_MOVED, CO_UI_KEPT))
     {
-        g_ui[block].failed = 1;
+        b->failed = 1;
         co_log("players: the game rebuilt the %s table's owner elsewhere and its code could not be set back; restart the game",
                kCoUiBlocks[block].name);
         return 0;
     }
-    Release(&g_ui[block]);
-    g_ui[block].layout = CO_UI_KEPT;
+    if (block == CO_UI_MAP) Release(b);
+    else b->room = b->memory = b->table = b->owner = 0;
+    b->layout = CO_UI_KEPT;
     return 1;
 }
 
@@ -207,6 +222,27 @@ void co_ui_state(uintptr_t block)
     if (CO_PLAYERS != 8 || (b->layout == CO_UI_MOVED && b->owner != block && !Back(CO_UI_MAP))) return;
     if (b->layout == CO_UI_KEPT && !b->failed) Move(CO_UI_MAP, block);
     if (b->layout == CO_UI_MOVED) memset((void*)b->memory, 0, b->bytes);
+}
+
+/* H2's init builds the teammate panel and the name tags each time the game enters the mission's screen mode; the
+ * HUD's update reaches them only in that mode, after the init. The tables move at the first init. The game keeps H2
+ * in place for good; its blocks are zeroed only when allocated, as the game's HUD memory is. */
+static uint64_t HudInitDetour(uint64_t h2, uint64_t a2, uint64_t a3, uint64_t a4)
+{
+    uintptr_t hud = 0;
+    if (g_coApi->read(g_game + CO_UI_HUD_GLOBAL, &hud, sizeof hud) == 0 && hud != 0 && (uintptr_t)h2 == hud + CO_UI_H2)
+        for (unsigned block = CO_UI_HUD; block <= CO_UI_TAG; block++)
+        {
+            CoUiState* b = &g_ui[block];
+            if (b->layout == CO_UI_MOVED && b->owner != (uintptr_t)h2 && !Back(block)) continue;
+            if (b->layout == CO_UI_KEPT && !b->failed) Move(block, (uintptr_t)h2);
+        }
+    else if (!g_toldHud)
+    {
+        g_toldHud = 1;
+        co_log("players: the HUD is not where the game keeps it; %s and %s", kCoUiSays[CO_UI_HUD].four, kCoUiSays[CO_UI_TAG].four);
+    }
+    return g_hudInit(h2, a2, a3, a4);
 }
 
 /* While a block's guards for four are not in, no index above 3 may exist: the join limit stays at four. */
@@ -228,6 +264,16 @@ void co_ui_install(uintptr_t game)
     if (g_keptRoom == 0) { co_log("players: no free memory near the game's code; a session takes four players"); return; }
     for (unsigned block = 0; block < CO_UI_BLOCKS; block++)
         if (Switch(block, CO_UI_OFF, CO_UI_KEPT)) g_ui[block].layout = CO_UI_KEPT;
+    /* The state comes before the game first enters the mission's screen mode: without it, H2 was never built. */
+    uint64_t state = 1;
+    const char* why = NULL;
+    if (g_ui[CO_UI_HUD].layout != CO_UI_KEPT && g_ui[CO_UI_TAG].layout != CO_UI_KEPT) return;
+    if (g_coApi->read(game + CO_UI_STATE_GLOBAL, &state, sizeof state) != 0 || state != 0) why = "the game was already running when the mod loaded";
+    else if (g_coApi->code_matches(game + CO_UI_HUD_INIT, kHudInitPin) != 1) why = "the HUD's init is not the reviewed code";
+    else if (g_coApi->hook(g_coMod, game + CO_UI_HUD_INIT, (void*)HudInitDetour, (void**)&g_hudInit) != 0) why = "the HUD's init could not be hooked";
+    if (why == NULL) return;
+    g_ui[CO_UI_HUD].failed = g_ui[CO_UI_TAG].failed = 1;
+    co_log("players: %s; %s and %s", why, kCoUiSays[CO_UI_HUD].four, kCoUiSays[CO_UI_TAG].four);
 }
 
 #ifdef CO_TEST
@@ -242,6 +288,8 @@ void co_ui_test_reset(void)
     memset(g_ui, 0, sizeof g_ui);
     if (g_keptRoom) VirtualFree((void*)g_keptRoom, 0, MEM_RELEASE);
     g_keptRoom = g_game = 0;
+    g_toldHud = 0;
+    g_hudInit = NULL;
 }
 
 /* Sets every block's layout without writing: for other steps' tests only. */
@@ -258,6 +306,17 @@ unsigned co_ui_test_sites(unsigned block)
     unsigned n = 0;
     for (size_t i = 0; i < CO_UI_SITES; i++) n += kCoUiSites[i].block == block;
     return n;
+}
+/* Every site of the block holds what the layout writes there. */
+int co_ui_test_as(unsigned block, int layout)
+{
+    uint8_t want[12];
+    for (size_t i = 0; i < CO_UI_SITES; i++)
+    {
+        const CoUiSite* s = &kCoUiSites[i];
+        if (s->block == block && (!Want(s, layout, want) || memcmp((const void*)(g_game + s->rva), want, s->size) != 0)) return 0;
+    }
+    return 1;
 }
 /* The sites whose bytes KEPT changes. */
 unsigned co_ui_test_kept(void)

@@ -316,7 +316,7 @@ int main(void)
     {
         static char line[96];
         snprintf(line, sizeof line, "players: %u accesses to four-entry tables of the game skip a player index above 3", co_counts_test_guards());
-        CHECK(co_counts_test_guards() >= (players == 4 ? 78u : 31u) && fake_host_logged(line));
+        CHECK(co_counts_test_guards() >= (players == 4 ? 78u : 30u) && fake_host_logged(line));
         snprintf(line, sizeof line, "session: %u guards keep the lists in messages inside the game's buffers", co_counts_test_net());
         CHECK(co_counts_test_net() >= 9 && fake_host_logged(line));
     }
@@ -470,6 +470,10 @@ int main(void)
         const uint8_t* byEdx = Cave(CURSOR_EDX, 5);
         const uint8_t* byR8 = Cave(CURSOR_R8, 5);
         CHECK((byEdx != NULL) == (players == 4) && (byR8 != NULL) == (players == 4));
+        /* The name tags' guard too: cmp dword [rsp+0x20],4 in a build for four; co_ui.c's in a build for eight. */
+        const uint8_t* tags = Cave(0x18AF049u, 8);
+        CHECK((tags != NULL) == (players == 4));
+        if (tags != NULL) CHECK(tags[0] == 0x83 && tags[1] == 0x7C && tags[4] == 4 && Leads(tags + 7, 0x18AEDB9u));
         if (byEdx != NULL && byR8 != NULL)
         {
             Landing(CURSOR_EDX + 5u, kEdx, sizeof kEdx);

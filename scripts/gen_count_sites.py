@@ -24,7 +24,7 @@ import os, re, struct, sys
 G_COUNT, G_GUARD, G_NET, G_EIGHT, G_TEST, G_LOADOUT, G_GUARD4, G_SYNCED, G_LOOT, G_SUMMARY = range(10)
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE + '/sites')
-import cave_asm, loadout_sites, map_sites, summary_sites
+import cave_asm, loadout_sites, map_sites, summary_sites, tag_sites
 dump = open(sys.argv[1], 'rb').read()
 out = sys.argv[2] if len(sys.argv) > 2 else HERE + '/../src/co_count_sites.h'
 
@@ -159,9 +159,8 @@ GUARDS = [
     # A vehicle's owner id from four: skipping would leave the vehicle's field unset, so 4 to 7 share an id. An owner
     # without an index (-1) stays as it is.
     (0x7171EC, 'e9 48 ff ff ff', 'cmp ecx, 4\n jb 1f\n cmp ecx, -1\n je 1f\n and ecx, 3\n1: jmp game+0x717139'),
-    # HUD: the samples panel's four avatars, the in-world tags' four rows.
+    # HUD: the samples panel's four avatars.
     (0x18437DD, '42 89 44 ad 40', 'cmp r13d, 4\n jae 1f\n mov dword ptr [rbp+r13*4+0x40], eax\n1: jmp game+0x18437E2'),
-    (0x18AF049, '41 83 bd 84 00 00 00 00', 'cmp dword ptr [rsp+0x20], 4\n jae game+0x18AEDB9\n cmp dword ptr [r13+0x84], 0\n jmp game+0x18AF051'),
     # The game state's four rows of 0x90 by player index. Each skip target loads again what the loop keeps in a
     # register the index lookup overwrites.
     (0xB8F681, 'f2 41 0f 10 45 00', 'cmp eax, 4\n jae game+0xB8F723\n movsd xmm0, qword ptr [r13+0]\n jmp game+0xB8F687'),
@@ -285,10 +284,11 @@ RECORD_SITES = [(0x12CB379, '44 8b 87 d0 05 00 00', '44 8b 87 48 03 00 00')]
 # The loadout screen for eight: its sites and caves, and the guards of the build for four they replace.
 LOADOUT_SITES, LOADOUT_CAVES = loadout_sites.build(dump)
 # The guards of tables that a build for eight gives eight entries: the mission summary's rows here (group 9), the map's
-# cursors in co_ui.c, which keeps them at four until the cursors move. Here they are the build for four's.
-GUARDS += summary_sites.GUARD4 + map_sites.GUARD4
+# cursors and the name tags in co_ui.c, which keeps them at four until the tables move. Here they are the build for
+# four's.
+GUARDS += summary_sites.GUARD4 + map_sites.GUARD4 + tag_sites.GUARD4
 GUARD_SITES += map_sites.GUARD4_SITES
-OFF = set(loadout_sites.MOD_OFF) | {rva for rva, _, _ in summary_sites.GUARD4 + map_sites.GUARD4 + map_sites.GUARD4_SITES}
+OFF = set(loadout_sites.MOD_OFF) | {rva for rva, _, _ in summary_sites.GUARD4 + map_sites.GUARD4 + map_sites.GUARD4_SITES + tag_sites.GUARD4}
 assert OFF <= {rva for rva, _, _ in GUARD_SITES} | {rva for rva, _, _ in GUARDS}
 rows_by_group = ((G_GUARD, GUARD_SITES), (G_EIGHT, EIGHT_SITES), (G_COUNT, MIRROR_CAPS), (G_COUNT, RECORD_SITES),
                  (G_LOADOUT, [(r, o, n) for r, o, n, _ in LOADOUT_SITES]), (G_SYNCED, [(r, o, n) for r, o, n, _ in loadout_sites.SYNCED_SITES]),

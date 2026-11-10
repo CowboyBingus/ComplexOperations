@@ -47,9 +47,9 @@ bound. Among them are the galactic map's cursors, the game state's player rows, 
 result's and the mission summary's rows, the Activity record's lists (see Mission), the clan records and the clan
 station's rows. 79 guards cover the accesses to them: an index past the table's end skips the access, and for 0 to 3
 nothing changes. 68 guards are code beside the game's; 11 are a compare changed in place. The guards go in and out
-together with the counts. A build for eight keeps 32 of them. The loadout screen's 19 and the mission summary's 4 make
-way for their eight cards and rows (see Loadout screen and Mission); the galactic map's 24 are its own (see Galactic
-map).
+together with the counts. A build for eight keeps 31 of them. The loadout screen's 19 and the mission summary's 4 make
+way for their eight cards and rows (see Loadout screen and Mission); the galactic map's 24 and the name tags' 1 are
+its own (see Galactic map, Squad HUD and name tags).
 
 Some message handlers copy a list from the wire into a buffer of fixed size and trust the count. Nine guards keep
 such lists inside their buffers: the handler ignores a message whose list is too long, and two senders stop at what
@@ -178,6 +178,30 @@ Limits that remain:
 - Where a cursor's colour comes from for players 5 to 8 is not known.
 - The map's tweens share a pool of 256 nodes; eight cursors take more of it.
 
+## Squad HUD and name tags
+
+The in-mission HUD shows three teammate panels and four name tags over players' heads. Both sit in the HUD's second
+part, packed between other HUD members: the panel widget with its three panels, and seven arrays of four tag rows.
+
+A build for eight puts the name tags' guard in at startup: a tag index of four or more skips the row. The game builds
+the panels and the tags each time a mission's HUD starts, in one init; the HUD's update reaches them only after it.
+The mod hooks that init. At the first one it moves the panel widget to a block of the mod's with seven panels, and the
+tag rows to a block with eight rows, both within 2 GB of the HUD and at the old address modulo 0x100. 18 code sites
+get the distance to the panel's block, 21 count or reach panels in place and 1 goes through code beside the game's.
+The tags take 23 sites with the distance, 9 in place and 2 caves, the guard for eight among them. The blocks stay for
+the rest of the game: widgets elsewhere point into them.
+
+When the mod loads after the game has started, or the code differs, the HUD keeps three panels and four tags; the
+guard stays. A build for four keeps both, with the tags' guard in its counts.
+
+Limits that remain:
+
+- Seven panels make the panel's background 488 units high instead of 216 (68 a panel): whether it then covers other
+  HUD parts is not known.
+- Tags 5 to 8 are white: the game picks a player colour only for session slots 0 to 3.
+- The new tag rows and panel are drawn in address order among their siblings, which may put them in front of other
+  HUD parts.
+
 ## Engine
 
 The engine sends a session's peers as a count and a list. The sender writes the count as a whole byte; the readers
@@ -189,7 +213,7 @@ the game drops four and more. It goes in on its own: when it cannot, the peer li
 
 ## State
 
-- The galactic map, mission, mission summary, Activity record and clan changes are checked against the game's code and in the unit tests only.
+- The galactic map, squad HUD, name tags, mission, mission summary, Activity record and clan changes are checked against the game's code and in the unit tests only.
 - Tested with one player: all eight pods are entered on foot, launch, and are there again after the return; missions
   and returns work with the lists counting to eight. A mission from a new pod after a completed mission's summary
   works; the mission was ended through the game's own handler, not by flying an extraction.
@@ -265,12 +289,13 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `scripts/sites/summary_sites.py` | The mission summary's sites and caves for eight, and its guards for four. |
 | `scripts/gen_count_sites.py` | Writes `co_count_sites.h`; assembles the caves with GNU `as`. Holds the guards, the member lists' caps, the lobby's size and the loot rows' guards. |
 | `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards and the mission result's slots in both managers' states, the Activity record's participants and post, and the join limit without the managers. The mission summary in each build. |
-| `src/co_ui.c` | The tables a build for eight moves at run time: the galactic map's cursors. Guards for four, the move, its undo. |
+| `src/co_ui.c` | The tables a build for eight moves at run time: the galactic map's cursors, the squad HUD's panel, the name tags' rows. Guards for four, the move, its undo, the hook of the HUD's init. |
 | `src/co_ui_sites.h` | Their code sites and caves. Generated; do not edit. |
 | `scripts/sites/map_sites.py` | The galactic map's sites and caves for eight, and its guards for four. |
+| `scripts/sites/hud_sites.py`, `tag_sites.py` | The squad HUD's and the name tags' sites and caves for eight; the tags' guard for four. |
 | `scripts/gen_ui_sites.py` | Writes `co_ui_sites.h`; checks that no site shares a byte with the other steps' in a build for eight. |
 | `scripts/sites/cave_asm.py` | Assembles the caves with GNU `as` for both generators. |
-| `tests/ui_test.c` | The map's guards for four, its move with the state, refusal on changed code and rollback of a failed write. |
+| `tests/ui_test.c` | The guards for four, the map's move with the state, the HUD's and tags' move at the HUD's init, refusal on changed code and rollback of a failed write. |
 | `tests/engine_test.c` | The engine's sites: written, refused on changed code, taken back on a failed write. |
 | `tests/harness/` | The stand-in loader and game image the tests run against. |
 
@@ -311,9 +336,11 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `the score manager's loot rows are cleared and added for eight rows` | The loot rows' code moved with the managers. |
 | `the score manager's loot rows by index are bounded where the managers keep them` | The loot rows' guards are in place. |
 | `the session is full at four players: the player managers have four slots` | A build for eight whose managers have four slots: four players. |
-| `the session is full at four players: tables of four entries are not guarded` | A build for eight without the map's guards: four players. |
+| `the session is full at four players: tables of four entries are not guarded` | A build for eight without the map's or the tags' guards: four players. |
 | `the galactic map has eight cursors` | A build for eight players: the map's cursors are in the mod's memory. |
 | `the galactic map keeps four cursors` | The move did not happen; the reason stands before it. |
+| `the squad HUD has seven teammate panels`, `eight players have name tags` | A build for eight players: the HUD's tables are in the mod's memory. |
+| `the squad HUD keeps three teammate panels`, `four players have name tags` | Those moves did not happen; the reason stands before it. |
 | `TEST BUILD, not for play` | Built with `--test-first-slot`. |
 | `the session lists count to four as before` | The count change is off; the reason stands before it. |
 | `the bridge is not the one with the eight-pod bay` | The level data is missing: four pods. |

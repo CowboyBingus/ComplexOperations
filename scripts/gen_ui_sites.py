@@ -14,10 +14,10 @@ import os, re, struct, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE + '/sites')
-import cave_asm, map_sites
+import cave_asm, hud_sites, map_sites, tag_sites
 
 # (C name, module, owner): the map's owner is the component block, the others' the HUD's second part H2.
-BLOCKS = [('CO_UI_MAP', map_sites, 'block')]
+BLOCKS = [('CO_UI_MAP', map_sites, 'block'), ('CO_UI_HUD', hud_sites, 'H2'), ('CO_UI_TAG', tag_sites, 'H2')]
 GAME, BYTES, REL, JUMP = 'CO_UI_GAME', 'CO_UI_BYTES', 'CO_UI_REL', 'CO_UI_JUMP'
 dump = open(sys.argv[1], 'rb').read()
 out = sys.argv[2] if len(sys.argv) > 2 else HERE + '/../src/co_ui_sites.h'
@@ -101,6 +101,8 @@ taken += [(r[0] + r[1], r[0] + r[1] + 4, 'pods') for r in rows('co_pod_sites.h',
 taken += [(r[0], r[0] + r[1], 'counts') for r in rows('co_count_sites.h', 'kCoCountSites', 'kCoCountClears') if r[3] != 6]
 taken += [(r[0], r[0] + 8, 'counts clear') for r in rows('co_count_sites.h', 'kCoCountClears', 'kCoCountCode')]
 taken += [(r[0], r[0] + r[1], 'counts cave') for r in rows('co_count_sites.h', 'kCoCountCaves', 'kCoMessageShapes') if r[2] != 6]
+# The hook of H2's init (co_ui.c) replaces the function's first instructions.
+taken += [(0x12E96D0, 0x12E96D0 + 31, 'hook of 0x12E96D0')]
 assert len(taken) > 2000, len(taken)
 mine = sorted((rva, rva + s['size']) for rva, s in slots.items())
 for (a, b), (c, _) in zip(mine, mine[1:]): assert b <= c, (hex(a), hex(c))
