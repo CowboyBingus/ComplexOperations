@@ -54,7 +54,8 @@ bits. With up to seven peers the message is unchanged.
 ## State
 
 - Tested with one player: all eight pods are entered on foot, launch, and are there again after the return; missions
-  and returns work with the lists counting to eight.
+  and returns work with the lists counting to eight. A mission from a new pod after a completed mission's summary
+  works; the mission was ended through the game's own handler, not by flying an extraction.
 - Not tested: two or more players in one session, and the launch cutscene for four or more.
 - The launch sound for a lone player in pods 5 to 8 is hooked; the mod logs once when it answers for such a pod.
 
