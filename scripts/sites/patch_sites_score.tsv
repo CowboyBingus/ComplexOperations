@@ -1,0 +1,26 @@
+site	fn	region	form	disp	disp_offset_in_insn	bytes	insn
+0x53e18d	0x53e130	A0 ptr	direct	0x37d70	4	4c898cd3707d0300	mov    QWORD PTR [rbx+rdx*8+0x37d70],r9
+0x53e261	0x53e1b0	A0 ptr	direct	0x37d70	4	4889bcd3707d0300	mov    QWORD PTR [rbx+rdx*8+0x37d70],rdi
+0x53e2c1	0x53e280	A0 ptr	direct	0x37d70	4	488b8cd3707d0300	mov    rcx,QWORD PTR [rbx+rdx*8+0x37d70]
+0x62d0dd	0x62d0a0	A0 ptr	direct	0x37d70	3	4c8da8707d0300	lea    r13,[rax+0x37d70]
+0x62e330	0x62e2f0	A0 ptr	direct	0x37d70	4	488b84ce707d0300	mov    rax,QWORD PTR [rsi+rcx*8+0x37d70]
+0x62ef6b	0x62ec20	A0 ptr	direct	0x37d70	4	498b84dc707d0300	mov    rax,QWORD PTR [r12+rbx*8+0x37d70]
+0x631390	0x631320	A0 ptr	direct	0x37d70	4	498b84ee707d0300	mov    rax,QWORD PTR [r14+rbp*8+0x37d70]
+0x631563	0x631320	A0 ptr	direct	0x37d70	4	4b8b84e6707d0300	mov    rax,QWORD PTR [r14+r12*8+0x37d70]
+0x63194f	0x631930	A0 ptr	direct	0x37d70	4	4c8b94c1707d0300	mov    r10,QWORD PTR [rcx+rax*8+0x37d70]
+0x63195b	0x631930	A0 ptr	direct	0x37d70	4	4c8994f1707d0300	mov    QWORD PTR [rcx+rsi*8+0x37d70],r10
+0x631c42	0x631b90	A0 ptr	direct	0x37d70	4	4889bcd3707d0300	mov    QWORD PTR [rbx+rdx*8+0x37d70],rdi
+0x631cb4	0x631c60	A0 ptr	direct	0x37d70	4	488994cb707d0300	mov    QWORD PTR [rbx+rcx*8+0x37d70],rdx
+0x631e9b	0x631e50	A0 ptr	direct	0x37d70	4	488b8cd7707d0300	mov    rcx,QWORD PTR [rdi+rdx*8+0x37d70]
+0x631fa4	0x631f00	A0 ptr	G+index	0x37d70	4	498b8c24707d0300	mov    rcx,QWORD PTR [r12+0x37d70]
+0x631fb1	0x631f00	A0 ptr	direct	0x37d70	4	498b84f6707d0300	mov    rax,QWORD PTR [r14+rsi*8+0x37d70]
+0x631fb9	0x631f00	A0 ptr	G+index	0x37d70	4	49898424707d0300	mov    QWORD PTR [r12+0x37d70],rax
+0x631fc1	0x631f00	A0 ptr	direct	0x37d70	4	49898cf6707d0300	mov    QWORD PTR [r14+rsi*8+0x37d70],rcx
+0x63206a	0x631f00	A0 ptr	direct	0x37d70	4	498b84f6707d0300	mov    rax,QWORD PTR [r14+rsi*8+0x37d70]
+0x6320cf	0x631f00	A0 ptr	G+index	0x37d70	4	498b8424707d0300	mov    rax,QWORD PTR [r12+0x37d70]
+0x632203	0x632160	A0 ptr	G+index	0x37d70	4	498b8c24707d0300	mov    rcx,QWORD PTR [r12+0x37d70]
+0x632210	0x632160	A0 ptr	direct	0x37d70	4	498b84f6707d0300	mov    rax,QWORD PTR [r14+rsi*8+0x37d70]
+0x632218	0x632160	A0 ptr	G+index	0x37d70	4	49898424707d0300	mov    QWORD PTR [r12+0x37d70],rax
+0x632220	0x632160	A0 ptr	direct	0x37d70	4	49898cf6707d0300	mov    QWORD PTR [r14+rsi*8+0x37d70],rcx
+0x63230d	0x632160	A0 ptr	direct	0x37d70	4	498b84f6707d0300	mov    rax,QWORD PTR [r14+rsi*8+0x37d70]
+0x632371	0x632160	A0 ptr	G+index	0x37d70	4	498b8424707d0300	mov    rax,QWORD PTR [r12+0x37d70]

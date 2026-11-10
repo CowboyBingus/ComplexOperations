@@ -99,7 +99,7 @@ fi
 
 dll=$root/complex_operations.dll
 if ! $no_dll; then
-    if ! "$zig" cc -std=c11 -target x86_64-windows-gnu -shared -O2 -Wall -Werror -Wno-unused-parameter \
+    if ! "$zig" cc -std=c11 -target x86_64-windows-gnu -shared -O2 -Wall -Werror -Wno-unused-parameter ${CO_CFLAGS:-} \
         -I "$sdk" -I "$root/src" "${sources[@]}" -o "$dll"; then
         echo 'The DLL did not compile.' >&2
         exit 1

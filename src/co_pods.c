@@ -116,7 +116,7 @@ static uintptr_t g_game, g_manager, g_block;
 static int g_state; /* 0 waiting for the constructor, 1 eight slots, -1 left as the game has it */
 
 /* Free address space within 1.75 GB of `target`, above it first: the code reaches the manager by a 32-bit offset. */
-static uintptr_t AllocNear(uintptr_t target, size_t size)
+uintptr_t co_alloc_near(uintptr_t target, size_t size)
 {
     const uintptr_t span = 0x70000000u, grain = 0x10000u;
     for (int up = 1; up >= 0; up--)
@@ -182,7 +182,7 @@ static void Move(uintptr_t state)
             return;
         }
     }
-    uintptr_t manager = AllocNear(block, 0x10000u);
+    uintptr_t manager = co_alloc_near(block, 0x10000u);
     if (manager == 0) { co_log("hellpods: no free memory within 2 GB of the entity state; four pods as before"); return; }
     int64_t d = (int64_t)manager - (int64_t)block;
     for (size_t i = 0; i < n; i++)
@@ -251,7 +251,14 @@ static uint64_t StateCtorDetour(uint64_t state, uint64_t a2, uint64_t a3, uint64
     }
     /* The game zeroes its state before this constructor; the moved manager is outside it. */
     if (g_state == 1) { memset((void*)g_manager, 0, CO_ALLOC_USED); memset(g_cameras.units, 0, sizeof g_cameras.units); }
+    co_managers_state((uintptr_t)state + CO_STATE_BLOCK);
+#ifdef CO_CANARY
+    uint64_t result = g_stateCtor(state, a2, a3, a4, a5, a6);
+    co_managers_canary(0);
+    return result;
+#else
     return g_stateCtor(state, a2, a3, a4, a5, a6);
+#endif
 }
 
 /* Without the mod's level patch the four records are other units, which must not become pods: each has to carry its
@@ -322,6 +329,9 @@ static uint64_t LevelPassDetour(void* collector, void* table, void* level, uint6
     g_bayWalked = 0;
     g_walkLevel = level;
     uint64_t result = g_levelPass(collector, table, level, first, index);
+#ifdef CO_CANARY
+    co_managers_canary(0);
+#endif
     const int bay = g_bayWalked;
     g_bayWalked = outer;
     g_walkLevel = outerLevel;
@@ -419,6 +429,7 @@ void co_pods_install(uintptr_t game)
 {
     uint64_t global = 1;
     g_game = game;
+    co_managers_install(game);
     if (g_coApi->read(game + CO_STATE_GLOBAL, &global, 8) != 0 || global != 0)
     { g_state = -1; co_log("hellpods: the game was already running when the mod loaded; four pods as before"); return; }
     if (g_coApi->code_matches(game + CO_STATE_CTOR, kStateCtorPin) != 1)
