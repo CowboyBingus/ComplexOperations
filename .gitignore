@@ -5,3 +5,5 @@ build/
 *.pdb
 *.zip
 __pycache__/
+data/
+.hellforge-assets.json

@@ -1,6 +1,6 @@
 # Complex Operations
 
-A standalone HellForge code mod. Work in progress: the first part gives the ship eight hellpods.
+A standalone HellForge code mod. Its first part gives the ship eight hellpods.
 
 It runs on game build 25480438 only. On any other build it logs the reason and changes nothing.
 
@@ -39,11 +39,18 @@ The tests run the mod against a stand-in game image: no game is needed.
 
 ## Install
 
-1. Build the mod, or take a built `complex_operations.dll`.
-2. Put `hellforge-mod.json` and `complex_operations.dll` in one folder inside HellForge's mods folder.
-3. Add the level data of the eight-pod bay. Without it the mod leaves four pods.
+Put these four files in one folder inside HellForge's mods folder:
 
-The level data is not part of this folder yet.
+- `hellforge-mod.json`
+- `complex_operations.dll`
+- `hellforge-recipe.json`
+- `hellforge-recipe.literals`
+
+HellForge builds the bay's level data from the recipe and the player's own game files before a session, into the
+folder's `data/`. The recipe holds no game content: unchanged bytes are copied from the player's game, and only changed
+and new values ship. Without the level data the mod leaves four pods.
+
+The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), which are not in this folder.
 
 ## Source
 
@@ -52,6 +59,7 @@ The level data is not part of this folder yet.
 | `src/co_mod.c` | The entry point: the build check and the game-loaded event. |
 | `src/co_pods.c` | The eight pods: memory, code sites, hooks. |
 | `src/co_pod_sites.h` | The code sites that address the manager and the pod table. Generated; do not edit. |
+| `hellforge-recipe.json`, `.literals` | The bay's level, geometry and collision data as a HellForge recipe. |
 | `scripts/pod_sites.tsv` | The reviewed site list of the pod manager: one row for each instruction. |
 | `scripts/gen_pod_sites.py` | Writes `co_pod_sites.h` from the site list and a dump of the game's code. |
 | `tests/pods_test.c` | The refusals: another build, changed code, a failed write, a failed hook. |
