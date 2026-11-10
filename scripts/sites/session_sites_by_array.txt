@@ -1,0 +1,1075 @@
+# address  fn  bytes  instruction  target  form   (U = function has no call/jump/lea/pointer reference in the image)
+
+### A1 hs slots[4]x0x38  ctx+0x159d0..0x15ab0  sites=198 functions=57 unreferenced-fn sites=65
+### forms: {'direct-addimm32': 9, 'direct-disp32': 34, 'direct-disp8': 96, 'derived-disp8': 44, 'derived-nodisp': 2, 'direct-addimm8': 12, 'derived-addimm8': 1}
+  ac6134 fn   ac5d40  48 81 c3 08 5a 01 00           add    rbx,0x15a08                                       hs+0x58    direct-addimm32
+  acca82 fn   acbe60  48 39 bb d0 59 01 00           cmp    QWORD PTR [rbx+0x159d0],rdi                       hs+0x20    direct-disp32
+  acca8b fn   acbe60  8b 83 f0 59 01 00              mov    eax,DWORD PTR [rbx+0x159f0]                       hs+0x40    direct-disp32
+  acca9a fn   acbe60  48 39 bb 08 5a 01 00           cmp    QWORD PTR [rbx+0x15a08],rdi                       hs+0x58    direct-disp32
+  accaa3 fn   acbe60  8b 83 28 5a 01 00              mov    eax,DWORD PTR [rbx+0x15a28]                       hs+0x78    direct-disp32
+  accab2 fn   acbe60  48 39 bb 40 5a 01 00           cmp    QWORD PTR [rbx+0x15a40],rdi                       hs+0x90    direct-disp32
+  accabb fn   acbe60  8b 83 60 5a 01 00              mov    eax,DWORD PTR [rbx+0x15a60]                       hs+0xb0    direct-disp32
+  accaca fn   acbe60  48 39 bb 78 5a 01 00           cmp    QWORD PTR [rbx+0x15a78],rdi                       hs+0xc8    direct-disp32
+  accad7 fn   acbe60  8b 83 98 5a 01 00              mov    eax,DWORD PTR [rbx+0x15a98]                       hs+0xe8    direct-disp32
+  ad58e8 fn   ad5800U 48 81 c3 08 5a 01 00           add    rbx,0x15a08                                       hs+0x58    direct-addimm32
+  b9393d fn   b938c0U 49 8d 41 20                    lea    rax,[r9+0x20]                                     hs+0x20    direct-disp8
+  b93959 fn   b938c0U 49 8d 41 20                    lea    rax,[r9+0x20]                                     hs+0x20    direct-disp8
+  b93964 fn   b938c0U c7 40 20 06 00 00 00           mov    DWORD PTR [rax+0x20],0x6                          hs+0x40    derived-disp8
+  b93974 fn   b938c0U 89 50 24                       mov    DWORD PTR [rax+0x24],edx                          hs+0x44    derived-disp8
+  b93a29 fn   b939a0  48 8d 4e 20                    lea    rcx,[rsi+0x20]                                    hs+0x20    direct-disp8
+  b93a44 fn   b939a0  48 8d 7e 20                    lea    rdi,[rsi+0x20]                                    hs+0x20    direct-disp8
+  b93a8f fn   b939a0  8b 4f 20                       mov    ecx,DWORD PTR [rdi+0x20]                          hs+0x40    derived-disp8
+  b93a9e fn   b939a0  8b 47 24                       mov    eax,DWORD PTR [rdi+0x24]                          hs+0x44    derived-disp8
+  b93ac6 fn   b939a0  8b 4f 20                       mov    ecx,DWORD PTR [rdi+0x20]                          hs+0x40    derived-disp8
+  b93acb fn   b939a0  89 6f 24                       mov    DWORD PTR [rdi+0x24],ebp                          hs+0x44    derived-disp8
+  b93b0f fn   b939a0  44 89 6f 28                    mov    DWORD PTR [rdi+0x28],r13d                         hs+0x48    derived-disp8
+  b93e3f fn   b93b50  49 8d 47 20                    lea    rax,[r15+0x20]                                    hs+0x20    direct-disp8
+  b93e60 fn   b93b50  49 8d 47 40                    lea    rax,[r15+0x40]                                    hs+0x40    direct-disp8
+  b93f92 fn   b93f10U 48 8d 4f 20                    lea    rcx,[rdi+0x20]                                    hs+0x20    direct-disp8
+  b93fae fn   b93f10U 48 8d 4f 20                    lea    rcx,[rdi+0x20]                                    hs+0x20    direct-disp8
+  b93fc1 fn   b93f10U 48 c7 41 20 05 00 00 00        mov    QWORD PTR [rcx+0x20],0x5                          hs+0x40    derived-disp8
+  b93fcc fn   b93f10U 0f 11 41 28                    movups XMMWORD PTR [rcx+0x28],xmm0                       hs+0x48    derived-disp8
+  b9409e fn   b94040U 49 8d 49 20                    lea    rcx,[r9+0x20]                                     hs+0x20    direct-disp8
+  b940b8 fn   b94040U 49 8d 41 20                    lea    rax,[r9+0x20]                                     hs+0x20    direct-disp8
+  b940c5 fn   b94040U 89 70 24                       mov    DWORD PTR [rax+0x24],esi                          hs+0x44    derived-disp8
+  b94381 fn   b942a0  49 8d 7c 24 20                 lea    rdi,[r12+0x20]                                    hs+0x20    direct-disp8
+  b94691 fn   b94660U 49 8d 41 20                    lea    rax,[r9+0x20]                                     hs+0x20    direct-disp8
+  b946ad fn   b94660U 49 8d 41 20                    lea    rax,[r9+0x20]                                     hs+0x20    direct-disp8
+  b946b6 fn   b94660U f3 0f 11 48 18                 movss  DWORD PTR [rax+0x18],xmm1                         hs+0x38    derived-disp8
+  b9a0b3 fn   b99ff0U 49 8d 42 20                    lea    rax,[r10+0x20]                                    hs+0x20    direct-disp8
+  b9a0cf fn   b99ff0U 49 8d 42 20                    lea    rax,[r10+0x20]                                    hs+0x20    direct-disp8
+  ba7e92 fn   ba7e10  48 8d 4f 20                    lea    rcx,[rdi+0x20]                                    hs+0x20    direct-disp8
+  ba7eae fn   ba7e10  48 8d 4f 20                    lea    rcx,[rdi+0x20]                                    hs+0x20    direct-disp8
+  ba7ec1 fn   ba7e10  48 c7 41 20 05 00 00 00        mov    QWORD PTR [rcx+0x20],0x5                          hs+0x40    derived-disp8
+  ba7ecc fn   ba7e10  0f 11 41 28                    movups XMMWORD PTR [rcx+0x28],xmm0                       hs+0x48    derived-disp8
+  baa623 fn   baa560  49 8d 42 20                    lea    rax,[r10+0x20]                                    hs+0x20    direct-disp8
+  baa63f fn   baa560  49 8d 42 20                    lea    rax,[r10+0x20]                                    hs+0x20    direct-disp8
+  bac94c fn   bac910  49 8d 41 20                    lea    rax,[r9+0x20]                                     hs+0x20    direct-disp8
+  bac968 fn   bac910  49 8d 41 20                    lea    rax,[r9+0x20]                                     hs+0x20    direct-disp8
+  bac971 fn   bac910  f3 0f 11 40 18                 movss  DWORD PTR [rax+0x18],xmm0                         hs+0x38    derived-disp8
+  bb4b20 fn   bb4aa0  49 8d 41 20                    lea    rax,[r9+0x20]                                     hs+0x20    direct-disp8
+  bb4b3c fn   bb4aa0  49 8d 41 20                    lea    rax,[r9+0x20]                                     hs+0x20    direct-disp8
+  bb4b47 fn   bb4aa0  c7 40 20 06 00 00 00           mov    DWORD PTR [rax+0x20],0x6                          hs+0x40    derived-disp8
+  bb4b5a fn   bb4aa0  89 50 24                       mov    DWORD PTR [rax+0x24],edx                          hs+0x44    derived-disp8
+  bbe9ca fn   bbe960  49 8d 49 20                    lea    rcx,[r9+0x20]                                     hs+0x20    direct-disp8
+  bbe9e6 fn   bbe960  49 8d 41 20                    lea    rax,[r9+0x20]                                     hs+0x20    direct-disp8
+  bbe9f3 fn   bbe960  89 70 24                       mov    DWORD PTR [rax+0x24],esi                          hs+0x44    derived-disp8
+ 1083bc6 fn  1083150  48 8d 43 40                    lea    rax,[rbx+0x40]                                    hs+0x40    direct-disp8
+ 1083c0e fn  1083150  4c 89 53 20                    mov    QWORD PTR [rbx+0x20],r10                          hs+0x20    direct-disp8
+ 1083c23 fn  1083150  48 89 4b 28                    mov    QWORD PTR [rbx+0x28],rcx                          hs+0x28    direct-disp8
+ 1083c2a fn  1083150  89 4b 30                       mov    DWORD PTR [rbx+0x30],ecx                          hs+0x30    direct-disp8
+ 1083c30 fn  1083150  c7 43 40 09 00 00 00           mov    DWORD PTR [rbx+0x40],0x9                          hs+0x40    direct-disp8
+ 1083c7b fn  1083150  89 43 34                       mov    DWORD PTR [rbx+0x34],eax                          hs+0x34    direct-disp8
+ 1083ca1 fn  1083150  8b 43 34                       mov    eax,DWORD PTR [rbx+0x34]                          hs+0x34    direct-disp8
+ 1088a87 fn  1088a30  48 8d 87 90 00 00 00           lea    rax,[rdi+0x90]                                    hs+0x90    direct-disp32
+ 1088b0b fn  1088a30  48 89 47 20                    mov    QWORD PTR [rdi+0x20],rax                          hs+0x20    direct-disp8
+ 1088b16 fn  1088a30  48 89 47 28                    mov    QWORD PTR [rdi+0x28],rax                          hs+0x28    direct-disp8
+ 1088b24 fn  1088a30  89 4f 30                       mov    DWORD PTR [rdi+0x30],ecx                          hs+0x30    direct-disp8
+ 1088b27 fn  1088a30  89 5f 34                       mov    DWORD PTR [rdi+0x34],ebx                          hs+0x34    direct-disp8
+ 1088b2a fn  1088a30  c7 47 40 09 00 00 00           mov    DWORD PTR [rdi+0x40],0x9                          hs+0x40    direct-disp8
+ 1088b40 fn  1088a30  f3 0f 11 47 38                 movss  DWORD PTR [rdi+0x38],xmm0                         hs+0x38    direct-disp8
+ 1088b7e fn  1088a30  8b 47 34                       mov    eax,DWORD PTR [rdi+0x34]                          hs+0x34    direct-disp8
+ 1088b92 fn  1088a30  8b 47 34                       mov    eax,DWORD PTR [rdi+0x34]                          hs+0x34    direct-disp8
+ 1088dde fn  1088d80U 48 8d 43 40                    lea    rax,[rbx+0x40]                                    hs+0x40    direct-disp8
+ 1088e2e fn  1088d80U 4c 89 4b 20                    mov    QWORD PTR [rbx+0x20],r9                           hs+0x20    direct-disp8
+ 1088e39 fn  1088d80U 48 89 43 28                    mov    QWORD PTR [rbx+0x28],rax                          hs+0x28    direct-disp8
+ 1088e47 fn  1088d80U 89 4b 30                       mov    DWORD PTR [rbx+0x30],ecx                          hs+0x30    direct-disp8
+ 1088e4d fn  1088d80U c7 43 40 09 00 00 00           mov    DWORD PTR [rbx+0x40],0x9                          hs+0x40    direct-disp8
+ 1088e79 fn  1088d80U c7 43 34 ff ff ff ff           mov    DWORD PTR [rbx+0x34],0xffffffff                   hs+0x34    direct-disp8
+ 1088e83 fn  1088d80U 89 43 34                       mov    DWORD PTR [rbx+0x34],eax                          hs+0x34    direct-disp8
+ 1088ea9 fn  1088d80U 8b 43 34                       mov    eax,DWORD PTR [rbx+0x34]                          hs+0x34    direct-disp8
+ 1088ef3 fn  1088d80U 89 43 34                       mov    DWORD PTR [rbx+0x34],eax                          hs+0x34    direct-disp8
+ 10897a3 fn  1089720  49 8d 45 58                    lea    rax,[r13+0x58]                                    hs+0x58    direct-disp8
+ 108985e fn  1089720  49 89 55 20                    mov    QWORD PTR [r13+0x20],rdx                          hs+0x20    direct-disp8
+ 1089869 fn  1089720  49 89 45 28                    mov    QWORD PTR [r13+0x28],rax                          hs+0x28    direct-disp8
+ 1089877 fn  1089720  41 89 4d 30                    mov    DWORD PTR [r13+0x30],ecx                          hs+0x30    direct-disp8
+ 108987b fn  1089720  41 c7 45 40 09 00 00 00        mov    DWORD PTR [r13+0x40],0x9                          hs+0x40    direct-disp8
+ 10898af fn  1089720  41 89 45 38                    mov    DWORD PTR [r13+0x38],eax                          hs+0x38    direct-disp8
+ 108a374 fn  108a350U 4c 8d 59 20                    lea    r11,[rcx+0x20]                                    hs+0x20    direct-disp8
+ 108a39b fn  108a350U 48 8d 4b 20                    lea    rcx,[rbx+0x20]                                    hs+0x20    direct-disp8
+ 108a3a9 fn  108a350U 44 89 49 24                    mov    DWORD PTR [rcx+0x24],r9d                          hs+0x44    derived-disp8
+ 108a609 fn  108a440  49 8d 7c 24 40                 lea    rdi,[r12+0x40]                                    hs+0x40    direct-disp8
+ 108a7e9 fn  108a440  49 8d 74 24 78                 lea    rsi,[r12+0x78]                                    hs+0x78    direct-disp8
+ 108aa41 fn  108a440  49 8d 44 24 20                 lea    rax,[r12+0x20]                                    hs+0x20    direct-disp8
+ 108abcd fn  108a440  49 8d 4c 24 20                 lea    rcx,[r12+0x20]                                    hs+0x20    direct-disp8
+ 108abe8 fn  108a440  49 8d 54 24 20                 lea    rdx,[r12+0x20]                                    hs+0x20    direct-disp8
+ 108ac04 fn  108a440  8b 42 18                       mov    eax,DWORD PTR [rdx+0x18]                          hs+0x38    derived-disp8
+ 108ae3a fn  108a440  49 8d 5c 24 28                 lea    rbx,[r12+0x28]                                    hs+0x28    direct-disp8
+ 108aec8 fn  108a440  49 8d 4c 24 40                 lea    rcx,[r12+0x40]                                    hs+0x40    direct-disp8
+ 108bb53 fn  108b6b0  48 8d 4d 20                    lea    rcx,[rbp+0x20]                                    hs+0x20    direct-disp8
+ 108bb6d fn  108b6b0  48 8d 45 20                    lea    rax,[rbp+0x20]                                    hs+0x20    direct-disp8
+ 108bb76 fn  108b6b0  8b 48 14                       mov    ecx,DWORD PTR [rax+0x14]                          hs+0x34    derived-disp8
+ 108bb79 fn  108b6b0  48 c7 00 00 00 00 00           mov    QWORD PTR [rax],0x0                               hs+0x20    derived-nodisp
+ 108bb80 fn  108b6b0  c7 40 20 00 00 00 00           mov    DWORD PTR [rax+0x20],0x0                          hs+0x40    derived-disp8
+ 108bb87 fn  108b6b0  c7 40 18 00 00 00 00           mov    DWORD PTR [rax+0x18],0x0                          hs+0x38    derived-disp8
+ 108bbe9 fn  108bbc0U 4c 8d 4b 20                    lea    r9,[rbx+0x20]                                     hs+0x20    direct-disp8
+ 108c192 fn  108bc70  49 39 41 58                    cmp    QWORD PTR [r9+0x58],rax                           hs+0x58    direct-disp8
+ 108c19b fn  108bc70  4d 39 b1 90 00 00 00           cmp    QWORD PTR [r9+0x90],r14                           hs+0x90    direct-disp32
+ 108c1a8 fn  108bc70  4d 39 b1 c8 00 00 00           cmp    QWORD PTR [r9+0xc8],r14                           hs+0xc8    direct-disp32
+ 108c2a3 fn  108bc70  49 8d 71 20                    lea    rsi,[r9+0x20]                                     hs+0x20    direct-disp8
+ 108c33f fn  108bc70  49 8d 41 20                    lea    rax,[r9+0x20]                                     hs+0x20    direct-disp8
+ 108c3a9 fn  108bc70  49 8d 51 20                    lea    rdx,[r9+0x20]                                     hs+0x20    direct-disp8
+ 108c7da fn  108c760  48 83 c1 20                    add    rcx,0x20                                          hs+0x20    direct-addimm8
+ 108c7f6 fn  108c760  49 8d 4e 20                    lea    rcx,[r14+0x20]                                    hs+0x20    direct-disp8
+ 108c815 fn  108c760  8b 41 20                       mov    eax,DWORD PTR [rcx+0x20]                          hs+0x40    derived-disp8
+ 108c846 fn  108c760  89 41 10                       mov    DWORD PTR [rcx+0x10],eax                          hs+0x30    derived-disp8
+ 108c849 fn  108c760  0f 11 41 28                    movups XMMWORD PTR [rcx+0x28],xmm0                       hs+0x48    derived-disp8
+ 108c84d fn  108c760  c7 41 20 05 00 00 00           mov    DWORD PTR [rcx+0x20],0x5                          hs+0x40    derived-disp8
+ 108c854 fn  108c760  4c 89 49 08                    mov    QWORD PTR [rcx+0x8],r9                            hs+0x28    derived-disp8
+ 108c878 fn  108c760  c7 41 20 04 00 00 00           mov    DWORD PTR [rcx+0x20],0x4                          hs+0x40    derived-disp8
+ 108c87f fn  108c760  4c 89 69 28                    mov    QWORD PTR [rcx+0x28],r13                          hs+0x48    derived-disp8
+ 108c8e3 fn  108c760  49 8d 7e 40                    lea    rdi,[r14+0x40]                                    hs+0x40    direct-disp8
+ 108c92f fn  108c760  43 8b 4c 37 40                 mov    ecx,DWORD PTR [r15+r14*1+0x40]                    hs+0x40    direct-disp8
+ 108c934 fn  108c760  43 8b 54 37 34                 mov    edx,DWORD PTR [r15+r14*1+0x34]                    hs+0x34    direct-disp8
+ 108c939 fn  108c760  47 8b 4c 37 30                 mov    r9d,DWORD PTR [r15+r14*1+0x30]                    hs+0x30    direct-disp8
+ 108c93e fn  108c760  4f 8b 44 37 28                 mov    r8,QWORD PTR [r15+r14*1+0x28]                     hs+0x28    direct-disp8
+ 108ce32 fn  108cdf0U 48 83 c1 20                    add    rcx,0x20                                          hs+0x20    direct-addimm8
+ 108ce50 fn  108cdf0U 49 8d 41 20                    lea    rax,[r9+0x20]                                     hs+0x20    direct-disp8
+ 108ce63 fn  108cdf0U c7 40 20 06 00 00 00           mov    DWORD PTR [rax+0x20],0x6                          hs+0x40    derived-disp8
+ 108ce6d fn  108cdf0U 89 50 24                       mov    DWORD PTR [rax+0x24],edx                          hs+0x44    derived-disp8
+ 108ceb8 fn  108ce80U 48 83 c1 20                    add    rcx,0x20                                          hs+0x20    direct-addimm8
+ 108cee1 fn  108ce80U 48 8d 4f 20                    lea    rcx,[rdi+0x20]                                    hs+0x20    direct-disp8
+ 108cef4 fn  108ce80U 48 c7 41 20 05 00 00 00        mov    QWORD PTR [rcx+0x20],0x5                          hs+0x40    derived-disp8
+ 108cefc fn  108ce80U 0f 11 41 28                    movups XMMWORD PTR [rcx+0x28],xmm0                       hs+0x48    derived-disp8
+ 108d2d9 fn  108d190  48 8d 5e 20                    lea    rbx,[rsi+0x20]                                    hs+0x20    direct-disp8
+ 108d370 fn  108d190  48 8d 5e 40                    lea    rbx,[rsi+0x40]                                    hs+0x40    direct-disp8
+ 108d449 fn  108d3b0U 49 8d 5c 24 20                 lea    rbx,[r12+0x20]                                    hs+0x20    direct-disp8
+ 108d72f fn  108d6d0U 48 83 c1 20                    add    rcx,0x20                                          hs+0x20    direct-addimm8
+ 108d749 fn  108d6d0U 48 8d 7d 20                    lea    rdi,[rbp+0x20]                                    hs+0x20    direct-disp8
+ 108d790 fn  108d6d0U 8b 4f 20                       mov    ecx,DWORD PTR [rdi+0x20]                          hs+0x40    derived-disp8
+ 108d79e fn  108d6d0U 8b 47 24                       mov    eax,DWORD PTR [rdi+0x24]                          hs+0x44    derived-disp8
+ 108d7c6 fn  108d6d0U 8b 4f 20                       mov    ecx,DWORD PTR [rdi+0x20]                          hs+0x40    derived-disp8
+ 108d7cb fn  108d6d0U 89 77 24                       mov    DWORD PTR [rdi+0x24],esi                          hs+0x44    derived-disp8
+ 108d80f fn  108d6d0U 44 89 77 28                    mov    DWORD PTR [rdi+0x28],r14d                         hs+0x48    derived-disp8
+ 108d8af fn  108d840  48 8d 5e 20                    lea    rbx,[rsi+0x20]                                    hs+0x20    direct-disp8
+ 108d998 fn  108d840  48 8d 59 40                    lea    rbx,[rcx+0x40]                                    hs+0x40    direct-disp8
+ 108da1d fn  108d9f0  48 83 c1 20                    add    rcx,0x20                                          hs+0x20    direct-addimm8
+ 108da3d fn  108d9f0  4d 8d 67 20                    lea    r12,[r15+0x20]                                    hs+0x20    direct-disp8
+ 108daa5 fn  108d9f0  49 8d 4f 20                    lea    rcx,[r15+0x20]                                    hs+0x20    direct-disp8
+ 108dacb fn  108d9f0  49 8d 47 40                    lea    rax,[r15+0x40]                                    hs+0x40    direct-disp8
+ 108e273 fn  108dfc0U 49 8d 47 20                    lea    rax,[r15+0x20]                                    hs+0x20    direct-disp8
+ 108e29d fn  108dfc0U 49 8d 47 40                    lea    rax,[r15+0x40]                                    hs+0x40    direct-disp8
+ 108e3ae fn  108e310U 48 83 c3 58                    add    rbx,0x58                                          hs+0x58    direct-addimm8
+ 108e43a fn  108e410U 48 83 c3 58                    add    rbx,0x58                                          hs+0x58    direct-addimm8
+ 108e4c9 fn  108e4a0U 48 83 c3 58                    add    rbx,0x58                                          hs+0x58    direct-addimm8
+ 108e561 fn  108e530U 48 83 c3 58                    add    rbx,0x58                                          hs+0x58    direct-addimm8
+ 108e614 fn  108e5d0U 48 83 c3 58                    add    rbx,0x58                                          hs+0x58    direct-addimm8
+ 108e6a9 fn  108e680  48 83 c3 58                    add    rbx,0x58                                          hs+0x58    direct-addimm8
+ 108e7bc fn  108e710U 48 83 c3 58                    add    rbx,0x58                                          hs+0x58    direct-addimm8
+ 1090057 fn  108ff40  49 8b 89 d0 59 01 00           mov    rcx,QWORD PTR [r9+0x159d0]                        hs+0x20    direct-disp32
+ 1090077 fn  108ff40  49 8b 89 08 5a 01 00           mov    rcx,QWORD PTR [r9+0x15a08]                        hs+0x58    direct-disp32
+ 1090097 fn  108ff40  49 8b 89 40 5a 01 00           mov    rcx,QWORD PTR [r9+0x15a40]                        hs+0x90    direct-disp32
+ 10900b7 fn  108ff40  49 8b 89 78 5a 01 00           mov    rcx,QWORD PTR [r9+0x15a78]                        hs+0xc8    direct-disp32
+ 12dc210 fn  12dc080  48 8b 8f d0 59 01 00           mov    rcx,QWORD PTR [rdi+0x159d0]                       hs+0x20    direct-disp32
+ 12dc227 fn  12dc080  48 8b 8f 08 5a 01 00           mov    rcx,QWORD PTR [rdi+0x15a08]                       hs+0x58    direct-disp32
+ 12dc243 fn  12dc080  48 8b 8f 40 5a 01 00           mov    rcx,QWORD PTR [rdi+0x15a40]                       hs+0x90    direct-disp32
+ 12dc25a fn  12dc080  48 8b 8f 78 5a 01 00           mov    rcx,QWORD PTR [rdi+0x15a78]                       hs+0xc8    direct-disp32
+ 134dcba fn  134d740  48 8d 86 f0 59 01 00           lea    rax,[rsi+0x159f0]                                 hs+0x40    direct-disp32
+ 134fba4 fn  134fb30U 49 8d 4b 20                    lea    rcx,[r11+0x20]                                    hs+0x20    direct-disp8
+ 134fbbd fn  134fb30U 49 8d 43 20                    lea    rax,[r11+0x20]                                    hs+0x20    direct-disp8
+ 1350228 fn  1350180  48 81 c3 08 5a 01 00           add    rbx,0x15a08                                       hs+0x58    direct-addimm32
+ 13502ba fn  1350280U 48 81 c3 08 5a 01 00           add    rbx,0x15a08                                       hs+0x58    direct-addimm32
+ 1350359 fn  1350320  48 81 c3 08 5a 01 00           add    rbx,0x15a08                                       hs+0x58    direct-addimm32
+ 1350401 fn  13503c0  48 81 c3 08 5a 01 00           add    rbx,0x15a08                                       hs+0x58    direct-addimm32
+ 13504bf fn  1350470  48 81 c3 08 5a 01 00           add    rbx,0x15a08                                       hs+0x58    direct-addimm32
+ 135060c fn  1350530U 48 81 c3 08 5a 01 00           add    rbx,0x15a08                                       hs+0x58    direct-addimm32
+ 1350618 fn  1350530U 83 7b 20 03                    cmp    DWORD PTR [rbx+0x20],0x3                          hs+0x78    derived-disp8
+ 135061e fn  1350530U 48 8b 13                       mov    rdx,QWORD PTR [rbx]                               hs+0x58    derived-nodisp
+ 1350660 fn  1350530U 48 83 c3 38                    add    rbx,0x38                                          hs+0x90    derived-addimm8
+ 13506d7 fn  1350680  89 7d 44                       mov    DWORD PTR [rbp+0x44],edi                          hs+0x44    direct-disp8
+ 13506dc fn  1350680  89 7d 7c                       mov    DWORD PTR [rbp+0x7c],edi                          hs+0x7c    direct-disp8
+ 13506e2 fn  1350680  89 bd b4 00 00 00              mov    DWORD PTR [rbp+0xb4],edi                          hs+0xb4    direct-disp32
+ 13506e8 fn  1350680  89 bd ec 00 00 00              mov    DWORD PTR [rbp+0xec],edi                          hs+0xec    direct-disp32
+ 135072d fn  1350680  48 8d 5d 20                    lea    rbx,[rbp+0x20]                                    hs+0x20    direct-disp8
+ 13507eb fn  1350680  48 8d 5d 40                    lea    rbx,[rbp+0x40]                                    hs+0x40    direct-disp8
+ 135092f fn  13508e0U 4c 8b 81 d0 59 01 00           mov    r8,QWORD PTR [rcx+0x159d0]                        hs+0x20    direct-disp32
+ 1350953 fn  13508e0U 4c 8b 81 08 5a 01 00           mov    r8,QWORD PTR [rcx+0x15a08]                        hs+0x58    direct-disp32
+ 1350971 fn  13508e0U 4c 8b 81 40 5a 01 00           mov    r8,QWORD PTR [rcx+0x15a40]                        hs+0x90    direct-disp32
+ 1350993 fn  13508e0U 4c 8b 81 78 5a 01 00           mov    r8,QWORD PTR [rcx+0x15a78]                        hs+0xc8    direct-disp32
+ 135bb97 fn  135ba10  49 8d 80 d0 59 01 00           lea    rax,[r8+0x159d0]                                  hs+0x20    direct-disp32
+ 135bbce fn  135ba10  49 8d 80 d0 59 01 00           lea    rax,[r8+0x159d0]                                  hs+0x20    direct-disp32
+ 135bc03 fn  135ba10  49 8d 80 d0 59 01 00           lea    rax,[r8+0x159d0]                                  hs+0x20    direct-disp32
+ 135bc3e fn  135ba10  49 8d 80 d0 59 01 00           lea    rax,[r8+0x159d0]                                  hs+0x20    direct-disp32
+ 13638f0 fn  13637e0  48 83 bc 3e d0 59 01 00 00     cmp    QWORD PTR [rsi+rdi*1+0x159d0],0x0                 hs+0x20    direct-disp32
+ 13638ff fn  13637e0  83 bc 3e f0 59 01 00 05        cmp    DWORD PTR [rsi+rdi*1+0x159f0],0x5                 hs+0x40    direct-disp32
+ 136390d fn  13637e0  48 8b 84 3e d0 59 01 00        mov    rax,QWORD PTR [rsi+rdi*1+0x159d0]                 hs+0x20    direct-disp32
+ 1363a41 fn  13637e0  48 8b bc 3e d0 59 01 00        mov    rdi,QWORD PTR [rsi+rdi*1+0x159d0]                 hs+0x20    direct-disp32
+ 14726b6 fn  1472670  48 81 c1 f0 59 01 00           add    rcx,0x159f0                                       hs+0x40    direct-addimm32
+ 208abd0 fn  208aaa0  48 89 51 f1                    mov    QWORD PTR [rcx-0xf],rdx                           hs+0xf9    derived-disp8
+ 208abe0 fn  208aaa0  48 89 51 f4                    mov    QWORD PTR [rcx-0xc],rdx                           hs+0xfc    derived-disp8
+ 208abe8 fn  208aaa0  48 89 51 f7                    mov    QWORD PTR [rcx-0x9],rdx                           hs+0xff    derived-disp8
+ 208abf0 fn  208aaa0  48 89 51 f3                    mov    QWORD PTR [rcx-0xd],rdx                           hs+0xfb    derived-disp8
+ 208ac00 fn  208aaa0  48 89 51 f2                    mov    QWORD PTR [rcx-0xe],rdx                           hs+0xfa    derived-disp8
+
+### A2 hs index flags[4]x1  ctx+0x15ab0..0x15ab8  sites=22 functions=9 unreferenced-fn sites=5
+### forms: {'direct-disp32': 13, 'derived-disp8': 9}
+ 1083c9b fn  1083150  89 83 00 01 00 00              mov    DWORD PTR [rbx+0x100],eax                         hs+0x100   direct-disp32
+ 1083ca4 fn  1083150  c6 84 18 00 01 00 00 01        mov    BYTE PTR [rax+rbx*1+0x100],0x1                    hs+0x100   direct-disp32
+ 1088b8c fn  1088a30  89 87 00 01 00 00              mov    DWORD PTR [rdi+0x100],eax                         hs+0x100   direct-disp32
+ 1088b95 fn  1088a30  c6 84 38 00 01 00 00 01        mov    BYTE PTR [rax+rdi*1+0x100],0x1                    hs+0x100   direct-disp32
+ 1088ea3 fn  1088d80U 89 83 00 01 00 00              mov    DWORD PTR [rbx+0x100],eax                         hs+0x100   direct-disp32
+ 1088eac fn  1088d80U c6 84 18 00 01 00 00 01        mov    BYTE PTR [rax+rbx*1+0x100],0x1                    hs+0x100   direct-disp32
+ 10896ff fn  10896a0U c6 84 18 00 01 00 00 01        mov    BYTE PTR [rax+rbx*1+0x100],0x1                    hs+0x100   direct-disp32
+ 108984c fn  1089720  41 89 8d 00 01 00 00           mov    DWORD PTR [r13+0x100],ecx                         hs+0x100   direct-disp32
+ 108bb93 fn  108b6b0  c6 84 29 00 01 00 00 00        mov    BYTE PTR [rcx+rbp*1+0x100],0x0                    hs+0x100   direct-disp32
+ 108bc13 fn  108bbc0U 48 8d 83 00 01 00 00           lea    rax,[rbx+0x100]                                   hs+0x100   direct-disp32
+ 108bc59 fn  108bbc0U c6 84 18 00 01 00 00 01        mov    BYTE PTR [rax+rbx*1+0x100],0x1                    hs+0x100   direct-disp32
+ 108c2a7 fn  108bc70  4d 8d a9 00 01 00 00           lea    r13,[r9+0x100]                                    hs+0x100   direct-disp32
+ 108c3ee fn  108bc70  42 c6 84 08 00 01 00 00 01     mov    BYTE PTR [rax+r9*1+0x100],0x1                     hs+0x100   direct-disp32
+ 208abd4 fn  208aaa0  89 51 f9                       mov    DWORD PTR [rcx-0x7],edx                           hs+0x101   derived-disp8
+ 208abd7 fn  208aaa0  66 89 51 fd                    mov    WORD PTR [rcx-0x3],dx                             hs+0x105   derived-disp8
+ 208abdb fn  208aaa0  88 51 ff                       mov    BYTE PTR [rcx-0x1],dl                             hs+0x107   derived-disp8
+ 208abe4 fn  208aaa0  89 51 fc                       mov    DWORD PTR [rcx-0x4],edx                           hs+0x104   derived-disp8
+ 208abec fn  208aaa0  88 51 ff                       mov    BYTE PTR [rcx-0x1],dl                             hs+0x107   derived-disp8
+ 208abf4 fn  208aaa0  89 51 fb                       mov    DWORD PTR [rcx-0x5],edx                           hs+0x103   derived-disp8
+ 208abf7 fn  208aaa0  88 51 ff                       mov    BYTE PTR [rcx-0x1],dl                             hs+0x107   derived-disp8
+ 208ac04 fn  208aaa0  89 51 fa                       mov    DWORD PTR [rcx-0x6],edx                           hs+0x102   derived-disp8
+ 208ac07 fn  208aaa0  66 89 51 fe                    mov    WORD PTR [rcx-0x2],dx                             hs+0x106   derived-disp8
+
+### A3 hs party recs[4]x0x1C0  ctx+0x15ab8..0x161b8  sites=110 functions=12 unreferenced-fn sites=22
+### forms: {'direct-disp32': 44, 'derived-nodisp': 16, 'direct-disp32-scaled': 1, 'derived-disp8': 36, 'derived-disp8-scaled': 12, 'derived-addimm8': 1}
+  b935e5 fn   b93580U 49 8d b6 08 01 00 00           lea    rsi,[r14+0x108]                                   hs+0x108   direct-disp32
+  b940c8 fn   b94040U 49 8d 81 08 01 00 00           lea    rax,[r9+0x108]                                    hs+0x108   direct-disp32
+  b940d2 fn   b94040U 4c 39 18                       cmp    QWORD PTR [rax],r11                               hs+0x108   derived-nodisp
+  b940d5 fn   b94040U 49 8d 91 10 01 00 00           lea    rdx,[r9+0x110]                                    hs+0x110   direct-disp32
+  b940dc fn   b94040U 49 8d 89 d0 02 00 00           lea    rcx,[r9+0x2d0]                                    hs+0x2d0   direct-disp32
+  b940e7 fn   b94040U 4d 39 99 c8 02 00 00           cmp    QWORD PTR [r9+0x2c8],r11                          hs+0x2c8   direct-disp32
+  b940f2 fn   b94040U 4d 39 99 88 04 00 00           cmp    QWORD PTR [r9+0x488],r11                          hs+0x488   direct-disp32
+  b940f9 fn   b94040U 49 8d 91 90 04 00 00           lea    rdx,[r9+0x490]                                    hs+0x490   direct-disp32
+  b94104 fn   b94040U 4d 39 99 48 06 00 00           cmp    QWORD PTR [r9+0x648],r11                          hs+0x648   direct-disp32
+  b9410b fn   b94040U 49 8d 89 50 06 00 00           lea    rcx,[r9+0x650]                                    hs+0x650   direct-disp32
+  b9412a fn   b94040U 49 8d 89 10 01 00 00           lea    rcx,[r9+0x110]                                    hs+0x110   direct-disp32
+  bae767 fn   bae700  49 8d b6 08 01 00 00           lea    rsi,[r14+0x108]                                   hs+0x108   direct-disp32
+  bbe9f6 fn   bbe960  49 8d 81 08 01 00 00           lea    rax,[r9+0x108]                                    hs+0x108   direct-disp32
+  bbea00 fn   bbe960  4c 39 18                       cmp    QWORD PTR [rax],r11                               hs+0x108   derived-nodisp
+  bbea03 fn   bbe960  49 8d 91 10 01 00 00           lea    rdx,[r9+0x110]                                    hs+0x110   direct-disp32
+  bbea0a fn   bbe960  49 8d 89 d0 02 00 00           lea    rcx,[r9+0x2d0]                                    hs+0x2d0   direct-disp32
+  bbea15 fn   bbe960  4d 39 99 c8 02 00 00           cmp    QWORD PTR [r9+0x2c8],r11                          hs+0x2c8   direct-disp32
+  bbea20 fn   bbe960  4d 39 99 88 04 00 00           cmp    QWORD PTR [r9+0x488],r11                          hs+0x488   direct-disp32
+  bbea27 fn   bbe960  49 8d 91 90 04 00 00           lea    rdx,[r9+0x490]                                    hs+0x490   direct-disp32
+  bbea32 fn   bbe960  4d 39 99 48 06 00 00           cmp    QWORD PTR [r9+0x648],r11                          hs+0x648   direct-disp32
+  bbea39 fn   bbe960  49 8d 89 50 06 00 00           lea    rcx,[r9+0x650]                                    hs+0x650   direct-disp32
+  bbea58 fn   bbe960  49 8d 89 10 01 00 00           lea    rcx,[r9+0x110]                                    hs+0x110   direct-disp32
+ 1088be6 fn  1088a30  48 8d 8f 08 01 00 00           lea    rcx,[rdi+0x108]                                   hs+0x108   direct-disp32
+ 1089838 fn  1089720  49 8d 8d 08 01 00 00           lea    rcx,[r13+0x108]                                   hs+0x108   direct-disp32
+ 108a3ad fn  108a350U 4c 8d 83 08 01 00 00           lea    r8,[rbx+0x108]                                    hs+0x108   direct-disp32
+ 108a3b4 fn  108a350U 49 39 30                       cmp    QWORD PTR [r8],rsi                                hs+0x108   derived-nodisp
+ 108a3b7 fn  108a350U 48 8d 93 10 01 00 00           lea    rdx,[rbx+0x110]                                   hs+0x110   direct-disp32
+ 108a3be fn  108a350U 48 8d 8b d0 02 00 00           lea    rcx,[rbx+0x2d0]                                   hs+0x2d0   direct-disp32
+ 108a3c9 fn  108a350U 48 39 b3 c8 02 00 00           cmp    QWORD PTR [rbx+0x2c8],rsi                         hs+0x2c8   direct-disp32
+ 108a3d4 fn  108a350U 48 39 b3 88 04 00 00           cmp    QWORD PTR [rbx+0x488],rsi                         hs+0x488   direct-disp32
+ 108a3db fn  108a350U 48 8d 93 90 04 00 00           lea    rdx,[rbx+0x490]                                   hs+0x490   direct-disp32
+ 108a3e6 fn  108a350U 48 39 b3 48 06 00 00           cmp    QWORD PTR [rbx+0x648],rsi                         hs+0x648   direct-disp32
+ 108a3ed fn  108a350U 48 8d 8b 50 06 00 00           lea    rcx,[rbx+0x650]                                   hs+0x650   direct-disp32
+ 108a40b fn  108a350U 48 8d 8b 10 01 00 00           lea    rcx,[rbx+0x110]                                   hs+0x110   direct-disp32
+ 108a731 fn  108a440  49 8d bc 24 40 01 00 00        lea    rdi,[r12+0x140]                                   hs+0x140   direct-disp32
+ 108b245 fn  108a440  49 8d 8c 24 08 01 00 00        lea    rcx,[r12+0x108]                                   hs+0x108   direct-disp32
+ 108b270 fn  108a440  4a 89 84 21 08 01 00 00        mov    QWORD PTR [rcx+r12*1+0x108],rax                   hs+0x108   direct-disp32
+ 108b27d fn  108a440  42 0f 11 84 21 10 01 00 00     movups XMMWORD PTR [rcx+r12*1+0x110],xmm0                hs+0x110   direct-disp32
+ 108b28b fn  108a440  42 0f 11 8c 21 20 01 00 00     movups XMMWORD PTR [rcx+r12*1+0x120],xmm1                hs+0x120   direct-disp32
+ 108b299 fn  108a440  42 0f 11 84 21 30 01 00 00     movups XMMWORD PTR [rcx+r12*1+0x130],xmm0                hs+0x130   direct-disp32
+ 108b577 fn  108b560  48 8d b1 10 01 00 00           lea    rsi,[rcx+0x110]                                   hs+0x110   direct-disp32
+ 108b5a9 fn  108b560  49 39 ac c3 18 01 00 00        cmp    QWORD PTR [r11+rax*8+0x118],rbp                   hs+0x118   direct-disp32-scaled
+ 108b5b6 fn  108b560  4d 8d 8b 08 01 00 00           lea    r9,[r11+0x108]                                    hs+0x108   direct-disp32
+ 108b6c7 fn  108b6b0  48 8d 99 08 01 00 00           lea    rbx,[rcx+0x108]                                   hs+0x108   direct-disp32
+ 108b6d1 fn  108b6b0  8b 43 08                       mov    eax,DWORD PTR [rbx+0x8]                           hs+0x110   derived-disp8
+ 108b6e0 fn  108b6b0  4a 39 7c c3 10                 cmp    QWORD PTR [rbx+r8*8+0x10],rdi                     hs+0x118   derived-disp8-scaled
+ 108b6e9 fn  108b6b0  89 43 08                       mov    DWORD PTR [rbx+0x8],eax                           hs+0x110   derived-disp8
+ 108b6ec fn  108b6b0  48 8b 4c c3 10                 mov    rcx,QWORD PTR [rbx+rax*8+0x10]                    hs+0x118   derived-disp8-scaled
+ 108b6f1 fn  108b6b0  4a 89 4c c3 10                 mov    QWORD PTR [rbx+r8*8+0x10],rcx                     hs+0x118   derived-disp8-scaled
+ 108b6f9 fn  108b6b0  8b 43 08                       mov    eax,DWORD PTR [rbx+0x8]                           hs+0x110   derived-disp8
+ 108b704 fn  108b6b0  8b 4b 38                       mov    ecx,DWORD PTR [rbx+0x38]                          hs+0x140   derived-disp8
+ 108b71b fn  108b6b0  48 39 3c 1a                    cmp    QWORD PTR [rdx+rbx*1],rdi                         hs+0x108   derived-nodisp
+ 108b724 fn  108b6b0  89 43 38                       mov    DWORD PTR [rbx+0x38],eax                          hs+0x140   derived-disp8
+ 108b734 fn  108b6b0  0f 10 04 19                    movups xmm0,XMMWORD PTR [rcx+rbx*1]                      hs+0x108   derived-nodisp
+ 108b738 fn  108b6b0  0f 11 04 1a                    movups XMMWORD PTR [rdx+rbx*1],xmm0                      hs+0x108   derived-nodisp
+ 108b73c fn  108b6b0  0f 10 4c 19 10                 movups xmm1,XMMWORD PTR [rcx+rbx*1+0x10]                 hs+0x118   derived-disp8
+ 108b741 fn  108b6b0  0f 11 4c 1a 10                 movups XMMWORD PTR [rdx+rbx*1+0x10],xmm1                 hs+0x118   derived-disp8
+ 108b746 fn  108b6b0  8b 4b 38                       mov    ecx,DWORD PTR [rbx+0x38]                          hs+0x140   derived-disp8
+ 108b751 fn  108b6b0  8b 43 08                       mov    eax,DWORD PTR [rbx+0x8]                           hs+0x110   derived-disp8
+ 108b7f1 fn  108b6b0  48 8d 9d c8 02 00 00           lea    rbx,[rbp+0x2c8]                                   hs+0x2c8   direct-disp32
+ 108b7fa fn  108b6b0  8b 43 08                       mov    eax,DWORD PTR [rbx+0x8]                           hs+0x2d0   derived-disp8
+ 108b801 fn  108b6b0  48 39 7c d3 10                 cmp    QWORD PTR [rbx+rdx*8+0x10],rdi                    hs+0x2d8   derived-disp8-scaled
+ 108b80a fn  108b6b0  89 43 08                       mov    DWORD PTR [rbx+0x8],eax                           hs+0x2d0   derived-disp8
+ 108b80d fn  108b6b0  48 8b 4c c3 10                 mov    rcx,QWORD PTR [rbx+rax*8+0x10]                    hs+0x2d8   derived-disp8-scaled
+ 108b812 fn  108b6b0  48 89 4c d3 10                 mov    QWORD PTR [rbx+rdx*8+0x10],rcx                    hs+0x2d8   derived-disp8-scaled
+ 108b819 fn  108b6b0  8b 43 08                       mov    eax,DWORD PTR [rbx+0x8]                           hs+0x2d0   derived-disp8
+ 108b822 fn  108b6b0  8b 4b 38                       mov    ecx,DWORD PTR [rbx+0x38]                          hs+0x300   derived-disp8
+ 108b83b fn  108b6b0  48 39 3c 1a                    cmp    QWORD PTR [rdx+rbx*1],rdi                         hs+0x2c8   derived-nodisp
+ 108b844 fn  108b6b0  89 43 38                       mov    DWORD PTR [rbx+0x38],eax                          hs+0x300   derived-disp8
+ 108b854 fn  108b6b0  0f 10 04 19                    movups xmm0,XMMWORD PTR [rcx+rbx*1]                      hs+0x2c8   derived-nodisp
+ 108b858 fn  108b6b0  0f 11 04 1a                    movups XMMWORD PTR [rdx+rbx*1],xmm0                      hs+0x2c8   derived-nodisp
+ 108b85c fn  108b6b0  0f 10 4c 19 10                 movups xmm1,XMMWORD PTR [rcx+rbx*1+0x10]                 hs+0x2d8   derived-disp8
+ 108b861 fn  108b6b0  0f 11 4c 1a 10                 movups XMMWORD PTR [rdx+rbx*1+0x10],xmm1                 hs+0x2d8   derived-disp8
+ 108b866 fn  108b6b0  8b 4b 38                       mov    ecx,DWORD PTR [rbx+0x38]                          hs+0x300   derived-disp8
+ 108b871 fn  108b6b0  8b 43 08                       mov    eax,DWORD PTR [rbx+0x8]                           hs+0x2d0   derived-disp8
+ 108b911 fn  108b6b0  48 8d 9d 88 04 00 00           lea    rbx,[rbp+0x488]                                   hs+0x488   direct-disp32
+ 108b91a fn  108b6b0  8b 43 08                       mov    eax,DWORD PTR [rbx+0x8]                           hs+0x490   derived-disp8
+ 108b921 fn  108b6b0  48 39 7c d3 10                 cmp    QWORD PTR [rbx+rdx*8+0x10],rdi                    hs+0x498   derived-disp8-scaled
+ 108b92a fn  108b6b0  89 43 08                       mov    DWORD PTR [rbx+0x8],eax                           hs+0x490   derived-disp8
+ 108b92d fn  108b6b0  48 8b 4c c3 10                 mov    rcx,QWORD PTR [rbx+rax*8+0x10]                    hs+0x498   derived-disp8-scaled
+ 108b932 fn  108b6b0  48 89 4c d3 10                 mov    QWORD PTR [rbx+rdx*8+0x10],rcx                    hs+0x498   derived-disp8-scaled
+ 108b939 fn  108b6b0  8b 43 08                       mov    eax,DWORD PTR [rbx+0x8]                           hs+0x490   derived-disp8
+ 108b942 fn  108b6b0  8b 4b 38                       mov    ecx,DWORD PTR [rbx+0x38]                          hs+0x4c0   derived-disp8
+ 108b95b fn  108b6b0  48 39 3c 1a                    cmp    QWORD PTR [rdx+rbx*1],rdi                         hs+0x488   derived-nodisp
+ 108b964 fn  108b6b0  89 43 38                       mov    DWORD PTR [rbx+0x38],eax                          hs+0x4c0   derived-disp8
+ 108b974 fn  108b6b0  0f 10 04 19                    movups xmm0,XMMWORD PTR [rcx+rbx*1]                      hs+0x488   derived-nodisp
+ 108b978 fn  108b6b0  0f 11 04 1a                    movups XMMWORD PTR [rdx+rbx*1],xmm0                      hs+0x488   derived-nodisp
+ 108b97c fn  108b6b0  0f 10 4c 19 10                 movups xmm1,XMMWORD PTR [rcx+rbx*1+0x10]                 hs+0x498   derived-disp8
+ 108b981 fn  108b6b0  0f 11 4c 1a 10                 movups XMMWORD PTR [rdx+rbx*1+0x10],xmm1                 hs+0x498   derived-disp8
+ 108b986 fn  108b6b0  8b 4b 38                       mov    ecx,DWORD PTR [rbx+0x38]                          hs+0x4c0   derived-disp8
+ 108b991 fn  108b6b0  8b 43 08                       mov    eax,DWORD PTR [rbx+0x8]                           hs+0x490   derived-disp8
+ 108ba31 fn  108b6b0  48 8d 9d 48 06 00 00           lea    rbx,[rbp+0x648]                                   hs+0x648   direct-disp32
+ 108ba3a fn  108b6b0  8b 43 08                       mov    eax,DWORD PTR [rbx+0x8]                           hs+0x650   derived-disp8
+ 108ba41 fn  108b6b0  48 39 7c d3 10                 cmp    QWORD PTR [rbx+rdx*8+0x10],rdi                    hs+0x658   derived-disp8-scaled
+ 108ba4a fn  108b6b0  89 43 08                       mov    DWORD PTR [rbx+0x8],eax                           hs+0x650   derived-disp8
+ 108ba4d fn  108b6b0  48 8b 4c c3 10                 mov    rcx,QWORD PTR [rbx+rax*8+0x10]                    hs+0x658   derived-disp8-scaled
+ 108ba52 fn  108b6b0  48 89 4c d3 10                 mov    QWORD PTR [rbx+rdx*8+0x10],rcx                    hs+0x658   derived-disp8-scaled
+ 108ba59 fn  108b6b0  8b 43 08                       mov    eax,DWORD PTR [rbx+0x8]                           hs+0x650   derived-disp8
+ 108ba62 fn  108b6b0  8b 4b 38                       mov    ecx,DWORD PTR [rbx+0x38]                          hs+0x680   derived-disp8
+ 108ba7b fn  108b6b0  48 39 3c 1a                    cmp    QWORD PTR [rdx+rbx*1],rdi                         hs+0x648   derived-nodisp
+ 108ba84 fn  108b6b0  89 43 38                       mov    DWORD PTR [rbx+0x38],eax                          hs+0x680   derived-disp8
+ 108ba94 fn  108b6b0  0f 10 04 19                    movups xmm0,XMMWORD PTR [rcx+rbx*1]                      hs+0x648   derived-nodisp
+ 108ba98 fn  108b6b0  0f 11 04 1a                    movups XMMWORD PTR [rdx+rbx*1],xmm0                      hs+0x648   derived-nodisp
+ 108ba9c fn  108b6b0  0f 10 4c 19 10                 movups xmm1,XMMWORD PTR [rcx+rbx*1+0x10]                 hs+0x658   derived-disp8
+ 108baa1 fn  108b6b0  0f 11 4c 1a 10                 movups XMMWORD PTR [rdx+rbx*1+0x10],xmm1                 hs+0x658   derived-disp8
+ 108baa6 fn  108b6b0  8b 4b 38                       mov    ecx,DWORD PTR [rbx+0x38]                          hs+0x680   derived-disp8
+ 108bab1 fn  108b6b0  8b 43 08                       mov    eax,DWORD PTR [rbx+0x8]                           hs+0x650   derived-disp8
+ 108c5fe fn  108c5e0U 48 8d b1 08 01 00 00           lea    rsi,[rcx+0x108]                                   hs+0x108   direct-disp32
+ 208aae9 fn  208aaa0  0f 11 01                       movups XMMWORD PTR [rcx],xmm0                            hs+0x108   derived-nodisp
+ 208aaef fn  208aaa0  48 83 c1 10                    add    rcx,0x10                                          hs+0x118   derived-addimm8
+
+### A4 hs pending joins[4]x0x40  ctx+0x161b8..0x162b8  sites=6 functions=2 unreferenced-fn sites=0
+### forms: {'direct-disp32': 6}
+ 108af53 fn  108a440  4d 8d b4 24 08 08 00 00        lea    r14,[r12+0x808]                                   hs+0x808   direct-disp32
+ 108c48d fn  108bc70  48 8d 83 08 08 00 00           lea    rax,[rbx+0x808]                                   hs+0x808   direct-disp32
+ 108c4ba fn  108bc70  4c 89 84 18 08 08 00 00        mov    QWORD PTR [rax+rbx*1+0x808],r8                    hs+0x808   direct-disp32
+ 108c4cf fn  108bc70  0f 11 84 18 10 08 00 00        movups XMMWORD PTR [rax+rbx*1+0x810],xmm0                hs+0x810   direct-disp32
+ 108c4dc fn  108bc70  0f 11 8c 18 20 08 00 00        movups XMMWORD PTR [rax+rbx*1+0x820],xmm1                hs+0x820   direct-disp32
+ 108c4e4 fn  108bc70  0f 11 84 18 30 08 00 00        movups XMMWORD PTR [rax+rbx*1+0x830],xmm0                hs+0x830   direct-disp32
+
+### hs tail +0x908/+0x910  ctx+0x162b8..0x162c8  sites=8 functions=3 unreferenced-fn sites=0
+### forms: {'direct-disp32': 8}
+ 108cbbe fn  108c760  49 8b 86 10 09 00 00           mov    rax,QWORD PTR [r14+0x910]                         hs+0x910   direct-disp32
+ 108cbd4 fn  108c760  49 8b 86 08 09 00 00           mov    rax,QWORD PTR [r14+0x908]                         hs+0x908   direct-disp32
+ 108d899 fn  108d840  48 8d 8e 08 09 00 00           lea    rcx,[rsi+0x908]                                   hs+0x908   direct-disp32
+ 108d8c5 fn  108d840  48 8b 86 10 09 00 00           mov    rax,QWORD PTR [rsi+0x910]                         hs+0x910   direct-disp32
+ 108d8d7 fn  108d840  48 8b 86 08 09 00 00           mov    rax,QWORD PTR [rsi+0x908]                         hs+0x908   direct-disp32
+ 135071c fn  1350680  48 8d 8d 08 09 00 00           lea    rcx,[rbp+0x908]                                   hs+0x908   direct-disp32
+ 135074a fn  1350680  48 8b 85 10 09 00 00           mov    rax,QWORD PTR [rbp+0x910]                         hs+0x910   direct-disp32
+ 1350764 fn  1350680  48 8b 85 08 09 00 00           mov    rax,QWORD PTR [rbp+0x908]                         hs+0x908   direct-disp32
+
+### B1c cs ready count  ctx+0x162d8..0x162e0  sites=52 functions=30 unreferenced-fn sites=7
+### forms: {'direct-disp32': 39, 'direct-disp8': 11, 'direct-disp32(scan)': 2}
+  65fb59 fn   65fa50  83 b8 d8 62 01 00 01           cmp    DWORD PTR [rax+0x162d8],0x1                       cs+0x10    direct-disp32
+  65fc1d fn   65fa50  83 b8 d8 62 01 00 01           cmp    DWORD PTR [rax+0x162d8],0x1                       cs+0x10    direct-disp32
+  65fd88 fn   65fa50  44 8b 90 d8 62 01 00           mov    r10d,DWORD PTR [rax+0x162d8]                      cs+0x10    direct-disp32
+  66ca1c fn   66c920  03 81 d8 62 01 00              add    eax,DWORD PTR [rcx+0x162d8]                       cs+0x10    direct-disp32
+  6ec6e5 fn   6ec610  8b 88 d8 62 01 00              mov    ecx,DWORD PTR [rax+0x162d8]                       cs+0x10    direct-disp32
+  a56d64 fn   a56960  41 8b be d8 62 01 00           mov    edi,DWORD PTR [r14+0x162d8]                       cs+0x10    direct-disp32
+  a56f1d fn   a56960  41 83 be d8 62 01 00 01        cmp    DWORD PTR [r14+0x162d8],0x1                       cs+0x10    direct-disp32
+  ac72cb fn   ac7280  44 8b 90 d8 62 01 00           mov    r10d,DWORD PTR [rax+0x162d8]                      cs+0x10    direct-disp32
+  ac7c29 fn   ac7be0  44 8b 9a d8 62 01 00           mov    r11d,DWORD PTR [rdx+0x162d8]                      cs+0x10    direct-disp32
+  ac8376 fn   ac7be0  39 b1 d8 62 01 00              cmp    DWORD PTR [rcx+0x162d8],esi                       cs+0x10    direct-disp32
+  ac83c9 fn   ac7be0  3b b1 d8 62 01 00              cmp    esi,DWORD PTR [rcx+0x162d8]                       cs+0x10    direct-disp32
+  b5f3c7 fn   b5f320  8b 81 d8 62 01 00              mov    eax,DWORD PTR [rcx+0x162d8]                       cs+0x10    direct-disp32
+  b9099f fn   b90940  44 8b 42 10                    mov    r8d,DWORD PTR [rdx+0x10]                          cs+0x10    direct-disp8
+  b909c6 fn   b90940  ff 42 10                       inc    DWORD PTR [rdx+0x10]                              cs+0x10    direct-disp8
+  b91030 fn   b90eb0  8b 4b 10                       mov    ecx,DWORD PTR [rbx+0x10]                          cs+0x10    direct-disp8
+  b91054 fn   b90eb0  89 43 10                       mov    DWORD PTR [rbx+0x10],eax                          cs+0x10    direct-disp8
+  b93c1e fn   b93b50  8b 83 d8 62 01 00              mov    eax,DWORD PTR [rbx+0x162d8]                       cs+0x10    direct-disp32
+  b93cf1 fn   b93b50  44 8b a3 d8 62 01 00           mov    r12d,DWORD PTR [rbx+0x162d8]                      cs+0x10    direct-disp32
+  b9bce0 fn   b9b500  45 8b 86 d8 62 01 00           mov    r8d,DWORD PTR [r14+0x162d8]                       cs+0x10    direct-disp32
+  bde478 fn   bde430  8b 98 d8 62 01 00              mov    ebx,DWORD PTR [rax+0x162d8]                       cs+0x10    direct-disp32
+  bde4cd fn   bde430  8b 9f d8 62 01 00              mov    ebx,DWORD PTR [rdi+0x162d8]                       cs+0x10    direct-disp32
+  bde5da fn   bde430  8b 93 d8 62 01 00              mov    edx,DWORD PTR [rbx+0x162d8]                       cs+0x10    direct-disp32
+  fdce81 fn   fdce00  8b 81 d8 62 01 00              mov    eax,DWORD PTR [rcx+0x162d8]                       cs+0x10    direct-disp32
+  fdce9a fn   fdce00  c7 81 d8 62 01 00 01 00 00 00  mov    DWORD PTR [rcx+0x162d8],0x1                       cs+0x10    direct-disp32
+  fdd1ef fn   fdce00  89 88 d8 62 01 00              mov    DWORD PTR [rax+0x162d8],ecx                       cs+0x10    direct-disp32
+ 1083672 fn  1083150  39 77 10                       cmp    DWORD PTR [rdi+0x10],esi                          cs+0x10    direct-disp8
+ 10836cb fn  1083150  3b 5f 10                       cmp    ebx,DWORD PTR [rdi+0x10]                          cs+0x10    direct-disp8
+ 1083c7e fn  1083150  45 89 98 d8 62 01 00           mov    DWORD PTR [r8+0x162d8],r11d                       cs+0x10    direct-disp32
+ 1085e1a fn  1085d70  45 39 77 10                    cmp    DWORD PTR [r15+0x10],r14d                         cs+0x10    direct-disp8
+ 1085e67 fn  1085d70  45 3b 57 10                    cmp    r10d,DWORD PTR [r15+0x10]                         cs+0x10    direct-disp8
+ 1085e7e fn  1085d70  41 c7 47 10 01 00 00 00        mov    DWORD PTR [r15+0x10],0x1                          cs+0x10    direct-disp8
+ 108769f fn  1087540  8b 4b 10                       mov    ecx,DWORD PTR [rbx+0x10]                          cs+0x10    direct-disp8
+ 10876c4 fn  1087540  89 43 10                       mov    DWORD PTR [rbx+0x10],eax                          cs+0x10    direct-disp8
+ 1088b48 fn  1088a30  89 98 d8 62 01 00              mov    DWORD PTR [rax+0x162d8],ebx                       cs+0x10    direct-disp32
+ 1088e86 fn  1088d80U 45 89 9a d8 62 01 00           mov    DWORD PTR [r10+0x162d8],r11d                      cs+0x10    direct-disp32
+ 1089cd4 fn  1089720  44 8b b0 d8 62 01 00           mov    r14d,DWORD PTR [rax+0x162d8]                      cs+0x10    direct-disp32(scan)
+ 1089f85 fn  1089720  8b 88 d8 62 01 00              mov    ecx,DWORD PTR [rax+0x162d8]                       cs+0x10    direct-disp32(scan)
+ 108ab98 fn  108a440  39 81 d8 62 01 00              cmp    DWORD PTR [rcx+0x162d8],eax                       cs+0x10    direct-disp32
+ 108ac2b fn  108a440  44 3b b1 d8 62 01 00           cmp    r14d,DWORD PTR [rcx+0x162d8]                      cs+0x10    direct-disp32
+ 108e055 fn  108dfc0U 8b 87 d8 62 01 00              mov    eax,DWORD PTR [rdi+0x162d8]                       cs+0x10    direct-disp32
+ 108e121 fn  108dfc0U 44 8b af d8 62 01 00           mov    r13d,DWORD PTR [rdi+0x162d8]                      cs+0x10    direct-disp32
+ 12d57ee fn  12d57e0  8b 88 d8 62 01 00              mov    ecx,DWORD PTR [rax+0x162d8]                       cs+0x10    direct-disp32
+ 12e6756 fn  12e6690U 45 8b 82 d8 62 01 00           mov    r8d,DWORD PTR [r10+0x162d8]                       cs+0x10    direct-disp32
+ 12e683e fn  12e6690U 41 83 ba d8 62 01 00 01        cmp    DWORD PTR [r10+0x162d8],0x1                       cs+0x10    direct-disp32
+ 134f107 fn  134f100U 8b 80 d8 62 01 00              mov    eax,DWORD PTR [rax+0x162d8]                       cs+0x10    direct-disp32
+ 1359e88 fn  1359db0  41 8b 91 d8 62 01 00           mov    edx,DWORD PTR [r9+0x162d8]                        cs+0x10    direct-disp32
+ 1363670 fn  13632c0  44 8b 87 d8 62 01 00           mov    r8d,DWORD PTR [rdi+0x162d8]                       cs+0x10    direct-disp32
+ 138509c fn  1384be0  83 be d8 62 01 00 00           cmp    DWORD PTR [rsi+0x162d8],0x0                       cs+0x10    direct-disp32
+ 13850e1 fn  1384be0  3b 9e d8 62 01 00              cmp    ebx,DWORD PTR [rsi+0x162d8]                       cs+0x10    direct-disp32
+ 1386a67 fn  1386a40U 8b 81 d8 62 01 00              mov    eax,DWORD PTR [rcx+0x162d8]                       cs+0x10    direct-disp32
+ 18f9dde fn  18f9d90  83 b9 d8 62 01 00 01           cmp    DWORD PTR [rcx+0x162d8],0x1                       cs+0x10    direct-disp32
+ 18fb705 fn  18fb6d0  83 b9 d8 62 01 00 01           cmp    DWORD PTR [rcx+0x162d8],0x1                       cs+0x10    direct-disp32
+
+### B1 cs ready[4]x8  ctx+0x162e0..0x16300  sites=41 functions=24 unreferenced-fn sites=4
+### forms: {'direct-disp32': 22, 'derived-nodisp-scaled': 1, 'direct-addimm32': 1, 'direct-disp32-scaled': 5, 'direct-disp8-scaled': 10, 'direct-disp8': 1, 'direct-disp32(scan)': 1}
+  65fd8f fn   65fa50  4c 8d a0 e0 62 01 00           lea    r12,[rax+0x162e0]                                 cs+0x18    direct-disp32
+  65fdc2 fn   65fa50  4d 3b 04 c4                    cmp    r8,QWORD PTR [r12+rax*8]                          cs+0x18    derived-nodisp-scaled
+  6ec6eb fn   6ec610  48 8d b0 e0 62 01 00           lea    rsi,[rax+0x162e0]                                 cs+0x18    direct-disp32
+  a56d73 fn   a56960  49 8d 8e e0 62 01 00           lea    rcx,[r14+0x162e0]                                 cs+0x18    direct-disp32
+  a56e73 fn   a56960  49 8d 96 e0 62 01 00           lea    rdx,[r14+0x162e0]                                 cs+0x18    direct-disp32
+  ac72db fn   ac7280  48 05 e0 62 01 00              add    rax,0x162e0                                       cs+0x18    direct-addimm32
+  ac7c39 fn   ac7be0  48 8d 82 e0 62 01 00           lea    rax,[rdx+0x162e0]                                 cs+0x18    direct-disp32
+  ac8382 fn   ac7be0  48 8b 94 c1 e0 62 01 00        mov    rdx,QWORD PTR [rcx+rax*8+0x162e0]                 cs+0x18    direct-disp32-scaled
+  b5f468 fn   b5f320  49 8b 88 e0 62 01 00           mov    rcx,QWORD PTR [r8+0x162e0]                        cs+0x18    direct-disp32
+  b5f477 fn   b5f320  4d 39 a0 e0 62 01 00           cmp    QWORD PTR [r8+0x162e0],r12                        cs+0x18    direct-disp32
+  b909b0 fn   b90940  48 39 5c c2 18                 cmp    QWORD PTR [rdx+rax*8+0x18],rbx                    cs+0x18    direct-disp8-scaled
+  b909be fn   b90940  4a 89 5c c2 18                 mov    QWORD PTR [rdx+r8*8+0x18],rbx                     cs+0x18    direct-disp8-scaled
+  b91042 fn   b90eb0  48 39 7c d3 18                 cmp    QWORD PTR [rbx+rdx*8+0x18],rdi                    cs+0x18    direct-disp8-scaled
+  b91057 fn   b90eb0  48 8b 4c c3 18                 mov    rcx,QWORD PTR [rbx+rax*8+0x18]                    cs+0x18    direct-disp8-scaled
+  b9105c fn   b90eb0  48 89 4c d3 18                 mov    QWORD PTR [rbx+rdx*8+0x18],rcx                    cs+0x18    direct-disp8-scaled
+  b93c24 fn   b93b50  4c 8d ab e0 62 01 00           lea    r13,[rbx+0x162e0]                                 cs+0x18    direct-disp32
+  b9bcfc fn   b9b500  49 8d 86 e0 62 01 00           lea    rax,[r14+0x162e0]                                 cs+0x18    direct-disp32
+  bde471 fn   bde430  48 8d b8 e0 62 01 00           lea    rdi,[rax+0x162e0]                                 cs+0x18    direct-disp32
+  bde4ee fn   bde430  48 8d 97 e8 62 01 00           lea    rdx,[rdi+0x162e8]                                 cs+0x20    direct-disp32
+  bde612 fn   bde430  4c 39 84 cb e0 62 01 00        cmp    QWORD PTR [rbx+rcx*8+0x162e0],r8                  cs+0x18    direct-disp32-scaled
+  fdce7a fn   fdce00  0f 10 81 e0 62 01 00           movups xmm0,XMMWORD PTR [rcx+0x162e0]                    cs+0x18    direct-disp32
+  fdcea4 fn   fdce00  0f 10 81 f0 62 01 00           movups xmm0,XMMWORD PTR [rcx+0x162f0]                    cs+0x28    direct-disp32
+  fdceab fn   fdce00  48 89 81 e0 62 01 00           mov    QWORD PTR [rcx+0x162e0],rax                       cs+0x18    direct-disp32
+  fdd1f5 fn   fdce00  0f 11 80 e0 62 01 00           movups XMMWORD PTR [rax+0x162e0],xmm0                    cs+0x18    direct-disp32
+  fdd1fc fn   fdce00  0f 11 88 f0 62 01 00           movups XMMWORD PTR [rax+0x162f0],xmm1                    cs+0x28    direct-disp32
+ 108367d fn  1083150  48 8b 74 c7 18                 mov    rsi,QWORD PTR [rdi+rax*8+0x18]                    cs+0x18    direct-disp8-scaled
+ 1085e2d fn  1085d70  4d 8b 4c c7 18                 mov    r9,QWORD PTR [r15+rax*8+0x18]                     cs+0x18    direct-disp8-scaled
+ 1085e86 fn  1085d70  4d 89 67 18                    mov    QWORD PTR [r15+0x18],r12                          cs+0x18    direct-disp8
+ 10876b2 fn  1087540  48 39 7c c3 18                 cmp    QWORD PTR [rbx+rax*8+0x18],rdi                    cs+0x18    direct-disp8-scaled
+ 10876c7 fn  1087540  48 8b 4c c3 18                 mov    rcx,QWORD PTR [rbx+rax*8+0x18]                    cs+0x18    direct-disp8-scaled
+ 10876cc fn  1087540  48 89 4c d3 18                 mov    QWORD PTR [rbx+rdx*8+0x18],rcx                    cs+0x18    direct-disp8-scaled
+ 1089cdb fn  1089720  48 8d 88 e0 62 01 00           lea    rcx,[rax+0x162e0]                                 cs+0x18    direct-disp32(scan)
+ 108abb0 fn  108a440  4a 8b 9c f1 e0 62 01 00        mov    rbx,QWORD PTR [rcx+r14*8+0x162e0]                 cs+0x18    direct-disp32-scaled
+ 108e05b fn  108dfc0U 48 8d b7 e0 62 01 00           lea    rsi,[rdi+0x162e0]                                 cs+0x18    direct-disp32
+ 12d57f4 fn  12d57e0  4c 8d 90 e0 62 01 00           lea    r10,[rax+0x162e0]                                 cs+0x18    direct-disp32
+ 12e6797 fn  12e6690U 49 8d 92 e0 62 01 00           lea    rdx,[r10+0x162e0]                                 cs+0x18    direct-disp32
+ 1359ea0 fn  1359db0  4d 39 84 c1 e0 62 01 00        cmp    QWORD PTR [r9+rax*8+0x162e0],r8                   cs+0x18    direct-disp32-scaled
+ 136368c fn  13632c0  48 8d 87 e0 62 01 00           lea    rax,[rdi+0x162e0]                                 cs+0x18    direct-disp32
+ 13850b2 fn  1384be0  48 8b 8c c6 e0 62 01 00        mov    rcx,QWORD PTR [rsi+rax*8+0x162e0]                 cs+0x18    direct-disp32-scaled
+ 1386afa fn  1386a40U 49 8b 88 e0 62 01 00           mov    rcx,QWORD PTR [r8+0x162e0]                        cs+0x18    direct-disp32
+ 1386b09 fn  1386a40U 49 39 b0 e0 62 01 00           cmp    QWORD PTR [r8+0x162e0],rsi                        cs+0x18    direct-disp32
+
+### B2c cs syncing count  ctx+0x16300..0x16308  sites=19 functions=12 unreferenced-fn sites=2
+### forms: {'direct-disp32': 7, 'direct-disp8': 11, 'direct-disp32(scan)': 1}
+  66ca16 fn   66c920  8b 81 00 63 01 00              mov    eax,DWORD PTR [rcx+0x16300]                       cs+0x38    direct-disp32
+  b90fe6 fn   b90eb0  44 8b 43 38                    mov    r8d,DWORD PTR [rbx+0x38]                          cs+0x38    direct-disp8
+  b9100d fn   b90eb0  89 43 38                       mov    DWORD PTR [rbx+0x38],eax                          cs+0x38    direct-disp8
+ 10838c6 fn  1083150  89 77 38                       mov    DWORD PTR [rdi+0x38],esi                          cs+0x38    direct-disp8
+ 1083c88 fn  1083150  44 89 98 00 63 01 00           mov    DWORD PTR [rax+0x16300],r11d                      cs+0x38    direct-disp32
+ 108692f fn  1086920  8b 49 38                       mov    ecx,DWORD PTR [rcx+0x38]                          cs+0x38    direct-disp8
+ 108696e fn  1086920  8b 4b 38                       mov    ecx,DWORD PTR [rbx+0x38]                          cs+0x38    direct-disp8
+ 1086981 fn  1086920  89 4b 38                       mov    DWORD PTR [rbx+0x38],ecx                          cs+0x38    direct-disp8
+ 1086b76 fn  1086b70  8b 41 38                       mov    eax,DWORD PTR [rcx+0x38]                          cs+0x38    direct-disp8
+ 1086bb1 fn  1086b70  89 43 38                       mov    DWORD PTR [rbx+0x38],eax                          cs+0x38    direct-disp8
+ 1086bc8 fn  1086b70  8b 43 38                       mov    eax,DWORD PTR [rbx+0x38]                          cs+0x38    direct-disp8
+ 1087646 fn  1087540  44 8b 43 38                    mov    r8d,DWORD PTR [rbx+0x38]                          cs+0x38    direct-disp8
+ 108767c fn  1087540  89 43 38                       mov    DWORD PTR [rbx+0x38],eax                          cs+0x38    direct-disp8
+ 1088b51 fn  1088a30  89 98 00 63 01 00              mov    DWORD PTR [rax+0x16300],ebx                       cs+0x38    direct-disp32
+ 1088e90 fn  1088d80U 44 89 98 00 63 01 00           mov    DWORD PTR [rax+0x16300],r11d                      cs+0x38    direct-disp32
+ 1089ce2 fn  1089720  8b b0 00 63 01 00              mov    esi,DWORD PTR [rax+0x16300]                       cs+0x38    direct-disp32(scan)
+ 134f117 fn  134f110U 8b 80 00 63 01 00              mov    eax,DWORD PTR [rax+0x16300]                       cs+0x38    direct-disp32
+ 18f9dd5 fn  18f9d90  83 b9 00 63 01 00 00           cmp    DWORD PTR [rcx+0x16300],0x0                       cs+0x38    direct-disp32
+ 18fb6fc fn  18fb6d0  83 b9 00 63 01 00 00           cmp    DWORD PTR [rcx+0x16300],0x0                       cs+0x38    direct-disp32
+
+### B2 cs syncing[4]x16  ctx+0x16308..0x16348  sites=1 functions=1 unreferenced-fn sites=0
+### forms: {'direct-disp32(scan)': 1}
+ 1089cf3 fn  1089720  48 8d 88 08 63 01 00           lea    rcx,[rax+0x16308]                                 cs+0x40    direct-disp32(scan)
+
+### B3c cs list3 count  ctx+0x16348..0x16350  sites=19 functions=13 unreferenced-fn sites=6
+### forms: {'direct-disp32': 18, 'direct-disp32(scan)': 1}
+  b91061 fn   b90eb0  44 8b 83 80 00 00 00           mov    r8d,DWORD PTR [rbx+0x80]                          cs+0x80    direct-disp32
+  b9108e fn   b90eb0  89 83 80 00 00 00              mov    DWORD PTR [rbx+0x80],eax                          cs+0x80    direct-disp32
+  b92bc0 fn   b92b50  8b 93 80 00 00 00              mov    edx,DWORD PTR [rbx+0x80]                          cs+0x80    direct-disp32
+  b92c0b fn   b92b50  8b 8b 80 00 00 00              mov    ecx,DWORD PTR [rbx+0x80]                          cs+0x80    direct-disp32
+  b92c1f fn   b92b50  ff 83 80 00 00 00              inc    DWORD PTR [rbx+0x80]                              cs+0x80    direct-disp32
+  b93d37 fn   b93b50  8b b3 48 63 01 00              mov    esi,DWORD PTR [rbx+0x16348]                       cs+0x80    direct-disp32
+ 1083c92 fn  1083150  44 89 98 48 63 01 00           mov    DWORD PTR [rax+0x16348],r11d                      cs+0x80    direct-disp32
+ 1085e8a fn  1085d70  41 c7 87 80 00 00 00 01 00 00  mov    DWORD PTR [r15+0x80],0x1                          cs+0x80    direct-disp32
+ 10876d1 fn  1087540  44 8b 83 80 00 00 00           mov    r8d,DWORD PTR [rbx+0x80]                          cs+0x80    direct-disp32
+ 10876fe fn  1087540  89 83 80 00 00 00              mov    DWORD PTR [rbx+0x80],eax                          cs+0x80    direct-disp32
+ 1088115 fn  10880f0U 8b 91 80 00 00 00              mov    edx,DWORD PTR [rcx+0x80]                          cs+0x80    direct-disp32
+ 108816b fn  10880f0U 8b 8b 80 00 00 00              mov    ecx,DWORD PTR [rbx+0x80]                          cs+0x80    direct-disp32
+ 108817f fn  10880f0U ff 83 80 00 00 00              inc    DWORD PTR [rbx+0x80]                              cs+0x80    direct-disp32
+ 1088b5a fn  1088a30  89 98 48 63 01 00              mov    DWORD PTR [rax+0x16348],ebx                       cs+0x80    direct-disp32
+ 1088e9a fn  1088d80U 44 89 98 48 63 01 00           mov    DWORD PTR [rax+0x16348],r11d                      cs+0x80    direct-disp32
+ 108a1b1 fn  1089720  8b 98 48 63 01 00              mov    ebx,DWORD PTR [rax+0x16348]                       cs+0x80    direct-disp32(scan)
+ 108e167 fn  108dfc0U 44 8b b7 48 63 01 00           mov    r14d,DWORD PTR [rdi+0x16348]                      cs+0x80    direct-disp32
+ 1346ea8 fn  1346e30  41 8b 91 48 63 01 00           mov    edx,DWORD PTR [r9+0x16348]                        cs+0x80    direct-disp32
+ 134ee09 fn  134ee00U 45 8b 81 48 63 01 00           mov    r8d,DWORD PTR [r9+0x16348]                        cs+0x80    direct-disp32
+
+### B3 cs list3[4]x16  ctx+0x16350..0x16390  sites=19 functions=10 unreferenced-fn sites=4
+### forms: {'direct-disp32-scaled': 10, 'direct-disp32': 6, 'direct-addimm32': 2, 'direct-disp32(scan)': 1}
+  b91077 fn   b90eb0  48 39 bc c3 88 00 00 00        cmp    QWORD PTR [rbx+rax*8+0x88],rdi                    cs+0x88    direct-disp32-scaled
+  b9109c fn   b90eb0  0f 10 84 cb 88 00 00 00        movups xmm0,XMMWORD PTR [rbx+rcx*8+0x88]                 cs+0x88    direct-disp32-scaled
+  b910a4 fn   b90eb0  0f 11 84 d3 88 00 00 00        movups XMMWORD PTR [rbx+rdx*8+0x88],xmm0                 cs+0x88    direct-disp32-scaled
+  b910ae fn   b90eb0  48 8d 83 88 00 00 00           lea    rax,[rbx+0x88]                                    cs+0x88    direct-disp32
+  b92bd7 fn   b92b50  48 3b ac cb 88 00 00 00        cmp    rbp,QWORD PTR [rbx+rcx*8+0x88]                    cs+0x88    direct-disp32-scaled
+  b92bf2 fn   b92b50  48 89 ac c3 88 00 00 00        mov    QWORD PTR [rbx+rax*8+0x88],rbp                    cs+0x88    direct-disp32-scaled
+  b93d3d fn   b93b50  48 81 c3 50 63 01 00           add    rbx,0x16350                                       cs+0x88    direct-addimm32
+ 1085e95 fn  1085d70  4d 89 a7 88 00 00 00           mov    QWORD PTR [r15+0x88],r12                          cs+0x88    direct-disp32
+ 1085ea6 fn  1085d70  49 89 87 90 00 00 00           mov    QWORD PTR [r15+0x90],rax                          cs+0x90    direct-disp32
+ 10876e7 fn  1087540  48 39 bc c3 88 00 00 00        cmp    QWORD PTR [rbx+rax*8+0x88],rdi                    cs+0x88    direct-disp32-scaled
+ 108770c fn  1087540  0f 10 84 cb 88 00 00 00        movups xmm0,XMMWORD PTR [rbx+rcx*8+0x88]                 cs+0x88    direct-disp32-scaled
+ 1087714 fn  1087540  0f 11 84 d3 88 00 00 00        movups XMMWORD PTR [rbx+rdx*8+0x88],xmm0                 cs+0x88    direct-disp32-scaled
+ 108771e fn  1087540  48 8d 8b 88 00 00 00           lea    rcx,[rbx+0x88]                                    cs+0x88    direct-disp32
+ 1088137 fn  10880f0U 4c 3b 84 cb 88 00 00 00        cmp    r8,QWORD PTR [rbx+rcx*8+0x88]                     cs+0x88    direct-disp32-scaled
+ 1088152 fn  10880f0U 4c 89 84 c3 88 00 00 00        mov    QWORD PTR [rbx+rax*8+0x88],r8                     cs+0x88    direct-disp32-scaled
+ 108a1b7 fn  1089720  48 8d b0 50 63 01 00           lea    rsi,[rax+0x16350]                                 cs+0x88    direct-disp32(scan)
+ 108e16e fn  108dfc0U 48 81 c7 50 63 01 00           add    rdi,0x16350                                       cs+0x88    direct-addimm32
+ 1346eb3 fn  1346e30  49 8d 81 50 63 01 00           lea    rax,[r9+0x16350]                                  cs+0x88    direct-disp32
+ 134ee15 fn  134ee00U 49 8d 89 50 63 01 00           lea    rcx,[r9+0x16350]                                  cs+0x88    direct-disp32
+
+### B4c cs session count  ctx+0x16390..0x16398  sites=174 functions=128 unreferenced-fn sites=42
+### forms: {'direct-disp32': 172, 'direct-disp32(scan)': 2}
+  517fea fn   517fd0  83 b8 90 63 01 00 04           cmp    DWORD PTR [rax+0x16390],0x4                       cs+0xc8    direct-disp32
+  5a8114 fn   5a80f0  45 8b 8a 90 63 01 00           mov    r9d,DWORD PTR [r10+0x16390]                       cs+0xc8    direct-disp32
+  607157 fn   607150U 8b 90 90 63 01 00              mov    edx,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+  63118b fn   631130  45 8b 81 90 63 01 00           mov    r8d,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+  6314ea fn   631320  41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+  67a6f5 fn   67a6e0U 83 b8 90 63 01 00 04           cmp    DWORD PTR [rax+0x16390],0x4                       cs+0xc8    direct-disp32
+  67ab34 fn   67ab10U 83 b8 90 63 01 00 04           cmp    DWORD PTR [rax+0x16390],0x4                       cs+0xc8    direct-disp32
+  6e2cdb fn   6e2c10  41 8b 91 90 63 01 00           mov    edx,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+  6ed98b fn   6ed910  41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+  71710d fn   7152f0  45 8b 81 90 63 01 00           mov    r8d,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+  ab3235 fn   ab2fa0  39 9f 90 63 01 00              cmp    DWORD PTR [rdi+0x16390],ebx                       cs+0xc8    direct-disp32
+  ab32bb fn   ab2fa0  3b 9f 90 63 01 00              cmp    ebx,DWORD PTR [rdi+0x16390]                       cs+0xc8    direct-disp32
+  adb5ae fn   adaf10  83 b8 90 63 01 00 01           cmp    DWORD PTR [rax+0x16390],0x1                       cs+0xc8    direct-disp32
+  b5ebc2 fn   b5ea90  83 b8 90 63 01 00 04           cmp    DWORD PTR [rax+0x16390],0x4                       cs+0xc8    direct-disp32
+  b5ef45 fn   b5ee80U 39 9f 90 63 01 00              cmp    DWORD PTR [rdi+0x16390],ebx                       cs+0xc8    direct-disp32
+  b5efcb fn   b5ee80U 3b 9f 90 63 01 00              cmp    ebx,DWORD PTR [rdi+0x16390]                       cs+0xc8    direct-disp32
+  b67313 fn   b67250  83 bb 90 63 01 00 01           cmp    DWORD PTR [rbx+0x16390],0x1                       cs+0xc8    direct-disp32
+  b900cf fn   b90040U 45 8b 81 90 63 01 00           mov    r8d,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+  b902ff fn   b90260U 45 8b 81 90 63 01 00           mov    r8d,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+  b90491 fn   b903f0  45 8b 81 90 63 01 00           mov    r8d,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+  b90a86 fn   b90a10U 44 39 bb c8 00 00 00           cmp    DWORD PTR [rbx+0xc8],r15d                         cs+0xc8    direct-disp32
+  b90aa5 fn   b90a10U 3b bb c8 00 00 00              cmp    edi,DWORD PTR [rbx+0xc8]                          cs+0xc8    direct-disp32
+  b90ab0 fn   b90a10U 44 89 bb c8 00 00 00           mov    DWORD PTR [rbx+0xc8],r15d                         cs+0xc8    direct-disp32
+  b90b98 fn   b90b20  8b 93 c8 00 00 00              mov    edx,DWORD PTR [rbx+0xc8]                          cs+0xc8    direct-disp32
+  b90be3 fn   b90b20  8b 8b c8 00 00 00              mov    ecx,DWORD PTR [rbx+0xc8]                          cs+0xc8    direct-disp32
+  b90c03 fn   b90b20  89 83 c8 00 00 00              mov    DWORD PTR [rbx+0xc8],eax                          cs+0xc8    direct-disp32
+  b90f80 fn   b90eb0  8b 93 c8 00 00 00              mov    edx,DWORD PTR [rbx+0xc8]                          cs+0xc8    direct-disp32
+  b90fb2 fn   b90eb0  ff 8b c8 00 00 00              dec    DWORD PTR [rbx+0xc8]                              cs+0xc8    direct-disp32
+  b90fb8 fn   b90eb0  8b 83 c8 00 00 00              mov    eax,DWORD PTR [rbx+0xc8]                          cs+0xc8    direct-disp32
+  b9140a fn   b91320  44 39 bb c8 00 00 00           cmp    DWORD PTR [rbx+0xc8],r15d                         cs+0xc8    direct-disp32
+  b9144f fn   b91320  3b bb c8 00 00 00              cmp    edi,DWORD PTR [rbx+0xc8]                          cs+0xc8    direct-disp32
+  b923c1 fn   b92370U 41 8b 90 c8 00 00 00           mov    edx,DWORD PTR [r8+0xc8]                           cs+0xc8    direct-disp32
+  b92707 fn   b925a0  41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+  b993c8 fn   b99310  45 8b 81 90 63 01 00           mov    r8d,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+  b9a067 fn   b99ff0U 8b 91 90 63 01 00              mov    edx,DWORD PTR [rcx+0x16390]                       cs+0xc8    direct-disp32
+  b9bcd7 fn   b9b500  41 39 be 90 63 01 00           cmp    DWORD PTR [r14+0x16390],edi                       cs+0xc8    direct-disp32
+  b9bd20 fn   b9b500  41 3b be 90 63 01 00           cmp    edi,DWORD PTR [r14+0x16390]                       cs+0xc8    direct-disp32
+  b9dc05 fn   b9dba0U 8b 93 90 63 01 00              mov    edx,DWORD PTR [rbx+0x16390]                       cs+0xc8    direct-disp32
+  b9e7ae fn   b9e670  45 8b 86 90 63 01 00           mov    r8d,DWORD PTR [r14+0x16390]                       cs+0xc8    direct-disp32
+  ba58e2 fn   ba5840  45 8b 81 90 63 01 00           mov    r8d,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+  baa5d7 fn   baa560  8b 91 90 63 01 00              mov    edx,DWORD PTR [rcx+0x16390]                       cs+0xc8    direct-disp32
+  bad7d1 fn   bad740  45 8b 81 90 63 01 00           mov    r8d,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+  bb4513 fn   bb44c0  41 8b 90 c8 00 00 00           mov    edx,DWORD PTR [r8+0xc8]                           cs+0xc8    direct-disp32
+  bba82a fn   bba740  41 8b 93 90 63 01 00           mov    edx,DWORD PTR [r11+0x16390]                       cs+0xc8    direct-disp32
+  bde52c fn   bde430  8b bb 90 63 01 00              mov    edi,DWORD PTR [rbx+0x16390]                       cs+0xc8    direct-disp32
+  bde5cd fn   bde430  8b 83 90 63 01 00              mov    eax,DWORD PTR [rbx+0x16390]                       cs+0xc8    direct-disp32
+ 103ad09 fn  103aa00  44 8b 8a 90 63 01 00           mov    r9d,DWORD PTR [rdx+0x16390]                       cs+0xc8    direct-disp32
+ 103ada6 fn  103aa00  44 8b 8a 90 63 01 00           mov    r9d,DWORD PTR [rdx+0x16390]                       cs+0xc8    direct-disp32
+ 103ae01 fn  103aa00  44 8b 8a 90 63 01 00           mov    r9d,DWORD PTR [rdx+0x16390]                       cs+0xc8    direct-disp32
+ 103ae57 fn  103aa00  44 8b 82 90 63 01 00           mov    r8d,DWORD PTR [rdx+0x16390]                       cs+0xc8    direct-disp32
+ 1083c3a fn  1083150  45 8b 88 90 63 01 00           mov    r9d,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 10849bd fn  10845b0  44 39 a7 c8 00 00 00           cmp    DWORD PTR [rdi+0xc8],r12d                         cs+0xc8    direct-disp32
+ 10849e5 fn  10845b0  3b 9f c8 00 00 00              cmp    ebx,DWORD PTR [rdi+0xc8]                          cs+0xc8    direct-disp32
+ 10849ed fn  10845b0  44 89 a7 c8 00 00 00           mov    DWORD PTR [rdi+0xc8],r12d                         cs+0xc8    direct-disp32
+ 1084fd0 fn  1084fd0  44 8b 89 c8 00 00 00           mov    r9d,DWORD PTR [rcx+0xc8]                          cs+0xc8    direct-disp32
+ 108621c fn  1085d70  45 8b 88 90 63 01 00           mov    r9d,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 1087066 fn  1087010  44 39 a9 c8 00 00 00           cmp    DWORD PTR [rcx+0xc8],r13d                         cs+0xc8    direct-disp32
+ 1087219 fn  1087010  45 3b a7 c8 00 00 00           cmp    r12d,DWORD PTR [r15+0xc8]                         cs+0xc8    direct-disp32
+ 1087251 fn  1087010  45 89 af c8 00 00 00           mov    DWORD PTR [r15+0xc8],r13d                         cs+0xc8    direct-disp32
+ 10872f1 fn  10872c0U 8b 89 c8 00 00 00              mov    ecx,DWORD PTR [rcx+0xc8]                          cs+0xc8    direct-disp32
+ 1087333 fn  10872c0U 8b 8f c8 00 00 00              mov    ecx,DWORD PTR [rdi+0xc8]                          cs+0xc8    direct-disp32
+ 108734c fn  10872c0U 89 87 c8 00 00 00              mov    DWORD PTR [rdi+0xc8],eax                          cs+0xc8    direct-disp32
+ 10875d0 fn  1087540  8b 93 c8 00 00 00              mov    edx,DWORD PTR [rbx+0xc8]                          cs+0xc8    direct-disp32
+ 1087612 fn  1087540  ff 8b c8 00 00 00              dec    DWORD PTR [rbx+0xc8]                              cs+0xc8    direct-disp32
+ 1087618 fn  1087540  8b 83 c8 00 00 00              mov    eax,DWORD PTR [rbx+0xc8]                          cs+0xc8    direct-disp32
+ 1087e4c fn  1087da0U 39 b3 c8 00 00 00              cmp    DWORD PTR [rbx+0xc8],esi                          cs+0xc8    direct-disp32
+ 1087e8f fn  1087da0U 3b bb c8 00 00 00              cmp    edi,DWORD PTR [rbx+0xc8]                          cs+0xc8    direct-disp32
+ 1088b63 fn  1088a30  c7 80 90 63 01 00 01 00 00 00  mov    DWORD PTR [rax+0x16390],0x1                       cs+0xc8    direct-disp32
+ 1088e54 fn  1088d80U 45 8b 82 90 63 01 00           mov    r8d,DWORD PTR [r10+0x16390]                       cs+0xc8    direct-disp32
+ 10896b8 fn  10896a0U 45 8b 8a 90 63 01 00           mov    r9d,DWORD PTR [r10+0x16390]                       cs+0xc8    direct-disp32
+ 1089cfe fn  1089720  8b 88 90 63 01 00              mov    ecx,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32(scan)
+ 1089d9d fn  1089720  45 8b 88 90 63 01 00           mov    r9d,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 1089f8e fn  1089720  8b 88 90 63 01 00              mov    ecx,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32(scan)
+ 108aa2c fn  108a440  44 8b 80 90 63 01 00           mov    r8d,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 108bf59 fn  108bc70  41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 1097330 fn  10971f0  41 8b 91 90 63 01 00           mov    edx,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 1097394 fn  10971f0  41 8b 89 90 63 01 00           mov    ecx,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 10976f0 fn  1097560  8b 82 90 63 01 00              mov    eax,DWORD PTR [rdx+0x16390]                       cs+0xc8    direct-disp32
+ 117852a fn  1178380  8b 88 90 63 01 00              mov    ecx,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 11785d7 fn  1178380  8b 88 90 63 01 00              mov    ecx,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 117865f fn  1178380  8b 88 90 63 01 00              mov    ecx,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 11786eb fn  1178380  8b 88 90 63 01 00              mov    ecx,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 11792fa fn  1179150  8b 88 90 63 01 00              mov    ecx,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 11793a7 fn  1179150  8b 88 90 63 01 00              mov    ecx,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 117942f fn  1179150  8b 88 90 63 01 00              mov    ecx,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 11794bb fn  1179150  8b 88 90 63 01 00              mov    ecx,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 11ce215 fn  11ce1f0U 8b 88 90 63 01 00              mov    ecx,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 11cf020 fn  11cf000  41 8b 9b 90 63 01 00           mov    ebx,DWORD PTR [r11+0x16390]                       cs+0xc8    direct-disp32
+ 1291baa fn  1291ba0U 44 8b 80 90 63 01 00           mov    r8d,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 1291c3a fn  1291c30U 44 8b 80 90 63 01 00           mov    r8d,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 12d7684 fn  12d5ac0  8b 8a 90 63 01 00              mov    ecx,DWORD PTR [rdx+0x16390]                       cs+0xc8    direct-disp32
+ 12efade fn  12efab0  8b a8 90 63 01 00              mov    ebp,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 12f2514 fn  12f2490  44 8b 9b 90 63 01 00           mov    r11d,DWORD PTR [rbx+0x16390]                      cs+0xc8    direct-disp32
+ 12f287c fn  12f2780  45 8b 8a 90 63 01 00           mov    r9d,DWORD PTR [r10+0x16390]                       cs+0xc8    direct-disp32
+ 12f2ad7 fn  12f2a70U 45 8b 8a 90 63 01 00           mov    r9d,DWORD PTR [r10+0x16390]                       cs+0xc8    direct-disp32
+ 133a51a fn  133a1b0  8b 88 90 63 01 00              mov    ecx,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 133ecb0 fn  133eba0  44 8b 81 90 63 01 00           mov    r8d,DWORD PTR [rcx+0x16390]                       cs+0xc8    direct-disp32
+ 1341afd fn  1341790  44 8b 82 90 63 01 00           mov    r8d,DWORD PTR [rdx+0x16390]                       cs+0xc8    direct-disp32
+ 1346ed6 fn  1346e30  41 8b 81 90 63 01 00           mov    eax,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 134e801 fn  134e730  44 39 a3 90 63 01 00           cmp    DWORD PTR [rbx+0x16390],r12d                      cs+0xc8    direct-disp32
+ 134eb69 fn  134e730  44 3b a3 90 63 01 00           cmp    r12d,DWORD PTR [rbx+0x16390]                      cs+0xc8    direct-disp32
+ 134eec9 fn  134eec0  45 8b 82 90 63 01 00           mov    r8d,DWORD PTR [r10+0x16390]                       cs+0xc8    direct-disp32
+ 134f127 fn  134f120U 8b 80 90 63 01 00              mov    eax,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 134f140 fn  134f130U 45 8b 81 c8 00 00 00           mov    r8d,DWORD PTR [r9+0xc8]                           cs+0xc8    direct-disp32
+ 134f199 fn  134f180U 45 8b 88 90 63 01 00           mov    r9d,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 134f1f9 fn  134f1f0U 45 8b 81 90 63 01 00           mov    r8d,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 134fa12 fn  134f980  83 bb 90 63 01 00 01           cmp    DWORD PTR [rbx+0x16390],0x1                       cs+0xc8    direct-disp32
+ 134fa9f fn  134fa90  39 99 90 63 01 00              cmp    DWORD PTR [rcx+0x16390],ebx                       cs+0xc8    direct-disp32
+ 134fb11 fn  134fa90  3b 9e 90 63 01 00              cmp    ebx,DWORD PTR [rsi+0x16390]                       cs+0xc8    direct-disp32
+ 134fb5c fn  134fb30U 8b 91 90 63 01 00              mov    edx,DWORD PTR [rcx+0x16390]                       cs+0xc8    direct-disp32
+ 134fbfb fn  134fbe0  83 bb 90 63 01 00 01           cmp    DWORD PTR [rbx+0x16390],0x1                       cs+0xc8    direct-disp32
+ 136365a fn  13632c0  39 9f 90 63 01 00              cmp    DWORD PTR [rdi+0x16390],ebx                       cs+0xc8    direct-disp32
+ 13636b0 fn  13632c0  3b 9f 90 63 01 00              cmp    ebx,DWORD PTR [rdi+0x16390]                       cs+0xc8    direct-disp32
+ 1366d3b fn  1366d20  41 8b b9 90 63 01 00           mov    edi,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 1367be1 fn  1367ba0  2b 98 90 63 01 00              sub    ebx,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 13685ca fn  13685b0  2b 98 90 63 01 00              sub    ebx,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 1370ddc fn  1370dd0U 45 8b 8a 90 63 01 00           mov    r9d,DWORD PTR [r10+0x16390]                       cs+0xc8    direct-disp32
+ 1381268 fn  1381220  41 39 bf 90 63 01 00           cmp    DWORD PTR [r15+0x16390],edi                       cs+0xc8    direct-disp32
+ 1381556 fn  1381220  41 3b bf 90 63 01 00           cmp    edi,DWORD PTR [r15+0x16390]                       cs+0xc8    direct-disp32
+ 1381a2d fn  13819b0U 44 8b 8e 90 63 01 00           mov    r9d,DWORD PTR [rsi+0x16390]                       cs+0xc8    direct-disp32
+ 1381edd fn  1381dc0  8b 8a 90 63 01 00              mov    ecx,DWORD PTR [rdx+0x16390]                       cs+0xc8    direct-disp32
+ 1382539 fn  1382530U 45 8b 81 90 63 01 00           mov    r8d,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 1382589 fn  1382580U 45 8b 81 90 63 01 00           mov    r8d,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 1382609 fn  1382600U 45 8b 82 90 63 01 00           mov    r8d,DWORD PTR [r10+0x16390]                       cs+0xc8    direct-disp32
+ 138266f fn  1382650  41 8b 91 90 63 01 00           mov    edx,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 1382aa0 fn  1382a60  44 39 bf c8 00 00 00           cmp    DWORD PTR [rdi+0xc8],r15d                         cs+0xc8    direct-disp32
+ 1382c10 fn  1382a60  3b 9f c8 00 00 00              cmp    ebx,DWORD PTR [rdi+0xc8]                          cs+0xc8    direct-disp32
+ 1382df2 fn  1382dd0U 39 9f c8 00 00 00              cmp    DWORD PTR [rdi+0xc8],ebx                          cs+0xc8    direct-disp32
+ 1382e79 fn  1382dd0U 3b 9f c8 00 00 00              cmp    ebx,DWORD PTR [rdi+0xc8]                          cs+0xc8    direct-disp32
+ 13834c4 fn  1383470U 39 9f c8 00 00 00              cmp    DWORD PTR [rdi+0xc8],ebx                          cs+0xc8    direct-disp32
+ 1383549 fn  1383470U 3b 9f c8 00 00 00              cmp    ebx,DWORD PTR [rdi+0xc8]                          cs+0xc8    direct-disp32
+ 13951ae fn  1394fd0  41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 13a5a15 fn  13a4f90  45 8b 81 90 63 01 00           mov    r8d,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 13e46ee fn  13e41c0  41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 13e5271 fn  13e5220  8b 8a 90 63 01 00              mov    ecx,DWORD PTR [rdx+0x16390]                       cs+0xc8    direct-disp32
+ 13e6356 fn  13e6250  41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 13e64f6 fn  13e6250  41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 13eefaf fn  13eeac0  8b 90 90 63 01 00              mov    edx,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 142ef10 fn  142ee70  41 8b 91 90 63 01 00           mov    edx,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 14623c8 fn  1461b60  41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 1466f5d fn  1466170  45 8b 88 90 63 01 00           mov    r9d,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 146aa0f fn  146a5b0  41 8b b3 90 63 01 00           mov    esi,DWORD PTR [r11+0x16390]                       cs+0xc8    direct-disp32
+ 146c424 fn  146c2f0  41 8b 81 90 63 01 00           mov    eax,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 146c6ff fn  146c2f0  39 81 90 63 01 00              cmp    DWORD PTR [rcx+0x16390],eax                       cs+0xc8    direct-disp32
+ 146cbd9 fn  146c2f0  41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 146cfc4 fn  146c2f0  3b 81 90 63 01 00              cmp    eax,DWORD PTR [rcx+0x16390]                       cs+0xc8    direct-disp32
+ 146f7aa fn  146f740  39 b3 90 63 01 00              cmp    DWORD PTR [rbx+0x16390],esi                       cs+0xc8    direct-disp32
+ 146f9f6 fn  146f740  3b ab 90 63 01 00              cmp    ebp,DWORD PTR [rbx+0x16390]                       cs+0xc8    direct-disp32
+ 146fd9f fn  146fc40  41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 14710ce fn  1470d90  45 8b 82 90 63 01 00           mov    r8d,DWORD PTR [r10+0x16390]                       cs+0xc8    direct-disp32
+ 1471a46 fn  14719f0U 44 8b 93 90 63 01 00           mov    r10d,DWORD PTR [rbx+0x16390]                      cs+0xc8    direct-disp32
+ 1471b5d fn  1471b00U 45 8b 8b 90 63 01 00           mov    r9d,DWORD PTR [r11+0x16390]                       cs+0xc8    direct-disp32
+ 1471cad fn  1471c50U 45 8b 8b 90 63 01 00           mov    r9d,DWORD PTR [r11+0x16390]                       cs+0xc8    direct-disp32
+ 14cfe98 fn  14cfd80  8b a8 90 63 01 00              mov    ebp,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 14d03f3 fn  14d0370  41 8b 91 90 63 01 00           mov    edx,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 1759d84 fn  1759d20  8b 90 90 63 01 00              mov    edx,DWORD PTR [rax+0x16390]                       cs+0xc8    direct-disp32
+ 1819fd4 fn  1819a70  41 8b 91 90 63 01 00           mov    edx,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 181a0e4 fn  1819a70  41 8b 91 90 63 01 00           mov    edx,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 182f73f fn  182f560  41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 186fe34 fn  186fd70  41 8b 91 90 63 01 00           mov    edx,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 186ff18 fn  186fd70  41 8b 88 90 63 01 00           mov    ecx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 1870146 fn  18700a0  41 8b 91 90 63 01 00           mov    edx,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 18a18c1 fn  18a17d0  45 8b 81 90 63 01 00           mov    r8d,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 18af0f5 fn  18aebc0  41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 18b3e8c fn  18b3a90  41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 18f9de7 fn  18f9d90  83 b9 90 63 01 00 01           cmp    DWORD PTR [rcx+0x16390],0x1                       cs+0xc8    direct-disp32
+ 18fb3f9 fn  18fb330  83 bb 90 63 01 00 01           cmp    DWORD PTR [rbx+0x16390],0x1                       cs+0xc8    direct-disp32
+ 18fb70e fn  18fb6d0  83 b9 90 63 01 00 01           cmp    DWORD PTR [rcx+0x16390],0x1                       cs+0xc8    direct-disp32
+ 195af56 fn  195ae20  41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 195e959 fn  195e650  41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 195f076 fn  195ee20  41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+ 198a8eb fn  1989c80  41 8b 91 90 63 01 00           mov    edx,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 19a46af fn  19a43f0  41 8b 91 90 63 01 00           mov    edx,DWORD PTR [r9+0x16390]                        cs+0xc8    direct-disp32
+ 19a544b fn  19a5370U 41 8b 90 90 63 01 00           mov    edx,DWORD PTR [r8+0x16390]                        cs+0xc8    direct-disp32
+
+### B4 cs session[4]x32  ctx+0x16398..0x16418  sites=277 functions=106 unreferenced-fn sites=76
+### forms: {'direct-disp32': 238, 'derived-disp8': 30, 'derived-nodisp': 3, 'direct-disp32(scan)': 1, 'derived-addimm8': 2, 'direct-addimm32': 3}
+  5a8120 fn   5a80f0  49 8d 8a 98 63 01 00           lea    rcx,[r10+0x16398]                                 cs+0xd0    direct-disp32
+  5a813d fn   5a80f0  49 8d 8a 98 63 01 00           lea    rcx,[r10+0x16398]                                 cs+0xd0    direct-disp32
+  5a8149 fn   5a80f0  80 79 18 00                    cmp    BYTE PTR [rcx+0x18],0x0                           cs+0xe8    derived-disp8
+  5a814f fn   5a80f0  80 79 19 00                    cmp    BYTE PTR [rcx+0x19],0x0                           cs+0xe9    derived-disp8
+  607171 fn   607150U 49 8d 89 d0 00 00 00           lea    rcx,[r9+0xd0]                                     cs+0xd0    direct-disp32
+  607191 fn   607150U 42 8b 84 08 e4 00 00 00        mov    eax,DWORD PTR [rax+r9*1+0xe4]                     cs+0xe4    direct-disp32
+  63119b fn   631130  49 8d 91 98 63 01 00           lea    rdx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+  6311c8 fn   631130  42 8b 84 08 ac 63 01 00        mov    eax,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+  6314f5 fn   631320  49 8d 88 98 63 01 00           lea    rcx,[r8+0x16398]                                  cs+0xd0    direct-disp32
+  631551 fn   631320  42 8b 8c 00 ac 63 01 00        mov    ecx,DWORD PTR [rax+r8*1+0x163ac]                  cs+0xe4    direct-disp32
+  6e2ced fn   6e2c10  49 8d 81 98 63 01 00           lea    rax,[r9+0x16398]                                  cs+0xd0    direct-disp32
+  6e2d3f fn   6e2c10  42 8b 94 08 ac 63 01 00        mov    edx,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+  6ed9b6 fn   6ed910  4e 39 8c 01 98 63 01 00        cmp    QWORD PTR [rcx+r8*1+0x16398],r9                   cs+0xd0    direct-disp32
+  717119 fn   7152f0  49 8d 91 98 63 01 00           lea    rdx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+  7171e4 fn   7152f0  42 8b 8c 08 ac 63 01 00        mov    ecx,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+  ab3247 fn   ab2fa0  4c 8b 94 38 98 63 01 00        mov    r10,QWORD PTR [rax+rdi*1+0x16398]                 cs+0xd0    direct-disp32
+  b5ef57 fn   b5ee80U 4c 8b 94 38 98 63 01 00        mov    r10,QWORD PTR [rax+rdi*1+0x16398]                 cs+0xd0    direct-disp32
+  b900df fn   b90040U 49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+  b90108 fn   b90040U 42 83 bc 08 ac 63 01 00 ff     cmp    DWORD PTR [rax+r9*1+0x163ac],0xffffffff           cs+0xe4    direct-disp32
+  b9013b fn   b90040U 42 8b 84 08 ac 63 01 00        mov    eax,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+  b9030f fn   b90260U 49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+  b90338 fn   b90260U 42 83 bc 08 ac 63 01 00 ff     cmp    DWORD PTR [rax+r9*1+0x163ac],0xffffffff           cs+0xe4    direct-disp32
+  b9036b fn   b90260U 42 8b 84 08 ac 63 01 00        mov    eax,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+  b904a1 fn   b903f0  49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+  b904cb fn   b903f0  42 83 bc 08 ac 63 01 00 ff     cmp    DWORD PTR [rax+r9*1+0x163ac],0xffffffff           cs+0xe4    direct-disp32
+  b9050b fn   b903f0  42 8b 84 08 ac 63 01 00        mov    eax,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+  b90a96 fn   b90a10U 48 8b 8c 19 d0 00 00 00        mov    rcx,QWORD PTR [rcx+rbx*1+0xd0]                    cs+0xd0    direct-disp32
+  b90ab7 fn   b90a10U 0f 11 83 d0 00 00 00           movups XMMWORD PTR [rbx+0xd0],xmm0                       cs+0xd0    direct-disp32
+  b90abe fn   b90a10U 0f 11 83 e0 00 00 00           movups XMMWORD PTR [rbx+0xe0],xmm0                       cs+0xe0    direct-disp32
+  b90ac5 fn   b90a10U 0f 11 83 f0 00 00 00           movups XMMWORD PTR [rbx+0xf0],xmm0                       cs+0xf0    direct-disp32
+  b90acc fn   b90a10U 0f 11 83 00 01 00 00           movups XMMWORD PTR [rbx+0x100],xmm0                      cs+0x100   direct-disp32
+  b90ad3 fn   b90a10U 0f 11 83 10 01 00 00           movups XMMWORD PTR [rbx+0x110],xmm0                      cs+0x110   direct-disp32
+  b90ada fn   b90a10U 0f 11 83 20 01 00 00           movups XMMWORD PTR [rbx+0x120],xmm0                      cs+0x120   direct-disp32
+  b90ae1 fn   b90a10U 0f 11 83 30 01 00 00           movups XMMWORD PTR [rbx+0x130],xmm0                      cs+0x130   direct-disp32
+  b90ae8 fn   b90a10U 0f 11 83 40 01 00 00           movups XMMWORD PTR [rbx+0x140],xmm0                      cs+0x140   direct-disp32
+  b90bb6 fn   b90b20  48 39 bc 18 d0 00 00 00        cmp    QWORD PTR [rax+rbx*1+0xd0],rdi                    cs+0xd0    direct-disp32
+  b90f98 fn   b90eb0  48 39 bc 18 d0 00 00 00        cmp    QWORD PTR [rax+rbx*1+0xd0],rdi                    cs+0xd0    direct-disp32
+  b90fc6 fn   b90eb0  0f 10 84 18 d0 00 00 00        movups xmm0,XMMWORD PTR [rax+rbx*1+0xd0]                 cs+0xd0    direct-disp32
+  b90fce fn   b90eb0  0f 11 84 1e d0 00 00 00        movups XMMWORD PTR [rsi+rbx*1+0xd0],xmm0                 cs+0xd0    direct-disp32
+  b90fd6 fn   b90eb0  0f 10 8c 18 e0 00 00 00        movups xmm1,XMMWORD PTR [rax+rbx*1+0xe0]                 cs+0xe0    direct-disp32
+  b90fde fn   b90eb0  0f 11 8c 1e e0 00 00 00        movups XMMWORD PTR [rsi+rbx*1+0xe0],xmm1                 cs+0xe0    direct-disp32
+  b91426 fn   b91320  4c 8b 84 18 d0 00 00 00        mov    r8,QWORD PTR [rax+rbx*1+0xd0]                     cs+0xd0    direct-disp32
+  b923ce fn   b92370U 49 8d 80 d0 00 00 00           lea    rax,[r8+0xd0]                                     cs+0xd0    direct-disp32
+  b923e8 fn   b92370U 49 8d 88 d0 00 00 00           lea    rcx,[r8+0xd0]                                     cs+0xd0    direct-disp32
+  b923f8 fn   b92370U c6 41 19 01                    mov    BYTE PTR [rcx+0x19],0x1                           cs+0xe9    derived-disp8
+  b92712 fn   b925a0  49 8d 80 98 63 01 00           lea    rax,[r8+0x16398]                                  cs+0xd0    direct-disp32
+  b92790 fn   b925a0  42 8b 8c 00 ac 63 01 00        mov    ecx,DWORD PTR [rax+r8*1+0x163ac]                  cs+0xe4    direct-disp32
+  b993d4 fn   b99310  49 8d 91 98 63 01 00           lea    rdx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+  b994a8 fn   b99310  42 8b 94 08 ac 63 01 00        mov    edx,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+  b9a07a fn   b99ff0U 49 8d 80 d0 00 00 00           lea    rax,[r8+0xd0]                                     cs+0xd0    direct-disp32
+  b9a094 fn   b99ff0U 49 8d 88 d0 00 00 00           lea    rcx,[r8+0xd0]                                     cs+0xd0    direct-disp32
+  b9a0a4 fn   b99ff0U c6 41 18 01                    mov    BYTE PTR [rcx+0x18],0x1                           cs+0xe8    derived-disp8
+  b9bcef fn   b9b500  4a 8b 94 30 98 63 01 00        mov    rdx,QWORD PTR [rax+r14*1+0x16398]                 cs+0xd0    direct-disp32
+  b9dc1c fn   b9dba0U 48 8d 8b 98 63 01 00           lea    rcx,[rbx+0x16398]                                 cs+0xd0    direct-disp32
+  b9dc3a fn   b9dba0U 8b 84 19 ac 63 01 00           mov    eax,DWORD PTR [rcx+rbx*1+0x163ac]                 cs+0xe4    direct-disp32
+  b9e7bc fn   b9e670  49 8d 8e 98 63 01 00           lea    rcx,[r14+0x16398]                                 cs+0xd0    direct-disp32
+  b9e7d7 fn   b9e670  49 8d 86 98 63 01 00           lea    rax,[r14+0x16398]                                 cs+0xd0    direct-disp32
+  ba58f2 fn   ba5840  49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+  ba5918 fn   ba5840  42 83 bc 08 ac 63 01 00 ff     cmp    DWORD PTR [rax+r9*1+0x163ac],0xffffffff           cs+0xe4    direct-disp32
+  ba594b fn   ba5840  42 8b 84 08 ac 63 01 00        mov    eax,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+  baa5ea fn   baa560  49 8d 80 d0 00 00 00           lea    rax,[r8+0xd0]                                     cs+0xd0    direct-disp32
+  baa604 fn   baa560  49 8d 88 d0 00 00 00           lea    rcx,[r8+0xd0]                                     cs+0xd0    direct-disp32
+  baa614 fn   baa560  c6 41 18 01                    mov    BYTE PTR [rcx+0x18],0x1                           cs+0xe8    derived-disp8
+  bad7e1 fn   bad740  49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+  bad808 fn   bad740  42 83 bc 08 ac 63 01 00 ff     cmp    DWORD PTR [rax+r9*1+0x163ac],0xffffffff           cs+0xe4    direct-disp32
+  bad83b fn   bad740  42 8b 84 08 ac 63 01 00        mov    eax,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+  bb4520 fn   bb44c0  49 8d 80 d0 00 00 00           lea    rax,[r8+0xd0]                                     cs+0xd0    direct-disp32
+  bb453a fn   bb44c0  49 8d 88 d0 00 00 00           lea    rcx,[r8+0xd0]                                     cs+0xd0    direct-disp32
+  bb454a fn   bb44c0  c6 41 19 01                    mov    BYTE PTR [rcx+0x19],0x1                           cs+0xe9    derived-disp8
+  bba837 fn   bba740  49 8d 8b 98 63 01 00           lea    rcx,[r11+0x16398]                                 cs+0xd0    direct-disp32
+  bba857 fn   bba740  42 8b 84 19 ac 63 01 00        mov    eax,DWORD PTR [rcx+r11*1+0x163ac]                 cs+0xe4    direct-disp32
+  bde532 fn   bde430  48 8d 93 98 63 01 00           lea    rdx,[rbx+0x16398]                                 cs+0xd0    direct-disp32
+  bde5d3 fn   bde430  4c 8d 8b 98 63 01 00           lea    r9,[rbx+0x16398]                                  cs+0xd0    direct-disp32
+ 103ad17 fn  103aa00  48 8d 8a 98 63 01 00           lea    rcx,[rdx+0x16398]                                 cs+0xd0    direct-disp32
+ 103ad7b fn  103aa00  8b 8c 10 ac 63 01 00           mov    ecx,DWORD PTR [rax+rdx*1+0x163ac]                 cs+0xe4    direct-disp32
+ 103adb4 fn  103aa00  48 8d 8a 98 63 01 00           lea    rcx,[rdx+0x16398]                                 cs+0xd0    direct-disp32
+ 103add6 fn  103aa00  8b 8c 10 ac 63 01 00           mov    ecx,DWORD PTR [rax+rdx*1+0x163ac]                 cs+0xe4    direct-disp32
+ 103ae0f fn  103aa00  48 8d 8a 98 63 01 00           lea    rcx,[rdx+0x16398]                                 cs+0xd0    direct-disp32
+ 103ae2c fn  103aa00  8b 8c 10 ac 63 01 00           mov    ecx,DWORD PTR [rax+rdx*1+0x163ac]                 cs+0xe4    direct-disp32
+ 103ae63 fn  103aa00  48 8d 82 98 63 01 00           lea    rax,[rdx+0x16398]                                 cs+0xd0    direct-disp32
+ 103ae88 fn  103aa00  8b 8c 10 ac 63 01 00           mov    ecx,DWORD PTR [rax+rdx*1+0x163ac]                 cs+0xe4    direct-disp32
+ 1083c58 fn  1083150  4e 39 94 00 98 63 01 00        cmp    QWORD PTR [rax+r8*1+0x16398],r10                  cs+0xd0    direct-disp32
+ 1083d34 fn  1083150  42 8b 8c 02 ac 63 01 00        mov    ecx,DWORD PTR [rdx+r8*1+0x163ac]                  cs+0xe4    direct-disp32
+ 10849d6 fn  10845b0  48 8b 8c 39 d0 00 00 00        mov    rcx,QWORD PTR [rcx+rdi*1+0xd0]                    cs+0xd0    direct-disp32
+ 10849f7 fn  10845b0  0f 11 87 d0 00 00 00           movups XMMWORD PTR [rdi+0xd0],xmm0                       cs+0xd0    direct-disp32
+ 10849fe fn  10845b0  0f 11 87 e0 00 00 00           movups XMMWORD PTR [rdi+0xe0],xmm0                       cs+0xe0    direct-disp32
+ 1084a05 fn  10845b0  0f 11 87 f0 00 00 00           movups XMMWORD PTR [rdi+0xf0],xmm0                       cs+0xf0    direct-disp32
+ 1084a0c fn  10845b0  0f 11 87 00 01 00 00           movups XMMWORD PTR [rdi+0x100],xmm0                      cs+0x100   direct-disp32
+ 1084a13 fn  10845b0  0f 11 87 10 01 00 00           movups XMMWORD PTR [rdi+0x110],xmm0                      cs+0x110   direct-disp32
+ 1084a1a fn  10845b0  0f 11 87 20 01 00 00           movups XMMWORD PTR [rdi+0x120],xmm0                      cs+0x120   direct-disp32
+ 1084a21 fn  10845b0  0f 11 87 30 01 00 00           movups XMMWORD PTR [rdi+0x130],xmm0                      cs+0x130   direct-disp32
+ 1084a28 fn  10845b0  0f 11 87 40 01 00 00           movups XMMWORD PTR [rdi+0x140],xmm0                      cs+0x140   direct-disp32
+ 1084fde fn  1084fd0  4c 8d 81 d0 00 00 00           lea    r8,[rcx+0xd0]                                     cs+0xd0    direct-disp32
+ 1086238 fn  1085d70  4e 39 94 00 98 63 01 00        cmp    QWORD PTR [rax+r8*1+0x16398],r10                  cs+0xd0    direct-disp32
+ 1086460 fn  1085d70  42 83 bc 02 ac 63 01 00 04     cmp    DWORD PTR [rdx+r8*1+0x163ac],0x4                  cs+0xe4    direct-disp32
+ 10870a4 fn  1087010  4a 8b bc 38 d0 00 00 00        mov    rdi,QWORD PTR [rax+r15*1+0xd0]                    cs+0xd0    direct-disp32
+ 1087260 fn  1087010  41 0f 11 87 d0 00 00 00        movups XMMWORD PTR [r15+0xd0],xmm0                       cs+0xd0    direct-disp32
+ 1087268 fn  1087010  41 0f 11 87 e0 00 00 00        movups XMMWORD PTR [r15+0xe0],xmm0                       cs+0xe0    direct-disp32
+ 1087270 fn  1087010  41 0f 11 87 f0 00 00 00        movups XMMWORD PTR [r15+0xf0],xmm0                       cs+0xf0    direct-disp32
+ 1087278 fn  1087010  41 0f 11 87 00 01 00 00        movups XMMWORD PTR [r15+0x100],xmm0                      cs+0x100   direct-disp32
+ 1087280 fn  1087010  41 0f 11 87 10 01 00 00        movups XMMWORD PTR [r15+0x110],xmm0                      cs+0x110   direct-disp32
+ 1087288 fn  1087010  41 0f 11 87 20 01 00 00        movups XMMWORD PTR [r15+0x120],xmm0                      cs+0x120   direct-disp32
+ 1087290 fn  1087010  41 0f 11 87 30 01 00 00        movups XMMWORD PTR [r15+0x130],xmm0                      cs+0x130   direct-disp32
+ 1087298 fn  1087010  41 0f 11 87 40 01 00 00        movups XMMWORD PTR [r15+0x140],xmm0                      cs+0x140   direct-disp32
+ 1087306 fn  10872c0U 48 39 9c 38 d0 00 00 00        cmp    QWORD PTR [rax+rdi*1+0xd0],rbx                    cs+0xd0    direct-disp32
+ 1087339 fn  10872c0U 48 8d 97 d0 00 00 00           lea    rdx,[rdi+0xd0]                                    cs+0xd0    direct-disp32
+ 1087358 fn  10872c0U 89 42 10                       mov    DWORD PTR [rdx+0x10],eax                          cs+0xe0    derived-disp8
+ 108735f fn  10872c0U 48 89 72 08                    mov    QWORD PTR [rdx+0x8],rsi                           cs+0xd8    derived-disp8
+ 108736a fn  10872c0U 89 42 14                       mov    DWORD PTR [rdx+0x14],eax                          cs+0xe4    derived-disp8
+ 1087375 fn  10872c0U 88 42 19                       mov    BYTE PTR [rdx+0x19],al                            cs+0xe9    derived-disp8
+ 1087378 fn  10872c0U 48 89 1a                       mov    QWORD PTR [rdx],rbx                               cs+0xd0    derived-nodisp
+ 108737b fn  10872c0U c6 42 18 00                    mov    BYTE PTR [rdx+0x18],0x0                           cs+0xe8    derived-disp8
+ 10875f8 fn  1087540  48 39 bc 18 d0 00 00 00        cmp    QWORD PTR [rax+rbx*1+0xd0],rdi                    cs+0xd0    direct-disp32
+ 1087626 fn  1087540  0f 10 84 18 d0 00 00 00        movups xmm0,XMMWORD PTR [rax+rbx*1+0xd0]                 cs+0xd0    direct-disp32
+ 108762e fn  1087540  0f 11 84 1e d0 00 00 00        movups XMMWORD PTR [rsi+rbx*1+0xd0],xmm0                 cs+0xd0    direct-disp32
+ 1087636 fn  1087540  0f 10 8c 18 e0 00 00 00        movups xmm1,XMMWORD PTR [rax+rbx*1+0xe0]                 cs+0xe0    direct-disp32
+ 108763e fn  1087540  0f 11 8c 1e e0 00 00 00        movups XMMWORD PTR [rsi+rbx*1+0xe0],xmm1                 cs+0xe0    direct-disp32
+ 1087e66 fn  1087da0U 4c 8b 84 18 d0 00 00 00        mov    r8,QWORD PTR [rax+rbx*1+0xd0]                     cs+0xd0    direct-disp32
+ 1088b77 fn  1088a30  48 89 81 98 63 01 00           mov    QWORD PTR [rcx+0x16398],rax                       cs+0xd0    direct-disp32
+ 1088b84 fn  1088a30  89 81 ac 63 01 00              mov    DWORD PTR [rcx+0x163ac],eax                       cs+0xe4    direct-disp32
+ 1088e68 fn  1088d80U 4e 39 8c 10 98 63 01 00        cmp    QWORD PTR [rax+r10*1+0x16398],r9                  cs+0xd0    direct-disp32
+ 1088eeb fn  1088d80U 42 8b 84 12 ac 63 01 00        mov    eax,DWORD PTR [rdx+r10*1+0x163ac]                 cs+0xe4    direct-disp32
+ 10896da fn  10896a0U 4e 39 9c 10 98 63 01 00        cmp    QWORD PTR [rax+r10*1+0x16398],r11                 cs+0xd0    direct-disp32
+ 1089711 fn  10896a0U 46 8b 84 11 ac 63 01 00        mov    r8d,DWORD PTR [rcx+r10*1+0x163ac]                 cs+0xe4    direct-disp32
+ 1089ce8 fn  1089720  48 8d b8 98 63 01 00           lea    rdi,[rax+0x16398]                                 cs+0xd0    direct-disp32(scan)
+ 1089db8 fn  1089720  4e 39 94 00 98 63 01 00        cmp    QWORD PTR [rax+r8*1+0x16398],r10                  cs+0xd0    direct-disp32
+ 1089e97 fn  1089720  42 8b 84 02 ac 63 01 00        mov    eax,DWORD PTR [rdx+r8*1+0x163ac]                  cs+0xe4    direct-disp32
+ 108bf64 fn  108bc70  49 8d 80 98 63 01 00           lea    rax,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 108bf83 fn  108bc70  49 8d 88 98 63 01 00           lea    rcx,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 108bf97 fn  108bc70  39 41 10                       cmp    DWORD PTR [rcx+0x10],eax                          cs+0xe0    derived-disp8
+ 108bfa2 fn  108bc70  48 8b 49 08                    mov    rcx,QWORD PTR [rcx+0x8]                           cs+0xd8    derived-disp8
+ 109733b fn  10971f0  49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 109739f fn  10971f0  49 8d 81 98 63 01 00           lea    rax,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 109743b fn  10971f0  42 8b 8c 08 ac 63 01 00        mov    ecx,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+ 109744a fn  10971f0  49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 1097468 fn  10971f0  39 41 10                       cmp    DWORD PTR [rcx+0x10],eax                          cs+0xe0    derived-disp8
+ 109747b fn  10971f0  48 8b 49 08                    mov    rcx,QWORD PTR [rcx+0x8]                           cs+0xd8    derived-disp8
+ 1097711 fn  1097560  48 8b 9c 17 98 63 01 00        mov    rbx,QWORD PTR [rdi+rdx*1+0x16398]                 cs+0xd0    direct-disp32
+ 11cf037 fn  11cf000  4a 8b 8c 18 98 63 01 00        mov    rcx,QWORD PTR [rax+r11*1+0x16398]                 cs+0xd0    direct-disp32
+ 1291bc6 fn  1291ba0U 49 8d 92 d0 00 00 00           lea    rdx,[r10+0xd0]                                    cs+0xd0    direct-disp32
+ 1291be7 fn  1291ba0U 42 8b 8c 10 e4 00 00 00        mov    ecx,DWORD PTR [rax+r10*1+0xe4]                    cs+0xe4    direct-disp32
+ 1291c56 fn  1291c30U 49 8d 92 d0 00 00 00           lea    rdx,[r10+0xd0]                                    cs+0xd0    direct-disp32
+ 1291c77 fn  1291c30U 42 8b 8c 10 e4 00 00 00        mov    ecx,DWORD PTR [rax+r10*1+0xe4]                    cs+0xe4    direct-disp32
+ 12d768e fn  12d5ac0  48 8d 82 98 63 01 00           lea    rax,[rdx+0x16398]                                 cs+0xd0    direct-disp32
+ 12efae4 fn  12efab0  48 8d b8 98 63 01 00           lea    rdi,[rax+0x16398]                                 cs+0xd0    direct-disp32
+ 12f2520 fn  12f2490  48 8d 8b 98 63 01 00           lea    rcx,[rbx+0x16398]                                 cs+0xd0    direct-disp32
+ 12f256a fn  12f2490  8b bc 18 ac 63 01 00           mov    edi,DWORD PTR [rax+rbx*1+0x163ac]                 cs+0xe4    direct-disp32
+ 12f2888 fn  12f2780  49 8d 92 98 63 01 00           lea    rdx,[r10+0x16398]                                 cs+0xd0    direct-disp32
+ 12f2958 fn  12f2780  42 8b 94 10 ac 63 01 00        mov    edx,DWORD PTR [rax+r10*1+0x163ac]                 cs+0xe4    direct-disp32
+ 12f2ae3 fn  12f2a70U 49 8d 8a 98 63 01 00           lea    rcx,[r10+0x16398]                                 cs+0xd0    direct-disp32
+ 12f2bb8 fn  12f2a70U 42 8b 8c 10 ac 63 01 00        mov    ecx,DWORD PTR [rax+r10*1+0x163ac]                 cs+0xe4    direct-disp32
+ 133ec9b fn  133eba0  48 8d 81 98 63 01 00           lea    rax,[rcx+0x16398]                                 cs+0xd0    direct-disp32
+ 133ecc0 fn  133eba0  48 8b 10                       mov    rdx,QWORD PTR [rax]                               cs+0xd0    derived-nodisp
+ 133ee97 fn  133eba0  48 83 c0 20                    add    rax,0x20                                          cs+0xf0    derived-addimm8
+ 134e864 fn  134e730  4c 8b bc 18 98 63 01 00        mov    r15,QWORD PTR [rax+rbx*1+0x16398]                 cs+0xd0    direct-disp32
+ 134eee8 fn  134eec0  4e 39 8c 11 98 63 01 00        cmp    QWORD PTR [rcx+r10*1+0x16398],r9                  cs+0xd0    direct-disp32
+ 134ef09 fn  134eec0  42 8b 84 12 ac 63 01 00        mov    eax,DWORD PTR [rdx+r10*1+0x163ac]                 cs+0xe4    direct-disp32
+ 134f14c fn  134f130U 49 8d 89 d0 00 00 00           lea    rcx,[r9+0xd0]                                     cs+0xd0    direct-disp32
+ 134f1c8 fn  134f180U 4e 39 94 01 98 63 01 00        cmp    QWORD PTR [rcx+r8*1+0x16398],r10                  cs+0xd0    direct-disp32
+ 134f1e3 fn  134f180U 42 8b 84 02 ac 63 01 00        mov    eax,DWORD PTR [rdx+r8*1+0x163ac]                  cs+0xe4    direct-disp32
+ 134f205 fn  134f1f0U 49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 134f22a fn  134f1f0U 42 8b 84 08 ac 63 01 00        mov    eax,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+ 134fab6 fn  134fa90  48 8b bc 30 98 63 01 00        mov    rdi,QWORD PTR [rax+rsi*1+0x16398]                 cs+0xd0    direct-disp32
+ 134fb6f fn  134fb30U 49 8d 88 d0 00 00 00           lea    rcx,[r8+0xd0]                                     cs+0xd0    direct-disp32
+ 134fb8a fn  134fb30U 49 8d 88 d0 00 00 00           lea    rcx,[r8+0xd0]                                     cs+0xd0    direct-disp32
+ 134fb96 fn  134fb30U c6 41 18 01                    mov    BYTE PTR [rcx+0x18],0x1                           cs+0xe8    derived-disp8
+ 136367f fn  13632c0  48 8b 94 38 98 63 01 00        mov    rdx,QWORD PTR [rax+rdi*1+0x16398]                 cs+0xd0    direct-disp32
+ 1366d46 fn  1366d20  49 81 c1 98 63 01 00           add    r9,0x16398                                        cs+0xd0    direct-addimm32
+ 1370dec fn  1370dd0U 49 8d 8a 98 63 01 00           lea    rcx,[r10+0x16398]                                 cs+0xd0    direct-disp32
+ 1370e0a fn  1370dd0U 42 8b 94 11 ac 63 01 00        mov    edx,DWORD PTR [rcx+r10*1+0x163ac]                 cs+0xe4    direct-disp32
+ 13812b6 fn  1381220  4a 8b b4 38 98 63 01 00        mov    rsi,QWORD PTR [rax+r15*1+0x16398]                 cs+0xd0    direct-disp32
+ 1381a3b fn  13819b0U 48 8d 8e 98 63 01 00           lea    rcx,[rsi+0x16398]                                 cs+0xd0    direct-disp32
+ 1381a56 fn  13819b0U 48 8d 86 98 63 01 00           lea    rax,[rsi+0x16398]                                 cs+0xd0    direct-disp32
+ 1381eec fn  1381dc0  48 8d 82 98 63 01 00           lea    rax,[rdx+0x16398]                                 cs+0xd0    direct-disp32
+ 1381f31 fn  1381dc0  8b 8c 10 ac 63 01 00           mov    ecx,DWORD PTR [rax+rdx*1+0x163ac]                 cs+0xe4    direct-disp32
+ 1382545 fn  1382530U 49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 138256f fn  1382530U 42 8b 8c 08 ac 63 01 00        mov    ecx,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+ 1382595 fn  1382580U 49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 13825ba fn  1382580U 42 8b 84 08 ac 63 01 00        mov    eax,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+ 1382628 fn  1382600U 4e 39 8c 11 98 63 01 00        cmp    QWORD PTR [rcx+r10*1+0x16398],r9                  cs+0xd0    direct-disp32
+ 1382643 fn  1382600U 42 8b 84 12 ac 63 01 00        mov    eax,DWORD PTR [rdx+r10*1+0x163ac]                 cs+0xe4    direct-disp32
+ 138267a fn  1382650  49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 13826bf fn  1382650  42 8b 8c 08 ac 63 01 00        mov    ecx,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+ 1382ab7 fn  1382a60  48 8b b4 38 d0 00 00 00        mov    rsi,QWORD PTR [rax+rdi*1+0xd0]                    cs+0xd0    direct-disp32
+ 1382e0d fn  1382dd0U 4c 8b 94 38 d0 00 00 00        mov    r10,QWORD PTR [rax+rdi*1+0xd0]                    cs+0xd0    direct-disp32
+ 13834dd fn  1383470U 4c 8b 94 38 d0 00 00 00        mov    r10,QWORD PTR [rax+rdi*1+0xd0]                    cs+0xd0    direct-disp32
+ 13951bb fn  1394fd0  49 8d 80 ac 63 01 00           lea    rax,[r8+0x163ac]                                  cs+0xe4    direct-disp32
+ 139522e fn  1394fd0  42 8b 8c 00 98 63 01 00        mov    ecx,DWORD PTR [rax+r8*1+0x16398]                  cs+0xd0    direct-disp32
+ 13a5a21 fn  13a4f90  49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 13a5a5c fn  13a4f90  42 8b 8c 08 ac 63 01 00        mov    ecx,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+ 13e46f9 fn  13e41c0  49 8d 88 98 63 01 00           lea    rcx,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 13e4700 fn  13e41c0  48 3b 31                       cmp    rsi,QWORD PTR [rcx]                               cs+0xd0    derived-nodisp
+ 13e4707 fn  13e41c0  48 83 c1 20                    add    rcx,0x20                                          cs+0xf0    derived-addimm8
+ 13e4715 fn  13e41c0  49 8d 88 98 63 01 00           lea    rcx,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 13e472b fn  13e41c0  39 41 10                       cmp    DWORD PTR [rcx+0x10],eax                          cs+0xe0    derived-disp8
+ 13e4736 fn  13e41c0  48 8b 49 08                    mov    rcx,QWORD PTR [rcx+0x8]                           cs+0xd8    derived-disp8
+ 13e527f fn  13e5220  48 8d 82 98 63 01 00           lea    rax,[rdx+0x16398]                                 cs+0xd0    direct-disp32
+ 13e52bb fn  13e5220  48 81 c2 98 63 01 00           add    rdx,0x16398                                       cs+0xd0    direct-addimm32
+ 13e52d5 fn  13e5220  39 42 10                       cmp    DWORD PTR [rdx+0x10],eax                          cs+0xe0    derived-disp8
+ 13e52e0 fn  13e5220  4c 8b 42 08                    mov    r8,QWORD PTR [rdx+0x8]                            cs+0xd8    derived-disp8
+ 13e6361 fn  13e6250  49 8d 88 98 63 01 00           lea    rcx,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 13e637d fn  13e6250  49 8d 88 98 63 01 00           lea    rcx,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 13e6393 fn  13e6250  39 41 10                       cmp    DWORD PTR [rcx+0x10],eax                          cs+0xe0    derived-disp8
+ 13e639e fn  13e6250  48 8b 49 08                    mov    rcx,QWORD PTR [rcx+0x8]                           cs+0xd8    derived-disp8
+ 13e6501 fn  13e6250  49 8d 88 98 63 01 00           lea    rcx,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 13e651d fn  13e6250  49 8d 88 98 63 01 00           lea    rcx,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 13e6533 fn  13e6250  39 41 10                       cmp    DWORD PTR [rcx+0x10],eax                          cs+0xe0    derived-disp8
+ 13e653e fn  13e6250  48 8b 49 08                    mov    rcx,QWORD PTR [rcx+0x8]                           cs+0xd8    derived-disp8
+ 13eefb5 fn  13eeac0  4c 8d b0 98 63 01 00           lea    r14,[rax+0x16398]                                 cs+0xd0    direct-disp32
+ 142ef26 fn  142ee70  49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 142ef48 fn  142ee70  42 8b 8c 08 ac 63 01 00        mov    ecx,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+ 14623da fn  1461b60  49 8d 80 98 63 01 00           lea    rax,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 146240c fn  1461b60  42 8b 8c 00 ac 63 01 00        mov    ecx,DWORD PTR [rax+r8*1+0x163ac]                  cs+0xe4    direct-disp32
+ 1466f88 fn  1466170  4e 39 94 00 98 63 01 00        cmp    QWORD PTR [rax+r8*1+0x16398],r10                  cs+0xd0    direct-disp32
+ 14670b0 fn  1466170  42 8b 8c 02 ac 63 01 00        mov    ecx,DWORD PTR [rdx+r8*1+0x163ac]                  cs+0xe4    direct-disp32
+ 146aa20 fn  146a5b0  49 81 c3 98 63 01 00           add    r11,0x16398                                       cs+0xd0    direct-addimm32
+ 146c433 fn  146c2f0  49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 146c45a fn  146c2f0  46 8b ac 08 ac 63 01 00        mov    r13d,DWORD PTR [rax+r9*1+0x163ac]                 cs+0xe4    direct-disp32
+ 146c71d fn  146c2f0  4c 8b b4 08 98 63 01 00        mov    r14,QWORD PTR [rax+rcx*1+0x16398]                 cs+0xd0    direct-disp32
+ 146cbe4 fn  146c2f0  49 8d 80 98 63 01 00           lea    rax,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 146cc3d fn  146c2f0  46 8b ac 00 ac 63 01 00        mov    r13d,DWORD PTR [rax+r8*1+0x163ac]                 cs+0xe4    direct-disp32
+ 146f808 fn  146f740  48 8b 8c 1f 98 63 01 00        mov    rcx,QWORD PTR [rdi+rbx*1+0x16398]                 cs+0xd0    direct-disp32
+ 146f846 fn  146f740  48 8b 8c 1f 98 63 01 00        mov    rcx,QWORD PTR [rdi+rbx*1+0x16398]                 cs+0xd0    direct-disp32
+ 146f865 fn  146f740  48 8b 8c 1f 98 63 01 00        mov    rcx,QWORD PTR [rdi+rbx*1+0x16398]                 cs+0xd0    direct-disp32
+ 146fdb6 fn  146fc40  49 8d 80 98 63 01 00           lea    rax,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 146fdda fn  146fc40  42 8b 9c 00 ac 63 01 00        mov    ebx,DWORD PTR [rax+r8*1+0x163ac]                  cs+0xe4    direct-disp32
+ 14710de fn  1470d90  49 8d 8a 98 63 01 00           lea    rcx,[r10+0x16398]                                 cs+0xd0    direct-disp32
+ 1471101 fn  1470d90  42 83 bc 10 ac 63 01 00 ff     cmp    DWORD PTR [rax+r10*1+0x163ac],0xffffffff          cs+0xe4    direct-disp32
+ 147112c fn  1470d90  46 8b bc 10 ac 63 01 00        mov    r15d,DWORD PTR [rax+r10*1+0x163ac]                cs+0xe4    direct-disp32
+ 1471a56 fn  14719f0U 48 8d 93 98 63 01 00           lea    rdx,[rbx+0x16398]                                 cs+0xd0    direct-disp32
+ 1471a89 fn  14719f0U 44 39 84 18 ac 63 01 00        cmp    DWORD PTR [rax+rbx*1+0x163ac],r8d                 cs+0xe4    direct-disp32
+ 1471ab8 fn  14719f0U 44 8b 84 18 ac 63 01 00        mov    r8d,DWORD PTR [rax+rbx*1+0x163ac]                 cs+0xe4    direct-disp32
+ 1471b6d fn  1471b00U 49 8d 93 98 63 01 00           lea    rdx,[r11+0x16398]                                 cs+0xd0    direct-disp32
+ 1471ba0 fn  1471b00U 46 39 84 18 ac 63 01 00        cmp    DWORD PTR [rax+r11*1+0x163ac],r8d                 cs+0xe4    direct-disp32
+ 1471bcf fn  1471b00U 46 8b 84 18 ac 63 01 00        mov    r8d,DWORD PTR [rax+r11*1+0x163ac]                 cs+0xe4    direct-disp32
+ 1471cbd fn  1471c50U 49 8d 93 98 63 01 00           lea    rdx,[r11+0x16398]                                 cs+0xd0    direct-disp32
+ 1471cf0 fn  1471c50U 46 39 84 18 ac 63 01 00        cmp    DWORD PTR [rax+r11*1+0x163ac],r8d                 cs+0xe4    direct-disp32
+ 1471d28 fn  1471c50U 46 8b 84 18 ac 63 01 00        mov    r8d,DWORD PTR [rax+r11*1+0x163ac]                 cs+0xe4    direct-disp32
+ 149e3e6 fn  149e2d0  48 89 b3 e0 63 01 00           mov    QWORD PTR [rbx+0x163e0],rsi                       cs+0x118   direct-disp32
+ 14d03fe fn  14d0370  49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 14d047b fn  14d0370  42 8b 8c 08 ac 63 01 00        mov    ecx,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+ 1819fdf fn  1819a70  49 8d 81 98 63 01 00           lea    rax,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 181a0b0 fn  1819a70  42 8b 8c 08 ac 63 01 00        mov    ecx,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+ 181a0f6 fn  1819a70  49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 181a23c fn  1819a70  42 8b 8c 08 ac 63 01 00        mov    ecx,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+ 182f74a fn  182f560  49 8d 88 98 63 01 00           lea    rcx,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 182f9c7 fn  182f560  42 8b 8c 00 ac 63 01 00        mov    ecx,DWORD PTR [rax+r8*1+0x163ac]                  cs+0xe4    direct-disp32
+ 186fe3f fn  186fd70  49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 186feec fn  186fd70  42 8b 8c 08 ac 63 01 00        mov    ecx,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+ 186ff23 fn  186fd70  49 8d 80 98 63 01 00           lea    rax,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 1870077 fn  186fd70  42 8b 8c 00 ac 63 01 00        mov    ecx,DWORD PTR [rax+r8*1+0x163ac]                  cs+0xe4    direct-disp32
+ 1870151 fn  18700a0  49 8d 89 98 63 01 00           lea    rcx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 1870278 fn  18700a0  42 8b 8c 08 ac 63 01 00        mov    ecx,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+ 18a18cd fn  18a17d0  49 8d 91 98 63 01 00           lea    rdx,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 18a18ec fn  18a17d0  46 8b b4 08 ac 63 01 00        mov    r14d,DWORD PTR [rax+r9*1+0x163ac]                 cs+0xe4    direct-disp32
+ 18af10e fn  18aebc0  49 8d 80 98 63 01 00           lea    rax,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 18af1dd fn  18aebc0  42 8b 8c 00 ac 63 01 00        mov    ecx,DWORD PTR [rax+r8*1+0x163ac]                  cs+0xe4    direct-disp32
+ 18b3e97 fn  18b3a90  49 8d 88 98 63 01 00           lea    rcx,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 18b3f84 fn  18b3a90  42 8b 8c 00 ac 63 01 00        mov    ecx,DWORD PTR [rax+r8*1+0x163ac]                  cs+0xe4    direct-disp32
+ 195af61 fn  195ae20  49 8d 88 98 63 01 00           lea    rcx,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 195b032 fn  195ae20  49 8d 88 98 63 01 00           lea    rcx,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 195b04c fn  195ae20  39 41 10                       cmp    DWORD PTR [rcx+0x10],eax                          cs+0xe0    derived-disp8
+ 195b05f fn  195ae20  48 8b 49 08                    mov    rcx,QWORD PTR [rcx+0x8]                           cs+0xd8    derived-disp8
+ 195e964 fn  195e650  49 8d 88 98 63 01 00           lea    rcx,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 195ea2c fn  195e650  49 8d 88 98 63 01 00           lea    rcx,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 195ea46 fn  195e650  39 41 10                       cmp    DWORD PTR [rcx+0x10],eax                          cs+0xe0    derived-disp8
+ 195ea59 fn  195e650  48 8b 49 08                    mov    rcx,QWORD PTR [rcx+0x8]                           cs+0xd8    derived-disp8
+ 195f081 fn  195ee20  49 8d 80 98 63 01 00           lea    rax,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 195f14f fn  195ee20  49 8d 88 98 63 01 00           lea    rcx,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 195f16d fn  195ee20  39 41 10                       cmp    DWORD PTR [rcx+0x10],eax                          cs+0xe0    derived-disp8
+ 195f180 fn  195ee20  48 8b 49 08                    mov    rcx,QWORD PTR [rcx+0x8]                           cs+0xd8    derived-disp8
+ 198a8f6 fn  1989c80  49 8d 81 98 63 01 00           lea    rax,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 198a9ad fn  1989c80  42 8b 8c 08 ac 63 01 00        mov    ecx,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+ 19a46c1 fn  19a43f0  49 8d 81 98 63 01 00           lea    rax,[r9+0x16398]                                  cs+0xd0    direct-disp32
+ 19a4734 fn  19a43f0  42 8b 8c 08 ac 63 01 00        mov    ecx,DWORD PTR [rax+r9*1+0x163ac]                  cs+0xe4    direct-disp32
+ 19a545d fn  19a5370U 49 8d 80 98 63 01 00           lea    rax,[r8+0x16398]                                  cs+0xd0    direct-disp32
+ 19a5490 fn  19a5370U 42 8b 8c 00 ac 63 01 00        mov    ecx,DWORD PTR [rax+r8*1+0x163ac]                  cs+0xe4    direct-disp32
+
+### B5 cs {peer,u32,u32}[4]x16  ctx+0x16418..0x16458  sites=57 functions=21 unreferenced-fn sites=25
+### forms: {'direct-addimm32': 4, 'direct-disp32': 29, 'direct-disp32-scaled': 24}
+  b92cdd fn   b92c80U 48 05 50 01 00 00              add    rax,0x150                                         cs+0x150   direct-addimm32
+  b92da1 fn   b92d50U 48 89 aa 60 01 00 00           mov    QWORD PTR [rdx+0x160],rbp                         cs+0x160   direct-disp32
+  b92da8 fn   b92d50U 48 89 aa 70 01 00 00           mov    QWORD PTR [rdx+0x170],rbp                         cs+0x170   direct-disp32
+  b92daf fn   b92d50U 48 89 aa 80 01 00 00           mov    QWORD PTR [rdx+0x180],rbp                         cs+0x180   direct-disp32
+  b92e6d fn   b92e10U 48 05 50 01 00 00              add    rax,0x150                                         cs+0x150   direct-addimm32
+  bb5ad1 fn   bb5a80  48 89 aa 60 01 00 00           mov    QWORD PTR [rdx+0x160],rbp                         cs+0x160   direct-disp32
+  bb5ad8 fn   bb5a80  48 89 aa 70 01 00 00           mov    QWORD PTR [rdx+0x170],rbp                         cs+0x170   direct-disp32
+  bb5adf fn   bb5a80  48 89 aa 80 01 00 00           mov    QWORD PTR [rdx+0x180],rbp                         cs+0x180   direct-disp32
+  bb9fad fn   bb9f40  48 05 50 01 00 00              add    rax,0x150                                         cs+0x150   direct-addimm32
+  bc055d fn   bc0500  48 05 50 01 00 00              add    rax,0x150                                         cs+0x150   direct-addimm32
+ 1084e26 fn  1084e10U 89 91 58 01 00 00              mov    DWORD PTR [rcx+0x158],edx                         cs+0x158   direct-disp32
+ 1084e34 fn  1084e10U 89 8b 5c 01 00 00              mov    DWORD PTR [rbx+0x15c],ecx                         cs+0x15c   direct-disp32
+ 1084e3f fn  1084e10U 89 83 58 01 00 00              mov    DWORD PTR [rbx+0x158],eax                         cs+0x158   direct-disp32
+ 1084e4c fn  1084e10U 89 83 5c 01 00 00              mov    DWORD PTR [rbx+0x15c],eax                         cs+0x15c   direct-disp32
+ 1084f59 fn  1084f50  48 8d 81 50 01 00 00           lea    rax,[rcx+0x150]                                   cs+0x150   direct-disp32
+ 1086ac0 fn  1086aa0U 8b 93 58 01 00 00              mov    edx,DWORD PTR [rbx+0x158]                         cs+0x158   direct-disp32
+ 1086acf fn  1086aa0U 89 8b 58 01 00 00              mov    DWORD PTR [rbx+0x158],ecx                         cs+0x158   direct-disp32
+ 1086ad9 fn  1086aa0U 44 8b 83 5c 01 00 00           mov    r8d,DWORD PTR [rbx+0x15c]                         cs+0x15c   direct-disp32
+ 1086ae6 fn  1086aa0U 89 8b 5c 01 00 00              mov    DWORD PTR [rbx+0x15c],ecx                         cs+0x15c   direct-disp32
+ 108c9c3 fn  108c760  48 8b 94 0f 18 64 01 00        mov    rdx,QWORD PTR [rdi+rcx*1+0x16418]                 cs+0x150   direct-disp32
+ 108c9d0 fn  108c760  8b 84 0f 24 64 01 00           mov    eax,DWORD PTR [rdi+rcx*1+0x16424]                 cs+0x15c   direct-disp32
+ 108c9e5 fn  108c760  8b 84 0f 20 64 01 00           mov    eax,DWORD PTR [rdi+rcx*1+0x16420]                 cs+0x158   direct-disp32
+ 134f0a5 fn  134f090U 49 8d 8a 18 64 01 00           lea    rcx,[r10+0x16418]                                 cs+0x150   direct-disp32
+ 134f0cf fn  134f090U 41 8b 84 ca 20 64 01 00        mov    eax,DWORD PTR [r10+rcx*8+0x16420]                 cs+0x158   direct-disp32-scaled
+ 134f0e1 fn  134f090U 41 8b 84 ca 24 64 01 00        mov    eax,DWORD PTR [r10+rcx*8+0x16424]                 cs+0x15c   direct-disp32-scaled
+ 1387e67 fn  1387d00  49 8d 88 18 64 01 00           lea    rcx,[r8+0x16418]                                  cs+0x150   direct-disp32
+ 1387e8e fn  1387d00  41 8b 84 c8 20 64 01 00        mov    eax,DWORD PTR [r8+rcx*8+0x16420]                  cs+0x158   direct-disp32-scaled
+ 1387e9d fn  1387d00  41 8b 84 c8 24 64 01 00        mov    eax,DWORD PTR [r8+rcx*8+0x16424]                  cs+0x15c   direct-disp32-scaled
+ 1387ece fn  1387d00  41 8b 84 c8 20 64 01 00        mov    eax,DWORD PTR [r8+rcx*8+0x16420]                  cs+0x158   direct-disp32-scaled
+ 1387edd fn  1387d00  41 8b 84 c8 24 64 01 00        mov    eax,DWORD PTR [r8+rcx*8+0x16424]                  cs+0x15c   direct-disp32-scaled
+ 1473b34 fn  1473460  49 8d 88 18 64 01 00           lea    rcx,[r8+0x16418]                                  cs+0x150   direct-disp32
+ 1473b5e fn  1473460  41 8b 84 c8 20 64 01 00        mov    eax,DWORD PTR [r8+rcx*8+0x16420]                  cs+0x158   direct-disp32-scaled
+ 1473b6d fn  1473460  41 8b 84 c8 24 64 01 00        mov    eax,DWORD PTR [r8+rcx*8+0x16424]                  cs+0x15c   direct-disp32-scaled
+ 14d0832 fn  14d07e0  48 8d 8d 18 64 01 00           lea    rcx,[rbp+0x16418]                                 cs+0x150   direct-disp32
+ 14d085e fn  14d07e0  8b 84 cd 20 64 01 00           mov    eax,DWORD PTR [rbp+rcx*8+0x16420]                 cs+0x158   direct-disp32-scaled
+ 14d086c fn  14d07e0  8b 84 cd 24 64 01 00           mov    eax,DWORD PTR [rbp+rcx*8+0x16424]                 cs+0x15c   direct-disp32-scaled
+ 14d760c fn  14d72f0  49 8d 91 50 01 00 00           lea    rdx,[r9+0x150]                                    cs+0x150   direct-disp32
+ 14d7783 fn  14d72f0  41 8b 84 d1 58 01 00 00        mov    eax,DWORD PTR [r9+rdx*8+0x158]                    cs+0x158   direct-disp32-scaled
+ 14d7793 fn  14d72f0  41 8b 84 d1 5c 01 00 00        mov    eax,DWORD PTR [r9+rdx*8+0x15c]                    cs+0x15c   direct-disp32-scaled
+ 17823bb fn  17823a0U 49 8d 91 18 64 01 00           lea    rdx,[r9+0x16418]                                  cs+0x150   direct-disp32
+ 17823e0 fn  17823a0U 41 8b 84 d1 20 64 01 00        mov    eax,DWORD PTR [r9+rdx*8+0x16420]                  cs+0x158   direct-disp32-scaled
+ 17823f0 fn  17823a0U 41 8b 84 d1 24 64 01 00        mov    eax,DWORD PTR [r9+rdx*8+0x16424]                  cs+0x15c   direct-disp32-scaled
+ 178efe9 fn  178efc0  49 8d 91 18 64 01 00           lea    rdx,[r9+0x16418]                                  cs+0x150   direct-disp32
+ 178f00c fn  178efc0  41 8b 84 c9 20 64 01 00        mov    eax,DWORD PTR [r9+rcx*8+0x16420]                  cs+0x158   direct-disp32-scaled
+ 178f01c fn  178efc0  41 8b 84 c9 24 64 01 00        mov    eax,DWORD PTR [r9+rcx*8+0x16424]                  cs+0x15c   direct-disp32-scaled
+ 179e976 fn  179e940  48 8d 8e 18 64 01 00           lea    rcx,[rsi+0x16418]                                 cs+0x150   direct-disp32
+ 179e99e fn  179e940  8b 84 ce 20 64 01 00           mov    eax,DWORD PTR [rsi+rcx*8+0x16420]                 cs+0x158   direct-disp32-scaled
+ 179e9ad fn  179e940  8b 84 ce 24 64 01 00           mov    eax,DWORD PTR [rsi+rcx*8+0x16424]                 cs+0x15c   direct-disp32-scaled
+ 1992176 fn  1992130  49 8d 88 18 64 01 00           lea    rcx,[r8+0x16418]                                  cs+0x150   direct-disp32
+ 199219e fn  1992130  41 8b 84 c8 20 64 01 00        mov    eax,DWORD PTR [r8+rcx*8+0x16420]                  cs+0x158   direct-disp32-scaled
+ 19921ad fn  1992130  41 8b 84 c8 24 64 01 00        mov    eax,DWORD PTR [r8+rcx*8+0x16424]                  cs+0x15c   direct-disp32-scaled
+ 19922e5 fn  19922b0U 49 8d 88 18 64 01 00           lea    rcx,[r8+0x16418]                                  cs+0x150   direct-disp32
+ 199230e fn  19922b0U 41 8b 84 c8 20 64 01 00        mov    eax,DWORD PTR [r8+rcx*8+0x16420]                  cs+0x158   direct-disp32-scaled
+ 199231d fn  19922b0U 41 8b 84 c8 24 64 01 00        mov    eax,DWORD PTR [r8+rcx*8+0x16424]                  cs+0x15c   direct-disp32-scaled
+ 199244b fn  1992420U 49 8d 88 18 64 01 00           lea    rcx,[r8+0x16418]                                  cs+0x150   direct-disp32
+ 1992470 fn  1992420U 41 8b 84 c8 20 64 01 00        mov    eax,DWORD PTR [r8+rcx*8+0x16420]                  cs+0x158   direct-disp32-scaled
+ 199247f fn  1992420U 41 8b 84 c8 24 64 01 00        mov    eax,DWORD PTR [r8+rcx*8+0x16424]                  cs+0x15c   direct-disp32-scaled
+
+### B6 cs {peer,f32}[4]x16  ctx+0x16458..0x16498  sites=26 functions=3 unreferenced-fn sites=12
+### forms: {'direct-disp32': 25, 'direct-disp32(scan)': 1}
+  b924fb fn   b924b0U 48 89 81 90 01 00 00           mov    QWORD PTR [rcx+0x190],rax                         cs+0x190   direct-disp32
+  b92506 fn   b924b0U 89 81 98 01 00 00              mov    DWORD PTR [rcx+0x198],eax                         cs+0x198   direct-disp32
+  b92515 fn   b924b0U 48 89 81 a0 01 00 00           mov    QWORD PTR [rcx+0x1a0],rax                         cs+0x1a0   direct-disp32
+  b92520 fn   b924b0U 89 81 a8 01 00 00              mov    DWORD PTR [rcx+0x1a8],eax                         cs+0x1a8   direct-disp32
+  b9252f fn   b924b0U 48 89 81 b0 01 00 00           mov    QWORD PTR [rcx+0x1b0],rax                         cs+0x1b0   direct-disp32
+  b9253a fn   b924b0U 89 81 b8 01 00 00              mov    DWORD PTR [rcx+0x1b8],eax                         cs+0x1b8   direct-disp32
+  b92549 fn   b924b0U 48 89 81 c0 01 00 00           mov    QWORD PTR [rcx+0x1c0],rax                         cs+0x1c0   direct-disp32
+  b92554 fn   b924b0U 89 81 c8 01 00 00              mov    DWORD PTR [rcx+0x1c8],eax                         cs+0x1c8   direct-disp32
+  b9255f fn   b924b0U 0f 11 81 90 01 00 00           movups XMMWORD PTR [rcx+0x190],xmm0                      cs+0x190   direct-disp32
+  b92569 fn   b924b0U 0f 11 81 a0 01 00 00           movups XMMWORD PTR [rcx+0x1a0],xmm0                      cs+0x1a0   direct-disp32
+  b92573 fn   b924b0U 0f 11 81 b0 01 00 00           movups XMMWORD PTR [rcx+0x1b0],xmm0                      cs+0x1b0   direct-disp32
+  b9257d fn   b924b0U 0f 11 81 c0 01 00 00           movups XMMWORD PTR [rcx+0x1c0],xmm0                      cs+0x1c0   direct-disp32
+  bb0082 fn   baff70  f3 0f 11 a0 98 01 00 00        movss  DWORD PTR [rax+0x198],xmm4                        cs+0x198   direct-disp32
+  bb008a fn   baff70  4c 89 98 90 01 00 00           mov    QWORD PTR [rax+0x190],r11                         cs+0x190   direct-disp32
+  bb0096 fn   baff70  0f 11 80 90 01 00 00           movups XMMWORD PTR [rax+0x190],xmm0                      cs+0x190   direct-disp32
+  bb00a3 fn   baff70  4c 89 88 a0 01 00 00           mov    QWORD PTR [rax+0x1a0],r9                          cs+0x1a0   direct-disp32
+  bb00aa fn   baff70  f3 0f 11 98 a8 01 00 00        movss  DWORD PTR [rax+0x1a8],xmm3                        cs+0x1a8   direct-disp32
+  bb00b7 fn   baff70  0f 11 80 a0 01 00 00           movups XMMWORD PTR [rax+0x1a0],xmm0                      cs+0x1a0   direct-disp32
+  bb00c4 fn   baff70  4c 89 80 b0 01 00 00           mov    QWORD PTR [rax+0x1b0],r8                          cs+0x1b0   direct-disp32
+  bb00cb fn   baff70  f3 0f 11 90 b8 01 00 00        movss  DWORD PTR [rax+0x1b8],xmm2                        cs+0x1b8   direct-disp32
+  bb00d8 fn   baff70  0f 11 80 b0 01 00 00           movups XMMWORD PTR [rax+0x1b0],xmm0                      cs+0x1b0   direct-disp32
+  bb00e5 fn   baff70  48 89 90 c0 01 00 00           mov    QWORD PTR [rax+0x1c0],rdx                         cs+0x1c0   direct-disp32
+  bb00ec fn   baff70  f3 0f 11 88 c8 01 00 00        movss  DWORD PTR [rax+0x1c8],xmm1                        cs+0x1c8   direct-disp32
+  bb00f9 fn   baff70  0f 11 80 c0 01 00 00           movups XMMWORD PTR [rax+0x1c0],xmm0                      cs+0x1c0   direct-disp32
+ 1089889 fn  1089720  49 8d 88 58 64 01 00           lea    rcx,[r8+0x16458]                                  cs+0x190   direct-disp32
+ 1089d67 fn  1089720  49 8d 88 58 64 01 00           lea    rcx,[r8+0x16458]                                  cs+0x190   direct-disp32(scan)

@@ -29,6 +29,15 @@ eight slots and changes the 1,053 code sites that address them.
 
 This alone lets no fifth player join: the session's own lists still hold four. It is the base the later parts need.
 
+## Session lists
+
+The session keeps its peers in arrays of four, packed in one object. The lists that will hold eight stay in place.
+The six arrays behind them move to the mod's memory: index flags, party records, ready peers, a third peer list,
+peer values and hostability. 253 code sites get the new distance; 17 of them through a short stub, because the
+instruction has no room for it.
+
+The counts are still four: this step changes where the arrays are, not how many peers they hold.
+
 ## State
 
 - Tested with one player: all eight pods are entered on foot, launch, and are there again after the return.
@@ -82,7 +91,11 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `scripts/pod_sites.tsv` | The reviewed site list of the pod manager: one row for each instruction. |
 | `scripts/gen_pod_sites.py` | Writes `co_pod_sites.h` from the site list and a dump of the game's code. |
 | `tests/pods_test.c` | The refusals: another build, changed code, a failed write, a failed hook. |
+| `src/co_session.c` | The session lists: the extension block, code sites and stubs. |
+| `src/co_session_sites.h` | Their code sites. Generated; do not edit. |
+| `scripts/gen_session_sites.py` | Writes `co_session_sites.h` from the site list and a dump of the game's code. |
 | `tests/managers_test.c` | The same refusals for the player managers. |
+| `tests/session_test.c` | The same for the session lists, and that sites and stubs lead to the new place. |
 | `tests/harness/` | The stand-in loader and game image the tests run against. |
 
 ## How it stays safe
@@ -95,12 +108,13 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 
 ## Log
 
-The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.log` and start with `hellpods:` or
-`players:`.
+The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.log` and start with `hellpods:`,
+`players:` or `session:`.
 
 | Line | Meaning |
 |---|---|
 | `the pod manager and the ship's pod table have 8 slots` | The code is in place. |
 | `7 component managers have 8 slots` | The player managers are in place. |
+| `7 arrays of the session lists moved` | The session lists' arrays are in the mod's memory. |
 | `the bridge is not the one with the eight-pod bay` | The level data is missing: four pods. |
 | `... is not the reviewed one` | The game's code differs from the reviewed build: that part is off. |

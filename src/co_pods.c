@@ -252,6 +252,7 @@ static uint64_t StateCtorDetour(uint64_t state, uint64_t a2, uint64_t a3, uint64
     /* The game zeroes its state before this constructor; the moved manager is outside it. */
     if (g_state == 1) { memset((void*)g_manager, 0, CO_ALLOC_USED); memset(g_cameras.units, 0, sizeof g_cameras.units); }
     co_managers_state((uintptr_t)state + CO_STATE_BLOCK);
+    co_session_state();
 #ifdef CO_CANARY
     uint64_t result = g_stateCtor(state, a2, a3, a4, a5, a6);
     co_managers_canary(0);
@@ -331,6 +332,7 @@ static uint64_t LevelPassDetour(void* collector, void* table, void* level, uint6
     uint64_t result = g_levelPass(collector, table, level, first, index);
 #ifdef CO_CANARY
     co_managers_canary(0);
+    co_session_canary(0);
 #endif
     const int bay = g_bayWalked;
     g_bayWalked = outer;

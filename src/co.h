@@ -26,6 +26,12 @@ void co_managers_install(uintptr_t game);
 void co_managers_state(uintptr_t block);
 #ifdef CO_CANARY
 void co_managers_canary(int fill);
+void co_session_canary(int fill);
 #endif
+
+/* The session's peer lists (co_session.c). `install` once with game.dll's base, on the loader's thread; `state` in
+ * the state constructor's hook. */
+void co_session_install(uintptr_t game);
+void co_session_state(void);
 
 #endif
