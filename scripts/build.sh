@@ -2,7 +2,11 @@
 # Builds Complex Operations (complex_operations.dll, beside hellforge-mod.json) and, with --test, builds and runs every
 # tests/*_test.c against tests/harness. The Linux equivalent of HellForge's own mod build: the same Zig target and warning
 # flags, the SDK of a HellForge-Open checkout, and the tests as Windows executables under Wine.
-# Usage: scripts/build.sh [--test] [--package] [--only <test id>] [--hellforge <HellForge-Open checkout>] [--zig <zig>] [--no-dll]
+# Usage: scripts/build.sh [--test] [--package] [--players 4|8] [--test-first-slot <1-7>] [--only <test id>]
+#        [--hellforge <HellForge-Open checkout>] [--zig <zig>] [--no-dll]
+# --players sets how many players a session takes (default 4); the DLL and the tests are built for that count.
+# --test-first-slot is a test aid for a PC with two game instances and never goes into a package: as host the mod
+# gives joining peers slots and player indexes from that number on. It needs --players 8.
 # Defaults: HELLFORGE_OPEN, else ~/HellForge; HELLFORGE_ZIG, else ~/.local/share/zig-native/zig.
 set -euo pipefail
 export LC_ALL=C
@@ -16,6 +20,8 @@ hellforge=${HELLFORGE_OPEN:-}
 zig=${HELLFORGE_ZIG:-}
 no_dll=false
 package=false
+players=4
+first_slot=0
 while (($#)); do
     case $1 in
         --test)
@@ -50,6 +56,22 @@ while (($#)); do
             no_dll=true
             shift
             ;;
+        --players)
+            if (($# < 2)) || [[ $2 != 4 && $2 != 8 ]]; then
+                echo '--players needs 4 or 8.' >&2
+                exit 1
+            fi
+            players=$2
+            shift 2
+            ;;
+        --test-first-slot)
+            if (($# < 2)) || [[ ! $2 =~ ^[1-7]$ ]]; then
+                echo '--test-first-slot needs a slot from 1 to 7.' >&2
+                exit 1
+            fi
+            first_slot=$2
+            shift 2
+            ;;
         --package)
             package=true
             shift
@@ -60,6 +82,16 @@ while (($#)); do
             ;;
     esac
 done
+
+if ((first_slot != 0)) && $package; then
+    echo '--test-first-slot is a test aid; a package is never built with it.' >&2
+    exit 1
+fi
+if ((first_slot != 0 && players != 8)); then
+    echo '--test-first-slot needs --players 8: a client with a player index above 3 never spawns in a build for four.' >&2
+    exit 1
+fi
+defines=(-DCO_PLAYERS="$players" -DCO_TEST_FIRST_SLOT="$first_slot")
 
 if [[ -z $hellforge ]]; then
     hellforge=$HOME/HellForge
@@ -100,12 +132,15 @@ fi
 dll=$root/complex_operations.dll
 if ! $no_dll; then
     if ! "$zig" cc -std=c11 -target x86_64-windows-gnu -shared -O2 -Wall -Werror -Wno-unused-parameter ${CO_CFLAGS:-} \
-        -I "$sdk" -I "$root/src" "${sources[@]}" -o "$dll"; then
+        "${defines[@]}" -I "$sdk" -I "$root/src" "${sources[@]}" -o "$dll"; then
         echo 'The DLL did not compile.' >&2
         exit 1
     fi
     find "$root" -maxdepth 1 -type f \( -iname '*.lib' -o -iname '*.pdb' \) -delete
-    printf 'Built %s (%s bytes)\n' "$dll" "$(stat -c '%s' "$dll")"
+    printf 'Built %s (%s bytes) for %s players\n' "$dll" "$(stat -c '%s' "$dll")" "$players"
+    if ((first_slot != 0)); then
+        printf 'TEST BUILD: joining peers get slots and player indexes from %s on. Not for players.\n' "$first_slot"
+    fi
 fi
 
 if $test_mode && [[ ! -d $root/tests ]]; then
@@ -131,7 +166,7 @@ elif $test_mode; then
         local test_file=$2
         local exe=$out/${id}_test.exe
         if ! "$zig" cc -std=c11 -target x86_64-windows-gnu -O2 -g -Wall -Werror -Wno-unused-parameter -DCO_TEST \
-            -I "$sdk" -I "$root/src" -I "$root/tests" \
+            "${defines[@]}" -I "$sdk" -I "$root/src" -I "$root/tests" \
             "$test_file" "${sources[@]}" "${harness[@]}" -o "$exe"; then
             printf '%s: did not compile\n' "$id"
             failed=$((failed + 1))

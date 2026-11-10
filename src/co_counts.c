@@ -1,19 +1,20 @@
 /* Eight players: the session's peer lists, second step. With the neighbours moved (co_session.c) the lists can hold
  * eight entries; this makes the code count to eight. Most sites are one instruction with a four in it. Code the
  * compiler unrolled for four entries gets the other four from the mod: a cave beside the game's code, or a hook of the
- * whole function. No fifth peer gets in yet: the join gate still counts to CO_JOIN_LIMIT.
- * The same sites carry the guards: tables the game keeps at four entries skip a player index of four or more. */
+ * whole function. The join gate counts to CO_JOIN_LIMIT, the build's player count.
+ * The same sites carry the guards: tables the game keeps at four entries skip a player index of four or more, and a
+ * message whose list is longer than its handler's buffer is ignored. */
 #include <string.h>
 #include <windows.h>
 
 #include "co.h"
 
-typedef struct CoCountSite { uint32_t rva; uint8_t size, skip; uint8_t old[12], now[12]; } CoCountSite;
+typedef struct CoCountSite { uint32_t rva; uint8_t size, skip, group; uint8_t old[12], now[12]; } CoCountSite;
 typedef struct CoCountClear { uint32_t rva; uint8_t mov, land; } CoCountClear;
 typedef struct CoCountCave
 {
     uint32_t rva;
-    uint8_t size, replaced[12];
+    uint8_t size, group, replaced[12];
     uint16_t code, length;
     uint16_t jumps[3];        /* where the cave's jumps into the game have their rel32; 0 ends the list */
     uint16_t callAt;          /* where the callback's address goes */
@@ -27,13 +28,28 @@ typedef struct CoRegs { uint64_t r15, r14, r13, r12, r11, r10, r9, r8, rdi, rsi,
 #define CO_COUNT_CLEARS (sizeof kCoCountClears / sizeof kCoCountClears[0])
 #define CO_COUNT_CAVES (sizeof kCoCountCaves / sizeof kCoCountCaves[0])
 #define CO_CAVE_ROOM 0x2000u
-/* The guards are the last CO_COUNT_GUARDS caves and CO_COUNT_GUARD_SITES of the sites. They go in and out with the
- * counts: a table that stays at four entries is safe only while every access to it is guarded. */
-#define CO_GUARDS (CO_COUNT_GUARDS + CO_COUNT_GUARD_SITES)
 _Static_assert(sizeof kCoCountCode <= CO_CAVE_ROOM, "the caves' code must fit their room");
+/* A site's or cave's group. Guards go in and out with the counts: a table that stays at four entries is safe only
+ * while every access to it is guarded. The last two depend on the build. */
+enum { CO_G_COUNT, CO_G_GUARD, CO_G_NET, CO_G_EIGHT, CO_G_TEST };
+/* The build's player count (scripts/build.sh --players). Four leaves the join gate, the client's own index tests and
+ * the SOS beacon as the game has them. */
+#ifndef CO_PLAYERS
+#define CO_PLAYERS 4
+#endif
+/* Test builds only (--test-first-slot): the host gives joining peers slots and player indexes from this number on,
+ * so that two game instances reach the code for players 5 to 8. Zero is off. */
+#ifndef CO_TEST_FIRST_SLOT
+#define CO_TEST_FIRST_SLOT 0
+#endif
+_Static_assert(CO_PLAYERS == 4 || CO_PLAYERS == 8, "a session takes four or eight players");
+_Static_assert(CO_TEST_FIRST_SLOT == 0 || (CO_PLAYERS == 8 && CO_TEST_FIRST_SLOT >= 1 && CO_TEST_FIRST_SLOT <= 7),
+               "the test option needs a build for eight players and a slot from 1 to 7");
 #define CO_PEERS 8u
-#define CO_JOIN_LIMIT 4u          /* peers a session takes; eight once every per-player part holds eight */
-#define CO_PLAYER_INDEXES 4u      /* player indexes the game hands out */
+#define CO_JOIN_LIMIT ((uint32_t)CO_PLAYERS)       /* peers a session takes */
+#define CO_PLAYER_INDEXES ((uint32_t)CO_PLAYERS)   /* player indexes that count as valid */
+#define CO_FIRST_SLOT ((uint32_t)(CO_TEST_FIRST_SLOT ? CO_TEST_FIRST_SLOT : 1))
+#define CO_FIRST_INDEX ((uint32_t)CO_TEST_FIRST_SLOT)
 #define CO_HOST_SYNC 0x159B0u     /* in the session context: the host's synchronizer, peer slots at +0x20 */
 #define CO_SLOT 0x38u
 #define CO_RECORDS 0x200u         /* in the extension: party records, 0x1C0 each */
@@ -49,6 +65,12 @@ static SlotsFn g_slotsReady, g_slotsFree;
 static PeerGoneFn g_peerGone;
 static uintptr_t g_game, g_context, g_extension, g_caves;
 static int g_on, g_hooks = -1;
+static uint32_t g_ignored;        /* a bit for each message shape that was logged as ignored */
+
+static int Active(uint8_t group)
+{
+    return group <= CO_G_NET || (group == CO_G_EIGHT && CO_PLAYERS == 8) || (group == CO_G_TEST && CO_TEST_FIRST_SLOT != 0);
+}
 
 static uint64_t* Slot(uintptr_t sync, uint32_t slot) { return (uint64_t*)(sync + 0x20u + slot * CO_SLOT); }
 static uint32_t SlotField(uintptr_t sync, uint32_t slot, uint32_t field) { return *(uint32_t*)(sync + 0x20u + slot * CO_SLOT + field); }
@@ -67,12 +89,18 @@ static uint64_t FindRecord(uint64_t key)
 static void FindByRsi(CoRegs* regs) { if (regs->rcx == 0) regs->rcx = FindRecord(regs->rsi); }
 static void FindByR11(CoRegs* regs) { if (regs->rcx == 0) regs->rcx = FindRecord(regs->r11); }
 
-/* The host's own slot always counts as used. */
+/* The host's own slot always counts as used. A joining peer gets a slot from CO_FIRST_SLOT on, so only those are
+ * open to it. */
 static uint32_t FreeSlots(uintptr_t sync)
 {
-    uint32_t used = 1;
-    for (uint32_t i = 1; i < CO_PEERS; i++) used += *Slot(sync, i) != 0;
-    return used < CO_JOIN_LIMIT ? CO_JOIN_LIMIT - used : 0;
+    uint32_t used = 1, open = 0;
+    for (uint32_t i = 1; i < CO_PEERS; i++)
+    {
+        if (*Slot(sync, i) != 0) used++;
+        else if (i >= CO_FIRST_SLOT) open++;
+    }
+    const uint32_t left = used < CO_JOIN_LIMIT ? CO_JOIN_LIMIT - used : 0;
+    return left < open ? left : open;
 }
 
 /* r9 is the host's synchronizer here; the game goes on with the free slots in ecx. */
@@ -94,7 +122,59 @@ static void LastSlotState(CoRegs* regs)
     regs->rax = answer;
 }
 
-static void (*const kCountCallbacks[])(CoRegs*) = {FindByRsi, FindByR11, JoinGate, ClearValueKeys, LastSlotState};
+/* rax is the handler's number, rdx its arguments. A list longer than the handler's buffer would be copied over the
+ * stack behind it: the cave returns from the handler when this leaves rax set. */
+static void MessageFits(CoRegs* regs)
+{
+    const uint32_t shape = (uint32_t)regs->rax;
+    const uint8_t* arguments = (const uint8_t*)regs->rdx;
+    uint32_t at = 0;
+    regs->rax = 0;
+    for (const uint8_t* s = kCoMessageShapes[shape]; *s != 0xFF; s++)
+    {
+        if (*s == 0) { at++; continue; }
+        const uint32_t count = *(const uint32_t*)(arguments + at * 16u + 8u);
+        if (count > *s)
+        {
+            regs->rax = 1;
+            if (!(g_ignored & 1u << shape))
+            {
+                g_ignored |= 1u << shape;
+                co_log("session: a message with a list of %u entries was ignored; its handler at game+0x%X holds %u", count, kCoMessageHandlers[shape], (unsigned)*s);
+            }
+            return;
+        }
+        at += 1u + count;
+    }
+}
+
+/* rsi is the first slot. The game takes the first free slot; this one starts at CO_FIRST_SLOT and takes a lower one
+ * only when none is left there. rdx is the slot, as the game's own search leaves it. */
+static void JoinSlot(CoRegs* regs)
+{
+    const uintptr_t sync = (uintptr_t)regs->rsi - 0x20u;
+    regs->rdx = 0;
+    for (uint32_t n = 0; n < CO_PEERS - 1u; n++)
+    {
+        const uint32_t i = n + CO_FIRST_SLOT < CO_PEERS ? n + CO_FIRST_SLOT : n + CO_FIRST_SLOT - CO_PEERS + 1u;
+        if (*Slot(sync, i) == 0) { regs->rdx = (uint64_t)(uintptr_t)Slot(sync, i); return; }
+    }
+}
+
+/* r13 is the index flags, one byte for each player index. The first free index from CO_FIRST_INDEX on is taken and
+ * left in r8d, as the game's search does from zero; -1 when all eight are taken. */
+static void JoinIndex(CoRegs* regs)
+{
+    uint8_t* flags = (uint8_t*)(uintptr_t)regs->r13;
+    regs->r8 = 0xFFFFFFFFu;
+    for (uint32_t n = 0; n < CO_PEERS; n++)
+    {
+        const uint32_t i = (n + CO_FIRST_INDEX) % CO_PEERS;
+        if (flags[i] == 0) { flags[i] = 1; regs->r8 = i; return; }
+    }
+}
+
+static void (*const kCountCallbacks[])(CoRegs*) = {FindByRsi, FindByR11, JoinGate, ClearValueKeys, LastSlotState, MessageFits, JoinSlot, JoinIndex};
 
 /* The session init clears the keys 1 to 3 itself; its hook (co_session.c) calls this behind it. */
 void co_counts_session_init(void) { if (g_on) ClearValueKeys(NULL); }
@@ -182,9 +262,21 @@ static int WriteClear(const CoCountClear* c, int eight)
 
 static void Back(size_t sites, size_t clears, size_t caves)
 {
-    for (size_t i = 0; i < caves; i++) g_coApi->write(g_game + kCoCountCaves[i].rva, kCoCountCaves[i].replaced, kCoCountCaves[i].size);
+    for (size_t i = 0; i < caves; i++)
+        if (Active(kCoCountCaves[i].group)) g_coApi->write(g_game + kCoCountCaves[i].rva, kCoCountCaves[i].replaced, kCoCountCaves[i].size);
     for (size_t i = 0; i < clears; i++) WriteClear(&kCoCountClears[i], 0);
-    for (size_t i = 0; i < sites; i++) WriteSite(&kCoCountSites[i], kCoCountSites[i].old);
+    for (size_t i = 0; i < sites; i++)
+        if (Active(kCoCountSites[i].group)) WriteSite(&kCoCountSites[i], kCoCountSites[i].old);
+}
+
+/* How many sites and caves of a group there are; `caves` gets the caves alone. */
+static unsigned InGroup(uint8_t group, unsigned* caves)
+{
+    unsigned sites = 0, found = 0;
+    for (size_t i = 0; i < CO_COUNT_SITES; i++) sites += kCoCountSites[i].group == group;
+    for (size_t i = 0; i < CO_COUNT_CAVES; i++) found += kCoCountCaves[i].group == group;
+    if (caves != NULL) *caves = found;
+    return sites + found;
 }
 
 /* The session step undoes its sites by writing distances back; this goes first, so they are where it expects them. */
@@ -203,12 +295,13 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
     static const char kStays[] = "the session lists count to four as before";
     if (g_on || g_hooks != 1 || g_game == 0) return;
     for (size_t i = 0; i < CO_COUNT_SITES; i++)
-        if (!SiteMatches(&kCoCountSites[i]))
+        if (Active(kCoCountSites[i].group) && !SiteMatches(&kCoCountSites[i]))
         { co_log("session: the code at game+0x%X is not the reviewed one; %s", kCoCountSites[i].rva, kStays); return; }
     for (size_t i = 0; i < CO_COUNT_CAVES; i++)
     {
         uint8_t bytes[12];
         const CoCountCave* c = &kCoCountCaves[i];
+        if (!Active(c->group)) continue;
         if (g_coApi->read(g_game + c->rva, bytes, c->size) != 0 || memcmp(bytes, c->replaced, c->size) != 0)
         { co_log("session: the code at game+0x%X is not the reviewed one; %s", c->rva, kStays); return; }
     }
@@ -243,7 +336,7 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
     g_extension = extension;
     /* The game cannot run on a mix: whatever is written goes back when one write fails. */
     for (size_t i = 0; i < CO_COUNT_SITES; i++)
-        if (WriteSite(&kCoCountSites[i], kCoCountSites[i].now) != 0)
+        if (Active(kCoCountSites[i].group) && WriteSite(&kCoCountSites[i], kCoCountSites[i].now) != 0)
         { Back(i, 0, 0); goto failed; }
     for (size_t i = 0; i < CO_COUNT_CLEARS; i++)
         if (WriteClear(&kCoCountClears[i], 1) != 0)
@@ -252,6 +345,7 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
     {
         const CoCountCave* c = &kCoCountCaves[i];
         uint8_t jump[12];
+        if (!Active(c->group)) continue;
         int32_t to = (int32_t)((int64_t)(g_caves + c->code) - (int64_t)(g_game + c->rva + 5u));
         memset(jump, 0x90, sizeof jump);
         jump[0] = 0xE9;
@@ -260,9 +354,16 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
         { Back(CO_COUNT_SITES, CO_COUNT_CLEARS, i); goto failed; }
     }
     g_on = 1;
-    co_log("session: the session lists count to eight (%u code sites changed, %u through caves); a session still takes %u players",
-           (unsigned)(CO_COUNT_SITES + CO_COUNT_CLEARS + CO_COUNT_CAVES - CO_GUARDS), (unsigned)(CO_COUNT_CAVES - CO_COUNT_GUARDS), CO_JOIN_LIMIT);
-    co_log("players: %u accesses to four-entry tables of the game skip a player index above 3", CO_GUARDS);
+    {
+        unsigned caves;
+        const unsigned counts = InGroup(CO_G_COUNT, &caves) + (unsigned)CO_COUNT_CLEARS;
+        co_log("session: the session lists count to eight (%u code sites changed, %u through caves); a session %s %u players",
+               counts, caves, CO_PLAYERS == 8 ? "takes" : "still takes", CO_JOIN_LIMIT);
+        co_log("players: %u accesses to four-entry tables of the game skip a player index above 3", InGroup(CO_G_GUARD, NULL));
+        co_log("session: %u guards keep the lists in messages inside the game's buffers", InGroup(CO_G_NET, NULL));
+        if (Active(CO_G_EIGHT))
+            co_log("session: player indexes 4 to 7 are valid and the SOS beacon counts to eight (%u code sites changed)", InGroup(CO_G_EIGHT, NULL));
+    }
     return;
 failed:
     VirtualFree((void*)g_caves, 0, MEM_RELEASE);
@@ -283,6 +384,8 @@ void co_counts_install(uintptr_t game)
         g_coApi->hook(g_coMod, game + CO_PEER_GONE, (void*)PeerGoneDetour, (void**)&g_peerGone) != 0)
     { g_hooks = 0; co_log("session: a function of the session lists could not be hooked; the session lists count to four as before"); return; }
     g_hooks = 1;
+    if (CO_TEST_FIRST_SLOT != 0)
+        co_log("session: TEST BUILD, not for play: as host, joining peers get slots and player indexes from %u on", CO_FIRST_SLOT);
 }
 
 #ifdef CO_TEST
@@ -309,6 +412,7 @@ void co_counts_test_reset(void)
     g_caves = g_game = 0;
     g_on = 0;
     g_hooks = -1;
+    g_ignored = 0;
 }
 
 /* Every site, clear and cave site holds the game's bytes (a moved array's distance aside). */
@@ -325,10 +429,42 @@ int co_counts_test_reviewed(const uint8_t* image)
     return 1;
 }
 
-unsigned co_counts_test_guards(void) { return CO_GUARDS; }
+unsigned co_counts_test_guards(void) { return InGroup(CO_G_GUARD, NULL); }
+/* The sites, clears and caves this build writes. */
+unsigned co_counts_test_sites(void)
+{
+    unsigned n = (unsigned)CO_COUNT_CLEARS;
+    for (uint8_t group = CO_G_COUNT; group <= CO_G_TEST; group++)
+        if (Active(group)) n += InGroup(group, NULL);
+    return n;
+}
+unsigned co_counts_test_net(void) { return InGroup(CO_G_NET, NULL); }
+int co_counts_test_players(void) { return CO_PLAYERS; }
+int co_counts_test_first_slot(void) { return CO_TEST_FIRST_SLOT; }
+int co_counts_test_fits(uint32_t shape, const void* arguments)
+{
+    CoRegs regs = {0};
+    regs.rax = shape; regs.rdx = (uint64_t)(uintptr_t)arguments;
+    MessageFits(&regs);
+    return regs.rax == 0;
+}
+/* The slot number a joining peer gets (-1 for none), and its player index; the index is marked as taken. */
+int co_counts_test_join_slot(uintptr_t sync)
+{
+    CoRegs regs = {0};
+    regs.rsi = sync + 0x20u;
+    JoinSlot(&regs);
+    return regs.rdx == 0 ? -1 : (int)((regs.rdx - sync - 0x20u) / CO_SLOT);
+}
+uint32_t co_counts_test_join_index(uint8_t* flags)
+{
+    CoRegs regs = {0};
+    regs.r13 = (uint64_t)(uintptr_t)flags;
+    JoinIndex(&regs);
+    return (uint32_t)regs.r8;
+}
 int co_counts_test_on(void) { return g_on; }
 uintptr_t co_counts_test_caves(void) { return g_caves; }
-unsigned co_counts_test_sites(void) { return (unsigned)(CO_COUNT_SITES + CO_COUNT_CLEARS + CO_COUNT_CAVES); }
 uint32_t co_counts_test_ready(uintptr_t sync) { return SlotsReadyDetour(sync); }
 uint32_t co_counts_test_free(uintptr_t sync) { return SlotsFreeDetour(sync); }
 uint64_t co_counts_test_find(uint64_t key) { return FindRecord(key); }

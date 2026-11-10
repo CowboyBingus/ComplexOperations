@@ -8,9 +8,14 @@
 #   - a cave: a jump replaces some instructions and leads to code of the mod's, which may call into the mod's C code
 #     and jumps back (CAVES). The caves are assembled here with GNU as; the header holds their bytes.
 # The guards (GUARDS, GUARD_SITES) are caves and in-place sites of the same kind for the game's four-entry tables.
+# The message guards (MESSAGES, NET_GUARDS) keep a list in a message inside the buffer its handler has for it.
+# Every site and cave carries a group; the mod writes the groups its build has switched on:
+#   0 counts, 1 guards, 2 message guards (always); 3 only in a build for eight players (EIGHT_SITES);
+#   4 only with the test option that hands out slots and indexes from a later number (TEST_CAVES).
 # An instruction of a moved array carries a distance the session step rewrites; those four bytes are not compared.
 import os, re, struct, subprocess, sys, tempfile
 
+G_COUNT, G_GUARD, G_NET, G_EIGHT, G_TEST = range(5)
 HERE = os.path.dirname(os.path.abspath(__file__))
 dump = open(sys.argv[1], 'rb').read()
 out = sys.argv[2] if len(sys.argv) > 2 else HERE + '/../src/co_count_sites.h'
@@ -33,7 +38,7 @@ for line in open(HERE + '/sites/count_sites.tsv'):
     assert len(old) == len(new) <= 12 and dump[rva:rva + len(old)] == old, f[0]
     skip = skip_of(rva, len(old))
     if skip != 0xFF: assert old[skip:skip + 4] == new[skip:skip + 4], f[0]
-    sites.append((rva, old, new, skip))
+    sites.append((rva, old, new, skip, G_COUNT))
 
 # xor eax,eax; mov [reg+A2],eax -> and qword [reg+A2],0. eax is loaded again before its next use, and so are the
 # flags. (rva of the xor, ModRM of the mov, ModRM of the and)
@@ -95,7 +100,7 @@ CALL = '''
     popfq
 '''
 # Callbacks, by number (the same order as kCountCallbacks in co_counts.c).
-FIND_RSI, FIND_R11, GATE, VALUES, LAST_SLOT = 0, 1, 2, 3, 4
+FIND_RSI, FIND_R11, GATE, VALUES, LAST_SLOT, MESSAGE, TEST_SLOT, TEST_INDEX = range(8)
 # (rva, bytes the jump replaces, code; `game+0x..` is an address in the game, CALL(n) the call of callback n)
 def HIGH(r): return ''.join(' movups [%s+0x%x], xmm0\n' % (r, o) for o in range(0x150, 0x1D0, 0x10))
 CAVES = [
@@ -199,6 +204,26 @@ GUARDS = [
     (0x1471AC0, '41 8b c0 8b 8c 87 d8 27 00 00', 'mov eax, r8d\n cmp r8d, 4\n jae game+0x1471AE8\n mov ecx, dword ptr [rdi+rax*4+0x27d8]\n jmp game+0x1471ACA'),
     (0x1471BD7, '41 8b c0 8b 9c 87 d8 27 00 00', 'mov eax, r8d\n cmp r8d, 4\n jae game+0x1471C0D\n mov ebx, dword ptr [rdi+rax*4+0x27d8]\n jmp game+0x1471BE1'),
     (0x1471D30, '41 8b c0 8b 8c 86 d8 27 00 00', 'mov eax, r8d\n cmp r8d, 4\n jae game+0x1471DB1\n mov ecx, dword ptr [rsi+rax*4+0x27d8]\n jmp game+0x1471D3A'),
+    # Four entries of 0x1320 by player index: entry 4 would be the object's own members, a called pointer among
+    # them. The function gives no value (its four callers read none), so 4 and more return at once.
+    (0x139D300, '48 89 5c 24 10', 'cmp r8d, 4\n jae 1f\n mov qword ptr [rsp+0x10], rbx\n jmp game+0x139D305\n1: ret'),
+    # Mission result: four rows of 0x18 by score slot, the next table right behind. Slot 4 and up goes the
+    # function's own way for a slot without row values.
+    (0x62F2E5, '4b 8b 84 cc 40 c4 00 00', 'cmp r13d, 4\n jae game+0x62F358\n mov rax, qword ptr [r12+r9*8+0xc440]\n jmp game+0x62F2ED'),
+    # Galactic map cursors again: the functions that write a cursor by the index in edx. None gives a value: no
+    # caller reads one, and four of the eight have no caller in the game's code.
+    (0x142FF90, '89 54 24 10 53', 'cmp edx, 4\n jae 1f\n mov dword ptr [rsp+0x10], edx\n push rbx\n jmp game+0x142FF95\n1: ret'),
+    (0x1433020, '48 8b c4 48 89 58 10', 'cmp edx, 4\n jae 1f\n mov rax, rsp\n mov qword ptr [rax+0x10], rbx\n jmp game+0x1433027\n1: ret'),
+    (0x14332E0, '40 53 48 83 ec 20', 'cmp edx, 4\n jae 1f\n push rbx\n sub rsp, 0x20\n jmp game+0x14332E6\n1: ret'),
+    (0x1433380, '48 89 5c 24 08', 'cmp edx, 4\n jae 1f\n mov qword ptr [rsp+8], rbx\n jmp game+0x1433385\n1: ret'),
+    (0x14335F0, '48 89 5c 24 10', 'cmp edx, 4\n jae 1f\n mov qword ptr [rsp+0x10], rbx\n jmp game+0x14335F5\n1: ret'),
+    (0x72F7F0, '48 8b c4 48 89 58 08', 'cmp edx, 4\n jae 1f\n mov rax, rsp\n mov qword ptr [rax+8], rbx\n jmp game+0x72F7F7\n1: ret'),
+    (0x142F860, '48 89 5c 24 08', 'cmp edx, 4\n jae 1f\n mov qword ptr [rsp+8], rbx\n jmp game+0x142F865\n1: ret'),
+    (0x142F810, '48 89 5c 24 08', 'cmp edx, 4\n jae 1f\n mov qword ptr [rsp+8], rbx\n jmp game+0x142F815\n1: ret'),
+    # A record's bits 0 to 3 and 4 to 7 by player index: index 4 would set a bit of the other half or a flag above
+    # them. An index of -1 goes on as the game has it.
+    (0x13D1119, '44 8b 4d 6f 41 b8 04 00 00 00', 'cmp eax, 4\n jb 1f\n cmp eax, -1\n jne game+0x13D173E\n1: mov r9d, dword ptr [rbp+0x6f]\n mov r8d, 4\n'
+                                                 ' jmp game+0x13D1123'),
 ]
 # Guards in place: the game tests the index against -1 ("none") only. cmp reg,-1; je becomes cmp reg,4; jae, which
 # sends 4 to 7 the way "none" goes and leaves -1 going there. (rva, bytes, new bytes)
@@ -211,19 +236,75 @@ GUARD_SITES = [
     (0x14716AD, '83 f8 ff 0f 84 b7 00 00 00', '83 f8 04 0f 83 b7 00 00 00'),         # the own card
     # Four bytes on the stack by manager slot: the game stops the process at slot 4; this goes on to the next slot.
     (0x146C3D5, '0f 83 30 0f 00 00', '0f 83 d9 02 00 00'),
+    (0x18C0F2F, '83 ff ff 0f 84 a2 03 00 00', '83 ff 04 0f 83 a2 03 00 00'),         # map input: the own cursor moved
+    (0x18C0C1A, '83 fa ff 0f 84 8c 02 00 00', '83 fa 04 0f 83 8c 02 00 00'),         # and a drop point chosen with it
 ]
-for rva, old, new in GUARD_SITES:
-    old = bytes.fromhex(old); new = bytes.fromhex(new)
-    assert len(old) == len(new) <= 12 and dump[rva:rva + len(old)] == old and skip_of(rva, len(old)) == 0xFF, hex(rva)
-    sites.append((rva, old, new, 0xFF))
-COUNT_CAVES = len(CAVES)
-CAVES += GUARDS
+# Only in a build for eight players: what the game tests against its four. The client's own player index (below 4:
+# else it stays in "joining" and never spawns) and the SOS beacon's "the squad is full". (rva, bytes, new bytes)
+EIGHT_SITES = [
+    (0x134EF11, '83 f8 04 0f 93 c0', '83 f8 08 0f 93 c0'),                           # a client: my index is valid
+    (0x1086460, '42 83 bc 02 ac 63 01 00 04', '42 83 bc 02 ac 63 01 00 08'),         # a client: my index may spawn
+    (0x517FEA, '83 b8 90 63 01 00 04', '83 b8 90 63 01 00 08'),                      # SOS starts below this many peers
+    (0x67A6F5, '83 b8 90 63 01 00 04', '83 b8 90 63 01 00 08'),                      # the same, second entry
+    (0x67AB34, '83 b8 90 63 01 00 04', '83 b8 90 63 01 00 08'),                      # SOS ends at this many peers
+    (0xB5EBC2, '83 b8 90 63 01 00 04', '83 b8 90 63 01 00 08'),                      # the same when a peer is added
+    (0x66CA22, '83 f8 04', '83 f8 08'),                                              # SOS can be called below this many
+]
+for group, rows in ((G_GUARD, GUARD_SITES), (G_EIGHT, EIGHT_SITES)):
+    for rva, old, new in rows:
+        old = bytes.fromhex(old); new = bytes.fromhex(new)
+        assert len(old) == len(new) <= 12 and dump[rva:rva + len(old)] == old and skip_of(rva, len(old)) == 0xFF, hex(rva)
+        sites.append((rva, old, new, 0xFF, group))
+
+# Message guards. A handler copies each list of a message into a fixed buffer on its stack and trusts the count
+# from the wire, which can be higher than the buffer (and is, once a session has more than four peers). A cave at
+# the handler's entry asks the mod's C code whether every list fits; a message with a longer list is ignored.
+# The handler gets its arguments as 16-byte entries with the value or its address at +8; a list is one entry with
+# its count and one entry for each element.
+# (handler, bytes the jump replaces, the same as code, where it goes on, shape: 0 one entry, n a list of at most n)
+MESSAGES = [
+    # rpc_sync_update_or_add_lobby: a lobby's members, four each; one list of eight.
+    (0xBBD6F0, '40 55 56 41 56', 'push rbp\n push rsi\n push r14', 0xBBD6F5, [0] * 12 + [4] * 7 + [0, 0, 8, 4]),
+    # rpc_mission_progression_result_received: five lists of eight, four of fifteen, four of four.
+    (0xBA9440, '48 8b c4 55 56', 'mov rax, rsp\n push rbp\n push rsi', 0xBA9445, [0] + [8] * 5 + [15] * 4 + [0] * 4 + [4, 0, 4, 4, 4]),
+    # rpc_sync_droppable_infinite_map_items
+    (0xBBE230, '48 89 5c 24 08', 'mov qword ptr [rsp+8], rbx', 0xBBE235, [128, 4]),
+    # The party list (five peers) of rpc_from_partyleader_join_lobby and rpc_from_partyleader_join_request.
+    (0xBA2FC0, '48 89 5c 24 18', 'mov qword ptr [rsp+0x18], rbx', 0xBA2FC5, [0, 5]),
+    (0xBA8CC0, '4c 8b dc 49 89 5b 18', 'mov r11, rsp\n mov qword ptr [r11+0x18], rbx', 0xBA8CC7, [0, 5]),
+    # rpc_hostability_scores: five peers and five scores.
+    (0xBAFF70, '40 53 48 83 ec 50', 'push rbx\n sub rsp, 0x50', 0xBAFF76, [5, 5]),
+]
+SHAPE_ROOM = 24
+NET_GUARDS = [(rva, replaced, 'mov eax, %d\n CALL(%d)\n test eax, eax\n jne 1f\n %s\n jmp game+0x%X\n1: ret' % (i, MESSAGE, code, back))
+              for i, (rva, replaced, code, back, _) in enumerate(MESSAGES)]
+NET_GUARDS += [
+    # rpc_from_host_party_join_accepted: its entry has no room for a jump, so the count is tested where it is
+    # read; a longer list leaves by the handler's own end.
+    (0xBAC74D, '8b 4a 18 0f 11 44 24 20', 'mov ecx, dword ptr [rdx+0x18]\n cmp ecx, 5\n ja game+0xBAC79C\n movups xmmword ptr [rsp+0x20], xmm0\n'
+                                          ' jmp game+0xBAC755'),
+    # The sender of a lobby's entry loops over the lobby's member count; its lists and the receiver's hold four.
+    (0x1339313, '41 8b 8f d0 05 00 00', 'mov ecx, dword ptr [r15+0x5d0]\n cmp ecx, 4\n jbe 1f\n mov ecx, 4\n1: jmp game+0x133931A'),
+    # The sender of the hostability scores appends a peer and a score for each ready peer it finds in slots 0 to 3;
+    # both lists hold five.
+    (0x108ABF2, '8b c7 8b ce 48 89 9c c5 b0 01 00 00', 'cmp edi, 5\n jae game+0x108AC24\n cmp esi, 5\n jae game+0x108AC24\n mov eax, edi\n mov ecx, esi\n'
+                                                       ' mov qword ptr [rbp+rax*8+0x1b0], rbx\n jmp game+0x108ABFE'),
+]
+# The test option: the host's join request handler looks for the first free slot and the first free player index.
+# The mod's C code does both searches from the option's number on, so one joining peer gets a slot and an index
+# above 3. (r9 is loaded as the game's own search leaves it; the index search ends where the game stores the index.)
+TEST_CAVES = [
+    (0x108C382, '41 8b c6 48 8b ce', 'CALL(%d)\n mov r9, qword ptr [rbp-0x59]\n jmp game+0x108C3B0' % TEST_SLOT),
+    (0x108C3CA, '49 8b c5 44 89 72 24', 'mov dword ptr [rdx+0x24], r14d\n CALL(%d)\n jmp game+0x108C3F7' % TEST_INDEX),
+]
+cave_groups = [G_COUNT] * len(CAVES) + [G_GUARD] * len(GUARDS) + [G_NET] * len(NET_GUARDS) + [G_TEST] * len(TEST_CAVES)
+CAVES += GUARDS + NET_GUARDS + TEST_CAVES
 # In place, with the cave above: the first loop's count is a copy of that constant.
-sites.append((0x108D2DD, bytes.fromhex('8b ef 90'), bytes.fromhex('8d 6f 04'), 0xFF))
+sites.append((0x108D2DD, bytes.fromhex('8b ef 90'), bytes.fromhex('8d 6f 04'), 0xFF, G_COUNT))
 assert dump[0x108D2DD:0x108D2E0] == bytes.fromhex('8b ef 90')
 # mov esi,4; lea rbx,[rbp+0x40]; mov r14d,esi: esi is also a value that stays four, r14d the slot loop's count.
 # -> push 4; pop rsi; lea rbx,[rbp+0x40]; lea r14d,[rsi+4]; nop
-sites.append((0x13507E6, bytes.fromhex('be 04 00 00 00 48 8d 5d 40 44 8b f6'), bytes.fromhex('6a 04 5e 48 8d 5d 40 44 8d 76 04 90'), 0xFF))
+sites.append((0x13507E6, bytes.fromhex('be 04 00 00 00 48 8d 5d 40 44 8b f6'), bytes.fromhex('6a 04 5e 48 8d 5d 40 44 8d 76 04 90'), 0xFF, G_COUNT))
 assert dump[0x13507E6:0x13507F2] == sites[-1][1]
 sites.sort()
 
@@ -237,7 +318,7 @@ taken = [(rva, rva + size) for rva, size in stubs]
 taken += [(rva + at, rva + at + 4) for rva, at in rows('co_session_sites.h') if (rva, at) not in stubs]
 taken += [(rva + at, rva + at + 4) for rva, at in rows('co_manager_sites.h') + rows('co_pod_sites.h')]
 assert len(taken) > 1400
-own = [(rva, rva + len(old), skip != 0xFF) for rva, old, _, skip in sites] + [(rva, rva + 8, True) for rva, _, _ in CLEARS]
+own = [(rva, rva + len(old), skip != 0xFF) for rva, old, _, skip, _ in sites] + [(rva, rva + 8, True) for rva, _, _ in CLEARS]
 own += [(rva, rva + len(bytes.fromhex(replaced)), False) for rva, replaced, _ in CAVES]
 own.sort()
 for (a, b, _), (c, _, _) in zip(own, own[1:]): assert b <= c, (hex(a), hex(c))
@@ -284,19 +365,28 @@ for rva, replaced, text in CAVES:
 def c_bytes(b): return ', '.join('0x%02X' % x for x in b)
 h = ['/* Generated by scripts/gen_count_sites.py from scripts/sites/count_sites.tsv; do not edit. */\n']
 h.append('static const CoCountSite kCoCountSites[] = {\n')
-for rva, old, new, skip in sites:
-    h.append('    {0x%Xu, %d, %d, {%s}, {%s}},\n' % (rva, len(old), skip, c_bytes(old), c_bytes(new)))
+for rva, old, new, skip, group in sites:
+    h.append('    {0x%Xu, %d, %d, %d, {%s}, {%s}},\n' % (rva, len(old), skip, group, c_bytes(old), c_bytes(new)))
 h.append('};\nstatic const CoCountClear kCoCountClears[] = {\n')
 for rva, mov, land in CLEARS: h.append('    {0x%Xu, 0x%02X, 0x%02X},\n' % (rva, mov, land))
 h.append('};\n')
 blob = bytearray(); rows = []
-for rva, replaced, code, jumps, calls in caves:
+for (rva, replaced, code, jumps, calls), group in zip(caves, cave_groups):
     assert len(jumps) <= 3 and len(calls) <= 1
-    rows.append('    {0x%Xu, %d, {%s}, %d, %d, {%s}, %d, %d},\n' % (rva, len(replaced), c_bytes(replaced), len(blob), len(code),
+    rows.append('    {0x%Xu, %d, %d, {%s}, %d, %d, {%s}, %d, %d},\n' % (rva, len(replaced), group, c_bytes(replaced), len(blob), len(code),
                 ', '.join(str(j) for j in jumps + [0] * (3 - len(jumps))), calls[0][0] if calls else 0, calls[0][1] if calls else 0xFF))
     blob += code
 h.append('static const uint8_t kCoCountCode[] = {\n')
 for i in range(0, len(blob), 24): h.append('    ' + c_bytes(blob[i:i + 24]) + ',\n')
-h.append('};\nstatic const CoCountCave kCoCountCaves[] = {\n'); h += rows; h.append('};\n#define CO_COUNT_GUARDS %du\n#define CO_COUNT_GUARD_SITES %du\n' % (len(GUARDS), len(GUARD_SITES)))
+h.append('};\nstatic const CoCountCave kCoCountCaves[] = {\n'); h += rows
+h.append('};\n/* A message handler\'s arguments in order: 0 one entry, n a list of at most n entries, 0xFF the end. */\n')
+h.append('static const uint8_t kCoMessageShapes[][%d] = {\n' % SHAPE_ROOM)
+for _, _, _, _, shape in MESSAGES:
+    assert len(shape) < SHAPE_ROOM and all(0 <= n < 0xFF for n in shape)
+    h.append('    {%s},\n' % ', '.join(str(n) for n in shape + [0xFF]))
+h.append('};\nstatic const uint32_t kCoMessageHandlers[] = {%s};\n' % ', '.join('0x%Xu' % m[0] for m in MESSAGES))
+assert len(cave_groups) == len(caves) == len(CAVES)
 open(out, 'w').writelines(h)
-print('%d sites, %d clears, %d caves (%d bytes); of them %d guard caves, %d guard sites' % (len(sites), len(CLEARS), len(caves), len(blob), len(GUARDS), len(GUARD_SITES)))
+print('%d sites, %d clears, %d caves (%d bytes)' % (len(sites), len(CLEARS), len(caves), len(blob)))
+for group, name in enumerate(('counts', 'guards', 'message guards', 'eight players only', 'test option only')):
+    print('  %-20s %3d sites, %2d caves' % (name, sum(s[4] == group for s in sites), cave_groups.count(group)))

@@ -1,7 +1,8 @@
 # Complex Operations
 
-A standalone HellForge code mod for eight-player sessions. Two parts are in: eight hellpods on the ship, and eight
-slots in the game's per-player component managers. A session still takes four players.
+A standalone HellForge code mod for eight-player sessions: eight hellpods on the ship, eight slots in the game's
+per-player managers and session lists. The default build still takes four players; `--players 8` builds one that
+takes eight (see Build).
 
 It runs on game build 25480438 only. On any other build it logs the reason and changes nothing.
 
@@ -42,13 +43,19 @@ code of its own beside the game's (14) or a hook of the function (3).
 
 Other tables of the game stay at four entries and are indexed by a player index with no check. Among them are the
 galactic map's cursors, the game state's player rows, the loadout screen's cards, the score slots and the mission
-summary's rows. 57 guards cover the accesses to them: an index of four or more skips the access, and for 0 to 3 nothing
-changes. 50 guards are code beside the game's; 7 are a compare changed in place. The guards go in and out together
+summary's rows. 70 guards cover the accesses to them: an index of four or more skips the access, and for 0 to 3 nothing
+changes. 61 guards are code beside the game's; 9 are a compare changed in place. The guards go in and out together
 with the counts.
 
-Three limits remain:
+Some message handlers copy a list from the wire into a buffer of fixed size and trust the count. Nine guards keep
+such lists inside their buffers: the handler ignores a message whose list is too long, and two senders stop at what
+the receiver holds. Every build has them.
 
-- The join gate still lets four players in. The parts that follow must hold eight first.
+A build for eight players also lets a client's player index 4 to 7 count as valid, opens the join gate to eight, and
+makes the SOS beacon count to eight.
+
+Limits that remain:
+
 - The hostability scores stay at four entries. Their message carries five at most, so peers 5 to 8 get no score.
 - A guarded table has no entry for players 5 to 8: no map cursor, no loadout card, no row in the mission summary.
 
@@ -63,14 +70,22 @@ bits. With up to seven peers the message is unchanged.
 - Tested with one player: all eight pods are entered on foot, launch, and are there again after the return; missions
   and returns work with the lists counting to eight. A mission from a new pod after a completed mission's summary
   works; the mission was ended through the game's own handler, not by flying an extraction.
-- Not tested: two or more players in one session, and the launch cutscene for four or more.
+- Tested with two players (two game instances on one PC, build for four): the join, both players on the ship, a
+  seat in a new pod seen by the other player.
+- Not tested: a build for eight players in a game, a player with index 4 to 7, a launch with two or more players.
 - The launch sound for a lone player in pods 5 to 8 is hooked; the mod logs once when it answers for such a pod.
 
 ## Build
 
 ```text
-scripts/build.sh [--test] [--package] [--hellforge <HellForge checkout>] [--zig <zig>]
+scripts/build.sh [--test] [--package] [--players 4|8] [--test-first-slot <1-7>] [--hellforge <checkout>] [--zig <zig>]
 ```
+
+`--players` sets how many players a session takes (default 4). The DLL and the tests are built for that count.
+
+`--test-first-slot` is a test aid for one PC with two game instances. As host, the mod gives joining peers slots
+and player indexes from that number on, so one joiner reaches the code for players 5 to 8. It needs `--players 8`,
+`--package` refuses it, and the log says it is a test build.
 
 The script builds `complex_operations.dll` beside `hellforge-mod.json`. It takes the mod SDK from a HellForge checkout
 (`HELLFORGE_OPEN`, else `~/HellForge`) and Zig from `HELLFORGE_ZIG`, else `~/.local/share/zig-native/zig`.
@@ -145,6 +160,10 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `7 component managers have 8 slots` | The player managers are in place. |
 | `7 arrays of the session lists moved` | The session lists' arrays are in the mod's memory. |
 | `the session lists count to eight` | The lists' code counts to eight; the line says how many players get in. |
+| `... guards keep the lists in messages inside the game's buffers` | The message guards are in place. |
+| `a message with a list of ... entries was ignored` | A peer sent a longer list than the handler holds; once a handler. |
+| `player indexes 4 to 7 are valid` | A build for eight players. |
+| `TEST BUILD, not for play` | Built with `--test-first-slot`. |
 | `the session lists count to four as before` | The count change is off; the reason stands before it. |
 | `the bridge is not the one with the eight-pod bay` | The level data is missing: four pods. |
 | `... is not the reviewed one` | The game's code differs from the reviewed build: that part is off. |
