@@ -38,6 +38,12 @@ instruction has no room for it.
 
 The counts are still four: this step changes where the arrays are, not how many peers they hold.
 
+## Engine
+
+The engine sends a session's peers as a count and a list. The sender writes the count as a whole byte; the readers
+take three bits of it, so eight peers arrive as none. Five sites in `helldivers2.exe` make the readers take four
+bits. With up to seven peers the message is unchanged.
+
 ## State
 
 - Tested with one player: all eight pods are entered on foot, launch, and are there again after the return.
@@ -91,6 +97,7 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `scripts/pod_sites.tsv` | The reviewed site list of the pod manager: one row for each instruction. |
 | `scripts/gen_pod_sites.py` | Writes `co_pod_sites.h` from the site list and a dump of the game's code. |
 | `tests/pods_test.c` | The refusals: another build, changed code, a failed write, a failed hook. |
+| `src/co_engine.c` | The engine's peer-count readers. |
 | `src/co_session.c` | The session lists: the extension block, code sites and stubs. |
 | `src/co_session_sites.h` | Their code sites. Generated; do not edit. |
 | `scripts/gen_session_sites.py` | Writes `co_session_sites.h` from the site list and a dump of the game's code. |
@@ -109,7 +116,7 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 ## Log
 
 The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.log` and start with `hellpods:`,
-`players:` or `session:`.
+`players:`, `session:` or `engine:`.
 
 | Line | Meaning |
 |---|---|

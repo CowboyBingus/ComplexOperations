@@ -29,6 +29,9 @@ void co_managers_canary(int fill);
 void co_session_canary(int fill);
 #endif
 
+/* The engine's peer list message (co_engine.c). Once, with helldivers2.exe's base (0 when unknown). */
+void co_engine_install(uintptr_t engine);
+
 /* The session's peer lists (co_session.c). `install` once with game.dll's base, on the loader's thread; `state` in
  * the state constructor's hook. */
 void co_session_install(uintptr_t game);

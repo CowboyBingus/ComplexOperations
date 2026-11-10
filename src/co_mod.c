@@ -26,6 +26,7 @@ static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
     if (game == 0) { co_log("game.dll was not found; nothing changed"); return; }
     co_pods_install(game);
     co_session_install(game);
+    co_engine_install(g_coApi->module_base("helldivers2.exe", &size));
 }
 
 HF_MOD_EXPORT int hellforge_mod_init(const HfApi* api, HfMod* mod)
