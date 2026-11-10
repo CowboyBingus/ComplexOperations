@@ -47,6 +47,7 @@ unsigned co_counts_test_loadout(void);
 unsigned co_counts_test_synced(void);
 uintptr_t co_counts_test_synced_table(void);
 int co_counts_test_move_writes(void);
+unsigned co_counts_test_room(void);
 void co_pods_test_reset(void);
 void co_managers_test_reset(void);
 void co_managers_test_force(int state);
@@ -257,7 +258,7 @@ static const uint8_t* Cave(uint32_t site, uint32_t size)
         if (image[site + i] != 0x90) return NULL;
     memcpy(&to, image + site + 1, 4);
     const uint8_t* cave = image + site + 5 + to;
-    return (uintptr_t)cave >= caves && (uintptr_t)cave < caves + 0x2000u ? cave : NULL;
+    return (uintptr_t)cave >= caves && (uintptr_t)cave < caves + co_counts_test_room() ? cave : NULL;
 }
 
 /* A jump's or branch's four-byte distance at `at` leads to this place in the game. */
@@ -375,7 +376,7 @@ int main(void)
         CHECK(image[CAVE_SITE] == 0xE9);
         memcpy(&to, image + CAVE_SITE + 1, 4);
         const uint8_t* cave = image + CAVE_SITE + 5 + to;
-        CHECK((uintptr_t)cave >= caves && (uintptr_t)cave < caves + 0x2000u && cave[0] == 0x9C);
+        CHECK((uintptr_t)cave >= caves && (uintptr_t)cave < caves + co_counts_test_room() && cave[0] == 0x9C);
         /* behind the call: test rcx,rcx; jne game+0x108A426; jmp game+0x108A3FD; the callback's address */
         CHECK(cave[0x86] == 0x48 && cave[0x89] == 0x0F && cave[0x8F] == 0xE9);
         memcpy(&to, cave + 0x8B, 4);

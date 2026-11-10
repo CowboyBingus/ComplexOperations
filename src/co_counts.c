@@ -29,7 +29,9 @@ typedef struct CoRegs { uint64_t r15, r14, r13, r12, r11, r10, r9, r8, rdi, rsi,
 #define CO_COUNT_SITES (sizeof kCoCountSites / sizeof kCoCountSites[0])
 #define CO_COUNT_CLEARS (sizeof kCoCountClears / sizeof kCoCountClears[0])
 #define CO_COUNT_CAVES (sizeof kCoCountCaves / sizeof kCoCountCaves[0])
-#define CO_CAVE_ROOM 0x2000u
+/* Room for the caves to grow into; allocated near game+0x1000000, so every jump back stays within a rel32 (checked per
+ * jump when the caves are placed). */
+#define CO_CAVE_ROOM 0x4000u
 _Static_assert(sizeof kCoCountCode <= CO_CAVE_ROOM, "the caves' code must fit their room");
 /* A site's or cave's group. Guards go in and out with the counts: a table that stays at four entries is safe only
  * while every access to it is guarded. The rest depend on the build. The loadout screen's eight records and cards
@@ -691,6 +693,7 @@ unsigned co_counts_test_sites(void)
     return n;
 }
 unsigned co_counts_test_net(void) { return InGroup(CO_G_NET, NULL); }
+unsigned co_counts_test_room(void) { return CO_CAVE_ROOM; }
 int co_counts_test_players(void) { return CO_PLAYERS; }
 int co_counts_test_first_slot(void) { return CO_TEST_FIRST_SLOT; }
 int co_counts_test_fits(uint32_t shape, const void* arguments)
