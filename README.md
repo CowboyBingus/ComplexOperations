@@ -28,16 +28,21 @@ Every player in the session needs the mod.
 ## Build
 
 ```text
-scripts/build.sh [--test] [--hellforge <HellForge checkout>] [--zig <zig>]
+scripts/build.sh [--test] [--package] [--hellforge <HellForge checkout>] [--zig <zig>]
 ```
 
 The script builds `complex_operations.dll` beside `hellforge-mod.json`. It takes the mod SDK from a HellForge checkout
 (`HELLFORGE_OPEN`, else `~/HellForge`) and Zig from `HELLFORGE_ZIG`, else `~/.local/share/zig-native/zig`.
 
+`--package` writes `build/package/complex-operations-<version>.zip` with the four files a player installs.
+
 `--test` also builds and runs `tests/*_test.c` as Windows programs under Wine (`WINE`, else Proton Experimental's).
 The tests run the mod against a stand-in game image: no game is needed.
 
 ## Install
+
+The mod needs a HellForge with mod SDK 17 or newer. Older ones cannot build the level data from the recipe and refuse
+the mod.
 
 Put these four files in one folder inside HellForge's mods folder:
 
@@ -47,8 +52,8 @@ Put these four files in one folder inside HellForge's mods folder:
 - `hellforge-recipe.literals`
 
 HellForge builds the bay's level data from the recipe and the player's own game files before a session, into the
-folder's `data/`. The recipe holds no game content: unchanged bytes are copied from the player's game, and only changed
-and new values ship. Without the level data the mod leaves four pods.
+folder's `data/`. The recipe copies every unchanged value from the player's game. It ships only the values the mod changed (a moved
+vertex's new coordinate, for example) and the mod's own new data. Without the level data the mod leaves four pods.
 
 The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), which are not in this folder.
 

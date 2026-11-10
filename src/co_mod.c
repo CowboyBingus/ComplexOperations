@@ -29,7 +29,7 @@ static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
 
 HF_MOD_EXPORT int hellforge_mod_init(const HfApi* api, HfMod* mod)
 {
-    if (api == NULL || mod == NULL || api->version < 15u) return 1;
+    if (api == NULL || mod == NULL || api->version < 17u) return 1;
     g_coApi = api;
     g_coMod = mod;
     const char* build = api->build_id();

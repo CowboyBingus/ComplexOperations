@@ -2,7 +2,7 @@
 # Builds Complex Operations (complex_operations.dll, beside hellforge-mod.json) and, with --test, builds and runs every
 # tests/*_test.c against tests/harness. The Linux equivalent of HellForge's own mod build: the same Zig target and warning
 # flags, the SDK of a HellForge-Open checkout, and the tests as Windows executables under Wine.
-# Usage: scripts/build.sh [--test] [--only <test id>] [--hellforge <HellForge-Open checkout>] [--zig <zig>] [--no-dll]
+# Usage: scripts/build.sh [--test] [--package] [--only <test id>] [--hellforge <HellForge-Open checkout>] [--zig <zig>] [--no-dll]
 # Defaults: HELLFORGE_OPEN, else ~/HellForge; HELLFORGE_ZIG, else ~/.local/share/zig-native/zig.
 set -euo pipefail
 export LC_ALL=C
@@ -15,6 +15,7 @@ only=
 hellforge=${HELLFORGE_OPEN:-}
 zig=${HELLFORGE_ZIG:-}
 no_dll=false
+package=false
 while (($#)); do
     case $1 in
         --test)
@@ -47,6 +48,10 @@ while (($#)); do
             ;;
         --no-dll)
             no_dll=true
+            shift
+            ;;
+        --package)
+            package=true
             shift
             ;;
         *)
@@ -158,4 +163,21 @@ elif $test_mode; then
         printf '%s test file(s) failed.\n' "$failed" >&2
         exit 1
     fi
+fi
+
+# The files a player installs, as one zip. HellForge builds data/ from the recipe on the player's PC.
+if $package; then
+    version=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/hellforge-mod.json")
+    files=(hellforge-mod.json complex_operations.dll hellforge-recipe.json hellforge-recipe.literals)
+    for file in "${files[@]}"; do
+        if [[ ! -f $root/$file ]]; then
+            echo "$file is missing; nothing packaged." >&2
+            exit 1
+        fi
+    done
+    mkdir -p -- "$build/package"
+    zip_file=$build/package/complex-operations-$version.zip
+    rm -f -- "$zip_file"
+    (cd "$root" && zip -q "$zip_file" "${files[@]}")
+    printf 'Packaged %s (%s bytes)\n' "$zip_file" "$(stat -c '%s' "$zip_file")"
 fi
