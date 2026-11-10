@@ -8,6 +8,11 @@
 #include "hellforge_mod.h"
 
 #define CO_GAME_BUILD "25480438"
+/* The build's player count (scripts/build.sh --players). Four leaves the join gate, the client's own index tests, the
+ * SOS beacon and the lobby's size as the game has them. */
+#ifndef CO_PLAYERS
+#define CO_PLAYERS 4
+#endif
 
 extern const HfApi* g_coApi;
 extern HfMod* g_coMod;

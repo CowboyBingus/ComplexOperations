@@ -10,7 +10,7 @@
 # The guards (GUARDS, GUARD_SITES) are caves and in-place sites of the same kind for the game's four-entry tables.
 # The message guards (MESSAGES, NET_GUARDS) keep a list in a message inside the buffer its handler has for it.
 # Every site and cave carries a group; the mod writes the groups its build has switched on:
-#   0 counts, 1 guards, 2 message guards (always); 3 only in a build for eight players (EIGHT_SITES);
+#   0 counts, 1 guards, 2 message guards (always); 3 only in a build for eight players (EIGHT_SITES, EIGHT_CAVES);
 #   4 only with the test option that hands out slots and indexes from a later number (TEST_CAVES).
 # An instruction of a moved array carries a distance the session step rewrites; those four bytes are not compared.
 import os, re, struct, subprocess, sys, tempfile
@@ -240,7 +240,8 @@ GUARD_SITES = [
     (0x18C0C1A, '83 fa ff 0f 84 8c 02 00 00', '83 fa 04 0f 83 8c 02 00 00'),         # and a drop point chosen with it
 ]
 # Only in a build for eight players: what the game tests against its four. The client's own player index (below 4:
-# else it stays in "joining" and never spawns) and the SOS beacon's "the squad is full". (rva, bytes, new bytes)
+# else it stays in "joining" and never spawns), the SOS beacon's "the squad is full" and the lobby's size. A build
+# for four keeps a lobby of four. (rva, bytes, new bytes)
 EIGHT_SITES = [
     (0x134EF11, '83 f8 04 0f 93 c0', '83 f8 08 0f 93 c0'),                           # a client: my index is valid
     (0x1086460, '42 83 bc 02 ac 63 01 00 04', '42 83 bc 02 ac 63 01 00 08'),         # a client: my index may spawn
@@ -249,8 +250,29 @@ EIGHT_SITES = [
     (0x67AB34, '83 b8 90 63 01 00 04', '83 b8 90 63 01 00 08'),                      # SOS ends at this many peers
     (0xB5EBC2, '83 b8 90 63 01 00 04', '83 b8 90 63 01 00 08'),                      # the same when a peer is added
     (0x66CA22, '83 f8 04', '83 f8 08'),                                              # SOS can be called below this many
+    # The lobby closes (Steam: not joinable, PlayFab: private) once these many host slots are taken.
+    (0x108AA56, '83 f9 04', '83 f9 08'),
+    # The lobby takes eight: the Steam lobby's size at create, the joiner's reset of it, a third copy without a caller.
+    (0x10919D1, 'b9 04 00 00 00', 'b9 08 00 00 00'),
+    (0x108F108, 'c7 86 90 1b 00 00 04 00 00 00', 'c7 86 90 1b 00 00 08 00 00 00'),
+    (0x1091D68, 'c7 83 90 1b 00 00 04 00 00 00', 'c7 83 90 1b 00 00 08 00 00 00'),
+    (0x133B272, '41 b8 04 00 00 00', '41 b8 08 00 00 00'),                           # lobby search: members up to 8 less the party
+    (0x12CB9BA, '74 22', 'eb 22'),       # the host's friends-list post keeps the session's count, no re-post capped at 4
+    (0x1338699, 'c7 84 24 b0 00 00 00 04 00 00 00', 'c7 84 24 b0 00 00 00 08 00 00 00'),   # the lobby's size the UI shows
 ]
-for group, rows in ((G_GUARD, GUARD_SITES), (G_EIGHT, EIGHT_SITES)):
+# The lobby's member lists (moved by the session step) take eight ids. Without the move eight would overrun the lobby
+# object, so these are counts: the session step's sites are all in before any of them. (rva, bytes, new bytes)
+MIRROR_CAPS = [
+    (0x1093CB0, '41 b8 04 00 00 00', '41 b8 08 00 00 00'),                           # PlayFab members copy
+    (0x1093D1E, '41 b8 04 00 00 00', '41 b8 08 00 00 00'),                           # Steam members copy
+    (0x1093C91, '83 f8 04', '83 f8 08'),                                              # LAN count clamp
+    (0x1093C96, 'c7 87 b0 1b 00 00 04 00 00 00', 'c7 87 b0 1b 00 00 08 00 00 00'),
+    (0x1092E78, '41 b8 04 00 00 00', '41 b8 08 00 00 00'),                           # a copy of the fill without a caller
+    (0x1092ECB, '83 f8 04', '83 f8 08'),
+    (0x1092ED0, 'c7 83 b0 1b 00 00 04 00 00 00', 'c7 83 b0 1b 00 00 08 00 00 00'),
+    (0x1092F31, '41 b8 04 00 00 00', '41 b8 08 00 00 00'),
+]
+for group, rows in ((G_GUARD, GUARD_SITES), (G_EIGHT, EIGHT_SITES), (G_COUNT, MIRROR_CAPS)):
     for rva, old, new in rows:
         old = bytes.fromhex(old); new = bytes.fromhex(new)
         assert len(old) == len(new) <= 12 and dump[rva:rva + len(old)] == old and skip_of(rva, len(old)) == 0xFF, hex(rva)
@@ -297,8 +319,10 @@ TEST_CAVES = [
     (0x108C382, '41 8b c6 48 8b ce', 'CALL(%d)\n mov r9, qword ptr [rbp-0x59]\n jmp game+0x108C3B0' % TEST_SLOT),
     (0x108C3CA, '49 8b c5 44 89 72 24', 'mov dword ptr [rdx+0x24], r14d\n CALL(%d)\n jmp game+0x108C3F7' % TEST_INDEX),
 ]
-cave_groups = [G_COUNT] * len(CAVES) + [G_GUARD] * len(GUARDS) + [G_NET] * len(NET_GUARDS) + [G_TEST] * len(TEST_CAVES)
-CAVES += GUARDS + NET_GUARDS + TEST_CAVES
+# Only in a build for eight players: a friend's lobby shows eight places. edx stays four, the record's inline members.
+EIGHT_CAVES = [(0x103D11D, 'ba 04 00 00 00 41 89 96 4c 03 00 00', 'mov edx, 4\n mov dword ptr [r14+0x34c], 8\n jmp game+0x103D129')]
+cave_groups = [G_COUNT] * len(CAVES) + [G_GUARD] * len(GUARDS) + [G_NET] * len(NET_GUARDS) + [G_EIGHT] * len(EIGHT_CAVES) + [G_TEST] * len(TEST_CAVES)
+CAVES += GUARDS + NET_GUARDS + EIGHT_CAVES + TEST_CAVES
 # In place, with the cave above: the first loop's count is a copy of that constant.
 sites.append((0x108D2DD, bytes.fromhex('8b ef 90'), bytes.fromhex('8d 6f 04'), 0xFF, G_COUNT))
 assert dump[0x108D2DD:0x108D2E0] == bytes.fromhex('8b ef 90')

@@ -2,6 +2,7 @@
 # rva	instruction bytes	its bytes for eight	list	instruction
 # Not here, and four on purpose: the hostability scores (0x108ABDD the sender's slot lookup, 0x108989B and 0x1089D7B
 # the readers). Their message carries five entries at most; the sender's and the receiver's buffers hold five.
+# Not here: 0x108AA56, the slot loop that closes the lobby when it is full. It is in gen_count_sites.py's EIGHT_SITES.
 AC613B	bf 03 00 00 00	bf 07 00 00 00	A1	mov edi,0x3
 AD58EF	bf 03 00 00 00	bf 07 00 00 00	A1	mov edi,0x3
 B67132	83 f8 04	83 f8 08	A1	cmp eax,0x4
@@ -53,7 +54,6 @@ BC0576	83 f9 04	83 f9 08	B5	cmp ecx,0x4
 108A60E	be 04 00 00 00	be 08 00 00 00	A1	mov esi,0x4
 108A72B	41 bf 04 00 00 00	41 bf 08 00 00 00	A3	mov r15d,0x4
 108A7EE	41 be 03 00 00 00	41 be 07 00 00 00	A1	mov r14d,0x3
-108AA56	83 f9 04	83 f9 08	A1	cmp ecx,0x4
 108AE3F	bf 04 00 00 00	bf 08 00 00 00	A1	mov edi,0x4
 108AEE7	83 f8 04	83 f8 08	A1	cmp eax,0x4
 108B25F	83 f8 04	83 f8 08	A3	cmp eax,0x4

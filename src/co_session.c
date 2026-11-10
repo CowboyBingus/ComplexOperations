@@ -2,7 +2,8 @@
  * session context, every per-peer array with four entries and the next array right behind it. The arrays that will
  * grow to eight stay where they are; this moves the neighbours they would overrun (index flags, party records, ready
  * peers, list 3 with its count, peer values, hostability) to an extension block near the context and gives every code
- * site that addresses them the new distance. Sites that cannot hold a 32-bit distance jump to a stub that can. */
+ * site that addresses them the new distance. Sites that cannot hold a 32-bit distance jump to a stub that can.
+ * The lobby's three member lists of four go the same way, to room for eight, so that a lobby of eight fits. */
 #include <string.h>
 #include <windows.h>
 
@@ -14,11 +15,12 @@ typedef struct CoSessionStub
 {
     uint32_t rva;
     uint8_t size, length, at;
+    uint8_t again;    /* a second place in the stub for the same value, 0 for none */
     uint32_t old;
     uint8_t array, shift;
     uint8_t jumpAt;   /* a conditional jump in the stub: where its rel32 is, 0 for none */
     uint32_t jumpTo;  /* and the rva it leads to */
-    uint8_t replaced[12], code[16];
+    uint8_t replaced[12], code[64];
 } CoSessionStub;
 #include "co_session_sites.h"
 
@@ -27,14 +29,17 @@ typedef struct CoSessionStub
 #define CO_SESSION_INIT 0x134D740u      /* sets up the session context the global points at */
 #define CO_SESSION_GLOBAL 0x347CEF0u
 #define CO_SESSION_READY 0xB388u        /* a byte in the context: set once the init has run */
-#define CO_EXTENSION 0x1000u
-#define CO_STUB_ROOM 0x20u
+#define CO_EXTENSION 0x8000u
+/* A lobby object's copy is the longest stub: 64 bytes and the jump back. */
+#define CO_STUB_ROOM 0x50u
+_Static_assert(CO_SESSION_STUBS * CO_STUB_ROOM <= 0x1000u, "the stubs must fit their page");
 static const char kSessionInitPin[] = "48 89 5C 24 18 48 89 4C 24 08 55 56 57 48 8B EC 48 83 EC 30 48 8B 35";
 
 typedef uint64_t (*SessionInitFn)(uint64_t, uint64_t, uint64_t, uint64_t);
 static SessionInitFn g_sessionInit;
 /* Where each moved array ended in the context, in kCoSessionArrays' order. */
-static const uint32_t kOldEnd[] = {0x15AB8u, 0x1634Cu, 0x16300u, 0x16390u, 0x16458u, 0x16498u, 0x161B8u};
+static const uint32_t kOldEnd[] = {0x15AB8u, 0x1634Cu, 0x16300u, 0x16390u, 0x16458u, 0x16498u, 0x161B8u, 0x18D88u, 0x1A940u, 0x1EFE8u};
+_Static_assert(sizeof kOldEnd == sizeof kCoSessionArrays / 2, "an old end for every moved array");
 static uintptr_t g_game, g_context, g_extension, g_stubs;
 static int g_state; /* 0 not moved, 1 moved, -1 left as the game has it */
 
@@ -92,6 +97,7 @@ static void Move(uintptr_t context)
         { Release(); co_log("session: the extension is out of reach for game+0x%X; the session lists stay as they are", s->rva); return; }
         memcpy(stub, s->code, s->length);
         memcpy(stub + s->at, &value, 4);
+        if (s->again) memcpy(stub + s->again, &value, 4);
         if (s->jumpAt)
         {
             int32_t to = (int32_t)((int64_t)(g_game + s->jumpTo) - (int64_t)((uintptr_t)stub + s->jumpAt + 4u));
@@ -124,8 +130,8 @@ static void Move(uintptr_t context)
         { Undo(CO_SESSION_SITES, i); Release(); co_log("session: game+0x%X could not be written; the session lists stay as they are", s->rva); return; }
     }
     g_state = 1;
-    co_log("session: %u arrays of the session lists moved (%u code sites changed, %u through stubs)", (unsigned)(sizeof kCoSessionArrays / sizeof kCoSessionArrays[0]),
-           (unsigned)(CO_SESSION_SITES + CO_SESSION_STUBS), (unsigned)CO_SESSION_STUBS);
+    co_log("session: %u arrays of the session lists and the lobby's member lists moved (%u code sites changed, %u through stubs)",
+           (unsigned)(sizeof kCoSessionArrays / sizeof kCoSessionArrays[0]), (unsigned)(CO_SESSION_SITES + CO_SESSION_STUBS), (unsigned)CO_SESSION_STUBS);
 }
 
 #ifdef CO_CANARY
@@ -229,4 +235,13 @@ uintptr_t co_session_test_extension(void) { return g_extension; }
 uintptr_t co_session_test_stubs(void) { return g_stubs; }
 unsigned co_session_test_sites(void) { return (unsigned)CO_SESSION_SITES; }
 unsigned co_session_test_stub_count(void) { return (unsigned)CO_SESSION_STUBS; }
+/* The number of the write that changes the site or stub at rva, from the first of the move; -1 for none. */
+int co_session_test_write_of(uint32_t rva)
+{
+    for (size_t i = 0; i < CO_SESSION_SITES; i++)
+        if (kCoSessionSites[i].rva == rva) return (int)i;
+    for (size_t i = 0; i < CO_SESSION_STUBS; i++)
+        if (kCoSessionStubs[i].rva == rva) return (int)(CO_SESSION_SITES + i);
+    return -1;
+}
 #endif

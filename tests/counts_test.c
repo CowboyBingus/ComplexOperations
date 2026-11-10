@@ -2,7 +2,8 @@
  * a failed write takes all of them back, and the mod's own slot and record code handles entries 4 to 7. The guards
  * of the game's four-entry tables go the same way; some of them are run with player indexes 0 to 7. The message
  * guards are run with lists that fit and lists that do not. The build's player count decides which sites belong to
- * it, and the test option's slot and index search is checked against a stand-in synchronizer. */
+ * it, and the test option's slot and index search is checked against a stand-in synchronizer. The lobby's member
+ * lists fill eight in every build; the lobby takes eight only in a build for eight. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,6 +35,7 @@ int co_counts_test_first_slot(void);
 int co_counts_test_fits(uint32_t shape, const void* arguments);
 int co_counts_test_join_slot(uintptr_t sync);
 uint32_t co_counts_test_join_index(uint8_t* flags);
+int co_counts_test_write_of(uint32_t rva);
 void co_pods_test_reset(void);
 void co_managers_test_reset(void);
 
@@ -65,6 +67,12 @@ void co_managers_test_reset(void);
 #define NET_APPEND 0x108ABF2u       /* a sender's append to two lists of five */
 #define TEST_SLOT 0x108C382u        /* the join request's search for a free slot */
 #define TEST_INDEX 0x108C3CAu       /* and for a free player index */
+#define MIRROR_CAP 0x1093CB0u       /* mov r8d,4: the PlayFab members copied into the main lobby's list */
+#define MIRROR_COUNT 0x1093C96u     /* mov dword [rdi+0x1BB0],4: the LAN count clamp */
+#define LOBBY_FULL 0x108AA56u       /* cmp ecx,4: the host slots taken when the lobby closes */
+#define LOBBY_SIZE 0x10919D1u       /* mov ecx,4: the Steam lobby's size */
+#define LOBBY_POST 0x12CB9BAu       /* je: the friends-list post's re-post of a count of at most four */
+#define LOBBY_FRIEND 0x103D11Du     /* mov edx,4; mov [r14+0x34C],edx: a friend's lobby size */
 
 typedef uint64_t (*InitFn)(uint64_t, uint64_t, uint64_t, uint64_t);
 typedef uint32_t (*CardFn)(void*, uint32_t);
@@ -125,7 +133,8 @@ static int AsTheGameHasIt(void)
            image[GUARD_SITE + 2] == 0xFF && image[GUARD_SITE + 4] == 0x84 && image[GUARD_NEXT + 2] == 0x30 &&
            image[GUARD_ROW] == 0xF2 && image[GUARD_CARD] == 0x8B && image[LAST_GUARD] == 0x41 && image[GUARD_ENTRY] == 0x48 &&
            image[GUARD_INPUT + 2] == 0xFF && image[EIGHT_INDEX + 2] == 4 && image[EIGHT_SOS + 2] == 4 && image[NET_SCORES] == 0x40 &&
-           image[NET_SENDER] == 0x41 && image[TEST_SLOT] == 0x41 && image[TEST_INDEX] == 0x49 && co_counts_test_reviewed(image);
+           image[NET_SENDER] == 0x41 && image[TEST_SLOT] == 0x41 && image[TEST_INDEX] == 0x49 && image[MIRROR_CAP + 2] == 4 &&
+           image[LOBBY_FULL + 2] == 4 && image[LOBBY_SIZE + 1] == 4 && image[LOBBY_FRIEND] == 0xBA && co_counts_test_reviewed(image);
 }
 
 /* The jump at a cave's site, the rest of the replaced bytes as nops; the cave it leads to. */
@@ -168,7 +177,7 @@ int main(void)
     CHECK(g_fake.writes == 0 && AsTheGameHasIt());
     Init(CONTEXT);
     CHECK(co_session_test_state() == 1 && co_counts_test_on() == 1);
-    CHECK(fake_host_logged("session: the session lists count to eight (134 code sites changed, 14 through caves)"));
+    CHECK(fake_host_logged("session: the session lists count to eight (141 code sites changed, 14 through caves)"));
     {
         static char line[96];
         snprintf(line, sizeof line, "players: %u accesses to four-entry tables of the game skip a player index above 3", co_counts_test_guards());
@@ -184,6 +193,19 @@ int main(void)
     CHECK(fake_host_logged("TEST BUILD") == (first != 0));
     CHECK((Cave(TEST_SLOT, 6) != NULL) == (first != 0) && (Cave(TEST_INDEX, 7) != NULL) == (first != 0));
     if (first == 0) CHECK(g_fake.image[TEST_SLOT] == 0x41 && g_fake.image[TEST_INDEX] == 0x49);
+    /* The member lists fill eight in every build. The lobby closes, and is made, at the build's player count. */
+    CHECK(g_fake.image[MIRROR_CAP] == 0x41 && g_fake.image[MIRROR_CAP + 2] == 8 && g_fake.image[MIRROR_COUNT + 6] == 8);
+    CHECK(g_fake.image[LOBBY_FULL + 2] == players && g_fake.image[LOBBY_SIZE] == 0xB9 && g_fake.image[LOBBY_SIZE + 1] == players);
+    CHECK(g_fake.image[LOBBY_POST] == (players == 8 ? 0xEB : 0x74));
+    CHECK(fake_host_logged("and the lobby takes eight") == (players == 8));
+    {
+        /* mov edx,4; mov dword [r14+0x34C],8; jmp back: four inline members, eight places shown */
+        static const uint8_t kFriend[] = {0xBA, 0x04, 0x00, 0x00, 0x00, 0x41, 0xC7, 0x86, 0x4C, 0x03, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0xE9};
+        const uint8_t* cave = Cave(LOBBY_FRIEND, 12);
+        CHECK((cave != NULL) == (players == 8));
+        if (cave != NULL) CHECK(memcmp(cave, kFriend, sizeof kFriend) == 0 && Leads(cave + 17, 0x103D129u));
+        if (players != 8) CHECK(g_fake.image[LOBBY_FRIEND] == 0xBA);
+    }
     writes = g_fake.writes;
     CHECK(writes >= moves + (int)co_counts_test_sites());
     {
@@ -504,6 +526,39 @@ int main(void)
     CHECK(co_session_test_state() == 1 && co_counts_test_on() == (players == 8 ? 0 : 1));
     CHECK(fake_host_logged("game+0x66CA22 is not the reviewed one") == (players == 8));
     CHECK(g_fake.image[EIGHT_INDEX + 2] == 4);
+
+    /* The member lists' caps are counts: a changed one leaves every build at four. */
+    Start("one changed member list cap");
+    g_fake.image[MIRROR_CAP + 1] ^= 0x01;
+    Init(CONTEXT);
+    CHECK(co_session_test_state() == 1 && co_counts_test_on() == 0 && g_fake.writes == moves);
+    CHECK(fake_host_logged("session: the code at game+0x1093CB0 is not the reviewed one; the session lists count to four as before"));
+
+    /* The lobby's size is only the build for eight's concern, its cave too. */
+    Start("one changed lobby site of the build for eight");
+    g_fake.image[LOBBY_FRIEND + 6] ^= 0x01;
+    Init(CONTEXT);
+    CHECK(co_session_test_state() == 1 && co_counts_test_on() == (players == 8 ? 0 : 1));
+    CHECK(fake_host_logged("game+0x103D11D is not the reviewed one") == (players == 8));
+    CHECK(g_fake.image[LOBBY_FULL + 2] == 4 && g_fake.image[LOBBY_SIZE + 1] == 4);
+
+    /* A failed write at a member list's cap or a lobby site takes every count back. */
+    {
+        const uint32_t kLobby[] = {MIRROR_CAP, MIRROR_COUNT, LOBBY_FULL, LOBBY_SIZE, LOBBY_POST, LOBBY_FRIEND};
+        for (size_t i = 0; i < sizeof kLobby / sizeof kLobby[0]; i++)
+        {
+            static char name[64];
+            const int at = co_counts_test_write_of(kLobby[i]);
+            CHECK((at >= 0) == (players == 8 || kLobby[i] == MIRROR_CAP || kLobby[i] == MIRROR_COUNT));
+            if (at < 0) continue;
+            snprintf(name, sizeof name, "the write at game+0x%X fails", kLobby[i]);
+            Start(name);
+            g_fake.failWriteAt = moves + at;
+            Init(CONTEXT);
+            CHECK(co_session_test_state() == 1 && co_counts_test_on() == 0 && AsTheGameHasIt());
+            CHECK(fake_host_logged("a count site could not be written; the session lists count to four as before"));
+        }
+    }
 
     /* The same for the test option's two places. */
     Start("one changed site of the test option");

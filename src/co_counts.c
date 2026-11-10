@@ -32,11 +32,6 @@ _Static_assert(sizeof kCoCountCode <= CO_CAVE_ROOM, "the caves' code must fit th
 /* A site's or cave's group. Guards go in and out with the counts: a table that stays at four entries is safe only
  * while every access to it is guarded. The last two depend on the build. */
 enum { CO_G_COUNT, CO_G_GUARD, CO_G_NET, CO_G_EIGHT, CO_G_TEST };
-/* The build's player count (scripts/build.sh --players). Four leaves the join gate, the client's own index tests and
- * the SOS beacon as the game has them. */
-#ifndef CO_PLAYERS
-#define CO_PLAYERS 4
-#endif
 /* Test builds only (--test-first-slot): the host gives joining peers slots and player indexes from this number on,
  * so that two game instances reach the code for players 5 to 8. Zero is off. */
 #ifndef CO_TEST_FIRST_SLOT
@@ -362,7 +357,8 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
         co_log("players: %u accesses to four-entry tables of the game skip a player index above 3", InGroup(CO_G_GUARD, NULL));
         co_log("session: %u guards keep the lists in messages inside the game's buffers", InGroup(CO_G_NET, NULL));
         if (Active(CO_G_EIGHT))
-            co_log("session: player indexes 4 to 7 are valid and the SOS beacon counts to eight (%u code sites changed)", InGroup(CO_G_EIGHT, NULL));
+            co_log("session: player indexes 4 to 7 are valid, the SOS beacon counts to eight and the lobby takes eight (%u code sites changed)",
+                   InGroup(CO_G_EIGHT, NULL));
     }
     return;
 failed:
@@ -462,6 +458,27 @@ uint32_t co_counts_test_join_index(uint8_t* flags)
     regs.r13 = (uint64_t)(uintptr_t)flags;
     JoinIndex(&regs);
     return (uint32_t)regs.r8;
+}
+/* The number of the write that changes the site or cave at rva, from the first of the counts; -1 when this build
+ * does not write it. */
+int co_counts_test_write_of(uint32_t rva)
+{
+    int n = 0;
+    for (size_t i = 0; i < CO_COUNT_SITES; i++)
+    {
+        const CoCountSite* s = &kCoCountSites[i];
+        if (!Active(s->group)) continue;
+        if (s->rva == rva) return n;
+        n += s->skip == 0xFF ? 1 : (s->skip != 0) + (s->skip + 4 < s->size);
+    }
+    n += (int)CO_COUNT_CLEARS;
+    for (size_t i = 0; i < CO_COUNT_CAVES; i++)
+        if (Active(kCoCountCaves[i].group))
+        {
+            if (kCoCountCaves[i].rva == rva) return n;
+            n++;
+        }
+    return -1;
 }
 int co_counts_test_on(void) { return g_on; }
 uintptr_t co_counts_test_caves(void) { return g_caves; }

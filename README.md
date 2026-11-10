@@ -37,7 +37,7 @@ The six arrays behind them move to the mod's memory: index flags, party records,
 peer values and hostability. 281 code sites get the new distance; 20 of them through a short stub, because the
 instruction has no room for it.
 
-With the room made, the lists count to eight: 120 sites that loop, compare or clear for four entries do so for eight.
+With the room made, the lists count to eight: 119 sites that loop, compare or clear for four entries do so for eight.
 In 17 places the game's compiler wrote the code out for exactly four entries; there the mod adds the other four, with
 code of its own beside the game's (14) or a hook of the function (3).
 
@@ -52,18 +52,41 @@ such lists inside their buffers: the handler ignores a message whose list is too
 the receiver holds. Every build has them.
 
 A build for eight players also lets a client's player index 4 to 7 count as valid, opens the join gate to eight, and
-makes the SOS beacon count to eight.
+makes the SOS beacon count to eight. Its lobby takes eight too (see Lobby).
 
 Limits that remain:
 
 - The hostability scores stay at four entries. Their message carries five at most, so peers 5 to 8 get no score.
 - A guarded table has no entry for players 5 to 8: no map cursor, no loadout card, no row in the mission summary.
 
+## Lobby
+
+Each of the game's three lobby objects (the main lobby, the one being joined, the previous one) keeps its members in a
+list of four. The host drops a peer that is not in the main list, and a client sends its state only to peers in it.
+
+The session step moves the three lists to the mod's memory, with room for eight. 31 code sites get the new distance.
+In 4 places the game copies a whole lobby object; a stub copies the moved list first. Behind the move, 8 sites let the
+lists fill to eight. Every build has this.
+
+A build for four closes the lobby at four players: Steam marks it not joinable, PlayFab makes it private.
+
+A build for eight makes the lobby take eight. The Steam lobby is made for eight and the PlayFab lobby for twelve (the
+game adds four). The lobby closes at eight. The lobby search, a friend's lobby in the friends list and the member
+count the host posts for friends go to eight too. 7 sites and 1 cave do this, with the counts.
+
+Limits that remain:
+
+- A lobby's entry in a message to other players lists four members at most.
+- A friend's full lobby without the mod shows four of eight places; Steam refuses the join.
+
 ## Engine
 
 The engine sends a session's peers as a count and a list. The sender writes the count as a whole byte; the readers
 take three bits of it, so eight peers arrive as none. Five sites in `helldivers2.exe` make the readers take four
 bits. With up to seven peers the message is unchanged.
+
+A build for eight players changes one more site there: the lobby search keeps results with up to seven members, where
+the game drops four and more. It goes in on its own: when it cannot, the peer list change stays.
 
 ## State
 
@@ -72,7 +95,8 @@ bits. With up to seven peers the message is unchanged.
   works; the mission was ended through the game's own handler, not by flying an extraction.
 - Tested with two players (two game instances on one PC, build for four): the join, both players on the ship, a
   seat in a new pod seen by the other player.
-- Not tested: a build for eight players in a game, a player with index 4 to 7, a launch with two or more players.
+- Not tested: a build for eight players in a game, a player with index 4 to 7, a launch with two or more players, a
+  lobby with more than four members.
 - The launch sound for a lone player in pods 5 to 8 is hooked; the mod logs once when it answers for such a pod.
 
 ## Build
@@ -128,17 +152,18 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `scripts/pod_sites.tsv` | The reviewed site list of the pod manager: one row for each instruction. |
 | `scripts/gen_pod_sites.py` | Writes `co_pod_sites.h` from the site list and a dump of the game's code. |
 | `tests/pods_test.c` | The refusals: another build, changed code, a failed write, a failed hook. |
-| `src/co_engine.c` | The engine's peer-count readers. |
-| `src/co_session.c` | The session lists: the extension block, code sites and stubs. |
+| `src/co_engine.c` | The engine's peer-count readers and the lobby search's member limit. |
+| `src/co_session.c` | The session lists and the lobby's member lists: the extension block, code sites and stubs. |
 | `src/co_session_sites.h` | Their code sites. Generated; do not edit. |
-| `scripts/gen_session_sites.py` | Writes `co_session_sites.h` from the site list and a dump of the game's code. |
+| `scripts/gen_session_sites.py` | Writes `co_session_sites.h` from the site list and a dump of the game's code. Holds the lobby's member lists' sites; assembles their stubs with GNU `as`. |
 | `tests/managers_test.c` | The same refusals for the player managers. |
-| `tests/session_test.c` | The same for the session lists, and that sites and stubs lead to the new place. |
+| `tests/session_test.c` | The same for the session lists, and that sites and stubs lead to the new place. Runs the lobby copies' stubs. |
 | `src/co_counts.c` | The session lists' counts: sites, code caves, the hooks for entries 4 to 7. The guards too. |
 | `src/co_count_sites.h` | Their code sites and the caves' code. Generated; do not edit. |
 | `scripts/sites/count_sites.tsv` | The reviewed count sites: one row for each instruction. |
-| `scripts/gen_count_sites.py` | Writes `co_count_sites.h`; assembles the caves with GNU `as`. Holds the guards. |
+| `scripts/gen_count_sites.py` | Writes `co_count_sites.h`; assembles the caves with GNU `as`. Holds the guards, the member lists' caps and the lobby's size. |
 | `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. |
+| `tests/engine_test.c` | The engine's sites: written, refused on changed code, taken back on a failed write. |
 | `tests/harness/` | The stand-in loader and game image the tests run against. |
 
 ## How it stays safe
@@ -158,11 +183,12 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 |---|---|
 | `the pod manager and the ship's pod table have 8 slots` | The code is in place. |
 | `7 component managers have 8 slots` | The player managers are in place. |
-| `7 arrays of the session lists moved` | The session lists' arrays are in the mod's memory. |
+| `10 arrays of the session lists and the lobby's member lists moved` | Those arrays are in the mod's memory. |
 | `the session lists count to eight` | The lists' code counts to eight; the line says how many players get in. |
 | `... guards keep the lists in messages inside the game's buffers` | The message guards are in place. |
 | `a message with a list of ... entries was ignored` | A peer sent a longer list than the handler holds; once a handler. |
-| `player indexes 4 to 7 are valid` | A build for eight players. |
+| `player indexes 4 to 7 are valid` | A build for eight players: the lobby takes eight too. |
+| `the lobby search lists lobbies with up to 7 members` | A build for eight players: the search's site is in place. |
 | `TEST BUILD, not for play` | Built with `--test-first-slot`. |
 | `the session lists count to four as before` | The count change is off; the reason stands before it. |
 | `the bridge is not the one with the eight-pod bay` | The level data is missing: four pods. |
