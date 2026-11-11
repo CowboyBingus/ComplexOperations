@@ -471,7 +471,7 @@ static void SeatValid(CoRegs* regs) { regs->flags = (regs->flags & ~(uint64_t)1)
 /* B1, the per-frame booster update; rcx is B. */
 static void Boosters(CoRegs* regs) { co_boosters_update((uintptr_t)regs->rcx); }
 
-/* By the numbers in gen_count_sites.py; 11 to 13 are kept for other caves. */
+/* By the numbers in gen_count_sites.py; the empty slots (11 to 13, 20 to 29, 37 to 39) are free for other caves. */
 static void (*const kCountCallbacks[])(CoRegs*) = {
     FindByRsi, FindByR11, JoinGate, ClearValueKeys, LastSlotState, MessageFits, JoinSlot, JoinIndex,
     HostAppend, HostBuild, HostScores,
