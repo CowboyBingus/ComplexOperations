@@ -4,7 +4,8 @@
 
 #include "co.h"
 
-#define FAKE_IMAGE_SIZE 0x3500000u
+/* As far as the status effects' table at game+0x37CB600, which the booster update reads. */
+#define FAKE_IMAGE_SIZE 0x37D0000u
 #define FAKE_HOOKS 16
 /* The engine's per-peer loadout table (four entries of 0x9F8, 8 modulo 16 as in the game) and the registry that lists
  * it, at free places in the image. The globals that lead to them are set as the game sets them at startup. */

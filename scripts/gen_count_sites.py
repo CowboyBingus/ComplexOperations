@@ -23,16 +23,20 @@
 #   12 the Activity record's further participants and the answers it waits for (ACTIVITY): in every build while the
 #     post's hook is in and every one of them matches, else none of them;
 #   13 only for eight players: the hostability scores of eight peers (HOST_SITES, HOST_CAVES);
-#   14 only for four players: the two message guards of the hostability scores that group 13 replaces.
+#   14 only for four players: the two message guards of the hostability scores that group 13 replaces;
+#   15 only for eight players: the HiveMind's difficulty multipliers for five to eight players (sites/difficulty_sites.py);
+#   16 only for eight players: the Pelican's seats 8 and 9, behind the mod's check of its unit's nodes, and
+#   17 only for eight players: every player's boosters (both sites/extract_sites.py).
+# Groups 15 to 17 are refused one by one: a changed byte leaves its group out and the rest goes in.
 # It also writes tests/co_stack_code.h: the game's code the tests run beside the stack fixes.
 # An instruction of a moved array carries a distance the session step rewrites; those four bytes are not compared.
 import os, re, struct, sys
 
 G_COUNT, G_GUARD, G_NET, G_EIGHT, G_TEST, G_LOADOUT, G_GUARD4, G_SYNCED, G_LOOT, G_SUMMARY, G_STACK, G_STACK8, G_ACTIVITY, \
-    G_WIRE, G_NET4 = range(15)
+    G_WIRE, G_NET4, G_DIFFICULTY, G_SEATS, G_BOOSTERS = range(18)
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE + '/sites')
-import cave_asm, loadout_sites, map_sites, stack_sites, summary_sites, tag_sites
+import cave_asm, difficulty_sites, extract_sites, loadout_sites, map_sites, stack_sites, summary_sites, tag_sites
 dump = open(sys.argv[1], 'rb').read()
 out = sys.argv[2] if len(sys.argv) > 2 else HERE + '/../src/co_count_sites.h'
 
@@ -115,8 +119,8 @@ CALL = '''
     pop rax
     popfq
 '''
-# Callbacks, by number (the index in kCountCallbacks in co_counts.c). 8 to 10 are the hostability scores', 11 to 13 are
-# kept for the extraction caves; 18 and 19 are the stack fixes' (stack_sites.py), 30 to 34 the Activity record's.
+# Callbacks, by number (the index in kCountCallbacks in co_counts.c). 8 to 10 are the hostability scores'; 18 and 19
+# the stack fixes' (stack_sites.py), 30 to 34 the Activity record's, 40 to 43 extract_sites.py's.
 FIND_RSI, FIND_R11, GATE, VALUES, LAST_SLOT, MESSAGE, TEST_SLOT, TEST_INDEX = range(8)
 HOST_APPEND, HOST_BUILD, HOST_SCORES = range(8, 11)
 SCORE_INDEX, SCORE_ROW, PARTICIPANT, RECORD = range(14, 18)
@@ -401,12 +405,16 @@ LOADOUT_CAVES = [(rva, replaced, text) for rva, replaced, text, _ in LOADOUT_CAV
 SUMMARY_CAVES = [(rva, replaced, text) for rva, replaced, text, _, _ in summary_sites.CAVES]
 SUMMARY_CAVES += [(rva, replaced, text) for rva, replaced, text, _ in summary_sites.GUARD8]
 STACK_CAVES = [(rva, replaced, text) for rva, replaced, text, _, _ in stack_sites.CAVES]
+DIFFICULTY_CAVES = [(rva, replaced, text) for rva, replaced, text, _ in difficulty_sites.build(dump)[1]]
+EXTRACT_CAVES = extract_sites.build(dump)[1]
 cave_groups = ([G_COUNT] * len(CAVES) + [G_GUARD4 if rva in OFF else G_GUARD for rva, _, _ in GUARDS] +
                [G_NET4 if rva in HOST_REPLACES else G_NET for rva, _, _ in NET_GUARDS] +
                [G_EIGHT] * len(EIGHT_CAVES) + [G_TEST] * len(TEST_CAVES) + [G_LOADOUT] * len(LOADOUT_CAVES) + [G_LOOT] * len(LOOT) +
                [G_SUMMARY] * len(SUMMARY_CAVES) + [G_STACK8 if eight else G_STACK for _, _, _, _, eight in stack_sites.CAVES] +
-               [G_ACTIVITY] * len(ACTIVITY) + [G_WIRE] * len(HOST_CAVES))
-CAVES += GUARDS + NET_GUARDS + EIGHT_CAVES + TEST_CAVES + LOADOUT_CAVES + LOOT + SUMMARY_CAVES + STACK_CAVES + ACTIVITY + HOST_CAVES
+               [G_ACTIVITY] * len(ACTIVITY) + [G_WIRE] * len(HOST_CAVES) +
+               [G_DIFFICULTY] * len(DIFFICULTY_CAVES) + [g for _, _, _, _, g in EXTRACT_CAVES])
+CAVES += (GUARDS + NET_GUARDS + EIGHT_CAVES + TEST_CAVES + LOADOUT_CAVES + LOOT + SUMMARY_CAVES + STACK_CAVES + ACTIVITY + HOST_CAVES +
+          DIFFICULTY_CAVES + [(rva, replaced, text) for rva, replaced, text, _, _ in EXTRACT_CAVES])
 # In place, with the cave above: the first loop's count is a copy of that constant.
 sites.append((0x108D2DD, bytes.fromhex('8b ef 90'), bytes.fromhex('8d 6f 04'), 0xFF, G_COUNT))
 assert dump[0x108D2DD:0x108D2E0] == bytes.fromhex('8b ef 90')
@@ -488,6 +496,16 @@ h.append('#define CO_SYNCED_POINTER 0x%Xu\n#define CO_SYNCED_ENGINE 0x%Xu\n#defi
 h.append('#define CO_SYNCED_TYPE 0x%Xu\n#define CO_SYNCED_OLD_SIZE 0x%Xu\n#define CO_SYNCED_NEW_SIZE 0x%Xu\n' % (m['registry_type'], m['old_size'], m['new_size']))
 h.append('static const uint32_t kCoSyncedLists[] = {%s};\n' % ', '.join('0x%Xu' % x for x in m['registry_lists']))
 h.append('static const uint32_t kCoSyncedRooms[] = {%s};\n' % ', '.join('%du' % x for x in m['registry_rooms']))
+# The Pelican's seat block (sites/extract_sites.py) and the game's bytes it is made from, which the mod compares first.
+block = extract_sites.seat_block(dump)
+h.append('#define CO_SEAT_RECORDS 0x%Xu\n#define CO_SEAT_LISTS 0x%Xu\n#define CO_SEAT_LIST_AT 0x%Xu\n'
+         % (extract_sites.RECORDS, extract_sites.LISTS, extract_sites.LIST_AT))
+h.append('static const uint8_t kCoSeatGame[] = {%s};\n' % c_bytes(dump[extract_sites.RECORDS:extract_sites.RECORDS + 8 * extract_sites.RECORD]))
+h.append('static const uint8_t kCoSeatEntrance[] = {%s};\n' % c_bytes(dump[extract_sites.LISTS + 6 * extract_sites.LIST:
+                                                                            extract_sites.LISTS + 7 * extract_sites.LIST]))
+h.append('static _Alignas(16) const uint8_t kCoSeatBlock[] = {\n')
+for i in range(0, len(block), 24): h.append('    ' + c_bytes(block[i:i + 24]) + ',\n')
+h.append('};\n')
 assert len(cave_groups) == len(caves) == len(CAVES)
 open(out, 'w').writelines(h)
 open(HERE + '/../tests/co_stack_code.h', 'w').writelines(stack_sites.test_header(dump))
@@ -495,6 +513,7 @@ print('%d sites, %d clears, %d caves (%d bytes)' % (len(sites), len(CLEARS), len
 for group, name in list(enumerate(('counts', 'guards', 'message guards', 'eight players only', 'test option only', 'loadout (eight only)',
                                     'guards (four only)', 'loadout table (eight)', 'loot rows', 'summary (eight only)', 'stack arrays',
                                     'stack arrays (eight)'))) + \
-                   [(G_WIRE, 'hostability (eight)'), (G_NET4, 'message guards (four)')]:
+                   [(G_WIRE, 'hostability (eight)'), (G_NET4, 'message guards (four)'),
+                    (G_DIFFICULTY, 'difficulty (eight)'), (G_SEATS, 'Pelican seats (eight)'), (G_BOOSTERS, 'boosters (eight)')]:
     print('  %-20s %3d sites, %2d caves' % (name, sum(s[4] == group for s in sites), cave_groups.count(group)))
 print('  %-20s %3d sites, %2d caves' % ('activity record', sum(s[4] == G_ACTIVITY for s in sites), cave_groups.count(G_ACTIVITY)))

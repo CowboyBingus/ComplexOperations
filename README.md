@@ -202,6 +202,35 @@ Limits that remain:
   is not known.
 - The summary's list of best entries keeps four.
 
+## Difficulty
+
+A build for eight carries the HiveMind's difficulty multipliers on past four players. The game keeps each multiplier
+for one to four players and reads it by player count with no bound, so a fifth player reads past them.
+
+- 26 caves replace those reads: spawners, patrols, encounters, guard forces and travelers.
+- One to four players get the game's own value.
+- Five to eight continue the step from three to four players: v4 + (n - 4) x (v4 - v3), at least 0.1.
+- Spawn caps are not changed here.
+
+## Extraction
+
+A build for eight gives the Pelican eight passenger seats where the game has six. 15 caves add two seats, 8 and 9 in
+the game's seat table. They attach to two nodes of the Pelican's unit, `attach_passenger_left_4` and
+`attach_passenger_right_4`. Players reach them as they reach the other passenger seats and sit as in the third seat on
+each side.
+
+The game's Pelican has no such nodes. The seats open only when the mod finds both on the Pelican's unit, which the mod's
+level data must add. The first Pelican decides, until the game closes. Without the nodes the Pelican keeps six
+passenger seats and the log says why.
+
+A build for eight also loads the boosters of all eight players. The game's booster update collects four players'
+boosters; 1 cave runs it over eight. With four players or fewer it does what the game does.
+
+Limits that remain:
+
+- The HUD's booster strip shows four boosters.
+- How a peer without the seats handles a player in seat 8 or 9 is not known; every player needs the mod.
+
 ## Galactic map
 
 The map object keeps the players' cursors (four of 0x298 bytes) and two lists of four for what each one hovers over.
@@ -341,7 +370,11 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `scripts/sites/loadout_sites.py` | The loadout screen's sites and caves for eight, and the per-peer loadout table's move and bounds. |
 | `scripts/sites/summary_sites.py` | The mission summary's sites and caves for eight, and its guards for four. |
 | `scripts/gen_count_sites.py` | Writes `co_count_sites.h` and `tests/co_stack_code.h`; assembles the caves with GNU `as`. Holds the guards, the member lists' caps, the lobby's size and the loot rows' guards. |
+| `scripts/sites/difficulty_sites.py` | The HiveMind's difficulty sites and their caves for eight. |
+| `scripts/sites/extract_sites.py` | The Pelican's seat caves and seat block, and the booster cave, for eight. |
+| `src/co_extract.c` | The check of the Pelican's seat nodes, and the booster update over eight. |
 | `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards and the mission result's slots in both managers' states, the Activity record's participants, answers and post, and the join limit without the managers. The mission summary in each build. |
+| `tests/extract_test.c` | The difficulty caves for one to eight players, the seat block, the node check and the boosters. Refusal by part and rollback of a failed write. |
 | `src/co_ui.c` | The tables a build for eight moves at run time: the galactic map's cursors, the squad HUD's panel, the name tags' rows. Guards for four, the move, its undo, the hook of the HUD's init. |
 | `src/co_ui_sites.h` | Their code sites and caves. Generated; do not edit. |
 | `scripts/sites/map_sites.py` | The galactic map's sites and caves for eight, and its guards for four. |
@@ -370,12 +403,13 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
   each time they run.
 - A table moves at run time only before the game's code first touches it, and only into memory within reach of every
   instruction that addresses it.
+- The difficulty, seat and booster caves are checked part by part: a changed byte turns off that part alone.
 - A failed step is logged in plain words, for example "four pods as before".
 
 ## Log
 
 The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.log` and start with `hellpods:`,
-`players:`, `session:` or `engine:`.
+`players:`, `session:`, `engine:` or `extraction:`.
 
 | Line | Meaning |
 |---|---|
@@ -406,6 +440,14 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `the galactic map keeps four cursors` | The move did not happen; the reason stands before it. |
 | `the squad HUD has seven teammate panels`, `eight players have name tags` | A build for eight players: the HUD's tables are in the mod's memory. |
 | `the squad HUD keeps three teammate panels`, `four players have name tags` | Those moves did not happen; the reason stands before it. |
+| `the HiveMind's difficulty multipliers go on past four players` | A build for eight players: the difficulty caves are in place. |
+| `the Pelican's seats 8 and 9 are in place` | A build for eight players: the seat caves are in; the seats open once the Pelican has their nodes. |
+| `the Pelican's unit has the nodes attach_passenger_left_4 and right_4` | Seats 8 and 9 are open until the game closes. |
+| `the Pelican's unit has no attach_passenger_left_4 and right_4 nodes` | The level data is missing: six passenger seats. |
+| `seat type 40 belongs to a unit other than the Pelican's shuttle_gunship` | The game's seats changed: six passenger seats. |
+| `the engine's unit functions are not the reviewed ones` | The node check cannot run: six passenger seats. |
+| `the boosters of all eight players are loaded` | A build for eight players: the booster cave is in place. |
+| `the HiveMind's multipliers stop at four players`, `the Pelican keeps six passenger seats`, `boosters of players 5 to 8 are not loaded` | That part is off and the rest goes in; the reason stands before it. |
 | `TEST BUILD, not for play` | Built with `--test-first-slot`. |
 | `the session lists count to four as before` | The count change is off; the reason stands before it. |
 | `the bridge is not the one with the eight-pod bay` | The level data is missing: four pods. |
