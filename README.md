@@ -136,7 +136,8 @@ and the cards. A build for eight allocates the screen bigger and moves the four 
 15 guards rebuilt for eight: an index of eight or more, or none, skips the access as before.
 
 The eight cards stand in one row at half the game's size, 232 reference units apart, so they do not overlap. The 3D
-figure preview has four slots. Cards 5 to 8 get no figure, where the game would draw a fifth one over card 1.
+figure preview has four slots, one for each player index. Players 5 to 8 (index 4 and up) get no figure, whichever
+card they hold; the game would draw a fifth one over card 1.
 
 The engine keeps one more loadout table, outside the screen: one entry for each peer, four of them. The build for
 eight moves it to the mod's memory with room for eight, when it writes its count sites. The four entries go along,
@@ -152,7 +153,7 @@ A build for four leaves the screen and the table as the game has them and keeps 
 
 Limits that remain:
 
-- Cards 5 to 8 show no 3D figure: the preview's figure slots stay at four.
+- Players 5 to 8 show no 3D figure on their card: the preview's figure slots stay at four.
 - The text on the cards is half size too. How well it reads is not yet checked in a game.
 
 ## Mission
