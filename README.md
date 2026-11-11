@@ -221,9 +221,14 @@ the game's seat table. They attach to two nodes of the Pelican's unit, `attach_p
 `attach_passenger_right_4`. Players reach them as they reach the other passenger seats and sit as in the third seat on
 each side.
 
-The game's Pelican has no such nodes. The seats open only when the mod finds both on a Pelican's unit, which the mod's
-level data must add. The first live gunship decides, until the next session context; other units with the Pelican's
-seat layout are skipped. Without the nodes the Pelican keeps six passenger seats and the log says why.
+The game's Pelican has no such nodes; the mod's recipe adds them to the Pelican's unit (`shuttle_gunship`) in each of
+the five archives that hold it. Each new node stands to the second seat as the third seat's node stands to the first:
+0.28 m forward of it, at the front edge of the second seat. Further along the rows there is no room: the bulkhead is
+ahead of the first seats, and the way in from the ramp is behind the second.
+
+The seats open only when the mod finds both nodes on a Pelican's unit. The first live gunship decides, until the next
+session context; other units with the Pelican's seat layout are skipped. Without the nodes the Pelican keeps six
+passenger seats and the log says why.
 
 Each attach to seat 8 or 9 checks that vehicle's own unit. A unit without the node, or a game with the seats off,
 seats that passenger at the third seat's node of that side.
@@ -338,11 +343,12 @@ Put these four files in one folder inside HellForge's mods folder:
 - `hellforge-recipe.json`
 - `hellforge-recipe.literals`
 
-HellForge builds the bay's level data from the recipe and the player's own game files before a session, into the
-folder's `data/`. The recipe copies every unchanged value from the player's game. It ships only the values the mod changed (a moved
+HellForge builds the bay's level data and the Pelican's unit from the recipe and the player's own game files before a
+session, into the folder's `data/`. The recipe copies every unchanged value from the player's game. It ships only the values the mod changed (a moved
 vertex's new coordinate, for example) and the mod's own new data. Without the level data the mod leaves four pods.
 
-The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), which are not in this folder.
+The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`, then `gunship_seats.py recipe` for the
+Pelican), which are not in this folder.
 
 ## Source
 
@@ -355,7 +361,7 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `src/co_manager_sites.h` | Their code sites and caves. Generated; do not edit. |
 | `scripts/sites/` | The reviewed site lists of the seven managers and the avatar manager. |
 | `scripts/gen_manager_sites.py` | Writes `co_manager_sites.h` from those lists and a dump of the game's code; assembles the loot rows' caves with GNU `as`. |
-| `hellforge-recipe.json`, `.literals` | The bay's level, geometry and collision data as a HellForge recipe. |
+| `hellforge-recipe.json`, `.literals` | The bay's level, geometry and collision data and the Pelican's seat nodes as a HellForge recipe. |
 | `scripts/pod_sites.tsv` | The reviewed site list of the pod manager: one row for each instruction. |
 | `scripts/gen_pod_sites.py` | Writes `co_pod_sites.h` from the site list and a dump of the game's code. |
 | `tests/pods_test.c` | The refusals: another build, changed code, a failed write, a failed hook. |
