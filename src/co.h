@@ -173,12 +173,26 @@ int co_seed_text_marked(const char* text);
 const char* co_join_check(uintptr_t game);
 const char* co_join_install(uintptr_t game);
 int co_join_gate(uintptr_t sync, uint64_t peer, uint64_t join, uint64_t reported, uint32_t value, uint64_t now_ms);
+/* A mission's level init while a war-table preview still generates (co_drain.c): the game starts over the running
+ * generation. The detour of 0xF71220 first cancels it and steps the generator until it is idle, for 2 s at most. */
+#define CO_LEVEL_INIT 0xF71220u
+#define CO_GEN_RESET 0xF70D10u     /* (lg): states 1 and 3 become 4, cancelling */
+#define CO_GEN_STEP 0xF73F10u      /* (lg): the generator's step; state 4 becomes 0 once its job has ended */
+#define CO_DRAIN_LIMIT_MS 2000u
+const char* co_drain_check(uintptr_t game);
+const char* co_drain_install(uintptr_t game);
+/* The steps taken, or -1 when the limit was reached with the generator still busy. `now` reads the clock. */
+int co_drain(uintptr_t level, void (*reset)(uintptr_t), void (*step)(uintptr_t), uint64_t (*now)(void));
 #ifdef CO_TEST
 void co_join_test_reset(void);
 void co_join_test_image(uint8_t* image, uint8_t slots);
 void co_join_test_calls(void* gate, void* update, void* remove, void* denied, uint32_t slots);
 uint64_t co_join_test_confirm(uint64_t sync, uint64_t peer, uint64_t join, uint64_t reported, uint32_t value);
 uint64_t co_join_test_update(uint64_t sync);
+void co_drain_test_reset(void);
+void co_drain_test_image(uint8_t* image);
+void co_drain_test_calls(void* init, void (*reset)(uintptr_t), void (*step)(uintptr_t));
+void co_drain_test_init(uint64_t level, uint64_t rdx, uint32_t r8, uint64_t preview);
 #endif
 /* The live side (co_peers.c). `start` once at game load; `tick` on the game thread: the host keeps its row set, a
  * client sends its message once it holds the row, each tried again while HellForge refuses. `launch_install` hooks

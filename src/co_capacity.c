@@ -78,7 +78,7 @@ static const char* OwnSites(uintptr_t game)
     const char* why;
     if ((why = co_pages_check(game)) != NULL || (why = co_hud_check(game)) != NULL || (why = co_mark_check(game)) != NULL ||
         (why = co_launch_check(game)) != NULL || (why = co_rows_check(game)) != NULL ||
-        (why = co_join_check(game)) != NULL) return why;
+        (why = co_join_check(game)) != NULL || (why = co_drain_check(game)) != NULL) return why;
     return NULL;
 }
 
@@ -115,8 +115,8 @@ int co_complex_start(void)
 {
     const char* why;
     if (!co_complex_on()) return 0;
-    if ((why = co_rows_install(g_capacity.game)) == NULL && (why = co_join_install(g_capacity.game)) == NULL &&
-        (why = CoXlInstall(g_capacity.game)) == NULL && (why = co_mark_install(g_capacity.game)) == NULL) why = co_launch_install(g_capacity.game);
+    if ((why = co_rows_install(g_capacity.game)) == NULL && (why = co_drain_install(g_capacity.game)) == NULL &&
+        (why = co_join_install(g_capacity.game)) == NULL && (why = CoXlInstall(g_capacity.game)) == NULL && (why = co_mark_install(g_capacity.game)) == NULL) why = co_launch_install(g_capacity.game);
     if (why == NULL) return 1;
     g_capacity.on = 0; /* what did go in runs the game's own code on every level: nothing is complex without the mark */
     co_log("complex operations are off: %s", why);
