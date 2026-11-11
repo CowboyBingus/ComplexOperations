@@ -85,6 +85,10 @@ CAVES = [
 BOOSTER_PINS = [(0x8568BA, 0x8569BA), (0x8569BA, 0x856ABA), (0x856ABA, 0x856BBA), (0x12689C0, 0x1268AA7),
                 (0x12FE350, 0x12FE360), (0x12FE4E0, 0x12FE4F0), (0x670E30, 0x670E40), (0x66F190, 0x66F1BC),
                 (0x66F4C0, 0x66F4D0)]
+# HellForge moves the stratagem list at game+0x37CB600 when a mod adds a stratagem, and rewrites this lea r13's disp32
+# with it (its stratagem_sites.h). The pin leaves those four bytes open; the callback reads the list through the lea.
+EFFECTS_LEA = 0x856993
+BOOSTER_OPEN = range(EFFECTS_LEA + 3, EFFECTS_LEA + 7)
 
 
 def seat_block(dump):
@@ -112,6 +116,8 @@ def check(dump):
     # those seat 0's pair.
     assert [(i32(PAIRS + 8 * r), i32(PAIRS + 8 * r + 4)) for r in range(8)] == [(6, -1)] * 6 + [(-1, 0)] * 2
     assert all(ok - lo <= 256 and dump[lo:ok] for lo, ok in BOOSTER_PINS)
+    assert dump[EFFECTS_LEA:EFFECTS_LEA + 3] == bytes.fromhex('4c8d2d') and \
+        EFFECTS_LEA + 7 + struct.unpack_from('<i', dump, EFFECTS_LEA + 3)[0] == 0x37CB600
     assert HASH_L4 not in [r[0] for r in recs] and HASH_R4 not in [r[0] for r in recs]
 
 

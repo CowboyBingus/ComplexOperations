@@ -517,7 +517,8 @@ h.append('};\n')
 # The game's bytes the booster callback rebuilds, as code_matches patterns.
 h.append('static const struct { uint32_t rva; const char* pin; } kCoBoosterPins[] = {\n')
 for lo, end in extract_sites.BOOSTER_PINS:
-    h.append('    {0x%Xu, "%s"},\n' % (lo, ' '.join('%02X' % x for x in dump[lo:end])))
+    h.append('    {0x%Xu, "%s"},\n' % (lo, ' '.join('??' if lo + i in extract_sites.BOOSTER_OPEN else '%02X' % x
+                                                for i, x in enumerate(dump[lo:end]))))
 h.append('};\n')
 assert len(cave_groups) == len(caves) == len(CAVES)
 open(out, 'w').writelines(h)

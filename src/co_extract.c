@@ -57,7 +57,7 @@ static const char kIsPin[] = "40 53 48 83 EC 20 48 8B DA E8 A2 E9 E9 FF 48 8B 48
 #define CO_ENGINE_MODE 0xAC21Cu             /* 4 in a mission */
 #define CO_PLAYERS_GLOBAL 0x3326468u
 #define CO_NO_PLAYER 0x3483C34u
-#define CO_EFFECTS 0x37CB600u
+#define CO_EFFECTS_LEA 0x856993u          /* lea r13, the status effects' list: HellForge moves it and rewrites the lea */
 /* The callees, as 0x8568A0 calls them. co_counts.c first checks their bytes and the body's (kCoBoosterPins). */
 #define CO_FIND_PACKAGE 0x12689C0u
 #define CO_LOAD 0x12FE350u
@@ -182,6 +182,9 @@ uint32_t co_seat_node(uintptr_t entity, uint32_t seat)
     return seat == 8 ? CO_NODE_LEFT_3 : CO_NODE_RIGHT_3;
 }
 
+/* Where the game's own code finds the list now: game+0x37CB600, or HellForge's copy once a mod adds a stratagem. */
+static uintptr_t Effects(void) { return g_game + CO_EFFECTS_LEA + 7u + (intptr_t)*(const int32_t*)(g_game + CO_EFFECTS_LEA + 3u); }
+
 static const uint8_t* Booster(uint32_t index) { return (const uint8_t*)(g_game + CO_BOOSTER_TABLE + index * CO_BOOSTER); }
 
 /* The player a status effect goes to, as the game picks it: the local player, or "none". */
@@ -206,7 +209,7 @@ static void Change(uint32_t index, int load)
     if (load && !has)
     {
         uint8_t record[0x30];
-        const uint32_t value = *(const uint32_t*)(*(const uintptr_t*)(g_game + CO_EFFECTS + effect * 8u) + 0x50u);
+        const uint32_t value = *(const uint32_t*)(*(const uintptr_t*)(Effects() + effect * 8u) + 0x50u);
         memset(record, 0, sizeof record);
         memcpy(record, &effect, 4);
         memcpy(record + 4, &value, 4);

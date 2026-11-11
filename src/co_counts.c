@@ -1083,6 +1083,14 @@ uint32_t co_counts_test_booster_pin(uint32_t rva)
         if (rva >= kCoBoosterPins[i].rva && rva < kCoBoosterPins[i].rva + (strlen(kCoBoosterPins[i].pin) + 1) / 3) return kCoBoosterPins[i].rva;
     return 0;
 }
+/* 1 when the pin leaves the byte at rva open (??). */
+int co_counts_test_booster_open(uint32_t rva)
+{
+    const uint32_t pin = co_counts_test_booster_pin(rva);
+    for (size_t i = 0; pin != 0 && i < sizeof kCoBoosterPins / sizeof kCoBoosterPins[0]; i++)
+        if (kCoBoosterPins[i].rva == pin) return kCoBoosterPins[i].pin[3 * (rva - pin)] == '?';
+    return 0;
+}
 uintptr_t co_counts_test_caves(void) { return g_caves; }
 uint32_t co_counts_test_ready(uintptr_t sync) { return SlotsReadyDetour(sync); }
 uint32_t co_counts_test_free(uintptr_t sync) { return SlotsFreeDetour(sync); }

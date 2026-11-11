@@ -33,6 +33,7 @@ uint64_t co_counts_test_seat_valid(uint64_t flags);
 const uint8_t* co_counts_test_seat_block(size_t* size);
 uint32_t co_counts_test_seat_node(uint64_t entity, uint32_t seat);
 uint32_t co_counts_test_booster_pin(uint32_t rva);
+int co_counts_test_booster_open(uint32_t rva);
 void co_pods_test_reset(void);
 void co_managers_test_reset(void);
 void co_managers_test_force(int state);
@@ -75,6 +76,8 @@ const uint32_t* co_extract_test_extra(void);
 #define ENGINE 0x3326340u
 #define PLAYERS 0x3326468u
 #define EFFECTS 0x37CB600u
+#define EFFECTS_LEA 0x856993u
+#define EFFECTS_MOVED 0x37CC000u   /* where a test puts the list as HellForge's stratagems move it */
 #define B_NOW 0x14u
 
 typedef uint64_t (*InitFn)(uint64_t, uint64_t, uint64_t, uint64_t);
@@ -413,7 +416,7 @@ static void Remove(const uint32_t* player, uint32_t id, uint32_t effect)
 }
 
 static uint8_t* g_loadouts;
-static uint8_t g_engine[0xAC220], g_players[0xF0], g_effect[0x58], g_b[0x40];
+static uint8_t g_engine[0xAC220], g_players[0xF0], g_effect[0x58], g_moved[0x58], g_b[0x40];
 
 /* The players' boosters by table index; an index of 0x15 or more is an id the table does not hold. */
 static void Players(uint32_t count, const uint32_t* index)
@@ -430,6 +433,15 @@ static void Players(uint32_t count, const uint32_t* index)
 
 /* The booster table as the game holds it: ids 0x100 + i, a package for every index not divisible by 3, a status effect
  * (15) for index 20 alone. */
+/* The game's lea r13 at 0x856993, pointed at the list as the game or HellForge has it. */
+static void ListAt(uint32_t list)
+{
+    const uint8_t lea[3] = {0x4C, 0x8D, 0x2D};
+    const int32_t disp = (int32_t)(list - (EFFECTS_LEA + 7));
+    Put(EFFECTS_LEA, lea, 3);
+    Put(EFFECTS_LEA + 3, &disp, 4);
+}
+
 static void Boosters(uint32_t mode)
 {
     for (uint32_t i = 0; i < 21; i++)
@@ -452,6 +464,7 @@ static void Boosters(uint32_t mode)
     PutPointer(PLAYERS, g_players);
     memcpy(g_effect + 0x50, &value, 4);
     PutPointer(EFFECTS + 15 * 8, g_effect);
+    ListAt(EFFECTS);
     memset(g_b, 0, sizeof g_b);
     co_extract_test_calls((void*)Find, (void*)Load, (void*)Unload, (void*)Has, (void*)Add, (void*)Remove);
 }
@@ -752,6 +765,23 @@ int main(void)
             Players(4, kFour);
             g_has = 1;
             CHECK(Update(co_boosters_update, "U514 R15 ", kFour));
+
+            /* A mod added a stratagem: HellForge moved the list and rewrote the lea. The value comes from the moved
+             * list, and the pin leaves the lea's four rewritten bytes open, so the check still passes. */
+            g_case = "the status effects' list moved";
+            const uint32_t moved = 0x40000000u;
+            memcpy(g_moved + 0x50, &moved, 4);
+            PutPointer(EFFECTS_MOVED + 15 * 8, g_moved);
+            ListAt(EFFECTS_MOVED);
+            Players(5, kFive20);
+            g_has = 0;
+            memset(g_record, 0, sizeof g_record);
+            CHECK(Update(co_boosters_update, "L514 A15 ", kFour));
+            memcpy(&value, g_record + 4, 4);
+            CHECK(value == moved);
+            for (uint32_t at = EFFECTS_LEA; at < EFFECTS_LEA + 10; at++)
+                CHECK(co_counts_test_booster_open(at) == (at >= EFFECTS_LEA + 3 && at < EFFECTS_LEA + 7));
+            ListAt(EFFECTS);
         }
     }
 
