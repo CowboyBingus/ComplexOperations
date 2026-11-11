@@ -1,7 +1,8 @@
 /* The caves past four players against a stand-in game image: the HiveMind's difficulty multipliers, the Pelican's seats
  * 8 and 9 behind the check of its unit's nodes, and every player's boosters. A build for eight writes them, each group
  * on its own: a changed byte leaves that group out and the session lists go in. A failed write takes everything back. A
- * build for four writes none of them. The difficulty caves and the seat and booster callbacks run natively. */
+ * build for four writes none of them. The difficulty caves, the attach node caves and the seat and booster callbacks
+ * run natively. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +31,8 @@ uint64_t co_counts_test_seat_data(uint32_t* count);
 uint64_t co_counts_test_seat_list(uint64_t lists);
 uint64_t co_counts_test_seat_valid(uint64_t flags);
 const uint8_t* co_counts_test_seat_block(size_t* size);
+uint32_t co_counts_test_seat_node(uint64_t entity, uint32_t seat);
+uint32_t co_counts_test_booster_pin(uint32_t rva);
 void co_pods_test_reset(void);
 void co_managers_test_reset(void);
 void co_managers_test_force(int state);
@@ -54,12 +57,16 @@ const uint32_t* co_extract_test_extra(void);
 /* The seat data the block copies, the collections and the script api (co_extract.c). */
 #define SEAT_RECORDS 0x31AE690u
 #define SEAT_LISTS 0x31AE590u
+#define SEAT_PAIRS 0x31AEAF0u
+#define SEAT_NODES 0x215C800u         /* the event handler's attach node per seat */
 #define SEAT_LIST_AT 0x578u
 #define COLLECTIONS 0x3326D88u
 #define SCRIPT_API 0x3326308u
 #define GUNSHIP 0xEF3A4136B21592CBull
 #define LEFT_4 0xFC07BFB6u
 #define RIGHT_4 0x27393B02u
+#define LEFT_3 0xDD1461AEu
+#define RIGHT_3 0x6AD680F5u
 #define HUB 0xA524B781u
 /* The booster update's globals. */
 #define LOADOUTS 0x347CE50u
@@ -76,6 +83,7 @@ typedef uint64_t (*SeatListFn)(uint64_t, uint32_t);
 typedef uint8_t (*SeatValidFn)(uint64_t, uint32_t);
 typedef void (*BoostersFn)(uintptr_t);
 typedef void (*RunFn)(const void*, uint32_t, float*);
+typedef uint32_t (*NodeFn)(const void*, uint32_t, uintptr_t);
 
 static int g_failed;
 static const char* g_case;
@@ -257,7 +265,7 @@ static uint8_t g_entities[4][24];
 static void* g_unitApi[0x740 / 8];
 static uint8_t g_script[0x20];
 static uint32_t g_units[4];          /* by owner: the unit; 0xDEAD is a unit that is not alive */
-static int g_isGunship[4], g_left[4], g_right[4], g_calls;
+static int g_isGunship[4], g_left[4], g_right[4], g_calls, g_aliveZero;
 
 static int Owner(uint32_t unit)
 {
@@ -266,7 +274,8 @@ static int Owner(uint32_t unit)
     return -1;
 }
 static uintptr_t Entity(uint32_t id) { return id >= 0x500u && id < 0x504u ? (uintptr_t)g_entities[id - 0x500u] : 0; }
-static uint8_t Alive(uint32_t unit) { g_calls++; return unit != 0xDEADu && Owner(unit) >= 0; }
+/* A unit handle of 0 is slot 0, generation 0 to the engine: alive if slot 0 holds a unit, as here. */
+static uint8_t Alive(uint32_t unit) { g_calls++; g_aliveZero += unit == 0; return unit != 0xDEADu && Owner(unit) >= 0; }
 static uint8_t Is(uint32_t unit, uint64_t name) { g_calls++; return name == GUNSHIP && g_isGunship[Owner(unit)]; }
 static uint8_t HasNode(uint32_t unit, uint32_t hash)
 {
@@ -283,7 +292,7 @@ static void Pelicans(uint32_t count, const uint32_t* types)
     memset(g_isGunship, 0, sizeof g_isGunship);
     memset(g_left, 0, sizeof g_left);
     memset(g_right, 0, sizeof g_right);
-    g_calls = 0;
+    g_calls = g_aliveZero = 0;
     for (uint32_t i = 0; i < 4; i++)
     {
         const uint32_t id = 0x500u + i;
@@ -319,6 +328,44 @@ static SeatListFn SeatListCave(const uint8_t* cave)
     memcpy(enter + 8, &to, 8);
     Landing(ENTER + 0x100u, enter, sizeof enter);
     return (SeatListFn)(uintptr_t)(g_fake.image + ENTER + 0x100u);
+}
+
+/* The way into an attach node cave as the event handler has it: r14 the image, esi the seat, rdi the vehicle's entity
+ * record; back in the game (`back`), r8d goes out. */
+static NodeFn NodeCave(const uint8_t* cave, uint32_t back)
+{
+    static const uint8_t kEnter[] = {0x56, 0x57, 0x41, 0x56, 0x49, 0x89, 0xCE, 0x89, 0xD6, 0x4C, 0x89, 0xC7,
+                                     0x41, 0xB8, 0x11, 0x11, 0x11, 0x11, 0xFF, 0x25, 0, 0, 0, 0};
+    static const uint8_t kBack[] = {0x44, 0x89, 0xC0, 0x41, 0x5E, 0x5F, 0x5E, 0xC3};
+    uint8_t enter[sizeof kEnter + 8];
+    const uint64_t to = (uint64_t)(uintptr_t)cave;
+    memcpy(enter, kEnter, sizeof kEnter);
+    memcpy(enter + sizeof kEnter, &to, 8);
+    Landing(ENTER + 0x200u, enter, sizeof enter);
+    Landing(back, kBack, sizeof kBack);
+    return (NodeFn)(uintptr_t)(g_fake.image + ENTER + 0x200u);
+}
+
+/* The game's attach nodes per seat, and what both node caves give for seats 0 to 12 on this entity record: the
+ * game's node, and for 8 and 9 the one co_seat_node names. */
+static int NodesAre(uintptr_t entity, uint32_t left, uint32_t right)
+{
+    static const uint32_t kNodes[] = {0x995DDD30u, 0xEB814487u, LEFT_3, 0x726600ADu, 0xA6571071u, RIGHT_3, HUB, 0, 0, 0, 0x1234u, 0x5678u, 0x9ABCu};
+    static const struct { uint32_t rva, back; } kAt[] = {{0x1191702u, 0x119170Au}, {0x11917E2u, 0x11917EAu}};
+    int ok = 1;
+    Put(SEAT_NODES, kNodes, sizeof kNodes);
+    for (size_t i = 0; i < 2; i++)
+    {
+        const uint8_t* cave = Cave(kAt[i].rva, 8);
+        if (cave == NULL) return 0;
+        const NodeFn node = NodeCave(cave, kAt[i].back);
+        for (uint32_t seat = 0; seat < 13; seat++)
+        {
+            const uint32_t want = seat == 8 ? left : seat == 9 ? right : kNodes[seat], got = node(g_fake.image, seat, entity);
+            if (got != want) { printf("  cave 0x%X seat %u: node 0x%X, expected 0x%X\n", kAt[i].rva, seat, got, want); ok = 0; }
+        }
+    }
+    return ok && co_counts_test_seat_node(entity, 8) == left && co_counts_test_seat_node(entity, 9) == right;
 }
 
 static void SeatsAsTheGame(void)
@@ -527,6 +574,25 @@ int main(void)
         SeatsOn();
         CHECK(g_calls == calls);
 
+        /* Each attach asks its own unit: the gunship with both nodes gets them, one that lost left_4 (as one without
+         * the recipe data) and owner 0 without any get the third seats' nodes, as do no record, unit 0 and a dead unit. */
+        g_case = "the attach nodes, unit by unit";
+        g_left[2] = 1;
+        CHECK(NodesAre((uintptr_t)g_entities[2], LEFT_4, RIGHT_4));
+        g_left[2] = 0;
+        CHECK(NodesAre((uintptr_t)g_entities[2], LEFT_3, RIGHT_4));
+        CHECK(NodesAre((uintptr_t)g_entities[0], LEFT_3, RIGHT_3));
+        CHECK(NodesAre(0, LEFT_3, RIGHT_3));
+        CHECK(fake_host_logged("extraction: seat 8 has no node of its own here; its passenger sits at the third seat's node"));
+        {
+            const uint32_t zero = 0, dead = 0xDEADu;
+            memcpy(g_entities[3] + 0xC, &zero, 4);
+            g_aliveZero = 0;
+            CHECK(NodesAre((uintptr_t)g_entities[3], LEFT_3, RIGHT_3) && g_aliveZero == 0);
+            memcpy(g_entities[3] + 0xC, &dead, 4);
+            CHECK(NodesAre((uintptr_t)g_entities[3], LEFT_3, RIGHT_3));
+        }
+
         /* The callbacks as the caves call them: the getter's count, the entrance's list, and seats 8 and 9 valid. */
         const SeatDataFn data = (SeatDataFn)(uintptr_t)Cave(kSeats[0].rva, kSeats[0].size);
         const uint8_t* list = Cave(kSeats[7].rva, kSeats[7].size);
@@ -576,14 +642,44 @@ int main(void)
                 for (uint32_t seat = 0; seat < 12; seat++) CHECK(offValid(0, seat) == (seat < 8 ? 2 : 0));
             }
         }
+        /* A peer's message can still seat someone in 8 or 9: with the seats off they sit at the third seats' nodes,
+         * even on a unit that has the new ones. */
+        g_case = "the attach nodes with the seats off";
+        g_left[0] = 1;
+        CHECK(NodesAre((uintptr_t)g_entities[0], LEFT_3, RIGHT_3));
 
-        g_case = "seat type 40 on another unit";
+        g_case = "unit 0 before a gunship";
         Start(g_case);
         Init();
-        Pelicans(1, kOne);
-        g_left[0] = g_right[0] = 1;
-        SeatsAsTheGame();
-        CHECK(co_extract_test_seats() == -1 && fake_host_logged("extraction: seat type 40 belongs to a unit other than the Pelican's"));
+        {
+            static const uint32_t kTwo[] = {40, 40};
+            const uint32_t zero = 0;
+            Pelicans(2, kTwo);
+            g_units[0] = 0;
+            memcpy(g_entities[0] + 0xC, &zero, 4);
+            g_isGunship[0] = g_isGunship[1] = g_left[1] = g_right[1] = 1;
+            SeatsOn();
+            CHECK(co_extract_test_seats() == 1 && g_aliveZero == 0);
+        }
+
+        g_case = "seat type 40 on another unit, then a gunship";
+        Start(g_case);
+        Init();
+        {
+            static const uint32_t kTwo[] = {40, 40};
+            Pelicans(2, kTwo);
+            g_left[0] = g_right[0] = 1;
+            SeatsAsTheGame();
+            SeatsAsTheGame();
+            CHECK(co_extract_test_seats() == 0 &&
+                  fake_host_logged("extraction: a unit other than shuttle_gunship has seat type 40; the mod looks at the next one"));
+            g_isGunship[1] = g_left[1] = g_right[1] = 1;
+            SeatsOn();
+            CHECK(co_extract_test_seats() == 1);
+            CHECK(NodesAre((uintptr_t)g_entities[0], LEFT_4, RIGHT_4) && NodesAre((uintptr_t)g_entities[1], LEFT_4, RIGHT_4));
+            g_left[0] = g_right[0] = 0;
+            CHECK(NodesAre((uintptr_t)g_entities[0], LEFT_3, RIGHT_3));
+        }
 
         g_case = "the engine's unit functions changed";
         Start(g_case);
@@ -667,9 +763,11 @@ int main(void)
             {"a seat site changed", 0x11917E2u, 7, G_SEATS,
              "extraction: the code at game+0x11917E2 is not the reviewed one; the Pelican keeps six passenger seats"},
             {"the seat records changed", SEAT_RECORDS + 7 * 0x8C + 8, 0, G_SEATS,
-             "extraction: the code at game+0x31AE690 is not the reviewed one; the Pelican keeps six passenger seats"},
+             "extraction: the seat data at game+0x31AE690 is not the reviewed one; the Pelican keeps six passenger seats"},
             {"the entrance list changed", SEAT_LISTS + 6 * 0x1C + 24, 0, G_SEATS,
-             "extraction: the code at game+0x31AE690 is not the reviewed one; the Pelican keeps six passenger seats"},
+             "extraction: the seat data at game+0x31AE638 is not the reviewed one; the Pelican keeps six passenger seats"},
+            {"the entrance pairs changed", SEAT_PAIRS + 9 * 4, 0, G_SEATS,
+             "extraction: the seat data at game+0x31AEAF0 is not the reviewed one; the Pelican keeps six passenger seats"},
             {"the booster site changed", BOOSTER_SITE, 1, G_BOOSTERS,
              "players: the code at game+0x573690 is not the reviewed one; boosters of players 5 to 8 are not loaded"},
         };
@@ -687,6 +785,7 @@ int main(void)
         }
         static const struct { const char* name; uint32_t rva; int group; const char* line; } kCode[] = {
             {"the entity lookup changed", 0xFD9D40u, G_SEATS, "extraction: the code at game+0xFD9D40 is not the reviewed one"},
+            {"the seat event handler changed", 0x1191531u, G_SEATS, "extraction: the code at game+0x1191531 is not the reviewed one"},
             {"the booster collector changed", 0x8568BAu, G_BOOSTERS, "players: the code at game+0x8568BA is not the reviewed one"},
             {"the status effect call changed", 0x66F190u, G_BOOSTERS, "players: the code at game+0x66F190 is not the reviewed one"},
         };
@@ -699,6 +798,35 @@ int main(void)
             CHECK(co_counts_test_on() == 1 && co_counts_test_refused() == 1u << kCode[i].group && fake_host_logged(kCode[i].line));
             CHECK(Caves(kCode[i].group) == 0);
         }
+        /* What the booster callback rebuilds of 0x8568A0 and its callees is pinned: the stride, B+0x14, the package,
+         * mode, effect, players, no-player, effect-table and package-manager reads, the store, the callees' calls and
+         * argument use. Each pin's change leaves the boosters out. */
+        static const uint32_t kDepends[] = {0x8568BAu, 0x8568D7u, 0x8568F0u, 0x856903u, 0x856916u, 0x85692Fu, 0x856945u, 0x8569E3u,
+                                            0x8569E8u, 0x8569F5u, 0x856A07u, 0x856A13u, 0x856A2Au, 0x856A3Au, 0x856A43u, 0x856A50u,
+                                            0x856A5Bu, 0x856A6Eu, 0x856A73u, 0x856A8Eu, 0x856A9Fu, 0x856B1Fu, 0x856B6Fu, 0x856B7Eu,
+                                            0x856BB6u, 0x1268A99u, 0x12FE350u, 0x12FE4E0u, 0x670E30u, 0x66F1B7u, 0x66F4C0u};
+        uint32_t pins[sizeof kDepends / sizeof kDepends[0]];
+        size_t distinct = 0;
+        for (size_t i = 0; i < sizeof kDepends / sizeof kDepends[0]; i++)
+        {
+            const uint32_t pin = co_counts_test_booster_pin(kDepends[i]);
+            g_case = "a booster dependency is pinned";
+            if (pin == 0) { printf("  0x%X is in no booster pin\n", kDepends[i]); CHECK(pin != 0); continue; }
+            size_t j = 0;
+            while (j < distinct && pins[j] != pin) j++;
+            if (j < distinct) continue;
+            pins[distinct++] = pin;
+            static char name[64], line[160];
+            snprintf(name, sizeof name, "the booster code at game+0x%X changed", pin);
+            snprintf(line, sizeof line, "players: the code at game+0x%X is not the reviewed one; boosters of players 5 to 8 are not loaded", pin);
+            Start(name);
+            Remember();
+            g_fake.noMatch[0] = pin;
+            Init();
+            CHECK(co_counts_test_on() == 1 && co_counts_test_refused() == 1u << G_BOOSTERS && fake_host_logged(line));
+            CHECK(Caves(G_BOOSTERS) == 0 && Caves(G_SEATS) == SEAT_SITES);
+        }
+        CHECK(distinct == 9);
     }
 
     /* A failed write at any of them takes back every site, as with the others. */

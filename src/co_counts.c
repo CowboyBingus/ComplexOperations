@@ -468,6 +468,9 @@ static void SeatList(CoRegs* regs)
 /* V1, seat 8 or 9: the carry flag says it exists, for the cave's jb. */
 static void SeatValid(CoRegs* regs) { regs->flags = (regs->flags & ~(uint64_t)1) | (uint64_t)co_seats_on(); }
 
+/* NL3 and NL6, seat 8 or 9 in esi: the node to attach to on the vehicle whose entity record is rdi. */
+static void SeatNode(CoRegs* regs) { regs->r8 = co_seat_node((uintptr_t)regs->rdi, (uint32_t)regs->rsi); }
+
 /* B1, the per-frame booster update; rcx is B. */
 static void Boosters(CoRegs* regs) { co_boosters_update((uintptr_t)regs->rcx); }
 
@@ -477,7 +480,7 @@ static void (*const kCountCallbacks[])(CoRegs*) = {
     HostAppend, HostBuild, HostScores,
     [14] = LootIndex, LootRow, Participant, Record, co_avatars_dist_sum, co_avatars_enc_spread,
     [30] = Waiting, AnswerRaxRsi, AnswerR10R11, AnswerRaxRdi, Dropped, RecordWaiting, DroppedRdx,
-    [40] = SeatData, SeatList, SeatValid, Boosters,
+    [40] = SeatData, SeatList, SeatValid, Boosters, SeatNode,
 };
 #define CO_CALLBACKS (sizeof kCountCallbacks / sizeof kCountCallbacks[0])
 
@@ -725,24 +728,40 @@ static int ActivityMatches(void)
     return 1;
 }
 
-/* A group of its own is left out, once, with what that means. */
-static void Refuse(uint8_t group, uint32_t rva)
+/* A group of its own is left out, once, with what that means; `what` is "code" or "seat data". */
+static void Refuse(uint8_t group, uint32_t rva, const char* what)
 {
     static const char* const kWhat[] = {"the HiveMind's multipliers stop at four players",
                                         "the Pelican keeps six passenger seats", "boosters of players 5 to 8 are not loaded"};
     if (g_refused >> group & 1u) return;
     g_refused |= 1u << group;
-    co_log("%s: the code at game+0x%X is not the reviewed one; %s", group == CO_G_SEATS ? "extraction" : "players", rva,
+    co_log("%s: the %s at game+0x%X is not the reviewed one; %s", group == CO_G_SEATS ? "extraction" : "players", what, rva,
            kWhat[group - CO_G_DIFFICULTY]);
 }
 
-/* The game's seat records and entrance list that the mod's seat block copies. */
-static int SeatDataMatches(void)
+static int Holds(uint32_t rva, const uint8_t* bytes, size_t size)
 {
-    uint8_t records[sizeof kCoSeatGame], entrance[sizeof kCoSeatEntrance];
-    return g_coApi->read(g_game + CO_SEAT_RECORDS, records, sizeof records) == 0 && memcmp(records, kCoSeatGame, sizeof records) == 0 &&
-           g_coApi->read(g_game + CO_SEAT_LISTS + 6u * 0x1Cu, entrance, sizeof entrance) == 0 &&
-           memcmp(entrance, kCoSeatEntrance, sizeof entrance) == 0;
+    uint8_t now[sizeof kCoSeatGame];
+    return size <= sizeof now && g_coApi->read(g_game + rva, now, size) == 0 && memcmp(now, bytes, size) == 0;
+}
+
+/* The game's seat records and entrance list that the mod's seat block copies, and the entrance pairs that keep seats 8
+ * and 9 away from 0x635270's node lookup (extract_sites.check). 0, or the first that differs. */
+static uint32_t SeatDataDiffers(void)
+{
+    if (!Holds(CO_SEAT_RECORDS, kCoSeatGame, sizeof kCoSeatGame)) return CO_SEAT_RECORDS;
+    if (!Holds(CO_SEAT_LISTS + 6u * 0x1Cu, kCoSeatEntrance, sizeof kCoSeatEntrance)) return CO_SEAT_LISTS + 6u * 0x1Cu;
+    if (!Holds(CO_SEAT_PAIRS, kCoSeatPairs, sizeof kCoSeatPairs)) return CO_SEAT_PAIRS;
+    return 0;
+}
+
+/* The booster callback rebuilds 0x8568A0's body over eight, so that body and its callees must be the reviewed ones. 0,
+ * or the first that differs. */
+static uint32_t BoosterCodeDiffers(void)
+{
+    for (size_t i = 0; i < sizeof kCoBoosterPins / sizeof kCoBoosterPins[0]; i++)
+        if (g_coApi->code_matches(g_game + kCoBoosterPins[i].rva, kCoBoosterPins[i].pin) != 1) return kCoBoosterPins[i].rva;
+    return 0;
 }
 
 /* Called by the session step once the arrays are moved and their old places zeroed. */
@@ -754,18 +773,20 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
     g_refused = 0;
     if (Active(CO_G_SEATS))
     {
-        const uint32_t at = co_extract_seats_ready(g_game);
-        if (at != 0 || !SeatDataMatches()) Refuse(CO_G_SEATS, at != 0 ? at : CO_SEAT_RECORDS);
+        const uint32_t at = co_extract_seats_ready(g_game), data = at != 0 ? 0 : SeatDataDiffers();
+        if (at != 0) Refuse(CO_G_SEATS, at, "code");
+        else if (data != 0) Refuse(CO_G_SEATS, data, "seat data");
     }
     if (Active(CO_G_BOOSTERS))
     {
-        const uint32_t at = co_extract_boosters_ready(g_game);
-        if (at != 0) Refuse(CO_G_BOOSTERS, at);
+        const uint32_t at = BoosterCodeDiffers();
+        if (at != 0) Refuse(CO_G_BOOSTERS, at, "code");
+        else co_extract_boosters_ready(g_game);
     }
     for (size_t i = 0; i < CO_COUNT_SITES; i++)
         if (Active(kCoCountSites[i].group) && !SiteMatches(&kCoCountSites[i]))
         {
-            if (OwnGroup(kCoCountSites[i].group)) { Refuse(kCoCountSites[i].group, kCoCountSites[i].rva); continue; }
+            if (OwnGroup(kCoCountSites[i].group)) { Refuse(kCoCountSites[i].group, kCoCountSites[i].rva, "code"); continue; }
             co_log("session: the code at game+0x%X is not the reviewed one; %s", kCoCountSites[i].rva, kStays);
             return;
         }
@@ -776,7 +797,7 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
         if (!Active(c->group)) continue;
         if (g_coApi->read(g_game + c->rva, bytes, c->size) != 0 || memcmp(bytes, c->replaced, c->size) != 0)
         {
-            if (OwnGroup(c->group)) { Refuse(c->group, c->rva); continue; }
+            if (OwnGroup(c->group)) { Refuse(c->group, c->rva, "code"); continue; }
             co_log("session: the code at game+0x%X is not the reviewed one; %s", c->rva, kStays);
             return;
         }
@@ -919,6 +940,7 @@ void co_counts_test_fill(uint8_t* image)
     for (size_t i = 0; i < CO_COUNT_CAVES; i++) memcpy(image + kCoCountCaves[i].rva, kCoCountCaves[i].replaced, kCoCountCaves[i].size);
     memcpy(image + CO_SEAT_RECORDS, kCoSeatGame, sizeof kCoSeatGame);
     memcpy(image + CO_SEAT_LISTS + 6u * 0x1Cu, kCoSeatEntrance, sizeof kCoSeatEntrance);
+    memcpy(image + CO_SEAT_PAIRS, kCoSeatPairs, sizeof kCoSeatPairs);
     for (size_t i = 0; i < CO_COUNT_CLEARS; i++)
     {
         const uint8_t head[] = {0x33, 0xC0, 0x89, kCoCountClears[i].mov};
@@ -1045,6 +1067,22 @@ uint64_t co_counts_test_seat_data(uint32_t* count) { CoRegs regs = {0}; regs.rdx
 uint64_t co_counts_test_seat_list(uint64_t lists) { CoRegs regs = {0}; regs.rcx = lists; SeatList(&regs); return regs.rax; }
 uint64_t co_counts_test_seat_valid(uint64_t flags) { CoRegs regs = {0}; regs.flags = flags; SeatValid(&regs); return regs.flags; }
 const uint8_t* co_counts_test_seat_block(size_t* size) { *size = sizeof kCoSeatBlock; return kCoSeatBlock; }
+uint32_t co_counts_test_seat_node(uint64_t entity, uint32_t seat)
+{
+    CoRegs regs = {0};
+    regs.rdi = entity;
+    regs.rsi = seat;
+    regs.r8 = 0xFFFFFFFF00000000ull;
+    SeatNode(&regs);
+    return regs.r8 >> 32 == 0 ? (uint32_t)regs.r8 : 0;
+}
+/* The booster pin that holds this address, or 0. */
+uint32_t co_counts_test_booster_pin(uint32_t rva)
+{
+    for (size_t i = 0; i < sizeof kCoBoosterPins / sizeof kCoBoosterPins[0]; i++)
+        if (rva >= kCoBoosterPins[i].rva && rva < kCoBoosterPins[i].rva + (strlen(kCoBoosterPins[i].pin) + 1) / 3) return kCoBoosterPins[i].rva;
+    return 0;
+}
 uintptr_t co_counts_test_caves(void) { return g_caves; }
 uint32_t co_counts_test_ready(uintptr_t sync) { return SlotsReadyDetour(sync); }
 uint32_t co_counts_test_free(uintptr_t sync) { return SlotsFreeDetour(sync); }

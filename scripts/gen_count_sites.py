@@ -120,7 +120,7 @@ CALL = '''
     popfq
 '''
 # Callbacks, by number (the index in kCountCallbacks in co_counts.c). 8 to 10 are the hostability scores'; 18 and 19
-# the stack fixes' (stack_sites.py), 30 to 36 the Activity record's, 40 to 43 extract_sites.py's.
+# the stack fixes' (stack_sites.py), 30 to 36 the Activity record's, 40 to 44 extract_sites.py's.
 FIND_RSI, FIND_R11, GATE, VALUES, LAST_SLOT, MESSAGE, TEST_SLOT, TEST_INDEX = range(8)
 HOST_APPEND, HOST_BUILD, HOST_SCORES = range(8, 11)
 SCORE_INDEX, SCORE_ROW, PARTICIPANT, RECORD = range(14, 18)
@@ -509,8 +509,15 @@ h.append('#define CO_SEAT_RECORDS 0x%Xu\n#define CO_SEAT_LISTS 0x%Xu\n#define CO
 h.append('static const uint8_t kCoSeatGame[] = {%s};\n' % c_bytes(dump[extract_sites.RECORDS:extract_sites.RECORDS + 8 * extract_sites.RECORD]))
 h.append('static const uint8_t kCoSeatEntrance[] = {%s};\n' % c_bytes(dump[extract_sites.LISTS + 6 * extract_sites.LIST:
                                                                             extract_sites.LISTS + 7 * extract_sites.LIST]))
+h.append('#define CO_SEAT_PAIRS 0x%Xu\nstatic const uint8_t kCoSeatPairs[] = {%s};\n'
+         % (extract_sites.PAIRS, c_bytes(dump[extract_sites.PAIRS:extract_sites.PAIRS + 8 * 8])))
 h.append('static _Alignas(16) const uint8_t kCoSeatBlock[] = {\n')
 for i in range(0, len(block), 24): h.append('    ' + c_bytes(block[i:i + 24]) + ',\n')
+h.append('};\n')
+# The game's bytes the booster callback rebuilds, as code_matches patterns.
+h.append('static const struct { uint32_t rva; const char* pin; } kCoBoosterPins[] = {\n')
+for lo, end in extract_sites.BOOSTER_PINS:
+    h.append('    {0x%Xu, "%s"},\n' % (lo, ' '.join('%02X' % x for x in dump[lo:end])))
 h.append('};\n')
 assert len(cave_groups) == len(caves) == len(CAVES)
 open(out, 'w').writelines(h)

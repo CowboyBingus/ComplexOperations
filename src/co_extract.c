@@ -2,9 +2,10 @@
  * scripts/sites/extract_sites.py; co_counts.c writes them with the counts and calls in here.
  *
  * Seats 8 and 9 attach to two scene-graph nodes the game's Pelican unit does not have; the mod's recipe data adds them.
- * What the attach code does with a missing node is not known, so the seats exist only once the mod has seen both nodes
- * on the Pelican's own unit, through the engine's has_node, the function the game itself asks before attaching
- * (0x119FDAD). Until then the caves hand out the game's six passenger seats. */
+ * A missing node makes node() -1, which the attach code stores unchecked, so the seats exist only once the mod has seen
+ * both nodes on a Pelican's own unit, through the engine's has_node, the function the game itself asks before attaching
+ * (0x119FDAD). Until then the caves hand out the game's six passenger seats. A peer's message can still seat someone in
+ * 8 or 9, so each attach asks again for its own unit (co_seat_node). */
 #include <string.h>
 
 #include "co.h"
@@ -21,6 +22,10 @@
 #define CO_ENTITY_RECORD 0xFD9D40u
 #define CO_ENTITY_UNIT 0xCu
 static const char kEntityPin[] = "48 83 EC 08 3B 0D 02 9F 4A 02 0F 84 9B 00 00 00";
+/* The event handler 0x1191520 that NL3 and NL6 sit in: esi the seat, rdi the vehicle's entity record (0x119F910 finds it
+ * from the seater's, and the attach 0x119FC60 reads its unit at +0xC). */
+#define CO_SEAT_EVENTS 0x1191531u
+static const char kSeatEventsPin[] = "41 8B F0 8B EA E8 05 88 E4 FF 48 8B C8 48 8B D8 E8 CA E3 00 00 48 8B F8";
 /* The engine's unit functions, from its script table [game+0x3326308]+0x18: has_node searches the unit's scene graph
  * (+0x10 count, +0x40 name hashes) as node() does for the attach; alive and "is of resource" check the unit first,
  * because has_node does not. */
@@ -35,6 +40,8 @@ static const char kIsPin[] = "40 53 48 83 EC 20 48 8B DA E8 A2 E9 E9 FF 48 8B 48
 #define CO_GUNSHIP 0xEF3A4136B21592CBull  /* content/fac_helldivers/vehicles/shuttle_gunship/shuttle_gunship */
 #define CO_NODE_LEFT_4 0xFC07BFB6u        /* attach_passenger_left_4 */
 #define CO_NODE_RIGHT_4 0x27393B02u       /* attach_passenger_right_4 */
+#define CO_NODE_LEFT_3 0xDD1461AEu        /* attach_passenger_left_3, seat 2's: the game attaches to it on every type-40 unit */
+#define CO_NODE_RIGHT_3 0x6AD680F5u       /* attach_passenger_right_3, seat 5's */
 
 /* The booster update 0x8568A0: loadout entries L = [0x347CE50] (count +0x2D200, 0x1690 each; +0x28 clear and +0x2C set
  * for a player's, booster id +0x168) and the booster table (21 of 0x38: id, status effect +4, package +0x34). */
@@ -51,18 +58,13 @@ static const char kIsPin[] = "40 53 48 83 EC 20 48 8B DA E8 A2 E9 E9 FF 48 8B 48
 #define CO_PLAYERS_GLOBAL 0x3326468u
 #define CO_NO_PLAYER 0x3483C34u
 #define CO_EFFECTS 0x37CB600u
-static const char kCollectorPin[] =
-    "4C 8B 05 8F 65 C2 02 45 33 C9 45 33 D2 48 89 4C 24 20 0F 57 C0 48 8B D9 0F 11 44 24 30 45 8B 98 00 D2 02 00 45 85 DB "
-    "74 62 49 83 C0 2C 48 8D 1D A2 71 AA 02 66 90 41 80 78 FC 00 75 35 41 80 38 00 74 2F 41 83 F9 04 73 38 41 8B 80 3C 01 00 00";
-static const struct { uint32_t rva; const char* pin; } kBoosterCode[] = {
-    {0x8568BAu, kCollectorPin},
-    {0x12689C0u, "48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 4C"},
-    {0x12FE350u, "45 85 C0 0F 84 75 01 00 00 41 56 41 57 48 83 EC"},
-    {0x12FE4E0u, "45 85 C0 0F 84 60 01 00 00 41 56 41 57 48 83 EC"},
-    {0x670E30u, "48 89 5C 24 18 57 48 83 EC 20 33 DB 41 8B F8 3B"},
-    {0x66F190u, "48 89 5C 24 20 48 89 4C 24 08 55 56 57 41 54 41"},
-    {0x66F4C0u, "48 89 5C 24 18 48 89 6C 24 20 41 56 48 83 EC 20"},
-};
+/* The callees, as 0x8568A0 calls them. co_counts.c first checks their bytes and the body's (kCoBoosterPins). */
+#define CO_FIND_PACKAGE 0x12689C0u
+#define CO_LOAD 0x12FE350u
+#define CO_UNLOAD 0x12FE4E0u
+#define CO_HAS_EFFECT 0x670E30u
+#define CO_ADD_EFFECT 0x66F190u
+#define CO_REMOVE_EFFECT 0x66F4C0u
 
 typedef uintptr_t (*EntityFn)(uint32_t);
 typedef uint8_t (*HasNodeFn)(uint32_t, uint32_t);
@@ -76,7 +78,10 @@ typedef void (*RemoveEffectFn)(const uint32_t*, uint32_t, uint32_t);
 
 static uintptr_t g_game;
 static int g_seats;                  /* 0 not decided yet, 1 eight passenger seats, -1 six */
+static int g_toldOther, g_toldNode;  /* logged: a type-40 owner that is no gunship; a seat 8 or 9 without its node */
 static EntityFn g_entity;
+static AliveFn g_alive;
+static HasNodeFn g_hasNode;
 static struct
 {
     FindPackageFn find;
@@ -90,26 +95,26 @@ static uint32_t g_extra[4], g_lastFour[4];   /* boosters 5 to 8, and the four th
 uint32_t co_extract_seats_ready(uintptr_t game)
 {
     g_game = game;
-    g_seats = 0;
+    g_seats = g_toldOther = g_toldNode = 0;
+    g_alive = NULL;
+    g_hasNode = NULL;
     if (g_coApi->code_matches(game + CO_ENTITY_RECORD, kEntityPin) != 1) return CO_ENTITY_RECORD;
+    if (g_coApi->code_matches(game + CO_SEAT_EVENTS, kSeatEventsPin) != 1) return CO_SEAT_EVENTS;
     g_entity = (EntityFn)(game + CO_ENTITY_RECORD);
     return 0;
 }
 
-uint32_t co_extract_boosters_ready(uintptr_t game)
+void co_extract_boosters_ready(uintptr_t game)
 {
     g_game = game;
-    for (size_t i = 0; i < sizeof kBoosterCode / sizeof kBoosterCode[0]; i++)
-        if (g_coApi->code_matches(game + kBoosterCode[i].rva, kBoosterCode[i].pin) != 1) return kBoosterCode[i].rva;
-    g_fn.find = (FindPackageFn)(game + 0x12689C0u);
-    g_fn.load = (PackageFn)(game + 0x12FE350u);
-    g_fn.unload = (PackageFn)(game + 0x12FE4E0u);
-    g_fn.has = (HasEffectFn)(game + 0x670E30u);
-    g_fn.add = (AddEffectFn)(game + 0x66F190u);
-    g_fn.remove = (RemoveEffectFn)(game + 0x66F4C0u);
+    g_fn.find = (FindPackageFn)(game + CO_FIND_PACKAGE);
+    g_fn.load = (PackageFn)(game + CO_LOAD);
+    g_fn.unload = (PackageFn)(game + CO_UNLOAD);
+    g_fn.has = (HasEffectFn)(game + CO_HAS_EFFECT);
+    g_fn.add = (AddEffectFn)(game + CO_ADD_EFFECT);
+    g_fn.remove = (RemoveEffectFn)(game + CO_REMOVE_EFFECT);
     memset(g_extra, 0, sizeof g_extra);
     memset(g_lastFour, 0, sizeof g_lastFour);
-    return 0;
 }
 
 static void Decided(int seats, const char* line)
@@ -118,8 +123,9 @@ static void Decided(int seats, const char* line)
     co_log("extraction: %s", line);
 }
 
-/* The first Pelican with a live unit decides, once: the recipe data is the same for every Pelican of the session. With
- * none yet the game's six seats stay and the next call looks again; a count of eight only ever grows to ten. */
+/* The first gunship with a live unit decides, until the next apply: the recipe data is the same for every gunship of
+ * the session. Owners of type 40 that are not a gunship are skipped, as the game skips unit 0 before alive (0x119FED2).
+ * With none yet the game's six seats stay and the next call looks again; a count of eight only ever grows to ten. */
 int co_seats_on(void)
 {
     if (g_seats != 0) return g_seats > 0;
@@ -144,15 +150,36 @@ int co_seats_on(void)
         const uintptr_t entity = g_entity(*(const uint32_t*)(owners[i] + 8u));
         if (entity == 0) continue;
         const uint32_t unit = *(const uint32_t*)(entity + CO_ENTITY_UNIT);
-        if (!((AliveFn)alive)(unit)) continue;
+        if (unit == 0 || !((AliveFn)alive)(unit)) continue;
         if (!((IsFn)is)(unit, CO_GUNSHIP))
-            Decided(-1, "seat type 40 belongs to a unit other than the Pelican's shuttle_gunship; the Pelican keeps six passenger seats");
-        else if (!((HasNodeFn)hasNode)(unit, CO_NODE_LEFT_4) || !((HasNodeFn)hasNode)(unit, CO_NODE_RIGHT_4))
+        {
+            if (!g_toldOther) co_log("extraction: a unit other than shuttle_gunship has seat type 40; the mod looks at the next one");
+            g_toldOther = 1;
+            continue;
+        }
+        g_alive = (AliveFn)alive;
+        g_hasNode = (HasNodeFn)hasNode;
+        if (!g_hasNode(unit, CO_NODE_LEFT_4) || !g_hasNode(unit, CO_NODE_RIGHT_4))
             Decided(-1, "the Pelican's unit has no attach_passenger_left_4 and right_4 nodes (its recipe data is missing); six passenger seats");
         else Decided(1, "the Pelican's unit has the nodes attach_passenger_left_4 and right_4: eight passenger seats");
         return g_seats > 0;
     }
     return 0;
+}
+
+/* The node seat 8 or 9 attaches to on the vehicle with this entity record: its own only with the seats on and on this
+ * unit, else left_3's or right_3's, which the game's seats 2 and 5 attach to on every type-40 unit. */
+uint32_t co_seat_node(uintptr_t entity, uint32_t seat)
+{
+    const uint32_t own = seat == 8 ? CO_NODE_LEFT_4 : CO_NODE_RIGHT_4;
+    if (co_seats_on() && entity != 0)
+    {
+        const uint32_t unit = *(const uint32_t*)(entity + CO_ENTITY_UNIT);
+        if (unit != 0 && g_alive(unit) && g_hasNode(unit, own)) return own;
+    }
+    if (!g_toldNode) co_log("extraction: seat %u has no node of its own here; its passenger sits at the third seat's node", seat);
+    g_toldNode = 1;
+    return seat == 8 ? CO_NODE_LEFT_3 : CO_NODE_RIGHT_3;
 }
 
 static const uint8_t* Booster(uint32_t index) { return (const uint8_t*)(g_game + CO_BOOSTER_TABLE + index * CO_BOOSTER); }
@@ -231,8 +258,10 @@ void co_boosters_update(uintptr_t b)
 void co_extract_test_reset(void)
 {
     g_game = 0;
-    g_seats = 0;
+    g_seats = g_toldOther = g_toldNode = 0;
     g_entity = NULL;
+    g_alive = NULL;
+    g_hasNode = NULL;
     memset(&g_fn, 0, sizeof g_fn);
     memset(g_extra, 0, sizeof g_extra);
     memset(g_lastFour, 0, sizeof g_lastFour);

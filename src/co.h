@@ -72,11 +72,13 @@ void co_avatars_install(uintptr_t game);
 void co_avatars_dist_sum(CoRegs* regs);
 void co_avatars_enc_spread(CoRegs* regs);
 
-/* Extraction for eight (co_extract.c), for caves co_counts.c writes. `ready` once before they go in: 0, or the place of
- * game code they call that is not the reviewed one. co_seats_on is 1 once the Pelican's unit was seen with both nodes. */
+/* Extraction for eight (co_extract.c), for caves co_counts.c writes. `ready` once before they go in; the seats' gives 0,
+ * or the place of game code they call that is not the reviewed one (co_counts.c checks the boosters'). co_seats_on is 1
+ * once a gunship's unit was seen with both nodes; co_seat_node is the node seat 8 or 9 attaches to on that vehicle. */
 uint32_t co_extract_seats_ready(uintptr_t game);
-uint32_t co_extract_boosters_ready(uintptr_t game);
+void co_extract_boosters_ready(uintptr_t game);
 int co_seats_on(void);
+uint32_t co_seat_node(uintptr_t entity, uint32_t seat);
 void co_boosters_update(uintptr_t b);
 
 #endif

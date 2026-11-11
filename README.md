@@ -219,9 +219,12 @@ the game's seat table. They attach to two nodes of the Pelican's unit, `attach_p
 `attach_passenger_right_4`. Players reach them as they reach the other passenger seats and sit as in the third seat on
 each side.
 
-The game's Pelican has no such nodes. The seats open only when the mod finds both on the Pelican's unit, which the mod's
-level data must add. The first Pelican decides, until the game closes. Without the nodes the Pelican keeps six
-passenger seats and the log says why.
+The game's Pelican has no such nodes. The seats open only when the mod finds both on a Pelican's unit, which the mod's
+level data must add. The first live gunship decides, until the next session context; other units with the Pelican's
+seat layout are skipped. Without the nodes the Pelican keeps six passenger seats and the log says why.
+
+Each attach to seat 8 or 9 checks that vehicle's own unit. A unit without the node, or a game with the seats off,
+seats that passenger at the third seat's node of that side.
 
 A build for eight also loads the boosters of all eight players. The game's booster update collects four players'
 boosters; 1 cave runs it over eight. With four players or fewer it does what the game does.
@@ -229,7 +232,8 @@ boosters; 1 cave runs it over eight. With four players or fewer it does what the
 Limits that remain:
 
 - The HUD's booster strip shows four boosters.
-- How a peer without the seats handles a player in seat 8 or 9 is not known; every player needs the mod.
+- A peer without the mod finds no node for a player in seat 8 or 9 and attaches them to node -1; every player needs
+  the mod.
 
 ## Galactic map
 
@@ -374,7 +378,7 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `scripts/sites/extract_sites.py` | The Pelican's seat caves and seat block, and the booster cave, for eight. |
 | `src/co_extract.c` | The check of the Pelican's seat nodes, and the booster update over eight. |
 | `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards and the mission result's slots in both managers' states, the Activity record's participants, answers and post, and the join limit without the managers. The mission summary in each build. |
-| `tests/extract_test.c` | The difficulty caves for one to eight players, the seat block, the node check and the boosters. Refusal by part and rollback of a failed write. |
+| `tests/extract_test.c` | The difficulty caves for one to eight players, the seat block, the node checks, the attach node caves and the boosters. Refusal by part and rollback of a failed write. |
 | `src/co_ui.c` | The tables a build for eight moves at run time: the galactic map's cursors, the squad HUD's panel, the name tags' rows. Guards for four, the move, its undo, the hook of the HUD's init. |
 | `src/co_ui_sites.h` | Their code sites and caves. Generated; do not edit. |
 | `scripts/sites/map_sites.py` | The galactic map's sites and caves for eight, and its guards for four. |
@@ -442,9 +446,10 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `the squad HUD keeps three teammate panels`, `four players have name tags` | Those moves did not happen; the reason stands before it. |
 | `the HiveMind's difficulty multipliers go on past four players` | A build for eight players: the difficulty caves are in place. |
 | `the Pelican's seats 8 and 9 are in place` | A build for eight players: the seat caves are in; the seats open once the Pelican has their nodes. |
-| `the Pelican's unit has the nodes attach_passenger_left_4 and right_4` | Seats 8 and 9 are open until the game closes. |
+| `the Pelican's unit has the nodes attach_passenger_left_4 and right_4` | Seats 8 and 9 are open until the next session context. |
 | `the Pelican's unit has no attach_passenger_left_4 and right_4 nodes` | The level data is missing: six passenger seats. |
-| `seat type 40 belongs to a unit other than the Pelican's shuttle_gunship` | The game's seats changed: six passenger seats. |
+| `a unit other than shuttle_gunship has seat type 40` | That unit is skipped; the next gunship decides. |
+| `seat 8 has no node of its own here` (or seat 9) | That passenger sits at the third seat's node of that side. Logged once a session context. |
 | `the engine's unit functions are not the reviewed ones` | The node check cannot run: six passenger seats. |
 | `the boosters of all eight players are loaded` | A build for eight players: the booster cave is in place. |
 | `the HiveMind's multipliers stop at four players`, `the Pelican keeps six passenger seats`, `boosters of players 5 to 8 are not loaded` | That part is off and the rest goes in; the reason stands before it. |

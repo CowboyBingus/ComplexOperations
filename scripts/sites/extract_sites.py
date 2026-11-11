@@ -4,21 +4,25 @@
 # every cave natively against the dump.
 # Seats: the Pelican is seat type 40 (6 passenger seats, entrance 6, hub 7). Seats 8 (attach_passenger_left_4) and 9
 # (attach_passenger_right_4) join them, reached through the hub and with left_3's / right_3's sit events (3, 6). C1,
-# L1 and V1 ask the mod: seats 8 and 9 exist only once it has seen both nodes on the Pelican's unit (co_extract.c);
+# L1 and V1 ask the mod: seats 8 and 9 exist only once it has seen both nodes on a Pelican's unit (co_extract.c);
 # until then C1 hands out the game's eight records, L1 the game's entrance list and V1 refuses seats 8 and 9, so the
-# other caves, which act on seats 8 and 9 alone, change nothing.
+# other caves, which act on seats 8 and 9 alone, change nothing. A peer's message can still name seat 8 or 9, so NL3
+# and NL6 ask for each attach whether that unit has the node, and else attach to left_3 / right_3.
 # Boosters: B1 replaces the per-frame booster update's only call of the collector 0x8568A0, which stops at four
-# players; the callback does its work over eight (co_extract.c).
+# players; the callback does its work over eight (co_extract.c). BOOSTER_PINS are the game's bytes it rebuilds.
 #   CAVES: (rva, replaced hex, asm, note, group)    GNU as intel code; game+0x.. and CALL(n) as in gen_count_sites.py
 import struct
 
-SEAT_DATA, SEAT_LIST, SEAT_VALID, BOOSTERS = 40, 41, 42, 43
+SEAT_DATA, SEAT_LIST, SEAT_VALID, BOOSTERS, SEAT_NODE = 40, 41, 42, 43, 44
 G_SEATS, G_BOOSTERS = 16, 17
 HASH_L4, HASH_R4 = 0xFC07BFB6, 0x27393B02   # thin murmur64a of attach_passenger_left_4 / attach_passenger_right_4
+HASH_L3, HASH_R3 = 0xDD1461AE, 0x6AD680F5   # attach_passenger_left_3 / right_3: seats 2 and 5, on every gunship
 RECORDS = 0x31AE690                          # type 40's eight seat records of 0x8C: {hash, index, n, links[32]}
 RECORD = 0x8C
 LISTS = 0x31AE590                            # type 40's seat lists, 0x1C each; the entrance (6) lists 0,3,1,4,2,5,-1
 LIST = 0x1C
+PAIRS = 0x31AEAF0                            # type 40's entrance pairs, 8 B per seat: (6, -1) for 0..5, (-1, 0) for 6, 7
+NODES = 0x215C800                            # the attach node per seat of the event handler 0x1191520
 HUB_HASH = 0xA524B781                        # interact_passenger, seats 6 and 7
 LIST_AT = 0x578                              # the entrance list in the mod's seat block
 BLOCK_SIZE = LIST_AT + 9 * 4
@@ -65,15 +69,22 @@ CAVES = [
     # 0x119AA50 gives -1 for all eight seats: the same for 8 and 9.
     (0x119AF2A, '8b c2 48 8d 04 85 00 00 00 00', 'cmp edx, 8\n jb 1f\n mov eax, -1\n ret\n1: mov eax, edx\n lea rax, [rax*4+0x0]\n'
                                                 ' jmp game+0x119AF34', 'A1 words', G_SEATS),
-    # The seat event handler 0x1191520, events 3 and 6: seats 8 and 9 attach to their own nodes (the table holds 0
-    # there). The flags are dead: the next flag user is past the call behind.
-    (0x1191702, '45 8b 84 b6 00 c8 15 02', 'mov r8d, dword ptr [r14+rsi*4+0x215c800]\n cmp esi, 8\n jne 1f\n mov r8d, %#x\n'
-                                          '1: cmp esi, 9\n jne 2f\n mov r8d, %#x\n2: jmp game+0x119170A' % (HASH_L4, HASH_R4), 'NL3 node', G_SEATS),
-    (0x11917E2, '45 8b 84 b6 00 c8 15 02', 'mov r8d, dword ptr [r14+rsi*4+0x215c800]\n cmp esi, 8\n jne 1f\n mov r8d, %#x\n'
-                                          '1: cmp esi, 9\n jne 2f\n mov r8d, %#x\n2: jmp game+0x11917EA' % (HASH_L4, HASH_R4), 'NL6 node', G_SEATS),
+    # The seat event handler 0x1191520, events 3 and 6: seats 8 and 9 attach to the node the callback names, their
+    # own where that unit has it (rdi the vehicle's entity record from 0x119F910, its unit at +0xC). The flags are
+    # dead: the next flag user is past the call behind.
+    (0x1191702, '45 8b 84 b6 00 c8 15 02', 'mov r8d, dword ptr [r14+rsi*4+0x215c800]\n cmp esi, 8\n jb 1f\n cmp esi, 9\n ja 1f\n'
+                                          ' CALL(%d)\n1: jmp game+0x119170A' % SEAT_NODE, 'NL3 node', G_SEATS),
+    (0x11917E2, '45 8b 84 b6 00 c8 15 02', 'mov r8d, dword ptr [r14+rsi*4+0x215c800]\n cmp esi, 8\n jb 1f\n cmp esi, 9\n ja 1f\n'
+                                          ' CALL(%d)\n1: jmp game+0x11917EA' % SEAT_NODE, 'NL6 node', G_SEATS),
     # The per-frame booster update: the collector's only call. rcx is B (world+0xEB5A50); every register is kept.
     (0x573690, 'e8 0b 32 2e 00', 'CALL(%d)\n jmp game+0x573695' % BOOSTERS, 'B1 boosters', G_BOOSTERS),
 ]
+# The booster callback rebuilds 0x8568A0's body and calls its callees as it does: the bytes it depends on, (start, end).
+# The body holds every field offset, stride and global; 0x12689C0 writes *rcx on every path; 0x66F190 saves rcx only to
+# overwrite it (0x66F1B7). Of the other callees the head with the arguments' first use. Code_matches takes 256 at most.
+BOOSTER_PINS = [(0x8568BA, 0x8569BA), (0x8569BA, 0x856ABA), (0x856ABA, 0x856BBA), (0x12689C0, 0x1268AA7),
+                (0x12FE350, 0x12FE360), (0x12FE4E0, 0x12FE4F0), (0x670E30, 0x670E40), (0x66F190, 0x66F1BC),
+                (0x66F4C0, 0x66F4D0)]
 
 
 def seat_block(dump):
@@ -95,7 +106,12 @@ def check(dump):
     recs = [(u32(RECORDS + r * RECORD), u32(RECORDS + r * RECORD + 4), i32(RECORDS + r * RECORD + 8)) for r in range(8)]
     assert [r[1:] for r in recs] == [(r, 1) for r in range(7)] + [(7, 7)] and recs[6][0] == recs[7][0] == HUB_HASH, recs
     assert [i32(LISTS + 6 * LIST + 4 * j) for j in range(7)] == [0, 3, 1, 4, 2, 5, -1]
-    assert [u32(0x215C800 + 4 * i) for i in range(6, 10)] == [HUB_HASH, 0, 0, 0]   # the attach nodes; 8, 9 hold none
+    assert [u32(NODES + 4 * i) for i in range(6, 10)] == [HUB_HASH, 0, 0, 0]   # the attach nodes; 8, 9 hold none
+    assert u32(NODES + 8) == HASH_L3 and u32(NODES + 0x14) == HASH_R3        # the fallback is seats 2 and 5's node
+    # 0x635270 resolves records by the pairs' seats (its callers 0x6367E8, 0x637758), never seat 8 or 9: E1 gives
+    # those seat 0's pair.
+    assert [(i32(PAIRS + 8 * r), i32(PAIRS + 8 * r + 4)) for r in range(8)] == [(6, -1)] * 6 + [(-1, 0)] * 2
+    assert all(ok - lo <= 256 and dump[lo:ok] for lo, ok in BOOSTER_PINS)
     assert HASH_L4 not in [r[0] for r in recs] and HASH_R4 not in [r[0] for r in recs]
 
 
