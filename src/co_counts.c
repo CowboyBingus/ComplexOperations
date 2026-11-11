@@ -5,7 +5,7 @@
  * to four.
  * The same sites carry the guards: tables the game keeps at four entries skip a player index of four or more, and a
  * message whose list is longer than its handler's buffer is ignored. The Activity record's post lists participants 5 to
- * 8, which the record has no room for. */
+ * 8, which the record has no room for, and the record waits for their answers as for the first four. */
 #include <string.h>
 #include <windows.h>
 
@@ -38,8 +38,11 @@ _Static_assert(sizeof kCoCountCode <= CO_CAVE_ROOM, "the caves' code must fit th
  * manager's loot guards (CO_G_LOOT) ask the player managers' state each time, so they fit both of its states. The mission
  * summary's eight rows and cards (CO_G_SUMMARY) replace its guards for four rows, as the loadout screen's do. Stack
  * arrays that four players' avatars and bodies overrun get room in every build (CO_G_STACK); those with room for eight
- * avatars only in a build for eight (CO_G_STACK8), the only one whose avatar manager holds more. */
-enum { CO_G_COUNT, CO_G_GUARD, CO_G_NET, CO_G_EIGHT, CO_G_TEST, CO_G_LOADOUT, CO_G_GUARD4, CO_G_SYNCED, CO_G_LOOT, CO_G_SUMMARY, CO_G_STACK, CO_G_STACK8 };
+ * avatars only in a build for eight (CO_G_STACK8), the only one whose avatar manager holds more. The Activity record's
+ * further participants and answers (CO_G_ACTIVITY) need the post's hook; without it or with one of its sites changed
+ * they stay out and the rest goes in, since the record's guards bound its lists on their own. */
+enum { CO_G_COUNT, CO_G_GUARD, CO_G_NET, CO_G_EIGHT, CO_G_TEST, CO_G_LOADOUT, CO_G_GUARD4, CO_G_SYNCED, CO_G_LOOT, CO_G_SUMMARY, CO_G_STACK, CO_G_STACK8,
+       CO_G_ACTIVITY };
 /* Test builds only (--test-first-slot): the host gives joining peers slots and player indexes from this number on,
  * so that two game instances reach the code for players 5 to 8. Zero is off. */
 #ifndef CO_TEST_FIRST_SLOT
@@ -83,6 +86,7 @@ static PeerGoneFn g_peerGone;
 static ActivityPostFn g_activityPost;
 static uintptr_t g_game, g_context, g_extension, g_caves;
 static int g_on, g_hooks = -1;
+static int g_activityHooked, g_activity;   /* the post's hook is in; the Activity group is (to be) written */
 static uint32_t g_ignored;        /* a bit for each message shape that was logged as ignored */
 static int g_toldFour;            /* the join limit's fall back to four was logged */
 static uintptr_t g_syncedOld, g_syncedNew, g_syncedBlock;
@@ -91,7 +95,7 @@ static int Active(uint8_t group)
 {
     return group <= CO_G_NET || group == CO_G_LOOT || group == CO_G_STACK ||
            ((group == CO_G_EIGHT || group == CO_G_LOADOUT || group == CO_G_SYNCED || group == CO_G_SUMMARY || group == CO_G_STACK8) && CO_PLAYERS == 8) ||
-           (group == CO_G_GUARD4 && CO_PLAYERS == 4) || (group == CO_G_TEST && CO_TEST_FIRST_SLOT != 0);
+           (group == CO_G_GUARD4 && CO_PLAYERS == 4) || (group == CO_G_TEST && CO_TEST_FIRST_SLOT != 0) || (group == CO_G_ACTIVITY && g_activity);
 }
 
 static uint64_t* Slot(uintptr_t sync, uint32_t slot) { return (uint64_t*)(sync + 0x20u + slot * CO_SLOT); }
@@ -268,6 +272,67 @@ static int InTable(uintptr_t table, uint64_t key)
     return 0;
 }
 
+/* The record's own list of peers whose answer it waits for holds three (count +0x10, ids from +0x18). The non-local
+ * peers behind them wait here until the record is in the table, then under its key until each has answered, left or
+ * the record is posted or dropped. The game's tests of its count stay on "pending" while one waits here. */
+typedef struct CoActivityWaiting { uint64_t key; uint32_t count; uint64_t ids[CO_PEERS - CO_ACTIVITY_ROOM]; } CoActivityWaiting;
+static uint64_t g_waitFurther[CO_PEERS - CO_ACTIVITY_ROOM];
+static uint32_t g_waitFurtherCount;
+static CoActivityWaiting g_waiting[CO_ACTIVITY_RECORDS];
+
+/* rcx is a non-local ready peer the record's list has no room for. Record takes the list on the same path. */
+static void Waiting(CoRegs* regs)
+{
+    if (g_activity && g_waitFurtherCount < CO_PEERS - CO_ACTIVITY_ROOM) g_waitFurther[g_waitFurtherCount++] = regs->rcx;
+}
+
+static CoActivityWaiting* FindWaiting(uint64_t key)
+{
+    for (uint32_t i = 0; i < CO_ACTIVITY_RECORDS; i++)
+        if (g_waiting[i].count != 0 && g_waiting[i].key == key) return &g_waiting[i];
+    return NULL;
+}
+
+/* The same rule for a free entry as the participants' (Record): one is always free or left by a record gone. */
+static void KeepWaiting(uintptr_t table, uint64_t key)
+{
+    CoActivityWaiting* waiting = FindWaiting(key);
+    for (uint32_t i = 0; waiting == NULL && g_waitFurtherCount != 0 && i < CO_ACTIVITY_RECORDS; i++)
+        if (g_waiting[i].count == 0 || !InTable(table, g_waiting[i].key)) waiting = &g_waiting[i];
+    if (waiting != NULL)
+    {
+        waiting->key = key;
+        waiting->count = g_waitFurtherCount;
+        memcpy(waiting->ids, g_waitFurther, g_waitFurtherCount * sizeof g_waitFurther[0]);
+    }
+    g_waitFurtherCount = 0;
+}
+
+/* A peer answered the record or left: it no longer waits. The carry flag says others still do, for the caves' jc. */
+static void Answer(CoRegs* regs, uint64_t record, uint64_t peer)
+{
+    CoActivityWaiting* waiting = FindWaiting(*(const uint64_t*)(uintptr_t)record);
+    if (waiting != NULL)
+        for (uint32_t i = 0; i < waiting->count; i++)
+            if (waiting->ids[i] == peer) waiting->ids[i--] = waiting->ids[--waiting->count];
+    regs->flags = (regs->flags & ~(uint64_t)1) | (waiting != NULL && waiting->count != 0);
+}
+
+static void AnswerRaxRsi(CoRegs* regs) { Answer(regs, regs->rax, regs->rsi); }
+static void AnswerR10R11(CoRegs* regs) { Answer(regs, regs->r10, regs->r11); }
+static void AnswerRaxRdi(CoRegs* regs) { Answer(regs, regs->rax, regs->rdi); }
+
+static void Forget(uint64_t key)
+{
+    CoActivityWaiting* waiting = FindWaiting(key);
+    CoActivityExtras* extras = FindExtras(key);
+    if (waiting != NULL) waiting->count = 0;
+    if (extras != NULL) extras->count = 0;
+}
+
+/* rax is a record in state 2 or 3 that leaves the table. */
+static void Dropped(CoRegs* regs) { Forget(*(const uint64_t*)(uintptr_t)regs->rax); }
+
 /* rsi is the table (its count at +0x1100), rsi + rcx the new record. Keys are unique in the table: the game makes no
  * second record for a key. A record that timed out leaves the table without a post; its entry is free again then, so
  * one is always free (32 entries, at most 31 other records). */
@@ -276,6 +341,7 @@ static void Record(CoRegs* regs)
     const uintptr_t table = (uintptr_t)regs->rsi;
     const uint8_t* record = (const uint8_t*)(uintptr_t)(regs->rsi + regs->rcx);
     const uint64_t key = *(const uint64_t*)record;
+    KeepWaiting(table, key);
     CoActivityExtras* extras = FindExtras(key);
     if (*(const uint32_t*)(record + CO_ACTIVITY_COUNT) != CO_ACTIVITY_ROOM || g_furtherCount == 0)
     {
@@ -298,6 +364,7 @@ static void Record(CoRegs* regs)
 static void (*const kCountCallbacks[])(CoRegs*) = {
     FindByRsi, FindByR11, JoinGate, ClearValueKeys, LastSlotState, MessageFits, JoinSlot, JoinIndex,
     [14] = LootIndex, LootRow, Participant, Record, co_avatars_dist_sum, co_avatars_enc_spread,
+    [30] = Waiting, AnswerRaxRsi, AnswerR10R11, AnswerRaxRdi, Dropped,
 };
 #define CO_CALLBACKS (sizeof kCountCallbacks / sizeof kCountCallbacks[0])
 
@@ -323,10 +390,12 @@ static uint64_t ActivityPostDetour(uint64_t unused, uint64_t activity, uint64_t 
     static uint64_t all[CO_PEERS];
     uintptr_t table = 0;
     const uintptr_t record = (uintptr_t)ids - CO_ACTIVITY_IDS;
-    if (!g_on || count != CO_ACTIVITY_ROOM || g_coApi->read(g_game + CO_ACTIVITY_TABLE, &table, sizeof table) != 0 || table == 0 ||
+    if (!g_on || !g_activity || count != CO_ACTIVITY_ROOM || g_coApi->read(g_game + CO_ACTIVITY_TABLE, &table, sizeof table) != 0 || table == 0 ||
         record < table || record >= table + CO_ACTIVITY_RECORDS * CO_ACTIVITY_RECORD || (record - table) % CO_ACTIVITY_RECORD != 0)
         return g_activityPost(unused, activity, object, ids, count);
     CoActivityExtras* extras = FindExtras(*(const uint64_t*)record);
+    CoActivityWaiting* waiting = FindWaiting(*(const uint64_t*)record);
+    if (waiting != NULL) waiting->count = 0;
     if (extras == NULL) return g_activityPost(unused, activity, object, ids, count);
     memcpy(all, ids, CO_ACTIVITY_ROOM * sizeof all[0]);
     memcpy(all + CO_ACTIVITY_ROOM, extras->ids, extras->count * sizeof all[0]);
@@ -522,11 +591,33 @@ void co_counts_undo(void)
     g_caves = 0;
 }
 
+static const char kActivityFour[] = "Activity records list and wait for four players";
+
+/* The Activity group's sites hold the reviewed bytes and its callbacks exist; else it stays out, and the log says why. */
+static int ActivityMatches(void)
+{
+    for (size_t i = 0; i < CO_COUNT_SITES; i++)
+        if (kCoCountSites[i].group == CO_G_ACTIVITY && !SiteMatches(&kCoCountSites[i]))
+        { co_log("session: the code at game+0x%X is not the reviewed one; %s", kCoCountSites[i].rva, kActivityFour); return 0; }
+    for (size_t i = 0; i < CO_COUNT_CAVES; i++)
+    {
+        uint8_t bytes[12];
+        const CoCountCave* c = &kCoCountCaves[i];
+        if (c->group != CO_G_ACTIVITY) continue;
+        if (g_coApi->read(g_game + c->rva, bytes, c->size) != 0 || memcmp(bytes, c->replaced, c->size) != 0)
+        { co_log("session: the code at game+0x%X is not the reviewed one; %s", c->rva, kActivityFour); return 0; }
+        if (c->callback != 0xFF && (c->callback >= CO_CALLBACKS || kCountCallbacks[c->callback] == NULL))
+        { co_log("session: the cave at game+0x%X has no callback %u; %s", c->rva, (unsigned)c->callback, kActivityFour); return 0; }
+    }
+    return 1;
+}
+
 /* Called by the session step once the arrays are moved and their old places zeroed. */
 void co_counts_apply(uintptr_t context, uintptr_t extension)
 {
     static const char kStays[] = "the session lists count to four as before";
     if (g_on || g_hooks != 1 || g_game == 0) return;
+    g_activity = g_activityHooked && ActivityMatches();
     for (size_t i = 0; i < CO_COUNT_SITES; i++)
         if (Active(kCoCountSites[i].group) && !SiteMatches(&kCoCountSites[i]))
         { co_log("session: the code at game+0x%X is not the reviewed one; %s", kCoCountSites[i].rva, kStays); return; }
@@ -576,6 +667,10 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
     { SyncedBack(); VirtualFree((void*)g_caves, 0, MEM_RELEASE); g_caves = 0; co_log("session: %s", kStays); return; }
     g_context = context;
     g_extension = extension;
+    /* Records of an earlier context post as four from here on. */
+    g_furtherCount = g_waitFurtherCount = 0;
+    memset(g_extras, 0, sizeof g_extras);
+    memset(g_waiting, 0, sizeof g_waiting);
     /* The game cannot run on a mix: whatever is written goes back when one write fails. */
     for (size_t i = 0; i < CO_COUNT_SITES; i++)
         if (Active(kCoCountSites[i].group) && WriteSite(&kCoCountSites[i], kCoCountSites[i].now) != 0)
@@ -617,6 +712,9 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
             co_log("players: the mission summary has eight rows and cards (%u code sites changed)", InGroup(CO_G_SUMMARY, NULL));
         co_log("players: %u code sites keep the game's stack arrays for avatars and players inside their room",
                InGroup(CO_G_STACK, NULL) + (Active(CO_G_STACK8) ? InGroup(CO_G_STACK8, NULL) : 0u));
+        if (Active(CO_G_ACTIVITY))
+            co_log("session: an Activity record lists every participant and waits for each one's answer (%u code sites changed)",
+                   InGroup(CO_G_ACTIVITY, NULL));
     }
     return;
 failed:
@@ -627,21 +725,28 @@ failed:
     co_log("session: a count site could not be written; %s", kStays);
 }
 
-/* The hooks stay for good and pass through while the counts are off. */
+/* The hooks stay for good and pass through while the counts are off. The post's hook only serves the Activity group:
+ * without it the counts and guards still go in. */
 void co_counts_install(uintptr_t game)
 {
     g_game = game;
     if (g_coApi->code_matches(game + CO_SLOTS_READY, "33 C0 48 39 41 20 74 12 83 79 40 05") != 1 ||
         g_coApi->code_matches(game + CO_SLOTS_FREE, "33 C0 4C 8B C1 48 39 41 58 0F 95 C0") != 1 ||
-        g_coApi->code_matches(game + CO_PEER_GONE, "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 81 EC E0 01 00 00") != 1 ||
-        g_coApi->code_matches(game + CO_ACTIVITY_POST, "4C 8B DC 49 89 5B 08 55 56 57 41 56 41 57 48 81 EC D0 0C 00 00") != 1)
+        g_coApi->code_matches(game + CO_PEER_GONE, "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 81 EC E0 01 00 00") != 1)
     { g_hooks = 0; co_log("session: this is not the game code the mod was made for (a game update or another mod); the session lists count to four as before"); return; }
     if (g_coApi->hook(g_coMod, game + CO_SLOTS_READY, (void*)SlotsReadyDetour, (void**)&g_slotsReady) != 0 ||
         g_coApi->hook(g_coMod, game + CO_SLOTS_FREE, (void*)SlotsFreeDetour, (void**)&g_slotsFree) != 0 ||
-        g_coApi->hook(g_coMod, game + CO_PEER_GONE, (void*)PeerGoneDetour, (void**)&g_peerGone) != 0 ||
-        g_coApi->hook(g_coMod, game + CO_ACTIVITY_POST, (void*)ActivityPostDetour, (void**)&g_activityPost) != 0)
+        g_coApi->hook(g_coMod, game + CO_PEER_GONE, (void*)PeerGoneDetour, (void**)&g_peerGone) != 0)
     { g_hooks = 0; co_log("session: a function of the session lists could not be hooked; the session lists count to four as before"); return; }
     g_hooks = 1;
+    if (g_coApi->code_matches(game + CO_ACTIVITY_POST, "4C 8B DC 49 89 5B 08 55 56 57 41 56 41 57 48 81 EC D0 0C 00 00") != 1)
+        co_log("session: the Activity record's post at game+0x%X is not the code the mod was made for (a game update or another mod); %s",
+               CO_ACTIVITY_POST, kActivityFour);
+    else if (g_coApi->hook(g_coMod, game + CO_ACTIVITY_POST, (void*)ActivityPostDetour, (void**)&g_activityPost) != 0)
+        co_log("session: the Activity record's post at game+0x%X could not be hooked; %s", CO_ACTIVITY_POST, kActivityFour);
+    else
+        g_activityHooked = 1;
+    g_activity = g_activityHooked;
     if (CO_TEST_FIRST_SLOT != 0)
         co_log("session: TEST BUILD, not for play: as host, joining peers get slots and player indexes from %u on", CO_FIRST_SLOT);
 }
@@ -678,6 +783,9 @@ void co_counts_test_reset(void)
     g_toldFour = 0;
     g_furtherCount = 0;
     memset(g_extras, 0, sizeof g_extras);
+    g_activityHooked = g_activity = 0;
+    g_waitFurtherCount = 0;
+    memset(g_waiting, 0, sizeof g_waiting);
 }
 
 /* Every site, clear and cave site holds the game's bytes (a moved array's distance aside). */
@@ -705,7 +813,7 @@ uintptr_t co_counts_test_synced_table(void) { return g_syncedNew; }
 unsigned co_counts_test_sites(void)
 {
     unsigned n = (unsigned)CO_COUNT_CLEARS;
-    for (uint8_t group = CO_G_COUNT; group <= CO_G_STACK8; group++)
+    for (uint8_t group = CO_G_COUNT; group <= CO_G_ACTIVITY; group++)
         if (Active(group)) n += InGroup(group, NULL);
     return n;
 }
@@ -780,4 +888,8 @@ void co_counts_test_participant(uintptr_t frame, uintptr_t context, uint32_t pla
 }
 void co_counts_test_record(uintptr_t table, uint32_t offset) { CoRegs regs = {0}; regs.rsi = table; regs.rcx = offset; Record(&regs); }
 void co_counts_test_post_original(ActivityPostFn original) { g_activityPost = original; }
+int co_counts_test_activity(void) { return g_activity; }
+unsigned co_counts_test_activity_sites(void) { return InGroup(CO_G_ACTIVITY, NULL); }
+/* Peers the record with this key still waits for in the mod's list; -1 for no list. */
+int co_counts_test_waiting(uint64_t key) { const CoActivityWaiting* w = FindWaiting(key); return w != NULL ? (int)w->count : -1; }
 #endif
