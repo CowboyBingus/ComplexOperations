@@ -17,11 +17,14 @@
 #   7 only for eight players: the bounds of the per-peer loadout table, which the mod moves to room for eight first;
 #   8 the score manager's loot rows (always): the bounds by index that follow the player managers' state (LOOT);
 #   9 only for eight players: the mission summary with eight rows and cards (sites/summary_sites.py); its guards for
-#     four rows are group 6.
+#     four rows are group 6;
+#   12 the Activity record's further participants and the answers it waits for (ACTIVITY): in every build while the
+#     post's hook is in and every one of them matches, else none of them. 10 and 11 are kept for other sites.
 # An instruction of a moved array carries a distance the session step rewrites; those four bytes are not compared.
 import os, re, struct, sys
 
 G_COUNT, G_GUARD, G_NET, G_EIGHT, G_TEST, G_LOADOUT, G_GUARD4, G_SYNCED, G_LOOT, G_SUMMARY = range(10)
+G_ACTIVITY = 12
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE + '/sites')
 import cave_asm, loadout_sites, map_sites, summary_sites, tag_sites
@@ -110,6 +113,7 @@ CALL = '''
 # Callbacks, by number (the index in kCountCallbacks in co_counts.c). 8 to 13 are kept for the wire and extraction caves.
 FIND_RSI, FIND_R11, GATE, VALUES, LAST_SLOT, MESSAGE, TEST_SLOT, TEST_INDEX = range(8)
 SCORE_INDEX, SCORE_ROW, PARTICIPANT, RECORD = range(14, 18)
+WAITING, ANSWER_RAX_RSI, ANSWER_R10_R11, ANSWER_RAX_RDI, DROPPED = range(30, 35)
 # (rva, bytes the jump replaces, code; `game+0x..` is an address in the game, CALL(n) the call of callback n)
 def HIGH(r): return ''.join(' movups [%s+0x%x], xmm0\n' % (r, o) for o in range(0x150, 0x1D0, 0x10))
 CAVES = [
@@ -203,12 +207,10 @@ GUARDS = [
                                                 ' test dl, dl\n je game+0x62F358\n CALL(%d)\n add dword ptr [rsp+0x34], eax\n mov edx, dword ptr [rsp+0x34]\n'
                                                 ' jmp game+0x62F35C' % SCORE_ROW),
     # Activity record: the participants (four, the count right behind) and the peers whose answer it waits for (three)
-    # are filled from the ready list with no bound. A peer beyond them stays out of the record; the callback keeps
-    # participants 5 to 8 for the record that is being made, and the record's post lists them (co_counts.c).
+    # are filled from the ready list with no bound. A peer beyond them stays out of the record; the callbacks keep
+    # participants 5 to 8 and the non-local peers 4 to 7 (rcx) for the record that is being made (co_counts.c).
     (0xA56D88, '48 89 54 c5 98', 'CALL(%d)\n cmp eax, 4\n jae game+0xA56D95\n mov qword ptr [rbp+rax*8-0x68], rdx\n jmp game+0xA56D8D' % PARTICIPANT),
-    # The record is in the table now (rsi the table, rcx its offset): the kept participants go with its key.
-    (0xA56F0E, 'ff 86 00 11 00 00', 'inc dword ptr [rsi+0x1100]\n CALL(%d)\n jmp game+0xA56F14' % RECORD),
-    (0xA56E91, '48 89 4c c5 e8', 'cmp eax, 3\n jae game+0xA56E9E\n mov qword ptr [rbp+rax*8-0x18], rcx\n jmp game+0xA56E96'),
+    (0xA56E91, '48 89 4c c5 e8', 'cmp eax, 3\n jb 1f\n CALL(%d)\n jmp game+0xA56E9E\n1: mov qword ptr [rbp+rax*8-0x18], rcx\n jmp game+0xA56E96' % WAITING),
     (0x12E67B1, '48 89 4c c5 bf', 'cmp eax, 3\n jae game+0x12E67BE\n mov qword ptr [rbp+rax*8-0x41], rcx\n jmp game+0x12E67B6'),
     # A record's bits 0 to 3 and 4 to 7 by player index: index 4 would set a bit of the other half or a flag above
     # them. An index of -1 goes on as the game has it.
@@ -232,6 +234,27 @@ LOOT = [
     (0x631514, '8b c1 48 8d 0c 40', 'mov eax, ecx\n lea rcx, [rax+rax*2]\n CALL(%d)\n jae game+0x63155B\n jmp game+0x63151A' % SCORE_INDEX),
     (0x631693, '41 3b ae 0c 7d 03 00', 'push rax\n mov eax, ebp\n CALL(%d)\n pop rax\n jae game+0x6316A0\n cmp ebp, dword ptr [r14+0x37d0c]\n'
                                         ' jmp game+0x63169A' % SCORE_INDEX),
+]
+# The Activity record's waiting list in the mod's memory (group 12). A record (key +0, pending count +0x10, ids +0x18)
+# waits until every peer in it has answered: an answer swap-removes the peer, and a count of 0 sets state 3 and posts.
+# A count already 0 posts at any answer. The record's further peers follow the same rule: each answer first takes the
+# peer off them (the callback, CF while some still wait), and both tests of the count stay on "pending" while one does.
+# In 0xB9A5D0 the record is rax and the peer rsi, in 0x12E6AE0 r10 and r11, in 0x12E6B90 rax and rdi.
+ACTIVITY = [
+    # The record is in the table now (rsi the table, rcx its offset): the kept participants and peers go with its key.
+    (0xA56F0E, 'ff 86 00 11 00 00', 'inc dword ptr [rsi+0x1100]\n CALL(%d)\n jmp game+0xA56F14' % RECORD),
+    (0xB9A648, '44 8b 48 10 45 33 c0 45 85 c9 74 31', 'CALL(%d)\n mov r9d, dword ptr [rax+0x10]\n jnc 1f\n test r9d, r9d\n je game+0xB9A6AC\n'
+                                                     '1: xor r8d, r8d\n test r9d, r9d\n je game+0xB9A685\n jmp game+0xB9A654' % ANSWER_RAX_RSI),
+    (0xB9A680, '45 85 c9 75 27', 'test r9d, r9d\n jne game+0xB9A6AC\n CALL(%d)\n jc game+0xB9A6AC\n jmp game+0xB9A685' % ANSWER_RAX_RSI),
+    (0x12E6B20, '41 8b 52 10 85 d2 74 37', 'CALL(%d)\n mov edx, dword ptr [r10+0x10]\n jnc 1f\n test edx, edx\n je game+0x12E6B8A\n'
+                                           '1: test edx, edx\n je game+0x12E6B5F\n jmp game+0x12E6B28' % ANSWER_R10_R11),
+    (0x12E6B57, '41 8b 52 10 85 d2 75 2b', 'mov edx, dword ptr [r10+0x10]\n test edx, edx\n jne game+0x12E6B8A\n CALL(%d)\n jc game+0x12E6B8A\n'
+                                           ' jmp game+0x12E6B5F' % ANSWER_R10_R11),
+    (0x12E6C15, '44 8b 48 10 45 33 c0 45 85 c9 74 31', 'CALL(%d)\n mov r9d, dword ptr [rax+0x10]\n jnc 1f\n test r9d, r9d\n je game+0x12E6C79\n'
+                                                      '1: xor r8d, r8d\n test r9d, r9d\n je game+0x12E6C52\n jmp game+0x12E6C21' % ANSWER_RAX_RDI),
+    (0x12E6C4D, '45 85 c9 75 27', 'test r9d, r9d\n jne game+0x12E6C79\n CALL(%d)\n jc game+0x12E6C79\n jmp game+0x12E6C52' % ANSWER_RAX_RDI),
+    # 0x12E69D0 takes a record in state 2 or 3 (rax) out of the table: its kept participants and peers go too.
+    (0x12E6A0F, '8d 4a ff 49 ff c8', 'CALL(%d)\n lea ecx, [rdx-1]\n dec r8\n jmp game+0x12E6A15' % DROPPED),
 ]
 # Guards in place: the game tests the index against -1 ("none") only. cmp reg,-1; je becomes cmp reg,4; jae, which
 # sends 4 to 7 the way "none" goes and leaves -1 going there. (rva, bytes, new bytes)
@@ -347,8 +370,8 @@ SUMMARY_CAVES = [(rva, replaced, text) for rva, replaced, text, _, _ in summary_
 SUMMARY_CAVES += [(rva, replaced, text) for rva, replaced, text, _ in summary_sites.GUARD8]
 cave_groups = ([G_COUNT] * len(CAVES) + [G_GUARD4 if rva in OFF else G_GUARD for rva, _, _ in GUARDS] + [G_NET] * len(NET_GUARDS) +
                [G_EIGHT] * len(EIGHT_CAVES) + [G_TEST] * len(TEST_CAVES) + [G_LOADOUT] * len(LOADOUT_CAVES) + [G_LOOT] * len(LOOT) +
-               [G_SUMMARY] * len(SUMMARY_CAVES))
-CAVES += GUARDS + NET_GUARDS + EIGHT_CAVES + TEST_CAVES + LOADOUT_CAVES + LOOT + SUMMARY_CAVES
+               [G_SUMMARY] * len(SUMMARY_CAVES) + [G_ACTIVITY] * len(ACTIVITY))
+CAVES += GUARDS + NET_GUARDS + EIGHT_CAVES + TEST_CAVES + LOADOUT_CAVES + LOOT + SUMMARY_CAVES + ACTIVITY
 # In place, with the cave above: the first loop's count is a copy of that constant.
 sites.append((0x108D2DD, bytes.fromhex('8b ef 90'), bytes.fromhex('8d 6f 04'), 0xFF, G_COUNT))
 assert dump[0x108D2DD:0x108D2E0] == bytes.fromhex('8b ef 90')
@@ -434,3 +457,4 @@ print('%d sites, %d clears, %d caves (%d bytes)' % (len(sites), len(CLEARS), len
 for group, name in enumerate(('counts', 'guards', 'message guards', 'eight players only', 'test option only', 'loadout (eight only)',
                                'guards (four only)', 'loadout table (eight)', 'loot rows', 'summary (eight only)')):
     print('  %-20s %3d sites, %2d caves' % (name, sum(s[4] == group for s in sites), cave_groups.count(group)))
+print('  %-20s %3d sites, %2d caves' % ('activity record', sum(s[4] == G_ACTIVITY for s in sites), cave_groups.count(G_ACTIVITY)))

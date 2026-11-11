@@ -137,6 +137,11 @@ session's ready list with no bound:
 - The local player always gets a place among the four participants.
 - The mod keeps participants 5 to 8 for the record. A hook of the post lists them behind the four. The post writes a
   list of any length; HellForge's backend takes up to 16.
+- The mod keeps the other players 4 to 7 the record waits for. 6 sites in the game's three answer functions take an
+  answering or leaving player off that list too, and keep the record waiting while one is left. The time-out and the
+  drop work as for four.
+- The further participants and answers need the post's hook. Without it, or with one of their 8 sites changed, they
+  stay out: the record keeps four, and the rest of the counts and guards still goes in.
 
 A build for eight gives the mission summary screen eight rows and cards. The game packs two row blocks of four rows,
 four cards and four navigation entries into one allocation of 0x8A540 bytes. The build allocates 0x120C70 bytes and
@@ -148,8 +153,8 @@ four keeps the screen and its 4 guards.
 Limits that remain:
 
 - The mission result's loot rows hold score slots 1 to 4 only.
-- With five to eight players the Activity record waits for the answers of three other players. The others are paid
-  without it.
+- An Activity record made by the game's second record function (0x12E6690) keeps four participants and waits for three
+  other players.
 - The avatar manager's eight places, which dead players' bodies may also hold, are not covered yet.
 - The summary's cards 5 to 8 use the game's layout for four (a layout mode, not a count): where they appear on screen
   is not known.
@@ -288,7 +293,7 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `scripts/sites/loadout_sites.py` | The loadout screen's sites and caves for eight, and the per-peer loadout table's move and bounds. |
 | `scripts/sites/summary_sites.py` | The mission summary's sites and caves for eight, and its guards for four. |
 | `scripts/gen_count_sites.py` | Writes `co_count_sites.h`; assembles the caves with GNU `as`. Holds the guards, the member lists' caps, the lobby's size and the loot rows' guards. |
-| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards and the mission result's slots in both managers' states, the Activity record's participants and post, and the join limit without the managers. The mission summary in each build. |
+| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards and the mission result's slots in both managers' states, the Activity record's participants, answers and post, and the join limit without the managers. The mission summary in each build. |
 | `src/co_ui.c` | The tables a build for eight moves at run time: the galactic map's cursors, the squad HUD's panel, the name tags' rows. Guards for four, the move, its undo, the hook of the HUD's init. |
 | `src/co_ui_sites.h` | Their code sites and caves. Generated; do not edit. |
 | `scripts/sites/map_sites.py` | The galactic map's sites and caves for eight, and its guards for four. |
@@ -335,6 +340,8 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `the per-peer loadout table is not where the game keeps it` | Something else moved or changed it: the counts stay at four. |
 | `the score manager's loot rows are cleared and added for eight rows` | The loot rows' code moved with the managers. |
 | `the score manager's loot rows by index are bounded where the managers keep them` | The loot rows' guards are in place. |
+| `an Activity record lists every participant and waits for each one's answer` | The Activity record's further participants and answers are in place. |
+| `Activity records list and wait for four players` | The post's hook or one of those sites is missing; the reason stands before it. The rest is in. |
 | `the session is full at four players: the player managers have four slots` | A build for eight whose managers have four slots: four players. |
 | `the session is full at four players: tables of four entries are not guarded` | A build for eight without the map's or the tags' guards: four players. |
 | `the galactic map has eight cursors` | A build for eight players: the map's cursors are in the mod's memory. |
