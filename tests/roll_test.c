@@ -40,6 +40,23 @@ int main(void)
         CHECK(co_complex_roll(kVectors[i].seed, kVectors[i].planet, kVectors[i].value + 1u) == 1);
     }
 
+    /* The mark: read back as written, the other 31 bits kept, the same seed from marking twice, and fixed values. */
+    g_case = "the seed's mark";
+    for (uint32_t i = 0; i < 100000u; i++)
+    {
+        uint32_t seed = i * 0x9E3779B1u + 0x7F4A7C15u;
+        for (int complex = 0; complex < 2; complex++)
+        {
+            uint32_t marked = co_seed_marked(seed, complex);
+            CHECK(co_seed_is_complex(marked) == complex);
+            CHECK(((marked ^ seed) & ~1u) == 0);
+            CHECK(co_seed_marked(marked, complex) == marked);
+        }
+        if (g_failed) break;
+    }
+    CHECK(co_seed_marked(0x0184CCF6u, 1) == 0x0184CCF7u && co_seed_marked(0x0184CCF7u, 0) == 0x0184CCF6u);
+    CHECK(co_seed_marked(0xFFFFFFFFu, 0) == 0xFFFFFFFEu && co_seed_marked(0u, 1) == 1u);
+
     g_case = "the chance's ends";
     for (uint32_t seed = 0; seed < 100000u; seed++)
     {

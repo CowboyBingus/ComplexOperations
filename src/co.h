@@ -93,5 +93,8 @@ const char* CoXlInstall(uintptr_t game);
 /* Whether an operation is a complex operation (co_roll.c): the same answer on every peer, from the operation record's
  * seed and planet. `chance_65536` is the chance in 1/65536; 65536 and above is always. */
 int co_complex_roll(uint32_t operation_seed, uint32_t planet, uint32_t chance_65536);
+/* A level-11 mission's seed with the decision in it, and the decision read back (co_roll.c). */
+uint32_t co_seed_marked(uint32_t mission_seed, int complex);
+int co_seed_is_complex(uint32_t mission_seed);
 
 #endif

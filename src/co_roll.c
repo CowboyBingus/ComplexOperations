@@ -24,3 +24,14 @@ int co_complex_roll(uint32_t operation_seed, uint32_t planet, uint32_t chance_65
     h ^= h >> 16;
     return (h >> 16) < chance_65536;
 }
+
+/* The decision travels in the mission's seed. A client generates a mission with the host's seed (the host sends its
+ * string at launch and to a player who joins), so the host's answer reaches every peer with no message of the mod's
+ * own. The game feeds all 32 bits of a seed into its generator and takes any value, so no bit is spare: one bit is
+ * forced, set on a complex operation's missions and clear on every other level-11 mission, and read back at generation.
+ * Seeds of other levels are left as the game made them. Every build of the mod must keep the bit. */
+#define CO_SEED_MARK 0x1u
+
+uint32_t co_seed_marked(uint32_t mission_seed, int complex) { return complex ? mission_seed | CO_SEED_MARK : mission_seed & ~CO_SEED_MARK; }
+
+int co_seed_is_complex(uint32_t mission_seed) { return (mission_seed & CO_SEED_MARK) != 0; }
