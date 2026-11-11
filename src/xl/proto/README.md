@@ -63,6 +63,7 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
 | `difficulty_world.c`, `difficulty_world_arcs.c` | Level init records whether the level is complex by its address (`LevelComplex`); the objective fill and the mission arcs ask it. The arcs' `HELLFORGE_XL_ARCS` switch is gone. |
 | `difficulty_world.c` | Level init sets a weld block's places for the level (`../co_weld.c`). |
 | `difficulty_world.c` | Level init sets the stamp index's slots for the level (`../co_stamps.c`) and rebuilds the index when it was built as another level's. The index query's hook is in `../co_xl.c`. |
+| `difficulty_world.c` | The install goes on, behind the chains, with `../co_pocket.c`: FixUnreachableAreas' pocket search, component list and reconnect for a complex level. |
 | `difficulty_world.c`, `difficulty_world_gates.c` | Sites HellForge's level 11 has a step at (`../co_beside.c`): the thinning runs in front of its merge stub, the mine list and the records' store keep its guards, and the city gates' pins accept its jumps. |
 
 What the build does instead of an edit:

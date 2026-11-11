@@ -129,6 +129,11 @@ const char* co_chain_install(uintptr_t game, uintptr_t flag)
     return "a generator step of difficulty 11 could not be chained";
 }
 
+uintptr_t co_chain_slot(int chain)
+{
+    return g_chainPage != NULL && chain >= 0 && chain < CO_CHAINS ? (uintptr_t)g_chainPage + (uintptr_t)chain * CO_CHAIN_SLOT : 0;
+}
+
 #ifdef CO_TEST
 void co_chain_test_reset(void) { g_chainPage = NULL; }
 uintptr_t co_chain_test_page(void) { return (uintptr_t)g_chainPage; }

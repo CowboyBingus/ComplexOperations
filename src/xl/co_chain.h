@@ -44,6 +44,8 @@ const char* co_chain_check(uintptr_t game, uintptr_t stubs[CO_CHAINS]);
 void co_chain_build(uint8_t* page, uintptr_t code, uintptr_t game, uintptr_t flag, const uintptr_t stubs[CO_CHAINS]);
 /* Checks, builds a page of the mod's own and points the eleven jumps at it. NULL, or why every site is as it was. */
 const char* co_chain_install(uintptr_t game, uintptr_t flag);
+/* Where the mod's stub of a site runs once installed, for a step that goes in front of it (co_pocket.c); else 0. */
+uintptr_t co_chain_slot(int chain);
 
 #ifdef CO_TEST
 void co_chain_test_reset(void);
