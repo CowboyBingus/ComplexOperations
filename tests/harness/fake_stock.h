@@ -15,6 +15,7 @@ void fake_stock_chains(uint8_t* image, float disk);
  * the game's 16 and 10, and the two guards of a 17th slot, 0x20 apart. fake_stock_chains calls it. */
 #define FAKE_STOCK_MARKERS (FAKE_STOCK_STUBS + 0xE00u)
 void fake_stock_markers(uint8_t* image);
+#define FAKE_STOCK_CLUSTERS 0x3115000u /* its two cluster count stubs, set by fake_stock_chains too */
 uint32_t fake_stock_stub(int chain);
 
 /* The row readers as HellForge leaves them: the game's bytes at the three copies' ends, the seven distance reads on

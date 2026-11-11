@@ -1068,10 +1068,9 @@ static void WorldObjectivePlaced(uintptr_t block)
  * bands between 10 % and 88 % of the playable radius (step coprime to n, near n x 0.618, so neighbours differ). No new
  * draws and no trigonometry: every peer gets the same centres. The centre cluster stays. */
 WORLD_PASS(ClustersTimed, 0xF79520u, "GenerateLocationClusters")
-/* The pass also makes at least ceil(locations of a kind / N) clusters (difficulty_block.c's count stubs read {N - 1,
- * shift}): 24 per cluster elsewhere, 6 on an extra large level, so an operation's content is many small groups rather
- * than four large ones (s73i: 64 locations in 4 clusters). The lock keeps a level's N for its whole pass. */
-static volatile uint32_t* g_clusterPer;
+/* The pass also makes at least ceil(locations of a kind / N) clusters (../co_clusters.c's count stubs read {N - 1,
+ * shift}): HellForge's 24 per cluster elsewhere, 3 on an extra large level, so an operation's content is many small
+ * groups rather than four large ones (s73i: 64 locations in 4 clusters). The lock keeps a level's N for its whole pass. */
 static SRWLOCK g_clusterLock = SRWLOCK_INIT;
 static float ClusterDirection(float dx, float dy) /* a monotonic stand-in for the angle, 0..4 */
 {
@@ -1239,12 +1238,12 @@ static void ObjectiveArcs(uint64_t a, uint64_t pass, uint64_t clusters, uint32_t
 static uint64_t WorldPassClusters(uint64_t a, uint64_t b, uint64_t c, uint64_t e)
 {
     AcquireSRWLockExclusive(&g_clusterLock);
-    int small = g_clusterPer != NULL && g_world.current > 1.0f;
-    /* 3 locations a cluster on an extra large level (difficulty_block.c: ceil(n / 3) by 0xAAAAAAAB >> 33; 6 left the
+    int small = g_world.current > 1.0f;
+    /* 3 locations a cluster on an extra large level (../co_clusters.c: ceil(n / 3) by 0xAAAAAAAB >> 33; 6 left the
      * content in about a dozen lumps over the map, audit 13), within DIF_CLUSTERS */
-    if (small) { g_clusterPer[0] = 2; g_clusterPer[1] = 33; }
+    if (small) co_clusters_pass(1);
     uint64_t r = WorldPassClustersTimed(a, b, c, e);
-    if (small) { g_clusterPer[0] = 23; g_clusterPer[1] = 36; }
+    if (small) co_clusters_pass(0);
     ReleaseSRWLockExclusive(&g_clusterLock);
     uint64_t clusters = 0, countAt = 0, S = 0;
     uint32_t n = 0, W = 0;

@@ -10,6 +10,7 @@
 #include "xl/co_beside_sites.h"
 #include "xl/co_stamp_sites.h"
 #include "xl/co_weld_sites.h"
+#include "xl/co_cluster_sites.h"
 #include "xl/co_status_sites.h"
 #include "xl/co_pocket_sites.h"
 #include "xl/co_marker_sites.h"
@@ -66,6 +67,16 @@ void fake_stock_chains(uint8_t* image, float disk)
     /* and its structured step the weld's pool of 576 blocks, in the game's weld */
     for (size_t i = 0; i < sizeof kCoWeldValues / sizeof kCoWeldValues[0]; i++) memcpy(image + kCoWeldValues[i].rva, kCoWeldValues[i].stock, kCoWeldValues[i].length);
     for (int i = 0; i < 3; i++) memcpy(image + kCoWeldFull[i].rva, kCoWeldFull[i].bytes, kCoWeldFull[i].length);
+    /* and its block move the two cluster counts' stubs, 0x40 apart, behind jumps padded to the sites' lengths */
+    for (int i = 0; i < 2; i++)
+    {
+        const CoClusterSite* c = &kCoClusterSites[i];
+        const uint32_t stub = FAKE_STOCK_CLUSTERS + 0x40u * (uint32_t)i;
+        memcpy(image + stub, c->stock, c->stockSize);
+        Rel(image, stub + c->stockSize - 4u, c->back);
+        memset(image + c->site, 0x90, c->length); image[c->site] = 0xE9;
+        Rel(image, c->site + 1u, stub);
+    }
     /* the status volumes' unit registry is the game's: HellForge has no step there */
     for (int i = 0; i < CO_STATUS_SITES; i++) memcpy(image + kCoStatusSites[i].rva, kCoStatusSites[i].pin, kCoStatusSites[i].length);
     /* FixUnreachableAreas is the game's but for the restart step above */

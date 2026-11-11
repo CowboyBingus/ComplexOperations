@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+# Writes src/xl/co_cluster_sites.h: GenerateLocationClusters' two cluster counts (0xF7991F, 0xF79947) as HellForge's
+# level 11 leaves them and as a complex level counts (game build 25480438):
+#   scripts/gen_cluster_sites.py <game.dll image dump> <HellForge native/mod-loader> <the prototype's difficulty_block.c> [out]
+# HellForge's two stubs, their sites and its jumps are read from its source, the prototype's stubs from its own; the
+# game's bytes are checked on the dump, and each divisor's multiply and shift over every count a list can hold.
+import os, re, struct, sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+game = open(sys.argv[1], 'rb').read()
+stock = open(os.path.join(sys.argv[2], 'difficulty_block.c')).read()
+proto = open(sys.argv[3]).read()
+out = sys.argv[4] if len(sys.argv) > 4 else HERE + '/../src/xl/co_cluster_sites.h'
+
+
+def array(text, name):
+    found = re.search(r'static const uint8_t %s\[(\d+)\] = \{(.*?)\};' % name, text, re.S)
+    values = [int(x, 0) for x in re.sub(r'/\*.*?\*/', '', found.group(2), flags=re.S).replace('\n', ' ').split(',') if x.strip()]
+    assert len(values) == int(found.group(1)), name
+    return bytes(values)
+
+
+def hexes(b): return ', '.join('0x%02X' % x for x in b)
+
+
+def sites(text):
+    body = re.search(r'kClusterCountSites\[2\] = \{(.*?)\};', text, re.S).group(1)
+    rows = re.findall(r'\{(0x[0-9A-F]+)u, (\d+), (\w+), (\w+), (\d+), (\d+), (0x[0-9A-F]+)u\}', body)
+    assert len(rows) == 2
+    return [(int(s, 16), int(n), pin, stub, int(size), int(at), int(back, 16)) for s, n, pin, stub, size, at, back in rows]
+
+
+# HellForge's install: the stub copied, its last rel32 pointed back into the game, E9 and 0x90 over the site's length
+assert 'memcpy(stub, kClusterCountSites[i].stub, kClusterCountSites[i].size);' in stock
+assert 'uint8_t jump[9] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90};' in stock
+assert 'ApiWrite(game + kClusterCountSites[i].site, jump, kClusterCountSites[i].length)' in stock
+assert 'kClusterCountReads' not in stock   # no value of its stub is read at run time: 24 is in its code
+reads = re.search(r'kClusterCountReads\[2\]\[2\]\[3\] = \{\{\{(\d+), (\d+), 0x80\}, \{(\d+), (\d+), 0x84\}\}, \{\{(\d+), (\d+), 0x80\}, \{(\d+), (\d+), 0x84\}\}\};', proto)
+reads = [int(x) for x in reads.groups()]
+# what the prototype's pass writes on an extra large level and puts back: {the divisor - 1, the shift}
+per = re.search(r'if \(small\) \{ g_clusterPer\[0\] = (\d+); g_clusterPer\[1\] = (\d+); \}\s*uint64_t r = WorldPassClustersTimed\(a, b, c, e\);\s*'
+                r'if \(small\) \{ g_clusterPer\[0\] = (\d+); g_clusterPer\[1\] = (\d+); \}', open(os.path.join(os.path.dirname(sys.argv[3]), 'difficulty_world.c')).read())
+own_add, own_shift, stock_add, stock_shift = [int(x) for x in per.groups()]
+PLACES = 65024   # the locations a level can hold: no kind has more
+for add, shift, divisor in ((own_add, own_shift, 3), (stock_add, stock_shift, 24)):
+    assert add == divisor - 1
+    for n in range(PLACES + 1): assert ((n + add) * 0xAAAAAAAB) >> shift == -(-n // divisor), (divisor, n)
+
+rows = []
+for i, ((site, length, pin, stub, size, back_at, back), (psite, plength, ppin, pstub, psize, pback_at, pback)) in enumerate(zip(sites(stock), sites(proto))):
+    pin_bytes, stub_bytes, own = array(stock, pin), array(stock, stub), array(proto, pstub)
+    assert (site, length, back) == (psite, plength, pback) and array(proto, ppin) == pin_bytes
+    assert game[site:site + length] == pin_bytes and len(stub_bytes) == size and len(own) == psize
+    assert stub_bytes[back_at - 1] == 0xE9 and stub_bytes[back_at:] == b'\0\0\0\0' and back_at + 4 == size
+    assert own[pback_at - 1] == 0xE9 and own[pback_at:] == b'\0\0\0\0' and pback_at + 4 == psize
+    # HellForge's 24: lea eax, [r10+23]; the multiply; shr rax, 36
+    assert bytes([0x41, 0x8D, 0x42, stock_add]) in stub_bytes and bytes([0x48, 0xC1, 0xE8, stock_shift]) in stub_bytes
+    add_at, add_end, shift_at, shift_end = reads[4 * i:4 * i + 4]
+    assert own[add_at - 2:add_at + 4] == bytes([0x03, 0x05, 0, 0, 0, 0]) and add_end == add_at + 4     # add eax, [rip -> the divisor - 1]
+    assert own[shift_at - 2:shift_at + 4] == bytes([0x8B, 0x0D, 0, 0, 0, 0]) and shift_end == shift_at + 4  # mov ecx, [rip -> the shift]
+    assert own[shift_at + 4:shift_at + 7] == bytes([0x48, 0xD3, 0xE8])                                   # shr rax, cl
+    rows.append((site, length, pin_bytes, stub_bytes, own, add_at, shift_at, back))
+# the game's instruction at each site begins with a compare, and behind each way back the flags are set anew
+# (0xF7995D test edx, edx; 0xF7994E sub eax, r15d): a stub in front may change them
+assert rows[0][2][:3] == bytes.fromhex('443BD2') and rows[1][2][:3] == bytes.fromhex('413BCA')
+assert game[0xF7995D:0xF7995F] == bytes.fromhex('85D2') and game[0xF7994E:0xF79951] == bytes.fromhex('412BC7')
+assert rows[0][7] == 0xF7995D and rows[1][7] == 0xF7994E
+
+o = ['/* Generated by scripts/gen_cluster_sites.py from HellForge\'s and the prototype\'s sources and the game\'s image; do not edit. Game build 25480438. */\n',
+     '#ifndef CO_CLUSTER_SITES_H\n#define CO_CLUSTER_SITES_H\n\n#include <stdint.h>\n\n',
+     '/* ceil(n / divisor) as ((n + ADD) x 0xAAAAAAAB) >> SHIFT: HellForge\'s 24 a cluster, a complex level\'s 3. */\n',
+     '#define CO_CLUSTER_STOCK_ADD %du\n#define CO_CLUSTER_STOCK_SHIFT %du\n#define CO_CLUSTER_OWN_ADD %du\n#define CO_CLUSTER_OWN_SHIFT %du\n\n' % (stock_add, stock_shift, own_add, own_shift)]
+for i, (site, length, pin, stub, own, add_at, shift_at, back) in enumerate(rows):
+    o.append('static const uint8_t kClusterStock%d[%d] = {%s};\n' % (i, len(stub), hexes(stub)))
+    o.append('static const uint8_t kClusterOwn%d[%d] = {%s};\n' % (i, len(own), hexes(own)))
+o.append('\n/* A count\'s site: HellForge\'s jump over `length` bytes of the game\'s, its stub (the last rel32 leads to `back`), and\n')
+o.append(' * the mod\'s for a complex level, which reads the two numbers at addAt and shiftAt and ends with the same jump. */\n')
+o.append('typedef struct CoClusterSite { uint32_t site; uint8_t length; uint8_t game[9]; const uint8_t* stock; uint8_t stockSize; const uint8_t* own; uint8_t ownSize, addAt, shiftAt; uint32_t back; } CoClusterSite;\n')
+o.append('static const CoClusterSite kCoClusterSites[2] = {\n')
+for i, (site, length, pin, stub, own, add_at, shift_at, back) in enumerate(rows):
+    o.append('    {0x%Xu, %d, {%s}, kClusterStock%d, %d, kClusterOwn%d, %d, %d, %d, 0x%Xu},\n' % (site, length, hexes(pin), i, len(stub), i, len(own), add_at, shift_at, back))
+o.append('};\n\n#endif\n')
+open(out, 'w').write(''.join(o))
