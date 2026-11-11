@@ -17,7 +17,7 @@ typedef struct CoLivePage { float half, full, inverse, negHalf, negFull, gateHig
 typedef struct CoWorldReader { uint32_t rva; uint8_t length, which, page, flags; uint32_t function; uint8_t bytes[9]; } CoWorldReader;
 enum { CO_FIELD_GATE_HIGH, CO_FIELD_GATE_LOW, CO_FIELD_DROP_HIGH, CO_FIELD_DROP_LOW, CO_FIELD_MASK_SPAN, CO_FIELD_GOAL_HIGH, CO_FIELD_GOAL_LOW,
     CO_FIELD_MOTION_HIGH, CO_FIELD_MOTION_LOW, CO_FIELD_QUARTER, CO_FIELD_CLEARING };
-typedef struct CoPageReader { uint32_t rva; uint8_t length, field, page; uint8_t bytes[9]; } CoPageReader;
+typedef struct CoPageReader { uint32_t rva; uint8_t length, field, page; uint32_t value; uint8_t bytes[9]; } CoPageReader;
 typedef struct CoPageImmediate { uint32_t rva; uint8_t at; uint32_t value; uint8_t bytes[11]; } CoPageImmediate;
 
 /* A page's values for a world of 2048 m x scale. At scale 1 each is the game's constant, bit for bit. */
@@ -39,5 +39,12 @@ int co_pages_level(float scale, int mission);
 int co_pages_ship(void);
 /* The scale a page holds now (1 before the install). */
 float co_pages_scale(int page);
+
+#ifdef CO_TEST
+void co_pages_test_reset(void);
+const CoWorldReader* co_pages_test_readers(size_t* count);
+const CoPageReader* co_pages_test_singles(size_t* count);
+const CoPageImmediate* co_pages_test_immediates(size_t* count);
+#endif
 
 #endif
