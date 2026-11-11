@@ -35,7 +35,9 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
   They are in a later `living_world_density.c` that was not copied.
 - The loader's `PhysicsPools` with the fork's pool sizes, broadphase and navigation cells. `../../co_early.c` writes
   them beside HellForge's own, and `../co_xl.c` hooks the entity records' move from the same moment (`CoXlEarly`).
-- The callers of `WorldShip`, `EntityRecordsWatch` and `StatusWatch`: the loader's level change and watch thread.
+- The callers of `EntityRecordsWatch` and `StatusWatch`: the loader's watch thread. The first only notes a count.
+  The second installs the status volumes' larger unit registry, whose five stubs leave two uses of the game's own list
+  as they are (an append at 0x13CC3F6, a read at 0x13CC03F): it stays uninstalled until those are covered.
 
 ## Edits to the copied files
 

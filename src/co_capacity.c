@@ -117,9 +117,8 @@ int co_capacity_normal(void)
  * - the lists the generator and a mission fill on a 16384 m world (stamp index 131071, weld pool, footprint list,
  *   spawners 1024, markers 64, the pocket search, the clusters' divisor) and HellForge's limits for them on a normal
  *   level (co_level_limit): HellForge's level 11 has its own step at most of these sites;
- * - the world's settings, still the stand-in's (xl/co_xl_standin.h): with map scale 0 the world's install returns at
- *   once, so no level is complex and the generator chains and the radii stub never go in;
- * - the world's pins at the sites HellForge's town and living-world steps already changed;
+ * - the status volumes' unit registry: the prototype's five stubs leave two more uses of the game's own list
+ *   (an append at 0x13CC3F6, a read at 0x13CC03F), so nothing installs it;
  * - a client's way out of a level init it should not be in (it gets a normal level and a log line). */
 static void Settle(void)
 {
