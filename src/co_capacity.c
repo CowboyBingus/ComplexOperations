@@ -117,11 +117,12 @@ int co_capacity_normal(void)
 
 /* Every need, then one line when the part is off. What a complex operation lacks in this build, so that it is never on
  * (CO_COMPLEX_COMPLETE):
- * - the lists the generator and a mission fill on a 16384 m world (footprint list, spawners 1024,
- *   markers 64, the pocket search, the clusters' divisor) and HellForge's limits for them on a normal level
- *   (co_level_limit): HellForge's level 11 has its own step at most of these sites;
- * - the status volumes' unit registry: the prototype's five stubs leave two more uses of the game's own list
- *   (an append at 0x13CC3F6, a read at 0x13CC03F), so nothing installs it;
+ * - the generator's lists on a 16384 m world, each beside HellForge's own step: the city footprint list (0x8000) and
+ *   the city location reserve (0xF994A5), the pocket search and reconnect, the clusters' divisor;
+ * - a mission's lists: spawners 1024, map markers 64, the status volumes' unit registry (its two more uses of the
+ *   game's list, 0x13CC3F6 and 0x13CC03F, and a caller for its install);
+ * - an operation's three missions past 30 objectives: the objective list of 48, the result rows, a partner mission
+ *   per extra mission;
  * - a client's way out of a level init it should not be in (it gets a normal level and a log line). */
 static void Settle(void)
 {
