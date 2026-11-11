@@ -233,6 +233,12 @@ static void TownsForget(uint64_t pass)
 {
     if (g_towns.block == NULL || *g_towns.pass != pass) return;
     *g_towns.pass = 0;
-    if (g_towns.armed && g_world.below != NULL) { g_world.below[0] = g_towns.saved[0]; g_world.below[1] = g_towns.saved[1]; }
+    g_towns.armed = 0; /* the thresholds are this level's own (WorldWrite): an armed run's saved ones were another level's */
+}
+
+/* A new level: no run is armed. Before WorldWrite gives the level its thresholds. */
+static void TownsLevel(void)
+{
+    if (g_towns.block != NULL) *g_towns.pass = 0;
     g_towns.armed = 0;
 }

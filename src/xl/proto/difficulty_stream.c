@@ -441,7 +441,7 @@ static uint32_t WorldStreamMissionLocked(const uint8_t* array, uint32_t count)
     memset(g_streamMission, 0, count);
     uintptr_t block = 0;
     uint32_t locations = 0, marked = 0, outside = 0;
-    if (g_worldLevel == 0 || SafeRead(g_worldLevel + 0x2C8, &block, 8) || block == 0 || SafeRead(block + 0x11A715Cu, &locations, 4))
+    if (g_worldLevelLive == 0 || SafeRead(g_worldLevelLive + 0x2C8, &block, 8) || block == 0 || SafeRead(block + 0x11A715Cu, &locations, 4))
     {
         Note("difficulty: extra large maps: content streaming: the important locations do not read; every far location streams");
         return 0;
@@ -1007,13 +1007,13 @@ static void WorldStreamTick(float dt)
         ReleaseSRWLockExclusive(&g_streamLock);
         return;
     }
-    if (g_worldLevel != g_stream.level || g_stream.levels != g_world.levels)
+    if (g_worldLevelLive != g_stream.level || g_stream.levels != g_world.liveLevels) /* the mission in play, not a preview */
     {
         WorldStreamClearLocked();
         ReleaseSRWLockExclusive(&g_streamLock);
         return;
     }
-    if (g_stream.deferred == 0 || g_streamInside || !g_stream.generatorDone || !(g_world.current > 1.0f) || !WorldStreamInMission())
+    if (g_stream.deferred == 0 || g_streamInside || !g_stream.generatorDone || !(g_world.live > 1.0f) || !WorldStreamInMission())
     {
         ReleaseSRWLockExclusive(&g_streamLock);
         return;

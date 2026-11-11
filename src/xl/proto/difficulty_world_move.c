@@ -855,7 +855,7 @@ static void MoveGroundKeep(void)
 
 static void MoveTick(uint64_t level)
 {
-    if (!g_moveInstalled || level == 0 || level != g_worldLevel || g_world.current != 8.0f || !TerrainOn() || !NearOn() || !MoveOn()) return;
+    if (!g_moveInstalled || level == 0 || level != g_worldLevelLive || g_world.live != 8.0f || !TerrainOn() || !NearOn() || !MoveOn()) return;
     uint32_t state = 0;
     if (SafeRead(level + 0x1E4, &state, 4) || state != 3) return;
     if (g_near.level != g_world.levels || (g_move.state == MV_IDLE && g_near.state != NEAR_IN)) return;

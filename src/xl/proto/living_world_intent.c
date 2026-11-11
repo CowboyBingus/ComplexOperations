@@ -493,10 +493,10 @@ static void LwInvestigate(const LwEvent* e, int pass)
 static void LwNoiseDrain(void)
 {
     if (!g_lwNoiseOn) return;
-    static uintptr_t level;
+    static LONG level;
     LONG head = g_lwNoiseHead;
     MemoryBarrier();
-    if (level != g_lwWorld.lg) { level = g_lwWorld.lg; g_lwNoiseTail = head; memset(g_lwEvents, 0, sizeof g_lwEvents); } /* a new mission: nothing from before */
+    if (level != g_lwMission) { level = g_lwMission; g_lwNoiseTail = head; memset(g_lwEvents, 0, sizeof g_lwEvents); } /* a new mission: nothing from before */
     if (head - g_lwNoiseTail > (LONG)LW_NOISE_RING) g_lwNoiseTail = head - (LONG)LW_NOISE_RING;
     ULONGLONG now = GetTickCount64();
     for (; g_lwNoiseTail != head; g_lwNoiseTail++)
@@ -580,9 +580,9 @@ static void LwReinforce(int f, int want)
 /* each squads tick: once a second, the fights from the engaged units and the calls for help */
 static void LwFightScan(void)
 {
-    static ULONGLONG next; static uint32_t calls; static uintptr_t level;
+    static ULONGLONG next; static uint32_t calls; static LONG level;
     ULONGLONG now = GetTickCount64();
-    if (level != g_lwWorld.lg) { level = g_lwWorld.lg; memset(g_lwFights, 0, sizeof g_lwFights); calls = EvpU32(g_lwWorld.dir + 0x51950, 0); next = 0; }
+    if (level != g_lwMission) { level = g_lwMission; memset(g_lwFights, 0, sizeof g_lwFights); calls = EvpU32(g_lwWorld.dir + 0x51950, 0); next = 0; }
     if (now < next) return;
     next = now + 1000;
     float cx[32][3], ctp[32][3]; int cn[32], clusters = 0; uint8_t ccall[32]; uint32_t ct[32];
@@ -1304,11 +1304,11 @@ static void LwTerritoryTick(void)
  * with an intent every 10 s, and every living squad's place every 30 s (lwplot.py draws the tracks from these). */
 static void LwIntentTrace(void)
 {
-    static int on = -1; static uint8_t last[LW_SQUADS_MAX], lastState[LW_SQUADS_MAX]; static ULONGLONG every10, every30; static uintptr_t level;
+    static int on = -1; static uint8_t last[LW_SQUADS_MAX], lastState[LW_SQUADS_MAX]; static ULONGLONG every10, every30; static LONG level;
     if (on < 0) { char t[4] = ""; on = GetEnvironmentVariableA("HELLFORGE_LW_TEST_TRACE", t, sizeof t) > 0 && t[0] == '1'; }
     if (!on || g_lwWorld.populated != 1) return;
     static const char* const names[] = {"patrol", "investigate", "reinforce", "retake"};
-    if (level != g_lwWorld.lg) { level = g_lwWorld.lg; memset(last, 0, sizeof last); memset(lastState, 0, sizeof lastState); }
+    if (level != g_lwMission) { level = g_lwMission; memset(last, 0, sizeof last); memset(lastState, 0, sizeof lastState); }
     ULONGLONG now = GetTickCount64();
     int tick10 = now >= every10, tick30 = now >= every30;
     if (tick10) every10 = now + 10000;

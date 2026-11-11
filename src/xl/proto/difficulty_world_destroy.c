@@ -72,7 +72,7 @@ static void DestroyHold(uint64_t world, uint32_t handle)
     if (g_destroyWaiting < DESTROY_WAITING)
     {
         g_destroyWait[g_destroyWaiting].world = world; g_destroyWait[g_destroyWaiting].handle = handle;
-        g_destroyWait[g_destroyWaiting].ticks = 0; g_destroyWait[g_destroyWaiting].level = g_worldLevel; g_destroyWait[g_destroyWaiting].levels = g_world.levels;
+        g_destroyWait[g_destroyWaiting].ticks = 0; g_destroyWait[g_destroyWaiting].level = g_worldLevelLive; g_destroyWait[g_destroyWaiting].levels = g_world.liveLevels;
         g_destroyWaiting++;
     }
     else InterlockedIncrement(&g_destroyFull);
@@ -116,7 +116,7 @@ static void DestroyTick(void)
     LONG room = 0;
     for (LONG j = 0; j < g_destroyWaiting;)
     {
-        int stale = g_destroyWait[j].level != g_worldLevel || g_destroyWait[j].levels != g_world.levels;
+        int stale = g_destroyWait[j].level != g_worldLevelLive || g_destroyWait[j].levels != g_world.liveLevels; /* a preview is no new world */
         int state = stale ? 2 : DestroyHandleState(g_destroyWait[j].handle);
         if (state == 1 && ++g_destroyWait[j].ticks <= DESTROY_WAIT_TICKS) { j++; continue; }
         if (state == 0)

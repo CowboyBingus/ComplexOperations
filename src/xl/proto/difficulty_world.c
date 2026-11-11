@@ -68,7 +68,7 @@ static const struct { uint32_t rva; uint8_t at; uint32_t value; } kWorldImmediat
  * (scale - 1), 9068 m at 8 x (also the depth a falling unit is removed at). */
 #define FLAT_BAND_K 2.0f /* op 0x3E flatten zones: the falloff, x vanilla's metres, ending at its quad's edge (FlatBandStub) */
 #define PAD_BAND_K 1.5f /* op 0x3F rectangle pads: the falloff, x vanilla's metres (PadBandStubs) */
-typedef struct WorldValues { float half, full, inverse, gateHigh, gateLow, size, clearing, negHalf, dropHigh, dropLow, negFull, maskSpan, quarter, goalHigh, goalLow, padPx, padMetre, padQuad, flatPx; uint32_t capMul; float motionHigh, motionLow; } WorldValues;
+typedef CoGenPage WorldValues; /* the generation page (../co_pages.h); play's readers have the live page */
 /* GenerateClearingPoints (op 0xB3, 0xF42BD0) scatters Poisson points over the whole world square, keeps each with the
  * planet's chance (its random number x 2^-32, 0xF42D1E, against [settings+0x114]), and appends the kept ones (16 bytes
  * each, from G+0x11A16FC) without a check: room for about 1450 before the route counts at G+0x11A71B4. Their number grows
@@ -81,25 +81,30 @@ static const uint8_t kWorldStub[] = {
     0x48, 0x81, 0xEC, 0x88, 0x00, 0x00, 0x00,                         /*  11 sub rsp, 0x88 */
     STUB_SAVE_XMM,                                                    /*  18 movdqu [rsp+0x20..0x70], xmm0..xmm5 */
     0x4C, 0x89, 0xE9,                                                 /*  54 mov rcx, r13 (the level) */
-    STUB_CALL_IMM64,                                                  /*  57 mov rax, WorldLevel (imm64 at 59); call rax */
-    STUB_LOAD_XMM,                                                    /*  69 movdqu xmm0..xmm5, [rsp+0x20..0x70] */
-    0x48, 0x81, 0xC4, 0x88, 0x00, 0x00, 0x00,                         /* 105 add rsp, 0x88 */
-    STUB_POP_VOLATILE,                                                /* 112 pop r11 r10 r9 r8 rdx rcx rax */
-    0x83, 0x3D, 0, 0, 0, 0, 0x00,                                     /* 123 cmp dword [rip+size], 0 (rel32 at 125) */
-    0x74, 0x08,                                                       /* 130 je 140 */
-    0xF3, 0x0F, 0x10, 0x05, 0, 0, 0, 0,                               /* 132 movss xmm0, [rip+size] (rel32 at 136) */
-    0xF3, 0x41, 0x0F, 0x11, 0x85, 0xE0, 0x01, 0x00, 0x00,             /* 140 movss [r13+0x1e0], xmm0 */
-    0xE9, 0, 0, 0, 0};                                                /* 149 jmp 0xF714F1 (rel32 at 150) */
+    0x48, 0x89, 0xFA,                                                 /*  57 mov rdx, rdi (the preview's record; 0 for a mission) */
+    STUB_CALL_IMM64,                                                  /*  60 mov rax, WorldLevel (imm64 at 62); call rax */
+    STUB_LOAD_XMM,                                                    /*  72 movdqu xmm0..xmm5, [rsp+0x20..0x70] */
+    0x48, 0x81, 0xC4, 0x88, 0x00, 0x00, 0x00,                         /* 108 add rsp, 0x88 */
+    STUB_POP_VOLATILE,                                                /* 115 pop r11 r10 r9 r8 rdx rcx rax */
+    0x83, 0x3D, 0, 0, 0, 0, 0x00,                                     /* 126 cmp dword [rip+size], 0 (rel32 at 128) */
+    0x74, 0x08,                                                       /* 133 je 143 */
+    0xF3, 0x0F, 0x10, 0x05, 0, 0, 0, 0,                               /* 135 movss xmm0, [rip+size] (rel32 at 139) */
+    0xF3, 0x41, 0x0F, 0x11, 0x85, 0xE0, 0x01, 0x00, 0x00,             /* 143 movss [r13+0x1e0], xmm0 */
+    0xE9, 0, 0, 0, 0};                                                /* 152 jmp 0xF714F1 (rel32 at 153) */
+_Static_assert(sizeof kWorldStub == 157, "the level-init stub's offsets are the ones InstallWorld fills");
 static struct
 {
     uint32_t scale;                   /* the world at level 11: 2048 m x scale (1: not extra large) */
-    float current;                    /* the scale the constants and immediates hold now */
+    float current;                    /* the scale of the level set up last, a preview too: what generator code asks */
+    float live;                       /* the scale of the mission in play, 1 on the ship: what play code asks */
     WorldValues* values;
+    CoLivePage* liveValues;
+    volatile LONG liveLevels;         /* `levels` as the mission in play was set up; 0 on the ship */
     volatile uint32_t* below;         /* the thinning's thresholds the stubs read: [0] the jobs', [1] the placement's */
     uint32_t makeBelow, placeBelow;   /* an extra large level's (a vanilla level's are 0xFFFFFFFF: every stamp kept) */
     uintptr_t game;
     volatile LONG levels, switches;
-} g_world = {1, 1.0f};
+} g_world = {.scale = 1, .current = 1.0f, .live = 1.0f};
 
 /* The structured maps' city frame on a larger world: the city is a vanilla city's layout scaled by CITY_FRAME_K, at the
  * world's centre (see WorldSiteTemplate below). The zone template's square (0xFB8DD0: E = W x S+0x50 / s at
@@ -188,50 +193,25 @@ static void NetPositionRange(float scale)
         scale > 1.0f ? "an extra large level" : "vanilla", steps);
 }
 
-static void WorldWrite(float scale)
+/* A level is set up. The generator's side follows every level, a war-table preview too: its page, the thinning's
+ * thresholds, the immediates and the city zone's factor have one reader, the generation in flight. Play's side (its
+ * page and the network's position range) follows a mission only: the ship is played while previews generate. */
+static void WorldWrite(float scale, int mission)
 {
-    NetPositionRange(scale);
-    WorldValues* v = g_world.values;
-    v->half = 1024.0f * scale;
-    v->negHalf = -1024.0f * scale;
-    v->full = 2048.0f * scale;
-    v->inverse = 1.0f / (2048.0f * scale);
-    v->gateHigh = 2000.0f * scale;
-    v->gateLow = -2000.0f * scale;
-    v->clearing = 2.3283064365386963e-10f * scale * scale;
-    v->dropHigh = 1024.0f * scale - 25.0f;
-    v->dropLow = -(1024.0f * scale - 25.0f);
-    v->negFull = -2048.0f * scale;
-    v->maskSpan = 4096.0f * scale;
-    v->quarter = 512.0f * scale;
-    v->goalHigh = 4096.0f * scale;
-    v->goalLow = -4096.0f * scale;
-    v->motionHigh = 1900.0f + 1024.0f * (scale - 1.0f);
-    v->motionLow = -v->motionHigh;
-    /* Op 0x3F's rectangle pads (PadBandStubs): band in heightmap pixels, in metres for the quad, and the quad's read
-     * back of the stored pixels; vanilla 1 / 1 / 1 */
-    v->padPx = scale > 1.0f ? PAD_BAND_K / scale : 1.0f;
-    v->padMetre = scale > 1.0f ? PAD_BAND_K / 2.0f : 1.0f;
-    v->padQuad = scale > 1.0f ? scale / 2.0f : 1.0f;
-    v->flatPx = scale > 1.0f ? FLAT_BAND_K / scale : 1.0f;
+    const int changed = co_pages_level(scale, mission);
     if (g_world.below != NULL)
     {
         g_world.below[0] = scale > 1.0f ? g_world.makeBelow : 0xFFFFFFFFu;
         g_world.below[1] = scale > 1.0f ? g_world.placeBelow : 0xFFFFFFFFu;
         g_world.below[2] = scale > 1.0f ? DIF_PLACE_LIMIT : 0xFFFFFFFFu;
     }
-    for (int i = 0; i < WORLD_IMMEDIATES; i++)
-    {
-        float value;
-        memcpy(&value, &kWorldImmediates[i].value, 4);
-        value *= scale;
-        ApiWrite(g_world.game + kWorldImmediates[i].rva + kWorldImmediates[i].at, &value, 4);
-    }
     /* x g_cityZoneRatio: the playable fraction on an extra large city map is 0.95 (difficulty.c), not vanilla's x
      * map_scale / world scale, and the template's square is a share of it */
     if (g_cityZone != NULL) *g_cityZone = scale > 1.0f ? CITY_FRAME_K / g_difficulty.mapScale * g_cityZoneRatio : 1.0f;
-    g_world.current = scale;
-    InterlockedIncrement(&g_world.switches);
+    g_world.current = co_pages_scale(CO_PAGES_GEN);
+    if (changed & CO_PAGES_LIVE) NetPositionRange(scale);
+    g_world.live = co_pages_scale(CO_PAGES_LIVE);
+    if (changed) InterlockedIncrement(&g_world.switches);
 }
 
 /* The generator's stamp index (difficulty_maps.c; P = [lg+0x2C0], +0 its world, +8 the index, +0x48 its memory,
@@ -502,7 +482,8 @@ static LONG g_worldIndexFullSeen;
 /* Diagnostic: the location passes (by the dispatcher's names) wrapped while the world is extra large; each notes the
  * level's locations (G+0x11A7108) and important ones (G+0x11A715C) before and after, and its time. */
 typedef uint64_t (*WorldPassFn)(uint64_t, uint64_t, uint64_t, uint64_t);
-static uintptr_t g_worldLevel;
+static uintptr_t g_worldLevel;     /* the level set up last, a preview too */
+static uintptr_t g_worldLevelLive; /* the mission in play; 0 on the ship */
 static int32_t phaseBefore66 = -1; /* research: the road units when op 0x66 began */
 typedef struct TileRunner TileRunner;
 static inline TileRunner* TileRunnerSelf(void); /* below: a stamp planning runner on this thread */
@@ -682,6 +663,7 @@ static uint64_t WorldObjectiveFill(uint64_t level, uint64_t b, uint64_t row, uin
     uint8_t difficulty = 0;
     uint16_t r = (uint16_t)row;
     g_objectiveListCount = 0;
+    g_hudOrderCount = 0; /* another level's order is not this one's */
     /* The list as the game selected it (id/class from the row), on every level-11 map, vanilla size too (the census
      * baselines): the placement note after op 0x16 then compares it with what was placed. */
     if (g_difficultyGame != 0 && ids != 0 && n > 0 && n <= 32 && r < DIF_MISSION_ROWS && !SafeRead(level + 0xF9, &difficulty, 1) &&
@@ -1390,6 +1372,7 @@ static volatile LONG64 g_genOpSince;
 static uint32_t g_worldOpAt = 0xFFFFFFFFu;
 static void OverlapFlush(void); /* difficulty_world_overlap.c: notes the stamp overlap grid's counters for the run just ended */
 static float* g_heightCopy; /* the layer heightfield the loader keeps (below) */
+static LONG g_heightLevel = -1; /* the level it was kept in: it is lent to that level's layers only */
 static uint64_t g_heightSource, g_heightBytes;
 static volatile LONG g_worldStampNotes;
 /* Research (the smooth 16 km terrain): the kept layer heightfield written to the session's logs once per level, when the
@@ -2386,7 +2369,7 @@ static void WorldCamSetPosition(uint64_t camera, uint32_t node, const float* v)
         InterlockedIncrement(&c->calls);
         if (v) memcpy(c->position, v, 12);
     }
-    if (g_world.current == 8.0f) WorldCamNote();
+    if (g_world.live == 8.0f) WorldCamNote();
     if (WorldCamFromVantage(at))
     {
         g_camSetPosition(camera, node, g_vantagePosition);
@@ -3397,6 +3380,20 @@ static int NatureSlotOf(uint64_t S)
     return -1;
 }
 static void NatureGrid(uintptr_t gen, uint32_t worldSize); /* below */
+/* A generation that was dropped inside its window leaves it open: a new level starts with none. */
+static void NatureForget(void)
+{
+    AcquireSRWLockExclusive(&g_natureLock);
+    for (int s = 0; s < NATURE_SLOTS; s++)
+    {
+        uint64_t now = 0;
+        if (!g_nature[s].open) continue;
+        if (!SafeRead(g_nature[s].S + 0xC0, &now, 8) && now == (uint64_t)(uintptr_t)g_nature[s].copy) *(volatile uint64_t*)(uintptr_t)(g_nature[s].S + 0xC0) = g_nature[s].original;
+        g_nature[s].open = 0;
+    }
+    ReleaseSRWLockExclusive(&g_natureLock);
+}
+
 /* called before every dispatcher step of an extra large level: opens the window at op 0x15, closes it at any op outside */
 static void NatureWindow(uint64_t context, uint32_t op, uint32_t record)
 {
@@ -4941,7 +4938,7 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
     }
     if (matPatch) TerrainMatPatch(0);
     if (watch && op == 0x2B) TownsAfter(records, at, index, b, g, h, block); /* before TerrainStamps: it saves below[] */
-    if (g_cityShifted) { uint32_t now = at; if (!SafeRead(index, &now, 4) && now != at) { WorldCityShift(block, 1); WorldCityOpenZones(records, (uint32_t)d, b, block, 1); } }
+    if (watch && g_cityShifted && g_cities.level == g_world.levels) { uint32_t now = at; if (!SafeRead(index, &now, 4) && now != at) { WorldCityShift(block, 1); WorldCityOpenZones(records, (uint32_t)d, b, block, 1); } }
     if (watch) { uint32_t now = at; if (!SafeRead(index, &now, 4) && now != at) WorldCityStray(records, (uint32_t)d, b, block, op, at); }
     if (watch)
     {
@@ -5206,14 +5203,14 @@ static uint64_t WorldLayerSnap(uint64_t a, uint64_t b, uint64_t c, uint64_t fiel
             if (g_heightCopy != NULL)
             {
                 memcpy(g_heightCopy, (const void*)(uintptr_t)data, bytes);
-                g_heightSource = data; g_heightBytes = bytes;
+                g_heightSource = data; g_heightBytes = bytes; g_heightLevel = g_world.levels;
                 memcpy(g_heightField, now, sizeof now);
                 uint64_t copy = (uint64_t)(uintptr_t)g_heightCopy; memcpy(g_heightField, &copy, 8);
                 Note("difficulty: extra large maps: kept the layer heightfield (%u x %u, %llu MB) at 0x%llX", dims[0], dims[1], (unsigned long long)(bytes >> 20),
                     (unsigned long long)(uintptr_t)g_heightCopy);
             }
         }
-        else if (data == 0 && g_heightCopy != NULL)
+        else if (data == 0 && g_heightCopy != NULL && g_heightLevel == g_world.levels)
         {
             memcpy((void*)(uintptr_t)field, g_heightField, sizeof g_heightField); /* the caller's stack copy */
             if (InterlockedIncrement(&g_heightLent) <= 3) Note("difficulty: extra large maps: lent the kept heightfield to a layer spawn");
@@ -5231,7 +5228,7 @@ static WorldSampleFn g_layerSample;
 static float WorldLayerSample(uint64_t* holder, float x, float y)
 {
     uint64_t desc = *holder;
-    if (desc != 0 && *(volatile uint64_t*)(uintptr_t)desc == 0 && g_heightCopy != NULL)
+    if (desc != 0 && *(volatile uint64_t*)(uintptr_t)desc == 0 && g_heightCopy != NULL && g_heightLevel == g_world.levels)
     {
         memcpy((void*)(uintptr_t)desc, g_heightField, sizeof g_heightField); /* a stack copy, like WorldLayerSnap's */
         if (InterlockedIncrement(&g_heightLent) <= 3) Note("difficulty: extra large maps: lent the kept heightfield to a layer sample");
@@ -5268,15 +5265,28 @@ static uint64_t WorldObject(uint64_t world, uint64_t handle, uint64_t c, uint64_
     return g_worldObject(world, handle, c, d, e, f, g, h);
 }
 
-/* Level init, before it stores the level's size: the world for this level (level 11's scale, else vanilla). */
-static void WorldLevel(uintptr_t level)
+static void TownsLevel(void); /* difficulty_world_towns.c */
+/* What one level leaves behind that the next must not find: addresses inside the last generation's records, a window
+ * or a run a dropped generation left open, a restore owed to another level's block. */
+static void WorldLevelForget(void)
+{
+    g_rec25 = g_tileContext = g_pass74 = g_ctx74 = g_pass76 = g_pass15 = 0;
+    g_cityShifted = 0;
+    NatureForget();
+    TownsLevel();
+}
+
+/* Level init, before it stores the level's size: the world for this level (level 11's scale, else vanilla). `preview` is
+ * the war table's record, 0 for a mission; a retry of the same generation comes with the same one. */
+static void WorldLevel(uintptr_t level, uintptr_t preview)
 {
     NearOneMipDrop(); /* the previous extra large level's one-mip heightmap is not this level's */
     uint8_t difficulty = 0;
     float scale = 1.0f;
     if (g_world.scale > 1 && !SafeRead(level + 0xF9, &difficulty, 1) && difficulty == DIF_VANILLA + 1) scale = (float)g_world.scale;
+    WorldLevelForget();
     g_world.values->size = scale > 1.0f ? 2048.0f * scale : 0.0f;
-    if (scale != g_world.current) WorldWrite(scale);
+    WorldWrite(scale, preview == 0);
     g_worldLevel = level;
     if (g_world.below != NULL) g_world.below[3] = 0; /* op 0x2B's instances refused at the table's limit, this level */
     g_worldOpAt = 0xFFFFFFFFu;
@@ -5289,14 +5299,18 @@ static void WorldLevel(uintptr_t level)
         g_worldIndexFullSeen = full;
     }
     InterlockedIncrement(&g_world.levels);
+    if (preview == 0) { g_worldLevelLive = level; g_world.liveLevels = g_world.levels; }
 }
 
-/* The ship's navigation setup: the world back to vanilla (the ship's own systems read the same constants). */
+/* The ship's navigation setup: play's world back to vanilla (the ship's own systems read the same constants). The
+ * generator's side is left: the next level init sets it before a pass reads it. */
 static void WorldShip(void)
 {
     FpsLiftEnd("the ship");
     NearOneMipDrop();
-    if (g_world.values != NULL && g_world.current != 1.0f) WorldWrite(1.0f);
+    if (co_pages_ship() & CO_PAGES_LIVE) { NetPositionRange(1.0f); InterlockedIncrement(&g_world.switches); }
+    g_world.live = co_pages_scale(CO_PAGES_LIVE);
+    g_worldLevelLive = 0; g_world.liveLevels = 0;
 }
 
 /* HELLFORGE_XL_CENSUS=1: the install (and so its checks) on a level the loader does not grow too (InstallWorld). */
@@ -5352,34 +5366,7 @@ static const char* WorldSitesFailed(uintptr_t game)
         return "the world's destruction records are not the reviewed ones (an extra large map needs them)";
     if (SafeRead(game + DIF_INDEX_FULL, pin, 8) || memcmp(pin, kIndexFullPin, 8) != 0)
         return "the map generator's stamp index is not the reviewed one (an extra large map needs it)";
-    for (size_t i = 0; i < sizeof kWorldSites / sizeof kWorldSites[0]; i++)
-    {
-        const WorldSite* s = &kWorldSites[i];
-        int32_t disp;
-        if (SafeRead(game + s->rva + s->length - 4, &disp, 4) || game + s->rva + s->length + (intptr_t)disp != game + kWorldConstants[s->which])
-            return "a reader of the world's size is not the reviewed one (an extra large map needs it)";
-    }
-    for (int i = 0; i < 2; i++)
-    {
-        int32_t disp;
-        if (SafeRead(game + kWorldGate[i].rva + 4, &disp, 4) || game + kWorldGate[i].rva + 8 + (intptr_t)disp != game + kWorldGate[i].constant)
-            return "the director's spawn bounds are not the reviewed ones (an extra large map needs them)";
-    }
-    for (int i = 0; i < 4; i++)
-    {
-        int32_t disp;
-        uint8_t op[4];
-        if (SafeRead(game + kWorldDropBounds[i].rva, op, 4) || op[0] != 0xF3 || op[1] != 0x0F || op[2] != 0x10 ||
-            SafeRead(game + kWorldDropBounds[i].rva + 4, &disp, 4) || game + kWorldDropBounds[i].rva + 8 + (intptr_t)disp != game + kWorldDropBounds[i].constant)
-            return "the drop bounds are not the reviewed ones (an extra large map needs them)";
-    }
-    for (int i = 0; i < WORLD_IMMEDIATES; i++)
-    {
-        uint32_t value;
-        if (SafeRead(game + kWorldImmediates[i].rva + kWorldImmediates[i].at, &value, 4) || value != kWorldImmediates[i].value)
-            return "a world size the generator holds is not the reviewed one (an extra large map needs it)";
-    }
-    return NULL;
+    return co_pages_check(game); /* the world's readers, bounds and immediates: whole instructions */
 }
 
 /* The convoy manager ([game+0x3326B70], 2 records of 0x318 at +0xA0) spawns a convoy's escort squads in 0x868840: a
@@ -6228,15 +6215,17 @@ static const char* InstallWorld(DifficultyInstall* d)
     if (block == NULL) return "no memory within 2 GB of game.dll for the extra large world";
     g_world.game = game;
     g_world.values = (WorldValues*)(block + 0x1000);
-    WorldValues vanilla = {1024.0f, 2048.0f, 1.0f / 2048.0f, 2000.0f, -2000.0f, 0.0f, 2.3283064365386963e-10f, -1024.0f, 999.0f, -999.0f, -2048.0f, 4096.0f, 512.0f, 4096.0f, -4096.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1, 1900.0f, -1900.0f};
-    *g_world.values = vanilla;
+    g_world.liveValues = (CoLivePage*)(block + 0x1800);
+    /* the game's values until the readers are pointed (co_pages_install, below): the stubs made here read them too */
+    co_page_gen_values(g_world.values, 1.0f); g_world.values->size = 0.0f; g_world.values->capMul = 1;
+    co_page_live_values(g_world.liveValues, 1.0f);
     void* level = (void*)WorldLevel;
     int32_t rel;
     memcpy(block, kWorldStub, sizeof kWorldStub);
-    memcpy(block + 59, &level, 8);
-    rel = (int32_t)((uint8_t*)&g_world.values->size - (block + 130)); memcpy(block + 125, &rel, 4);
-    rel = (int32_t)((uint8_t*)&g_world.values->size - (block + 140)); memcpy(block + 136, &rel, 4);
-    rel = (int32_t)(game + DIF_WORLD_SIZE_BACK - (uintptr_t)(block + 154)); memcpy(block + 150, &rel, 4);
+    memcpy(block + 62, &level, 8);
+    rel = (int32_t)((uint8_t*)&g_world.values->size - (block + 133)); memcpy(block + 128, &rel, 4);
+    rel = (int32_t)((uint8_t*)&g_world.values->size - (block + 143)); memcpy(block + 139, &rel, 4);
+    rel = (int32_t)(game + DIF_WORLD_SIZE_BACK - (uintptr_t)(block + 157)); memcpy(block + 153, &rel, 4);
     uint8_t* skip = block + 0x280;
     float keep = 0.25f * (4.0f / g_difficulty.mapScale) * (4.0f / g_difficulty.mapScale);
     /* The whole share where they are placed (every way the jobs make instances), and sqrt(keep) earlier, where the jobs
@@ -6293,56 +6282,8 @@ static const char* InstallWorld(DifficultyInstall* d)
     if (flatBand) { const char* why = FlatBandSite(game, block + 0x5C0); if (why != NULL) return why; }
     if (caps) { const char* why = CapSites(game, block + 0x600); if (why != NULL) return why; }
     if (draws) { const char* why = OptionalDrawSite(game, block + 0x660); if (why != NULL) return why; }
-    const float* fields[5] = {&g_world.values->half, &g_world.values->full, &g_world.values->inverse, &g_world.values->negHalf, &g_world.values->negFull};
-    for (size_t i = 0; i < sizeof kWorldSites / sizeof kWorldSites[0]; i++)
-    {
-        const WorldSite* s = &kWorldSites[i];
-        uintptr_t end = game + s->rva + s->length;
-        rel = (int32_t)((intptr_t)(uintptr_t)fields[s->which] - (intptr_t)end);
-        if (ApiWrite(end - 4, &rel, 4)) return "a reader of the world's size could not be pointed at the larger world";
-    }
-    rel = (int32_t)((intptr_t)(uintptr_t)&g_world.values->clearing - (intptr_t)(game + DIF_CLEARING_RANDOM + 8));
-    if (ApiWrite(game + DIF_CLEARING_RANDOM + 4, &rel, 4)) return "the clearing points could not follow the larger world";
-    const float* gate[2] = {&g_world.values->gateHigh, &g_world.values->gateLow};
-    for (int i = 0; i < 2; i++)
-    {
-        rel = (int32_t)((intptr_t)(uintptr_t)gate[i] - (intptr_t)(game + kWorldGate[i].rva + 8));
-        if (ApiWrite(game + kWorldGate[i].rva + 4, &rel, 4)) return "the director's spawn bounds could not follow the larger world";
-    }
-    for (int i = 0; i < 4; i++)
-    {
-        const float* bound = kWorldDropBounds[i].high ? &g_world.values->dropHigh : &g_world.values->dropLow;
-        rel = (int32_t)((intptr_t)(uintptr_t)bound - (intptr_t)(game + kWorldDropBounds[i].rva + 8));
-        if (ApiWrite(game + kWorldDropBounds[i].rva + 4, &rel, 4)) return "the drop bounds could not follow the larger world";
-    }
-    if (ApiCodeMatches(game + 0x6AA0CAu, "F3 44 0F 10 35 31 DD D1 01"))
-    {
-        rel = (int32_t)((intptr_t)(uintptr_t)&g_world.values->maskSpan - (intptr_t)(game + 0x6AA0CAu + 9));
-        if (ApiWrite(game + 0x6AA0CAu + 5, &rel, 4)) return "a stratagem's payload clearance could not follow the larger world";
-    }
-    else Note("difficulty: a stratagem's payload clearance is not the reviewed one: vehicles on the larger world keep a vanilla clearance");
-    if (ApiCodeMatches(game + 0xF5CEE0u, "F3 44 0F 10 05 9F AC 46 01"))
-    {
-        rel = (int32_t)((intptr_t)(uintptr_t)&g_world.values->quarter - (intptr_t)(game + 0xF5CEE0u + 9));
-        if (ApiWrite(game + 0xF5CEE0u + 5, &rel, 4)) return "the earthquakes' bounds could not follow the larger world";
-    }
-    else Note("difficulty: the earthquakes' bounds are not the reviewed ones: their sources stay near the world's centre");
-    if (ApiCodeMatches(game + 0x7ED57Bu, "F3 0F 10 0D 81 A8 BD 01") && ApiCodeMatches(game + 0x7ED58Cu, "F3 0F 10 05 48 AE BD 01"))
-    {
-        rel = (int32_t)((intptr_t)(uintptr_t)&g_world.values->goalHigh - (intptr_t)(game + 0x7ED57Bu + 8));
-        if (ApiWrite(game + 0x7ED57Bu + 4, &rel, 4)) return "the enemies' movement goals could not follow the larger world";
-        rel = (int32_t)((intptr_t)(uintptr_t)&g_world.values->goalLow - (intptr_t)(game + 0x7ED58Cu + 8));
-        if (ApiWrite(game + 0x7ED58Cu + 4, &rel, 4)) return "the enemies' movement goals could not follow the larger world";
-    }
-    else Note("difficulty: the enemies' movement goal bounds are not the reviewed ones: enemies more than 4 km out keep still");
-    if (ApiCodeMatches(game + 0x5A01AFu, "F3 0F 10 05 11 7C E2 01") && ApiCodeMatches(game + 0x5A0199u, "F3 0F 10 0D 27 82 E2 01"))
-    {
-        rel = (int32_t)((intptr_t)(uintptr_t)&g_world.values->motionHigh - (intptr_t)(game + 0x5A01AFu + 8));
-        if (ApiWrite(game + 0x5A01AFu + 4, &rel, 4)) return "the units' motion bounds could not follow the larger world";
-        rel = (int32_t)((intptr_t)(uintptr_t)&g_world.values->motionLow - (intptr_t)(game + 0x5A0199u + 8));
-        if (ApiWrite(game + 0x5A0199u + 4, &rel, 4)) return "the units' motion bounds could not follow the larger world";
-    }
-    else Note("difficulty: the units' motion bounds are not the reviewed ones: units more than 1900 m out on any axis are removed");
+    /* every reader of the world's size and of a bound that follows it, each at its page; all of them or none */
+    { const char* why = co_pages_install(game, g_world.values, g_world.liveValues); if (why != NULL) return why; }
     InstallBeaconDepth(game);
     uint8_t jump[9] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90};
     rel = DifficultyJumpRel(game + DIF_INDEX_FULL, (uintptr_t)full); memcpy(jump + 1, &rel, 4);

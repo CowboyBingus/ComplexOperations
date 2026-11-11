@@ -518,6 +518,7 @@ static struct
     uint32_t building, undrawn; /* points refused: in the cell being built; the ground hit not the drawn ground (30 s) */
     int popMade, popPass, popTries, popTicks; float popNearest; double popMs; /* the populate, resumed each tick (LW_POP_MS) */
 } g_lwWorld;
+static LONG g_lwMission; /* counts the missions: the next one's level can get the last one's address, and is not it */
 
 static uint32_t LwAiCount(void) { uintptr_t c; return EvpPtr(g_lw.game + 0x3326D18u, &c) ? EvpU32(c + 0x1C, 0) : 0; }
 static float LwDist2(const float* a, float bx, float by) { float dx = a[0] - bx, dy = a[1] - by; return dx * dx + dy * dy; }
@@ -1350,9 +1351,9 @@ static int LwAboutToBeSeen(LwSquad* q)
  * for 20 s (cells get built as players move). */
 static int LwNodeHasFace(int node)
 {
-    static uint16_t nodeAt[LW_NODES_MAX]; static uint8_t nodeFace[LW_NODES_MAX]; static uintptr_t level;
+    static uint16_t nodeAt[LW_NODES_MAX]; static uint8_t nodeFace[LW_NODES_MAX]; static LONG level;
     typedef int (*SnapFn)(uint32_t nav, float* p, float radius, float* out, float* normal, uint32_t layer);
-    if (level != g_lwWorld.lg) { memset(nodeAt, 0, sizeof nodeAt); level = g_lwWorld.lg; }
+    if (level != g_lwMission) { memset(nodeAt, 0, sizeof nodeAt); level = g_lwMission; }
     if (node < 0 || node >= g_lwNodeCount || node >= LW_NODES_MAX) return 0;
     uint16_t now = (uint16_t)(GetTickCount64() / 20000u | 1u);
     if (nodeAt[node] == now) return nodeFace[node];
@@ -2465,6 +2466,7 @@ static void LwSquadsTick(void)
         LwSightRelease();
         memset(&g_lwWorld, 0, sizeof g_lwWorld);
         g_lwWorld.dir = dir; g_lwWorld.lg = lg; g_lwWorld.seed = seed;
+        g_lwMission++;
         g_lwRandom ^= seed | 1u;
         g_lwNodeCount = 0;
         g_lwWhy[0] = 0;
@@ -2776,9 +2778,9 @@ static void LwGarrisonsTick(void)
     uintptr_t gf, synced, runtime, lists, descriptors, points;
     if (!EvpPtr(g_lw.game + 0x33265C0u, &gf) || !EvpPtr(gf + 0x50, &synced) || !EvpPtr(gf + 0x40, &runtime) || !EvpPtr(gf + 0x48, &lists) ||
         !EvpPtr(gf + 0x38, &descriptors) || !EvpPtr(g_lw.game + 0x346D5C0u, &points)) return;
-    static uintptr_t level; /* the squads' level too: a new mission's GuardForce can reuse the old address (0 = not placed yet, no reset) */
-    int newLevel = g_lwWorld.lg && level && g_lwWorld.lg != level;
-    if (g_lwWorld.lg) level = g_lwWorld.lg;
+    static LONG level; /* the squads' mission too: a new mission's GuardForce can reuse the old address (0 = not placed yet, no reset) */
+    int newLevel = g_lwWorld.lg && level && g_lwMission != level;
+    if (g_lwWorld.lg) level = g_lwMission;
     if (gf != g_lwGarrisonOwner || newLevel) { g_lwGarrisonOwner = gf; g_lwGarrisonCount = 0; }
     uint32_t owned = EvpU32(gf + 0x10, 0), marked = 0;
     if (owned > LW_GARRISONS_MAX) owned = LW_GARRISONS_MAX;

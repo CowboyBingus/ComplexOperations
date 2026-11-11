@@ -41,6 +41,10 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
 |---|---|
 | `difficulty_world_terrain.c` | The stamp runners leave one worker of the frame's queue free (`StampRunnerCap`). |
 | `difficulty_world.c`, `_arcs.c`, `_macro.c`, `_terrain.c`, `difficulty_stream_window.c` | The generation block's offsets and counts are HellForge's (`../co_xl_standin.h` over `co_gen_at`, `co_gen_places`): no literal offset of a moved array, tables sized `CO_LOCATIONS_MAX`, the objective list bounded by its reported places. |
+| `difficulty_world.c` | The world's readers are pointed by `../co_pages.c` at two pages (`WorldValues` is its generation page). The level-init stub passes the preview's record; `WorldLevel` changes play's page for a mission only. |
+| `difficulty_stream.c`, `difficulty_world_move.c`, `_destroy.c`, `_terrain.c`, `difficulty_net_patience.c`, `living_world_defer.c` | Play code asks the mission in play (`g_world.live`, `g_worldLevelLive`, `liveLevels`), not the level set up last. |
+| `difficulty_world.c`, `difficulty_world_towns.c` | A level init drops what the last generation left: record addresses, open nature windows, the city shift, an armed towns run, the HUD order, the height copy's level. |
+| `living_world.c`, `living_world_intent.c` | The per-mission resets count missions (`g_lwMission`) instead of comparing level addresses. |
 
 What the build does instead of an edit:
 

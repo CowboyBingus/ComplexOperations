@@ -121,7 +121,7 @@ static int LwDeferHostHere(void)
 
 static int LwDeferWanted(int site, uintptr_t state, uint64_t resource, const uint8_t* params, float* at)
 {
-    if (!LwDeferListed(resource) || !LwDeferHostHere() || !(g_world.current > 2.0f) || LwDensityOn() != 1 || !LwDeferPassStart(site, state)) return 0;
+    if (!LwDeferListed(resource) || !LwDeferHostHere() || !(g_world.live > 2.0f) || LwDensityOn() != 1 || !LwDeferPassStart(site, state)) return 0;
     if (g_lwDefer.list == NULL) g_lwDefer.list = VirtualAlloc(NULL, sizeof(LwDeferred) * LW_DEFER_MAX, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (g_lwDefer.list == NULL || g_lwDefer.count >= LW_DEFER_MAX) return 0;
     memcpy(at, params + 0x38, 8);

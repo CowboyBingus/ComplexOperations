@@ -5832,7 +5832,7 @@ static uintptr_t g_sceneSwapExe;
 static volatile LONG64 g_sceneSwapsLocked;
 static uint64_t SceneSwapDetour(uint64_t scene)
 {
-    if (!(g_world.current > 1.0f) || g_nearTerrainLock[0] == NULL || g_nearTerrainLock[1] == NULL) return g_sceneSwapOriginal(scene);
+    if (!(g_world.live > 1.0f) || g_nearTerrainLock[0] == NULL || g_nearTerrainLock[1] == NULL) return g_sceneSwapOriginal(scene);
     uint64_t lock = 0;
     for (uintptr_t w = 0; w < 4 && lock == 0; w++)
         if (*(volatile uint64_t*)(g_sceneSwapExe + 0x190D4A0u + w * 0x80u) == scene) lock = *(volatile uint64_t*)(g_sceneSwapExe + 0x27C6350u + w * 8u);
@@ -6237,7 +6237,7 @@ static int NearShownLive(void)
     uintptr_t gameObj = 0, gen = 0, h = 0, cow = 0, nodes = 0; uint32_t state = 0, count = 0; uint8_t probe[24];
     if (g_nearShown.level != g_world.levels || g_nearShown.nodes == 0 || g_world.game == 0) return 0;
     if (SafeRead(g_world.game + 0x3326340u, &gameObj, 8) || gameObj == 0 || SafeRead(gameObj + 0xAC21Cu, &state, 4) || state != 4) return 0;
-    if (SafeRead(g_worldLevel + 0x2C8, &gen, 8) || gen == 0 || SafeRead(gen + 0x8758A0u, &h, 8) || h == 0 || SafeRead(h + 0x40, &cow, 8) || cow == 0 ||
+    if (SafeRead(g_worldLevelLive + 0x2C8, &gen, 8) || gen == 0 || SafeRead(gen + 0x8758A0u, &h, 8) || h == 0 || SafeRead(h + 0x40, &cow, 8) || cow == 0 ||
         SafeRead(cow, &count, 4) || SafeRead(cow + 8, &nodes, 8)) return 0;
     if (nodes != g_nearShown.nodes || count != g_nearShown.count) return 0;
     return !SafeRead(nodes, probe, sizeof probe) && !SafeRead(nodes + (uint64_t)(count - 1) * 24, probe, sizeof probe);

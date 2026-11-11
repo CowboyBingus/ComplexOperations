@@ -61,7 +61,7 @@ static void NetPatienceTick(void)
     if (SafeRead(exe + PAT_MANAGER, &manager, 8) || manager == 0 || SafeRead(manager + 0x98, &transport, 8) || transport == 0 ||
         SafeRead(transport, &vt, 8) || vt != exe + PAT_TRANSPORT_VT)
         return;
-    int raise = g_world.current > 1.0f;
+    int raise = g_world.live > 1.0f;
     if (!raise && !g_patience.raised) return;
     float before = *(const volatile float*)(transport + PAT_DEFAULT);
     uint32_t changed = PatienceSet(transport, raise);
