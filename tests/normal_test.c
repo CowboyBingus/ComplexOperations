@@ -1,6 +1,7 @@
 /* A normal level 11 mission stays the game's: which level is complex, the navigation tiles and limits each kind gets,
  * and the HUD stubs, whose normal path must be the bytes the game holds at each site and end where the game goes on. */
 #include <stdio.h>
+#include <math.h>
 #include <string.h>
 
 #include "harness/fake_host.h"
@@ -24,8 +25,14 @@ int main(void)
     g_coApi = fake_host_reset(CO_GAME_BUILD);
     g_coMod = (HfMod*)&g_fake;
     const float hellforge = 1022.0f / 1024.0f;
-    CHECK(co_level_complex(CO_DISK_KEY) && !co_level_complex(hellforge) && !co_level_complex(0.0f) && !co_level_complex(1.0f));
-    CHECK(!co_level_complex(0.98549998f - 0.0000001f) && !co_level_complex(0.9856f));
+    const float key = co_disk_key();
+    float radii[5];
+    co_complex_radii(radii);
+    /* HellForge's rule at map scale 20 on 16384 m: border 7956.4, disk 8073.4 of 8192 */
+    CHECK(radii[1] == key && radii[1] == 8073.4f / 8192.0f && radii[0] == 8013.4f / 8192.0f && radii[4] == 8074.4f);
+    CHECK(radii[2] == 8192.0f - 8073.4f - 1.0f && radii[3] == 8192.0f + 8073.4f + 1.0f && key > 0.9855f && key < 0.9856f);
+    CHECK(co_level_complex(key) && !co_level_complex(hellforge) && !co_level_complex(0.0f) && !co_level_complex(1.0f));
+    CHECK(!co_level_complex(0.9855f) && !co_level_complex(nextafterf(key, 1.0f)) && !co_level_complex(nextafterf(key, 0.0f)));
 
     g_case = "the navigation tiles";
     CoNavPlan p;
@@ -35,7 +42,7 @@ int main(void)
     CHECK(p.grid == 8 && p.low == -511.75f && p.high == 512.25f && p.tile == 128.0f && (p.high - p.low) / (float)p.grid == p.tile);
     co_nav_plan(0.0f, 0.0f, &p);         /* the ship */
     CHECK(p.grid == 8 && p.tile == 128.0f);
-    co_nav_plan(CO_DISK_KEY, 8074.4f, &p);
+    co_nav_plan(key, 8074.4f, &p);
     CHECK(p.grid == 32 && p.low == -8190.0f && p.high == 8194.0f && p.tile == 512.0f && (p.high - p.low) / (float)p.grid == p.tile);
     co_nav_plan(hellforge, 8074.4f, &p); /* the radius alone makes no level complex */
     CHECK(p.grid == 8 && p.tile == 256.0f);
@@ -91,6 +98,61 @@ int main(void)
     CHECK(memcmp(s + 15, kCoHudFlagBytes, sizeof kCoHudFlagBytes) == 0);
     CHECK(s[9] == 0x08 && memcmp(s + 10, kCoHudFlagBytes + 1, 3) == 0);
     CHECK(s[22] == 0xE9 && Leads(s, CODE + 0xC0, 23) == CO_HUD_FLAG_BACK);
+
+    /* The radii step: HellForge's stub as its source builds it for map scale 2, reached from the site's jump. */
+    g_case = "the radii step";
+    static const uint8_t stock[116] = {
+        0x4C, 0x89, 0x2D, 0x11, 0x22, 0x33, 0x00, 0x49, 0x89, 0x95, 0xE0, 0x2D, 0x00, 0x00, 0x41, 0x80, 0xBD, 0xF9, 0x00, 0x00, 0x00, 11, 0x75, 0x57,
+        0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+        0x41, 0xC7, 0x85, 0x78, 0x2D, 0x00, 0x00, 0, 0, 0, 0, 0x41, 0xC7, 0x85, 0x7C, 0x2D, 0x00, 0x00, 0, 0, 0, 0,
+        0x41, 0xC7, 0x85, 0x84, 0x2D, 0x00, 0x00, 0, 0, 0, 0, 0x41, 0xC7, 0x85, 0x88, 0x2D, 0x00, 0x00, 0, 0, 0, 0,
+        0x41, 0xC7, 0x85, 0x8C, 0x2D, 0x00, 0x00, 0, 0, 0, 0,
+        0x31, 0xC0, 0x49, 0x89, 0x85, 0x94, 0x2D, 0x00, 0x00, 0x48, 0xB8, 0x00, 0x00, 0x80, 0x3F, 0x00, 0x00, 0x80, 0x3F,
+        0x49, 0x89, 0x85, 0x9C, 0x2D, 0x00, 0x00, 0xE9, 0, 0, 0, 0};
+    const uint32_t stockAt = 0x3100C40u;
+    const float stockRadii[5] = {1009.24f / 1024.0f, 1022.0f / 1024.0f, 1.0f, 2047.0f, 1023.0f};
+    uint8_t* st = g_fake.image + stockAt;
+    CHECK(co_radii_check(game) != NULL);
+    memcpy(g_fake.image + CO_RADII_BEHIND, kCoRadiiBehind, sizeof kCoRadiiBehind);
+    CHECK(co_radii_check(game) != NULL); /* the game's own instruction at the site: HellForge's step is not there */
+    const uint8_t jump[7] = {0xE9, 0, 0, 0, 0, 0x90, 0x90};
+    const int32_t to = (int32_t)(stockAt - (CO_RADII_SITE + 5u)), back = (int32_t)(CO_RADII_SITE + 7u - (stockAt + 116u));
+    memcpy(g_fake.image + CO_RADII_SITE, jump, 7); memcpy(g_fake.image + CO_RADII_SITE + 1, &to, 4);
+    CHECK(co_radii_check(game) != NULL); /* a jump to nothing */
+    memcpy(st, stock, sizeof stock);
+    for (int i = 0; i < 5; i++) memcpy(st + 37 + 11 * i, &stockRadii[i], 4);
+    memcpy(st + 112, &back, 4);
+    CHECK(co_radii_check(game) == NULL && g_fake.writes == 0);
+    const float other = 800.0f / 1024.0f; /* another map scale's disk */
+    memcpy(st + 48, &other, 4); CHECK(co_radii_check(game) != NULL); memcpy(st + 48, &stockRadii[1], 4);
+    st[21] = 10; CHECK(co_radii_check(game) != NULL); st[21] = 11;
+    st[90] ^= 1; CHECK(co_radii_check(game) != NULL); st[90] ^= 1;
+    g_fake.image[CO_RADII_BEHIND + 4] ^= 1; CHECK(co_radii_check(game) != NULL); g_fake.image[CO_RADII_BEHIND + 4] ^= 1;
+    CHECK(co_radii_check(game) == NULL && CO_RADII_SITE + 7u == CO_RADII_BEHIND && CO_RADII_BEHIND + sizeof kCoRadiiBehind == CO_RADII_BACK);
+    memset(s, 0xCC, sizeof s);
+    CHECK(co_radii_stub(s, game + CODE + 0x100, game, game + FLAG + 1) == CO_RADII_STUB && s[CO_RADII_STUB] == 0xCC);
+    CHECK(s[0] == 0x80 && s[1] == 0x3D && Leads(s, CODE + 0x100, 2) + 1u == FLAG + 1u && s[7] == 0x74 && 9u + s[8] == 64u);
+    for (int i = 0; i < 5; i++)
+    {
+        /* each store is HellForge's own instruction for the field, with the complex level's value */
+        CHECK(memcmp(s + 9 + 11 * i, stock + 30 + 11 * i, 7) == 0 && memcmp(s + 16 + 11 * i, &radii[i], 4) == 0);
+    }
+    CHECK(memcmp(s + 64, kCoRadiiBehind, sizeof kCoRadiiBehind) == 0 && s[74] == 0xE9 && Leads(s, CODE + 0x100, 75) == CO_RADII_BACK);
+
+    /* One generation's decision: taken at its first level init, kept through its retries. */
+    g_case = "a generation's decision";
+    CoGeneration g = {0};
+    CHECK(co_generation_decision(&g, 0x1000, 0x51, 0, 11, 1, 1, CO_HOST_ROW_NONE) == CO_MISSION_COMPLEX);
+    CHECK(co_generation_decision(&g, 0x1000, 0x51, 1, 11, 1, 0, CO_HOST_ROW_NONE) == CO_MISSION_COMPLEX); /* a retry keeps it */
+    CHECK(co_generation_decision(&g, 0x1000, 0x50, 1, 11, 1, 1, CO_HOST_ROW_NONE) == CO_MISSION_COMPLEX);
+    CHECK(co_generation_decision(&g, 0x1000, 0x50, 0, 11, 1, 1, CO_HOST_ROW_NONE) == CO_MISSION_NORMAL);  /* a new generation */
+    CHECK(co_generation_decision(&g, 0x1000, 0x51, 1, 11, 1, 1, CO_HOST_ROW_NONE) == CO_MISSION_NORMAL);
+    CHECK(co_generation_decision(&g, 0x2000, 0x51, 1, 11, 1, 1, CO_HOST_ROW_NONE) == CO_MISSION_COMPLEX); /* another level: nothing held for it */
+    CHECK(co_generation_decision(&g, 0x2000, 0x51, 0, 10, 1, 1, CO_HOST_ROW_NONE) == CO_MISSION_NORMAL);  /* other difficulties */
+    CHECK(co_generation_decision(&g, 0x2000, 0x51, 1, 11, 1, 0, CO_HOST_ROW_NONE) == CO_MISSION_NORMAL);  /* and nothing held after one */
+    CHECK(co_generation_decision(&g, 0x3000, 0x51, 0, 11, 0, 1, CO_HOST_ROW_ON) == CO_MISSION_COMPLEX);
+    CHECK(co_generation_decision(&g, 0x3000, 0x51, 0, 11, 0, 1, CO_HOST_ROW_OFF) == CO_MISSION_NORMAL);
+    CHECK(co_generation_decision(&g, 0x3000, 0x51, 0, 11, 0, 1, CO_HOST_ROW_NONE) == CO_MISSION_LEAVE);
 
     if (g_failed) { printf("normal: %d checks failed\n", g_failed); return 1; }
     printf("normal: all cases passed\n");

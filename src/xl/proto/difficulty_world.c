@@ -826,6 +826,8 @@ static uint32_t g_hudRowKey[16], g_hudRows;
 typedef void (*HudRowAddFn)(uint64_t widget, uint32_t id);
 typedef void (*HudRowStateFn)(uint64_t row, uint32_t state);
 static HudRowStateFn g_hudRowState;
+static int g_radiiJump; static uint8_t g_radiiJumpBytes[10]; /* written once the block can run */
+static volatile uint8_t* g_genComplex; /* 1 while the level being set up is complex: the radii stub tests it */
 static int HudGroupedNow(void) { return g_hudLive != NULL && *g_hudLive != 0; }
 static volatile LONG g_hudRowsCut;
 static int HudInstances(uint64_t* inst, uint64_t* ids, uint32_t* n)
@@ -5286,8 +5288,15 @@ static void WorldLevel(uintptr_t level, uintptr_t preview)
 {
     NearOneMipDrop(); /* the previous extra large level's one-mip heightmap is not this level's */
     uint8_t difficulty = 0;
+    uint32_t seed = 0, retry = 0;
     float scale = 1.0f;
-    if (g_world.scale > 1 && !SafeRead(level + 0xF9, &difficulty, 1) && difficulty == DIF_VANILLA + 1) scale = (float)g_world.scale;
+    /* complex or not is this generation's: the host's decision in the seed the generation began with ([lg+0x8]; a
+     * retry, [lg+0xF950] == 1, has another seed in the level and keeps the answer) */
+    static CoGeneration generation;
+    int complex = g_world.scale > 1 && !SafeRead(level + 0xF9, &difficulty, 1) && !SafeRead(level + 0x8, &seed, 4) && !SafeRead(level + 0xF950, &retry, 4) &&
+        co_generation_decision(&generation, level, seed, retry == 1, difficulty, co_peers_is_host(), co_complex_on(), co_peers_host_row()) == CO_MISSION_COMPLEX;
+    if (complex) scale = (float)g_world.scale;
+    if (g_genComplex != NULL) *g_genComplex = (uint8_t)complex; /* the radii stub, later in this level init */
     WorldLevelForget();
     g_world.values->size = scale > 1.0f ? 2048.0f * scale : 0.0f;
     WorldWrite(scale, preview == 0);
@@ -6277,12 +6286,23 @@ static const char* InstallWorld(DifficultyInstall* d)
     rel = (int32_t)((block + 0x1200) - (full + 29)); memcpy(full + 25, &rel, 4);
     int padBand = PadBandStubs(game, block + 0x500), flatBand = FlatBandStub(game, block + 0x5C0), caps = CapStubs(game, block + 0x600), draws = OptionalDrawStub(game, block + 0x660);
     const char* objCapWhy = ObjCapStub(game, block + 0x6C0);
+    g_genComplex = block + 0x1141;
+    {
+        /* the complex level's radii, behind HellForge's own step; refused before anything of the world is written */
+        const char* why = co_radii_check(game);
+        uint8_t jump[10] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90, 0x90};
+        if (why != NULL) return why;
+        co_radii_stub(block + 0x800, (uintptr_t)(block + 0x800), game, (uintptr_t)g_genComplex);
+        rel = DifficultyJumpRel(game + CO_RADII_BEHIND, (uintptr_t)(block + 0x800)); memcpy(jump + 1, &rel, 4);
+        g_radiiJump = 1; memcpy(g_radiiJumpBytes, jump, sizeof jump);
+    }
     g_hudLive = block + 0x1140; /* in the values page: written per level, and 0 until a complex mission is set up */
     int hud = g_difficulty.missions > 1 && HudGroupStub(game, block + 0x700);
     DWORD protect;
     VirtualProtect(block, 0x1000, PAGE_EXECUTE_READ, &protect);
     if (objCapWhy == NULL) objCapWhy = ObjCapSite(game, block + 0x6C0);
     if (objCapWhy != NULL) Note("difficulty: %s: an objective keeps one mission's most copies", objCapWhy);
+    if (g_radiiJump && ApiWrite(game + CO_RADII_BEHIND, g_radiiJumpBytes, sizeof g_radiiJumpBytes)) return "the complex level's radii could not be put in";
     if (hud) HudGroupSite(game, block + 0x700);
     if (padBand) { const char* why = PadBandSites(game, block + 0x500); if (why != NULL) return why; }
     if (flatBand) { const char* why = FlatBandSite(game, block + 0x5C0); if (why != NULL) return why; }

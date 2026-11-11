@@ -36,6 +36,15 @@ int co_complex_decision(int is_host, int own_on, int host_row, uint32_t mission_
  * complex operation goes before a mission can start. */
 int co_complex_stays(int own_on, int host_row) { return own_on || host_row != CO_HOST_ROW_ON; }
 
+int co_generation_decision(CoGeneration* g, uintptr_t level, uint32_t first_seed, int retry, uint32_t difficulty, int is_host, int own_on, int host_row)
+{
+    if (difficulty != CO_COMPLEX_LEVEL) { g->held = 0; return CO_MISSION_NORMAL; }
+    if (retry && g->held && g->level == level) return g->decision; /* the session may have changed since; the generation has not */
+    g->level = level; g->seed = first_seed; g->held = 1;
+    g->decision = co_complex_decision(is_host, own_on, host_row, first_seed);
+    return g->decision;
+}
+
 int co_complex_rolls(int is_host, int own_on, int host_row) { return is_host ? own_on != 0 : host_row == CO_HOST_ROW_ON; }
 
 /* The seed a mission entry keeps: other levels' as the game made it; level 11's with the decision. Only a host whose

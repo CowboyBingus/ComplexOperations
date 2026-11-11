@@ -112,6 +112,10 @@ enum { CO_MISSION_NORMAL, CO_MISSION_COMPLEX, CO_MISSION_LEAVE };
 const char* co_complex_refusal(const CoComplexNeeds* needs);
 int co_complex_decision(int is_host, int own_on, int host_row, uint32_t mission_seed);
 int co_complex_stays(int own_on, int host_row);
+/* One generation's decision. A retry of the same generation (level init again with the retry flag, another seed in
+ * the level) keeps the first init's answer; `first_seed` is the seed of the descriptor the generation began with. */
+typedef struct CoGeneration { uintptr_t level; uint32_t seed; int decision, held; } CoGeneration;
+int co_generation_decision(CoGeneration* g, uintptr_t level, uint32_t first_seed, int retry, uint32_t difficulty, int is_host, int own_on, int host_row);
 uint32_t co_complex_entry_seed(uint32_t mission_seed, uint32_t difficulty, uint32_t operation_seed, uint32_t planet, int rolls);
 
 /* Room in the map generator (co_capacity.c). `init` asks HellForge for it, from hellforge_mod_init only. `poll` reads

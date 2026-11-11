@@ -6,10 +6,26 @@
 
 #include "co.h"
 
-/* The level's disk as a fraction of half the world ([lg+0x2D7C]): a complex level is written with this one. HellForge's
- * level 11 has 1022 / 1024, and its radius field ([lg+0x2D8C], 1023) passes every "larger than" test. */
-#define CO_DISK_KEY 0.9855f
+/* A complex level's radii, by HellForge's own rule for a larger map (border 389.12 x map scale + 174, fade + 57,
+ * disk + 117) on a world of 16384 m: [lg+0x2D78] fade and [lg+0x2D7C] disk as fractions of half the world, +0x2D84 and
+ * +0x2D88 the rectangle, +0x2D8C the disk + 1. The disk fraction is the level's key: HellForge's level 11 has
+ * 1022 / 1024 there, and its radius field (1023) passes every "larger than" test, so the key is what tells them apart. */
+#define CO_COMPLEX_MAP_SCALE 20.0f
+void co_complex_radii(float radii[5]);
+float co_disk_key(void);
 int co_level_complex(float disk);
+
+/* The radii of a complex level. HellForge's step at 0xF71CD8 writes its own for every level 11; the mod's stub runs
+ * right behind it (0xF71CDF) and writes these over them while `flag` is 1, so HellForge's step is not touched and its
+ * later steps, which test the disk, leave a complex level alone. `check` is NULL when the game's bytes behind and
+ * HellForge's step (its form, with disk 1022 / 1024) are the ones this was made for. */
+#define CO_RADII_SITE 0xF71CD8u
+#define CO_RADII_BEHIND 0xF71CDFu /* xor r10d, r10d; mov [r13+0x218], rdx: 10 bytes */
+#define CO_RADII_BACK 0xF71CE9u
+#define CO_RADII_STUB 79u
+extern const uint8_t kCoRadiiBehind[10];
+const char* co_radii_check(uintptr_t game);
+size_t co_radii_stub(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t flag);
 
 /* The navigation grid for a level: HellForge's own tiles (8 x 8; 256 m when the radius field is above 682, else and on
  * the ship 128 m) unless the level is complex (32 x 32 tiles of 512 m over 16384 m). */
