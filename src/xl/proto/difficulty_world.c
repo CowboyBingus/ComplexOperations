@@ -213,6 +213,7 @@ static void WorldWrite(float scale, int mission)
     if (changed & CO_PAGES_LIVE) NetPositionRange(scale);
     g_world.live = co_pages_scale(CO_PAGES_LIVE);
     if (g_hudLive != NULL) *g_hudLive = g_world.live > 1.0f;
+    co_locate_live(g_world.live > 1.0f); /* where a loot container's location is looked up */
     if (changed) InterlockedIncrement(&g_world.switches);
 }
 
@@ -5281,6 +5282,7 @@ static void WorldShip(void)
     if (co_pages_ship() & CO_PAGES_LIVE) { NetPositionRange(1.0f); InterlockedIncrement(&g_world.switches); }
     g_world.live = co_pages_scale(CO_PAGES_LIVE);
     if (g_hudLive != NULL) *g_hudLive = 0;
+    co_locate_live(0);
     g_worldLevelLive = 0; g_world.liveLevels = 0;
 }
 

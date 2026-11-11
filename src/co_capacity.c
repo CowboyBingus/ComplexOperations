@@ -7,6 +7,7 @@
 
 #include "co.h"
 #include "xl/co_chain.h"
+#include "xl/co_locate.h"
 #include "xl/co_nav.h"
 #include "xl/co_normal.h"
 #include "xl/co_pages.h"
@@ -147,7 +148,8 @@ static void Settle(void)
             co_markers_check(g_capacity.game) == NULL &&
             co_clusters_check(g_capacity.game, NULL) == NULL &&
             co_clusters_check(g_capacity.game, NULL) == NULL &&
-            co_city_check(g_capacity.game) == NULL;
+            co_city_check(g_capacity.game) == NULL &&
+            co_locate_check(g_capacity.game) == NULL;
         n->own_sites = (site = OwnSites(g_capacity.game)) == NULL;
         n->commit_free_mb = CommitFree();
         why = co_complex_refusal(n);
@@ -174,6 +176,7 @@ int co_complex_start(void)
         (why = co_status_install(g_capacity.game)) == NULL &&
         (why = co_clusters_install(g_capacity.game)) == NULL &&
         (why = co_clusters_install(g_capacity.game)) == NULL && (why = co_city_install(g_capacity.game)) == NULL &&
+        (why = co_locate_install(g_capacity.game)) == NULL &&
         (why = CoXlInstall(g_capacity.game)) == NULL && (why = co_mark_install(g_capacity.game)) == NULL) why = co_launch_install(g_capacity.game);
     if (why == NULL) return 1;
     g_capacity.on = 0; /* what did go in runs the game's own code on every level: nothing is complex without the mark */

@@ -10,6 +10,7 @@
 #include "xl/co_beside_sites.h"
 #include "xl/co_stamp_sites.h"
 #include "xl/co_weld_sites.h"
+#include "xl/co_locate_sites.h"
 #include "xl/co_cluster_sites.h"
 #include "xl/co_city_sites.h"
 #include "xl/co_status_sites.h"
@@ -68,6 +69,8 @@ void fake_stock_chains(uint8_t* image, float disk)
     /* and its structured step the weld's pool of 576 blocks, in the game's weld */
     for (size_t i = 0; i < sizeof kCoWeldValues / sizeof kCoWeldValues[0]; i++) memcpy(image + kCoWeldValues[i].rva, kCoWeldValues[i].stock, kCoWeldValues[i].length);
     for (int i = 0; i < 3; i++) memcpy(image + kCoWeldFull[i].rva, kCoWeldFull[i].bytes, kCoWeldFull[i].length);
+    /* its block move leaves the loot containers' location lookup the game's */
+    memcpy(image + CO_LOCATE_SITE, kCoLocateGame, sizeof kCoLocateGame);
     /* and its block move the two cluster counts' stubs, 0x40 apart, behind jumps padded to the sites' lengths */
     for (int i = 0; i < 2; i++)
     {
