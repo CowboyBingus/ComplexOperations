@@ -369,6 +369,16 @@ static const uint8_t kPlaceSkipStub[69] = {
     0x48, 0x8B, 0x4F, 0x20,                                           /* 57 mov rcx, [rdi+0x20] */
     0x45, 0x8B, 0xD5,                                                 /* 61 mov r10d, r13d */
     0xE9, 0, 0, 0, 0};                                                /* 64 jmp 0xF35037 (rel32 at 65) */
+/* HellForge's level 11 has its own step at the loop's start (its merge stub: the table's room, then the two
+ * instructions). The form there: the game's, or HellForge's jump to that stub, which the thinning then runs in front of. */
+static int PlaceLoopForm(uintptr_t game, uintptr_t* stub)
+{
+    uintptr_t at = 0;
+    int form = co_beside_form(game + DIF_PLACE_LOOP, kPlaceLoopPin, 10, 7, &at);
+    if (form == CO_BESIDE_STOCK && !co_beside_merge(game, at)) return CO_BESIDE_OTHER;
+    if (stub != NULL) *stub = form == CO_BESIDE_STOCK ? at : 0;
+    return form;
+}
 #define DIF_STAMP_PLACE 6.0f /* the placement's share over the jobs' (InstallWorld) */
 /* GenerateSubregionSpecial (op 0x76, 0xF65DA0) writes each non-empty location cluster's mean xyz to a 16-slot stack
  * array ([rbp+0x110 + 12 k], 0xF66060..0xF6607C; its cookie at [rbp+0x1D0]), k = the non-empty clusters so far
@@ -479,6 +489,14 @@ static const uint8_t kTreeClearStub[40] = {
 #define DIF_RECORDS_FULL 0x13E0360u
 static const uint8_t kRecordsFullPin[10] = {0x45, 0x33, 0xC0, 0x8B, 0xBC, 0x24, 0xC0, 0x00, 0x00, 0x00};
 static const uint8_t kRecordsFullSlot0[3] = {0x4D, 0x8B, 0xC3};
+/* HellForge's level 11 guards the store itself (0x13E036A: a null slot is skipped, the record left out). Its guard
+ * stays what a full table meets, so slot 0 is written only where the store is the game's. */
+static int RecordsStoreForm(uintptr_t game)
+{
+    uintptr_t at = 0;
+    int form = co_beside_form(game + CO_BESIDE_STORE, kCoBesideStorePin, 7, 7, &at);
+    return form == CO_BESIDE_STOCK && !co_beside_store(game, at) ? CO_BESIDE_OTHER : form;
+}
 static LONG g_worldIndexFullSeen;
 
 /* Diagnostic: the location passes (by the dispatcher's names) wrapped while the world is extra large; each notes the
@@ -5401,13 +5419,12 @@ static const char* WorldSitesFailed(uintptr_t game)
     uint8_t make[10];
     if (SafeRead(game + DIF_INSTANCE_MAKE, make, 10) || memcmp(make, kInstanceMakePin, 10) != 0)
         return "the stamp instances' creation is not the reviewed one (an extra large map needs it)";
-    uint8_t place[10];
-    if (SafeRead(game + DIF_PLACE_LOOP, place, 10) || memcmp(place, kPlaceLoopPin, 10) != 0)
+    if (PlaceLoopForm(game, NULL) == CO_BESIDE_OTHER)
         return "the stamp placement is not the reviewed one (an extra large map needs it)";
     if (!ApiCodeMatches(game + DIF_SPECIAL_LOOP, kSpecialLoopPin))
         return "op 0x76's cluster loop is not the reviewed one (an extra large map needs it)";
     uint8_t records[10];
-    if (SafeRead(game + DIF_RECORDS_FULL, records, 10) || memcmp(records, kRecordsFullPin, 10) != 0)
+    if (SafeRead(game + DIF_RECORDS_FULL, records, 10) || memcmp(records, kRecordsFullPin, 10) != 0 || RecordsStoreForm(game) == CO_BESIDE_OTHER)
         return "the world's destruction records are not the reviewed ones (an extra large map needs them)";
     if (SafeRead(game + DIF_INDEX_FULL, pin, 8) || memcmp(pin, kIndexFullPin, 8) != 0)
         return "the map generator's stamp index is not the reviewed one (an extra large map needs it)";
@@ -5497,11 +5514,19 @@ static const MissionList kMissionLists[] = {
 #define MISSION_LISTS (sizeof kMissionLists / sizeof kMissionLists[0])
 #define MISSION_LIST_STUB 0x40u
 static volatile LONG* g_missionListFull; /* per list: units left out */
+/* The mine list is guarded by HellForge's level 11 already, at the same 512 places: its guard stays. */
+static int MissionListStock(uintptr_t game, size_t i)
+{
+    uintptr_t stub = 0;
+    return kMissionLists[i].pin == CO_BESIDE_MINE && co_beside_form(game + CO_BESIDE_MINE, kCoBesideMinePin, 6, 6, &stub) == CO_BESIDE_STOCK &&
+        co_beside_mine(game, stub);
+}
 static const char* InstallMissionListGuards(uintptr_t game)
 {
     for (size_t i = 0; i < MISSION_LISTS; i++)
     {
         uint8_t pin[6];
+        if (MissionListStock(game, i)) continue;
         if (SafeRead(game + kMissionLists[i].pin, pin, 6) || memcmp(pin, kMissionLists[i].bytes, 6) != 0)
             return "the mission's per-name lists are not the reviewed ones; they stay unchecked";
     }
@@ -5540,6 +5565,7 @@ static const char* InstallMissionListGuards(uintptr_t game)
     for (size_t i = 0; i < MISSION_LISTS; i++)
     {
         uint8_t jump[6] = {0xE9, 0, 0, 0, 0, 0x90};
+        if (MissionListStock(game, i)) continue;
         int32_t rel = DifficultyJumpRel(game + kMissionLists[i].pin, (uintptr_t)(block + i * MISSION_LIST_STUB)); memcpy(jump + 1, &rel, 4);
         if (ApiWrite(game + kMissionLists[i].pin, jump, 6)) return "a mission list's guard could not be written";
     }
@@ -6300,7 +6326,11 @@ static const char* InstallWorld(DifficultyInstall* d)
     rel = (int32_t)(game + DIF_INSTANCE_REJECT - (uintptr_t)(make + 52)); memcpy(make + 48, &rel, 4);
     rel = (int32_t)(game + DIF_INSTANCE_MADE - (uintptr_t)(make + 67)); memcpy(make + 63, &rel, 4);
     rel = (int32_t)(game + DIF_PLACE_LOOP_END - (uintptr_t)(skip + 48)); memcpy(skip + 44, &rel, 4);
-    rel = (int32_t)(game + DIF_PLACE_LOOP_BACK - (uintptr_t)(skip + 69)); memcpy(skip + 65, &rel, 4);
+    { /* a stamp that is kept goes on through HellForge's merge stub where its level 11 has one */
+        uintptr_t merge = 0;
+        PlaceLoopForm(game, &merge);
+        co_beside_place_tail(skip + 57, (uintptr_t)(skip + 57), game, merge);
+    }
     uint8_t* walkStub = block + 0x380;
     memcpy(walkStub, kObjectWalkStub, sizeof kObjectWalkStub);
     rel = (int32_t)(game + DIF_OBJECT_WALK_NEXT - (uintptr_t)(walkStub + 10)); memcpy(walkStub + 6, &rel, 4);
@@ -6345,7 +6375,8 @@ static const char* InstallWorld(DifficultyInstall* d)
     uint8_t jump[9] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90};
     rel = DifficultyJumpRel(game + DIF_INDEX_FULL, (uintptr_t)full); memcpy(jump + 1, &rel, 4);
     if (ApiWrite(game + DIF_INDEX_FULL, jump, 5)) return "the stamp index's full case could not be guarded";
-    if (ApiWrite(game + DIF_RECORDS_FULL, kRecordsFullSlot0, 3)) return "the destruction records' full case could not be guarded";
+    if (RecordsStoreForm(game) == CO_BESIDE_GAME && ApiWrite(game + DIF_RECORDS_FULL, kRecordsFullSlot0, 3))
+        return "the destruction records' full case could not be guarded";
     for (int i = 0; i < 3; i++)
         if (ApiWrite(game + kPlaceBuffer[i].rva + kPlaceBuffer[i].at, &kPlaceBuffer[i].value, kPlaceBuffer[i].width))
             return "the stamp instances' buffer could not be enlarged";

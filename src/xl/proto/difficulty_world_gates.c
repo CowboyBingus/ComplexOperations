@@ -304,7 +304,7 @@ static const char* InstallCityGates(uintptr_t game)
     if (GetEnvironmentVariableA("HELLFORGE_XL_CITY_GATES", off, sizeof off) > 0 && !_stricmp(off, "off"))
         return "city gates about each city are off (HELLFORGE_XL_CITY_GATES=off); the cities keep the world-centred gates";
     for (size_t i = 0; i < sizeof kCityGatePins / sizeof kCityGatePins[0]; i++)
-        if (!ApiCodeMatches(game + kCityGatePins[i].rva, kCityGatePins[i].pin))
+        if (!co_beside_matches(game, kCityGatePins[i].rva, kCityGatePins[i].pin)) /* HellForge's border and refusal jumps lie inside */
             return "the city ops' distance gates are not the reviewed ones; the cities keep the world-centred gates";
     for (int i = 0; i < GATE_SITES; i++)
         if (!ApiCodeMatches(game + kCityGateSites[i].site, kCityGateSites[i].original))

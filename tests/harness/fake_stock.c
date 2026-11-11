@@ -7,6 +7,7 @@
 #include "xl/co_nav_sites.h"
 #include "fake_host.h"
 #include "co_early_sites.h"
+#include "xl/co_beside_sites.h"
 
 static void Rel(uint8_t* image, uint32_t at, uint32_t target) { const int32_t rel = (int32_t)(target - (at + 4u)); memcpy(image + at, &rel, 4); }
 
@@ -111,4 +112,44 @@ void fake_stock_early(uint8_t* image)
     memcpy(image + CO_EARLY_CELL_READ + 8u + (uint32_t)rel, &cell, 4);
     memset(image + CO_EARLY_SETUP, 0, 8);
     memcpy(exe + CO_EARLY_TILE_READ, kCoEarlyTileRead, 8);
+}
+
+static uint32_t Jump(uint8_t* image, uint32_t at, uint32_t target) { image[at] = 0xE9; Rel(image, at + 1u, target); return at + 5u; }
+static uint32_t Count(uint8_t* image, uint32_t at, uint32_t counter)
+{
+    image[at] = 0xF0; image[at + 1] = 0xFF; image[at + 2] = 0x05; Rel(image, at + 3u, FAKE_STOCK_BESIDE + 0x100u + 4u * counter);
+    return at + 7u;
+}
+static void Site(uint8_t* image, uint32_t site, uint32_t length, uint32_t stub)
+{
+    memset(image + site, 0x90, length);
+    Jump(image, site, stub);
+}
+
+void fake_stock_beside(uint8_t* image)
+{
+    static const uint8_t loop[10] = {0x48, 0x8B, 0x4F, 0x20, 0x45, 0x8B, 0xD5, 0x41, 0xFF, 0xC5};
+    uint32_t p = FAKE_STOCK_BESIDE;
+    memcpy(image + CO_BESIDE_MERGE, loop, sizeof loop);
+    memcpy(image + p, kCoBesideMergeHead, 17); p += 17;
+    p = Count(image, p, 3);
+    p = Jump(image, p, CO_BESIDE_MERGE_DROP);
+    memcpy(image + p, kCoBesideMergePin, 7); p += 7;
+    Jump(image, p, CO_BESIDE_MERGE + 7u);
+    Site(image, CO_BESIDE_MERGE, 7, FAKE_STOCK_BESIDE);
+
+    p = FAKE_STOCK_BESIDE + 0x40u;
+    memcpy(image + p, kCoBesideMineStub, sizeof kCoBesideMineStub);
+    Rel(image, p + 14u, CO_BESIDE_MINE + 6u);
+    Rel(image, p + 21u, FAKE_STOCK_BESIDE + 0x120u);
+    Rel(image, p + 26u, CO_BESIDE_MINE_DONE);
+    Site(image, CO_BESIDE_MINE, 6, p);
+
+    p = FAKE_STOCK_BESIDE + 0x80u;
+    { static const uint8_t head[5] = {0x4D, 0x85, 0xC0, 0x74, 0x0C}; memcpy(image + p, head, 5); p += 5; }
+    memcpy(image + p, kCoBesideStorePin, 7); p += 7;
+    p = Jump(image, p, CO_BESIDE_STORE + 7u);
+    p = Count(image, p, 4);
+    Jump(image, p, CO_BESIDE_STORE + 7u);
+    Site(image, CO_BESIDE_STORE, 7, FAKE_STOCK_BESIDE + 0x80u);
 }

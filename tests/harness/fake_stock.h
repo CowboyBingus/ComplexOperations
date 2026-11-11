@@ -27,4 +27,9 @@ void fake_stock_nav(uint8_t* image);
  * extents and cell size the game's, the plugin setup not begun; and the engine's tile size read. */
 void fake_stock_early(uint8_t* image);
 
+/* HellForge's jumps and stubs at the stamps' merge, the mine list and the records' store, built as its InstallTowns and
+ * InstallMineLimit build them, over the game's bytes there. Stubs at +0, +0x40, +0x80; their counters at +0x100. */
+#define FAKE_STOCK_BESIDE 0x3114000u
+void fake_stock_beside(uint8_t* image);
+
 #endif

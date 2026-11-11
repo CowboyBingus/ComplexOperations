@@ -19,6 +19,8 @@
 #include "co_chain.h"
 #include "co_rows.h"
 #include "co_nav.h"
+#include "co_beside.h"
+#include "co_beside_sites.h"
 
 /* Seven of the copied files' functions were called from loader code that did not come along (the watch thread, the
  * ship's level change, the density rules of a later branch); they are unused until their callers are written. */
