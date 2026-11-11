@@ -5260,6 +5260,7 @@ static void WorldLevel(uintptr_t level, uintptr_t preview)
     InterlockedIncrement(&g_worldOpRun);
     co_stamps_level(complex); /* the index's slots and cell width, read by its constructor */
     co_weld_level(complex);   /* a weld block's places */
+    co_city_level(complex);   /* the city footprint list's places and op 0xA7's location capacity */
     WorldIndex(level, 2048.0f * scale);
     LONG full = g_worldIndexFull != NULL ? *g_worldIndexFull : 0;
     if (full != g_worldIndexFullSeen)

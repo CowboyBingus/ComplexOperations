@@ -11,6 +11,7 @@
 #include "xl/co_stamp_sites.h"
 #include "xl/co_weld_sites.h"
 #include "xl/co_cluster_sites.h"
+#include "xl/co_city_sites.h"
 #include "xl/co_status_sites.h"
 #include "xl/co_pocket_sites.h"
 #include "xl/co_marker_sites.h"
@@ -77,6 +78,10 @@ void fake_stock_chains(uint8_t* image, float disk)
         memset(image + c->site, 0x90, c->length); image[c->site] = 0xE9;
         Rel(image, c->site + 1u, stub);
     }
+    /* and its map step the city footprint list's 0x2000 places, in the game's city generator */
+    for (int i = 0; i < CO_CITY_SITES; i++) memcpy(image + kCoCitySites[i].rva, kCoCitySites[i].bytes, kCoCitySites[i].length);
+    memcpy(image + kCoCitySites[CO_CITY_OP_LIMIT].back, kCoCityOpBehind, sizeof kCoCityOpBehind);
+    memcpy(image + kCoCitySites[CO_CITY_PLACER].back, kCoCityPlacerBehind, sizeof kCoCityPlacerBehind);
     /* the status volumes' unit registry is the game's: HellForge has no step there */
     for (int i = 0; i < CO_STATUS_SITES; i++) memcpy(image + kCoStatusSites[i].rva, kCoStatusSites[i].pin, kCoStatusSites[i].length);
     /* FixUnreachableAreas is the game's but for the restart step above */
