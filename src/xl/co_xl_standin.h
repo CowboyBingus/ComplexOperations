@@ -9,6 +9,7 @@
 #include "co_mix.h"
 #include "co_nav.h"
 #include "co_text.h"
+#include "co_spawners.h"
 
 /* ---- the level and its settings ------------------------------------------------------------------------------------
  * A complex level's settings, in the names the prototype reads them by. HellForge's level 11 keeps its own row
@@ -91,17 +92,17 @@ static inline int CoObjlistStamps(int32_t* starts, int32_t* counts)
 #define DIF_WELD_COUNT CO_WELD_COUNT
 /* Row type of the block's site tables (proto/important_sites.h, proto/route_sites.h; not compiled: HellForge moves them). */
 typedef struct LocationSite { uint32_t rva; uint8_t at; uint32_t value; } LocationSite;
+/* Spawner positions past a group's 16 places on complex missions (co_spawners.c); NULL before its install. */
+#define g_spawnerPlacesFull (co_spawners_places_full())
 
 /* 1 once the HUD's three grouped stubs are in (proto/difficulty_world.c HudGroupSite): a complex mission's rows are one
  * an objective, so its list may hold every mission's primaries. Until then the objective fill adds none. */
 static int g_hudGrouped;
 
-/* ---- state other install steps left behind -------------------------------------------------------------------------
- * To replace: each with the mod's own step once it has one. As they are, every reader takes its "not installed" path. */
+/* ---- the map's markers ---------------------------------------------------------------------------------------------- */
 /* Not a stand-in: the map's markers stay the game's 16 slots and 10 trackers in the map object (co_markers.h), so no
  * step learns its address. The one reader (the objectives note's "markers last shown") reads nothing while it is 0. */
 static uintptr_t g_markerMap;
-static volatile LONG* g_spawnerPlacesFull;    /* the director's spawner list of 1024: its full counter */
 
 /* ---- the navigation grid ---------------------------------------------------------------------------------------------
  * The mod's own step (co_nav.c): the engine once it is in, and the tile size it wrote for a complex level. A reader

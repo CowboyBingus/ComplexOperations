@@ -5270,7 +5270,7 @@ static void WorldLevel(uintptr_t level, uintptr_t preview)
         g_worldIndexFullSeen = full;
     }
     InterlockedIncrement(&g_world.levels);
-    if (preview == 0) { g_worldLevelLive = level; g_world.liveLevels = g_world.levels; }
+    if (preview == 0) { g_worldLevelLive = level; g_world.liveLevels = g_world.levels; co_spawners_mission(complex); } /* before the mission's first spawner is appended */
 }
 
 /* The ship's navigation setup: play's world back to vanilla (the ship's own systems read the same constants). The
@@ -5284,6 +5284,7 @@ static void WorldShip(void)
     if (g_hudLive != NULL) *g_hudLive = 0;
     co_locate_live(0);
     g_worldLevelLive = 0; g_world.liveLevels = 0;
+    co_spawners_mission(0);
 }
 
 /* HELLFORGE_XL_CENSUS=1: the install (and so its checks) on a level the loader does not grow too (InstallWorld). */

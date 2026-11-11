@@ -10,6 +10,7 @@
 #include "xl/co_beside_sites.h"
 #include "xl/co_stamp_sites.h"
 #include "xl/co_weld_sites.h"
+#include "xl/co_spawner_sites.h"
 #include "xl/co_locate_sites.h"
 #include "xl/co_cluster_sites.h"
 #include "xl/co_city_sites.h"
@@ -69,6 +70,7 @@ void fake_stock_chains(uint8_t* image, float disk)
     /* and its structured step the weld's pool of 576 blocks, in the game's weld */
     for (size_t i = 0; i < sizeof kCoWeldValues / sizeof kCoWeldValues[0]; i++) memcpy(image + kCoWeldValues[i].rva, kCoWeldValues[i].stock, kCoWeldValues[i].length);
     for (int i = 0; i < 3; i++) memcpy(image + kCoWeldFull[i].rva, kCoWeldFull[i].bytes, kCoWeldFull[i].length);
+    fake_stock_spawners(image); /* and its mission step the spawner list's guard */
     /* its block move leaves the loot containers' location lookup the game's */
     memcpy(image + CO_LOCATE_SITE, kCoLocateGame, sizeof kCoLocateGame);
     /* and its block move the two cluster counts' stubs, 0x40 apart, behind jumps padded to the sites' lengths */
@@ -207,4 +209,19 @@ void fake_stock_beside(uint8_t* image)
     p = Count(image, p, 4);
     Jump(image, p, CO_BESIDE_STORE + 7u);
     Site(image, CO_BESIDE_STORE, 7, FAKE_STOCK_BESIDE + 0x80u);
+}
+
+void fake_stock_spawners(uint8_t* image)
+{
+    const uint8_t back[5] = {0xE9, 0x0B, 0x01, 0x00, 0x00}; /* the append's own jump to 0xAD390B */
+    memcpy(image + CO_SPAWNER_ADD, kCoSpawnerBody, sizeof kCoSpawnerBody);
+    memcpy(image + CO_SPAWNER_ADD + sizeof kCoSpawnerBody, back, sizeof back);
+    memcpy(image + CO_SPAWNER_BASE_LOAD, kCoSpawnerBaseLoad, 7); memcpy(image + CO_SPAWNER_BASE_ADD, kCoSpawnerBaseAdd, 7);
+    memcpy(image + CO_SPAWNER_FIRST, kCoSpawnerFirst, 13); memcpy(image + CO_SPAWNER_NEXT, kCoSpawnerNext, 13);
+    memcpy(image + CO_SPAWNER_PLACES, kCoSpawnerPlaces, sizeof kCoSpawnerPlaces);
+    memcpy(image + FAKE_STOCK_SPAWNERS, kCoSpawnerGuard, sizeof kCoSpawnerGuard);
+    Rel(image, FAKE_STOCK_SPAWNERS + 14u, CO_SPAWNER_ADD);
+    Rel(image, FAKE_STOCK_SPAWNERS + 21u, FAKE_STOCK_SPAWNERS + 0x40u);
+    Rel(image, FAKE_STOCK_SPAWNERS + 26u, CO_SPAWNER_DONE);
+    Site(image, CO_SPAWNER_SITE, 6, FAKE_STOCK_SPAWNERS);
 }

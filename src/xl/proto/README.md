@@ -62,6 +62,7 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
 | `difficulty_world.c` | The HUD's three stubs come from `../co_normal.c`: each runs the game's own bytes unless the mission in play is complex, and the row state hook passes a normal mission through. |
 | `difficulty_world.c`, `difficulty_world_arcs.c` | Level init records whether the level is complex by its address (`LevelComplex`); the objective fill and the mission arcs ask it. The arcs' `HELLFORGE_XL_ARCS` switch is gone. |
 | `difficulty_world.c` | Level init sets a weld block's places for the level (`../co_weld.c`). |
+| `difficulty_world.c` | A mission's level init and the ship tell `../co_spawners.c` whether the mission in play is complex; the stream note's count of spawner positions past a group's places is that file's. |
 | `difficulty_world.c` | Level init sets the stamp index's slots for the level (`../co_stamps.c`) and rebuilds the index when it was built as another level's. The index query's hook is in `../co_xl.c`. |
 | `difficulty_world.c` | The install goes on, behind the chains, with `../co_pocket.c`: FixUnreachableAreas' pocket search, component list and reconnect for a complex level. |
 | `difficulty_world.c` | The cluster pass sets its divisor through `../co_clusters.c`, whose stubs stand in front of HellForge's two counts; `g_clusterPer` is gone. |
