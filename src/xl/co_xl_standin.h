@@ -90,9 +90,12 @@ static inline int CoObjlistStamps(int32_t* starts, int32_t* counts)
 /* Row type of the block's site tables (proto/important_sites.h, proto/route_sites.h; not compiled: HellForge moves them). */
 typedef struct LocationSite { uint32_t rva; uint8_t at; uint32_t value; } LocationSite;
 
+/* 1 once the HUD's three grouped stubs are in (proto/difficulty_world.c HudGroupSite): a complex mission's rows are one
+ * an objective, so its list may hold every mission's primaries. Until then the objective fill adds none. */
+static int g_hudGrouped;
+
 /* ---- state other install steps left behind -------------------------------------------------------------------------
  * To replace: each with the mod's own step once it has one. As they are, every reader takes its "not installed" path. */
-static int g_hudGrouped;                      /* the HUD's objective rows grouped by instance */
 /* Not a stand-in: the map's markers stay the game's 16 slots and 10 trackers in the map object (co_markers.h), so no
  * step learns its address. The one reader (the objectives note's "markers last shown") reads nothing while it is 0. */
 static uintptr_t g_markerMap;
