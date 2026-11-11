@@ -102,6 +102,11 @@ eight moves it to the mod's memory with room for eight, when it writes its count
 and the game's pointer and its three registry entries lead to the new place. Then 11 sites let the table's searches
 and its clear count to eight. When the table is not where the game keeps it, the counts stay at four.
 
+Each card also adds itself to a list of the game's type registry, which has room for four; two other lists lie behind
+it. The build for eight moves that list to the mod's memory with room for eight, before the cards' sites go in: 7 code
+sites read it there. It moves only while it is empty and goes back with the counts while it is empty. When it cannot
+move, the counts stay at four.
+
 A build for four leaves the screen and the table as the game has them and keeps the screen's 19 guards.
 
 Limits that remain:
@@ -213,7 +218,7 @@ the game drops four and more. It goes in on its own: when it cannot, the peer li
 
 ## State
 
-- The galactic map, squad HUD, name tags, mission, mission summary, Activity record and clan changes are checked against the game's code and in the unit tests only.
+- The galactic map, squad HUD, name tags, mission, mission summary, Activity record, clan and loadout cards' registry list changes are checked against the game's code and in the unit tests only.
 - Tested with one player: all eight pods are entered on foot, launch, and are there again after the return; missions
   and returns work with the lists counting to eight. A mission from a new pod after a completed mission's summary
   works; the mission was ended through the game's own handler, not by flying an extraction.
@@ -295,6 +300,11 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `scripts/sites/hud_sites.py`, `tag_sites.py` | The squad HUD's and the name tags' sites and caves for eight; the tags' guard for four. |
 | `scripts/gen_ui_sites.py` | Writes `co_ui_sites.h`; checks that no site shares a byte with the other steps' in a build for eight. |
 | `scripts/sites/cave_asm.py` | Assembles the caves with GNU `as` for both generators. |
+| `src/co_registry.c` | The type registry's list of loadout cards: its move to room for eight and back. |
+| `src/co_registry_sites.h` | Its code sites. Generated; do not edit. |
+| `scripts/sites/registry_sites.py` | The reviewed loads that reach that list. |
+| `scripts/gen_registry_sites.py` | Writes `co_registry_sites.h`; checks each load against a dump and the other steps' sites. |
+| `tests/registry_test.c` | The list's move in each build, run through the game's loads; refusal on changed code or a card in the list, rollback of a failed write. |
 | `tests/ui_test.c` | The guards for four, the map's move with the state, the HUD's and tags' move at the HUD's init, refusal on changed code and rollback of a failed write. |
 | `tests/engine_test.c` | The engine's sites: written, refused on changed code, taken back on a failed write. |
 | `tests/harness/` | The stand-in loader and game image the tests run against. |
@@ -331,6 +341,8 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `the lobby search lists lobbies with up to 7 members` | A build for eight players: the search's site is in place. |
 | `the loadout screen has eight records and cards` | A build for eight players: the loadout screen's arrays moved. |
 | `the per-peer loadout table moved to room for eight peers` | A build for eight players: that table is in the mod's memory. |
+| `the type registry's list of loadout cards has room for eight` | A build for eight players: the cards' registry list is in the mod's memory. |
+| `the type registry's list of loadout cards is not empty` | A card was there before the move: the counts stay at four. |
 | `the mission summary has eight rows and cards` | A build for eight players: the summary screen's rows and cards moved. |
 | `the per-peer loadout table is not where the game keeps it` | Something else moved or changed it: the counts stay at four. |
 | `the score manager's loot rows are cleared and added for eight rows` | The loot rows' code moved with the managers. |

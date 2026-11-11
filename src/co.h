@@ -51,6 +51,12 @@ void co_counts_apply(uintptr_t context, uintptr_t extension);
 void co_counts_undo(void);
 void co_counts_session_init(void);
 
+/* The registry's list of loadout card widgets (co_registry.c), for the eight cards of a build for eight. `cards` moves it
+ * to the mod's room for eight, from the counts' apply before any card exists; 1 when it is there. `back` returns it to
+ * the game's list while no card is registered in it. */
+int co_registry_cards(uintptr_t game);
+void co_registry_back(void);
+
 /* Tables a build for eight moves at run time (co_ui.c). `install` once with game.dll's base, before the state
  * constructor's hook goes in; `state` in that hook with the component block. `guarded` is 0 while a table with four
  * entries lacks its guards: then no player index above 3 may exist. */

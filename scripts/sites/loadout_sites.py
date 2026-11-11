@@ -638,7 +638,8 @@ MOD_OFF = [0x146CC05, 0x146E996, 0x146D320, 0x875B50, 0xB72AC6, 0xB90143, 0xB903
 # session init or state constructor (0xAB28F5), where the mod applies its sites. The generator puts SYNCED_SITES in
 # their own group of the build for eight; the mod's C code moves the table (SYNCED_MOVE) before it writes them and
 # moves it back after it has put them back.
-SYNCED_MOVE = {'pointer': 0x346D5F0, 'registry_type': 0x11D, 'registry_lists': (0x2078, 0x7230, 0x7248),
+# The three lists' rooms: entries from align8(count + 4) up to the next list's count (+0x20C0, +0x7248, +0x7260).
+SYNCED_MOVE = {'pointer': 0x346D5F0, 'registry_type': 0x11D, 'registry_lists': (0x2078, 0x7230, 0x7248), 'registry_rooms': (4, 1, 1),
                'old_size': 0x27E0, 'new_size': 8 * 0x9F8, 'entry': 0x9F8, 'key': 0x9F0,
                'engine': 0x3326340, 'member': 0x1024220 + 0x60E7208, 'registry': 0x3326E68}
 SYNCED_SITES = [

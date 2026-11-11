@@ -56,6 +56,9 @@ void co_managers_test_reset(void);
 void co_managers_test_force(int state);
 void co_ui_test_reset(void);
 void co_ui_test_force(int layout);
+void co_registry_test_fill(uint8_t* image);
+void co_registry_test_reset(void);
+int co_registry_test_reviewed(const uint8_t* image);
 uint32_t co_counts_test_loot_row(uintptr_t manager, uint32_t slot);
 uint64_t co_counts_test_loot_index(uint32_t index, uint64_t flags);
 typedef uint64_t (*PostFn)(uint64_t, uint64_t, uint64_t, const uint64_t*, uint32_t);
@@ -176,9 +179,11 @@ static void Start(const char* name)
     co_session_test_reset();
     co_counts_test_reset();
     co_ui_test_reset();
+    co_registry_test_reset();
     api = fake_host_reset(CO_GAME_BUILD);
     co_session_test_fill(g_fake.image);
     co_counts_test_fill(g_fake.image);
+    co_registry_test_fill(g_fake.image);
     memcpy(g_fake.image + SESSION_GLOBAL, &none, 8);
     if (hellforge_mod_init(api, g_mod) == 0 && g_fake.loaded != NULL) g_fake.loaded(g_mod, HF_EVENT_GAME_LOADED, NULL);
 }
@@ -256,7 +261,7 @@ static int AsTheGameHasIt(void)
            image[RECORD_POST + 3] == 0xD0 && image[RESULT_GATE + 2] == 3 && image[LOOT_INDEX] == 0x3B && image[ACTIVITY] == 0x48 &&
            image[ACTIVITY_MADE] == 0xFF &&
            image[CLAN_PAIR] == 0x40 && image[CLAN_OWN + 2] == 0xFF && image[CLAN_OWN + 3] == 0x74 &&
-           co_counts_test_reviewed(image) && TableAsTheGameHasIt();
+           co_counts_test_reviewed(image) && co_registry_test_reviewed(image) && TableAsTheGameHasIt();
 }
 
 /* The jump at a cave's site, the rest of the replaced bytes as nops; the cave it leads to. */
@@ -1268,6 +1273,7 @@ int main(void)
         const HfApi* api = fake_host_reset(CO_GAME_BUILD);
         co_session_test_fill(g_fake.image);
         co_counts_test_fill(g_fake.image);
+        co_registry_test_fill(g_fake.image);
         g_fake.noMatch[0] = 0x108B6B0u;
         hellforge_mod_init(api, g_mod);
         if (g_fake.loaded != NULL) g_fake.loaded(g_mod, HF_EVENT_GAME_LOADED, NULL);
@@ -1285,6 +1291,7 @@ int main(void)
         const HfApi* api = fake_host_reset(CO_GAME_BUILD);
         co_session_test_fill(g_fake.image);
         co_counts_test_fill(g_fake.image);
+        co_registry_test_fill(g_fake.image);
         if (hooked) g_fake.noHook = ACTIVITY_POST;
         else g_fake.noMatch[0] = ACTIVITY_POST;
         hellforge_mod_init(api, g_mod);
