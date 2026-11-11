@@ -1,0 +1,1567 @@
+/* Terrain diagnostics (research): what every level's generation does to the terrain, measured, so a map that comes out
+ * smooth, flat, stretched or bare can be traced to the pass that made it so. Off unless HELLFORGE_TERRAIN_DIAG is set:
+ *
+ *   1  measurements and a report per level (any level: a vanilla map gives the baseline an extra large one is held to)
+ *   2  also reads the merge's named render targets back after the passes that draw into them, and writes every image it
+ *      measured (raw, with a descriptor) for scripts/terrain-diag/terrain_diag.py to render and compare
+ *
+ * HELLFORGE_TERRAIN_DIAG_READBACK=off keeps level 2's image files but skips the readbacks (each read back image stays
+ * allocated by the engine: up to ~350 MB per level).
+ *
+ * What it records, per level (g_world.levels), into terrain-diag-<level>.json in the session's logs and a summary in
+ * modloader.log:
+ *
+ *   settings  the level's world size (lg+0x1E0) and radii (settings = lg+0x2D20: +0x50..+0x6C), the merge's tiles
+ *             (G+0x8758A8 +0x120 / +0x124), its samples per side (op 0x38's record +0xB4), the map type, the switches
+ *   plan      before the first merge (op 0x38): the main Voronoi's vertices (G+0x9F310, 0x48 each; heights G+0x1F8A30;
+ *             count G+0x11A7090): their spacing (nearest neighbour, m) and height spread; subregion cells (G+0x92F328,
+ *             0x20 each; count G+0x11A71C4) by height group and type; locations (G+0x11A7108); route vertices, cells,
+ *             edges (G+0x11A71B4 / +0x11A71C0 / +0x11A71CC)
+ *   ops       every pass record: op, name, steps (dispatcher calls), wall time, frames from first to last step, and the
+ *             locations it added (stamps are placed as locations)
+ *   images    each image measured, from:
+ *               - the merge's 8 intermediate captures (lg + 0x18 k, the scatter images' layout) after each op 0x5C
+ *               - readbacks of the named targets (level 2, between SetupTerrainMerge and CleanupTerrainMerge, calls as
+ *                 op 0x66 makes them at 0xF544F4..0xF544B5): heights 0x2A9E3232 after the passes that draw heights,
+ *                 materials 0x95E7E3AC after 0x41 / 0x64, the zone lookup 0x1524FE5A after op 0x4C draws it
+ *               - the scatter images (lg = G+0x8758A8: +0xD8 heights u16, +0xF0 material mix, +0x108 ground ids) after
+ *                 op 0x66 (heights, materials) and op 0xBB (ground ids, made by op 0x47: 0xBB fills the id table)
+ *               - the layer heightfield the loader keeps (difficulty_world.c, the terrain the layers snap to) at op 0x6D
+ *             Heights: in-disk spread and percentiles; slopes (histogram, mean, flat and steep shares); curvature; detail
+ *             at 8 / 32 / 128 / 512 / 2048 m (sd of the height less its local mean); local relief (max - min) in 32 /
+ *             128 / 512 m blocks; correlation length along x and y (stretching shows as a longer length, uneven
+ *             stretching as x != y). Material mix: painted share, weights, coverage per material slot. Ground ids:
+ *             density, coverage per id (through the scatter id table). Anything else: value spread and distinct values.
+ *   flags     health checks on the final terrain: resolution, flatness, missing detail, stretched lattice, anisotropy,
+ *             an unpainted material map, sparse scatter, a scatter cutoff inside the disk, stretched zone materials
+ *
+ * A readback copies the target when the GPU reaches the request, which can be several passes later: a readback "after"
+ * a pass shows the target at some point after it, not exactly then (the final images are the reliable ones).
+ *
+ * The images are measured inside the level's disk (lg+0x2D7C x half the world, around the centre), the playable land.
+ * The readbacks are asynchronous: requested as a pass's last step returns, collected on later dispatcher calls or game
+ * frames (TerrainDiagTick, packages.c), the report written once generation has ended and nothing is pending (or 20 s
+ * after). Everything runs on the thread that calls it; the state is behind one lock. */
+
+static const char* const kTdOpNames[0xBC] = {
+    "ApplyZoneDeltaSettings", "SetupMissionDistance", "BuildRouteCellAssociatedRoutes", "GenerateRouteCellVoronoi",
+    "GenerateSubregionHeights", "SmoothenRouteConnections", "GenerateObjectiveForcedLocations", "GenerateRoutes",
+    "AdjustRoutesForZones", "PlaceStampsOnRoutes", "GenerateWaterStart", "GenerateWaterFinalize", "FixWaterHeight",
+    "RenderRouteSegments", "GenerateRouteSegments", "AddRoutesToCollision", "AddRoadsToCollision", "SelectSubRegionCellType",
+    "SortRouteCellRoutes", "MergeSubRegionCells", "LevelGenerationNop", "GenerateMissionStampList", "GenerateObjectiveLocations",
+    "AddImportantLocations", "GenerateLocationClusters", "ForceSeed", "SpawnSettingsEntities", "BuildPalette", NULL,
+    "WaitForPackageGroup", NULL, "QueueStampPackages", NULL, "QueueRandomCacheLootRewardsPackages", NULL,
+    "QueueMarkerPackages", NULL, "GenerateVoronoi", "GenerateFbr", "PaintZoneByCornerTag", "PaintZoneByLocation",
+    "CellularAutomata", "CellularAutomataCorridor", "PlaceStampWithWeightRule", "CalculateCornerDownhill",
+    "CalculateCornerSlopes", "CalculateAreaSlopes", "SpawnStampTerrain", "ExtendStamps", NULL, "SpawnVistaLevel",
+    "GenerateSky", "GenerateSkyTestLevel", "GenerateVista", "GatherIndoorVolumes", "KickTerrainMerge", "SetupTerrainMerge",
+    "MergeClear", NULL, "DestroyVoronoiGeometries", "RenderHeightmapVoronoi", "RenderZoneHeightmap", "ForceFlattenZones",
+    "RenderStampsHeightmap", "SmoothHeightmap", "RenderVoronoiMaterials", "GenerateHeightmapProperties", "SetupFogVolumes",
+    "RenderFogVolumes", "CleanupFogVolumes", "SetupTerrainLightingMapsRenderData", "RenderTerrainLightingMaps",
+    "CleanupTerrainLightingMaps", "SetupFarScatterRenderData", "RenderFarScatter", "CleanupFarScatter", "RenderZoneLookup",
+    "SpawnEarthquakes", "GenerateOutsideMapDistance", "SetupIngameMapRenderData", "CreateIngameMap", "RenderPlayableArea",
+    "CleanupIngameMap", "AllocateMinimapResources", "ReleaseMinimapResources", "CollectMinimapProxies",
+    "CaptureMinimapTexture", "CollectMinimapScatter", "SpawnProxiesForCapture", "DespawnProxies", "CreateMinimapTexture",
+    "CaptureIntermediateHeightmapStart", "CaptureIntermediateHeightmapFinalize", "CaptureHeightmapStart",
+    "CaptureHeightmapFinalize", "GenerateResourceHash", "StartLoadMinimapResources", "UnloadUnusedMinimapPackages",
+    "FilterMinimap", "MergeStampHeights", "RenderFinalize", "CleanupTerrains", "CleanupTerrainMerge",
+    "CleanupTerrainMergeDelayed", "NavmeshGridInitialize", "InitSpawnTerrain", "SpawnTerrainWork", "SpawnTerrainFinalize",
+    "SpawnLevelLayers", "CullUnitsOutsidePlayableArea", "EnableConcurrentTerrainNavmeshSimplification", NULL,
+    "SetupTerrainNavmesh", "SetupNavmeshGeometry", "SetLevelToLoad", "LoadLevel", "GenerateSubregionCellsHeightGroupBasic",
+    "InitialiseSubregionCells", "GenerateSubregionSpecial", "GenerateSubregionCellsHeightGroupFromLow",
+    "SelectSubRegionCellsFromHeightGroup", "PaintVoronoiCornerByRouteCell", "PaintRouteCellsAsSubRegion",
+    "LinkLocationsToRouteCells", "AttachLocationsToRouteCells", "FixUnreachableAreas", "PaintSubRegionZones",
+    "TestLevelZoneSetup", "GenerateLocations", "GenerateDiscoveryLocations", "GenerateOutpostLocations",
+    "CalculateValidSmallLocationsPositions", "GenerateSmallLocations", "GenerateEmptyBorderLocations",
+    "GeneratePriorityRoutes", "GenerateConvoyRoutes", "GenerateCrossingLocations", "GenerateRoadAlongRoutes",
+    "FlattenVoronoiFromRoads", "SpreadLocations", "SpreadLocations_Cities", "FinalizeLocationPlacements",
+    "AddSatelliteLocations", NULL, "SetupRegion", "GenerateVoronoiHeightDifferenceMap", "GenerateHeightFromLocations",
+    "GenerateBottomFlatLookup", "GenerateFlatteningLookup", "InitializeScatter", "FinalizeScatterInitialization",
+    "CalculateScatterCache", "FreezeAllPlacedLocations", "OptimizeLocationRotation", "ForceSpawnDebugLocation",
+    "SetupBackgroundWind", "SpreadEdgeOfMapLocations", "GenerateDangerLevels", "CalculateMissionBoundaries",
+    "SelectOceanDirection", "GenerateExplorationLocations", "GatherExplorationLevels", "SpawnExplorationLevels",
+    "RevoronoiNatureRoutes", "FinalizeVoronoi", "QueueZonePackages", NULL, "GenerateCityRoads", "FlattenCityRoads",
+    "FlattenCityRegions", "FlattenCityStamps", "PlaceCityRoadStamps", "SetStampFlattenModeForCityRegions",
+    "ModifyCityRoutesThroughMissionStamps", "GenerateRoutesClassLookup", "GenerateCityWalls", "ProcessAsyncOperations",
+    "SetupHellpodAvoidance", "GenerateClearingMask", "GenerateClearingPoints", "GenerateHiveLordGraph",
+    "GenerateHiveLordGraphPost", "SubRegionExpansion", "LevelRoutes", "SpawnMeshesOnEmbankments", "ForceStructuredZoneLayout",
+    "SpawnImpTerrainProjector", "InitializeGlobalScatterIndirection"};
+
+static const char* TdOpName(uint32_t op) { return op < 0xBC && kTdOpNames[op] ? kTdOpNames[op] : "?"; }
+
+#define TD_RT_HEIGHTS 0x2A9E3232u   /* the terrain's height target (op 0x66 reads it back into lg+0xD8) */
+#define TD_RT_MATERIALS 0x95E7E3ACu /* the material mix target (op 0x66 -> lg+0xF0; the GPU scatter samples it, 0xF45106) */
+#define TD_RT_ZONES 0x1524FE5Au     /* the zone lookup target RenderZoneLookup (op 0x4C) creates and draws */
+#define TD_IMAGE_BLOCK 0x8758A8u    /* G+: the scatter images' owner (op 0xBB's [record+0x20]), +0x120 tile samples, +0x124 tiles */
+#define TD_MAX_RECORDS 512
+#define TD_MAX_PENDING 24
+
+typedef enum { TD_HEIGHTS_U16, TD_HEIGHTS_F32, TD_MATERIALS, TD_GROUND, TD_ZONES, TD_RAW } TdKind;
+
+typedef struct TdOp { uint32_t op, steps, locBefore, locAfter, done; double ms; ULONGLONG first, last; } TdOp;
+typedef struct TdPending { uint32_t id, hash, record, op; TdKind kind; ULONGLONG since; char label[48]; } TdPending;
+typedef struct TdKey { int set; double metresPerSample, sd, flat, detail32, detail128, corrX, corrY, slopeMean; } TdKey;
+
+static struct
+{
+    SRWLOCK lock;
+    int mode, readback;                  /* HELLFORGE_TERRAIN_DIAG 0..2, readbacks on */
+    LONG level;                          /* g_world.levels the state belongs to */
+    int planned, reported, ended, merging; /* merging: SetupTerrainMerge (0x38) done, CleanupTerrainMerge (0x66) not yet */
+    ULONGLONG endedAt;
+    uint32_t end, records, frames;
+    TdOp ops[TD_MAX_RECORDS];
+    uint32_t stepRecord, stepLocations;
+    LARGE_INTEGER stepStart;
+    TdPending pending[TD_MAX_PENDING];
+    uint32_t pendingCount, readbacks, images, captureSets;
+    LONG sessionReadbacks;
+    char settings[4096], plan[8192], imagesJson[96 * 1024], flags[4096];
+    int settingsLen, planLen, imagesLen, flagsLen;
+    TdKey finalHeights, imageHeights;    /* the layer heightfield's, the scatter heights image's */
+    double planSpacing, materialPainted, materialBars, materialMode, groundDensity, scatterRadius, disk, world;
+    int materialSeen, groundSeen;
+    uint64_t lastData[64];               /* images measured this level: a content hash (size and a 64 x 64 sample) */
+    char lastLabel[64][48];              /* ... and their labels (an unchanged image is noted as the same as the first) */
+    uint32_t lastDataCount;
+    uint64_t previousData[64];           /* the previous level's: a readback of a target not yet redrawn returns its content */
+    uint32_t previousDataCount;
+    int dumpAll;                         /* HELLFORGE_TERRAIN_DIAG_DUMP=all: every image's raw file, not only the final ones */
+    double imageDisk;                    /* the disk the image in measurement uses (m; -1: the whole image) */
+    TdKey tileHeights;                   /* a terrain tile's heights (difficulty_world.c's tile merge) */
+    char tilePlan[2048]; int tilePlanLen; /* the tile's Voronoi, as the plan */
+    uint32_t tileFaultOp; uintptr_t tileFaultAt, tileFaultData; /* a tile pass that faulted (the tile was abandoned) */
+} g_td = {SRWLOCK_INIT, -1};
+
+static ULONGLONG g_tdFrameTick;
+
+static int TdAppend(char* buffer, int* length, int size, const char* format, ...)
+{
+    if (*length >= size - 1) return 0;
+    va_list arguments;
+    va_start(arguments, format);
+    int n = vsnprintf(buffer + *length, (size_t)(size - *length), format, arguments);
+    va_end(arguments);
+    if (n < 0) return 0;
+    *length += n < size - *length ? n : size - *length - 1;
+    return n;
+}
+
+/* A JSON number, or null for a value that is not one. */
+/* A correlation length: beyond the search (negative, see TdCorrelation) as the string ">N". */
+static const char* TdLength(char* out, size_t size, double v)
+{
+    if (v == v && v < 0) { snprintf(out, size, "\">%.0f\"", -v); return out; }
+    if (!(v == v)) { snprintf(out, size, "null"); return out; }
+    snprintf(out, size, "%.6g", v);
+    return out;
+}
+
+static const char* TdNum(char* out, size_t size, double v)
+{
+    if (!(v == v) || v > 1e300 || v < -1e300) snprintf(out, size, "null");
+    else snprintf(out, size, "%.6g", v);
+    return out;
+}
+
+static uintptr_t TdGen(void)
+{
+    uintptr_t gen = 0;
+    if (g_worldLevel == 0 || SafeRead(g_worldLevel + 0x2C8, &gen, 8)) return 0;
+    return gen;
+}
+
+/* ---- the level's frame and settings ----------------------------------------------------------------------------- */
+
+static void TdLevelReset(void)
+{
+    LONG level = g_world.levels;
+    memset(g_td.ops, 0, sizeof g_td.ops);
+    g_td.level = level;
+    g_td.planned = g_td.reported = g_td.ended = g_td.merging = 0;
+    g_td.endedAt = 0;
+    g_td.end = g_td.records = g_td.frames = 0;
+    g_td.pendingCount = g_td.readbacks = g_td.images = g_td.captureSets = 0;
+    g_td.settingsLen = g_td.planLen = g_td.imagesLen = g_td.flagsLen = 0;
+    g_td.settings[0] = g_td.plan[0] = g_td.imagesJson[0] = g_td.flags[0] = 0;
+    memset(&g_td.finalHeights, 0, sizeof g_td.finalHeights);
+    memset(&g_td.imageHeights, 0, sizeof g_td.imageHeights);
+    memset(&g_td.tileHeights, 0, sizeof g_td.tileHeights);
+    g_td.tilePlanLen = 0;
+    g_td.tileFaultOp = 0; g_td.tileFaultAt = g_td.tileFaultData = 0;
+    g_td.planSpacing = g_td.materialPainted = g_td.materialBars = g_td.materialMode = g_td.groundDensity = g_td.scatterRadius = 0;
+    g_td.materialSeen = g_td.groundSeen = 0;
+    if (g_td.lastDataCount) /* a restarted level measured nothing: the last finished one stays the previous */
+    {
+        memcpy(g_td.previousData, g_td.lastData, sizeof g_td.previousData);
+        g_td.previousDataCount = g_td.lastDataCount;
+    }
+    g_td.lastDataCount = 0;
+    g_td.world = 2048.0 * g_world.current;
+    g_td.disk = 0.0;
+    g_td.imageDisk = 0.0;
+    if (g_worldLevel != 0)
+    {
+        float world = 0, disk = 0;
+        if (!SafeRead(g_worldLevel + 0x1E0, &world, 4) && world >= 256.0f && world <= 65536.0f) g_td.world = world;
+        if (!SafeRead(g_worldLevel + 0x2D7C, &disk, 4) && disk > 0.0f && disk <= 1.0f) { g_td.disk = disk * g_td.world * 0.5; g_td.imageDisk = g_td.disk; }
+    }
+}
+
+static void TdSettings(uint64_t record)
+{
+    uintptr_t lg = g_worldLevel, gen = TdGen();
+    if (lg == 0) return;
+    float world = 0, radii[8] = {0}, tileSamples = 0, samples = 0;
+    uint32_t worldInt = 0, tiles = 0, mapType = 0;
+    uint8_t difficulty = 0;
+    SafeRead(lg + 0x1E0, &world, 4); SafeRead(lg + 0x2D4C, &worldInt, 4); SafeRead(lg + 0x2D70, radii, sizeof radii);
+    SafeRead(lg + 0xF9, &difficulty, 1); SafeRead(lg + 0x2DE0, &mapType, 4);
+    if (gen != 0) { SafeRead(gen + TD_IMAGE_BLOCK + 0x120, &tileSamples, 4); SafeRead(gen + TD_IMAGE_BLOCK + 0x124, &tiles, 4); } /* +0x120 is a float */
+    if (record != 0) SafeRead(record + 0xB4, &samples, 4);
+    if (radii[3] > 0.0f && radii[3] <= 1.0f) { g_td.disk = radii[3] * (world > 0 ? world : g_td.world) * 0.5; g_td.imageDisk = g_td.disk; }
+    if (world >= 256.0f) g_td.world = world;
+    char zone[8] = "", radius[8] = "";
+    GetEnvironmentVariableA("HELLFORGE_XL_ZONE_REPEAT", zone, sizeof zone);
+    GetEnvironmentVariableA("HELLFORGE_XL_RADIUS_OLD", radius, sizeof radius);
+    double half = g_td.world * 0.5;
+    char a[32], b[32], c[32], d[32], e[32], f[32], g[32], h[32];
+    g_td.settingsLen = 0;
+    TdAppend(g_td.settings, &g_td.settingsLen, sizeof g_td.settings,
+        "{\"world_m\": %s, \"world_int\": %u, \"world_scale\": %g, \"difficulty\": %u, \"map_type_raw\": \"0x%08X\", "
+        "\"radius_50\": %s, \"radius_54\": %s, \"fade_58\": %s, \"disk_5c\": %s, \"radius_60\": %s, \"rect_low_m\": %s, "
+        "\"rect_high_m\": %s, \"disk_m\": %g, \"fade_m\": %g, \"vista_fade_m\": %g, \"merge_tiles\": %u, \"tile_samples\": %g, "
+        "\"merge_samples_per_side\": %g, \"metres_per_sample\": %g, \"zone_repeat\": %s, \"radius_old\": %s}",
+        TdNum(a, 32, world), worldInt, (double)g_world.current, (unsigned)difficulty, mapType, TdNum(b, 32, radii[0]), TdNum(c, 32, radii[1]),
+        TdNum(d, 32, radii[2]), TdNum(e, 32, radii[3]), TdNum(f, 32, radii[4]), TdNum(g, 32, radii[5]), TdNum(h, 32, radii[6]),
+        radii[3] * half, radii[2] * half, (radii[3] - radii[2]) * half, tiles, (double)tileSamples, (double)samples,
+        tiles && tileSamples > 0 ? g_td.world / ((double)tiles * tileSamples) : 0.0, zone[0] == '1' ? "true" : "false",
+        radius[0] == '1' ? "true" : "false");
+}
+
+/* ---- the plan, before the first merge --------------------------------------------------------------------------- */
+
+static int TdFloatCompare(const void* a, const void* b) { float x = *(const float*)a, y = *(const float*)b; return x < y ? -1 : x > y; }
+
+static void TdPlanFrom(uintptr_t gen, double world, int tile, char* out, int* outLen, int outSize)
+{
+    if (gen == 0) return;
+    uint32_t vertices = 0, subs = 0, locations = 0, route[3] = {0};
+    SafeRead(gen + 0x11A7090u, &vertices, 4); SafeRead(gen + 0x11A71C4u, &subs, 4); SafeRead(gen + 0x11A7108u, &locations, 4);
+    SafeRead(gen + 0x11A71B4u, &route[0], 4); SafeRead(gen + 0x11A71C0u, &route[1], 4); SafeRead(gen + 0x11A71CCu, &route[2], 4);
+    if (vertices > 65536) vertices = 0;
+    static float vxy[65536][2], vh[65536], nn[65536];
+    uint32_t n = 0;
+    for (uint32_t v = 0; v < vertices; v++)
+    {
+        if (SafeRead(gen + 0x9F310u + 0x48u * (uintptr_t)v, vxy[n], 8) || SafeRead(gen + 0x1F8A30u + 4u * (uintptr_t)v, &vh[n], 4)) break;
+        if (vxy[n][0] == vxy[n][0] && vh[n] == vh[n] && vh[n] > -1e6f && vh[n] < 1e6f) n++;
+    }
+    /* nearest-neighbour spacing on a 64 m hash grid (the lattice is 16 m at vanilla density) */
+    int grid = (int)(world / 64.0); if (grid < 8) grid = 8; if (grid > 512) grid = 512;
+    double cell = world / grid;
+    static uint32_t heads[512 * 512], next[65536];
+    for (int i = 0; i < grid * grid; i++) heads[i] = 0xFFFFFFFFu;
+    for (uint32_t v = 0; v < n; v++)
+    {
+        int gx = (int)(vxy[v][0] / cell), gy = (int)(vxy[v][1] / cell);
+        gx = gx < 0 ? 0 : gx >= grid ? grid - 1 : gx;
+        gy = gy < 0 ? 0 : gy >= grid ? grid - 1 : gy;
+        next[v] = heads[gy * grid + gx]; heads[gy * grid + gx] = v;
+    }
+    uint32_t m = 0;
+    double sum = 0, sum2 = 0, lo = 1e30, hi = -1e30, zeros = 0;
+    for (uint32_t v = 0; v < n; v++)
+    {
+        int gx = (int)(vxy[v][0] / cell), gy = (int)(vxy[v][1] / cell);
+        double best = 1e30;
+        for (int r = 1; r <= 4 && best > (r - 1) * cell * (r - 1) * cell; r++)
+            for (int y = gy - r; y <= gy + r; y++)
+                for (int x = gx - r; x <= gx + r; x++)
+                {
+                    if (x < 0 || y < 0 || x >= grid || y >= grid) continue;
+                    for (uint32_t u = heads[y * grid + x]; u != 0xFFFFFFFFu; u = next[u])
+                    {
+                        if (u == v) continue;
+                        double dx = vxy[u][0] - vxy[v][0], dy = vxy[u][1] - vxy[v][1], d = dx * dx + dy * dy;
+                        if (d < best && d > 1e-6) best = d;
+                    }
+                }
+        if (best < 1e29) nn[m++] = (float)sqrt(best);
+        sum += vh[v]; sum2 += (double)vh[v] * vh[v]; if (vh[v] < lo) lo = vh[v]; if (vh[v] > hi) hi = vh[v]; if (vh[v] == 0.0f) zeros++;
+    }
+    double nnMean = 0;
+    for (uint32_t k = 0; k < m; k++) nnMean += nn[k];
+    nnMean = m ? nnMean / m : 0;
+    if (m) qsort(nn, m, sizeof nn[0], TdFloatCompare);
+    double nnMedian = m ? nn[m / 2] : 0;
+    if (!tile) g_td.planSpacing = nnMedian;
+    double mean = n ? sum / n : 0, sd = n ? sqrt(fmax(0.0, sum2 / n - mean * mean)) : 0;
+    /* subregion cells by height group (-1..6) and by type */
+    uint32_t groups[8] = {0}, types[256] = {0};
+    for (uint32_t i = 0; i < subs && i < 8192; i++)
+    {
+        uint8_t entry[0x20];
+        if (SafeRead(gen + 0x92F328u + 0x20u * (uintptr_t)i, entry, sizeof entry)) break;
+        int32_t group, type; memcpy(&group, entry + 4, 4); memcpy(&type, entry + 0xC, 4);
+        if (group >= -1 && group <= 6) groups[group + 1]++;
+        if (type >= 0 && type < 256) types[type]++;
+    }
+    char a[32], b[32], c[32], d[32];
+    *outLen = 0;
+    TdAppend(out, outLen, outSize,
+        "{\"vertices\": %u, \"vertices_per_km2\": %g, \"spacing_mean_m\": %s, \"spacing_median_m\": %s, "
+        "\"height_min\": %s, \"height_max\": %s, \"height_mean\": %g, \"height_sd\": %g, \"height_zero_share\": %g, "
+        "\"subregion_cells\": %u, \"locations\": %u, \"route_vertices\": %u, \"route_cells\": %u, \"route_edges\": %u, \"groups\": {",
+        n, world > 0 ? n / (world * world / 1e6) : 0.0, TdNum(a, 32, nnMean), TdNum(b, 32, nnMedian), TdNum(c, 32, n ? lo : NAN),
+        TdNum(d, 32, n ? hi : NAN), mean, sd, n ? zeros / n : 0.0, subs, locations, route[0], route[1], route[2]);
+    int first = 1;
+    for (int k = 0; k < 8; k++) if (groups[k]) { TdAppend(out, outLen, outSize, "%s\"%d\": %u", first ? "" : ", ", k - 1, groups[k]); first = 0; }
+    TdAppend(out, outLen, outSize, "}, \"types\": {");
+    first = 1;
+    for (int k = 0; k < 256; k++) if (types[k]) { TdAppend(out, outLen, outSize, "%s\"0x%X\": %u", first ? "" : ", ", k, types[k]); first = 0; }
+    TdAppend(out, outLen, outSize, "}}");
+    Note("terrain diag (level %ld, %.0fx): %s: %u Voronoi vertices (%.1f per km2), spacing median %.1f m (mean %.1f), heights %.4f..%.4f sd %.4f (%.0f%% at 0), %u subregion cells, %u locations, routes %u/%u/%u",
+        (long)g_td.level, (double)g_world.current, tile ? "tile plan" : "plan", n, world > 0 ? n / (world * world / 1e6) : 0.0, nnMedian, nnMean, n ? lo : 0.0, n ? hi : 0.0, sd,
+        n ? 100.0 * zeros / n : 0.0, subs, locations, route[0], route[1], route[2]);
+}
+
+static void TdPlan(void) { TdPlanFrom(TdGen(), g_td.world, 0, g_td.plan, &g_td.planLen, sizeof g_td.plan); }
+
+/* ---- image measurements ----------------------------------------------------------------------------------------- */
+
+static float* g_tdField;           /* the full-resolution heights being measured (m) */
+static size_t g_tdFieldCap;
+static float* g_tdCoarse;          /* <= 1024 x 1024 block means */
+static double* g_tdSum;            /* the coarse grid's integral image */
+static uint8_t* g_tdMask;          /* coarse cells inside the disk */
+
+static int TdReserve(size_t samples)
+{
+    if (samples <= g_tdFieldCap) return 1;
+    if (g_tdField) VirtualFree(g_tdField, 0, MEM_RELEASE);
+    g_tdField = (float*)VirtualAlloc(NULL, samples * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    g_tdFieldCap = g_tdField ? samples : 0;
+    if (!g_tdCoarse) g_tdCoarse = (float*)VirtualAlloc(NULL, 1024u * 1024u * 4u, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!g_tdSum) g_tdSum = (double*)VirtualAlloc(NULL, 1025u * 1025u * 8u, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!g_tdMask) g_tdMask = (uint8_t*)VirtualAlloc(NULL, 1024u * 1024u, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    return g_tdField && g_tdCoarse && g_tdSum && g_tdMask;
+}
+
+/* The box mean of the coarse grid around (x, y), half-width k cells, clipped at the edges. */
+static double TdBox(int d, int x, int y, int k)
+{
+    int x0 = x - k < 0 ? 0 : x - k, y0 = y - k < 0 ? 0 : y - k, x1 = x + k + 1 > d ? d : x + k + 1, y1 = y + k + 1 > d ? d : y + k + 1;
+    double s = g_tdSum[(size_t)y1 * (d + 1) + x1] - g_tdSum[(size_t)y0 * (d + 1) + x1] - g_tdSum[(size_t)y1 * (d + 1) + x0] + g_tdSum[(size_t)y0 * (d + 1) + x0];
+    return s / ((double)(x1 - x0) * (y1 - y0));
+}
+
+/* The correlation length (m) along x (dx 1) or y: the lag at which the autocorrelation of the detrended coarse grid falls
+ * below 1/e, interpolated; minus a quarter of the grid (in m) if it never does within that (features longer than the
+ * search: the report shows it as a string ">N"); NaN if too few samples. */
+static double TdCorrelation(int d, double cellM, const float* e, const uint8_t* mask, double var, int alongX)
+{
+    if (var <= 0) return NAN;
+    double prev = 1.0, target = 1.0 / 2.718281828;
+    int step = d > 512 ? 2 : 1;
+    for (int lag = 1; lag <= d / 4; lag++)
+    {
+        double s = 0; size_t count = 0;
+        for (int y = 0; y < d; y += step)
+            for (int x = 0; x < d; x += step)
+            {
+                int x2 = alongX ? x + lag : x, y2 = alongX ? y : y + lag;
+                if (x2 >= d || y2 >= d) continue;
+                size_t i = (size_t)y * d + x, j = (size_t)y2 * d + x2;
+                if (!mask[i] || !mask[j]) continue;
+                s += (double)e[i] * e[j]; count++;
+            }
+        if (count < 64) return NAN;
+        double c = s / count / var;
+        if (c < target) return (lag - 1 + (prev - target) / (prev - c)) * cellM;
+        prev = c;
+    }
+    return -(d / 4) * cellM;
+}
+
+/* Height metrics of g_tdField (w x h, metresPerSample, the disk of radius diskM around the image's centre). */
+static void TdHeights(uint32_t w, uint32_t h, double metres, double diskM, char* json, int* len, int size, TdKey* key)
+{
+    const float* f = g_tdField;
+    double cx = w * 0.5, cy = h * 0.5, r = diskM > 0 ? diskM / metres : diskM < 0 ? 1e9 : (w < h ? w : h) * 0.5, r2 = r * r;
+    /* spread */
+    double sum = 0, sum2 = 0, lo = 1e30, hi = -1e30; size_t n = 0;
+    for (uint32_t y = 0; y < h; y++)
+    {
+        double dy = y + 0.5 - cy;
+        for (uint32_t x = 0; x < w; x++)
+        {
+            double dx = x + 0.5 - cx;
+            if (dx * dx + dy * dy > r2) continue;
+            double v = f[(size_t)y * w + x];
+            if (!(v == v)) continue;
+            sum += v; sum2 += v * v; n++; if (v < lo) lo = v; if (v > hi) hi = v;
+        }
+    }
+    if (n < 16) { TdAppend(json, len, size, ", \"heights\": null"); return; }
+    double mean = sum / n, sd = sqrt(fmax(0.0, sum2 / n - mean * mean));
+    static uint32_t hist[1024];
+    memset(hist, 0, sizeof hist);
+    double span = hi - lo > 1e-9 ? hi - lo : 1e-9;
+    for (uint32_t y = 0; y < h; y++)
+    {
+        double dy = y + 0.5 - cy;
+        for (uint32_t x = 0; x < w; x++)
+        {
+            double dx = x + 0.5 - cx;
+            if (dx * dx + dy * dy > r2) continue;
+            double v = f[(size_t)y * w + x];
+            if (!(v == v)) continue;
+            int b = (int)((v - lo) / span * 1023.0); hist[b < 0 ? 0 : b > 1023 ? 1023 : b]++;
+        }
+    }
+    double pct[3] = {0.01, 0.5, 0.99}, pv[3] = {lo, mean, hi};
+    for (int k = 0; k < 3; k++)
+    {
+        size_t want = (size_t)(pct[k] * n), seen = 0;
+        for (int b = 0; b < 1024; b++) { seen += hist[b]; if (seen > want) { pv[k] = lo + (b + 0.5) / 1024.0 * span; break; } }
+    }
+    /* slopes and curvature at full resolution */
+    static const double edges[6] = {1, 2, 5, 10, 20, 35};
+    double slopeBins[7] = {0}, slopeSum = 0, lapSum2 = 0; size_t sn = 0;
+    for (uint32_t y = 1; y + 1 < h; y++)
+    {
+        double dy0 = y + 0.5 - cy;
+        for (uint32_t x = 1; x + 1 < w; x++)
+        {
+            double dx0 = x + 0.5 - cx;
+            if (dx0 * dx0 + dy0 * dy0 > r2) continue;
+            size_t i = (size_t)y * w + x;
+            double c = f[i], l = f[i - 1], rr = f[i + 1], u = f[i - w], dn = f[i + w];
+            if (!(c == c && l == l && rr == rr && u == u && dn == dn)) continue;
+            double gx = (rr - l) / (2 * metres), gy = (dn - u) / (2 * metres), deg = atan(sqrt(gx * gx + gy * gy)) * 57.29578;
+            int b = 0; while (b < 6 && deg >= edges[b]) b++;
+            slopeBins[b]++; slopeSum += deg;
+            double lap = (l + rr + u + dn - 4 * c) / (metres * metres); lapSum2 += lap * lap; sn++;
+        }
+    }
+    /* coarse grid: block means of f, at most 1024 per side */
+    int factor = 1; while (w / factor > 1024 || h / factor > 1024) factor++;
+    int d = (int)((w < h ? w : h) / factor);
+    double cellM = metres * factor;
+    for (int y = 0; y < d; y++)
+        for (int x = 0; x < d; x++)
+        {
+            double s = 0; int c = 0;
+            for (int yy = 0; yy < factor; yy++)
+                for (int xx = 0; xx < factor; xx++)
+                {
+                    double v = f[(size_t)(y * factor + yy) * w + (x * factor + xx)];
+                    if (v == v) { s += v; c++; }
+                }
+            g_tdCoarse[(size_t)y * d + x] = c ? (float)(s / c) : (float)mean;
+            double ddx = (x + 0.5) * factor - cx, ddy = (y + 0.5) * factor - cy;
+            g_tdMask[(size_t)y * d + x] = ddx * ddx + ddy * ddy <= r2;
+        }
+    for (int x = 0; x <= d; x++) g_tdSum[x] = 0;
+    for (int y = 1; y <= d; y++)
+    {
+        double row = 0; g_tdSum[(size_t)y * (d + 1)] = 0;
+        for (int x = 1; x <= d; x++) { row += g_tdCoarse[(size_t)(y - 1) * d + (x - 1)]; g_tdSum[(size_t)y * (d + 1) + x] = g_tdSum[(size_t)(y - 1) * (d + 1) + x] + row; }
+    }
+    static const double scales[5] = {8, 32, 128, 512, 2048};
+    double detail[5];
+    for (int s = 0; s < 5; s++)
+    {
+        int k = (int)(scales[s] / cellM + 0.5);
+        if (k < 1 || 2 * k + 1 > d) { detail[s] = NAN; continue; }
+        double a = 0, a2 = 0; size_t c = 0;
+        for (int y = 0; y < d; y++)
+            for (int x = 0; x < d; x++)
+            {
+                size_t i = (size_t)y * d + x;
+                if (!g_tdMask[i]) continue;
+                double e = g_tdCoarse[i] - TdBox(d, x, y, k); a += e; a2 += e * e; c++;
+            }
+        detail[s] = c ? sqrt(fmax(0.0, a2 / c - (a / c) * (a / c))) : NAN;
+    }
+    /* local relief: max - min in non-overlapping blocks (full resolution) */
+    static const double blocks[3] = {32, 128, 512};
+    double relief[3], reliefP90[3];
+    static float ranges[1 << 20];
+    for (int s = 0; s < 3; s++)
+    {
+        uint32_t bsz = (uint32_t)(blocks[s] / metres + 0.5);
+        relief[s] = reliefP90[s] = NAN;
+        if (bsz < 2 || bsz > w / 2) continue;
+        uint32_t count = 0;
+        for (uint32_t by = 0; by + bsz <= h && count < (1u << 20); by += bsz)
+            for (uint32_t bx = 0; bx + bsz <= w && count < (1u << 20); bx += bsz)
+            {
+                double ddx = bx + bsz * 0.5 - cx, ddy = by + bsz * 0.5 - cy;
+                if (ddx * ddx + ddy * ddy > r2) continue;
+                float bl = 3e38f, bh = -3e38f;
+                for (uint32_t y = by; y < by + bsz; y++)
+                    for (uint32_t x = bx; x < bx + bsz; x++) { float v = f[(size_t)y * w + x]; if (v == v) { if (v < bl) bl = v; if (v > bh) bh = v; } }
+                if (bh >= bl) ranges[count++] = bh - bl;
+            }
+        if (!count) continue;
+        double t = 0; for (uint32_t k = 0; k < count; k++) t += ranges[k];
+        relief[s] = t / count;
+        qsort(ranges, count, sizeof ranges[0], TdFloatCompare);
+        reliefP90[s] = ranges[(uint32_t)(count * 0.9) < count ? (uint32_t)(count * 0.9) : count - 1];
+    }
+    /* correlation length after removing the 512 m (and, on worlds of 8 km or more, 2048 m) local mean, over ground
+     * steeper than 1 degree only: a large flat area (vanilla's flat ocean side) has no features and read as stretching */
+    static float detr[1024 * 1024];
+    static uint8_t rough[1024 * 1024];
+    double corr[2][2] = {{NAN, NAN}, {NAN, NAN}};
+    size_t roughCount = 0, maskCount = 0;
+    for (int y = 0; y < d; y++)
+        for (int x = 0; x < d; x++)
+        {
+            size_t i = (size_t)y * d + x;
+            rough[i] = 0;
+            if (!g_tdMask[i]) continue;
+            maskCount++;
+            int xl = x > 0 ? x - 1 : x, xr = x + 1 < d ? x + 1 : x, yu = y > 0 ? y - 1 : y, yd = y + 1 < d ? y + 1 : y;
+            double gx = (g_tdCoarse[(size_t)y * d + xr] - g_tdCoarse[(size_t)y * d + xl]) / ((xr - xl) * cellM);
+            double gy = (g_tdCoarse[(size_t)yd * d + x] - g_tdCoarse[(size_t)yu * d + x]) / ((yd - yu) * cellM);
+            if (gx * gx + gy * gy >= 0.017455 * 0.017455) { rough[i] = 1; roughCount++; } /* tan 1 degree */
+        }
+    double roughShare = maskCount ? (double)roughCount / maskCount : 0;
+    static const double trends[2] = {512, 2048};
+    for (int t = 0; t < 2; t++)
+    {
+        int k = (int)(trends[t] / cellM + 0.5);
+        if (k < 2 || 2 * k + 1 > d || (t == 1 && cellM * d < 8000) || roughShare < 0.05) continue;
+        double v2 = 0; size_t c = 0;
+        for (int y = 0; y < d; y++)
+            for (int x = 0; x < d; x++)
+            {
+                size_t i = (size_t)y * d + x;
+                detr[i] = (float)(g_tdCoarse[i] - TdBox(d, x, y, k));
+                if (rough[i]) { v2 += (double)detr[i] * detr[i]; c++; }
+            }
+        double var = c ? v2 / c : 0;
+        corr[t][0] = TdCorrelation(d, cellM, detr, rough, var, 1);
+        corr[t][1] = TdCorrelation(d, cellM, detr, rough, var, 0);
+    }
+    char s0[32], s1[32], s2[32], s3[32], s4[32], s5[32], s6[32], s7[32], s8[32], s9[32], s10[32], s11[32], s12[32], s13[32], s14[32], s15[32], s16[32], s17[32], s18[32];
+    double flat = sn ? (slopeBins[0]) / sn : NAN, steep = sn ? slopeBins[6] / sn : NAN;
+    TdAppend(json, len, size,
+        ", \"metres_per_sample\": %g, \"disk_m\": %g, \"in_disk_samples\": %zu, \"heights\": {\"min\": %g, \"max\": %g, \"mean\": %g, \"sd\": %g, "
+        "\"p01\": %g, \"p50\": %g, \"p99\": %g, \"p99_p01\": %g}, \"slope\": {\"mean_deg\": %s, \"flat_lt1\": %s, \"steep_ge35\": %s, \"bins\": "
+        "[%g, %g, %g, %g, %g, %g, %g], \"bin_edges_deg\": [1, 2, 5, 10, 20, 35]}, \"curvature_sd_per_m\": %s, "
+        "\"detail_sd_m\": {\"8\": %s, \"32\": %s, \"128\": %s, \"512\": %s, \"2048\": %s}, \"relief_m\": {\"32\": %s, \"128\": %s, \"512\": %s}, "
+        "\"relief_p90_m\": {\"32\": %s, \"128\": %s, \"512\": %s}, \"correlation_m\": {\"x_512\": %s, \"y_512\": %s, \"x_2048\": %s, \"y_2048\": %s}, "
+        "\"correlation_ground_share\": %g, \"coarse_cell_m\": %g",
+        metres, diskM, n, lo, hi, mean, sd, pv[0], pv[1], pv[2], pv[2] - pv[0], TdNum(s0, 32, sn ? slopeSum / sn : NAN), TdNum(s1, 32, flat),
+        TdNum(s2, 32, steep), sn ? slopeBins[0] / sn : 0, sn ? slopeBins[1] / sn : 0, sn ? slopeBins[2] / sn : 0, sn ? slopeBins[3] / sn : 0,
+        sn ? slopeBins[4] / sn : 0, sn ? slopeBins[5] / sn : 0, sn ? slopeBins[6] / sn : 0, TdNum(s3, 32, sn ? sqrt(lapSum2 / sn) : NAN),
+        TdNum(s4, 32, detail[0]), TdNum(s5, 32, detail[1]), TdNum(s6, 32, detail[2]), TdNum(s7, 32, detail[3]), TdNum(s8, 32, detail[4]),
+        TdNum(s9, 32, relief[0]), TdNum(s10, 32, relief[1]), TdNum(s11, 32, relief[2]), TdNum(s12, 32, reliefP90[0]), TdNum(s13, 32, reliefP90[1]),
+        TdNum(s14, 32, reliefP90[2]), TdLength(s15, 32, corr[0][0]), TdLength(s16, 32, corr[0][1]), TdLength(s17, 32, corr[1][0]), TdLength(s18, 32, corr[1][1]), roughShare, cellM);
+    if (key)
+    {
+        key->set = 1; key->metresPerSample = metres; key->sd = sd; key->flat = flat; key->detail32 = detail[1]; key->detail128 = detail[2];
+        key->corrX = corr[0][0]; key->corrY = corr[0][1]; key->slopeMean = sn ? slopeSum / sn : NAN;
+    }
+}
+
+/* The scatter id table (game+0x3328F60: pointer, count) for ground ids. */
+static uint32_t TdIdTable(uint32_t* out, uint32_t cap)
+{
+    uint64_t at = 0; uint32_t count = 0;
+    uintptr_t g = g_world.game + 0x3328F60u;
+    if (g_world.game == 0 || SafeRead(g, &at, 8) || SafeRead(g + 8, &count, 4) || count == 0 || count > cap || SafeRead(at, out, count * 4u)) return 0;
+    return count;
+}
+
+/* Clamp bars in a packed image, on a grid of at most 1024 x 1024: a sample whose run of equal values is long (1/16 of
+ * the grid) along one axis and short (under 1/128) along the other, the mode value left out. Also the mode and its
+ * share. A share of the grid's samples. */
+static double TdBars(const uint32_t* p, uint32_t w, uint32_t h, uint32_t* modeOut, double* modeShare)
+{
+    uint32_t step = 1; while (w / step > 1024 || h / step > 1024) step++;
+    uint32_t gw = w / step, gh = h / step;
+    static uint32_t g[1024 * 1024]; static uint16_t runX[1024 * 1024], runY[1024 * 1024];
+    static uint32_t values[64]; static uint32_t counts[64];
+    uint32_t distinct = 0;
+    for (uint32_t y = 0; y < gh; y++)
+        for (uint32_t x = 0; x < gw; x++)
+        {
+            uint32_t v = p[(size_t)(y * step) * w + x * step], k = 0;
+            g[(size_t)y * gw + x] = v;
+            for (; k < distinct; k++) if (values[k] == v) { counts[k]++; break; }
+            if (k == distinct && distinct < 64) { values[distinct] = v; counts[distinct++] = 1; }
+        }
+    uint32_t best = 0;
+    for (uint32_t k = 1; k < distinct; k++) if (counts[k] > counts[best]) best = k;
+    *modeOut = distinct ? values[best] : 0;
+    *modeShare = distinct && gw * gh ? (double)counts[best] / ((double)gw * gh) : 0;
+    for (uint32_t y = 0; y < gh; y++) /* run lengths along x, then along y */
+        for (uint32_t x = 0; x < gw;)
+        {
+            uint32_t e = x; while (e < gw && g[(size_t)y * gw + e] == g[(size_t)y * gw + x]) e++;
+            for (uint32_t k = x; k < e; k++) runX[(size_t)y * gw + k] = (uint16_t)(e - x > 65535 ? 65535 : e - x);
+            x = e;
+        }
+    for (uint32_t x = 0; x < gw; x++)
+        for (uint32_t y = 0; y < gh;)
+        {
+            uint32_t e = y; while (e < gh && g[(size_t)e * gw + x] == g[(size_t)y * gw + x]) e++;
+            for (uint32_t k = y; k < e; k++) runY[(size_t)k * gw + x] = (uint16_t)(e - y > 65535 ? 65535 : e - y);
+            y = e;
+        }
+    uint32_t longRun = gw / 16 > 8 ? gw / 16 : 8, shortRun = gw / 128 > 2 ? gw / 128 : 2;
+    size_t bars = 0;
+    for (size_t i = 0; i < (size_t)gw * gh; i++)
+    {
+        if (distinct && g[i] == *modeOut) continue;
+        if ((runX[i] >= longRun && runY[i] < shortRun) || (runY[i] >= longRun && runX[i] < shortRun)) bars++;
+    }
+    return gw * gh ? (double)bars / ((double)gw * gh) : 0;
+}
+
+/* The material mix (u32: weights in bits 0-7 and 8-15, slots at 16/21/26) or the ground ids (density 0-6, weights 7-11
+ * and 12-16, ids at 17/22/27). Rows are flipped (row = h - 1 - v); the disk is symmetric, so it does not matter here. */
+static void TdPacked(const uint32_t* p, uint32_t w, uint32_t h, double diskM, double metres, int ground, char* json, int* len, int size)
+{
+    double cx = w * 0.5, cy = h * 0.5, r = diskM > 0 ? diskM / metres : w * 0.5, r2 = r * r;
+    double cover[32] = {0}, wa = 0, wb = 0, painted = 0, density = 0; size_t n = 0;
+    for (uint32_t y = 0; y < h; y++)
+    {
+        double dy = y + 0.5 - cy;
+        for (uint32_t x = 0; x < w; x++)
+        {
+            double dx = x + 0.5 - cx;
+            if (dx * dx + dy * dy > r2) continue;
+            uint32_t v = p[(size_t)y * w + x];
+            n++;
+            if (!ground)
+            {
+                double a = v & 0xFF, b = (v >> 8) & 0xFF, rest = 255.0 - a - b; if (rest < 0) rest = 0;
+                wa += a; wb += b; if (a + b > 0) painted++;
+                cover[(v >> 16) & 31] += a / 255.0; cover[(v >> 21) & 31] += b / 255.0; cover[(v >> 26) & 31] += rest / 255.0;
+            }
+            else
+            {
+                double w1 = (v >> 7) & 31, w2 = (v >> 12) & 31;
+                density += v & 0x7F;
+                /* the callback picks id 2 for a random 0-31 at or below w2, id 1 at or below w1 + w2, else id 0 */
+                double p2 = w2 ? (w2 + 1) / 32.0 : 0, p1 = w1 ? fmin(1.0 - p2, (w1 + w2 + 1) / 32.0 - p2) : 0, p0 = 1.0 - p2 - (p1 > 0 ? p1 : 0);
+                cover[(v >> 27) & 31] += p2; cover[(v >> 22) & 31] += p1 > 0 ? p1 : 0; cover[(v >> 17) & 31] += p0 > 0 ? p0 : 0;
+            }
+        }
+    }
+    if (!n) return;
+    if (!ground)
+    {
+        /* the most common value (the target's clear value where nothing drew: 0x04000000 at 16 km before the merge fix),
+         * and clamp bars: a shader that samples a lookup past its edge stretches the edge texels into straight bars */
+        uint32_t mode = 0; double modeShare = 0, bars = TdBars(p, w, h, &mode, &modeShare);
+        TdAppend(json, len, size, ", \"in_disk_samples\": %zu, \"painted_share\": %g, \"mode_value\": \"0x%08X\", \"mode_share\": %g, "
+            "\"clamp_bar_share\": %g, \"weight_a_mean\": %g, \"weight_b_mean\": %g, \"slot_cover\": {",
+            n, painted / n, mode, modeShare, bars, wa / n, wb / n);
+        g_td.materialPainted = painted / n; g_td.materialSeen = 1; g_td.materialBars = bars; g_td.materialMode = modeShare;
+    }
+    else
+    {
+        uint32_t table[64]; uint32_t count = TdIdTable(table, 64);
+        TdAppend(json, len, size, ", \"in_disk_samples\": %zu, \"density_mean\": %g, \"id_table\": [", n, density / n);
+        for (uint32_t k = 0; k < count; k++) TdAppend(json, len, size, "%s\"0x%X\"", k ? ", " : "", table[k]);
+        TdAppend(json, len, size, "], \"id_cover\": {");
+        g_td.groundDensity = density / n; g_td.groundSeen = 1;
+    }
+    int first = 1;
+    for (int k = 0; k < 32; k++) if (cover[k] / n >= 0.0005) { TdAppend(json, len, size, "%s\"%d\": %.4f", first ? "" : ", ", k, cover[k] / n); first = 0; }
+    TdAppend(json, len, size, "}");
+}
+
+/* Any other image: value spread (as floats if they look like floats, else as integers) and distinct values. */
+static int TdLooksFloat(const uint32_t* p, size_t samples)
+{
+    size_t finite = 0, step = samples > 65536 ? samples / 65536 : 1, seen = 0;
+    for (size_t i = 0; i < samples; i += step)
+    {
+        float v; memcpy(&v, &p[i], 4); seen++;
+        if (v == v && fabsf(v) < 1e5f && (fabsf(v) > 1e-20f || v == 0.0f)) finite++;
+    }
+    return seen && finite >= seen * 99 / 100;
+}
+
+static void TdDistinct(const uint32_t* p, size_t samples, char* json, int* len, int size)
+{
+    static uint32_t values[64]; static double counts[64];
+    uint32_t distinct = 0, overflow = 0;
+    size_t step = samples > (1u << 20) ? samples / (1u << 20) : 1, seen = 0;
+    for (size_t i = 0; i < samples; i += step)
+    {
+        uint32_t v = p[i], k = 0; seen++;
+        for (; k < distinct; k++) if (values[k] == v) { counts[k]++; break; }
+        if (k == distinct) { if (distinct < 64) { values[distinct] = v; counts[distinct++] = 1; } else overflow = 1; }
+    }
+    TdAppend(json, len, size, ", \"distinct\": %s%u, \"top\": {", overflow ? "\"64+\", \"distinct_counted\": " : "", distinct);
+    for (uint32_t k = 0; k < distinct && k < 12; k++) TdAppend(json, len, size, "%s\"0x%08X\": %.4f", k ? ", " : "", values[k], counts[k] / seen);
+    TdAppend(json, len, size, "}");
+}
+
+static void TdDump(const char* label, const void* data, uint32_t w, uint32_t h, uint32_t bpp, const char* kind, double metres, int flipped)
+{
+    wchar_t name[96];
+    swprintf(name, 96, L"terrain-%ld-%02u-%hs.bin", (long)g_td.level, g_td.images, label);
+    HANDLE file = OpenLog(name);
+    if (file == INVALID_HANDLE_VALUE) return;
+    DWORD wrote = 0;
+    uint64_t bytes = (uint64_t)w * h * bpp, at = 0;
+    while (at < bytes) { DWORD chunk = (DWORD)(bytes - at > 0x40000000u ? 0x40000000u : bytes - at); if (!WriteFile(file, (const uint8_t*)data + at, chunk, &wrote, NULL)) break; at += wrote; }
+    CloseHandle(file);
+    swprintf(name, 96, L"terrain-%ld-%02u-%hs.txt", (long)g_td.level, g_td.images, label);
+    file = OpenLog(name);
+    if (file == INVALID_HANDLE_VALUE) return;
+    char text[400];
+    int n = snprintf(text, sizeof text, "label %s\nkind %s\ncolumns %u\nrows %u\nbytes_per_sample %u\nmetres_per_sample %g\nworld_m %g\ndisk_m %g\nrows_flipped %d\nworld_scale %g\n",
+        label, kind, w, h, bpp, metres, g_td.world, g_td.disk, flipped, (double)g_world.current);
+    WriteFile(file, text, (DWORD)n, &wrote, NULL);
+    CloseHandle(file);
+}
+
+/* The number after key in text (NaN if missing or null). */
+static double TdField(const char* text, const char* key)
+{
+    const char* at = strstr(text, key);
+    if (!at) return NAN;
+    char* end; double v = strtod(at + strlen(key), &end);
+    return end == at + strlen(key) ? NAN : v;
+}
+
+/* Measure one image and add it to the report. data is readable (copied or ours); bpp 2 or 4. */
+static void TdImage(const char* label, const char* source, uint32_t afterOp, uint32_t record, TdKind kind, const void* data, uint32_t w, uint32_t h,
+    uint32_t bpp, double metres, int flipped, TdKey* key)
+{
+    if (data == NULL || w < 16 || h < 16 || w > 16384 || h > 16384) return;
+    char* json = g_td.imagesJson; int* len = &g_td.imagesLen; int size = sizeof g_td.imagesJson;
+    static const char* const kinds[] = {"heights_u16", "heights_f32", "materials", "ground", "zones", "raw"};
+    size_t samples = (size_t)w * h;
+    /* an image already measured this level (same size, same 64 x 64 sample: readbacks lag, so several "after" a pass are
+     * the same target) is noted as the same as the first, not measured or written again; a keyed one always is */
+    uint64_t hash = (0xCBF29CE484222325ull ^ ((uint64_t)w << 32 | h) ^ bpp) * 0x100000001B3ull;
+    for (uint32_t y = 0; y < 64; y++)
+        for (uint32_t x = 0; x < 64; x++)
+        {
+            uint32_t v = 0; memcpy(&v, (const uint8_t*)data + ((size_t)(y * h / 64) * w + x * w / 64) * bpp, bpp);
+            hash = (hash ^ v) * 0x100000001B3ull;
+        }
+    for (uint32_t k = 0; k < g_td.lastDataCount && key == NULL; k++)
+        if (g_td.lastData[k] == hash)
+        {
+            TdAppend(json, len, size, "%s\n    {\"label\": \"%s\", \"source\": \"%s\", \"after_op\": \"0x%02X\", \"after_pass\": \"%s\", \"same_as\": \"%s\"}",
+                g_td.images ? "," : "", label, source, afterOp, TdOpName(afterOp), g_td.lastLabel[k]);
+            g_td.images++;
+            return;
+        }
+    for (uint32_t k = 0; k < g_td.previousDataCount && key == NULL; k++)
+        if (g_td.previousData[k] == hash)
+        {
+            TdAppend(json, len, size, "%s\n    {\"label\": \"%s\", \"source\": \"%s\", \"after_op\": \"0x%02X\", \"after_pass\": \"%s\", \"stale\": true}",
+                g_td.images ? "," : "", label, source, afterOp, TdOpName(afterOp));
+            g_td.images++;
+            Note("terrain diag (level %ld): %s holds the previous level's image (the target was not drawn yet): not measured", (long)g_td.level, label);
+            return;
+        }
+    if (g_td.lastDataCount < 64) { g_td.lastData[g_td.lastDataCount] = hash; snprintf(g_td.lastLabel[g_td.lastDataCount], 48, "%s", label); g_td.lastDataCount++; }
+    if (kind == TD_RAW && bpp == 4 && TdLooksFloat((const uint32_t*)data, samples)) kind = TD_HEIGHTS_F32;
+    LARGE_INTEGER t0, t1, hz; QueryPerformanceCounter(&t0);
+    TdAppend(json, len, size, "%s\n    {\"label\": \"%s\", \"source\": \"%s\", \"after_op\": \"0x%02X\", \"after_pass\": \"%s\", \"record\": %u, \"kind\": \"%s\", "
+        "\"columns\": %u, \"rows\": %u, \"bytes_per_sample\": %u",
+        g_td.images ? "," : "", label, source, afterOp, TdOpName(afterOp), record, kinds[kind], w, h, bpp);
+    int before = *len;
+    if ((kind == TD_HEIGHTS_U16 || kind == TD_HEIGHTS_F32) && TdReserve(samples))
+    {
+        if (kind == TD_HEIGHTS_U16) { const uint16_t* s = (const uint16_t*)data; for (size_t i = 0; i < samples; i++) g_tdField[i] = s[i] / 65535.0f * 1000.0f - 500.0f; }
+        else memcpy(g_tdField, data, samples * 4);
+        TdHeights(w, h, metres, g_td.imageDisk, json, len, size, key);
+    }
+    else if (kind == TD_MATERIALS || kind == TD_GROUND) TdPacked((const uint32_t*)data, w, h, g_td.imageDisk, metres, kind == TD_GROUND, json, len, size);
+    else if (bpp == 4) TdDistinct((const uint32_t*)data, samples, json, len, size);
+    QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
+    TdAppend(json, len, size, ", \"measure_ms\": %.1f}", (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart);
+    /* raw files (level 2): the final images only (the scatter images, the layer heightfield, a tile's, the first capture
+     * of each set), unless HELLFORGE_TERRAIN_DIAG_DUMP=all; each is up to 64 MB */
+    int final = !strncmp(label, "scatter-", 8) || !strncmp(label, "layer-", 6) || !strncmp(label, "tile-", 5) ||
+        (!strncmp(label, "capture", 7) && strlen(label) >= 2 && !strcmp(label + strlen(label) - 2, "-0"));
+    if (g_td.mode >= 2 && (final || g_td.dumpAll)) TdDump(label, data, w, h, bpp, kinds[kind], metres, flipped);
+    g_td.images++;
+    /* a one-line summary in modloader.log, from the JSON just written */
+    char summary[300] = "";
+    double sd = TdField(json + before, "\"sd\": "), flat = TdField(json + before, "\"flat_lt1\": "), d32 = TdField(json + before, "\"detail_sd_m\": {\"8\": ");
+    double r128 = TdField(json + before, "\"relief_m\": {\"32\": "), cx = TdField(json + before, "\"x_512\": "), cy = TdField(json + before, "\"y_512\": ");
+    double painted = TdField(json + before, "\"painted_share\": "), dens = TdField(json + before, "\"density_mean\": "), slope = TdField(json + before, "\"mean_deg\": ");
+    if (sd == sd) snprintf(summary, sizeof summary, "sd %.1f m, slope %.1f deg, flat %.1f%%, detail@8m %.2f m, relief@32m %.2f m, feature length x/y %.0f/%.0f m",
+        sd, slope, 100 * flat, d32, r128, cx, cy);
+    else if (painted == painted)
+        snprintf(summary, sizeof summary, "painted %.2f%%, most common value %.1f%%, clamp bars %.2f%%", 100 * painted,
+            100 * TdField(json + before, "\"mode_share\": "), 100 * TdField(json + before, "\"clamp_bar_share\": "));
+    else if (dens == dens) snprintf(summary, sizeof summary, "density %.1f of 127", dens);
+    /* a capture's smaller mips go to the report only (the first of a set is logged) */
+    if (!strncmp(label, "capture", 7) && !(strlen(label) >= 2 && !strcmp(label + strlen(label) - 2, "-0"))) return;
+    Note("terrain diag (level %ld, %.0fx): %s (%s, after 0x%02X %s): %u x %u at %.2f m: %s", (long)g_td.level, (double)g_world.current, label, source,
+        afterOp, TdOpName(afterOp), w, h, metres, summary);
+}
+
+/* Measure an image the game holds (descriptor {w, h, format, ?, data}). */
+static void TdDescriptor(const char* label, const char* source, uint32_t afterOp, uint32_t record, TdKind kind, uintptr_t descriptor, double metres,
+    int flipped, TdKey* key)
+{
+    uint32_t wh[4] = {0}; uint64_t data = 0;
+    if (SafeRead(descriptor, wh, 16) || SafeRead(descriptor + 0x10, &data, 8) || data < 0x10000 || wh[0] < 16 || wh[1] < 16 || wh[0] > 16384 || wh[1] > 16384) return;
+    uint32_t bpp = wh[2] == 0x16 ? 2 : 4;
+    if (kind == TD_HEIGHTS_U16 && bpp != 2) kind = TD_RAW;
+    if (metres < 0) metres = -metres / wh[0]; /* an extent (m) the image spans */
+    else if (metres == 0) metres = g_td.world / wh[0];
+    size_t bytes = (size_t)wh[0] * wh[1] * bpp;
+    void* copy = VirtualAlloc(NULL, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (copy == NULL) return;
+    if (!SafeRead((uintptr_t)data, copy, bytes)) TdImage(label, source, afterOp, record, kind, copy, wh[0], wh[1], bpp, metres, flipped, key);
+    VirtualFree(copy, 0, MEM_RELEASE);
+}
+
+/* ---- readbacks of the named targets ------------------------------------------------------------------------------ */
+
+typedef uint64_t (*TdFindFn)(uint32_t name);
+typedef uint32_t (*TdRequestFn)(uint64_t target);
+typedef uint8_t (*TdReadyFn)(uint32_t id);
+typedef void* (*TdGetFn)(void* out, uint32_t id);
+
+static uint64_t TdRenderTable(void)
+{
+    uint64_t engine = 0, table = 0;
+    if (SafeRead(g_world.game + 0x3326308u, &engine, 8) || engine == 0 || SafeRead(engine + 0x10, &table, 8)) return 0;
+    return table;
+}
+
+static TdPending* TdRequest(uint32_t hash, TdKind kind, const char* name, uint32_t op, uint32_t record)
+{
+    if (!g_td.readback || g_td.pendingCount >= TD_MAX_PENDING || g_td.readbacks >= 14 || g_td.sessionReadbacks >= 48) return NULL;
+    uint64_t table = TdRenderTable(), find = 0, request = 0;
+    if (table == 0 || SafeRead(table + 0x158, &find, 8) || SafeRead(table + 0x1A8, &request, 8) || !find || !request) return NULL;
+    uint64_t target = ((TdFindFn)(uintptr_t)find)(hash);
+    if (target == 0) { Note("terrain diag (level %ld): no %s target after 0x%02X", (long)g_td.level, name, op); return NULL; }
+    uint32_t id = ((TdRequestFn)(uintptr_t)request)(target);
+    if (id == 0xFFFFFFFFu) return NULL;
+    TdPending* p = &g_td.pending[g_td.pendingCount++];
+    memset(p, 0, sizeof *p);
+    p->id = id; p->hash = hash; p->record = record; p->op = op; p->kind = kind; p->since = GetTickCount64();
+    snprintf(p->label, sizeof p->label, "%s-after-%02X", name, op);
+    g_td.readbacks++; g_td.sessionReadbacks++;
+    return p;
+}
+
+static void TdCollect(void)
+{
+    if (!g_td.pendingCount) return;
+    uint64_t table = TdRenderTable(), ready = 0, get = 0;
+    if (table == 0 || SafeRead(table + 0x1D0, &ready, 8) || SafeRead(table + 0x1D8, &get, 8) || !ready || !get) return;
+    for (uint32_t k = 0; k < g_td.pendingCount;)
+    {
+        TdPending* p = &g_td.pending[k];
+        int done = 0;
+        if (((TdReadyFn)(uintptr_t)ready)(p->id))
+        {
+            uint8_t out[64] = {0};
+            void* descriptor = ((TdGetFn)(uintptr_t)get)(out, p->id);
+            if (descriptor) TdDescriptor(p->label, "readback", p->op, p->record, p->kind, (uintptr_t)descriptor, 0, 1, NULL);
+            done = 1;
+        }
+        else if (GetTickCount64() - p->since > 20000) { Note("terrain diag (level %ld): readback %s never came", (long)g_td.level, p->label); done = 1; }
+        if (done) g_td.pending[k] = g_td.pending[--g_td.pendingCount]; else k++;
+    }
+}
+
+/* Which targets to read back once a pass's last step returns: only while the merge's targets exist (after
+ * SetupTerrainMerge, before CleanupTerrainMerge releases them), the zone lookup once RenderZoneLookup drew it. */
+static void TdScheduleReadbacks(uint32_t op, uint32_t record)
+{
+    if (!g_td.merging) return;
+    switch (op)
+    {
+    case 0x3C: case 0x40: case 0x3E: case 0x3F: case 0x3D: case 0x0D: case 0x63:
+        TdRequest(TD_RT_HEIGHTS, TD_HEIGHTS_U16, "heights", op, record);
+        break;
+    case 0x41:
+        TdRequest(TD_RT_MATERIALS, TD_MATERIALS, "materials", op, record);
+        break;
+    case 0x4C:
+        TdRequest(TD_RT_ZONES, TD_ZONES, "zones", op, record);
+        break;
+    case 0x64:
+        TdRequest(TD_RT_HEIGHTS, TD_HEIGHTS_U16, "heights", op, record);
+        TdRequest(TD_RT_MATERIALS, TD_MATERIALS, "materials", op, record);
+        break;
+    }
+}
+
+/* ---- after a pass ------------------------------------------------------------------------------------------------ */
+
+static void TdPassDone(uint32_t op, uint32_t record, uint64_t recordAt)
+{
+    uintptr_t gen = TdGen();
+    if (op == 0x38) { g_td.merging = 1; TdSettings(recordAt); } /* again: the merge's tiles are set during 0x38 */
+    if (op == 0x66) g_td.merging = 0;
+    if (op == 0x5C && gen != 0)
+    {
+        g_td.captureSets++;
+        for (int k = 0; k < 8; k++)
+        {
+            /* CaptureIntermediateHeightmapFinalize (0xF53870) copies each finished readback's descriptor (the scatter
+             * images' layout) to [pass+0x18] = lg + 0x18 k (lg = G+0x8758A8); the readback ids are at G+0x119FF68+8 */
+            char label[48]; snprintf(label, sizeof label, "capture%u-%d", g_td.captureSets, k);
+            TdDescriptor(label, "merge capture (lg + 0x18 k)", op, record, TD_RAW, gen + TD_IMAGE_BLOCK + 0x18u * (uintptr_t)k, 0, 1, NULL);
+        }
+    }
+    if (op == 0x66 && gen != 0)
+    {
+        TdDescriptor("scatter-heights", "scatter image (lg+0xD8)", op, record, TD_HEIGHTS_U16, gen + TD_IMAGE_BLOCK + 0xD8, 0, 1, &g_td.imageHeights);
+        TdDescriptor("scatter-materials", "scatter image (lg+0xF0)", op, record, TD_MATERIALS, gen + TD_IMAGE_BLOCK + 0xF0, 0, 1, NULL);
+    }
+    if (op == 0xBB)
+    {
+        /* the ground ids (made by op 0x47) once this pass has filled the scatter's id table they index */
+        if (gen != 0) TdDescriptor("scatter-ground", "scatter image (lg+0x108)", op, record, TD_GROUND, gen + TD_IMAGE_BLOCK + 0x108, 0, 1, NULL);
+        float area = 0;
+        if (!SafeRead(g_world.game + 0x3328F6Cu, &area, 4) && area > 0) g_td.scatterRadius = sqrt(area);
+    }
+    if (op == 0x6D && g_heightCopy != NULL && g_heightBytes != 0)
+    {
+        uint32_t dims[2]; float extent[2];
+        memcpy(dims, g_heightField + 0x1C, 8); memcpy(extent, g_heightField + 0x14, 8);
+        if (dims[0] >= 16 && (uint64_t)dims[0] * dims[1] * 4u == g_heightBytes && extent[0] > 0)
+            TdImage("layer-heightfield", "layer heightfield (kept copy)", op, record, TD_HEIGHTS_F32, g_heightCopy, dims[0], dims[1], 4,
+                extent[0] / dims[0], 0, &g_td.finalHeights);
+    }
+    if (g_td.mode >= 2) TdScheduleReadbacks(op, record);
+}
+
+/* ---- the report --------------------------------------------------------------------------------------------------- */
+
+static void TdFlag(const char* code, const char* format, ...)
+{
+    char text[300];
+    va_list arguments; va_start(arguments, format); vsnprintf(text, sizeof text, format, arguments); va_end(arguments);
+    for (char* c = text; *c; c++) if (*c == '"' || *c == '\\') *c = '\'';
+    TdAppend(g_td.flags, &g_td.flagsLen, sizeof g_td.flags, "%s\n    {\"code\": \"%s\", \"text\": \"%s\"}", g_td.flagsLen ? "," : "", code, text);
+    Note("terrain diag (level %ld, %.0fx): FLAG %s: %s", (long)g_td.level, (double)g_world.current, code, text);
+}
+
+static void TdFlags(void)
+{
+    if (!g_td.ended)
+    {
+        TdFlag("incomplete", "generation did not reach its last pass (a FixUnreachableAreas restart or a quit): the figures are partial");
+        return;
+    }
+    const TdKey* k = g_td.finalHeights.set ? &g_td.finalHeights : g_td.imageHeights.set ? &g_td.imageHeights : NULL;
+    if (k)
+    {
+        if (k->metresPerSample > 1.0) TdFlag("resolution", "the terrain has %.2f m per sample (vanilla 0.5): detail finer than %.1f m cannot exist", k->metresPerSample, 2 * k->metresPerSample);
+        if (k->flat == k->flat && k->flat > 0.6) TdFlag("flat", "%.0f%% of the playable disk is flatter than 1 degree", 100 * k->flat);
+        if (k->detail32 == k->detail32 && k->detail32 < 0.3) TdFlag("smooth", "height detail at 32 m is %.2f m (sd of the height less its 32 m mean)", k->detail32);
+        else if (k->detail32 != k->detail32) TdFlag("smooth", "no detail at 32 m can be measured at %.2f m per sample", k->metresPerSample);
+        if (k->corrX == k->corrX && k->corrY == k->corrY)
+        {
+            double x = fabs(k->corrX), y = fabs(k->corrY); /* negative: longer than the search, at least |v| */
+            if (k->corrX < 0 && k->corrY < 0) TdFlag("long-features", "features along both axes are longer than %.0f m once the 512 m trend is gone: no small-scale relief", x);
+            else if (k->corrX < 0 || k->corrY < 0 || x / y > 1.33 || y / x > 1.33)
+                TdFlag("anisotropy", "features are %s%.0f m long along x and %s%.0f m along y: uneven stretching", k->corrX < 0 ? "over " : "", x,
+                    k->corrY < 0 ? "over " : "", y);
+        }
+    }
+    else TdFlag("no-heights", "no heightfield was measured (the layer heightfield and the scatter heights were both missing)");
+    if (g_td.planSpacing > 24.0) TdFlag("stretched-lattice", "the Voronoi lattice's median spacing is %.1f m (16 m at vanilla density): the plan's relief is %.1f x coarser", g_td.planSpacing, g_td.planSpacing / 16.0);
+    if (g_td.materialSeen && g_td.materialPainted < 0.02) TdFlag("unpainted", "%.2f%% of the playable disk has a painted material: no grass or plant records are chosen", 100 * g_td.materialPainted);
+    if (g_td.materialSeen && g_td.materialBars > 0.02)
+        TdFlag("clamped-lookup", "%.1f%% of the material mix is straight bars of one value: a shader samples a lookup past its edge", 100 * g_td.materialBars);
+    if (g_td.tileHeights.set && g_td.tileHeights.slopeMean == g_td.tileHeights.slopeMean && g_td.tileHeights.slopeMean > 25.0)
+        TdFlag("tile-steep", "the terrain tile's mean slope is %.1f degrees (sd %.1f m at %.2f m per sample): its height scale is off",
+            g_td.tileHeights.slopeMean, g_td.tileHeights.sd, g_td.tileHeights.metresPerSample);
+    if (g_td.tileFaultOp)
+        TdFlag("tile-fault", "the terrain tile's op 0x%02X %s faulted at game.dll+0x%llX (address 0x%llX): the tile was abandoned", g_td.tileFaultOp,
+            TdOpName(g_td.tileFaultOp), (unsigned long long)(g_td.tileFaultAt - (uintptr_t)GetModuleHandleW(L"game.dll")), (unsigned long long)g_td.tileFaultData);
+    if (g_td.groundSeen && g_td.groundDensity < 32) TdFlag("sparse-scatter", "the ground ids' mean density is %.1f of 127", g_td.groundDensity);
+    if (g_td.scatterRadius > 0 && g_td.disk > 0 && g_td.scatterRadius < g_td.disk - 1) TdFlag("scatter-cutoff", "scatter stops %.0f m from the centre, inside the %.0f m disk", g_td.scatterRadius, g_td.disk);
+    char zone[8] = ""; GetEnvironmentVariableA("HELLFORGE_XL_ZONE_REPEAT", zone, sizeof zone);
+    if (g_td.world > 2100 && zone[0] != '1') TdFlag("zone-materials-stretched", "zone height materials span the whole %.0f m world once (%.1f x vanilla's texel size)", g_td.world, g_td.world / 2048.0);
+    if (g_td.pendingCount) TdFlag("readbacks-lost", "%u readbacks never came back", g_td.pendingCount);
+}
+
+/* One line per level in terrain-diag-index.tsv (the session's logs), for comparing levels and runs at a glance. */
+static void TdIndexLine(void)
+{
+    HANDLE file = OpenLog(L"terrain-diag-index.tsv");
+    if (file == INVALID_HANDLE_VALUE) return;
+    DWORD wrote;
+    LARGE_INTEGER size = {0};
+    if (GetFileSizeEx(file, &size) && size.QuadPart == 0)
+    {
+        static const char head[] = "level\tcompleted\tworld_m\tmap_type\tmerge_tiles\tplan_spacing_m\tpainted\tmode_share\tclamp_bars\t"
+            "heights_sd_m\tflat_lt1\tslope_deg\tdetail32_m\ttile_sd_m\ttile_slope_deg\tflags\n";
+        WriteFile(file, head, (DWORD)(sizeof head - 1), &wrote, NULL);
+    }
+    char type[24] = "-";
+    const char* t = g_td.settingsLen ? strstr(g_td.settings, "\"map_type_raw\": \"") : NULL;
+    if (t) { t += 17; int i = 0; while (t[i] && t[i] != '"' && i < 23) { type[i] = t[i]; i++; } type[i] = 0; }
+    double tiles = g_td.settingsLen ? TdField(g_td.settings, "\"merge_tiles\": ") : NAN;
+    const TdKey* k = g_td.finalHeights.set ? &g_td.finalHeights : g_td.imageHeights.set ? &g_td.imageHeights : NULL;
+    char line[1024]; int n = 0;
+    char tilesText[16] = "-"; if (tiles == tiles) snprintf(tilesText, sizeof tilesText, "%.0f", tiles);
+    n += snprintf(line + n, sizeof line - n, "%ld\t%d\t%.0f\t%s\t%s\t%.1f\t", (long)g_td.level, g_td.ended, g_td.world, type, tilesText, g_td.planSpacing);
+    if (g_td.materialSeen) n += snprintf(line + n, sizeof line - n, "%.3f\t%.3f\t%.4f\t", g_td.materialPainted, g_td.materialMode, g_td.materialBars);
+    else n += snprintf(line + n, sizeof line - n, "-\t-\t-\t");
+    if (k) n += snprintf(line + n, sizeof line - n, "%.1f\t%.3f\t%.1f\t%.2f\t", k->sd, k->flat, k->slopeMean, k->detail32);
+    else n += snprintf(line + n, sizeof line - n, "-\t-\t-\t-\t");
+    if (g_td.tileHeights.set) n += snprintf(line + n, sizeof line - n, "%.1f\t%.1f\t", g_td.tileHeights.sd, g_td.tileHeights.slopeMean);
+    else n += snprintf(line + n, sizeof line - n, "%s\t-\t", g_td.tileFaultOp ? "fault" : "-");
+    /* the flag codes from the flags JSON */
+    int first = 1;
+    for (const char* f = g_td.flags; (f = strstr(f, "\"code\": \"")) != NULL && n < (int)sizeof line - 40; f++)
+    {
+        f += 9; int i = 0; char code[32];
+        while (f[i] && f[i] != '"' && i < 31) { code[i] = f[i]; i++; } code[i] = 0;
+        n += snprintf(line + n, sizeof line - n, "%s%s", first ? "" : ",", code); first = 0;
+    }
+    n += snprintf(line + n, sizeof line - n, "\n");
+    WriteFile(file, line, (DWORD)n, &wrote, NULL);
+    CloseHandle(file);
+}
+
+static void TdReport(void)
+{
+    if (g_td.reported || g_td.level < 0) return;
+    g_td.reported = 1;
+    if (!g_td.settingsLen) TdSettings(0);
+    TdFlags();
+    wchar_t name[64];
+    swprintf(name, 64, L"terrain-diag-%ld.json", (long)g_td.level);
+    HANDLE file = OpenLog(name);
+    if (file == INVALID_HANDLE_VALUE) return;
+    static char head[1024], ops[96 * 1024];
+    DWORD wrote;
+    int hl = 0, ol = 0;
+    TdAppend(head, &hl, sizeof head, "{\n  \"format\": 1,\n  \"level\": %ld,\n  \"completed\": %s,\n  \"world_scale\": %g,\n  \"world_m\": %g,\n  \"disk_m\": %g,\n  \"scatter_radius_m\": %g,\n  \"records\": %u,\n  \"frames\": %u,\n  \"settings\": ",
+        (long)g_td.level, g_td.ended ? "true" : "false", (double)g_world.current, g_td.world, g_td.disk, g_td.scatterRadius, g_td.records, g_td.frames);
+    WriteFile(file, head, (DWORD)hl, &wrote, NULL);
+    WriteFile(file, g_td.settingsLen ? g_td.settings : "null", (DWORD)(g_td.settingsLen ? g_td.settingsLen : 4), &wrote, NULL);
+    WriteFile(file, ",\n  \"plan\": ", 12, &wrote, NULL);
+    WriteFile(file, g_td.planLen ? g_td.plan : "null", (DWORD)(g_td.planLen ? g_td.planLen : 4), &wrote, NULL);
+    WriteFile(file, ",\n  \"tile_plan\": ", 17, &wrote, NULL);
+    WriteFile(file, g_td.tilePlanLen ? g_td.tilePlan : "null", (DWORD)(g_td.tilePlanLen ? g_td.tilePlanLen : 4), &wrote, NULL);
+    TdAppend(ops, &ol, sizeof ops, ",\n  \"ops\": [");
+    ULONGLONG start = 0;
+    for (uint32_t i = 0; i < g_td.records && i < TD_MAX_RECORDS; i++) if (g_td.ops[i].steps && (!start || g_td.ops[i].first < start)) start = g_td.ops[i].first;
+    int first = 1;
+    for (uint32_t i = 0; i < g_td.records && i < TD_MAX_RECORDS; i++)
+    {
+        const TdOp* o = &g_td.ops[i];
+        if (!o->steps) continue;
+        TdAppend(ops, &ol, sizeof ops, "%s\n    {\"record\": %u, \"op\": \"0x%02X\", \"pass\": \"%s\", \"steps\": %u, \"ms\": %.2f, \"start_ms\": %llu, \"span_ms\": %llu, \"locations\": %d, \"done\": %s}",
+            first ? "" : ",", i, o->op, TdOpName(o->op), o->steps, o->ms, (unsigned long long)(o->first - start), (unsigned long long)(o->last - o->first),
+            (int)o->locAfter - (int)o->locBefore, o->done ? "true" : "false");
+        first = 0;
+    }
+    TdAppend(ops, &ol, sizeof ops, "\n  ],\n  \"images\": [");
+    WriteFile(file, ops, (DWORD)ol, &wrote, NULL);
+    WriteFile(file, g_td.imagesJson, (DWORD)g_td.imagesLen, &wrote, NULL);
+    WriteFile(file, "\n  ],\n  \"flags\": [", 18, &wrote, NULL);
+    WriteFile(file, g_td.flags, (DWORD)g_td.flagsLen, &wrote, NULL);
+    WriteFile(file, "\n  ]\n}\n", 7, &wrote, NULL);
+    CloseHandle(file);
+    Note("terrain diag (level %ld, %.0fx): wrote terrain-diag-%ld.json (%u passes, %u images, %u readbacks)", (long)g_td.level, (double)g_world.current,
+        (long)g_td.level, g_td.records, g_td.images, g_td.readbacks);
+    TdIndexLine();
+}
+
+/* ---- the scatter by cell size (grass, plants, small rocks) ----------------------------------------------------------
+ *
+ * The ScatterSystem asks the callback game+0x137A2A0 (op 0x95's brushes) to fill one cell at a time:
+ * count = fn(cell x, cell y, cell size m, -, out, max, brush) (r9 unused; out at the first stack argument), the cell's centre (x, y) * size in world metres
+ * from the centre; brushes at game+0x3328F90 + 0x2860 * type, the radius^2 it keeps cells inside at
+ * [[brush+0x2858]+0xC]. Measured (t11): it is not asked around the player but in sweeps over the whole world, 16 m
+ * cells, one brush type after another, when a level starts (vanilla D10: ~300k cells, 654k instances; 16 km: ~15.7M
+ * cells over ~60 s, 173M instances). So the figures are per sweep: a sweep ends when no cell has been asked for 5 s,
+ * and one line then gives its cells, filled, instances, past the radius, at the maximum and the time it took, per cell
+ * size and per type (up to 4 sweeps a level). The first cell's line names the caller (the engine's scatter code). */
+static int TerrainDiagOn(void);
+static int TdScatterLayers(char* out, int len);
+static int WorldStreamFirstPlayer(float* xy); /* difficulty_stream.c */
+typedef uint32_t (*TdScatterFn)(int32_t x, int32_t y, int32_t size, void* unused, void* out, uint32_t max, uint8_t* brush);
+static TdScatterFn g_tdScatter;
+#define TD_SCATTER_SIZES 8
+#define TD_SCATTER_TYPES 24
+static struct
+{
+    volatile LONG size[TD_SCATTER_SIZES];
+    volatile LONG64 calls[TD_SCATTER_SIZES], filled[TD_SCATTER_SIZES], instances[TD_SCATTER_SIZES], outside[TD_SCATTER_SIZES],
+        full[TD_SCATTER_SIZES];
+    volatile LONG64 typeCells[TD_SCATTER_TYPES], typeInstances[TD_SCATTER_TYPES];
+    volatile LONG64 last; /* tick of the latest cell */
+    volatile LONG level, firstNoted;
+    ULONGLONG first, since;
+    int sweeps, silentNoted, quietNoted;
+    ULONGLONG sweptAt;
+} g_tdScat;
+
+static uint32_t TdScatterCell(int32_t x, int32_t y, int32_t size, void* unused, void* out, uint32_t max, uint8_t* brush)
+{
+    uint32_t made = g_tdScatter(x, y, size, unused, out, max, brush);
+    int k = 0;
+    for (; k < TD_SCATTER_SIZES; k++)
+    {
+        LONG have = g_tdScat.size[k];
+        if (have == size) break;
+        if (have == 0 && InterlockedCompareExchange(&g_tdScat.size[k], size, 0) == 0) break;
+        if (g_tdScat.size[k] == size) break;
+    }
+    if (k == TD_SCATTER_SIZES) return made;
+    uintptr_t type = ((uintptr_t)brush - (g_world.game + 0x3328F90u)) / 0x2860u;
+    if (InterlockedCompareExchange(&g_tdScat.firstNoted, 1, 0) == 0)
+    {
+        uintptr_t from = (uintptr_t)__builtin_return_address(0), exe = (uintptr_t)GetModuleHandleW(NULL);
+        Note("terrain diag (level %ld): first scatter cell: %ld m at (%ld, %ld), max %u, brush type %lld, made %u; asked from %s+0x%llX",
+            (long)g_world.levels, (long)size, (long)x * size, (long)y * size, max, (long long)(intptr_t)type, made,
+            from >= g_world.game && from < g_world.game + 0x4000000u ? "game.dll" : "exe",
+            (unsigned long long)(from >= g_world.game && from < g_world.game + 0x4000000u ? from - g_world.game : from - exe));
+    }
+    InterlockedExchange64(&g_tdScat.last, (LONG64)GetTickCount64());
+    InterlockedIncrement64(&g_tdScat.calls[k]);
+    if (made) { InterlockedIncrement64(&g_tdScat.filled[k]); InterlockedAdd64(&g_tdScat.instances[k], made); }
+    if (made >= max && max) InterlockedIncrement64(&g_tdScat.full[k]);
+    double cx = (double)x * size, cy = (double)y * size;
+    uintptr_t globals = 0; float r2 = 0;
+    if (!made && !SafeRead((uintptr_t)brush + 0x2858, &globals, 8) && globals && !SafeRead(globals + 0xC, &r2, 4) && cx * cx + cy * cy > r2)
+        InterlockedIncrement64(&g_tdScat.outside[k]);
+    if (type < TD_SCATTER_TYPES) { InterlockedIncrement64(&g_tdScat.typeCells[type]); if (made) InterlockedAdd64(&g_tdScat.typeInstances[type], made); }
+    return made;
+}
+
+static void TdScatterReport(void)
+{
+    if (g_tdScatter == NULL || g_tdScat.level != g_world.levels) return;
+    ULONGLONG now = GetTickCount64(), last = (ULONGLONG)g_tdScat.last;
+    if (g_tdScat.first == 0)
+    {
+        if (last != 0) { g_tdScat.first = last; return; }
+        /* after the sweeps, one line on the player's view 30 s later (with or without new cells) */
+        if (g_tdScat.sweeps > 0 && !g_tdScat.quietNoted && now - g_tdScat.sweptAt > 30000)
+        {
+            char quiet[2400];
+            g_tdScat.quietNoted = 1;
+            TdScatterLayers(quiet, (int)sizeof quiet);
+            Note("terrain diag (level %ld, %.0fx): scatter 30 s after the last sweep%s", (long)g_world.levels, (double)g_world.current, quiet);
+            return;
+        }
+        /* Silence is a finding too: said once, 90 s into the level. */
+        if (!g_tdScat.silentNoted && !g_tdScat.firstNoted && g_tdScat.since && now - g_tdScat.since > 90000)
+        {
+            g_tdScat.silentNoted = 1;
+            Note("terrain diag (level %ld, %.0fx): no scatter cells asked in 90 s of the level (the CPU scatter callback was never called)",
+                (long)g_world.levels, (double)g_world.current);
+        }
+        return;
+    }
+    if (now - last < 5000 || g_tdScat.sweeps >= 4) return;
+    char line[3200]; int n = 0;
+    n += snprintf(line + n, sizeof line - n, "terrain diag (level %ld, %.0fx): scatter sweep %d, %.1f s:", (long)g_world.levels,
+        (double)g_world.current, g_tdScat.sweeps + 1, (double)(last - g_tdScat.first) / 1000.0);
+    /* by cell size, smallest first */
+    int order[TD_SCATTER_SIZES], m = 0;
+    for (int k = 0; k < TD_SCATTER_SIZES; k++) if (g_tdScat.size[k]) order[m++] = k;
+    for (int i = 1; i < m; i++) for (int j = i; j > 0 && g_tdScat.size[order[j]] < g_tdScat.size[order[j - 1]]; j--) { int t = order[j]; order[j] = order[j - 1]; order[j - 1] = t; }
+    for (int i = 0; i < m && n < (int)sizeof line - 200; i++)
+    {
+        int k = order[i];
+        LONG64 calls = InterlockedExchange64(&g_tdScat.calls[k], 0), filled = InterlockedExchange64(&g_tdScat.filled[k], 0),
+            made = InterlockedExchange64(&g_tdScat.instances[k], 0), outside = InterlockedExchange64(&g_tdScat.outside[k], 0),
+            full = InterlockedExchange64(&g_tdScat.full[k], 0);
+        if (!calls) continue;
+        n += snprintf(line + n, sizeof line - n, " | %ld m: %lld cells, %.0f%% filled, %lld instances, %.0f%% past the radius, %.1f%% full",
+            (long)g_tdScat.size[k], (long long)calls, 100.0 * filled / calls, (long long)made, 100.0 * outside / calls, 100.0 * full / calls);
+    }
+    n += snprintf(line + n, sizeof line - n, " | by type (instances/cells):");
+    for (int t = 0; t < TD_SCATTER_TYPES && n < (int)sizeof line - 32; t++)
+    {
+        LONG64 v = InterlockedExchange64(&g_tdScat.typeInstances[t], 0), c = InterlockedExchange64(&g_tdScat.typeCells[t], 0);
+        if (c) n += snprintf(line + n, sizeof line - n, " %d:%lld/%lld", t, (long long)v, (long long)c);
+    }
+    if (n < (int)sizeof line - 64) n += TdScatterLayers(line + n, (int)sizeof line - n);
+    Note("%s", line);
+    g_tdScat.sweeps++;
+    g_tdScat.sweptAt = now;
+    g_tdScat.first = 0;
+    InterlockedExchange64(&g_tdScat.last, 0);
+}
+
+/* The engine's scatter update (exe+0x212F10, the callback's caller at +0x21347C), per frame and scatter layer
+ * (r9 = the layer): the camera's view (rdx +0x20 position, a distance from [layer+0x5C]) picks quadtree nodes
+ * ([[layer+0x40]+0x88], 0xE0 each, count +0x90; cells x/y at node +0x50/+0x54, cell size [layer+0x22C]); each cell is
+ * looked up in a hash cache ([layer+0x10] entries of 0x30: +0 key, +8 instance count, +0x10 instances, +0x28 next;
+ * [layer+0x24] buckets, [layer+0x8] entries, [layer+0x20] in use), and cells not cached ([[layer+0x40]+0x108], count
+ * +0x110) are generated through the callback. The wrapper keeps the layers it sees (up to 24) and the sweep line
+ * reports each layer's cache use and node counts. */
+typedef void (*TdScatterUpdateFn)(void* a, uint8_t* view, uint32_t c, uint8_t* layer, void* e, void* f, void* g, void* h);
+static TdScatterUpdateFn g_tdScatterUpdate;
+static uint8_t* volatile g_tdScatLayers[24];
+static volatile LONG64 g_tdScatUpdates, g_tdScatNodesMax, g_tdScatMissMax;
+static float g_tdScatView[4]; /* the view at the most nodes: +0x20, +0x24 (its distance), +0x28, +0x278 */
+/* the player's view (any other than the generator's): its last frustum box (+0x274, min xyz then max xyz) and, per
+ * layer slot, the most nodes in view and uncached cells it asked */
+static volatile LONG g_tdScatCellMin[2] = {0x7FFFFFFF, 0x7FFFFFFF}, g_tdScatCellMax[2] = {-0x7FFFFFFF, -0x7FFFFFFF}; /* the player view's node cells, m */
+static volatile LONG64 g_tdScatLayerNodes[24], g_tdScatLayerMiss[24];
+static uintptr_t g_tdScatViewFlags;
+
+static LONG64 g_tdScatSkipped;
+static int g_tdScatHooked;
+/* The far-scatter bake on extra large maps (load time; the user chose this cut, 2026-11-05): while the level's
+ * RenderFarScatter (op 0x4A) is its current record, its 64 phase-B tile views (camera B: near 1, far 1001, aspect 1;
+ * view +0x20, +0x24, +0x278, read by 0x212F8D / 0x212FD0) are left out of the engine's scatter update. Each skipped
+ * call is one layer of one view, and its return value is unused (0x210DEA). At 16 km each tile view asked ~253k cells of
+ * 256 lattice candidates (~0.33 s a tile, ~21 s for the bake) and kept their records all mission (~3.5 GB). What changes:
+ * the SpeedTree grass no longer draws into scatter_density (17 vegetation templates have a scatter_density_bake pass),
+ * so the far-scatter overlay, shown only within +-1024 m of the centre and there the 16 km bake squeezed 8x, loses its
+ * grass density. Placed vegetation and the player's own scatter cells are unchanged; no gameplay effect. Other views
+ * with the same near/far (op 0x0A's water camera) are untouched: the gate is op 0x4A. */
+static int TdScatterBakeView(const uint8_t* view)
+{
+    if (!(g_world.current > 1.0f) || g_genOp != 0x4A) return 0;
+    float v[2] = {0}, aspect = 0;
+    return !SafeRead((uintptr_t)view + 0x20, v, 8) && !SafeRead((uintptr_t)view + 0x278, &aspect, 4) && v[0] == 1.0f && v[1] == 1001.0f && aspect == 1.0f;
+}
+static void TdScatterUpdate(void* a, uint8_t* view, uint32_t c, uint8_t* layer, void* e, void* f, void* g, void* h)
+{
+    if (TdScatterBakeView(view))
+    {
+        static volatile LONG notedLevel = -1;
+        LONG levels = g_world.levels;
+        if (notedLevel != levels && InterlockedExchange(&notedLevel, levels) != levels)
+            Note("difficulty: extra large maps: the far-scatter bake's tile views are left out of the scatter update (op 0x4A, record %ld)", (long)g_genRecord);
+        InterlockedIncrement64(&g_tdScatSkipped);
+        return;
+    }
+    /* research A/B (HELLFORGE_XL_SCATTER_SKIP_GLOBAL=1): the same views at any record */
+    static int skipGlobal = -1;
+    if (skipGlobal < 0) { char t[4] = ""; skipGlobal = GetEnvironmentVariableA("HELLFORGE_XL_SCATTER_SKIP_GLOBAL", t, sizeof t) > 0 && t[0] == '1'; }
+    if (skipGlobal && g_world.current > 1.0)
+    {
+        float v[2] = {0}, aspect = 0;
+        if (!SafeRead((uintptr_t)view + 0x20, v, 8) && !SafeRead((uintptr_t)view + 0x278, &aspect, 4) && v[0] == 1.0f && v[1] == 1001.0f && aspect == 1.0f)
+        {
+            InterlockedIncrement64(&g_tdScatSkipped);
+            return;
+        }
+    }
+    if (!TerrainDiagOn()) { g_tdScatterUpdate(a, view, c, layer, e, f, g, h); return; }
+    g_tdScatterUpdate(a, view, c, layer, e, f, g, h);
+    InterlockedIncrement64(&g_tdScatUpdates);
+    int slot = 0;
+    for (; slot < 24; slot++)
+    {
+        uint8_t* have = g_tdScatLayers[slot];
+        if (have == layer) break;
+        if (have == NULL && InterlockedCompareExchangePointer((void* volatile*)&g_tdScatLayers[slot], layer, NULL) == NULL) break;
+    }
+    uintptr_t tree = 0; uint64_t nodes = 0, misses = 0;
+    if (!SafeRead((uintptr_t)layer + 0x40, &tree, 8) && tree && !SafeRead(tree + 0x90, &nodes, 8) && !SafeRead(tree + 0x110, &misses, 8))
+    {
+        float aspect = 0;
+        if (slot < 24 && !SafeRead((uintptr_t)view + 0x278, &aspect, 4) && aspect != 1.0f)
+        {
+            uintptr_t list = 0; float cell = 0;
+            SafeRead((uintptr_t)layer + 0x22C, &cell, 4);
+            if (!SafeRead(tree + 0x88, &list, 8) && list && nodes <= 4096 && cell >= 1.0f)
+                for (uint64_t i = 0; i < nodes; i++)
+                {
+                    int32_t xy[2];
+                    if (SafeRead(list + i * 0xE0 + 0x50, xy, 8)) break;
+                    for (int d = 0; d < 2; d++)
+                    {
+                        LONG m = (LONG)(xy[d] * cell);
+                        if (m < g_tdScatCellMin[d]) InterlockedExchange(&g_tdScatCellMin[d], m);
+                        if (m > g_tdScatCellMax[d]) InterlockedExchange(&g_tdScatCellMax[d], m);
+                    }
+                }
+            if ((LONG64)nodes > g_tdScatLayerNodes[slot]) InterlockedExchange64(&g_tdScatLayerNodes[slot], (LONG64)nodes);
+            InterlockedAdd64(&g_tdScatLayerMiss[slot], (LONG64)misses);
+        }
+        if ((LONG64)nodes > g_tdScatNodesMax)
+        {
+            InterlockedExchange64(&g_tdScatNodesMax, (LONG64)nodes);
+            SafeRead((uintptr_t)view + 0x20, g_tdScatView, 12); SafeRead((uintptr_t)view + 0x278, &g_tdScatView[3], 4);
+            g_tdScatViewFlags = (uintptr_t)e;
+        }
+        if ((LONG64)misses > g_tdScatMissMax) InterlockedExchange64(&g_tdScatMissMax, (LONG64)misses);
+    }
+}
+
+/* One summary of the layers' caches: in use / entries (buckets), cell size, the view distance factor [+0x5C]. */
+static int TdScatterLayers(char* out, int len)
+{
+    int n = snprintf(out, len, " | update calls %lld (%lld of the generator's view skipped), most nodes in view %lld (view +0x20 %.4g %.4g %.4g, +0x278 %.4g, flags %llX), most uncached %lld,"
+        " scatter layers ([+0x20]/[+0x8]/[+0x24], reach m [+0x5C]):",
+        (long long)InterlockedExchange64(&g_tdScatUpdates, 0), (long long)InterlockedExchange64(&g_tdScatSkipped, 0),
+        (long long)InterlockedExchange64(&g_tdScatNodesMax, 0), (double)g_tdScatView[0], (double)g_tdScatView[1], (double)g_tdScatView[2], (double)g_tdScatView[3], (unsigned long long)g_tdScatViewFlags,
+        (long long)InterlockedExchange64(&g_tdScatMissMax, 0));
+    /* per layer: reach m, then the player view's most nodes / cells asked; the tables' sizes once */
+    uint32_t tableUsed = 0, tableEntries = 0;
+    n += snprintf(out + n, len - n, " layers (reach m: player view nodes/asked):");
+    for (int k = 0; k < 24 && g_tdScatLayers[k] && n < len - 160; k++)
+    {
+        /* the update also runs for objects that are not scatter layers: kept are those with a 16 m-like cell and a reach */
+        uintptr_t l = (uintptr_t)g_tdScatLayers[k];
+        uint32_t entries = 0, used = 0; float cell = 0, reach = 0;
+        SafeRead(l + 0x8, &entries, 4); SafeRead(l + 0x20, &used, 4);
+        SafeRead(l + 0x22C, &cell, 4); SafeRead(l + 0x5C, &reach, 4);
+        if (!(cell >= 1.0f && cell <= 1024.0f && reach > 0.0f && reach < 100000.0f)) continue;
+        tableUsed = used; tableEntries = entries;
+        n += snprintf(out + n, len - n, " %.0f:%lld/%lld", (double)reach,
+            (long long)InterlockedExchange64(&g_tdScatLayerNodes[k], 0), (long long)InterlockedExchange64(&g_tdScatLayerMiss[k], 0));
+    }
+    float at[2] = {0};
+    int players = WorldStreamFirstPlayer(at);
+    if (n < len - 160)
+        n += snprintf(out + n, len - n, "; tables %u/%u | player view cells x %ld..%ld, y %ld..%ld m; player at (%.0f, %.0f)%s", tableUsed, tableEntries,
+            (long)InterlockedExchange(&g_tdScatCellMin[0], 0x7FFFFFFF), (long)InterlockedExchange(&g_tdScatCellMax[0], -0x7FFFFFFF),
+            (long)InterlockedExchange(&g_tdScatCellMin[1], 0x7FFFFFFF), (long)InterlockedExchange(&g_tdScatCellMax[1], -0x7FFFFFFF),
+            (double)at[0], (double)at[1], players ? "" : " (no player)");
+    return n;
+}
+
+/* The scatter system's world box: exe+0x214310 (rcx = the system) sets every layer's grid bounds (0x954D70) from
+ * [sys+0x378] (min xyz) and [sys+0x384] (max xyz), a union of the boxes registered with it (0x215725). The node
+ * selection clamps each view's cells to those bounds, so a box at vanilla's +-1024 m keeps scatter in the middle of a
+ * larger world. Logged per call, up to 6 a level. */
+typedef void (*TdScatterBoundsFn)(uint8_t* sys, void* b, void* c, void* d);
+static TdScatterBoundsFn g_tdScatterBounds;
+static volatile LONG g_tdScatBoundsNotes, g_tdScatBoundsLevel = -1;
+static void TdScatterBounds(uint8_t* sys, void* b, void* c, void* d)
+{
+    if (g_tdScatBoundsLevel != g_world.levels) { g_tdScatBoundsLevel = g_world.levels; g_tdScatBoundsNotes = 0; }
+    if (InterlockedIncrement(&g_tdScatBoundsNotes) <= 6)
+    {
+        float box[6] = {0};
+        SafeRead((uintptr_t)sys + 0x378, box, sizeof box);
+        Note("terrain diag (level %ld, %.0fx): scatter world box (%.0f, %.0f, %.0f)..(%.0f, %.0f, %.0f) applied to the layers' grids",
+            (long)g_world.levels, (double)g_world.current, (double)box[0], (double)box[1], (double)box[2], (double)box[3], (double)box[4], (double)box[5]);
+    }
+    g_tdScatterBounds(sys, b, c, d);
+}
+
+/* The engine's scatter update hook (the bake cut on extra large maps, and the diagnostics' figures); once. */
+static void ScatterBakeInstall(void)
+{
+    if (g_tdScatHooked) return;
+    uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
+    if (!ApiCodeMatches(exe + 0x212F10u, "48 89 5C 24 18 55 56 57 41 55 41 56 48 8D AC 24 E0 CB FF"))
+    {
+        Note("difficulty: extra large maps: the engine's scatter update is not the reviewed one; the far-scatter bake keeps its grass (and no scatter cache figures)");
+        g_tdScatHooked = -1;
+        return;
+    }
+    if (LoaderHook("extra large maps' far-scatter bake views", exe + 0x212F10u, (void*)TdScatterUpdate, (void**)&g_tdScatterUpdate) == 0) g_tdScatHooked = 1;
+    else g_tdScatHooked = -1;
+}
+
+/* Hook the scatter callback (level >= 1); the bytes are checked first. */
+static void TerrainDiagInstall(uintptr_t game)
+{
+    if (!TerrainDiagOn() || g_tdScatter != NULL) return;
+    if (!ApiCodeMatches(game + 0x137A2A0u, "40 55 53 56 57 41 54 41 56 41 57 48 8D AC 24 E0 FE FF FF")) { Note("terrain diag: the scatter callback is not the reviewed one; no scatter figures"); return; }
+    LoaderHook("terrain diag's scatter figures", game + 0x137A2A0u, (void*)TdScatterCell, (void**)&g_tdScatter);
+    uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
+    ScatterBakeInstall();
+    if (ApiCodeMatches(exe + 0x214310u, "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57"))
+        LoaderHook("terrain diag's scatter world box", exe + 0x214310u, (void*)TdScatterBounds, (void**)&g_tdScatterBounds);
+}
+
+/* ---- the hooks ------------------------------------------------------------------------------------------------------ */
+
+static int TerrainDiagOn(void)
+{
+    if (g_td.mode < 0)
+    {
+        char text[16] = "";
+        g_td.mode = GetEnvironmentVariableA("HELLFORGE_TERRAIN_DIAG", text, sizeof text) > 0 ? atoi(text) : 0;
+        if (g_td.mode < 0 || g_td.mode > 2) g_td.mode = 0;
+        char rb[16] = "";
+        g_td.readback = g_td.mode >= 2 && !(GetEnvironmentVariableA("HELLFORGE_TERRAIN_DIAG_READBACK", rb, sizeof rb) > 0 && !_stricmp(rb, "off"));
+        char dump[16] = "";
+        g_td.dumpAll = GetEnvironmentVariableA("HELLFORGE_TERRAIN_DIAG_DUMP", dump, sizeof dump) > 0 && !_stricmp(dump, "all");
+        if (g_td.mode) Note("terrain diag: on (level %d%s%s): a report per level in terrain-diag-<level>.json", g_td.mode, g_td.readback ? ", with readbacks" : "",
+            g_td.mode >= 2 ? (g_td.dumpAll ? ", every image's raw file" : ", the final images' raw files") : "");
+    }
+    return g_td.mode > 0;
+}
+
+/* Before the dispatcher runs a step: the record and its op, the clock. */
+static void TerrainDiagBefore(uint64_t records, uint64_t index, uint32_t end, uint32_t* at, uint32_t* op)
+{
+    *at = 0xFFFFFFFFu; *op = 0xFFFFFFFFu;
+    if (!TerrainDiagOn() || g_worldLevel == 0) return;
+    if (SafeRead(index, at, 4) || SafeRead(records + (uint64_t)*at * 0x19B0u, op, 4)) { *at = 0xFFFFFFFFu; return; }
+    AcquireSRWLockExclusive(&g_td.lock);
+    if (g_td.level != g_world.levels) { if (g_td.level >= 0 && !g_td.reported) TdReport(); TdLevelReset(); }
+    if (end && end <= TD_MAX_RECORDS) { g_td.end = end; if (end > g_td.records) g_td.records = end; }
+    if (*at < TD_MAX_RECORDS)
+    {
+        TdOp* o = &g_td.ops[*at];
+        ULONGLONG now = GetTickCount64();
+        if (!o->steps) { o->first = now; o->op = *op; uintptr_t gen = TdGen(); if (gen) SafeRead(gen + 0x11A7108u, &o->locBefore, 4); }
+        o->last = now;
+        if (*at + 1 > g_td.records) g_td.records = *at + 1;
+    }
+    /* the plan as the first merge begins (the drop suggestion's moment: the generation's resources are still alive) */
+    if (*op == 0x38 && !g_td.planned) { g_td.planned = 1; TdSettings(records + (uint64_t)*at * 0x19B0u); TdPlan(); }
+    TdCollect();
+    ReleaseSRWLockExclusive(&g_td.lock);
+    QueryPerformanceCounter(&g_td.stepStart);
+}
+
+/* After it: the step's time; a record whose index moved on is done. */
+static void TerrainDiagAfter(uint64_t records, uint64_t index, uint32_t at, uint32_t op)
+{
+    if (at == 0xFFFFFFFFu || g_td.mode <= 0) return;
+    LARGE_INTEGER now, hz; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&hz);
+    uint32_t after = at;
+    SafeRead(index, &after, 4);
+    AcquireSRWLockExclusive(&g_td.lock);
+    if (g_td.level == g_world.levels && at < TD_MAX_RECORDS)
+    {
+        TdOp* o = &g_td.ops[at];
+        o->steps++;
+        o->ms += (double)(now.QuadPart - g_td.stepStart.QuadPart) * 1000.0 / (double)hz.QuadPart;
+        if (after != at && !o->done)
+        {
+            o->done = 1;
+            uintptr_t gen = TdGen(); if (gen) SafeRead(gen + 0x11A7108u, &o->locAfter, 4);
+            TdPassDone(op, at, records + (uint64_t)at * 0x19B0u);
+            if (g_td.end && after >= g_td.end) { g_td.ended = 1; g_td.endedAt = GetTickCount64(); }
+        }
+    }
+    ReleaseSRWLockExclusive(&g_td.lock);
+}
+
+/* A terrain tile's heights (difficulty_world.c, after the tile's own merge): measured over the whole image. */
+static void TerrainDiagTile(const char* label, const void* data, uint32_t w, uint32_t h, uint32_t bpp, double metres)
+{
+    if (!TerrainDiagOn()) return;
+    AcquireSRWLockExclusive(&g_td.lock);
+    if (g_td.level == g_world.levels && !g_td.reported)
+    {
+        g_td.imageDisk = -1.0;
+        TdImage(label, "terrain tile", 0x5C, 0, bpp == 2 ? TD_HEIGHTS_U16 : TD_HEIGHTS_F32, data, w, h, bpp, metres, 0, &g_td.tileHeights);
+        g_td.imageDisk = g_td.disk;
+    }
+    ReleaseSRWLockExclusive(&g_td.lock);
+}
+
+static double g_tdTileExtent;
+
+/* The edge points RenderHeightmapVoronoi's second phase draws (G+0xEE10C8, 0x90 each: up to 16 edge pointers, then x,
+ * y, height at +0x80): how many, their extent, and where their edge pointers lead (this block, another block, else). */
+static void TdEdgePoints(const char* what, uintptr_t block, uintptr_t other)
+{
+    uint32_t n = 0, empty = 0, inBlock = 0, inOther = 0, elsewhere = 0;
+    float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+    for (uint32_t i = 0; i < 16384 && empty < 64; i++)
+    {
+        uint8_t e[0x90];
+        if (SafeRead(block + 0xEE10C8u + 0x90u * (uintptr_t)i, e, sizeof e)) break;
+        float v[3]; memcpy(v, e + 0x80, 12);
+        uint64_t first; memcpy(&first, e, 8);
+        if (first == 0 && v[0] == 0 && v[1] == 0) { empty++; continue; }
+        empty = 0; n++;
+        for (int k = 0; k < 3; k++) { if (v[k] < lo[k]) lo[k] = v[k]; if (v[k] > hi[k]) hi[k] = v[k]; }
+        for (int k = 0; k < 16; k++)
+        {
+            uint64_t q; memcpy(&q, e + 8 * k, 8);
+            if (q == 0) continue;
+            if (q >= block && q < block + GEN_BLOCK_SIZE) inBlock++;
+            else if (other && q >= other && q < other + GEN_BLOCK_SIZE) inOther++;
+            else elsewhere++;
+        }
+    }
+    Note("terrain diag (level %ld): %s edge points (G+EE10C8): %u, x %.1f..%.1f, y %.1f..%.1f, h %.4f..%.4f; edge pointers: %u into this block, %u into the %s, %u elsewhere",
+        (long)g_td.level, what, n, n ? lo[0] : 0, n ? hi[0] : 0, n ? lo[1] : 0, n ? hi[1] : 0, n ? lo[2] : 0, n ? hi[2] : 0, inBlock, inOther,
+        other == TdGen() ? "level's block" : "tile's block", elsewhere);
+    /* the edge-point index ranges RenderHeightmapVoronoi's second phase draws: each route cell's [+0xA0, +0xA4)
+     * (G+0x8EB328, 0x110 each, count G+0x11A71C0), and how many of the points they name lie in [0, extent] */
+    uint32_t cells = 0; SafeRead(block + 0x11A71C0u, &cells, 4);
+    uint32_t rlo = 0xFFFFFFFFu, rhi = 0, named = 0, local = 0, bad = 0;
+    double extent = block == TdGen() ? g_td.world : g_tdTileExtent;
+    for (uint32_t c = 0; c < cells && c < 16384; c++)
+    {
+        uint32_t r[2];
+        if (SafeRead(block + 0x8EB328u + 0x110u * (uintptr_t)c + 0xA0u, r, 8)) break;
+        if (r[1] < r[0] || r[1] - r[0] > 4096 || r[1] > 16384) { bad++; continue; }
+        if (r[0] < rlo) rlo = r[0];
+        if (r[1] > rhi) rhi = r[1];
+        for (uint32_t i = r[0]; i < r[1]; i++)
+        {
+            float v[2];
+            if (SafeRead(block + 0xEE10C8u + 0x90u * (uintptr_t)i + 0x80u, v, 8)) break;
+            named++;
+            if (v[0] >= -1.0f && v[0] <= extent + 1.0 && v[1] >= -1.0f && v[1] <= extent + 1.0) local++;
+        }
+    }
+    Note("terrain diag (level %ld): %s route cells %u: edge-point ranges %u..%u (%u bad), %u points named, %u within [0, %.0f m]",
+        (long)g_td.level, what, cells, rlo == 0xFFFFFFFFu ? 0 : rlo, rhi, bad, named, local, extent);
+}
+
+/* A terrain tile pass faulted (difficulty_world.c's guard): the tile was abandoned. */
+static void TerrainDiagTileFault(uint32_t op, uintptr_t at, uintptr_t data)
+{
+    if (!TerrainDiagOn()) return;
+    AcquireSRWLockExclusive(&g_td.lock);
+    if (g_td.level == g_world.levels) { g_td.tileFaultOp = op ? op : 0xFF; g_td.tileFaultAt = at; g_td.tileFaultData = data; }
+    ReleaseSRWLockExclusive(&g_td.lock);
+}
+
+/* A terrain tile's Voronoi (difficulty_world.c, once its CPU passes ran on a copy of the generation block). */
+static void TerrainDiagTilePlan(uintptr_t block, double extent)
+{
+    if (!TerrainDiagOn()) return;
+    g_tdTileExtent = extent;
+    AcquireSRWLockExclusive(&g_td.lock);
+    if (g_td.level == g_world.levels && !g_td.reported)
+    {
+        TdPlanFrom(block, extent, 1, g_td.tilePlan, &g_td.tilePlanLen, sizeof g_td.tilePlan);
+        TdEdgePoints("tile", block, TdGen());
+        TdEdgePoints("level", TdGen(), block);
+    }
+    ReleaseSRWLockExclusive(&g_td.lock);
+}
+
+/* Every game frame (packages.c): collect readbacks, count frames, write the report once generation is over. */
+static void TerrainDiagTick(void)
+{
+    if (g_td.mode <= 0) return;
+    if (g_tdScatter != NULL)
+    {
+        if (g_tdScat.level != g_world.levels)
+        {
+            for (int k = 0; k < TD_SCATTER_SIZES; k++)
+                g_tdScat.calls[k] = g_tdScat.filled[k] = g_tdScat.instances[k] = g_tdScat.outside[k] = g_tdScat.full[k] = 0;
+            for (int t = 0; t < TD_SCATTER_TYPES; t++) g_tdScat.typeInstances[t] = g_tdScat.typeCells[t] = 0;
+            g_tdScat.first = 0; g_tdScat.last = 0; g_tdScat.sweeps = 0; g_tdScat.firstNoted = 0; g_tdScat.silentNoted = 0; g_tdScat.quietNoted = 0;
+            g_tdScat.since = GetTickCount64(); g_tdScat.level = g_world.levels;
+        }
+        TdScatterReport();
+    }
+    AcquireSRWLockExclusive(&g_td.lock);
+    if (g_td.level == g_world.levels && !g_td.reported)
+    {
+        g_td.frames++;
+        TdCollect();
+        if (g_td.ended && (g_td.pendingCount == 0 || GetTickCount64() - g_td.endedAt > 20000)) TdReport();
+    }
+    ReleaseSRWLockExclusive(&g_td.lock);
+}

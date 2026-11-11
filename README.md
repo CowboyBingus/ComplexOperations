@@ -419,7 +419,10 @@ Pelican), which are not in this folder.
 | `tests/registry_test.c` | The list's move in each build, run through the game's loads; refusal on changed code or a card in the list, rollback of a failed write. |
 | `tests/ui_test.c` | The guards for four, the map's move with the state, the HUD's and tags' move at the HUD's init, refusal on changed code and rollback of a failed write. |
 | `tests/engine_test.c` | The engine's sites: written, refused on changed code, taken back on a failed write. |
+| `src/xl/` | The extra large world, built into the DLL but not installed: nothing calls `CoXlInstall`. |
+| `src/xl/proto/` | Its files as copied from a HellForge loader; `README.md` there says from where. Parts of `co_xl.c`. |
 | `src/xl/co_shim.h`, `co_shim.c` | The loader's helpers those files call, over the SDK and the mod's own parts. |
+| `src/xl/co_xl_standin.h` | Stand-ins for the loader's level 11 install those files read. To be replaced. |
 | `tests/shim_test.c` | The player list read at the game's offsets, and at the moved ones in a build for eight. |
 | `tests/harness/` | The stand-in loader and game image the tests run against. |
 

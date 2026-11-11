@@ -87,6 +87,9 @@ int co_seats_on(void);
 uint32_t co_seat_node(uintptr_t entity, uint32_t seat);
 void co_boosters_update(uintptr_t b);
 
+/* The extra large world (xl/co_xl.c): every install of it, NULL or why one refused. Not called yet. */
+const char* CoXlInstall(uintptr_t game);
+
 /* Whether an operation is a complex operation (co_roll.c): the same answer on every peer, from the operation record's
  * seed and planet. `chance_65536` is the chance in 1/65536; 65536 and above is always. */
 int co_complex_roll(uint32_t operation_seed, uint32_t planet, uint32_t chance_65536);
