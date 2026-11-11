@@ -97,4 +97,21 @@ int co_complex_roll(uint32_t operation_seed, uint32_t planet, uint32_t chance_65
 uint32_t co_seed_marked(uint32_t mission_seed, int complex);
 int co_seed_is_complex(uint32_t mission_seed);
 
+/* The complex part of the mod (co_complex.c): what it needs, and what a machine does with a level-11 mission. */
+#define CO_COMPLEX_LEVEL 11u
+#define CO_COMPLEX_CHANCE 16384u     /* in 1/65536: one level-11 operation in four */
+#define CO_COMPLEX_COMMIT_MB 28672u  /* commit an extra large map was measured to reach */
+typedef struct CoComplexNeeds
+{
+    int capacity_call, regions, live_load, capacity_granted; /* at the mod's start */
+    int level_11, moved, stock_stubs, own_sites;             /* at game load */
+    uint32_t commit_free_mb;
+} CoComplexNeeds;
+enum { CO_HOST_ROW_NONE, CO_HOST_ROW_OFF, CO_HOST_ROW_ON };
+enum { CO_MISSION_NORMAL, CO_MISSION_COMPLEX, CO_MISSION_LEAVE };
+const char* co_complex_refusal(const CoComplexNeeds* needs);
+int co_complex_decision(int is_host, int own_on, int host_row, uint32_t mission_seed);
+int co_complex_stays(int own_on, int host_row);
+uint32_t co_complex_entry_seed(uint32_t mission_seed, uint32_t difficulty, uint32_t operation_seed, uint32_t planet, int rolls);
+
 #endif
