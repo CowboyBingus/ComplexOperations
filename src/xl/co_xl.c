@@ -27,6 +27,7 @@
 #include "co_weld.h"
 #include "co_weld_sites.h"
 #include "co_pocket.h"
+#include "co_status.h"
 
 /* Seven of the copied files' functions were called from loader code that did not come along (the watch thread, the
  * ship's level change, the density rules of a later branch); they are unused until their callers are written. */
@@ -86,6 +87,7 @@ static uint32_t IndexQueryClamped(uint64_t index, uint32_t key, uint32_t mode, u
 static void CoXlTick(HfMod* mod, float dt, void* user)
 {
     (void)mod; (void)user;
+    StatusWatch(g_difficultyGame); /* the registry's hash, should the game have made the registry only now */
     WorldStreamTick(dt);
     NetPatienceTick();
     TerrainDiagTick();

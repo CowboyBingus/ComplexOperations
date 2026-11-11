@@ -10,6 +10,7 @@
 #include "xl/co_beside_sites.h"
 #include "xl/co_stamp_sites.h"
 #include "xl/co_weld_sites.h"
+#include "xl/co_status_sites.h"
 #include "xl/co_pocket_sites.h"
 #include "xl/co_marker_sites.h"
 
@@ -65,6 +66,8 @@ void fake_stock_chains(uint8_t* image, float disk)
     /* and its structured step the weld's pool of 576 blocks, in the game's weld */
     for (size_t i = 0; i < sizeof kCoWeldValues / sizeof kCoWeldValues[0]; i++) memcpy(image + kCoWeldValues[i].rva, kCoWeldValues[i].stock, kCoWeldValues[i].length);
     for (int i = 0; i < 3; i++) memcpy(image + kCoWeldFull[i].rva, kCoWeldFull[i].bytes, kCoWeldFull[i].length);
+    /* the status volumes' unit registry is the game's: HellForge has no step there */
+    for (int i = 0; i < CO_STATUS_SITES; i++) memcpy(image + kCoStatusSites[i].rva, kCoStatusSites[i].pin, kCoStatusSites[i].length);
     /* FixUnreachableAreas is the game's but for the restart step above */
     for (int i = 0; i < 3; i++) memcpy(image + kCoPocketSites[i].rva, kCoPocketSites[i].bytes, kCoPocketSites[i].length);
     for (size_t i = 0; i < sizeof kCoPocketPins / sizeof kCoPocketPins[0]; i++) memcpy(image + kCoPocketPins[i].rva, kCoPocketPins[i].bytes, kCoPocketPins[i].length);

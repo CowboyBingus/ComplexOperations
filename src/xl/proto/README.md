@@ -66,6 +66,7 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
 | `difficulty_world.c` | The install goes on, behind the chains, with `../co_pocket.c`: FixUnreachableAreas' pocket search, component list and reconnect for a complex level. |
 | `difficulty_world.c`, `difficulty_world_gates.c` | Sites HellForge's level 11 has a step at (`../co_beside.c`): the thinning runs in front of its merge stub, the mine list and the records' store keep its guards, and the city gates' pins accept its jumps. |
 | `difficulty_world.c`, `difficulty_world_arcs.c` | The objective fill's list is made by `../co_objectives.c` from the selection: within the reported places, a mission's primaries as whole blocks. The arcs take such a list's blocks from it. `ObjectiveIdCap` moved there. |
+| `difficulty_status.c` | The registry's stubs, list and hash are `../co_status.c`'s (seven sites, all or none, installed by `co_complex_start`); `StatusWatch` is called from the game thread's tick, moves the hash and notes skipped units. |
 
 What the build does instead of an edit:
 

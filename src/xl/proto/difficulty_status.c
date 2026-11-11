@@ -9,133 +9,21 @@
  * (0x13CC4D0: the last list entry into the hole, 0x13CC56F). An operation's three cities passed 4096 units and the
  * game ended 50 s into the mission (s74h). Scratch m347/m347.md (subagent; sites and bytes re-checked by Claude).
  *
- * Larger maps: the hash gets STATUS_HASH places (a zeroed table, installed while the count is 0: pointer, then cap, as
- * readers load the cap first), the list STATUS_LIST places in loader memory through stubs at its five accesses, and the
- * append checks the list's room (0xACF8F0; full: the unit is skipped, 0xACFA48, the loop's next item, with its
- * destruction callback, which is what removes list entries) and the insert a null slot (0xACF966: the entry taken back,
- * skipped). STATUS_LIST stays under the destruction-callback map in the same loop ([0x346D528]+0x52AF88, 0x8000 slots,
- * its own unchecked insert). Skips are counted and noted. */
-#define STATUS_MANAGER 0x347CF20u
-#define STATUS_LIST 24576u
-#define STATUS_HASH 65536u
+ * Larger maps: the hash gets CO_STATUS_HASH places and the list CO_STATUS_LIST places in the mod's memory, through
+ * stubs at every use of the game's list (../co_status.c, which co_complex_start installs: all or none). The append
+ * checks the list's room (0xACF8F0; full: the unit is skipped, 0xACFA48, the loop's next item, with its destruction
+ * callback, which is what removes list entries) and the insert a null slot (0xACF966: the entry taken back, skipped).
+ * CO_STATUS_LIST stays under the destruction-callback map in the same loop ([0x346D528]+0x52AF88, 0x8000 slots, its
+ * own unchecked insert). Skips are counted and noted. */
 
-static const struct { uint32_t site; uint8_t length; uint8_t pin[18]; } kStatusSites[5] = {
-    {0xACF8F0u, 11, {0x45, 0x8B, 0xB8, 0x98, 0x10, 0x13, 0x00, 0x41, 0x8D, 0x47, 0x01}},                       /* count; lea eax, [r15+1] */
-    {0xACF907u, 16, {0x43, 0x89, 0x84, 0xF8, 0x9C, 0x90, 0x12, 0x00, 0x43, 0x89, 0x9C, 0xF8, 0x98, 0x90, 0x12, 0x00}}, /* the append */
-    {0xACF966u, 6, {0x41, 0x89, 0x18, 0x48, 0x8B, 0xCF}},                                                     /* the insert's slot write */
-    {0x69C05Au, 8, {0x41, 0x8B, 0x8C, 0xC1, 0x9C, 0x90, 0x12, 0x00}},                                         /* the hit path's read */
-    {0x13CC56Fu, 18, {0x4C, 0x8B, 0x94, 0xC6, 0x98, 0x90, 0x12, 0x00, 0x33, 0xD2, 0x4C, 0x89, 0x94, 0xFE, 0x98, 0x90, 0x12, 0x00}}}; /* the removal's move */
-
-static uint32_t StatusSkips(void);
-static uint8_t* g_statusStubs;      /* stubs at +0x00, +0x40, +0x80, +0xC0, +0x100; data at +0x180: cap, skips, list */
-static uint64_t* g_statusHash;
-static volatile LONG g_statusState; /* 0 not yet, 1 code in, 2 hash in too, -1 off */
-
-static void StatusRel(uint8_t* at, uintptr_t to) { int32_t rel = (int32_t)((intptr_t)to - (intptr_t)(at + 4)); memcpy(at, &rel, 4); }
-
-static const char* StatusCodeInstall(uintptr_t game)
-{
-    for (int i = 0; i < 5; i++)
-    {
-        uint8_t bytes[18];
-        if (SafeRead(game + kStatusSites[i].site, bytes, kStatusSites[i].length) || memcmp(bytes, kStatusSites[i].pin, kStatusSites[i].length) != 0)
-            return "the status-effect volumes' unit registry is not the reviewed one: an extra large map keeps its 4096 units";
-    }
-    uint8_t* s = AllocateNearGame(game, 0x200);
-    uint64_t* list = (uint64_t*)VirtualAlloc(NULL, STATUS_LIST * 8u, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (s == NULL || list == NULL) return "no memory for the status-effect volumes' unit registry";
-    memset(s, 0xCC, 0x200);
-    uint8_t* data = s + 0x180;
-    uint32_t cap = STATUS_LIST, skips = 0;
-    memcpy(data, &cap, 4); memcpy(data + 4, &skips, 4); memcpy(data + 8, &list, 8);
-    /* S1 (0xACF8F0): mov r15d, [r8+0x131098]; cmp r15d, [cap]; jae +9; lea eax, [r15+1]; jmp 0xACF8FB; lock inc [skips]; jmp 0xACFA48 */
-    uint8_t* p = s;
-    static const uint8_t s1a[] = {0x45, 0x8B, 0xB8, 0x98, 0x10, 0x13, 0x00, 0x44, 0x3B, 0x3D};
-    memcpy(p, s1a, sizeof s1a); StatusRel(p + 10, (uintptr_t)data);
-    static const uint8_t s1b[] = {0x73, 0x09, 0x41, 0x8D, 0x47, 0x01, 0xE9};
-    memcpy(p + 14, s1b, sizeof s1b); StatusRel(p + 21, game + 0xACF8FBu);
-    static const uint8_t s1c[] = {0xF0, 0xFF, 0x05};
-    memcpy(p + 25, s1c, 3); StatusRel(p + 28, (uintptr_t)(data + 4));
-    p[32] = 0xE9; StatusRel(p + 33, game + 0xACFA48u);
-    /* S2 (0xACF907): mov r9, [list]; mov [r9+r15*8+4], eax; mov [r9+r15*8], ebx; jmp 0xACF917 */
-    p = s + 0x40;
-    static const uint8_t s2a[] = {0x4C, 0x8B, 0x0D};
-    memcpy(p, s2a, 3); StatusRel(p + 3, (uintptr_t)(data + 8));
-    static const uint8_t s2b[] = {0x43, 0x89, 0x44, 0xF9, 0x04, 0x43, 0x89, 0x1C, 0xF9, 0xE9};
-    memcpy(p + 7, s2b, sizeof s2b); StatusRel(p + 17, game + 0xACF917u);
-    /* S3 (0xACF966): test r8, r8; jz +11; mov [r8], ebx; mov rcx, rdi; jmp 0xACF96C;
-     *                mov rax, game+0x347CF20; mov rax, [rax]; dec dword [rax+0x131098]; lock inc [skips]; jmp 0xACFA48 */
-    p = s + 0x80;
-    static const uint8_t s3a[] = {0x4D, 0x85, 0xC0, 0x74, 0x0B, 0x41, 0x89, 0x18, 0x48, 0x8B, 0xCF, 0xE9};
-    memcpy(p, s3a, sizeof s3a); StatusRel(p + 12, game + 0xACF96Cu);
-    uint64_t manager = game + STATUS_MANAGER;
-    p[16] = 0x48; p[17] = 0xB8; memcpy(p + 18, &manager, 8);
-    static const uint8_t s3b[] = {0x48, 0x8B, 0x00, 0xFF, 0x88, 0x98, 0x10, 0x13, 0x00, 0xF0, 0xFF, 0x05};
-    memcpy(p + 26, s3b, sizeof s3b); StatusRel(p + 38, (uintptr_t)(data + 4));
-    p[42] = 0xE9; StatusRel(p + 43, game + 0xACFA48u);
-    /* S4 (0x69C05A): mov rcx, [list]; mov ecx, [rcx+rax*8+4]; jmp 0x69C062 */
-    p = s + 0xC0;
-    static const uint8_t s4a[] = {0x48, 0x8B, 0x0D};
-    memcpy(p, s4a, 3); StatusRel(p + 3, (uintptr_t)(data + 8));
-    static const uint8_t s4b[] = {0x8B, 0x4C, 0xC1, 0x04, 0xE9};
-    memcpy(p + 7, s4b, sizeof s4b); StatusRel(p + 12, game + 0x69C062u);
-    /* S5 (0x13CC56F): mov r9, [list]; mov r10, [r9+rax*8]; xor edx, edx; mov [r9+rdi*8], r10; jmp 0x13CC581 */
-    p = s + 0x100;
-    static const uint8_t s5a[] = {0x4C, 0x8B, 0x0D};
-    memcpy(p, s5a, 3); StatusRel(p + 3, (uintptr_t)(data + 8));
-    static const uint8_t s5b[] = {0x4D, 0x8B, 0x14, 0xC1, 0x33, 0xD2, 0x4D, 0x89, 0x14, 0xF9, 0xE9};
-    memcpy(p + 7, s5b, sizeof s5b); StatusRel(p + 18, game + 0x13CC581u);
-    DWORD old;
-    VirtualProtect(s, 0x200, PAGE_EXECUTE_READWRITE, &old); /* +0x180: the skips count, written by the stubs */
-    FlushInstructionCache(GetCurrentProcess(), s, 0x200);
-    g_statusStubs = s;
-    static const uint16_t at[5] = {0x00, 0x40, 0x80, 0xC0, 0x100};
-    for (int i = 0; i < 5; i++)
-    {
-        uint8_t jump[18];
-        memset(jump, 0x90, sizeof jump);
-        jump[0] = 0xE9;
-        int32_t rel = DifficultyJumpRel(game + kStatusSites[i].site, (uintptr_t)(s + at[i])); memcpy(jump + 1, &rel, 4);
-        if (ApiWrite(game + kStatusSites[i].site, jump, kStatusSites[i].length)) return "the status-effect volumes' unit registry could not be enlarged";
-    }
-    return NULL;
-}
-
-/* Polled (DifficultyWatch): the code once, then the hash once the manager exists with its inline table and no units. */
+/* The game thread's tick: the hash once the registry exists with the game's own table, and a note when units were skipped. */
 static void StatusWatch(uintptr_t game)
 {
-    if (g_statusState == 2)
-    {
-        static uint32_t noted;
-        uint32_t skips = StatusSkips();
-        if (skips != noted) { noted = skips; Note("difficulty: the status-effect volumes' unit registry skipped %u units (full)", skips); }
-        return;
-    }
-    if (g_statusState < 0 || !LargerMaps()) return;
-    if (g_statusState == 0)
-    {
-        const char* why = StatusCodeInstall(game);
-        if (why != NULL) { g_statusState = -1; Note("difficulty: %s", why); return; }
-        g_statusState = 1;
-    }
-    uint64_t m = 0, ptr = 0; uint32_t count = 1, cap = 0;
-    if (SafeRead(game + STATUS_MANAGER, &m, 8) || m == 0 || SafeRead(m + 0x129080, &ptr, 8) || SafeRead(m + 0x129088, &cap, 4) ||
-        SafeRead(m + 0x131098, &count, 4) || count != 0 || ptr != m + 0x121080 || cap != 0x1000) return;
-    if (g_statusHash == NULL) g_statusHash = (uint64_t*)VirtualAlloc(NULL, STATUS_HASH * 8u, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (g_statusHash == NULL) { g_statusState = -1; return; }
-    *(volatile uint64_t*)(uintptr_t)(m + 0x129080) = (uint64_t)(uintptr_t)g_statusHash;
-    MemoryBarrier();
-    *(volatile uint32_t*)(uintptr_t)(m + 0x129088) = STATUS_HASH;
-    g_statusState = 2;
-    Note("difficulty: the status-effect volumes' unit registry holds %u units (list) in a hash of %u (was 4096)", STATUS_LIST, STATUS_HASH);
-}
-
-/* The units skipped so far (a full list or hash), for the notes. */
-static uint32_t StatusSkips(void)
-{
-    uint32_t skips = 0;
-    if (g_statusStubs != NULL) memcpy(&skips, g_statusStubs + 0x184, 4);
-    return skips;
+    static uint32_t noted;
+    uint32_t skips = co_status_skips();
+    if (skips != noted) { noted = skips; Note("difficulty: the status-effect volumes' unit registry skipped %u units (full)", skips); }
+    if (co_status_hash(game))
+        Note("difficulty: the status-effect volumes' unit registry holds %u units (list) in a hash of %u (was 4096)", CO_STATUS_LIST, CO_STATUS_HASH);
 }
 
 /* Research (2026-11-04, s74h/s74i): on a city map FinalizeVoronoi's structured weld (0xFBBB20, from 0xF6810F) fails and

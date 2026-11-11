@@ -12,6 +12,7 @@
 #include "xl/co_pages.h"
 #include "xl/co_rows.h"
 #include "xl/co_stamps.h"
+#include "xl/co_status.h"
 #include "xl/co_weld.h"
 #include "xl/co_pocket.h"
 #include "xl/co_markers.h"
@@ -84,7 +85,7 @@ static const char* OwnSites(uintptr_t game)
     const char* why;
     if ((why = co_pages_check(game)) != NULL || (why = co_hud_check(game)) != NULL || (why = co_mark_check(game)) != NULL ||
         (why = co_launch_check(game)) != NULL || (why = co_rows_check(game)) != NULL ||
-        (why = co_join_check(game)) != NULL || (why = co_drain_check(game)) != NULL) return why;
+        (why = co_join_check(game)) != NULL || (why = co_drain_check(game)) != NULL || (why = co_status_check(game)) != NULL) return why;
     return NULL;
 }
 
@@ -165,6 +166,7 @@ int co_complex_start(void)
     if ((why = co_rows_install(g_capacity.game)) == NULL && (why = co_drain_install(g_capacity.game)) == NULL &&
         (why = co_join_install(g_capacity.game)) == NULL && (why = co_nav_install(g_capacity.game)) == NULL &&
         (why = co_stamps_install(g_capacity.game)) == NULL && (why = co_weld_install(g_capacity.game)) == NULL &&
+        (why = co_status_install(g_capacity.game)) == NULL &&
         (why = CoXlInstall(g_capacity.game)) == NULL && (why = co_mark_install(g_capacity.game)) == NULL) why = co_launch_install(g_capacity.game);
     if (why == NULL) return 1;
     g_capacity.on = 0; /* what did go in runs the game's own code on every level: nothing is complex without the mark */
