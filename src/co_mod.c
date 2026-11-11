@@ -26,7 +26,9 @@ static void CapacityTick(HfMod* mod, float dt, void* user)
 {
     (void)mod; (void)dt; (void)user;
     static int done;
-    if (!done) done = co_capacity_poll(GetTickCount64());
+    const uint64_t now = GetTickCount64();
+    if (!done && (done = co_capacity_poll(now)) != 0) co_complex_start(); /* nothing of the extra large world goes in while it is off */
+    co_peers_tick(now);
 }
 
 static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
@@ -41,6 +43,8 @@ static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
     co_avatars_install(game);
     co_session_install(game);
     co_engine_install(g_coApi->module_base("helldivers2.exe", &size));
+    co_capacity_game(game);
+    co_peers_start(game);
     if (g_coApi->size < offsetof(HfApi, on_game_thread) + sizeof(void*) || g_coApi->on_game_thread(g_coMod, CapacityTick, NULL) == 0) co_log("complex operations are off: the game thread's callback was refused");
 }
 

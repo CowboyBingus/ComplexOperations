@@ -43,12 +43,19 @@ static uint64_t FillDetour(uint64_t a, uint64_t b, uint64_t settings, uint64_t d
     return result;
 }
 
-const char* co_mark_install(uintptr_t game)
+const char* co_mark_check(uintptr_t game)
 {
     uint8_t now[sizeof kFill];
-    if (g_fill != NULL) return NULL;
     if (g_coApi->read(game + CO_MARK_FILL, now, sizeof now) != 0 || memcmp(now, kFill, sizeof now) != 0)
         return "the mission entry fill is not the game's code this mod was made for";
+    return NULL;
+}
+
+const char* co_mark_install(uintptr_t game)
+{
+    const char* why;
+    if (g_fill != NULL) return NULL;
+    if ((why = co_mark_check(game)) != NULL) return why;
     g_game = game;
     if (g_coApi->hook(g_coMod, game + CO_MARK_FILL, (void*)FillDetour, (void**)&g_fill) != 0) { g_fill = NULL; return "the mission entry fill could not be hooked"; }
     return NULL;

@@ -87,7 +87,7 @@ int co_seats_on(void);
 uint32_t co_seat_node(uintptr_t entity, uint32_t seat);
 void co_boosters_update(uintptr_t b);
 
-/* The extra large world (xl/co_xl.c): every install of it, NULL or why one refused. Not called yet. */
+/* The extra large world (xl/co_xl.c): every install of it, NULL or why one refused. Only co_complex_start calls it. */
 const char* CoXlInstall(uintptr_t game);
 
 /* Whether an operation is a complex operation (co_roll.c): the same answer on every peer, from the operation record's
@@ -124,6 +124,14 @@ uint32_t co_complex_entry_seed(uint32_t mission_seed, uint32_t difficulty, uint3
 #define CO_GEN_LOCATIONS 65024u /* everything placed on an extra large map; also the most HellForge gives */
 #define CO_GEN_WAIT_MS 60000u   /* HellForge installs level 11 up to 20 s after the game loaded */
 void co_capacity_init(void);
+/* game.dll, once it is loaded: with it the poll also asks HellForge's chained steps, the mod's own sites and the
+ * memory. Without it those stay unasked and the part off. */
+void co_capacity_game(uintptr_t game);
+/* What a complex operation still lacks in this build (the list is in co_capacity.c): while 0 the part is never on,
+ * whatever the machine has. */
+#define CO_COMPLEX_COMPLETE 0
+/* Once the part is on: every install of it. 1 when all went in; else the part is off again and the log says why. */
+int co_complex_start(void);
 int co_capacity_poll(uint64_t now_ms);
 /* Whether this machine decides complex operations for the boards it builds: the host when its part is on; a client
  * only with the host's row saying on (its own war table then shows what the host's does). */
@@ -160,6 +168,7 @@ int co_join_decision(int marked, int capability, uint64_t waited_ms);
 void co_peers_start(uintptr_t game);
 void co_peers_tick(uint64_t now_ms);
 const CoReports* co_peers_reports(void);
+const char* co_launch_check(uintptr_t game);
 const char* co_launch_install(uintptr_t game);
 int co_peers_host_row(void); /* CO_HOST_ROW_: as this machine holds it now */
 
@@ -167,6 +176,7 @@ int co_peers_host_row(void); /* CO_HOST_ROW_: as this machine holds it now */
  * entry fill, or says why not; `entry` is the hook's work behind the game's own fill. */
 #define CO_MARK_FILL 0x11E6340u
 #define CO_WAR_OBJECT 0x347CEE8u
+const char* co_mark_check(uintptr_t game); /* NULL when the fill is the game's; reads only */
 const char* co_mark_install(uintptr_t game);
 void co_mark_entry(uintptr_t game, uint32_t slot, uint32_t difficulty, uint32_t operation_seed, uintptr_t entry, int rolls);
 

@@ -130,12 +130,19 @@ static uint64_t LaunchDetour(uint64_t unused, uint64_t out, uint64_t planet, uin
     return g_launch(unused, out, planet, placement, difficulty);
 }
 
-const char* co_launch_install(uintptr_t game)
+const char* co_launch_check(uintptr_t game)
 {
     uint8_t now[sizeof kLaunch];
-    if (g_launch != NULL) return NULL;
     if (g_coApi->read(game + CO_LAUNCH_STRING, now, sizeof now) != 0 || memcmp(now, kLaunch, sizeof now) != 0)
         return "the seed string's build is not the game's code this mod was made for";
+    return NULL;
+}
+
+const char* co_launch_install(uintptr_t game)
+{
+    const char* why;
+    if (g_launch != NULL) return NULL;
+    if ((why = co_launch_check(game)) != NULL) return why;
     g_peers.game = game;
     if (g_coApi->hook(g_coMod, game + CO_LAUNCH_STRING, (void*)LaunchDetour, (void**)&g_launch) != 0) { g_launch = NULL; return "the seed string's build could not be hooked"; }
     return NULL;

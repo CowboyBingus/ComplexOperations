@@ -3,7 +3,11 @@
  * offset of its own: another mod's request moves every array behind it. */
 #include <string.h>
 
+#include <windows.h>
+
 #include "co.h"
+#include "xl/co_normal.h"
+#include "xl/co_pages.h"
 
 /* What the extra large world's code was written for. Stamps, places and the place set are HellForge's own sizes. */
 static const HfGenerationCapacity kWant = {.size = sizeof(HfGenerationCapacity), .locations = CO_GEN_LOCATIONS, .minimap_proxies = 32768u,
@@ -17,8 +21,10 @@ static struct
     CoComplexNeeds needs;
     HfGenerationCapacity have; /* as read with `moved`; zero before */
     uint64_t since;            /* the first poll */
+    uintptr_t game;
     int asked, settled, on;
 } g_capacity;
+static uint32_t g_commitTest; /* tests: the commit to report instead of the machine's */
 
 static int Has(size_t end) { return g_coApi != NULL && g_coApi->size >= end; }
 #define HAS(call) Has(offsetof(HfApi, call) + sizeof(void*))
@@ -53,20 +59,64 @@ void co_capacity_init(void)
     n->regions = RegionsNamed(&have);
 }
 
-/* The complex part's needs as this build can check them: the steps that pin stock's stubs, the mod's own sites and the
- * memory are not in it yet, so it is never on; the log says which of the two it is. */
+void co_capacity_game(uintptr_t game) { g_capacity.game = game; }
+
+/* What this process can still commit, in MB: an extra large map was measured to reach CO_COMPLEX_COMMIT_MB. */
+static uint32_t CommitFree(void)
+{
+    MEMORYSTATUSEX m = {.dwLength = sizeof m};
+    if (g_commitTest != 0) return g_commitTest;
+    if (!GlobalMemoryStatusEx(&m)) return 0;
+    return m.ullAvailPageFile >> 20 > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)(m.ullAvailPageFile >> 20);
+}
+
+/* The mod's own sites: every instruction an install of the complex part changes or hooks is the game's. Reads only. */
+static const char* OwnSites(uintptr_t game)
+{
+    const char* why;
+    if ((why = co_pages_check(game)) != NULL || (why = co_hud_check(game)) != NULL || (why = co_mark_check(game)) != NULL ||
+        (why = co_launch_check(game)) != NULL) return why;
+    return NULL;
+}
+
+/* Every need, then one line when the part is off. What a complex operation lacks in this build, so that it is never on
+ * (CO_COMPLEX_COMPLETE): the chains before HellForge's keyed generator steps and its nav, ship and spawner steps, the
+ * row readers' copies, the distance row's copy, the join gate's detour and the drain of a running preview. */
 static void Settle(void)
 {
-    CoComplexNeeds checked = g_capacity.needs;
-    checked.stock_stubs = checked.own_sites = 1;
-    checked.commit_free_mb = CO_COMPLEX_COMMIT_MB;
-    const char* why = co_complex_refusal(&checked);
+    CoComplexNeeds* n = &g_capacity.needs;
+    const char* site = NULL;
+    const char* why = co_complex_refusal(n);
     g_capacity.settled = 1;
-    g_capacity.on = co_complex_refusal(&g_capacity.needs) == NULL;
-    if (why != NULL) co_log("complex operations are off: %s", why);
+    /* the capacity needs alone say "not this HellForge"; the rest is asked only of a game that can have the part */
+    const int capacity = n->capacity_call && n->regions && !n->live_load && n->capacity_granted && n->level_11 && n->moved;
+    if (capacity && g_capacity.game != 0)
+    {
+        n->stock_stubs = co_radii_check(g_capacity.game) == NULL;
+        n->own_sites = (site = OwnSites(g_capacity.game)) == NULL;
+        n->commit_free_mb = CommitFree();
+        why = co_complex_refusal(n);
+    }
+    else if (capacity) why = NULL; /* no game to ask: the line below says what this build is */
+    g_capacity.on = CO_COMPLEX_COMPLETE && capacity && g_capacity.game != 0 && why == NULL;
+    if (why != NULL && site != NULL && n->stock_stubs) co_log("complex operations are off: %s (%s)", why, site);
+    else if (why != NULL && n->stock_stubs && n->own_sites && capacity && g_capacity.game != 0)
+        co_log("complex operations are off: %s (%u MB can be committed, %u are needed)", why, n->commit_free_mb, CO_COMPLEX_COMMIT_MB);
+    else if (why != NULL) co_log("complex operations are off: %s", why);
     else if (!g_capacity.on)
         co_log("complex operations are off: this build has the map generator's room (%u locations, a block of 0x%X bytes) and makes none yet",
             g_capacity.have.locations, g_capacity.have.block_bytes);
+}
+
+int co_complex_start(void)
+{
+    const char* why;
+    if (!co_complex_on()) return 0;
+    if ((why = CoXlInstall(g_capacity.game)) == NULL && (why = co_mark_install(g_capacity.game)) == NULL) why = co_launch_install(g_capacity.game);
+    if (why == NULL) return 1;
+    g_capacity.on = 0; /* what did go in runs the game's own code on every level: nothing is complex without the mark */
+    co_log("complex operations are off: %s", why);
+    return 0;
 }
 
 int co_capacity_poll(uint64_t now_ms)
@@ -98,3 +148,7 @@ int co_complex_on(void) { return g_capacity.settled && g_capacity.on; }
 uint32_t co_gen_at(int region) { return region >= 0 && region < HF_GEN_REGIONS ? g_capacity.have.regions[region].at : 0; }
 uint32_t co_gen_places(int region) { return region >= 0 && region < HF_GEN_REGIONS ? g_capacity.have.regions[region].places : 0; }
 uint32_t co_gen_block(void) { return g_capacity.have.block_bytes; }
+
+#ifdef CO_TEST
+void co_capacity_test_commit(uint32_t mb) { g_commitTest = mb; }
+#endif
