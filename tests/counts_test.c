@@ -13,7 +13,8 @@
  * keeps four and the rest goes in. A build for eight takes four players while the managers have four slots. The clan records' and the clan station's
  * handlers skip a player index of four or more in every build; the galactic map's cursors do in a build for four (a
  * build for eight moves them, tests/ui_test.c). A build for eight gives the mission summary eight rows
- * and cards and bounds its rows at eight; a build for four bounds them at four. */
+ * and cards and bounds its rows at eight; a build for four bounds them at four. A build for eight carries the
+ * hostability scores of eight peers in place of two message guards, which a build for four keeps. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,6 +70,10 @@ void co_counts_test_post_original(PostFn original);
 int co_counts_test_activity(void);
 unsigned co_counts_test_activity_sites(void);
 int co_counts_test_waiting(uint64_t key);
+unsigned co_counts_test_host(void);
+int co_counts_test_host_append(uintptr_t sync, uint64_t peer, uintptr_t slot);
+int co_counts_test_host_build(void* arguments);
+int co_counts_test_host_scores(const void* arguments);
 
 #define SESSION_INIT 0x134D740u
 #define SESSION_GLOBAL 0x347CEF0u
@@ -98,6 +103,12 @@ int co_counts_test_waiting(uint64_t key);
 #define NET_ACCEPTED 0xBAC74Du      /* mov ecx,[rdx+0x18]: a list's count where its handler reads it */
 #define NET_SENDER 0x1339313u       /* mov ecx,[r15+0x5d0]: the member count a sender loops over */
 #define NET_APPEND 0x108ABF2u       /* a sender's append to two lists of five */
+#define HOST_SLOT 0x108ABDDu        /* cmp eax,4: the scores' sender finds a ready peer in the slots */
+#define HOST_OWN 0x108989Bu         /* cmp eax,4: host migration, the own score among the scores */
+#define HOST_PEER 0x1089D7Bu        /* cmp edx,4: host migration, a peer's score */
+#define HOST_BUILD 0x108AC91u       /* mov ecx,[rbp]; xor r15d,r15d: the scores' arguments are built behind it */
+#define HOST_SCORES 0x158u          /* in the extension: eight scores of 16 bytes, key first */
+#define HOST_SYNCS 0x6588u          /* in the registry: the list of type 0xEB, count first */
 #define TEST_SLOT 0x108C382u        /* the join request's search for a free slot */
 #define TEST_INDEX 0x108C3CAu       /* and for a free player index */
 #define MIRROR_CAP 0x1093CB0u       /* mov r8d,4: the PlayFab members copied into the main lobby's list */
@@ -160,6 +171,8 @@ typedef void (*ClanFn)(uint32_t*, void*, uint32_t);
 typedef void (*RowFn)(uint32_t*, uint32_t);
 typedef void (*RowAgainFn)(uint32_t*, const void*, uint32_t);
 typedef uint32_t (*AnswerFn)(const void*, uint64_t, uint64_t, const void*);
+typedef void (*AppendFn)(uint64_t, uintptr_t, uintptr_t, const void*);
+typedef uintptr_t (*BuildFn)(void*, const void*);
 
 /* A handler's arguments as the game hands them over: 16 bytes each, the value at +8. `lists` are the counts of the
  * lists in order; `lead` values stand before the first list. Every list's elements follow its count. */
@@ -173,6 +186,21 @@ static const void* Arguments(uint32_t lead, const uint32_t* lists, size_t count)
         entries[at * 2 + 1] = lists[i];
         at += 1 + lists[i];
     }
+    return entries;
+}
+
+/* The scores' message as the game hands it over: n1 keys, then n2 scores, each element's value behind a pointer. */
+static uint64_t g_keys[16];
+static uint32_t g_values[16];
+static const void* Scores(uint32_t keys, uint32_t scores)
+{
+    static uint64_t entries[2 * 40];
+    uint32_t at = 0;
+    memset(entries, 0, sizeof entries);
+    entries[at * 2] = 0xA; entries[at * 2 + 1] = keys; at++;
+    for (uint32_t i = 0; i < keys; i++, at++) { g_keys[i] = 0x1000u + i; entries[at * 2] = 0x800000009ull; entries[at * 2 + 1] = (uint64_t)(uintptr_t)&g_keys[i]; }
+    entries[at * 2] = 0xA; entries[at * 2 + 1] = scores; at++;
+    for (uint32_t i = 0; i < scores; i++, at++) { g_values[i] = 0x3F800000u + i; entries[at * 2] = 0x400000002ull; entries[at * 2 + 1] = (uint64_t)(uintptr_t)&g_values[i]; }
     return entries;
 }
 
@@ -336,7 +364,9 @@ int main(void)
         snprintf(line, sizeof line, "players: %u accesses to four-entry tables of the game skip a player index above 3", co_counts_test_guards());
         CHECK(co_counts_test_guards() >= (players == 4 ? 77u : 29u) && fake_host_logged(line));
         snprintf(line, sizeof line, "session: %u guards keep the lists in messages inside the game's buffers", co_counts_test_net());
-        CHECK(co_counts_test_net() >= 9 && fake_host_logged(line));
+        CHECK(co_counts_test_net() == (players == 8 ? 7u : 9u) && fake_host_logged(line));
+        snprintf(line, sizeof line, "session: the hostability scores of eight peers go in their message (%u code sites changed)", co_counts_test_host());
+        CHECK(co_counts_test_host() == 6u && fake_host_logged(line) == (players == 8));
     }
     /* The build's player count: the log says what the join gate does, and the sites for eight are written with it. */
     CHECK((players == 4 || players == 8) && (first == 0 || players == 8));
@@ -622,7 +652,7 @@ int main(void)
         static const uint8_t kHandled[] = {0x48, 0x83, 0xC4, 0x50, 0x5B, 0xB8, 0x77, 0x00, 0x00, 0x00, 0xC3};
         const uint8_t* cave = Cave(NET_SCORES, 6);
         CHECK(cave != NULL);
-        if (cave != NULL)
+        if (cave != NULL && players == 4)
         {
             const HandlerFn handler = (HandlerFn)(uintptr_t)cave;
             Landing(0xBAFF76u, kHandled, sizeof kHandled);
@@ -681,9 +711,121 @@ int main(void)
         static const uint8_t kAppend[] = {0x89, 0xF8, 0x89, 0xF1, 0x48, 0x89, 0x9C, 0xC5, 0xB0, 0x01, 0x00, 0x00, 0xE9};
         cave = Cave(NET_APPEND, 12);
         CHECK(cave != NULL);
-        if (cave != NULL)
+        if (cave != NULL && players == 4)
             CHECK(memcmp(cave, kFull, sizeof kFull) == 0 && Leads(cave + 5, 0x108AC24u) && memcmp(cave + 9, kToo, sizeof kToo) == 0 &&
                   Leads(cave + 14, 0x108AC24u) && memcmp(cave + 18, kAppend, sizeof kAppend) == 0 && Leads(cave + 31, 0x108ABFEu));
+    }
+    {
+        /* The hostability scores. In place: the sender's slot search and the two searches of the host migration count
+         * to the build's players; a build for four keeps the game's four and its two guards (above). */
+        const uint8_t* image = g_fake.image;
+        CHECK(image[HOST_SLOT + 2] == players && image[HOST_OWN + 2] == players && image[HOST_PEER + 2] == players && image[HOST_PEER + 1] == 0xFA);
+        CHECK((Cave(HOST_BUILD, 6) != NULL) == (players == 8));
+        if (players == 4) CHECK(image[HOST_BUILD] == 0x8B && image[HOST_BUILD + 5] == 0xFF);
+
+        /* The callbacks, in every build. Nine ready peers, the host's own id among them: seven go in the message, in
+         * their order, each with the score of its slot. The message empties the lists. */
+        static uint8_t context[0xB3A0], slots[9][0x38];
+        static uint64_t arguments[2 * 64];
+        const uint64_t sync = (uint64_t)(uintptr_t)context, own = 0x2003u;
+        memcpy(context + 0xB398, &own, 8);
+        for (uint32_t i = 0; i < 9; i++)
+        {
+            const uint32_t score = 0x40000000u + i;
+            memcpy(slots[i] + 0x18, &score, 4);
+            CHECK(co_counts_test_host_append((uintptr_t)&sync, 0x2000u + i, (uintptr_t)slots[i]));
+        }
+        memset(arguments, 0xC5, sizeof arguments);
+        CHECK(co_counts_test_host_build(arguments));
+        CHECK(arguments[0] == 0xA && arguments[1] == 7 && arguments[16] == 0xA && arguments[17] == 7 && arguments[32] == 0xC5C5C5C5C5C5C5C5ull);
+        for (uint32_t i = 0; i < 7; i++)
+        {
+            const uint32_t peer = i < 3 ? i : i + 1;
+            CHECK(arguments[2 + i * 2] == 0x800000009ull && *(const uint64_t*)(uintptr_t)arguments[3 + i * 2] == 0x2000u + peer);
+            CHECK(arguments[18 + i * 2] == 0x400000002ull && *(const uint32_t*)(uintptr_t)arguments[19 + i * 2] == 0x40000000u + peer);
+        }
+        memset(arguments, 0xC5, sizeof arguments);
+        CHECK(co_counts_test_host_build(arguments));
+        CHECK(arguments[0] == 0xA && arguments[1] == 0 && arguments[2] == 0xA && arguments[3] == 0 && arguments[4] == 0xC5C5C5C5C5C5C5C5ull);
+
+        /* The handler's callback: lists of up to eight go to the extension, eight pairs, for the type-0xEB object of the
+         * moved context only; a longer list leaves them as they were. A key's score is 0 past the scores' list, and the
+         * bytes behind a score stay as they are, as the game's handler leaves them. */
+        const uintptr_t ctx = (uintptr_t)image + CONTEXT;
+        const struct { uint64_t at; uint32_t type, pad; } kSyncs[] = {{ctx + 0x162C8u, 0x85u, 0}, {0, 0xEBu, 0}, {ctx + 0x162C8u, 0xEBu, 0}};
+        static uint8_t other[0x200], saved[0xA0];
+        uint8_t* registry = g_fake.image + FAKE_REGISTRY + HOST_SYNCS;
+        uint8_t* pairs = (uint8_t*)co_session_test_extension() + HOST_SCORES;
+        const uint32_t three = 3;
+        memcpy(registry, &three, 4);
+        memcpy(registry + 8, kSyncs, sizeof kSyncs);
+        *(uint64_t*)(registry + 8 + 16) = (uint64_t)(uintptr_t)other;
+        memcpy(saved, pairs - 0x10, sizeof saved);
+        for (uint32_t keys = 0; keys < 10; keys++)
+            for (uint32_t scores = 0; scores < 10; scores++)
+            {
+                int kept = 1, zero = 1;
+                memset(pairs - 0x10, 0xC5, sizeof saved);
+                memset(other, 0xC5, sizeof other);
+                CHECK(co_counts_test_host_scores(Scores(keys, scores)));
+                for (uint32_t at = 0; at < sizeof other; at++) kept &= other[at] == 0xC5;
+                for (uint32_t at = 0; at < 0x10; at++) kept &= (pairs - 0x10)[at] == 0xC5 && pairs[0x80 + at] == 0xC5;
+                for (uint32_t at = 0; at < 0x40; at++) zero &= image[CONTEXT + 0x16458u + at] == 0;
+                CHECK(kept && zero);
+                for (uint32_t j = 0; j < 8; j++)
+                {
+                    const uint8_t* pair = pairs + j * 16;
+                    uint64_t key;
+                    uint32_t score, behind;
+                    memcpy(&key, pair, 8);
+                    memcpy(&score, pair + 8, 4);
+                    memcpy(&behind, pair + 12, 4);
+                    if (keys > 8 || scores > 8) CHECK(key == 0xC5C5C5C5C5C5C5C5ull && score == 0xC5C5C5C5u && behind == 0xC5C5C5C5u);
+                    else if (j < keys) CHECK(key == 0x1000u + j && score == (j < scores ? 0x3F800000u + j : 0) && behind == 0xC5C5C5C5u);
+                    else CHECK(key == 0 && score == 0 && behind == 0);
+                }
+            }
+        CHECK(fake_host_logged("session: a message with a list of 9 entries was ignored; its handler at game+0xBAFF70 holds 8"));
+
+        /* Run, in a build for eight: the three caves. The append's way in loads rbx (the peer) and r12 (the
+         * synchronizer); where the cave goes back the test pops them and returns. The build's way in sets r15; where
+         * that cave goes back the test returns r10 + r15, the buffer once r15 is zero. The handler is the cave itself. */
+        if (players == 8)
+        {
+            static const uint8_t kAppendIn[] = {0x53, 0x41, 0x54, 0x48, 0x89, 0xCB, 0x4D, 0x89, 0xC4, 0x41, 0xFF, 0xE1};
+            static const uint8_t kAppendBack[] = {0x41, 0x5C, 0x5B, 0xC3};
+            static const uint8_t kBuildIn[] = {0x41, 0x57, 0x49, 0xC7, 0xC7, 0x10, 0x00, 0x00, 0x00, 0x48, 0x89, 0xC8, 0xFF, 0xE2};
+            static const uint8_t kBuildBack[] = {0x4B, 0x8D, 0x04, 0x3A, 0x41, 0x5F, 0xC3};
+            const uint8_t* append = Cave(NET_APPEND, 12);
+            const uint8_t* build = Cave(HOST_BUILD, 6);
+            const uint8_t* handler = Cave(NET_SCORES, 6);
+            CHECK(append != NULL && build != NULL && handler != NULL);
+            if (append != NULL && build != NULL && handler != NULL)
+            {
+                CHECK(append[0] == 0x9C && build[0] == 0x9C && handler[0] == 0x9C);
+                Landing(ENTER + 0x60u, kAppendIn, sizeof kAppendIn);
+                Landing(0x108AC24u, kAppendBack, sizeof kAppendBack);
+                Landing(ENTER + 0x80u, kBuildIn, sizeof kBuildIn);
+                Landing(0x108AD6Au, kBuildBack, sizeof kBuildBack);
+                for (uint32_t i = 0; i < 9; i++) ((AppendFn)(uintptr_t)(image + ENTER + 0x60u))(0x2000u + i, (uintptr_t)slots[i], (uintptr_t)&sync, append);
+                memset(arguments, 0xC5, sizeof arguments);
+                CHECK(((BuildFn)(uintptr_t)(image + ENTER + 0x80u))(arguments, build) == (uintptr_t)arguments);
+                CHECK(arguments[1] == 7 && arguments[17] == 7);
+                memset(pairs, 0xC5, 0x80);
+                ((HandlerFn)(uintptr_t)handler)(NULL, arguments);
+                for (uint32_t j = 0; j < 8; j++)
+                {
+                    const uint32_t peer = j < 3 ? j : j + 1;
+                    uint64_t key;
+                    uint32_t score;
+                    memcpy(&key, pairs + j * 16, 8);
+                    memcpy(&score, pairs + j * 16 + 8, 4);
+                    CHECK(j < 7 ? key == 0x2000u + peer && score == 0x40000000u + peer : key == 0 && score == 0);
+                }
+            }
+        }
+        memcpy(pairs - 0x10, saved, sizeof saved);
+        memset(registry, 0, 8 + sizeof kSyncs);
     }
     {
         /* A joining peer's slot and player index on the host. Without the test option both are the lowest free ones
@@ -1377,6 +1519,46 @@ int main(void)
     Init(CONTEXT);
     CHECK(co_session_test_state() == 1 && co_counts_test_on() == 0 && g_fake.writes == moves);
     CHECK(fake_host_logged("game+0x1339313 is not the reviewed one") && Cave(NET_SCORES, 6) == NULL);
+
+    /* The hostability scores' sites are only the build for eight's concern. Two of its caves replace the bytes of the
+     * build for four's guards, so a change there concerns every build. */
+    {
+        static const struct { const char* name; uint32_t rva, at; int eight; } kHost[] = {
+            {"one changed site of the scores' sender", HOST_SLOT, 1, 1},
+            {"one changed site of the host migration", HOST_OWN, 1, 1},
+            {"one changed second site of the host migration", HOST_PEER, 0, 1},
+            {"one changed site of the scores' arguments", HOST_BUILD, 3, 1},
+            {"one changed site of the scores' append", NET_APPEND, 7, 0},
+            {"one changed site of the scores' handler", NET_SCORES, 1, 0},
+        };
+        for (size_t i = 0; i < sizeof kHost / sizeof kHost[0]; i++)
+        {
+            static char line[96];
+            const int concern = !kHost[i].eight || players == 8;
+            Start(kHost[i].name);
+            g_fake.image[kHost[i].rva + kHost[i].at] ^= 0x01;
+            Init(CONTEXT);
+            CHECK(co_session_test_state() == 1 && co_counts_test_on() == !concern);
+            snprintf(line, sizeof line, "game+0x%X is not the reviewed one", kHost[i].rva);
+            CHECK(fake_host_logged(line) == concern);
+            if (concern) CHECK(g_fake.writes == moves && Cave(NET_APPEND, 12) == NULL && g_fake.image[HOST_OWN + 2] == 4);
+            else CHECK(Cave(NET_APPEND, 12) != NULL && Cave(HOST_BUILD, 6) == NULL && g_fake.image[HOST_SLOT + 2] == 4);
+        }
+        const uint32_t kWrites[] = {HOST_SLOT, HOST_OWN, HOST_PEER, HOST_BUILD, NET_APPEND, NET_SCORES};
+        for (size_t i = 0; i < sizeof kWrites / sizeof kWrites[0]; i++)
+        {
+            static char name[64];
+            const int at = co_counts_test_write_of(kWrites[i]);
+            CHECK((at >= 0) == (players == 8 || kWrites[i] == NET_APPEND || kWrites[i] == NET_SCORES));
+            if (at < 0) continue;
+            snprintf(name, sizeof name, "the write at game+0x%X fails", kWrites[i]);
+            Start(name);
+            g_fake.failWriteAt = moves + at;
+            Init(CONTEXT);
+            CHECK(co_session_test_state() == 1 && co_counts_test_on() == 0 && AsTheGameHasIt());
+            CHECK(fake_host_logged("a count site could not be written; the session lists count to four as before"));
+        }
+    }
 
     /* A site that only a build for eight writes is only that build's concern. */
     Start("one changed site of the build for eight");

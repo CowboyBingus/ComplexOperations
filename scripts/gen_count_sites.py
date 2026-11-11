@@ -21,12 +21,15 @@
 #   10 the stack arrays that four players' avatars and bodies overrun (sites/stack_sites.py, always);
 #   11 only for eight players: the stack and frame arrays with room for eight avatars (sites/stack_sites.py);
 #   12 the Activity record's further participants and the answers it waits for (ACTIVITY): in every build while the
-#     post's hook is in and every one of them matches, else none of them.
+#     post's hook is in and every one of them matches, else none of them;
+#   13 only for eight players: the hostability scores of eight peers (HOST_SITES, HOST_CAVES);
+#   14 only for four players: the two message guards of the hostability scores that group 13 replaces.
 # It also writes tests/co_stack_code.h: the game's code the tests run beside the stack fixes.
 # An instruction of a moved array carries a distance the session step rewrites; those four bytes are not compared.
 import os, re, struct, sys
 
-G_COUNT, G_GUARD, G_NET, G_EIGHT, G_TEST, G_LOADOUT, G_GUARD4, G_SYNCED, G_LOOT, G_SUMMARY, G_STACK, G_STACK8, G_ACTIVITY = range(13)
+G_COUNT, G_GUARD, G_NET, G_EIGHT, G_TEST, G_LOADOUT, G_GUARD4, G_SYNCED, G_LOOT, G_SUMMARY, G_STACK, G_STACK8, G_ACTIVITY, \
+    G_WIRE, G_NET4 = range(15)
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE + '/sites')
 import cave_asm, loadout_sites, map_sites, stack_sites, summary_sites, tag_sites
@@ -112,9 +115,10 @@ CALL = '''
     pop rax
     popfq
 '''
-# Callbacks, by number (the index in kCountCallbacks in co_counts.c). 8 to 13 are kept for the wire and extraction caves;
-# 18 and 19 are the stack fixes' (stack_sites.py).
+# Callbacks, by number (the index in kCountCallbacks in co_counts.c). 8 to 10 are the hostability scores', 11 to 13 are
+# kept for the extraction caves; 18 and 19 are the stack fixes' (stack_sites.py), 30 to 34 the Activity record's.
 FIND_RSI, FIND_R11, GATE, VALUES, LAST_SLOT, MESSAGE, TEST_SLOT, TEST_INDEX = range(8)
+HOST_APPEND, HOST_BUILD, HOST_SCORES = range(8, 11)
 SCORE_INDEX, SCORE_ROW, PARTICIPANT, RECORD = range(14, 18)
 WAITING, ANSWER_RAX_RSI, ANSWER_R10_R11, ANSWER_RAX_RDI, DROPPED = range(30, 35)
 # (rva, bytes the jump replaces, code; `game+0x..` is an address in the game, CALL(n) the call of callback n)
@@ -307,6 +311,12 @@ MIRROR_CAPS = [
 ]
 # With the cave above: the friends post takes numLobbyMembers from the members, no longer from the entries.
 RECORD_SITES = [(0x12CB379, '44 8b 87 d0 05 00 00', '44 8b 87 48 03 00 00')]
+# Only in a build for eight players: the hostability scores' bounds, with their caves (HOST_CAVES below).
+HOST_SITES = [
+    (0x108ABDD, '83 f8 04', '83 f8 08'),     # the sender finds a ready peer in the slots
+    (0x108989B, '83 f8 04', '83 f8 08'),     # host migration: the new host's own score among the scores
+    (0x1089D7B, '83 fa 04', '83 fa 08'),     # and a peer's
+]
 # The loadout screen for eight: its sites and caves, and the guards of the build for four they replace.
 LOADOUT_SITES, LOADOUT_CAVES = loadout_sites.build(dump)
 # The guards of tables that a build for eight gives eight entries: the mission summary's rows here (group 9), the map's
@@ -323,7 +333,7 @@ rows_by_group = ((G_GUARD, GUARD_SITES), (G_EIGHT, EIGHT_SITES), (G_COUNT, MIRRO
                  (G_LOADOUT, [(r, o, n) for r, o, n, _ in LOADOUT_SITES]), (G_SYNCED, [(r, o, n) for r, o, n, _ in loadout_sites.SYNCED_SITES]),
                  (G_SUMMARY, [(r, o, n) for r, o, n, _ in summary_sites.INPLACE]),
                  (G_STACK, [(r, o, n) for r, o, n, _, eight in stack_sites.INPLACE if not eight]),
-                 (G_STACK8, [(r, o, n) for r, o, n, _, eight in stack_sites.INPLACE if eight]))
+                 (G_STACK8, [(r, o, n) for r, o, n, _, eight in stack_sites.INPLACE if eight]), (G_WIRE, HOST_SITES))
 for group, rows in rows_by_group:
     for rva, old, new in rows:
         old = bytes.fromhex(old); new = bytes.fromhex(new)
@@ -346,7 +356,7 @@ MESSAGES = [
     # The party list (five peers) of rpc_from_partyleader_join_lobby and rpc_from_partyleader_join_request.
     (0xBA2FC0, '48 89 5c 24 18', 'mov qword ptr [rsp+0x18], rbx', 0xBA2FC5, [0, 5]),
     (0xBA8CC0, '4c 8b dc 49 89 5b 18', 'mov r11, rsp\n mov qword ptr [r11+0x18], rbx', 0xBA8CC7, [0, 5]),
-    # rpc_hostability_scores: five peers and five scores.
+    # rpc_hostability_scores: five peers and five scores (a build for four; a build for eight has HOST_CAVES).
     (0xBAFF70, '40 53 48 83 ec 50', 'push rbx\n sub rsp, 0x50', 0xBAFF76, [5, 5]),
 ]
 SHAPE_ROOM = 24
@@ -360,7 +370,7 @@ NET_GUARDS += [
     # The sender of a lobby's entry loops over the lobby's member count; its lists and the receiver's hold four.
     (0x1339313, '41 8b 8f d0 05 00 00', 'mov ecx, dword ptr [r15+0x5d0]\n cmp ecx, 4\n jbe 1f\n mov ecx, 4\n1: jmp game+0x133931A'),
     # The sender of the hostability scores appends a peer and a score for each ready peer it finds in slots 0 to 3;
-    # both lists hold five.
+    # both lists hold five. A build for four only, as above.
     (0x108ABF2, '8b c7 8b ce 48 89 9c c5 b0 01 00 00', 'cmp edi, 5\n jae game+0x108AC24\n cmp esi, 5\n jae game+0x108AC24\n mov eax, edi\n mov ecx, esi\n'
                                                        ' mov qword ptr [rbp+rax*8+0x1b0], rbx\n jmp game+0x108ABFE'),
 ]
@@ -373,15 +383,30 @@ TEST_CAVES = [
 ]
 # Only in a build for eight players: a friend's lobby shows eight places. edx stays four, the record's inline members.
 EIGHT_CAVES = [(0x103D11D, 'ba 04 00 00 00 41 89 96 4c 03 00 00', 'mov edx, 4\n mov dword ptr [r14+0x34c], 8\n jmp game+0x103D129')]
+# Only in a build for eight players: the hostability scores of eight peers. The host leaves its own score out, so the
+# message holds seven at most, which the 3-bit count on the wire carries: no change to the network config. The sender's
+# lists and the handler's buffer live in the mod (co_counts.c). Their two message guards are the build for four's.
+# Three bounds go with them (HOST_SITES).
+HOST_CAVES = [
+    # The append goes to the mod's lists; edi and esi count only the game's lists, which stay empty.
+    (0x108ABF2, '8b c7 8b ce 48 89 9c c5 b0 01 00 00', 'CALL(%d)\n jmp game+0x108AC24' % HOST_APPEND),
+    # The arguments come from the mod's lists. The game uses r15 as zero from here on.
+    (0x108AC91, '8b 4d 00 45 33 ff', 'CALL(%d)\n xor r15d, r15d\n mov r10, rax\n jmp game+0x108AD6A' % HOST_BUILD),
+    # The handler: eight pairs into the scores in the extension.
+    (0xBAFF70, '40 53 48 83 ec 50', 'CALL(%d)\n ret' % HOST_SCORES),
+]
+HOST_REPLACES = {0x108ABF2, 0xBAFF70}
+assert {(r, b) for r, b, _ in NET_GUARDS if r in HOST_REPLACES} == {(r, b) for r, b, _ in HOST_CAVES if r in HOST_REPLACES}
 LOADOUT_CAVES = [(rva, replaced, text) for rva, replaced, text, _ in LOADOUT_CAVES]
 SUMMARY_CAVES = [(rva, replaced, text) for rva, replaced, text, _, _ in summary_sites.CAVES]
 SUMMARY_CAVES += [(rva, replaced, text) for rva, replaced, text, _ in summary_sites.GUARD8]
 STACK_CAVES = [(rva, replaced, text) for rva, replaced, text, _, _ in stack_sites.CAVES]
-cave_groups = ([G_COUNT] * len(CAVES) + [G_GUARD4 if rva in OFF else G_GUARD for rva, _, _ in GUARDS] + [G_NET] * len(NET_GUARDS) +
+cave_groups = ([G_COUNT] * len(CAVES) + [G_GUARD4 if rva in OFF else G_GUARD for rva, _, _ in GUARDS] +
+               [G_NET4 if rva in HOST_REPLACES else G_NET for rva, _, _ in NET_GUARDS] +
                [G_EIGHT] * len(EIGHT_CAVES) + [G_TEST] * len(TEST_CAVES) + [G_LOADOUT] * len(LOADOUT_CAVES) + [G_LOOT] * len(LOOT) +
                [G_SUMMARY] * len(SUMMARY_CAVES) + [G_STACK8 if eight else G_STACK for _, _, _, _, eight in stack_sites.CAVES] +
-               [G_ACTIVITY] * len(ACTIVITY))
-CAVES += GUARDS + NET_GUARDS + EIGHT_CAVES + TEST_CAVES + LOADOUT_CAVES + LOOT + SUMMARY_CAVES + STACK_CAVES + ACTIVITY
+               [G_ACTIVITY] * len(ACTIVITY) + [G_WIRE] * len(HOST_CAVES))
+CAVES += GUARDS + NET_GUARDS + EIGHT_CAVES + TEST_CAVES + LOADOUT_CAVES + LOOT + SUMMARY_CAVES + STACK_CAVES + ACTIVITY + HOST_CAVES
 # In place, with the cave above: the first loop's count is a copy of that constant.
 sites.append((0x108D2DD, bytes.fromhex('8b ef 90'), bytes.fromhex('8d 6f 04'), 0xFF, G_COUNT))
 assert dump[0x108D2DD:0x108D2E0] == bytes.fromhex('8b ef 90')
@@ -403,11 +428,12 @@ manager_caves = rows('co_manager_sites.h', 'kCoManagerCaves')
 taken += [(rva, rva + size) for rva, size in manager_caves]
 taken += [(rva + at, rva + at + 4) for rva, at in rows('co_manager_sites.h') + rows('co_pod_sites.h') if (rva, at) not in manager_caves]
 assert len(taken) > 1400
-# The build for four leaves out groups 5, 7, 9 and 11, the build for eight group 6: they may share bytes, a build may not.
+# The build for four leaves out groups 5, 7, 9, 11 and 13, the build for eight groups 6 and 14: they may share bytes, a
+# build may not.
 own = [(rva, rva + len(old), skip != 0xFF, group) for rva, old, _, skip, group in sites] + [(rva, rva + 8, True, G_COUNT) for rva, _, _ in CLEARS]
 own += [(rva, rva + len(bytes.fromhex(replaced)), False, group) for (rva, replaced, _), group in zip(CAVES, cave_groups)]
 own.sort()
-for left_out in ((G_LOADOUT, G_SYNCED, G_SUMMARY, G_STACK8), (G_GUARD4,)):
+for left_out in ((G_LOADOUT, G_SYNCED, G_SUMMARY, G_STACK8, G_WIRE), (G_GUARD4, G_NET4)):
     build = [o for o in own if o[3] not in left_out]
     for (a, b, _, _), (c, _, _, _) in zip(build, build[1:]): assert b <= c, (hex(a), hex(c))
 for a, b, shared, _ in own:
@@ -466,8 +492,9 @@ assert len(cave_groups) == len(caves) == len(CAVES)
 open(out, 'w').writelines(h)
 open(HERE + '/../tests/co_stack_code.h', 'w').writelines(stack_sites.test_header(dump))
 print('%d sites, %d clears, %d caves (%d bytes)' % (len(sites), len(CLEARS), len(caves), len(blob)))
-for group, name in enumerate(('counts', 'guards', 'message guards', 'eight players only', 'test option only', 'loadout (eight only)',
-                               'guards (four only)', 'loadout table (eight)', 'loot rows', 'summary (eight only)', 'stack arrays',
-                               'stack arrays (eight)')):
+for group, name in list(enumerate(('counts', 'guards', 'message guards', 'eight players only', 'test option only', 'loadout (eight only)',
+                                    'guards (four only)', 'loadout table (eight)', 'loot rows', 'summary (eight only)', 'stack arrays',
+                                    'stack arrays (eight)'))) + \
+                   [(G_WIRE, 'hostability (eight)'), (G_NET4, 'message guards (four)')]:
     print('  %-20s %3d sites, %2d caves' % (name, sum(s[4] == group for s in sites), cave_groups.count(group)))
 print('  %-20s %3d sites, %2d caves' % ('activity record', sum(s[4] == G_ACTIVITY for s in sites), cave_groups.count(G_ACTIVITY)))
