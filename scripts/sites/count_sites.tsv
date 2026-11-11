@@ -1,7 +1,7 @@
 # The session lists' count sites (game build 25480438): one instruction each, changed in place.
 # rva	instruction bytes	its bytes for eight	list	instruction
-# Not here, and four on purpose: the hostability scores (0x108ABDD the sender's slot lookup, 0x108989B and 0x1089D7B
-# the readers). Their message carries five entries at most; the sender's and the receiver's buffers hold five.
+# Not here: the hostability scores (0x108ABDD the sender's slot lookup, 0x108989B and 0x1089D7B the readers). They
+# count to eight only with their message's caves, in a build for eight: gen_count_sites.py's HOST_SITES.
 # Not here: 0x108AA56, the slot loop that closes the lobby when it is full. It is in gen_count_sites.py's EIGHT_SITES.
 AC613B	bf 03 00 00 00	bf 07 00 00 00	A1	mov edi,0x3
 AD58EF	bf 03 00 00 00	bf 07 00 00 00	A1	mov edi,0x3

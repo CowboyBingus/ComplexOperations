@@ -53,7 +53,13 @@ its own (see Galactic map, Squad HUD and name tags).
 
 Some message handlers copy a list from the wire into a buffer of fixed size and trust the count. Nine guards keep
 such lists inside their buffers: the handler ignores a message whose list is too long, and two senders stop at what
-the receiver holds. Every build has them.
+the receiver holds. A build for four has all nine. A build for eight has seven: the hostability scores' two make way
+for the scores of eight peers.
+
+A build for eight sends the hostability scores of all eight peers. The host sends them every 10 seconds, and a new
+host takes them over after a migration. The host leaves its own score out, so a message holds seven at most. The count
+on the wire already carries seven, so the network config stays as it is. The handler takes eight. 3 sites and 3 caves
+do this, with the counts. A build for four keeps the game's four scores.
 
 A build for eight players also lets a client's player index 4 to 7 count as valid, opens the join gate to eight, and
 makes the SOS beacon count to eight. Its lobby takes eight too (see Lobby). When the player managers could not get
@@ -61,7 +67,8 @@ eight slots, its join gate stays at four.
 
 Limits that remain:
 
-- The hostability scores stay at four entries. Their message carries five at most, so peers 5 to 8 get no score.
+- A peer without the mod must not be in a session of seven or more players. The hostability scores would be more than
+  its handler holds.
 - A guarded table has no entry for players 5 to 8: no clan record. In a build for four they have no map cursor and no
   row in the mission summary either.
 
@@ -282,7 +289,7 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `scripts/gen_session_sites.py` | Writes `co_session_sites.h` from the site list and a dump of the game's code. Holds the lobby's member lists' sites; assembles their stubs with GNU `as`. |
 | `tests/managers_test.c` | The same refusals for the player managers, the loot rows' sites and caves among them. Runs the caves. |
 | `tests/session_test.c` | The same for the session lists, and that sites and stubs lead to the new place. Runs the lobby copies' stubs. |
-| `src/co_counts.c` | The session lists' counts: sites, code caves, the hooks for entries 4 to 7. The guards, the loot rows' guards and the Activity record's participants too. |
+| `src/co_counts.c` | The session lists' counts: sites, code caves, the hooks for entries 4 to 7. The guards, the loot rows' guards, the Activity record's participants and the hostability scores too. |
 | `src/co_count_sites.h` | Their code sites and the caves' code. Generated; do not edit. |
 | `scripts/sites/count_sites.tsv` | The reviewed count sites: one row for each instruction. |
 | `scripts/sites/loadout_sites.py` | The loadout screen's sites and caves for eight, and the per-peer loadout table's move and bounds. |
@@ -327,6 +334,7 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `the session lists count to eight` | The lists' code counts to eight; the line says how many players get in. |
 | `... guards keep the lists in messages inside the game's buffers` | The message guards are in place. |
 | `a message with a list of ... entries was ignored` | A peer sent a longer list than the handler holds; once a handler. |
+| `the hostability scores of eight peers go in their message` | A build for eight players: the scores' sites and caves are in place. |
 | `player indexes 4 to 7 are valid` | A build for eight players: the lobby takes eight too. |
 | `the lobby search lists lobbies with up to 7 members` | A build for eight players: the search's site is in place. |
 | `the loadout screen has eight records and cards` | A build for eight players: the loadout screen's arrays moved. |

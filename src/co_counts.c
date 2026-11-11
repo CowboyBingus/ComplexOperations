@@ -5,7 +5,7 @@
  * to four.
  * The same sites carry the guards: tables the game keeps at four entries skip a player index of four or more, and a
  * message whose list is longer than its handler's buffer is ignored. The Activity record's post lists participants 5 to
- * 8, which the record has no room for. */
+ * 8, which the record has no room for. A build for eight carries the hostability scores of eight peers. */
 #include <string.h>
 #include <windows.h>
 
@@ -38,8 +38,11 @@ _Static_assert(sizeof kCoCountCode <= CO_CAVE_ROOM, "the caves' code must fit th
  * (CO_G_LOADOUT) replace the guards that keep a player index above 3 off its four-entry arrays (CO_G_GUARD4). The
  * per-peer loadout table's bounds (CO_G_SYNCED) are safe only while the table is in the mod's room for eight. The score
  * manager's loot guards (CO_G_LOOT) ask the player managers' state each time, so they fit both of its states. The mission
- * summary's eight rows and cards (CO_G_SUMMARY) replace its guards for four rows, as the loadout screen's do. */
-enum { CO_G_COUNT, CO_G_GUARD, CO_G_NET, CO_G_EIGHT, CO_G_TEST, CO_G_LOADOUT, CO_G_GUARD4, CO_G_SYNCED, CO_G_LOOT, CO_G_SUMMARY };
+ * summary's eight rows and cards (CO_G_SUMMARY) replace its guards for four rows, as the loadout screen's do. The
+ * hostability scores of eight peers (CO_G_WIRE) replace two message guards (CO_G_NET4) the same way. 10 to 12 are other
+ * steps'. */
+enum { CO_G_COUNT, CO_G_GUARD, CO_G_NET, CO_G_EIGHT, CO_G_TEST, CO_G_LOADOUT, CO_G_GUARD4, CO_G_SYNCED, CO_G_LOOT, CO_G_SUMMARY,
+       CO_G_WIRE = 13, CO_G_NET4 };
 /* Test builds only (--test-first-slot): the host gives joining peers slots and player indexes from this number on,
  * so that two game instances reach the code for players 5 to 8. Zero is off. */
 #ifndef CO_TEST_FIRST_SLOT
@@ -74,6 +77,15 @@ _Static_assert(CO_TEST_FIRST_SLOT == 0 || (CO_PLAYERS == 8 && CO_TEST_FIRST_SLOT
 #define CO_LOOT_SLOTS 0xC440u
 #define CO_LOOT_SLOTS_MOVED 0x37F20u
 #define CO_LOOT_COUNTS 0x8u       /* in a row: three counts of 4 bytes */
+/* The hostability scores: the host's slot keeps a peer's score at +0x18; the clients keep eight {key, score at +8} in
+ * the extension. The handler finds the clients' synchronizer in the game's registry, in the list of type 0xEB. */
+#define CO_SCORES 0x158u          /* in the extension */
+#define CO_SCORES_SENT 7u         /* a message's most: the host leaves its own out, and 3 bits on the wire count to 7 */
+#define CO_SLOT_SCORE 0x18u
+#define CO_CLIENT_SYNC 0x162C8u   /* in the session context: the one type-0xEB object, made by the session init */
+#define CO_REGISTRY CO_SYNCED_REGISTRY
+#define CO_REGISTRY_SYNCS 0x6588u /* that list: its count, then {object, type} entries of 16 bytes */
+#define CO_SYNC_TYPE 0xEBu
 
 typedef uint32_t (*SlotsFn)(uintptr_t);
 typedef uint64_t (*PeerGoneFn)(uintptr_t, uint64_t, uint64_t, uint64_t);
@@ -89,8 +101,9 @@ static uintptr_t g_syncedOld, g_syncedNew, g_syncedBlock;
 
 static int Active(uint8_t group)
 {
-    return group <= CO_G_NET || group == CO_G_LOOT || ((group == CO_G_EIGHT || group == CO_G_LOADOUT || group == CO_G_SYNCED || group == CO_G_SUMMARY) && CO_PLAYERS == 8) ||
-           (group == CO_G_GUARD4 && CO_PLAYERS == 4) || (group == CO_G_TEST && CO_TEST_FIRST_SLOT != 0);
+    return group <= CO_G_NET || group == CO_G_LOOT ||
+           ((group == CO_G_EIGHT || group == CO_G_LOADOUT || group == CO_G_SYNCED || group == CO_G_SUMMARY || group == CO_G_WIRE) && CO_PLAYERS == 8) ||
+           ((group == CO_G_GUARD4 || group == CO_G_NET4) && CO_PLAYERS == 4) || (group == CO_G_TEST && CO_TEST_FIRST_SLOT != 0);
 }
 
 static uint64_t* Slot(uintptr_t sync, uint32_t slot) { return (uint64_t*)(sync + 0x20u + slot * CO_SLOT); }
@@ -293,9 +306,73 @@ static void Record(CoRegs* regs)
     g_furtherCount = 0;
 }
 
-/* By the numbers in gen_count_sites.py; 8 to 13 are kept for other caves. */
+/* The host's scores for the next message. The message points at them, so they stay until the next update fills them
+ * (every 10 seconds). */
+static uint64_t g_scoreKeys[CO_SCORES_SENT];
+static uint32_t g_scores[CO_SCORES_SENT], g_scoreCount;
+static int g_scoresTold;
+
+/* rbx is a ready peer, rdx its slot, r12 the host's synchronizer (the session context first). The host's own score is
+ * never read from the message: the next host looks up its own and its peers'. */
+static void HostAppend(CoRegs* regs)
+{
+    const uintptr_t context = *(const uintptr_t*)(uintptr_t)regs->r12;
+    if (regs->rbx == *(const uint64_t*)(context + CO_LOCAL_PEER) || g_scoreCount >= CO_SCORES_SENT) return;
+    g_scoreKeys[g_scoreCount] = regs->rbx;
+    g_scores[g_scoreCount++] = *(const uint32_t*)(uintptr_t)(regs->rdx + CO_SLOT_SCORE);
+}
+
+/* rax is the message's argument buffer: a list is an entry with its count and an entry for each element, the value's
+ * address at +8, as the game writes them. */
+static void HostBuild(CoRegs* regs)
+{
+    uint64_t* entry = (uint64_t*)(uintptr_t)regs->rax;
+    *entry++ = 0xA; *entry++ = g_scoreCount;
+    for (uint32_t i = 0; i < g_scoreCount; i++) { *entry++ = 0x800000009ull; *entry++ = (uint64_t)(uintptr_t)&g_scoreKeys[i]; }
+    *entry++ = 0xA; *entry++ = g_scoreCount;
+    for (uint32_t i = 0; i < g_scoreCount; i++) { *entry++ = 0x400000002ull; *entry++ = (uint64_t)(uintptr_t)&g_scores[i]; }
+    g_scoreCount = 0;
+}
+
+/* rdx is the message's arguments: the keys, then the scores. A peer past the 8th has no place, so the message is
+ * ignored as the guards do. The pairs go where the game's handler writes them for the context the session step moved;
+ * the game makes no other object of that type. */
+static void HostScores(CoRegs* regs)
+{
+    const uint8_t* arguments = (const uint8_t*)(uintptr_t)regs->rdx;
+    const uint32_t keys = *(const uint32_t*)(arguments + 8);
+    const uint32_t scores = keys <= CO_PEERS ? *(const uint32_t*)(arguments + (1u + keys) * 16u + 8u) : 0;
+    if (keys > CO_PEERS || scores > CO_PEERS)
+    {
+        if (!g_scoresTold)
+        {
+            g_scoresTold = 1;
+            co_log("session: a message with a list of %u entries was ignored; its handler at game+0xBAFF70 holds %u", keys > CO_PEERS ? keys : scores, CO_PEERS);
+        }
+        return;
+    }
+    const uintptr_t registry = *(const uintptr_t*)(g_game + CO_REGISTRY);
+    if (registry == 0) return;
+    const uint32_t count = *(const uint32_t*)(registry + CO_REGISTRY_SYNCS);
+    for (uint32_t i = 0; i < count; i++)
+    {
+        const uintptr_t at = registry + CO_REGISTRY_SYNCS + 8u + i * 16u;
+        if (*(const uint32_t*)(at + 8) != CO_SYNC_TYPE || *(const uintptr_t*)at != g_context + CO_CLIENT_SYNC) continue;
+        uint8_t* pair = (uint8_t*)(g_extension + CO_SCORES);
+        for (uint32_t j = 0; j < CO_PEERS; j++, pair += 16)
+        {
+            if (j >= keys) { memset(pair, 0, 16); continue; }
+            const uint32_t score = j < scores ? **(const uint32_t* const*)(arguments + (2u + keys + j) * 16u + 8u) : 0;
+            memcpy(pair, *(const uint64_t* const*)(arguments + (1u + j) * 16u + 8u), 8);
+            memcpy(pair + 8, &score, 4);
+        }
+    }
+}
+
+/* By the numbers in gen_count_sites.py; 11 to 13 are kept for other caves. */
 static void (*const kCountCallbacks[])(CoRegs*) = {
     FindByRsi, FindByR11, JoinGate, ClearValueKeys, LastSlotState, MessageFits, JoinSlot, JoinIndex,
+    HostAppend, HostBuild, HostScores,
     [14] = LootIndex, LootRow, Participant, Record,
 };
 #define CO_CALLBACKS (sizeof kCountCallbacks / sizeof kCountCallbacks[0])
@@ -596,7 +673,8 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
                counts, caves, CO_PLAYERS == 8 ? "takes" : "still takes", (unsigned)CO_PLAYERS);
         co_log("players: %u accesses to four-entry tables of the game skip a player index above 3",
                InGroup(CO_G_GUARD, NULL) + (Active(CO_G_GUARD4) ? InGroup(CO_G_GUARD4, NULL) : 0u));
-        co_log("session: %u guards keep the lists in messages inside the game's buffers", InGroup(CO_G_NET, NULL));
+        co_log("session: %u guards keep the lists in messages inside the game's buffers",
+               InGroup(CO_G_NET, NULL) + (Active(CO_G_NET4) ? InGroup(CO_G_NET4, NULL) : 0u));
         co_log("players: the score manager's loot rows by index are bounded where the managers keep them (%u caves)",
                InGroup(CO_G_LOOT, NULL));
         if (Active(CO_G_EIGHT))
@@ -608,6 +686,8 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
             co_log("players: the per-peer loadout table moved to room for eight peers (%u code sites changed)", InGroup(CO_G_SYNCED, NULL));
         if (Active(CO_G_SUMMARY))
             co_log("players: the mission summary has eight rows and cards (%u code sites changed)", InGroup(CO_G_SUMMARY, NULL));
+        if (Active(CO_G_WIRE))
+            co_log("session: the hostability scores of eight peers go in their message (%u code sites changed)", InGroup(CO_G_WIRE, NULL));
     }
     return;
 failed:
@@ -668,6 +748,8 @@ void co_counts_test_reset(void)
     g_toldFour = 0;
     g_furtherCount = 0;
     memset(g_extras, 0, sizeof g_extras);
+    g_scoreCount = 0;
+    g_scoresTold = 0;
 }
 
 /* Every site, clear and cave site holds the game's bytes (a moved array's distance aside). */
@@ -694,11 +776,12 @@ uintptr_t co_counts_test_synced_table(void) { return g_syncedNew; }
 unsigned co_counts_test_sites(void)
 {
     unsigned n = (unsigned)CO_COUNT_CLEARS;
-    for (uint8_t group = CO_G_COUNT; group <= CO_G_SUMMARY; group++)
+    for (uint8_t group = CO_G_COUNT; group <= CO_G_NET4; group++)
         if (Active(group)) n += InGroup(group, NULL);
     return n;
 }
-unsigned co_counts_test_net(void) { return InGroup(CO_G_NET, NULL); }
+unsigned co_counts_test_net(void) { return InGroup(CO_G_NET, NULL) + (Active(CO_G_NET4) ? InGroup(CO_G_NET4, NULL) : 0u); }
+unsigned co_counts_test_host(void) { return InGroup(CO_G_WIRE, NULL); }
 unsigned co_counts_test_room(void) { return CO_CAVE_ROOM; }
 int co_counts_test_players(void) { return CO_PLAYERS; }
 int co_counts_test_first_slot(void) { return CO_TEST_FIRST_SLOT; }
@@ -767,4 +850,19 @@ void co_counts_test_participant(uintptr_t frame, uintptr_t context, uint32_t pla
 }
 void co_counts_test_record(uintptr_t table, uint32_t offset) { CoRegs regs = {0}; regs.rsi = table; regs.rcx = offset; Record(&regs); }
 void co_counts_test_post_original(ActivityPostFn original) { g_activityPost = original; }
+/* The hostability callbacks as their caves call them; each gives 1 when it left every register as it was. */
+static int Unchanged(void (*callback)(CoRegs*), CoRegs* regs)
+{
+    const CoRegs before = *regs;
+    callback(regs);
+    return memcmp(&before, regs, sizeof before) == 0;
+}
+int co_counts_test_host_append(uintptr_t sync, uint64_t peer, uintptr_t slot)
+{
+    CoRegs regs = {0};
+    regs.r12 = sync; regs.rbx = peer; regs.rdx = slot;
+    return Unchanged(HostAppend, &regs);
+}
+int co_counts_test_host_build(void* arguments) { CoRegs regs = {0}; regs.rax = (uint64_t)(uintptr_t)arguments; return Unchanged(HostBuild, &regs); }
+int co_counts_test_host_scores(const void* arguments) { CoRegs regs = {0}; regs.rdx = (uint64_t)(uintptr_t)arguments; return Unchanged(HostScores, &regs); }
 #endif
