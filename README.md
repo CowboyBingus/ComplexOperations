@@ -25,14 +25,17 @@ Every player in the session needs the mod.
 ## Player managers
 
 The game keeps one record for each player in seven managers: player, score, customization, kill streak, ship
-inventory, ship customization and ship modules. Each has four slots. The mod builds all seven in its own memory with
-eight slots and changes the 1,115 code sites that address them, the score manager's loot rows among them. 6 caves do
-the loot rows' code that the game wrote out for four rows (see Mission).
+inventory, ship customization and ship modules. Each has four slots. A build for eight builds all seven in the mod's
+memory with eight slots and changes the 1,115 code sites that address them, the score manager's loot rows among them.
+6 caves do the loot rows' code that the game wrote out for four rows (see Mission).
 
 A build for eight also moves the avatar manager from eight slots to sixteen. Players' bodies hold a slot too, so
 eight players and their bodies need more than eight. Its 2,700 code sites follow the same rules: 2,675 array offsets,
-20 distances from the component block, 4 capacity checks and 1 constant that folds a slot's start with an array. A
-build for four keeps the avatar manager as the game has it.
+20 distances from the component block, 4 capacity checks and 1 constant that folds a slot's start with an array.
+
+A build for four keeps all eight managers where the game has them. It joins four players, and HellForge and other mods
+read these managers at the game's offsets. A HellForge that finds the moved offsets through the game's code works with
+both builds.
 
 This alone lets no fifth player join: the session's own lists still hold four. It is the base the later parts need.
 
@@ -427,7 +430,8 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | Line | Meaning |
 |---|---|
 | `the pod manager and the ship's pod table have 8 slots` | The code is in place. |
-| `7 component managers have 8 slots` | The player managers are in place. |
+| `7 component managers have 8 slots` | A build for eight players: the player managers are in place. |
+| `a build for four keeps the game's player managers` | A build for four: the managers stay where the game has them. |
 | `the avatar manager has 16 slots for players and their bodies` | A build for eight players: the avatar manager moved with them. |
 | `... code sites keep the game's stack arrays for avatars and players inside their room` | The stack fixes are in place. |
 | `10 arrays of the session lists and the lobby's member lists moved` | Those arrays are in the mod's memory. |

@@ -102,6 +102,13 @@ int main(void)
     Start("the reviewed game");
     memcpy(g_vanilla, g_fake.image, FAKE_IMAGE_SIZE);
     BuildState(FIRST_STATE);
+#if CO_PLAYERS < 8
+    CHECK(avatar == -1 && co_managers_test_sites() == 0);
+    CHECK(g_fake.writes == 0 && AvatarAsGame());
+    CHECK(fake_host_logged("players: a build for four keeps the game's player managers") && !fake_host_logged("avatar manager"));
+    printf("%s\n", g_failed ? "avatars: failures" : "avatars: all cases passed");
+    return g_failed != 0;
+#endif
     CHECK(co_managers_test_state() == 1 && g_fake.writes == writes && g_fake.image[OTHER_CAP_SITE + 2] == 8);
     CHECK(fake_host_logged("players: 7 component managers have 8 slots"));
 #if CO_PLAYERS >= 8

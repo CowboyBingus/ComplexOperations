@@ -223,7 +223,14 @@ void co_managers_state(uintptr_t block)
         Release();
         g_state = 0;
     }
-    if (g_state == 0) { g_state = -1; Move(block); }
+    if (g_state == 0)
+    {
+        size_t active = 0;
+        for (size_t i = 0; i < CO_MANAGERS; i++) active += kCoManagers[i].players <= CO_PLAYERS;
+        g_state = -1;
+        if (active != 0) Move(block);
+        else co_log("players: a build for four keeps the game's player managers");
+    }
     if (g_state == 1) memset((void*)g_memory, 0, g_used);
 #ifdef CO_CANARY
     co_managers_canary(1);

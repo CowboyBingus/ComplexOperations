@@ -31,8 +31,9 @@ MANAGERS = {
 }
 # Slots before and after (CAP checks the first and writes the second); four and eight unless named here.
 SLOTS = {'avatar': (8, 16)}
-# Managers only a build for eight players moves; a build for four leaves them as the game has them.
-EIGHT_ONLY = {'avatar'}
+# Managers only a build for eight players moves; a build for four leaves them as the game has them. That is all of them:
+# a build for four joins four players, and HellForge and other mods read these managers at the game's offsets.
+EIGHT_ONLY = set(MANAGERS)
 # Sites the lists miss, found later: (manager, rva, offset of the disp32, old value[, what it adds])
 # The avatar's FOLD at 0xA4F4FD: add r9,0xE6; shl r9,5 reaches A1 + 0x1B70 of a slot (0xE6 x 32 = 0x150 + 0x1B70) with
 # no array offset of its own, so it adds A1's distance divided by 32.

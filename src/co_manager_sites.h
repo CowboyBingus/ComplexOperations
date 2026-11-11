@@ -4,13 +4,13 @@
 
 /* {name, the global that holds it, offset in the block, size, new size, slots, the build that moves it (players)} */
 static const CoManager kCoManagers[] = {
-    {"score", 0x3326AE0u, 0x7C7368u, 0x37E38u, 0x380A0u, 8, 4},
-    {"customization", 0x33264F8u, 0xE9FC98u, 0xB80u, 0xEA8u, 8, 4},
-    {"kill_streak", 0x3326AF0u, 0x2A988u, 0x4A8u, 0xCE8u, 8, 4},
-    {"ship_inventory", 0x33266D0u, 0xEB5178u, 0x168u, 0x318u, 8, 4},
-    {"ship_customization", 0x33267B8u, 0x3CA0u, 0x2B8u, 0x620u, 8, 4},
-    {"ship_modules_sync", 0x3326998u, 0x4148u, 0x267E8u, 0x73548u, 8, 4},
-    {"player", 0x3326468u, 0xEA0818u, 0x428u, 0x9E8u, 8, 4},
+    {"score", 0x3326AE0u, 0x7C7368u, 0x37E38u, 0x380A0u, 8, 8},
+    {"customization", 0x33264F8u, 0xE9FC98u, 0xB80u, 0xEA8u, 8, 8},
+    {"kill_streak", 0x3326AF0u, 0x2A988u, 0x4A8u, 0xCE8u, 8, 8},
+    {"ship_inventory", 0x33266D0u, 0xEB5178u, 0x168u, 0x318u, 8, 8},
+    {"ship_customization", 0x33267B8u, 0x3CA0u, 0x2B8u, 0x620u, 8, 8},
+    {"ship_modules_sync", 0x3326998u, 0x4148u, 0x267E8u, 0x73548u, 8, 8},
+    {"player", 0x3326468u, 0xEA0818u, 0x428u, 0x9E8u, 8, 8},
     {"avatar", 0x3326D20u, 0x956128u, 0x5497C8u, 0xFDC258u, 16, 8},
 };
 

@@ -138,6 +138,16 @@ int main(void)
     Start("the reviewed game");
     CHECK(g_fake.writes == 0);
     BuildState(FIRST_STATE);
+#if CO_PLAYERS < 8
+    /* A build for four joins four players and leaves every manager where the game and other mods expect it. */
+    CHECK(sites == 0 && co_managers_test_state() == -1 && g_fake.writes == 0);
+    CHECK(fake_host_logged("players: a build for four keeps the game's player managers"));
+    CHECK(!fake_host_logged("component managers") && !fake_host_logged("loot rows"));
+    BuildState(SECOND_STATE);
+    CHECK(g_fake.writes == 0 && co_managers_test_state() == -1);
+    printf("%s\n", g_failed ? "managers: failures" : "managers: all cases passed");
+    return g_failed != 0;
+#endif
     CHECK(co_managers_test_state() == 1 && g_fake.writes == writes && co_managers_test_caves() == 6);
     CHECK(fake_host_logged("players: 7 component managers have 8 slots"));
     CHECK(fake_host_logged("players: the score manager's loot rows are cleared and added for eight rows (6 caves)"));
