@@ -55,9 +55,11 @@ respawns. The mod's code goes in with the counts (see Session lists) and works f
 | Voice lines by the nearest Helldiver | Only avatars 1 to 8 speak | Eight only |
 | Spawn exclusion around avatars (three lists of eight) | Avatars past eight are left out | Eight only |
 | Director and position lists from the frame allocator | Room for sixteen | Eight only |
+| Dormancy pass: far entities sleep by the nearest player (four positions, the stack cookie behind) | The positions of eight players in the mod's memory | Eight only |
 
-The fixes for rooms of eight go in a build for eight only, the one whose avatar manager holds more than eight. 19 code
-sites change in a build for four, 31 in a build for eight. For four avatars or fewer the culls and the encounter give
+The fixes for rooms of eight go in a build for eight only, the one whose avatar manager holds more than eight. So does
+the dormancy pass's: it counts players, and only a build for eight has a fifth. 19 code sites change in a build for
+four, 35 in a build for eight. For four avatars or fewer the culls and the encounter give
 the game's own result. The anchor starts the fourth score at 0, which the game leaves unset.
 
 Limits that remain:

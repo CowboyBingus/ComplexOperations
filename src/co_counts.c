@@ -486,7 +486,7 @@ static void Boosters(CoRegs* regs) { co_boosters_update((uintptr_t)regs->rcx); }
 static void (*const kCountCallbacks[])(CoRegs*) = {
     FindByRsi, FindByR11, JoinGate, ClearValueKeys, LastSlotState, MessageFits, JoinSlot, JoinIndex,
     HostAppend, HostBuild, HostScores,
-    [14] = LootIndex, LootRow, Participant, Record, co_avatars_dist_sum, co_avatars_enc_spread,
+    [14] = LootIndex, LootRow, Participant, Record, co_avatars_dist_sum, co_avatars_enc_spread, co_avatars_dormancy,
     [30] = Waiting, AnswerRaxRsi, AnswerR10R11, AnswerRaxRdi, Dropped, RecordWaiting, DroppedRdx,
     [40] = SeatData, SeatList, SeatValid, Boosters, SeatNode,
 };
