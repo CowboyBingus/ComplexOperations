@@ -419,6 +419,8 @@ Pelican), which are not in this folder.
 | `tests/registry_test.c` | The list's move in each build, run through the game's loads; refusal on changed code or a card in the list, rollback of a failed write. |
 | `tests/ui_test.c` | The guards for four, the map's move with the state, the HUD's and tags' move at the HUD's init, refusal on changed code and rollback of a failed write. |
 | `tests/engine_test.c` | The engine's sites: written, refused on changed code, taken back on a failed write. |
+| `src/co_roll.c` | Whether an operation is a complex operation: an integer hash of its seed and planet. Not used yet. |
+| `tests/roll_test.c` | The roll's fixed answers and its share of operations at 5, 25 and 50 %. |
 | `src/xl/` | The extra large world, built into the DLL but not installed: nothing calls `CoXlInstall`. |
 | `src/xl/proto/` | Its files as copied from a HellForge loader; `README.md` there says from where. Parts of `co_xl.c`. |
 | `src/xl/co_shim.h`, `co_shim.c` | The loader's helpers those files call, over the SDK and the mod's own parts. |
