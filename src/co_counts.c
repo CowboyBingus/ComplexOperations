@@ -301,7 +301,8 @@ static uint64_t g_waitFurther[CO_PEERS - CO_ACTIVITY_ROOM];
 static uint32_t g_waitFurtherCount;
 static CoActivityWaiting g_waiting[CO_ACTIVITY_RECORDS];
 
-/* rcx is a non-local ready peer the record's list has no room for. Record takes the list on the same path. */
+/* rcx is a non-local ready peer the record's list has no room for. Record or RecordWaiting takes the list on the same
+ * path: both record makers count the record with no branch after their peers' loop. */
 static void Waiting(CoRegs* regs)
 {
     if (g_activity && g_waitFurtherCount < CO_PEERS - CO_ACTIVITY_ROOM) g_waitFurther[g_waitFurtherCount++] = regs->rcx;
@@ -351,8 +352,9 @@ static void Forget(uint64_t key)
     if (extras != NULL) extras->count = 0;
 }
 
-/* rax is a record in state 2 or 3 that leaves the table. */
+/* rax is a record in state 2 or 3 that leaves the table; rdx in the time-out's own drops. */
 static void Dropped(CoRegs* regs) { Forget(*(const uint64_t*)(uintptr_t)regs->rax); }
+static void DroppedRdx(CoRegs* regs) { Forget(*(const uint64_t*)(uintptr_t)regs->rdx); }
 
 /* rsi is the table (its count at +0x1100), rsi + rcx the new record. Keys are unique in the table: the game makes no
  * second record for a key. A record that timed out leaves the table without a post; its entry is free again then, so
@@ -380,6 +382,10 @@ static void Record(CoRegs* regs)
     }
     g_furtherCount = 0;
 }
+
+/* The second record maker's record is in the table (rsi, rcx as for Record). Its participants come from its caller, so
+ * the participants the first maker kept stay out: they can be left from one of its calls that found the table full. */
+static void RecordWaiting(CoRegs* regs) { KeepWaiting((uintptr_t)regs->rsi, *(const uint64_t*)(uintptr_t)(regs->rsi + regs->rcx)); }
 
 /* The host's scores for the next message. The message points at them, so they stay until the next update fills them
  * (every 10 seconds). */
@@ -470,7 +476,7 @@ static void (*const kCountCallbacks[])(CoRegs*) = {
     FindByRsi, FindByR11, JoinGate, ClearValueKeys, LastSlotState, MessageFits, JoinSlot, JoinIndex,
     HostAppend, HostBuild, HostScores,
     [14] = LootIndex, LootRow, Participant, Record, co_avatars_dist_sum, co_avatars_enc_spread,
-    [30] = Waiting, AnswerRaxRsi, AnswerR10R11, AnswerRaxRdi, Dropped,
+    [30] = Waiting, AnswerRaxRsi, AnswerR10R11, AnswerRaxRdi, Dropped, RecordWaiting, DroppedRdx,
     [40] = SeatData, SeatList, SeatValid, Boosters,
 };
 #define CO_CALLBACKS (sizeof kCountCallbacks / sizeof kCountCallbacks[0])

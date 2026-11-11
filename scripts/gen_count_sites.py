@@ -120,11 +120,11 @@ CALL = '''
     popfq
 '''
 # Callbacks, by number (the index in kCountCallbacks in co_counts.c). 8 to 10 are the hostability scores'; 18 and 19
-# the stack fixes' (stack_sites.py), 30 to 34 the Activity record's, 40 to 43 extract_sites.py's.
+# the stack fixes' (stack_sites.py), 30 to 36 the Activity record's, 40 to 43 extract_sites.py's.
 FIND_RSI, FIND_R11, GATE, VALUES, LAST_SLOT, MESSAGE, TEST_SLOT, TEST_INDEX = range(8)
 HOST_APPEND, HOST_BUILD, HOST_SCORES = range(8, 11)
 SCORE_INDEX, SCORE_ROW, PARTICIPANT, RECORD = range(14, 18)
-WAITING, ANSWER_RAX_RSI, ANSWER_R10_R11, ANSWER_RAX_RDI, DROPPED = range(30, 35)
+WAITING, ANSWER_RAX_RSI, ANSWER_R10_R11, ANSWER_RAX_RDI, DROPPED, RECORD_WAITING, DROPPED_RDX = range(30, 37)
 # (rva, bytes the jump replaces, code; `game+0x..` is an address in the game, CALL(n) the call of callback n)
 def HIGH(r): return ''.join(' movups [%s+0x%x], xmm0\n' % (r, o) for o in range(0x150, 0x1D0, 0x10))
 CAVES = [
@@ -219,10 +219,11 @@ GUARDS = [
                                                 ' jmp game+0x62F35C' % SCORE_ROW),
     # Activity record: the participants (four, the count right behind) and the peers whose answer it waits for (three)
     # are filled from the ready list with no bound. A peer beyond them stays out of the record; the callbacks keep
-    # participants 5 to 8 and the non-local peers 4 to 7 (rcx) for the record that is being made (co_counts.c).
+    # participants 5 to 8 and the non-local peers 4 to 7 (rcx) for the record that is being made (co_counts.c). The
+    # second record maker 0x12E6690 takes its four participants from its caller and fills only the peers' list.
     (0xA56D88, '48 89 54 c5 98', 'CALL(%d)\n cmp eax, 4\n jae game+0xA56D95\n mov qword ptr [rbp+rax*8-0x68], rdx\n jmp game+0xA56D8D' % PARTICIPANT),
     (0xA56E91, '48 89 4c c5 e8', 'cmp eax, 3\n jb 1f\n CALL(%d)\n jmp game+0xA56E9E\n1: mov qword ptr [rbp+rax*8-0x18], rcx\n jmp game+0xA56E96' % WAITING),
-    (0x12E67B1, '48 89 4c c5 bf', 'cmp eax, 3\n jae game+0x12E67BE\n mov qword ptr [rbp+rax*8-0x41], rcx\n jmp game+0x12E67B6'),
+    (0x12E67B1, '48 89 4c c5 bf', 'cmp eax, 3\n jb 1f\n CALL(%d)\n jmp game+0x12E67BE\n1: mov qword ptr [rbp+rax*8-0x41], rcx\n jmp game+0x12E67B6' % WAITING),
     # A record's bits 0 to 3 and 4 to 7 by player index: index 4 would set a bit of the other half or a flag above
     # them. An index of -1 goes on as the game has it.
     (0x13D1119, '44 8b 4d 6f 41 b8 04 00 00 00', 'cmp eax, 4\n jb 1f\n cmp eax, -1\n jne game+0x13D173E\n1: mov r9d, dword ptr [rbp+0x6f]\n mov r8d, 4\n'
@@ -266,6 +267,11 @@ ACTIVITY = [
     (0x12E6C4D, '45 85 c9 75 27', 'test r9d, r9d\n jne game+0x12E6C79\n CALL(%d)\n jc game+0x12E6C79\n jmp game+0x12E6C52' % ANSWER_RAX_RDI),
     # 0x12E69D0 takes a record in state 2 or 3 (rax) out of the table: its kept participants and peers go too.
     (0x12E6A0F, '8d 4a ff 49 ff c8', 'CALL(%d)\n lea ecx, [rdx-1]\n dec r8\n jmp game+0x12E6A15' % DROPPED),
+    # The second record maker's record is in the table (rsi, rcx as at 0xA56F0E): only its waiting peers go with its key.
+    (0x12E682E, 'ff 86 00 11 00 00', 'inc dword ptr [rsi+0x1100]\n CALL(%d)\n jmp game+0x12E6834' % RECORD_WAITING),
+    # The same drop inlined in the world update and in 0x12E63E0, the record in rdx: the per-frame time-out's drops.
+    (0x13F8657, '8d 41 ff 49 ff c8', 'CALL(%d)\n lea eax, [rcx-1]\n dec r8\n jmp game+0x13F865D' % DROPPED_RDX),
+    (0x12E64F7, '8d 41 ff 48 ff cf', 'CALL(%d)\n lea eax, [rcx-1]\n dec rdi\n jmp game+0x12E64FD' % DROPPED_RDX),
 ]
 # Guards in place: the game tests the index against -1 ("none") only. cmp reg,-1; je becomes cmp reg,4; jae, which
 # sends 4 to 7 the way "none" goes and leaves -1 going there. (rva, bytes, new bytes)

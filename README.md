@@ -180,10 +180,10 @@ session's ready list with no bound:
 - The local player always gets a place among the four participants.
 - The mod keeps participants 5 to 8 for the record. A hook of the post lists them behind the four. The post writes a
   list of any length; HellForge's backend takes up to 16.
-- The mod keeps the other players 4 to 7 the record waits for. 6 sites in the game's three answer functions take an
-  answering or leaving player off that list too, and keep the record waiting while one is left. The time-out and the
-  drop work as for four.
-- The further participants and answers need the post's hook. Without it, or with one of their 8 sites changed, they
+- The mod keeps the other players 4 to 7 the record waits for, in both of the game's record functions. 6 sites in the
+  game's three answer functions take an answering or leaving player off that list too, and keep the record waiting
+  while one is left. The time-out and the drop work as for four; the 3 drops free the mod's lists.
+- The further participants and answers need the post's hook. Without it, or with one of their 11 sites changed, they
   stay out: the record keeps four, and the rest of the counts and guards still goes in.
 
 A build for eight gives the mission summary screen eight rows and cards. The game packs two row blocks of four rows,
@@ -196,8 +196,8 @@ four keeps the screen and its 4 guards.
 Limits that remain:
 
 - The mission result's loot rows hold score slots 1 to 4 only.
-- An Activity record made by the game's second record function (0x12E6690) keeps four participants and waits for three
-  other players.
+- A record of the game's second record function (0x12E6690) lists the four participants its caller hands it. No caller
+  of that function was found in the game's code.
 - The summary's cards 5 to 8 use the game's layout for four (a layout mode, not a count): where they appear on screen
   is not known.
 - The summary's list of best entries keeps four.
