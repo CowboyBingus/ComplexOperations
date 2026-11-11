@@ -167,8 +167,10 @@ A build for four leaves the screen and the table as the game has them and keeps 
 Limits that remain:
 
 - The text on the cards is half size too: small but legible at 1280 x 720.
-- Card 5's figure is seen in a game, on host and joiner. Cards 6 to 8 are not yet.
-- Weathering and wound decals on the figures of cards 5 to 8 are not yet seen in a game.
+- The figures of players 5 to 8 are each seen in a game, on host and joiner, in sessions of two players. More than
+  two cards at once are not yet seen.
+- The figures of players 6 to 8 showed the frost their Helldiver wore after arriving. Wound decals on the figures of
+  players 5 to 8 are not yet seen in a game.
 
 ## Mission
 
