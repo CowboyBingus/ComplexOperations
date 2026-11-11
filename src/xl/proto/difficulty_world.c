@@ -193,6 +193,7 @@ static void NetPositionRange(float scale)
         scale > 1.0f ? "an extra large level" : "vanilla", steps);
 }
 
+static volatile uint8_t* g_hudLive; /* 1 while the mission in play is complex: the stubs and the row state test it */
 /* A level is set up. The generator's side follows every level, a war-table preview too: its page, the thinning's
  * thresholds, the immediates and the city zone's factor have one reader, the generation in flight. Play's side (its
  * page and the network's position range) follows a mission only: the ship is played while previews generate. */
@@ -211,6 +212,7 @@ static void WorldWrite(float scale, int mission)
     g_world.current = co_pages_scale(CO_PAGES_GEN);
     if (changed & CO_PAGES_LIVE) NetPositionRange(scale);
     g_world.live = co_pages_scale(CO_PAGES_LIVE);
+    if (g_hudLive != NULL) *g_hudLive = g_world.live > 1.0f;
     if (changed) InterlockedIncrement(&g_world.switches);
 }
 
@@ -824,6 +826,7 @@ static uint32_t g_hudRowKey[16], g_hudRows;
 typedef void (*HudRowAddFn)(uint64_t widget, uint32_t id);
 typedef void (*HudRowStateFn)(uint64_t row, uint32_t state);
 static HudRowStateFn g_hudRowState;
+static int HudGroupedNow(void) { return g_hudLive != NULL && *g_hudLive != 0; }
 static volatile LONG g_hudRowsCut;
 static int HudInstances(uint64_t* inst, uint64_t* ids, uint32_t* n)
 {
@@ -958,6 +961,7 @@ static void HudRowState(uint64_t row, uint32_t state)
     uint64_t inst = 0, ptrs = 0;
     uint32_t n = 0, id = 0, slot = 16;
     uint64_t def = 0;
+    if (!HudGroupedNow()) { g_hudRowState(row, state); return; } /* a normal mission's rows are the game's */
     for (uint32_t j = 0; j < g_hudRows && j < 16; j++)
         if (!SafeRead(row + 0xF060, &id, 4) && g_hudRowKey[j] == id) { def = g_hudRowDef[j]; slot = j; break; }
     uint32_t copies = 0, done = 0, failed = 0;
@@ -1002,6 +1006,7 @@ static uint64_t HudRowOf(uint64_t hud, uint32_t index)
 static int HudFindStub(uintptr_t game, uint8_t* code) /* before the block is made executable */
 {
     if (!ApiCodeMatches(game + HUD_FIND_SITE, kHudFindPin) || !ApiCodeMatches(game + HUD_FLAG_SITE, kHudFlagPin)) return 0;
+    code += co_hud_find_head(code, (uintptr_t)code, game, (uintptr_t)g_hudLive); /* a normal mission: the game's own search */
     static const uint8_t stub[] = {
         0x48, 0x83, 0xEC, 0x40,                   /*  0 sub rsp, 0x40 (16-aligned at the site) */
         0x0F, 0x11, 0x4C, 0x24, 0x20,             /*  4 movups [rsp+0x20], xmm1 (live across) */
@@ -1028,15 +1033,13 @@ static int HudGroupStub(uintptr_t game, uint8_t* code) /* before the block is ma
     if (!ApiCodeMatches(game + HUD_LIST_SITE, kHudListPin) || !ApiCodeMatches(game + HUD_LIST_BACK, kHudBackPin) ||
         !ApiCodeMatches(game + HUD_ROW_ADD, kHudRowAddPin) || !ApiCodeMatches(game + HUD_ROW_STATE, kHudRowStatePin))
     { Note("difficulty: HUD: the objective list is not the reviewed code; one mission's main objectives and steps"); return 0; }
-    /* mov rcx, r15 (the HUD); mov rax, HudObjectiveRows; call rax; jmp 0x17CF79A (rsp is 16-aligned here, its home area free) */
-    uint8_t stub[3 + 10 + 2 + 5] = {0x4C, 0x89, 0xF9, 0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xD0, 0xE9, 0, 0, 0, 0};
-    _Static_assert(sizeof stub == 20, "the HUD stub ends with its jump");
-    uint64_t to = (uint64_t)(uintptr_t)HudObjectiveRows;
-    memcpy(stub + 5, &to, 8);
-    int32_t rel = (int32_t)((intptr_t)(game + HUD_LIST_BACK) - (intptr_t)(code + sizeof stub)); memcpy(stub + 16, &rel, 4);
-    memcpy(code, stub, sizeof stub);
+    if (g_hudLive == NULL || co_hud_check(game) != NULL) { Note("difficulty: HUD: the objective rows are not the reviewed code; one mission's main objectives and steps"); return 0; }
+    /* each stub runs the game's own bytes unless the mission in play is complex (../co_normal.c; rsp is 16-aligned at
+     * the list site, its home area free) */
+    co_hud_list_stub(code, (uintptr_t)code, game, (uintptr_t)g_hudLive, (uintptr_t)HudObjectiveRows);
     if (!HudFindStub(game, code + 0x40)) { Note("difficulty: HUD: the objective rows' update is not the reviewed code; one mission's main objectives and steps"); return 0; }
-    return code[13] == 0xFF && code[15] == 0xE9;
+    co_hud_flag_stub(code + 0xC0, (uintptr_t)(code + 0xC0), game, (uintptr_t)g_hudLive);
+    return 1;
 }
 static void HudGroupSite(uintptr_t game, uint8_t* code)
 {
@@ -1045,8 +1048,9 @@ static void HudGroupSite(uintptr_t game, uint8_t* code)
     int32_t rel = DifficultyJumpRel(game + HUD_LIST_SITE, (uintptr_t)code); memcpy(jump + 1, &rel, 4);
     uint8_t find[43]; memset(find, 0x90, sizeof find); find[0] = 0xE9;
     rel = DifficultyJumpRel(game + HUD_FIND_SITE, (uintptr_t)(code + 0x40)); memcpy(find + 1, &rel, 4);
-    const uint8_t orFlag = 0x08; /* or byte [rsp+rax+0x30], cl: a row is near when any of its copies is */
-    if (ApiWrite(game + HUD_FIND_SITE, find, sizeof find) || ApiWrite(game + HUD_FLAG_SITE, &orFlag, 1) ||
+    uint8_t flag[7] = {0xE9, 0, 0, 0, 0, 0x90, 0x90}; /* a row is near when any of its copies is, on a complex mission */
+    rel = DifficultyJumpRel(game + HUD_FLAG_SITE, (uintptr_t)(code + 0xC0)); memcpy(flag + 1, &rel, 4);
+    if (ApiWrite(game + HUD_FIND_SITE, find, sizeof find) || ApiWrite(game + HUD_FLAG_SITE, flag, sizeof flag) ||
         ApiWrite(game + HUD_LIST_SITE, jump, sizeof jump)) { Note("difficulty: HUD: the objective list could not be patched"); return; }
     g_hudGrouped = 1;
     Note("difficulty: HUD: main objective and step rows are one per objective (16 rows), each row's state and near mark over its copies");
@@ -5310,6 +5314,7 @@ static void WorldShip(void)
     NearOneMipDrop();
     if (co_pages_ship() & CO_PAGES_LIVE) { NetPositionRange(1.0f); InterlockedIncrement(&g_world.switches); }
     g_world.live = co_pages_scale(CO_PAGES_LIVE);
+    if (g_hudLive != NULL) *g_hudLive = 0;
     g_worldLevelLive = 0; g_world.liveLevels = 0;
 }
 
@@ -6272,6 +6277,7 @@ static const char* InstallWorld(DifficultyInstall* d)
     rel = (int32_t)((block + 0x1200) - (full + 29)); memcpy(full + 25, &rel, 4);
     int padBand = PadBandStubs(game, block + 0x500), flatBand = FlatBandStub(game, block + 0x5C0), caps = CapStubs(game, block + 0x600), draws = OptionalDrawStub(game, block + 0x660);
     const char* objCapWhy = ObjCapStub(game, block + 0x6C0);
+    g_hudLive = block + 0x1140; /* in the values page: written per level, and 0 until a complex mission is set up */
     int hud = g_difficulty.missions > 1 && HudGroupStub(game, block + 0x700);
     DWORD protect;
     VirtualProtect(block, 0x1000, PAGE_EXECUTE_READ, &protect);
