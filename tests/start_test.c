@@ -65,6 +65,7 @@ static void Start(const char* name)
     fake_stock_chains(image, disk); /* its keyed generator steps, which the mod chains in front of */
     fake_stock_rows(image);         /* and its distance rows, behind the game's row readers */
     co_join_test_image(image, 4); co_drain_test_image(image);
+    fake_stock_nav(image);          /* its navigation steps, and the engine they retile */
     co_capacity_test_commit(CO_COMPLEX_COMMIT_MB);
     co_capacity_init();
     co_capacity_game((uintptr_t)image);
@@ -95,6 +96,9 @@ int main(void)
     g_fake.image[fake_stock_stub(4) + 9] ^= 1;
     CHECK(co_capacity_poll(1) == 1 && !co_capacity_needs()->stock_stubs && !co_complex_on() && co_complex_start() == 0 && Untouched());
     CHECK(Lines("complex operations are off") == 1 && fake_host_logged("larger-map steps are not the ones this mod was built for"));
+    Start("a navigation step of difficulty 11 is another");
+    g_fake.image[FAKE_STOCK_NAV + 0x100u + 56u] ^= 1;
+    CHECK(co_capacity_poll(1) == 1 && !co_capacity_needs()->stock_stubs && !co_complex_on() && co_complex_start() == 0 && Untouched());
     Start("no radii step");
     memset(g_fake.image + CO_RADII_SITE, 0x90, 7);
     CHECK(co_capacity_poll(1) == 1 && !co_capacity_needs()->stock_stubs && !co_complex_on());

@@ -19,4 +19,8 @@ uint32_t fake_stock_stub(int chain);
 #define FAKE_STOCK_ROW_TEN 0x3112000u
 void fake_stock_rows(uint8_t* image);
 
+/* HellForge's two navigation stubs behind its jumps, and the engine's nav code in a fake exe (fake_host_exe). */
+#define FAKE_STOCK_NAV 0x3113000u /* the mission's stub; the ship's at +0x100 */
+void fake_stock_nav(uint8_t* image);
+
 #endif

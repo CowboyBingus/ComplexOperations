@@ -36,16 +36,26 @@ int main(void)
 
     g_case = "the navigation tiles";
     CoNavPlan p;
-    co_nav_plan(hellforge, 1023.0f, &p); /* HellForge's level 11: 64 tiles of 256 m, as without the mod */
-    CHECK(p.grid == 8 && p.low == -1023.75f && p.high == 1024.25f && p.tile == 256.0f && (p.high - p.low) / (float)p.grid == p.tile);
-    co_nav_plan(0.5f, 682.0f, &p);       /* a lower level */
-    CHECK(p.grid == 8 && p.low == -511.75f && p.high == 512.25f && p.tile == 128.0f && (p.high - p.low) / (float)p.grid == p.tile);
-    co_nav_plan(0.0f, 0.0f, &p);         /* the ship */
-    CHECK(p.grid == 8 && p.tile == 128.0f);
+    /* the game's tile bounds: min + x * tile, and that + tile (exe 0x7B44D3) */
+    const struct { float disk, radius, low, tile, stockLow; } normal[] = {
+        {hellforge, 1023.0f, -4095.75f, 256.0f, -1023.75f}, /* HellForge's level 11 */
+        {0.5f, 682.0f, -2047.75f, 128.0f, -511.75f},        /* a lower level */
+        {0.0f, 0.0f, -2047.75f, 128.0f, -511.75f},          /* the ship */
+        {hellforge, 8074.4f, -4095.75f, 256.0f, -1023.75f}};/* the radius alone makes no level complex */
+    for (size_t i = 0; i < sizeof normal / sizeof normal[0]; i++)
+    {
+        co_nav_plan(normal[i].disk, normal[i].radius, &p);
+        CHECK(p.grid == 32 && p.low == normal[i].low && p.tile == normal[i].tile && p.high == p.low + 32.0f * p.tile);
+        /* tiles 12..19 are HellForge's 0..7, bit for bit: the navmesh over its world is built from the same bounds */
+        for (int x = 0; x < 8; x++)
+        {
+            volatile float mine = p.low + (float)(x + 12) * p.tile, stock = normal[i].stockLow + (float)x * p.tile;
+            volatile float mineEnd = mine + p.tile, stockEnd = stock + p.tile;
+            CHECK(memcmp((void*)&mine, (void*)&stock, 4) == 0 && memcmp((void*)&mineEnd, (void*)&stockEnd, 4) == 0);
+        }
+    }
     co_nav_plan(key, 8074.4f, &p);
     CHECK(p.grid == 32 && p.low == -8190.0f && p.high == 8194.0f && p.tile == 512.0f && (p.high - p.low) / (float)p.grid == p.tile);
-    co_nav_plan(hellforge, 8074.4f, &p); /* the radius alone makes no level complex */
-    CHECK(p.grid == 8 && p.tile == 256.0f);
 
     g_case = "the limits";
     CHECK(co_level_limit(CO_LIMIT_SPAWNERS, 0) == 128 && co_level_limit(CO_LIMIT_SPAWNERS, 1) == 1024);

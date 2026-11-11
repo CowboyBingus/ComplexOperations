@@ -3,6 +3,8 @@
 #include "fake_stock.h"
 #include "xl/co_chain.h"
 #include "xl/co_rows.h"
+#include "xl/co_nav.h"
+#include "xl/co_nav_sites.h"
 #include "fake_host.h"
 
 static void Rel(uint8_t* image, uint32_t at, uint32_t target) { const int32_t rel = (int32_t)(target - (at + 4u)); memcpy(image + at, &rel, 4); }
@@ -72,4 +74,24 @@ void fake_stock_rows(uint8_t* image)
     memcpy(image + CO_ROW_OBJECTIVES_SITE, kCoRowObjectives, sizeof kCoRowObjectives);
     memcpy(image + FAKE_STOCK_ROW_TEN + 0xF0u, radii, sizeof radii);
     g_fake.levelTen = (uintptr_t)image + FAKE_STOCK_ROW_TEN;
+}
+
+void fake_stock_nav(uint8_t* image)
+{
+    uint8_t* exe = fake_host_exe();
+    const uint64_t retile = 0x1122334455667788ull, system = (uint64_t)(uintptr_t)image + CO_NAV_SYSTEM;
+    const float sizes[2] = {128.0f, 256.0f};
+    uint8_t jump[15];
+    memcpy(image + FAKE_STOCK_NAV, kNavStock, sizeof kNavStock);
+    memcpy(image + FAKE_STOCK_NAV + 60, &retile, 8); memcpy(image + FAKE_STOCK_NAV + 126, &system, 8);
+    Rel(image, FAKE_STOCK_NAV + 141u, CO_NAV_BACK);
+    memcpy(image + FAKE_STOCK_NAV + 0x100u, kNavShipStock, sizeof kNavShipStock);
+    memcpy(image + FAKE_STOCK_NAV + 0x100u + 65, &retile, 8);
+    Rel(image, FAKE_STOCK_NAV + 0x100u + 140u, CO_NAV_SHIP_BACK);
+    memset(jump, 0x90, sizeof jump); jump[0] = 0xE9;
+    memcpy(image + CO_NAV_SITE, jump, 15); Rel(image, CO_NAV_SITE + 1u, FAKE_STOCK_NAV);
+    memcpy(image + CO_NAV_SHIP_SITE, jump, 10); Rel(image, CO_NAV_SHIP_SITE + 1u, FAKE_STOCK_NAV + 0x100u);
+    memcpy(exe + CO_NAV_EXE_PIN, kNavExe, sizeof kNavExe);
+    memcpy(exe + CO_NAV_TILE_READ, kNavTileRead, sizeof kNavTileRead);
+    memcpy(exe + CO_NAV_TILE_128, &sizes[0], 4); memcpy(exe + CO_NAV_TILE_256, &sizes[1], 4);
 }

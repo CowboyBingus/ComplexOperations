@@ -27,8 +27,9 @@ extern const uint8_t kCoRadiiBehind[10];
 const char* co_radii_check(uintptr_t game);
 size_t co_radii_stub(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t flag);
 
-/* The navigation grid for a level: HellForge's own tiles (8 x 8; 256 m when the radius field is above 682, else and on
- * the ship 128 m) unless the level is complex (32 x 32 tiles of 512 m over 16384 m). */
+/* The navigation grid for a level in a process whose grid is 32 x 32 (it cannot change size per level): a complex
+ * level has tiles of 512 m over 16384 m; any other has HellForge's tile size (256 m when the radius field is above
+ * 682, else and on the ship 128 m) and bounds four times HellForge's, so tiles 12..19 are HellForge's eight. */
 typedef struct CoNavPlan { uint32_t grid; float low, high, tile; } CoNavPlan;
 void co_nav_plan(float disk, float radius, CoNavPlan* plan);
 

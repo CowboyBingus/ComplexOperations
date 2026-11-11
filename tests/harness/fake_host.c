@@ -29,6 +29,7 @@ static int On(HfMod* mod, HfEvent event, HfEventCallback callback, void* user)
 
 static uintptr_t ModuleBase(const char* module, size_t* size)
 {
+    if (strcmp(module, "helldivers2.exe") == 0 && g_fake.exe != NULL) { if (size) *size = FAKE_EXE_SIZE; return (uintptr_t)g_fake.exe; }
     if (strcmp(module, "game.dll") != 0) return 0;
     if (size) *size = FAKE_IMAGE_SIZE;
     return (uintptr_t)g_fake.image;
@@ -37,7 +38,8 @@ static uintptr_t ModuleBase(const char* module, size_t* size)
 static int Inside(uintptr_t address, size_t size)
 {
     const uintptr_t base = (uintptr_t)g_fake.image;
-    return address >= base && address + size <= base + FAKE_IMAGE_SIZE;
+    const uintptr_t exe = (uintptr_t)g_fake.exe;
+    return (address >= base && address + size <= base + FAKE_IMAGE_SIZE) || (exe != 0 && address >= exe && address + size <= exe + FAKE_EXE_SIZE);
 }
 
 static int Read(uintptr_t address, void* buffer, size_t size)
@@ -137,6 +139,14 @@ static void Registry(uint8_t* image)
     memcpy(image + FAKE_UPS_POINTER, &ups, 8);
 }
 _Static_assert(FAKE_UPS + FAKE_UPS_SIZE <= FAKE_IMAGE_SIZE, "the placement system lies inside the image");
+
+static uint8_t* g_exe;
+uint8_t* fake_host_exe(void)
+{
+    if (g_exe == NULL) g_exe = VirtualAlloc(NULL, FAKE_EXE_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    else memset(g_exe, 0, FAKE_EXE_SIZE);
+    return g_fake.exe = g_exe;
+}
 
 const HfApi* fake_host_reset(const char* build)
 {

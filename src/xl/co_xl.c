@@ -18,6 +18,7 @@
 #include "co_normal.h"
 #include "co_chain.h"
 #include "co_rows.h"
+#include "co_nav.h"
 
 /* Seven of the copied files' functions were called from loader code that did not come along (the watch thread, the
  * ship's level change, the density rules of a later branch); they are unused until their callers are written. */
@@ -85,6 +86,7 @@ const char* CoXlInstall(uintptr_t game)
     if ((why = WorldSitesFailed(game)) != NULL) return why;
     WeldResearchInstall(game);
     if ((why = InstallWorld(&d)) != NULL || (why = InstallWorldStreamStep(&d)) != NULL || (why = InstallMapHud(&d)) != NULL) return why;
+    co_nav_ship(WorldShip); /* the ship's navigation step is where play's world goes back to the game's */
     if (g_coApi->on_game_thread(g_coMod, CoXlTick, NULL) == 0) return "the game thread's tick could not be registered";
     return NULL;
 }

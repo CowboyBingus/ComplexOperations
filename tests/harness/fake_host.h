@@ -39,6 +39,7 @@ typedef struct FakeHost
     HfGenerationCapacity capacity, wanted;
     uintptr_t levelRow;       /* difficulty_row(11) */
     uintptr_t levelTen;       /* difficulty_row(10) */
+    uint8_t* exe;             /* "helldivers2.exe", once fake_host_exe was asked for it; reads and writes reach it */
     uint32_t loadPhase;
     HfTickCallback tick;      /* the last on_game_thread callback */
     /* The session: the role, the host's row as this machine holds it (0 bytes: none), what share_set and send answer
@@ -53,6 +54,9 @@ extern FakeHost g_fake;
 
 /* A zeroed image and an empty log; returns the api to hand to the mod. */
 const HfApi* fake_host_reset(const char* build);
+/* An empty engine image of FAKE_EXE_SIZE for this case. */
+#define FAKE_EXE_SIZE 0x2800000u
+uint8_t* fake_host_exe(void);
 void* fake_host_detour(uintptr_t rva);
 int fake_host_logged(const char* text);
 

@@ -49,6 +49,7 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
 | `living_world.c`, `difficulty_stream.c`, `difficulty_world_terrain.c` | `hellforge_lw_test` and `hellforge_research_stream_observer` are not exported. |
 | `difficulty_world.c` | The install ends with `../co_chain.c`: the mod's stubs in front of HellForge's keyed generator steps. |
 | `difficulty_world.c` | A level init whose decision is "leave" logs one line and sets up a normal level. |
+| `difficulty_world.c` | `WorldShip` is called from the ship's navigation step (`../co_nav.c`), which the mod chains in front of HellForge's. |
 | `difficulty_world.c` | Level init sets the distance row for the level (`../co_rows.c`); the city zone's ratio is that file's. |
 | `difficulty_world.c` | The HUD's three stubs come from `../co_normal.c`: each runs the game's own bytes unless the mission in play is complex, and the row state hook passes a normal mission through. |
 

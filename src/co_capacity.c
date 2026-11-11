@@ -7,6 +7,7 @@
 
 #include "co.h"
 #include "xl/co_chain.h"
+#include "xl/co_nav.h"
 #include "xl/co_normal.h"
 #include "xl/co_pages.h"
 #include "xl/co_rows.h"
@@ -95,7 +96,8 @@ static void Settle(void)
     const int capacity = n->capacity_call && n->regions && !n->live_load && n->capacity_granted && n->level_11 && n->moved;
     if (capacity && g_capacity.game != 0)
     {
-        n->stock_stubs = co_radii_check(g_capacity.game) == NULL && co_chain_check(g_capacity.game, NULL) == NULL;
+        n->stock_stubs = co_radii_check(g_capacity.game) == NULL && co_chain_check(g_capacity.game, NULL) == NULL &&
+            co_nav_check(g_capacity.game, NULL) == NULL;
         n->own_sites = (site = OwnSites(g_capacity.game)) == NULL;
         n->commit_free_mb = CommitFree();
         why = co_complex_refusal(n);
@@ -116,7 +118,8 @@ int co_complex_start(void)
     const char* why;
     if (!co_complex_on()) return 0;
     if ((why = co_rows_install(g_capacity.game)) == NULL && (why = co_drain_install(g_capacity.game)) == NULL &&
-        (why = co_join_install(g_capacity.game)) == NULL && (why = CoXlInstall(g_capacity.game)) == NULL && (why = co_mark_install(g_capacity.game)) == NULL) why = co_launch_install(g_capacity.game);
+        (why = co_join_install(g_capacity.game)) == NULL && (why = co_nav_install(g_capacity.game)) == NULL &&
+        (why = CoXlInstall(g_capacity.game)) == NULL && (why = co_mark_install(g_capacity.game)) == NULL) why = co_launch_install(g_capacity.game);
     if (why == NULL) return 1;
     g_capacity.on = 0; /* what did go in runs the game's own code on every level: nothing is complex without the mark */
     co_log("complex operations are off: %s", why);
