@@ -11,6 +11,14 @@
 
 #include "co.h"
 
+/* The prototype's research switches (HELLFORGE_*) change what one machine generates, and every peer of a mission must
+ * generate alike: a build reads none of them, each as if unset, unless it is a research build (scripts/build.sh
+ * --research, which no package is made from). Every environment read of the copied files is such a switch. */
+#ifndef CO_RESEARCH
+static inline DWORD CoNoSwitch(char* buffer, DWORD size) { if (buffer != NULL && size != 0) buffer[0] = 0; return 0; }
+#define GetEnvironmentVariableA(name, buffer, size) CoNoSwitch((buffer), (DWORD)(size))
+#endif
+
 /* Per-player arrays of the copied code: the most slots any build's player manager has. The count that is read is
  * checked against the manager's slots now (co_managers_slots), four or eight. */
 #define CO_SHIM_MAX_PLAYERS 8

@@ -92,7 +92,7 @@ const char* CoXlInstall(uintptr_t game)
     LwInstallSmashSpares();
     LwInstallNoise();
     LwInstallDefer();
-    LwInstallMover();
+    if (LwEnabled()) LwInstallMover(); /* the living world's own guard: its callers are the living world's */
     DescInstallNotes();
     if ((why = WorldSitesFailed(game)) != NULL) return why;
     WeldResearchInstall(game);

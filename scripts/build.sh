@@ -3,7 +3,9 @@
 # tests/*_test.c against tests/harness. The Linux equivalent of HellForge's own mod build: the same Zig target and warning
 # flags, the SDK of a HellForge-Open checkout, and the tests as Windows executables under Wine.
 # Usage: scripts/build.sh [--test] [--package] [--players 4|8] [--test-first-slot <1-7>] [--only <test id>]
-#        [--hellforge <HellForge-Open checkout>] [--zig <zig>] [--no-dll]
+#        [--hellforge <HellForge-Open checkout>] [--zig <zig>] [--no-dll] [--research]
+# --research builds a DLL that reads the extra large world's HELLFORGE_* research switches. Peers must generate alike,
+# so no other build reads them and a package is never built with it.
 # --players sets how many players a session takes (default 4); the DLL and the tests are built for that count.
 # --test-first-slot is a test aid for a PC with two game instances and never goes into a package: as host the mod
 # gives joining peers slots and player indexes from that number on. It needs --players 8.
@@ -20,6 +22,7 @@ hellforge=${HELLFORGE_OPEN:-}
 zig=${HELLFORGE_ZIG:-}
 no_dll=false
 package=false
+research=false
 players=4
 first_slot=0
 while (($#)); do
@@ -76,6 +79,10 @@ while (($#)); do
             package=true
             shift
             ;;
+        --research)
+            research=true
+            shift
+            ;;
         *)
             echo "Unknown argument: $1" >&2
             exit 1
@@ -91,7 +98,14 @@ if ((first_slot != 0 && players != 8)); then
     echo '--test-first-slot needs --players 8: a client with a player index above 3 never spawns in a build for four.' >&2
     exit 1
 fi
+if $research && $package; then
+    echo '--research is for one PC; a package is never built with it.' >&2
+    exit 1
+fi
 defines=(-DCO_PLAYERS="$players" -DCO_TEST_FIRST_SLOT="$first_slot")
+if $research; then
+    defines+=(-DCO_RESEARCH)
+fi
 
 if [[ -z $hellforge ]]; then
     hellforge=$HOME/HellForge
