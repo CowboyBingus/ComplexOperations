@@ -665,16 +665,10 @@ static uint64_t WorldPassSatelliteCaps(uint64_t a, uint64_t b, uint64_t c, uint6
 }
 /* The map's objective list S is filled at generation setup (0xF7166B -> 0xF70F20: rcx the level, r8 the mission row,
  * r9 the descriptor's ids (level+0x110), the 5th argument their count (+0x10D), nine more through to the 14th). The
- * descriptor holds 32 ids at most (its tail follows at +0xA0; objcap.md), and the selection is held at the objective
- * list's room, so an operation's three missions on one map got fewer objectives than three missions have. Here the list
- * gets more: repeats of the descriptor's major (class 2 in the base row) and then optional (class 3) ids in their order,
- * until each class reaches each mission's count x the missions (g_operationMajor / g_operationOptional) or the list is
- * full. Each id is held at what three missions of the row can hold, the game's own rules for one selection (0x1756730)
- * times the missions: uses <= missions x min(row entry +0x14, definition +0x20), and the ids sharing a bit of the
- * definition's exclusive byte +0x2C at most missions uses per bit (the picker 0x1757870 drops an entry whose bits were
- * picked, 0x175790A). Past that the game's op 0x16 found no free place for the late repeats (s75w, row 137: five
- * once-per-mission optionals filled to 24, 37 places, 33 placed). Only the descriptor and the static tables decide it, so
- * every peer fills the same list. */
+ * descriptor holds one mission's objectives and HellForge's partner, held at the list's places. On a complex level the
+ * list is made again from it (../co_objectives.c): each of the operation's missions gets the selection's primaries as
+ * whole blocks, and the side objectives take the room that is left, repeated while places are free. No write passes
+ * the places HellForge reports. Only the descriptor and the static tables decide it, so every peer fills the same. */
 typedef uint64_t (*ObjectiveFillFn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
     uint64_t, uint64_t, uint64_t, uint64_t);
 static ObjectiveFillFn g_objectiveFill;
@@ -685,26 +679,10 @@ static void ArcListKeep(uintptr_t rows, uint16_t row, const uint32_t* selected, 
  * (static, subagent hud18: the definitions and mission rows hold no parent). The HUD orders its rows by it. */
 static uint32_t g_hudOrder[32], g_hudOrderCount;
 static int g_hudOrderClass[32];
-static uint32_t ObjectiveIdCap(uintptr_t base, uint32_t id, uint8_t* bits) /* one mission's most uses of id, and its exclusive bits */
-{
-    uint8_t entries[32 * 0x18];
-    uint32_t most = 0xFFFFFFFFu, perMission = 0;
-    *bits = 0;
-    if (!SafeRead(base + 0x40, entries, sizeof entries))
-        for (int i = 0; i < 32; i++)
-        {
-            uint32_t entry;
-            memcpy(&entry, entries + i * 0x18, 4);
-            if (entry == id) { memcpy(&most, entries + i * 0x18 + 0x14, 4); break; }
-        }
-    uintptr_t def = ObjectiveDef(g_difficultyGame, id);
-    if (def == 0 || SafeRead(def + 0x20, &perMission, 4) || SafeRead(def + 0x2C, bits, 1)) return 0;
-    return perMission < most ? perMission : most;
-}
 static uint64_t WorldObjectiveFill(uint64_t level, uint64_t b, uint64_t row, uint64_t ids, uint64_t count, uint64_t a6, uint64_t a7, uint64_t a8,
     uint64_t a9, uint64_t a10, uint64_t a11, uint64_t a12, uint64_t a13, uint64_t a14)
 {
-    uint32_t n = (uint32_t)count, list[64];
+    uint32_t n = (uint32_t)count, list[32];
     uint8_t difficulty = 0;
     uint16_t r = (uint16_t)row;
     g_objectiveListCount = 0;
@@ -728,106 +706,31 @@ static uint64_t WorldObjectiveFill(uint64_t level, uint64_t b, uint64_t row, uin
     }
     difficulty = 0;
     if (g_difficulty.missions > 1 && LevelComplex((uintptr_t)level) && g_operationOptional != 0 && g_difficultyGame != 0 && ids != 0 && n > 0 && n <= 32 && r < DIF_MISSION_ROWS &&
-        g_objectiveListPlaces > n && g_objectiveListPlaces <= 64 && !SafeRead(level + 0xF9, &difficulty, 1) && difficulty == DIF_VANILLA + 1 &&
+        g_objectiveListPlaces >= n && g_objectiveListPlaces <= CO_LIST_MOST && !SafeRead(level + 0xF9, &difficulty, 1) && difficulty == DIF_VANILLA + 1 &&
         !SafeRead(ids, list, 4ull * n))
     {
-        uintptr_t base = g_difficultyGame + DIF_MISSIONS + (uintptr_t)r * DIF_MISSION_ROW;
-        uint32_t m = g_difficulty.missions, total = n, uses[64] = {0}, cap[64], bitUses[8] = {0}, have[2] = {0}, before[2] = {0}, capped[2] = {0};
-        uint8_t bits[64];
-        int cls[64];
-        for (uint32_t i = 0; i < n; i++)
+        /* The other missions' primaries only with the grouped HUD in (HudGroupSite): the game's own list of main
+         * objectives and steps holds 16 instances, the grouped one 16 objectives whatever their copies. */
+        CoList fill;
+        const CoListRules rules = {g_difficulty.missions, g_objectiveListPlaces, g_hudGrouped, g_operationMajor, g_operationOptional};
+        const char* why = co_list(g_difficultyGame, r, list, n, &rules, &fill);
+        static LONG noted;
+        if (why != NULL)
         {
-            cls[i] = RowClass(base, list[i]);
-            cap[i] = ObjectiveIdCap(base, list[i], &bits[i]);
-            cap[i] = cap[i] > 0xFFFFFFFFu / m ? 0xFFFFFFFFu : cap[i] * m;
+            if (InterlockedIncrement(&noted) <= 4) Note("difficulty: an operation's %u missions on one map: the objective list stays the selection (%s)", rules.missions, why);
         }
-        for (uint32_t i = 0; i < n; i++)
+        else if (fill.count != n || memcmp(fill.ids, list, 4ull * n) != 0)
         {
-            uint32_t first = i;
-            for (uint32_t j = 0; j < i; j++) if (list[j] == list[i]) { first = j; break; }
-            uses[first]++;
-            for (int t = 0; t < 8; t++) if (bits[i] & (1u << t)) bitUses[t]++;
-            if (cls[i] == 2) have[0]++;
-            if (cls[i] == 3) have[1]++;
-        }
-        before[0] = have[0]; before[1] = have[1];
-        /* Every mission's main objectives and steps (the grouped HUD holds them, HudGroupStub): a row that mixes no
-         * partner (a city's Launch ICBM row 50: ICBM x3 and its three steps at vanilla size) gets the descriptor's class
-         * 0 and then class 1 ids again for each mission past the first, a mission's block at a time, before the majors
-         * (op 0x16 places the list in order). A mixing row's other missions' primaries come from MixPartner (2 x missions
-         * - 1 partners). Their exclusive bits are not counted: they are each mission's own. */
-        uint32_t mainsBefore = 0, mainsAfter = 0;
-        for (uint32_t i = 0; i < n; i++) mainsBefore += (cls[i] == 0 || cls[i] == 1) && list[i] != DIF_LIVE_EVENT_OBJECTIVE;
-        mainsAfter = mainsBefore;
-        const int mixes = (g_difficulty.flags & HF_DIFFICULTY_SECOND_PRIMARY) && g_mixBase[r];
-        if (g_hudGrouped && !mixes)
-            for (uint32_t k = 1; k < m; k++)
-                for (int c = 0; c < 2; c++)
-                    for (uint32_t i = 0; i < n && total < g_objectiveListPlaces; i++)
-                        if (cls[i] == c && list[i] != DIF_LIVE_EVENT_OBJECTIVE) { list[total++] = list[i]; mainsAfter++; }
-        /* A mixing row whose layout has fewer partners than 2 x missions - 1 (s93b: row 129 on layout 1 mixed row 118
-         * only, so the 16 km map had one primary and its steps for three missions): its primary blocks (a main, class
-         * 0 or a partner's -1, and the class 1 steps the selection put right after it) again, in order, until the map
-         * holds 2 x missions primaries (a level-11 mission's two, per mission), each block at most once per mission. */
-        uint32_t primaries = 0, blocksAdded = 0;
-        if (g_hudGrouped && mixes)
-        {
-            uint32_t start[32], length[32], blocks = 0;
-            for (uint32_t i = 0; i < n && blocks < 32; i++)
-            {
-                if (!((cls[i] == 0 || cls[i] == -1) && list[i] != DIF_LIVE_EVENT_OBJECTIVE)) continue;
-                uint32_t j = i + 1;
-                while (j < n && cls[j] == 1 && list[j] != DIF_LIVE_EVENT_OBJECTIVE) j++;
-                start[blocks] = i; length[blocks] = j - i; blocks++;
-            }
-            primaries = blocks;
-            const uint32_t target = 2 * m < blocks * m ? 2 * m : blocks * m;
-            for (uint32_t k = 0; blocks > 0 && primaries < target; k++)
-            {
-                uint32_t b = k % blocks;
-                if (total + length[b] > g_objectiveListPlaces) break;
-                for (uint32_t t = 0; t < length[b]; t++) list[total++] = list[start[b] + t];
-                mainsAfter += length[b]; primaries++; blocksAdded++;
-            }
-        }
-        const uint32_t want[2] = {g_operationMajor, g_operationOptional};
-        for (int c = 0; c < 2; c++) /* majors first: op 0x16 places the list in order */
-        {
-            for (int progress = 1; progress && have[c] < want[c] && total < g_objectiveListPlaces;)
-            {
-                progress = 0;
-                for (uint32_t i = 0; i < n && have[c] < want[c] && total < g_objectiveListPlaces; i++)
-                {
-                    if (cls[i] != c + 2) continue;
-                    uint32_t first = i;
-                    for (uint32_t j = 0; j < i; j++) if (list[j] == list[i]) { first = j; break; }
-                    if (first != i) continue; /* each id once per sweep */
-                    int open = uses[i] < cap[i];
-                    for (int t = 0; t < 8 && open; t++) if ((bits[i] & (1u << t)) && bitUses[t] >= m) open = 0;
-                    if (!open) continue;
-                    list[total++] = list[i];
-                    uses[i]++;
-                    for (int t = 0; t < 8; t++) if (bits[i] & (1u << t)) bitUses[t]++;
-                    have[c]++;
-                    progress = 1;
-                }
-            }
-            if (have[c] < want[c] && total < g_objectiveListPlaces) capped[c] = 1;
-        }
-        if (total > n)
-        {
-            memcpy(g_objectiveList, list, 4ull * total);
-            g_objectiveListCount = total;
-            ArcListKeep(g_difficultyGame + DIF_MISSIONS, r, list, n, list, total);
-            char mixNote[96] = "";
-            if (blocksAdded) snprintf(mixNote, sizeof mixNote, " (%u primaries again, too few partners for this layout: %u of %u)", blocksAdded, primaries, 2 * m);
-            static LONG noted;
+            memcpy(g_objectiveList, fill.ids, 4ull * fill.count);
+            g_objectiveListCount = fill.count;
+            ArcListKeep(g_difficultyGame + DIF_MISSIONS, r, list, n, fill.ids, fill.count);
             if (InterlockedIncrement(&noted) <= 4)
-                Note("difficulty: an operation's %u missions on one map: on the map's objective list main objectives and steps %u -> %u%s%s, major %u -> %u of %u%s, "
-                    "optional %u -> %u of %u%s (%u -> %u of %u places)", m, mainsBefore, mainsAfter, mixes ? " (the partners' primaries)" : "", blocksAdded ? mixNote : "",
-                    before[0], have[0], want[0], capped[0] ? " (the row's ids hold no more for its missions)" : "", before[1], have[1], want[1],
-                    capped[1] ? " (the row's ids hold no more for its missions)" : "", n, total, g_objectiveListPlaces);
-            return g_objectiveFill(level, b, row, (uint64_t)(uintptr_t)list, total, a6, a7, a8, a9, a10, a11, a12, a13, a14);
+                Note("difficulty: an operation's %u missions on one map: on the map's objective list %u missions hold their primaries (%u blocks, the selection has %u; "
+                    "%u not in for want of places), main objectives %u, steps %u, major %u -> %u of %u%s, optional %u -> %u of %u%s (%u -> %u of %u places)", rules.missions,
+                    fill.held, fill.blocks, fill.unit, fill.short_, fill.mains, fill.steps, fill.major[0], fill.major[1], rules.wantMajor,
+                    fill.capped[0] ? " (the row's ids hold no more for its missions)" : "", fill.optional[0], fill.optional[1], rules.wantOptional,
+                    fill.capped[1] ? " (the row's ids hold no more for its missions)" : "", n, fill.count, rules.places);
+            return g_objectiveFill(level, b, row, (uint64_t)(uintptr_t)fill.ids, fill.count, a6, a7, a8, a9, a10, a11, a12, a13, a14);
         }
         memcpy(g_objectiveList, list, 4ull * n);
         g_objectiveListCount = n;

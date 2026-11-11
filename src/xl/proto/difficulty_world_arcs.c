@@ -325,7 +325,9 @@ static void ObjectiveArcs(uint64_t a, uint64_t pass, uint64_t clusters, uint32_t
     if (why == NULL)
     {
         for (uint32_t i = 0; i < listed; i++) listClass[i] = ArcListClass(rows, row, ids[i]);
-        if (!ArcBlocks(rows, row, ids, listClass, listed, P, entryBlock, entryMain, blockRow, &blocks)) why = "a primary on the list is no mission row's";
+        /* a list the fill made carries its blocks (../co_objectives.c); any other is read by the same rule */
+        if (!co_list_kept(row, ids, listed, entryBlock, entryMain, blockRow, &blocks) && !ArcBlocks(rows, row, ids, listClass, listed, P, entryBlock, entryMain, blockRow, &blocks))
+            why = "a primary on the list is no mission row's";
         else if (blocks < 2) why = "one block only";
     }
     /* the objective records in order against the list in order (op 0x16 places the list in order and leaves out an id
