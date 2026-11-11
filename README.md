@@ -132,8 +132,11 @@ Limits that remain:
 
 The loadout screen keeps four arrays by player or card: the players' records, a map from player to card, its reverse
 and the cards. A build for eight allocates the screen bigger and moves the four arrays to arrays of eight at its end.
-430 code sites address the new places or count to eight; 41 more go through code beside the game's. Among those are
+430 code sites address the new places or count to eight; 43 more go through code beside the game's. Among those are
 15 guards rebuilt for eight: an index of eight or more, or none, skips the access as before.
+
+The eight cards stand in one row at half the game's size, 232 reference units apart, so they do not overlap. The 3D
+figure preview has four slots. Cards 5 to 8 get no figure, where the game would draw a fifth one over card 1.
 
 The engine keeps one more loadout table, outside the screen: one entry for each peer, four of them. The build for
 eight moves it to the mod's memory with room for eight, when it writes its count sites. The four entries go along,
@@ -150,8 +153,7 @@ A build for four leaves the screen and the table as the game has them and keeps 
 Limits that remain:
 
 - Cards 5 to 8 show no 3D figure: the preview's figure slots stay at four.
-- The eight cards are spread evenly at the width of four, so they probably overlap.
-- The cards' width comes from the game's data, not from code the mod changes.
+- The text on the cards is half size too. How well it reads is not yet checked in a game.
 
 ## Mission
 
