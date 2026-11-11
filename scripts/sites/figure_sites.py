@@ -271,6 +271,16 @@ CAP_INPLACE = [
     (0x130417C, '3bb008c50000', '83fe0c0f1f00', '13040f0 busy check: slots 0..11'),
     (0x130639E, '3bb008c50000', '83fe0c0f1f00', '1306330 busy check: slots 0..11'),
     (0x13F87CF, '3bb208c50000', '83fe0c0f1f00', '13f81a0 busy check: slots 0..11'),
+    # The update's request loop (0x1398870..0x1398E1F) keeps one "still loading" byte per record slot on its stack:
+    # eight bytes at rbp+0x150, the stack cookie right behind them at rbp+0x158. Slot 8 read the cookie's low byte as
+    # its flag, so its requests (the figure's armor, helmet and cape) were skipped forever, and a write would have
+    # broken the cookie. The flags go to rbp+0x140: sixteen bytes the function only uses after this loop, zeroed
+    # there before each use (0x1398EA1..0x1398ED0). xmm0 is free: the function reads no xmm register before 0x1398EA1.
+    # rbp+0x150 is written again (0x1398E32) before its next read (0x1399A6C).
+    (0x139884D, '48c7855001000000000000', '0f57c00f11854001000090', '1398800 update: sixteen slot flags zeroed at rbp+0x140'),
+    (0x13988EE, '80bc355001000000', '80bc354001000000', '1398800 update: a slot flag read'),
+    (0x1398926, 'c684355001000001', 'c684354001000001', '1398800 update: a slot flag set'),
+    (0x1398936, 'c684355001000000', 'c684354001000000', '1398800 update: a slot flag cleared'),
 ]
 
 # A world's records are cleared by an unrolled compare of all 8 (base = UPS, world, value). The cave adds 8..11 with
