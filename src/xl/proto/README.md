@@ -33,6 +33,8 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
 - The loader's own level 11 install and the fork's edits to it. `../co_xl_standin.h` gives the names these files read.
 - The density rules' calls into `living_world_mover.c` (`LwMoverRoom`, `LwMoverPending`, `LwMoverSent`, `LwMoverNote`).
   They are in a later `living_world_density.c` that was not copied.
+- The loader's `PhysicsPools` with the fork's pool sizes, broadphase and navigation cells. `../../co_early.c` writes
+  them beside HellForge's own, and `../co_xl.c` hooks the entity records' move from the same moment (`CoXlEarly`).
 - The callers of `WorldShip`, `EntityRecordsWatch` and `StatusWatch`: the loader's level change and watch thread.
 
 ## Edits to the copied files

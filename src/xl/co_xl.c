@@ -64,6 +64,19 @@ static void CoXlTick(HfMod* mod, float dt, void* user)
     TacTick();
 }
 
+/* As game.dll is loaded: the records' move must be hooked before the game builds its entity state, and a process moves
+ * them once, so it goes in with the engine's room (co_early.c), not with the level's installs. */
+void CoXlEarly(uintptr_t game)
+{
+    static int shim;
+    if (!shim++) { co_shim_install(); co_shim_entity_records(&g_entityRecordDisp); }
+    EntityRecordsInstall(game);
+}
+int CoXlRecords(void) { return g_entityRecordsState; }
+#ifdef CO_TEST
+void CoXlTestRecords(int state) { g_entityRecordsState = state; }
+#endif
+
 /* Every install of the prototype, in the loader's order: what it did when game.dll was loaded, then the level
  * install's check and steps, then the tick. NULL, or why a step refused. The loader ran these at three different
  * moments and only for an extra large level; when each may run in the mod, and for which operation, is not settled,
@@ -72,9 +85,6 @@ const char* CoXlInstall(uintptr_t game)
 {
     DifficultyInstall d = {game};
     const char* why;
-    co_shim_install();
-    co_shim_entity_records(&g_entityRecordDisp);
-    if (WorldScaleFor(g_difficulty.mapScale) > 1) EntityRecordsInstall(game); /* before the game builds the entity state */
     InstallDaylight(game);
     LwInstallNavConnectNote();
     LwInstallHitNotes();

@@ -50,19 +50,40 @@ static int Stock(uintptr_t game, uintptr_t at, int ship)
     return memcmp(now, ship ? kNavShipStock : kNavStock, size) == 0;
 }
 
+/* The engine's side. The tile size read may be HellForge's 256 m at this moment: either of its two forms. */
+static int Engine(uintptr_t exe)
+{
+    float sizes[2] = {0.0f, 0.0f};
+    return exe != 0 && Same(exe + CO_NAV_EXE_PIN, kNavExe, sizeof kNavExe) && Same(exe + CO_NAV_TILE_READ, kNavTileRead, 4) &&
+        (Same(exe + CO_NAV_TILE_READ + 4u, kNavTileRead + 4, 4) || Same(exe + CO_NAV_TILE_READ + 4u, kNavTileRead256, 4)) &&
+        g_coApi->read(exe + CO_NAV_TILE_128, &sizes[0], 4) == 0 && g_coApi->read(exe + CO_NAV_TILE_256, &sizes[1], 4) == 0 && sizes[0] == 128.0f && sizes[1] == 256.0f;
+}
+
 const char* co_nav_check(uintptr_t game, uintptr_t stubs[2])
 {
-    const uintptr_t exe = g_coApi->module_base("helldivers2.exe", NULL);
     const uintptr_t mission = Jump(game + CO_NAV_SITE, sizeof kNavGame), ship = Jump(game + CO_NAV_SHIP_SITE, sizeof kNavShipGame);
-    float sizes[2] = {0.0f, 0.0f};
     if (!Stock(game, mission, 0) || !Stock(game, ship, 1)) return "difficulty 11's navigation steps are not the ones this mod was built for";
-    /* the tile size read may be HellForge's 256 m at this moment: either of its two forms */
-    if (exe == 0 || !Same(exe + CO_NAV_EXE_PIN, kNavExe, sizeof kNavExe) || !Same(exe + CO_NAV_TILE_READ, kNavTileRead, 4) ||
-        (!Same(exe + CO_NAV_TILE_READ + 4u, kNavTileRead + 4, 4) && !Same(exe + CO_NAV_TILE_READ + 4u, kNavTileRead256, 4)) ||
-        g_coApi->read(exe + CO_NAV_TILE_128, &sizes[0], 4) != 0 || g_coApi->read(exe + CO_NAV_TILE_256, &sizes[1], 4) != 0 || sizes[0] != 128.0f || sizes[1] != 256.0f)
-        return "the engine's navigation grid is not the code this mod was made for";
+    if (!Engine(g_coApi->module_base("helldivers2.exe", NULL))) return "the engine's navigation grid is not the code this mod was made for";
     if (stubs != NULL) { stubs[0] = mission; stubs[1] = ship; }
     return NULL;
+}
+
+int co_nav_plain(uintptr_t game)
+{
+    return Same(game + CO_NAV_SITE, kNavGame, sizeof kNavGame) && Same(game + CO_NAV_SHIP_SITE, kNavShipGame, sizeof kNavShipGame) &&
+        Engine(g_coApi->module_base("helldivers2.exe", NULL));
+}
+
+size_t co_nav_whole(uint8_t* out, uintptr_t code, int ship, uintptr_t retile, uintptr_t game)
+{
+    const size_t size = ship ? sizeof kNavShipStock : sizeof kNavStock, call = ship ? 65 : 60, back = ship ? 140 : 141;
+    const uint64_t system = game + CO_NAV_SYSTEM;
+    const int32_t rel = (int32_t)((int64_t)(game + (ship ? CO_NAV_SHIP_BACK : CO_NAV_BACK)) - (int64_t)(code + back + 4u));
+    memcpy(out, ship ? kNavShipStock : kNavStock, size);
+    memcpy(out + call, &retile, 8);
+    if (!ship) memcpy(out + 126, &system, 8);
+    memcpy(out + back, &rel, 4);
+    return size;
 }
 
 size_t co_nav_stub(uint8_t* out, uintptr_t code, int ship, uintptr_t retile, uintptr_t stock)
@@ -125,22 +146,51 @@ static int Point(uintptr_t site, uintptr_t to)
     return g_coApi->write(site + 1u, &rel, 4);
 }
 
+/* The game's instructions at a site become a jump of HellForge's form: E9 and nops over the whole of them. */
+static int Take(uintptr_t site, size_t length, uintptr_t to)
+{
+    uint8_t jump[15];
+    const int32_t rel = (int32_t)((int64_t)to - (int64_t)(site + 5u));
+    memset(jump, 0x90, sizeof jump); jump[0] = 0xE9; memcpy(jump + 1, &rel, 4);
+    return g_coApi->write(site, jump, length);
+}
+
 const char* co_nav_install(uintptr_t game)
 {
     const char* why;
     uintptr_t stubs[2];
     DWORD old;
     if (g_nav.page != NULL) return NULL;
-    if ((why = co_nav_check(game, stubs)) != NULL) return why;
+    /* a game with no step of HellForge's at the sites (no larger level 11) gets the mod's alone, whole */
+    const int plain = co_nav_plain(game);
+    if (!plain && (why = co_nav_check(game, stubs)) != NULL) return why;
     const uintptr_t exe = g_coApi->module_base("helldivers2.exe", NULL);
     uint8_t* page = (uint8_t*)co_alloc_near(game, 0x1000);
     float* tile = (float*)co_alloc_near(exe, 0x1000);
     if (page == NULL || tile == NULL) return "no memory near the game for the navigation grid's steps";
-    co_nav_stub(page, (uintptr_t)page, 0, (uintptr_t)co_nav_retile, stubs[0]);
-    co_nav_stub(page + 0x100, (uintptr_t)page + 0x100, 1, (uintptr_t)co_nav_retile, stubs[1]);
+    if (plain)
+    {
+        co_nav_whole(page, (uintptr_t)page, 0, (uintptr_t)co_nav_retile, game);
+        co_nav_whole(page + 0x100, (uintptr_t)page + 0x100, 1, (uintptr_t)co_nav_retile, game);
+    }
+    else
+    {
+        co_nav_stub(page, (uintptr_t)page, 0, (uintptr_t)co_nav_retile, stubs[0]);
+        co_nav_stub(page + 0x100, (uintptr_t)page + 0x100, 1, (uintptr_t)co_nav_retile, stubs[1]);
+    }
     if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &old)) return "the navigation grid's steps could not be made to run";
     FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
     g_nav.game = game; g_nav.exe = exe; g_nav.tile = tile;
+    if (plain)
+    {
+        if (Take(game + CO_NAV_SITE, sizeof kNavGame, (uintptr_t)page) == 0)
+        {
+            if (Take(game + CO_NAV_SHIP_SITE, sizeof kNavShipGame, (uintptr_t)page + 0x100) == 0) { g_nav.page = page; return NULL; }
+            g_coApi->write(game + CO_NAV_SITE, kNavGame, sizeof kNavGame);
+        }
+        g_nav.exe = 0; g_nav.tile = NULL;
+        return "the navigation grid's steps could not be written";
+    }
     if (Point(game + CO_NAV_SITE, (uintptr_t)page) == 0)
     {
         if (Point(game + CO_NAV_SHIP_SITE, (uintptr_t)page + 0x100) == 0) { g_nav.page = page; return NULL; }

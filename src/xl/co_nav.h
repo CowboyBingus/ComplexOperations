@@ -17,7 +17,12 @@ const char* co_nav_check(uintptr_t game, uintptr_t stubs[2]);
 /* Each stub keeps every register, calls `retile` with the id (ecx) and the level (rdx; 0 on the ship) and goes on at
  * HellForge's stub. Returns the size. */
 size_t co_nav_stub(uint8_t* out, uintptr_t code, int ship, uintptr_t retile, uintptr_t stock);
-/* Checks, then points HellForge's two jumps at the mod's stubs. NULL, or why; both jumps are HellForge's again after a
+/* 1 when both sites hold the game's own instructions and the engine's nav code is the one this was made for: a game
+ * whose level 11 brought no navigation step. `whole` is then the mod's stub: HellForge's form in full, with the mod's
+ * function, ending in the game's call and the way back. */
+int co_nav_plain(uintptr_t game);
+size_t co_nav_whole(uint8_t* out, uintptr_t code, int ship, uintptr_t retile, uintptr_t game);
+/* Checks, then points HellForge's two jumps at the mod's stubs, or takes the two sites when they are the game's. NULL, or why; both jumps are HellForge's again after a
  * failure. */
 const char* co_nav_install(uintptr_t game);
 /* What a stub calls before a grid is set up. The ship's call first runs `ship` (play's world back to the game's). */

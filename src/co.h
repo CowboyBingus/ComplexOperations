@@ -104,8 +104,9 @@ int co_seed_is_complex(uint32_t mission_seed);
 typedef struct CoComplexNeeds
 {
     int capacity_call, regions, live_load, capacity_granted; /* at the mod's start */
-    int level_11, moved, stock_stubs, own_sites;             /* at game load */
+    int level_11, moved, stock_stubs, own_sites;             /* once level 11 is installed */
     uint32_t commit_free_mb;
+    int early, records;                                      /* as game.dll is loaded: the engine's room, the records' hook */
 } CoComplexNeeds;
 enum { CO_HOST_ROW_NONE, CO_HOST_ROW_OFF, CO_HOST_ROW_ON };
 enum { CO_MISSION_NORMAL, CO_MISSION_COMPLEX, CO_MISSION_LEAVE };
@@ -127,6 +128,25 @@ void co_capacity_init(void);
 /* game.dll, once it is loaded: with it the poll also asks HellForge's chained steps, the mod's own sites and the
  * memory. Without it those stay unasked and the part off. */
 void co_capacity_game(uintptr_t game);
+/* The engine's room for a world of 16384 m (co_early.c): bodies and static actors 0x100000, actor connectors
+ * 0x400000, a broadphase of 17408 m, a navigation grid of 32 x 32 cells. The engine lays these out once, in the plugin
+ * setup, so they go in as game.dll is loaded. `check` reads only; `install` is NULL when all went in, else why and
+ * every site is as it was. */
+#define CO_EARLY_WORLD 16384.0f
+#define CO_EARLY_CELLS 32u
+const char* co_early_check(uintptr_t game, uintptr_t exe);
+const char* co_early_install(uintptr_t game, uintptr_t exe);
+int co_early_in(void);
+/* The entity records' move to 16384 (xl/co_xl.c): hooked from `early`, done when the game builds its entity state.
+ * 0 not asked, 1 hooked, 2 moved, -1 the game's 2048 stay. */
+void CoXlEarly(uintptr_t game);
+int CoXlRecords(void);
+/* From the game-loaded event, after co_capacity_game: decides the engine's room on what is known then (HellForge's
+ * capacity granted at boot, the mod's own sites, the memory) and puts it in. */
+void co_capacity_early(void);
+/* Once the poll has settled, whatever it decided: what a normal level needs in a process with the engine's room (the
+ * navigation grid's plan per level). 1 when there is nothing to do or it went in. */
+int co_capacity_normal(void);
 /* What a complex operation still lacks in this build (the list is in co_capacity.c): while 0 the part is never on,
  * whatever the machine has. */
 #define CO_COMPLEX_COMPLETE 0

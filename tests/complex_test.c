@@ -10,18 +10,19 @@ static const char* g_case;
 
 #define CHECK(what) do { if (!(what)) { printf("FAILED %s: %s\n", g_case, #what); g_failed++; } } while (0)
 
-static const CoComplexNeeds kAll = {1, 1, 0, 1, 1, 1, 1, 1, CO_COMPLEX_COMMIT_MB};
+static const CoComplexNeeds kAll = {1, 1, 0, 1, 1, 1, 1, 1, CO_COMPLEX_COMMIT_MB, 1, 1};
 
 int main(void)
 {
     g_case = "every need";
     CHECK(co_complex_refusal(&kAll) == NULL);
-    const char* reasons[9];
-    for (int i = 0; i < 9; i++)
+    const char* reasons[11];
+    for (int i = 0; i < 11; i++)
     {
         CoComplexNeeds n = kAll;
-        int* flags[8] = {&n.capacity_call, &n.regions, &n.live_load, &n.capacity_granted, &n.level_11, &n.moved, &n.stock_stubs, &n.own_sites};
-        if (i < 8) *flags[i] = !*flags[i];
+        int* flags[10] = {&n.capacity_call, &n.regions, &n.live_load, &n.capacity_granted, &n.level_11, &n.moved, &n.stock_stubs, &n.own_sites,
+            &n.early, &n.records};
+        if (i < 10) *flags[i] = !*flags[i];
         else n.commit_free_mb = CO_COMPLEX_COMMIT_MB - 1u;
         reasons[i] = co_complex_refusal(&n);
         CHECK(reasons[i] != NULL);

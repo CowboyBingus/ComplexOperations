@@ -11,6 +11,8 @@
 #include "xl/co_page_sites.h"
 
 void co_capacity_test_commit(uint32_t mb);
+void co_early_test_reset(void);
+void CoXlTestRecords(int state);
 
 static int g_failed;
 static const char* g_case;
@@ -66,9 +68,14 @@ static void Start(const char* name)
     fake_stock_rows(image);         /* and its distance rows, behind the game's row readers */
     co_join_test_image(image, 4); co_drain_test_image(image);
     fake_stock_nav(image);          /* its navigation steps, and the engine they retile */
+    fake_stock_early(image);        /* its pool sizes, in a game whose setup has not begun */
     co_capacity_test_commit(CO_COMPLEX_COMMIT_MB);
     co_capacity_init();
     co_capacity_game((uintptr_t)image);
+    /* the engine's room goes in as the game loads, whatever is decided later: not what the cases below count */
+    co_early_test_reset(); CoXlTestRecords(0);
+    co_capacity_early();
+    g_fake.writes = 0; g_fake.hookCount = 0; g_fake.log[0] = 0;
 }
 
 static int Untouched(void) { return g_fake.writes == 0 && g_fake.hookCount == 0; }
@@ -126,6 +133,24 @@ int main(void)
     g_fake.levelRow = 0;
     CHECK(co_capacity_poll(1) == 0 && co_capacity_poll(1 + CO_GEN_WAIT_MS) == 1 && !co_capacity_needs()->stock_stubs && !co_capacity_needs()->own_sites);
     CHECK(fake_host_logged("difficulty 11 is not installed") && co_complex_start() == 0 && Untouched()); /* the game is not even asked */
+
+    Start("the engine's room was not made as the game loaded");
+    co_capacity_init();
+    co_capacity_game((uintptr_t)g_fake.image); /* asked anew, and nothing put in */
+    CHECK(co_capacity_poll(1) == 1 && !co_capacity_needs()->early && !co_complex_on() && co_complex_start() == 0 && Untouched());
+    CHECK(Lines("complex operations are off") == 1 && fake_host_logged("were not enlarged as the game started"));
+    CHECK(co_capacity_normal() == 1 && Untouched()); /* the grid is HellForge's 8 x 8: nothing to plan */
+
+    Start("the entity records could not be moved");
+    CoXlTestRecords(-1);
+    CHECK(co_capacity_poll(1) == 1 && co_capacity_needs()->early && !co_capacity_needs()->records && !co_complex_on() && co_complex_start() == 0 && Untouched());
+    CHECK(Lines("complex operations are off") == 1 && fake_host_logged("the entity records kept the game's 2048 places"));
+
+    /* the engine's room is in and the part is off: every level still gets its navigation plan, in front of HellForge's */
+    Start("a normal level's navigation with the room made");
+    co_capacity_test_commit(CO_COMPLEX_COMMIT_MB - 1u);
+    CHECK(co_capacity_poll(1) == 1 && !co_complex_on() && Untouched());
+    CHECK(co_capacity_normal() == 1 && g_fake.writes == 2 && g_fake.hookCount == 0 && co_complex_start() == 0 && g_fake.writes == 2);
 
     if (g_failed) { printf("start: %d checks failed\n", g_failed); return 1; }
     printf("start: all cases passed\n");

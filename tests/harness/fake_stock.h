@@ -23,4 +23,8 @@ void fake_stock_rows(uint8_t* image);
 #define FAKE_STOCK_NAV 0x3113000u /* the mission's stub; the ship's at +0x100 */
 void fake_stock_nav(uint8_t* image);
 
+/* A game.dll just loaded under HellForge: its nine pool sizes written, the tenth, the broadphase, the navigation grid's
+ * extents and cell size the game's, the plugin setup not begun; and the engine's tile size read. */
+void fake_stock_early(uint8_t* image);
+
 #endif

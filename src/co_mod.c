@@ -27,7 +27,11 @@ static void CapacityTick(HfMod* mod, float dt, void* user)
     (void)mod; (void)dt; (void)user;
     static int done;
     const uint64_t now = GetTickCount64();
-    if (!done && (done = co_capacity_poll(now)) != 0) co_complex_start(); /* nothing of the extra large world goes in while it is off */
+    if (!done && (done = co_capacity_poll(now)) != 0)
+    {
+        co_capacity_normal(); /* after HellForge's level 11 is in or is known not to come: its steps are chained, not replaced */
+        co_complex_start();   /* nothing of the extra large world goes in while it is off */
+    }
     co_peers_tick(now);
 }
 
@@ -44,6 +48,7 @@ static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
     co_session_install(game);
     co_engine_install(g_coApi->module_base("helldivers2.exe", &size));
     co_capacity_game(game);
+    co_capacity_early(); /* this event is the first moment with game.dll's code there, and HellForge's pool sizes are in */
     co_peers_start(game);
     if (g_coApi->size < offsetof(HfApi, on_game_thread) + sizeof(void*) || g_coApi->on_game_thread(g_coMod, CapacityTick, NULL) == 0) co_log("complex operations are off: the game thread's callback was refused");
 }

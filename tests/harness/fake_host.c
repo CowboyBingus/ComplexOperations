@@ -75,6 +75,8 @@ static int Hook(HfMod* mod, uintptr_t target, void* detour, void** original)
     return 0;
 }
 
+static int HookEx(HfMod* mod, uintptr_t target, void* detour, void** original, int32_t priority) { return Hook(mod, target, detour, original); }
+
 static int GenerationCapacity(HfMod* mod, const HfGenerationCapacity* want, HfGenerationCapacity* have)
 {
     if (want != NULL && !g_fake.capacityRefused) g_fake.wanted = *want;
@@ -169,6 +171,7 @@ const HfApi* fake_host_reset(const char* build)
     g_api.write = Write;
     g_api.code_matches = CodeMatches;
     g_api.hook = Hook;
+    g_api.hook_ex = HookEx;
     g_api.generation_capacity = GenerationCapacity;
     g_api.difficulty_row = DifficultyRow;
     g_api.load_phase = LoadPhase;

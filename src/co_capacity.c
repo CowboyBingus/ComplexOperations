@@ -25,6 +25,7 @@ static struct
     HfGenerationCapacity have; /* as read with `moved`; zero before */
     uint64_t since;            /* the first poll */
     uintptr_t game;
+    const char* early;         /* why the engine's room did not go in; NULL when it did or was not asked */
     int asked, settled, on;
 } g_capacity;
 static uint32_t g_commitTest; /* tests: the commit to report instead of the machine's */
@@ -83,11 +84,39 @@ static const char* OwnSites(uintptr_t game)
     return NULL;
 }
 
+/* The engine lays its pools and its navigation grid out once, seconds after game.dll is loaded, and the mod knows only
+ * later whether level 11 is there. So the room goes in on what is known now, and only on a machine that could make a
+ * complex operation at all: where one of these fails nothing of the engine's is changed. */
+void co_capacity_early(void)
+{
+    CoComplexNeeds* n = &g_capacity.needs;
+    const uintptr_t game = g_capacity.game;
+    if (!g_capacity.asked || game == 0 || n->early) return;
+    if (!n->capacity_call || !n->regions || n->live_load || !n->capacity_granted) return; /* the poll names the reason */
+    if (CommitFree() < CO_COMPLEX_COMMIT_MB) { g_capacity.early = "not enough memory free for an extra large map"; return; }
+    if ((g_capacity.early = OwnSites(game)) != NULL) return;
+    if ((g_capacity.early = co_early_install(game, g_coApi->module_base("helldivers2.exe", NULL))) != NULL) return;
+    CoXlEarly(game);
+    n->early = 1;
+    co_log("the engine has room for a world of %.0f m: physics bodies and static actors 1048576, a navigation grid of %u x %u cells", (double)CO_EARLY_WORLD, CO_EARLY_CELLS, CO_EARLY_CELLS);
+}
+
+/* A grid of 32 x 32 is the mod's to plan for every level and the ship: HellForge's step leaves it alone. This does not
+ * wait for a complex operation to be possible; without it a normal level keeps the grid's start-up tiles. */
+int co_capacity_normal(void)
+{
+    const char* why;
+    if (!g_capacity.needs.early || g_capacity.game == 0) return 1;
+    if ((why = co_nav_install(g_capacity.game)) == NULL) return 1;
+    co_log("navigation: %s; every level keeps the grid's start-up tiles (32 m over 1024 m)", why);
+    return 0;
+}
+
 /* Every need, then one line when the part is off. What a complex operation lacks in this build, so that it is never on
  * (CO_COMPLEX_COMPLETE):
- * - the pools and lists of a 16384 m world (the 32 x 32 nav grid's layout, physics pools, broadphase, stamp index, weld
- *   pool, footprint list, spawner and marker lists, the pocket search): the engine lays them out once, before this
- *   start can run, and with them the stock limits a normal level keeps (co_level_limit);
+ * - the lists the generator and a mission fill on a 16384 m world (stamp index 131071, weld pool, footprint list,
+ *   spawners 1024, markers 64, the pocket search, the clusters' divisor) and HellForge's limits for them on a normal
+ *   level (co_level_limit): HellForge's level 11 has its own step at most of these sites;
  * - the world's settings, still the stand-in's (xl/co_xl_standin.h): with map scale 0 the world's install returns at
  *   once, so no level is complex and the generator chains and the radii stub never go in;
  * - the world's pins at the sites HellForge's town and living-world steps already changed;
@@ -100,18 +129,21 @@ static void Settle(void)
     g_capacity.settled = 1;
     /* the capacity needs alone say "not this HellForge"; the rest is asked only of a game that can have the part */
     const int capacity = n->capacity_call && n->regions && !n->live_load && n->capacity_granted && n->level_11 && n->moved;
-    if (capacity && g_capacity.game != 0)
+    if (capacity && g_capacity.game != 0 && n->early)
     {
+        /* hooked or moved: the game builds its entity state on its own time, and a move that fails then turns the part off */
+        n->records = CoXlRecords() > 0;
         n->stock_stubs = co_radii_check(g_capacity.game) == NULL && co_chain_check(g_capacity.game, NULL) == NULL &&
             co_nav_check(g_capacity.game, NULL) == NULL;
         n->own_sites = (site = OwnSites(g_capacity.game)) == NULL;
         n->commit_free_mb = CommitFree();
         why = co_complex_refusal(n);
     }
-    else if (capacity) why = NULL; /* no game to ask: the line below says what this build is */
+    else if (capacity && g_capacity.game == 0) why = NULL; /* no game to ask: the line below says what this build is */
     g_capacity.on = CO_COMPLEX_COMPLETE && capacity && g_capacity.game != 0 && why == NULL;
-    if (why != NULL && site != NULL && n->stock_stubs) co_log("complex operations are off: %s (%s)", why, site);
-    else if (why != NULL && n->stock_stubs && n->own_sites && capacity && g_capacity.game != 0)
+    if (why != NULL && capacity && !n->early && g_capacity.early != NULL) co_log("complex operations are off: %s (%s)", why, g_capacity.early);
+    else if (why != NULL && site != NULL && n->stock_stubs) co_log("complex operations are off: %s (%s)", why, site);
+    else if (why != NULL && n->stock_stubs && n->own_sites && n->records && capacity && g_capacity.game != 0)
         co_log("complex operations are off: %s (%u MB can be committed, %u are needed)", why, n->commit_free_mb, CO_COMPLEX_COMMIT_MB);
     else if (why != NULL) co_log("complex operations are off: %s", why);
     else if (!g_capacity.on)
@@ -156,7 +188,7 @@ int co_capacity_poll(uint64_t now_ms)
 }
 
 const CoComplexNeeds* co_capacity_needs(void) { return &g_capacity.needs; }
-int co_complex_on(void) { return g_capacity.settled && g_capacity.on; }
+int co_complex_on(void) { return g_capacity.settled && g_capacity.on && CoXlRecords() >= 0; }
 
 uint32_t co_gen_at(int region) { return region >= 0 && region < HF_GEN_REGIONS ? g_capacity.have.regions[region].at : 0; }
 uint32_t co_gen_places(int region) { return region >= 0 && region < HF_GEN_REGIONS ? g_capacity.have.regions[region].places : 0; }

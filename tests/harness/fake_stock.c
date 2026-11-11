@@ -6,6 +6,7 @@
 #include "xl/co_nav.h"
 #include "xl/co_nav_sites.h"
 #include "fake_host.h"
+#include "co_early_sites.h"
 
 static void Rel(uint8_t* image, uint32_t at, uint32_t target) { const int32_t rel = (int32_t)(target - (at + 4u)); memcpy(image + at, &rel, 4); }
 
@@ -94,4 +95,20 @@ void fake_stock_nav(uint8_t* image)
     memcpy(exe + CO_NAV_EXE_PIN, kNavExe, sizeof kNavExe);
     memcpy(exe + CO_NAV_TILE_READ, kNavTileRead, sizeof kNavTileRead);
     memcpy(exe + CO_NAV_TILE_128, &sizes[0], 4); memcpy(exe + CO_NAV_TILE_256, &sizes[1], 4);
+}
+
+void fake_stock_early(uint8_t* image)
+{
+    uint8_t* exe = g_fake.exe != NULL ? g_fake.exe : fake_host_exe(); /* a case's engine image is made once */
+    const float size = 3072.0f, cell = 128.0f;
+    int32_t rel;
+    for (size_t i = 0; i < sizeof kCoEarlyPools / sizeof kCoEarlyPools[0]; i++) memcpy(image + kCoEarlyPools[i].rva, kCoEarlyPools[i].stock, kCoEarlyPools[i].length);
+    memcpy(image + CO_EARLY_BROADPHASE_LOAD, kCoEarlyBroadphaseLoad, 8);
+    memcpy(image + CO_EARLY_BROADPHASE, &size, 4);
+    for (size_t i = 0; i < 4; i++) memcpy(image + kCoEarlyExtents[i].rva, kCoEarlyExtents[i].bytes, 7);
+    memcpy(image + CO_EARLY_CELL_READ, kCoEarlyCellRead, 8);
+    memcpy(&rel, kCoEarlyCellRead + 4, 4);
+    memcpy(image + CO_EARLY_CELL_READ + 8u + (uint32_t)rel, &cell, 4);
+    memset(image + CO_EARLY_SETUP, 0, 8);
+    memcpy(exe + CO_EARLY_TILE_READ, kCoEarlyTileRead, 8);
 }
