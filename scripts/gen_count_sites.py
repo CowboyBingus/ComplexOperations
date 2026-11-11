@@ -26,17 +26,22 @@
 #   14 only for four players: the two message guards of the hostability scores that group 13 replaces;
 #   15 only for eight players: the HiveMind's difficulty multipliers for five to eight players (sites/difficulty_sites.py);
 #   16 only for eight players: the Pelican's seats 8 and 9, behind the mod's check of its unit's nodes, and
-#   17 only for eight players: every player's boosters (both sites/extract_sites.py).
-# Groups 15 to 17 are refused one by one: a changed byte leaves its group out and the rest goes in.
-# It also writes tests/co_stack_code.h: the game's code the tests run beside the stack fixes.
+#   17 only for eight players: every player's boosters (both sites/extract_sites.py);
+#   18 only for eight players: a 3D figure on every loadout card, behind the mod's move of the figure records
+#     (sites/figure_sites.py), and
+#   19 only for eight players while group 18 is out: the figure slot's cave and the per-peer table's player lookup bound
+#     that group 18 replaces at the same bytes (loadout_sites.FIGURE_SLOT, SYNCED_SITES).
+# Groups 15 to 18 are refused one by one: a changed byte leaves its group out and the rest goes in.
+# It also writes tests/co_stack_code.h and tests/co_figure_code.h: the game's code the tests run beside the stack fixes
+# and the figures' caves.
 # An instruction of a moved array carries a distance the session step rewrites; those four bytes are not compared.
 import os, re, struct, sys
 
 G_COUNT, G_GUARD, G_NET, G_EIGHT, G_TEST, G_LOADOUT, G_GUARD4, G_SYNCED, G_LOOT, G_SUMMARY, G_STACK, G_STACK8, G_ACTIVITY, \
-    G_WIRE, G_NET4, G_DIFFICULTY, G_SEATS, G_BOOSTERS = range(18)
+    G_WIRE, G_NET4, G_DIFFICULTY, G_SEATS, G_BOOSTERS, G_FIGURES, G_FIGURES4 = range(20)
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE + '/sites')
-import cave_asm, difficulty_sites, extract_sites, loadout_sites, map_sites, stack_sites, summary_sites, tag_sites
+import cave_asm, difficulty_sites, extract_sites, figure_sites, loadout_sites, map_sites, stack_sites, summary_sites, tag_sites
 dump = open(sys.argv[1], 'rb').read()
 out = sys.argv[2] if len(sys.argv) > 2 else HERE + '/../src/co_count_sites.h'
 
@@ -329,6 +334,13 @@ HOST_SITES = [
 ]
 # The loadout screen for eight: its sites and caves, and the guards of the build for four they replace.
 LOADOUT_SITES, LOADOUT_CAVES = loadout_sites.build(dump)
+# Its figures for eight: sites, caves and the fields the record move rebases. Each row they replace holds the first
+# bytes of the figures' row at its place, so comparing the figures' rows compares those too.
+FIGURE_SITES, FIGURE_CAVES, FIGURE_RELS = figure_sites.build(dump)
+_replaced = {rva: old for rva, old, _, _ in loadout_sites.SYNCED_SITES + LOADOUT_CAVES if rva in figure_sites.REPLACES}
+assert set(_replaced) == set(figure_sites.REPLACES)
+for rva, rep, _, _ in FIGURE_CAVES:
+    if rva in _replaced: assert bytes.fromhex(rep).startswith(bytes.fromhex(_replaced[rva])), hex(rva)
 # The guards of tables that a build for eight gives eight entries: the mission summary's rows here (group 9), the map's
 # cursors and the name tags in co_ui.c, which keeps them at four until the tables move. Here they are the build for
 # four's.
@@ -340,7 +352,10 @@ GUARD_SITES += map_sites.GUARD4_SITES
 OFF = set(loadout_sites.MOD_OFF) | {rva for rva, _, _ in summary_sites.GUARD4 + map_sites.GUARD4 + map_sites.GUARD4_SITES + tag_sites.GUARD4}
 assert OFF <= {rva for rva, _, _ in GUARD_SITES} | {rva for rva, _, _ in GUARDS}
 rows_by_group = ((G_GUARD, GUARD_SITES), (G_EIGHT, EIGHT_SITES), (G_COUNT, MIRROR_CAPS), (G_COUNT, RECORD_SITES),
-                 (G_LOADOUT, [(r, o, n) for r, o, n, _ in LOADOUT_SITES]), (G_SYNCED, [(r, o, n) for r, o, n, _ in loadout_sites.SYNCED_SITES]),
+                 (G_LOADOUT, [(r, o, n) for r, o, n, _ in LOADOUT_SITES]),
+                 (G_SYNCED, [(r, o, n) for r, o, n, _ in loadout_sites.SYNCED_SITES if r not in figure_sites.REPLACES]),
+                 (G_FIGURES4, [(r, o, n) for r, o, n, _ in loadout_sites.SYNCED_SITES if r in figure_sites.REPLACES]),
+                 (G_FIGURES, [(r, o, n) for r, o, n, _ in FIGURE_SITES]),
                  (G_SUMMARY, [(r, o, n) for r, o, n, _ in summary_sites.INPLACE]),
                  (G_STACK, [(r, o, n) for r, o, n, _, eight in stack_sites.INPLACE if not eight]),
                  (G_STACK8, [(r, o, n) for r, o, n, _, eight in stack_sites.INPLACE if eight]), (G_WIRE, HOST_SITES))
@@ -407,7 +422,9 @@ HOST_CAVES = [
 ]
 HOST_REPLACES = {0x108ABF2, 0xBAFF70}
 assert {(r, b) for r, b, _ in NET_GUARDS if r in HOST_REPLACES} == {(r, b) for r, b, _ in HOST_CAVES if r in HOST_REPLACES}
+LOADOUT_GROUPS = [G_FIGURES4 if rva in figure_sites.REPLACES else G_LOADOUT for rva, _, _, _ in LOADOUT_CAVES]
 LOADOUT_CAVES = [(rva, replaced, text) for rva, replaced, text, _ in LOADOUT_CAVES]
+FIGURE_CAVES = [(rva, replaced, text) for rva, replaced, text, _ in FIGURE_CAVES]
 SUMMARY_CAVES = [(rva, replaced, text) for rva, replaced, text, _, _ in summary_sites.CAVES]
 SUMMARY_CAVES += [(rva, replaced, text) for rva, replaced, text, _ in summary_sites.GUARD8]
 STACK_CAVES = [(rva, replaced, text) for rva, replaced, text, _, _ in stack_sites.CAVES]
@@ -415,12 +432,12 @@ DIFFICULTY_CAVES = [(rva, replaced, text) for rva, replaced, text, _ in difficul
 EXTRACT_CAVES = extract_sites.build(dump)[1]
 cave_groups = ([G_COUNT] * len(CAVES) + [G_GUARD4 if rva in OFF else G_GUARD for rva, _, _ in GUARDS] +
                [G_NET4 if rva in HOST_REPLACES else G_NET for rva, _, _ in NET_GUARDS] +
-               [G_EIGHT] * len(EIGHT_CAVES) + [G_TEST] * len(TEST_CAVES) + [G_LOADOUT] * len(LOADOUT_CAVES) + [G_LOOT] * len(LOOT) +
+               [G_EIGHT] * len(EIGHT_CAVES) + [G_TEST] * len(TEST_CAVES) + LOADOUT_GROUPS + [G_LOOT] * len(LOOT) +
                [G_SUMMARY] * len(SUMMARY_CAVES) + [G_STACK8 if eight else G_STACK for _, _, _, _, eight in stack_sites.CAVES] +
                [G_ACTIVITY] * len(ACTIVITY) + [G_WIRE] * len(HOST_CAVES) +
-               [G_DIFFICULTY] * len(DIFFICULTY_CAVES) + [g for _, _, _, _, g in EXTRACT_CAVES])
+               [G_DIFFICULTY] * len(DIFFICULTY_CAVES) + [g for _, _, _, _, g in EXTRACT_CAVES] + [G_FIGURES] * len(FIGURE_CAVES))
 CAVES += (GUARDS + NET_GUARDS + EIGHT_CAVES + TEST_CAVES + LOADOUT_CAVES + LOOT + SUMMARY_CAVES + STACK_CAVES + ACTIVITY + HOST_CAVES +
-          DIFFICULTY_CAVES + [(rva, replaced, text) for rva, replaced, text, _, _ in EXTRACT_CAVES])
+          DIFFICULTY_CAVES + [(rva, replaced, text) for rva, replaced, text, _, _ in EXTRACT_CAVES] + FIGURE_CAVES)
 # In place, with the cave above: the first loop's count is a copy of that constant.
 sites.append((0x108D2DD, bytes.fromhex('8b ef 90'), bytes.fromhex('8d 6f 04'), 0xFF, G_COUNT))
 assert dump[0x108D2DD:0x108D2E0] == bytes.fromhex('8b ef 90')
@@ -442,12 +459,14 @@ manager_caves = rows('co_manager_sites.h', 'kCoManagerCaves')
 taken += [(rva, rva + size) for rva, size in manager_caves]
 taken += [(rva + at, rva + at + 4) for rva, at in rows('co_manager_sites.h') + rows('co_pod_sites.h') if (rva, at) not in manager_caves]
 assert len(taken) > 1400
-# The build for four leaves out groups 5, 7, 9, 11 and 13, the build for eight groups 6 and 14: they may share bytes, a
-# build may not.
+# The build for four leaves out groups 5, 7, 9, 11, 13, 18 and 19, the build for eight groups 6 and 14 and one of 18 and
+# 19: they may share bytes, a build may not. The fields the record move rebases count as group 18's.
 own = [(rva, rva + len(old), skip != 0xFF, group) for rva, old, _, skip, group in sites] + [(rva, rva + 8, True, G_COUNT) for rva, _, _ in CLEARS]
 own += [(rva, rva + len(bytes.fromhex(replaced)), False, group) for (rva, replaced, _), group in zip(CAVES, cave_groups)]
+own += [(rva, rva + len(bytes.fromhex(hx)), False, G_FIGURES) for rva, hx, _, _ in FIGURE_RELS]
 own.sort()
-for left_out in ((G_LOADOUT, G_SYNCED, G_SUMMARY, G_STACK8, G_WIRE), (G_GUARD4, G_NET4)):
+for left_out in ((G_LOADOUT, G_SYNCED, G_SUMMARY, G_STACK8, G_WIRE, G_FIGURES, G_FIGURES4), (G_GUARD4, G_NET4, G_FIGURES4),
+                 (G_GUARD4, G_NET4, G_FIGURES)):
     build = [o for o in own if o[3] not in left_out]
     for (a, b, _, _), (c, _, _, _) in zip(build, build[1:]): assert b <= c, (hex(a), hex(c))
 for a, b, shared, _ in own:
@@ -479,9 +498,15 @@ for rva, old, new, skip, group in sites:
 h.append('};\nstatic const CoCountClear kCoCountClears[] = {\n')
 for rva, mov, land in CLEARS: h.append('    {0x%Xu, 0x%02X, 0x%02X},\n' % (rva, mov, land))
 h.append('};\n')
-blob = bytearray(); rows = []
+blob = bytearray(); rows = []; cave_rels = []
 for (rva, replaced, code, jumps, calls), group in zip(caves, cave_groups):
     assert len(jumps) <= 3 and len(calls) <= 1
+    if group == G_FIGURES and rva in figure_sites.CAVES_WITH_REL:
+        # The record fields of the destroy caves: each value once in a cmp and once in a mov.
+        for value in figure_sites.CAVE_REL:
+            at = [i for i in range(len(code) - 3) if struct.unpack_from('<I', code, i)[0] == value]
+            assert len(at) == 2 and not any(j - 3 <= i <= j + 3 for i in at for j in jumps), (hex(rva), hex(value), at)
+            cave_rels += [len(blob) + i for i in at]
     rows.append('    {0x%Xu, %d, %d, {%s}, %d, %d, {%s}, %d, %d},\n' % (rva, len(replaced), group, c_bytes(replaced), len(blob), len(code),
                 ', '.join(str(j) for j in jumps + [0] * (3 - len(jumps))), calls[0][0] if calls else 0, calls[0][1] if calls else 0xFF))
     blob += code
@@ -502,6 +527,21 @@ h.append('#define CO_SYNCED_POINTER 0x%Xu\n#define CO_SYNCED_ENGINE 0x%Xu\n#defi
 h.append('#define CO_SYNCED_TYPE 0x%Xu\n#define CO_SYNCED_OLD_SIZE 0x%Xu\n#define CO_SYNCED_NEW_SIZE 0x%Xu\n' % (m['registry_type'], m['old_size'], m['new_size']))
 h.append('static const uint32_t kCoSyncedLists[] = {%s};\n' % ', '.join('0x%Xu' % x for x in m['registry_lists']))
 h.append('static const uint32_t kCoSyncedRooms[] = {%s};\n' % ', '.join('%du' % x for x in m['registry_rooms']))
+# The figure records' move (sites/figure_sites.py): where they are, the fields the move rebases, and those of the
+# destroy caves as offsets in kCoCountCode.
+m = figure_sites.MOVE
+assert m['engine'] == loadout_sites.SYNCED_MOVE['engine'] and len(cave_rels) == 2 * len(figure_sites.CAVE_REL) * len(figure_sites.CAVES_WITH_REL)
+fields = [old for _, _, _, old in FIGURE_RELS] + figure_sites.CAVE_REL
+h.append('#define CO_FIGURE_POINTER 0x%Xu\n#define CO_FIGURE_ENGINE 0x%Xu\n#define CO_FIGURE_MEMBER 0x%Xu\n#define CO_FIGURE_RECORDS 0x%Xu\n'
+         % (m['pointer'], m['engine'], m['member'], m['records']))
+h.append('#define CO_FIGURE_OLD_SIZE 0x%Xu\n#define CO_FIGURE_NEW_SIZE 0x%Xu\n#define CO_FIGURE_LOW 0x%Xu\n#define CO_FIGURE_HIGH 0x%Xu\n'
+         % (m['old_count'] * m['stride'], m['new_count'] * m['stride'], min(fields), max(fields)))
+h.append('static const CoFigureRel kCoFigureRels[] = {\n')
+for rva, hx, at, _ in FIGURE_RELS:
+    b = bytes.fromhex(hx)
+    assert len(b) <= 12 and skip_of(rva, len(b)) == 0xFF
+    h.append('    {0x%Xu, %d, %d, {%s}},\n' % (rva, len(b), at, c_bytes(b)))
+h.append('};\nstatic const uint16_t kCoFigureCaveRels[] = {%s};\n' % ', '.join(str(x) for x in cave_rels))
 # The Pelican's seat block (sites/extract_sites.py) and the game's bytes it is made from, which the mod compares first.
 block = extract_sites.seat_block(dump)
 h.append('#define CO_SEAT_RECORDS 0x%Xu\n#define CO_SEAT_LISTS 0x%Xu\n#define CO_SEAT_LIST_AT 0x%Xu\n'
@@ -523,11 +563,15 @@ h.append('};\n')
 assert len(cave_groups) == len(caves) == len(CAVES)
 open(out, 'w').writelines(h)
 open(HERE + '/../tests/co_stack_code.h', 'w').writelines(stack_sites.test_header(dump))
+open(HERE + '/../tests/co_figure_code.h', 'w').writelines(figure_sites.test_header(dump))
 print('%d sites, %d clears, %d caves (%d bytes)' % (len(sites), len(CLEARS), len(caves), len(blob)))
 for group, name in list(enumerate(('counts', 'guards', 'message guards', 'eight players only', 'test option only', 'loadout (eight only)',
                                     'guards (four only)', 'loadout table (eight)', 'loot rows', 'summary (eight only)', 'stack arrays',
                                     'stack arrays (eight)'))) + \
                    [(G_WIRE, 'hostability (eight)'), (G_NET4, 'message guards (four)'),
-                    (G_DIFFICULTY, 'difficulty (eight)'), (G_SEATS, 'Pelican seats (eight)'), (G_BOOSTERS, 'boosters (eight)')]:
+                    (G_DIFFICULTY, 'difficulty (eight)'), (G_SEATS, 'Pelican seats (eight)'), (G_BOOSTERS, 'boosters (eight)'),
+                    (G_FIGURES, 'figures (eight)'), (G_FIGURES4, 'four figures (eight)')]:
     print('  %-20s %3d sites, %2d caves' % (name, sum(s[4] == group for s in sites), cave_groups.count(group)))
 print('  %-20s %3d sites, %2d caves' % ('activity record', sum(s[4] == G_ACTIVITY for s in sites), cave_groups.count(G_ACTIVITY)))
+print('  %-20s %3d fields rebased and %d in the destroy caves; figure caves %d bytes' % ('figure records', len(FIGURE_RELS), len(cave_rels),
+      sum(len(c[2]) for c, g in zip(caves, cave_groups) if g == G_FIGURES)))

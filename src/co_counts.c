@@ -6,7 +6,8 @@
  * The same sites carry the guards: tables the game keeps at four entries skip a player index of four or more, and a
  * message whose list is longer than its handler's buffer is ignored. The Activity record's post lists participants 5 to
  * 8, which the record has no room for, and the record waits for their answers as for the first four. A build for eight
- * carries the hostability scores of eight peers. */
+ * carries the hostability scores of eight peers. A build for eight gives every loadout card a 3D figure: the figure
+ * records move to the mod's room for twelve first. */
 #include <string.h>
 #include <windows.h>
 
@@ -23,11 +24,15 @@ typedef struct CoCountCave
     uint16_t callAt;          /* where the callback's address goes */
     uint8_t callback;         /* its number in kCountCallbacks; 0xFF for none */
 } CoCountCave;
+/* An instruction whose 32-bit field at `at` addresses a figure record of UPS; the move adds its distance there. */
+typedef struct CoFigureRel { uint32_t rva; uint8_t size, at, old[12]; } CoFigureRel;
 #include "co_count_sites.h"
 
 #define CO_COUNT_SITES (sizeof kCoCountSites / sizeof kCoCountSites[0])
 #define CO_COUNT_CLEARS (sizeof kCoCountClears / sizeof kCoCountClears[0])
 #define CO_COUNT_CAVES (sizeof kCoCountCaves / sizeof kCoCountCaves[0])
+#define CO_FIGURE_RELS (sizeof kCoFigureRels / sizeof kCoFigureRels[0])
+#define CO_FIGURE_CAVE_RELS (sizeof kCoFigureCaveRels / sizeof kCoFigureCaveRels[0])
 /* Room for the caves to grow into; allocated near game+0x1000000, so every jump back stays within a rel32 (checked per
  * jump when the caves are placed). */
 #define CO_CAVE_ROOM 0x4000u
@@ -45,9 +50,11 @@ _Static_assert(sizeof kCoCountCode <= CO_CAVE_ROOM, "the caves' code must fit th
  * eight peers (CO_G_WIRE) replace two message guards (CO_G_NET4) as the summary's rows replace its guards. */
 enum { CO_G_COUNT, CO_G_GUARD, CO_G_NET, CO_G_EIGHT, CO_G_TEST, CO_G_LOADOUT, CO_G_GUARD4, CO_G_SYNCED, CO_G_LOOT, CO_G_SUMMARY, CO_G_STACK, CO_G_STACK8,
        CO_G_ACTIVITY, CO_G_WIRE, CO_G_NET4 };
-/* Eight only, each on its own: the HiveMind's multipliers past four players, the Pelican's seats 8 and 9 and every
- * player's boosters. They stand alone, so a changed byte in one leaves that one out and not the session lists. */
-enum { CO_G_DIFFICULTY = CO_G_NET4 + 1, CO_G_SEATS, CO_G_BOOSTERS };
+/* Eight only, each on its own: the HiveMind's multipliers past four players, the Pelican's seats 8 and 9, every
+ * player's boosters and the loadout cards' eight figures. They stand alone, so a changed byte in one leaves that one
+ * out and not the session lists. The figures replace two rows of the loadout screen and the per-peer table at the same
+ * bytes; those (CO_G_FIGURES4) go in while the figures are out. */
+enum { CO_G_DIFFICULTY = CO_G_NET4 + 1, CO_G_SEATS, CO_G_BOOSTERS, CO_G_FIGURES, CO_G_FIGURES4 };
 /* Test builds only (--test-first-slot): the host gives joining peers slots and player indexes from this number on,
  * so that two game instances reach the code for players 5 to 8. Zero is off. */
 #ifndef CO_TEST_FIRST_SLOT
@@ -107,11 +114,12 @@ static uintptr_t g_syncedOld, g_syncedNew, g_syncedBlock;
 
 static uint32_t g_refused;        /* the groups of their own left out at the last apply */
 
-static int OwnGroup(uint8_t group) { return group >= CO_G_DIFFICULTY && group <= CO_G_BOOSTERS; }
+static int OwnGroup(uint8_t group) { return group >= CO_G_DIFFICULTY && group <= CO_G_FIGURES; }
 
 static int Active(uint8_t group)
 {
     if (OwnGroup(group)) return CO_PLAYERS == 8 && !(g_refused >> group & 1u);
+    if (group == CO_G_FIGURES4) return CO_PLAYERS == 8 && (g_refused >> CO_G_FIGURES & 1u);
     return group <= CO_G_NET || group == CO_G_LOOT || group == CO_G_STACK ||
            ((group == CO_G_EIGHT || group == CO_G_LOADOUT || group == CO_G_SYNCED || group == CO_G_SUMMARY || group == CO_G_STACK8 ||
              group == CO_G_WIRE) && CO_PLAYERS == 8) ||
@@ -694,13 +702,78 @@ static void SyncedBack(void)
     g_syncedBlock = g_syncedNew = g_syncedOld = 0;
 }
 
+/* The figure records: eight of 0xA0 in the placement system UPS, an object of engine init, with its count, mask and ring
+ * right behind them, so they cannot grow in place. 228 fields of the game's code address them from UPS. The move gives
+ * them a block of twelve within reach of every field, at the old place modulo 16, and adds the distance to each field
+ * and to the destroy caves' fields for records 8 to 11. */
+static uintptr_t g_figureUps, g_figureRoom, g_figureRecords;
+static int64_t g_figureDelta;
+static int g_figureOn;            /* the fields lead to the mod's block */
+
+/* A field's value with the records at the game's place, or moved. */
+static uint32_t RelValue(const CoFigureRel* r, int moved)
+{
+    uint32_t old;
+    memcpy(&old, r->old + r->at, 4);
+    return moved ? (uint32_t)(int32_t)((int64_t)old + g_figureDelta) : old;
+}
+
+static int RelHolds(const CoFigureRel* r, int moved)
+{
+    uint8_t bytes[12];
+    const uint32_t value = RelValue(r, moved);
+    if (g_coApi->read(g_game + r->rva, bytes, r->size) != 0) return 0;
+    return memcmp(bytes, r->old, r->at) == 0 && memcmp(bytes + r->at, &value, 4) == 0 &&
+           memcmp(bytes + r->at + 4, r->old + r->at + 4, r->size - r->at - 4u) == 0;
+}
+
+static int WriteRel(const CoFigureRel* r, int moved)
+{
+    const uint32_t value = RelValue(r, moved);
+    return g_coApi->write(g_game + r->rva + r->at, &value, 4);
+}
+
+/* Records 0 to 7 go to the block, then every field leads there; a failed write puts back the fields before it. */
+static int FigureMove(void)
+{
+    if (g_coApi->read(g_figureUps + CO_FIGURE_RECORDS, (void*)g_figureRecords, CO_FIGURE_OLD_SIZE) != 0) return 0;
+    for (size_t i = 0; i < CO_FIGURE_RELS; i++)
+        if (WriteRel(&kCoFigureRels[i], 1) != 0)
+        {
+            while (i--) WriteRel(&kCoFigureRels[i], 0);
+            return 0;
+        }
+    g_figureOn = 1;
+    return 1;
+}
+
+/* Records 0 to 7 go back to UPS, then the fields; a field that no longer leads to the block is left. Records 8 to 11
+ * have no place there. */
+static void FigureBack(void)
+{
+    if (!g_figureOn) return;
+    memcpy((void*)(g_figureUps + CO_FIGURE_RECORDS), (const void*)g_figureRecords, CO_FIGURE_OLD_SIZE);
+    for (size_t i = 0; i < CO_FIGURE_RELS; i++)
+        if (RelHolds(&kCoFigureRels[i], 1)) WriteRel(&kCoFigureRels[i], 0);
+    g_figureOn = 0;
+}
+
+static void FigureFree(void)
+{
+    if (g_figureRoom) VirtualFree((void*)g_figureRoom, 0, MEM_RELEASE);
+    g_figureRoom = g_figureRecords = g_figureUps = 0;
+    g_figureDelta = 0;
+}
+
 /* The session step undoes its sites by writing distances back; this goes first, so they are where it expects them.
- * The table goes back behind the sites that bound it. */
+ * The tables go back behind the sites that bound them. */
 void co_counts_undo(void)
 {
     if (!g_on) return;
     g_on = 0;
     Back(CO_COUNT_SITES, CO_COUNT_CLEARS, CO_COUNT_CAVES);
+    FigureBack();
+    FigureFree();
     SyncedBack();
     co_registry_back();
     if (g_caves) VirtualFree((void*)g_caves, 0, MEM_RELEASE);
@@ -732,7 +805,8 @@ static int ActivityMatches(void)
 static void Refuse(uint8_t group, uint32_t rva, const char* what)
 {
     static const char* const kWhat[] = {"the HiveMind's multipliers stop at four players",
-                                        "the Pelican keeps six passenger seats", "boosters of players 5 to 8 are not loaded"};
+                                        "the Pelican keeps six passenger seats", "boosters of players 5 to 8 are not loaded",
+                                        "the loadout screen shows four figures"};
     if (g_refused >> group & 1u) return;
     g_refused |= 1u << group;
     co_log("%s: the %s at game+0x%X is not the reviewed one; %s", group == CO_G_SEATS ? "extraction" : "players", what, rva,
@@ -764,8 +838,66 @@ static uint32_t BoosterCodeDiffers(void)
     return 0;
 }
 
-/* Called by the session step once the arrays are moved and their old places zeroed. */
+/* The figures are left out, once, with the reason. */
+static void RefuseFigures(const char* why)
+{
+    if (g_refused >> CO_G_FIGURES & 1u) return;
+    g_refused |= 1u << CO_G_FIGURES;
+    co_log("players: %s; the loadout screen shows four figures", why);
+}
+
+/* The figures' sites, caves and fields hold the reviewed bytes: 0, or the first that differs. */
+static uint32_t FigureCodeDiffers(void)
+{
+    for (size_t i = 0; i < CO_COUNT_SITES; i++)
+        if (kCoCountSites[i].group == CO_G_FIGURES && !SiteMatches(&kCoCountSites[i])) return kCoCountSites[i].rva;
+    for (size_t i = 0; i < CO_COUNT_CAVES; i++)
+    {
+        uint8_t bytes[12];
+        const CoCountCave* c = &kCoCountCaves[i];
+        if (c->group == CO_G_FIGURES && (g_coApi->read(g_game + c->rva, bytes, c->size) != 0 || memcmp(bytes, c->replaced, c->size) != 0))
+            return c->rva;
+    }
+    for (size_t i = 0; i < CO_FIGURE_RELS; i++)
+        if (!RelHolds(&kCoFigureRels[i], 0)) return kCoFigureRels[i].rva;
+    return 0;
+}
+
+/* Before anything is written, so that the rows the figures replace go in when they stay out: their code, UPS where
+ * engine init put it with no record in use (the mask at +0xC50C), and a block within reach of every field. */
+static void FiguresReady(void)
+{
+    uintptr_t ups = 0, engine = 0;
+    uint32_t mask = 1;
+    const uint32_t at = FigureCodeDiffers();
+    if (at != 0) { Refuse(CO_G_FIGURES, at, "code"); return; }
+    if (g_coApi->read(g_game + CO_FIGURE_POINTER, &ups, sizeof ups) != 0 || g_coApi->read(g_game + CO_FIGURE_ENGINE, &engine, sizeof engine) != 0 ||
+        ups == 0 || engine == 0 || ups != engine + CO_FIGURE_MEMBER || g_coApi->read(ups + CO_FIGURE_RECORDS + CO_FIGURE_OLD_SIZE + 4u, &mask, 4) != 0)
+    { RefuseFigures("the figure records are not where the game keeps them"); return; }
+    if (mask != 0) { RefuseFigures("a figure record is in use"); return; }
+    const uintptr_t old = ups + CO_FIGURE_RECORDS;
+    g_figureRoom = co_alloc_near(old, CO_FIGURE_NEW_SIZE + 16u);
+    if (g_figureRoom != 0)
+    {
+        g_figureRecords = g_figureRoom + (old & 15u);
+        g_figureDelta = (int64_t)g_figureRecords - (int64_t)old;
+        if (g_figureDelta + CO_FIGURE_LOW >= INT32_MIN && g_figureDelta + CO_FIGURE_HIGH <= INT32_MAX) { g_figureUps = ups; return; }
+    }
+    FigureFree();
+    RefuseFigures("there is no free memory within reach of the figure records");
+}
+
+static void Apply(uintptr_t context, uintptr_t extension);
+
+/* Called by the session step once the arrays are moved and their old places zeroed. The figures' block stays only
+ * with the counts. */
 void co_counts_apply(uintptr_t context, uintptr_t extension)
+{
+    Apply(context, extension);
+    if (!g_on) FigureFree();
+}
+
+static void Apply(uintptr_t context, uintptr_t extension)
 {
     static const char kStays[] = "the session lists count to four as before";
     if (g_on || g_hooks != 1 || g_game == 0) return;
@@ -783,6 +915,7 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
         if (at != 0) Refuse(CO_G_BOOSTERS, at, "code");
         else co_extract_boosters_ready(g_game);
     }
+    if (Active(CO_G_FIGURES)) FiguresReady();
     for (size_t i = 0; i < CO_COUNT_SITES; i++)
         if (Active(kCoCountSites[i].group) && !SiteMatches(&kCoCountSites[i]))
         {
@@ -828,6 +961,14 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
             memcpy(cave + c->callAt, &callback, 8);
         }
     }
+    /* The destroy caves' record fields lead to the figures' block; FiguresReady checked their reach. */
+    for (size_t i = 0; Active(CO_G_FIGURES) && i < CO_FIGURE_CAVE_RELS; i++)
+    {
+        int32_t field;
+        memcpy(&field, (void*)(g_caves + kCoFigureCaveRels[i]), 4);
+        field = (int32_t)((int64_t)field + g_figureDelta);
+        memcpy((void*)(g_caves + kCoFigureCaveRels[i]), &field, 4);
+    }
     DWORD before;
     if (!VirtualProtect((void*)g_caves, CO_CAVE_ROOM, PAGE_EXECUTE_READ, &before))
     { VirtualFree((void*)g_caves, 0, MEM_RELEASE); g_caves = 0; co_log("session: the caves could not be made executable; %s", kStays); return; }
@@ -838,6 +979,8 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
      * to eight. */
     if (Active(CO_G_LOADOUT) && !co_registry_cards(g_game))
     { SyncedBack(); VirtualFree((void*)g_caves, 0, MEM_RELEASE); g_caves = 0; co_log("session: %s", kStays); return; }
+    /* The figure records move before any site counts them to twelve. */
+    if (Active(CO_G_FIGURES) && !FigureMove()) goto failed;
     g_context = context;
     g_extension = extension;
     /* Records of an earlier context post as four from here on. */
@@ -897,9 +1040,13 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
             co_log("extraction: the Pelican's seats 8 and 9 are in place (%u caves); they open once its unit has their nodes",
                    InGroup(CO_G_SEATS, NULL));
         if (Active(CO_G_BOOSTERS)) co_log("players: the boosters of all eight players are loaded (%u cave)", InGroup(CO_G_BOOSTERS, NULL));
+        if (Active(CO_G_FIGURES))
+            co_log("players: every loadout card has a 3D figure; the figure records moved to room for twelve (%u code sites changed)",
+                   InGroup(CO_G_FIGURES, NULL) + (unsigned)CO_FIGURE_RELS);
     }
     return;
 failed:
+    FigureBack();
     SyncedBack();
     co_registry_back();
     VirtualFree((void*)g_caves, 0, MEM_RELEASE);
@@ -938,6 +1085,7 @@ void co_counts_test_fill(uint8_t* image)
 {
     for (size_t i = 0; i < CO_COUNT_SITES; i++) memcpy(image + kCoCountSites[i].rva, kCoCountSites[i].old, kCoCountSites[i].size);
     for (size_t i = 0; i < CO_COUNT_CAVES; i++) memcpy(image + kCoCountCaves[i].rva, kCoCountCaves[i].replaced, kCoCountCaves[i].size);
+    for (size_t i = 0; i < CO_FIGURE_RELS; i++) memcpy(image + kCoFigureRels[i].rva, kCoFigureRels[i].old, kCoFigureRels[i].size);
     memcpy(image + CO_SEAT_RECORDS, kCoSeatGame, sizeof kCoSeatGame);
     memcpy(image + CO_SEAT_LISTS + 6u * 0x1Cu, kCoSeatEntrance, sizeof kCoSeatEntrance);
     memcpy(image + CO_SEAT_PAIRS, kCoSeatPairs, sizeof kCoSeatPairs);
@@ -958,6 +1106,8 @@ void co_counts_test_fill(uint8_t* image)
 
 void co_counts_test_reset(void)
 {
+    FigureFree();
+    g_figureOn = 0;
     if (g_syncedBlock) VirtualFree((void*)g_syncedBlock, 0, MEM_RELEASE);
     g_syncedBlock = g_syncedNew = g_syncedOld = 0;
     if (g_caves) VirtualFree((void*)g_caves, 0, MEM_RELEASE);
@@ -987,6 +1137,8 @@ int co_counts_test_reviewed(const uint8_t* image)
         if (image[kCoCountClears[i].rva] != 0x33 || image[kCoCountClears[i].rva + 2] != 0x89) return 0;
     for (size_t i = 0; i < CO_COUNT_CAVES; i++)
         if (memcmp(image + kCoCountCaves[i].rva, kCoCountCaves[i].replaced, kCoCountCaves[i].size) != 0) return 0;
+    for (size_t i = 0; i < CO_FIGURE_RELS; i++)
+        if (memcmp(image + kCoFigureRels[i].rva, kCoFigureRels[i].old, kCoFigureRels[i].size) != 0) return 0;
     return 1;
 }
 
@@ -1000,8 +1152,8 @@ uintptr_t co_counts_test_synced_table(void) { return g_syncedNew; }
 /* The sites, clears and caves this build writes. */
 unsigned co_counts_test_sites(void)
 {
-    unsigned n = (unsigned)CO_COUNT_CLEARS;
-    for (uint8_t group = CO_G_COUNT; group <= CO_G_BOOSTERS; group++)
+    unsigned n = (unsigned)CO_COUNT_CLEARS + (Active(CO_G_FIGURES) ? (unsigned)CO_FIGURE_RELS : 0u);
+    for (uint8_t group = CO_G_COUNT; group <= CO_G_FIGURES4; group++)
         if (Active(group)) n += InGroup(group, NULL);
     return n;
 }
@@ -1036,11 +1188,13 @@ uint32_t co_counts_test_join_index(uint8_t* flags)
  * sites (co_registry.c) follow them. */
 int co_counts_test_move_writes(void) { return Active(CO_G_SYNCED) ? 4 : 0; }
 unsigned co_registry_test_sites(void);
-/* The number of the write that changes the site or cave at rva, from the first of the counts (the table move's and
- * the card list's writes first); -1 when this build does not write it. */
+/* The number of the write that changes the site, cave or figure field at rva, from the first of the counts (the table
+ * move's and the card list's writes first, then the figure fields'); -1 when this build does not write it. */
 int co_counts_test_write_of(uint32_t rva)
 {
     int n = co_counts_test_move_writes() + (Active(CO_G_LOADOUT) ? (int)co_registry_test_sites() : 0);
+    for (size_t i = 0; Active(CO_G_FIGURES) && i < CO_FIGURE_RELS; i++, n++)
+        if (kCoFigureRels[i].rva == rva) return n;
     for (size_t i = 0; i < CO_COUNT_SITES; i++)
     {
         const CoCountSite* s = &kCoCountSites[i];
@@ -1092,6 +1246,15 @@ int co_counts_test_booster_open(uint32_t rva)
     return 0;
 }
 uintptr_t co_counts_test_caves(void) { return g_caves; }
+/* The figure records' block (0 while they are the game's) and the fields the move rebases. */
+uintptr_t co_counts_test_figure_records(void) { return g_figureOn ? g_figureRecords : 0; }
+unsigned co_counts_test_figure_fields(void) { return (unsigned)CO_FIGURE_RELS; }
+uint32_t co_counts_test_figure_field(unsigned i, uint32_t* at, uint32_t* old)
+{
+    *at = kCoFigureRels[i].rva + kCoFigureRels[i].at;
+    *old = RelValue(&kCoFigureRels[i], 0);
+    return kCoFigureRels[i].rva;
+}
 uint32_t co_counts_test_ready(uintptr_t sync) { return SlotsReadyDetour(sync); }
 uint32_t co_counts_test_free(uintptr_t sync) { return SlotsFreeDetour(sync); }
 uint64_t co_counts_test_find(uint64_t key) { return FindRecord(key); }

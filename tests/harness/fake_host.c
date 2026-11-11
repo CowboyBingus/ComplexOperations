@@ -95,7 +95,10 @@ static void Registry(uint8_t* image)
     memcpy(image + FAKE_SYNCED_POINTER, &table, 8);
     memcpy(image + FAKE_ENGINE_GLOBAL, &engine, 8);
     memcpy(image + FAKE_REGISTRY_GLOBAL, &registry, 8);
+    const uint64_t ups = (uint64_t)(uintptr_t)(image + FAKE_UPS);
+    memcpy(image + FAKE_UPS_POINTER, &ups, 8);
 }
+_Static_assert(FAKE_UPS + FAKE_UPS_SIZE <= FAKE_IMAGE_SIZE, "the placement system lies inside the image");
 
 const HfApi* fake_host_reset(const char* build)
 {

@@ -551,7 +551,7 @@ int main(void)
         static char line[96];
         uint32_t value;
         snprintf(line, sizeof line, "players: the loadout screen has eight records and cards (%u code sites changed)", co_counts_test_loadout());
-        CHECK(co_counts_test_loadout() == 473u && fake_host_logged(line) == (players == 8));
+        CHECK(co_counts_test_loadout() == 472u && fake_host_logged(line) == (players == 8));
         memcpy(&value, image + LOADOUT_SIZE + 1, 4);
         CHECK(image[LOADOUT_SIZE] == 0xBA && value == (players == 8 ? 0x36FA70u : 0x2739D0u));
         CHECK(image[LOADOUT_BOUND] == 0xBF && image[LOADOUT_BOUND + 1] == players);
@@ -610,18 +610,18 @@ int main(void)
         else CHECK(memcmp(image + CARD_SCALE, kPivot, sizeof kPivot - 1) == 0);
 
         /* Run: the figure slot's cave. Where it goes back the test undoes the replaced push and sub and returns the
-         * slot (add rsp,0x30; pop rbx; mov eax,edx; ret): 0 to 3 arrive as they are, 4 and up as -1. */
-        static const uint8_t kSlot[] = {0x83, 0xFA, 0x04, 0x72, 0x05, 0xBA, 0xFF, 0xFF, 0xFF, 0xFF, 0x53, 0x48, 0x83, 0xEC, 0x30, 0xE9};
+         * slot (add rsp,0x30; pop rbx; mov eax,edx; ret): 0 to 3 arrive as they are. A build for eight gives positions
+         * 4 to 7 the figure records 8 to 11 (tests/figures_test.c runs the rest of the figures); the rest get -1. */
         static const uint8_t kSlotBack[] = {0x48, 0x83, 0xC4, 0x30, 0x5B, 0x89, 0xD0, 0xC3};
         cave = Cave(FIGURE_SLOT, 6);
         CHECK((cave != NULL) == (players == 8));
         if (cave != NULL)
         {
-            static const uint32_t kSlots[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 0x80000000u, 0xFFFFFFFFu};
-            CHECK(memcmp(cave, kSlot, sizeof kSlot) == 0 && Leads(cave + 16, 0x18A1A66u));
+            static const uint32_t kSlots[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 0x80000000u, 0xFFFFFFFFu};
+            CHECK(cave[0] == 0x83 && cave[1] == 0xFA && cave[2] == 0x04 && cave[25] == 0xE9 && Leads(cave + 26, 0x18A1A66u));
             Landing(0x18A1A66u, kSlotBack, sizeof kSlotBack);
             for (size_t i = 0; i < sizeof kSlots / sizeof kSlots[0]; i++)
-                CHECK(((CardFn)(uintptr_t)cave)(NULL, kSlots[i]) == (kSlots[i] < 4 ? kSlots[i] : 0xFFFFFFFFu));
+                CHECK(((CardFn)(uintptr_t)cave)(NULL, kSlots[i]) == (kSlots[i] < 4 ? kSlots[i] : kSlots[i] < 8 ? kSlots[i] + 4 : 0xFFFFFFFFu));
         }
         else CHECK(image[FIGURE_SLOT] == 0x40 && image[FIGURE_SLOT + 1] == 0x53);
     }
@@ -655,7 +655,7 @@ int main(void)
         static char line[96];
         uint32_t size;
         snprintf(line, sizeof line, "players: the per-peer loadout table moved to room for eight peers (%u code sites changed)", co_counts_test_synced());
-        CHECK(co_counts_test_synced() == 12u && fake_host_logged(line) == (players == 8));
+        CHECK(co_counts_test_synced() == 11u && fake_host_logged(line) == (players == 8));
         memcpy(&size, image + SYNCED_CLEAR + 2, 4);
         CHECK(size == (players == 8 ? 0x4FC0u : 0x27E0u) && image[SYNCED_SEARCH + 2] == players && image[SYNCED_GONE + 2] == players);
         CHECK((table != 0) == (players == 8) && TableHolds(image + FAKE_SYNCED_TABLE));

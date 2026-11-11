@@ -4,8 +4,8 @@
 
 #include "co.h"
 
-/* As far as the status effects' table at game+0x37CB600, which the booster update reads. */
-#define FAKE_IMAGE_SIZE 0x37D0000u
+/* As far as the figures' placement system (FAKE_UPS) behind the status effects' table at game+0x37CB600. */
+#define FAKE_IMAGE_SIZE 0x39A0000u
 #define FAKE_HOOKS 16
 /* The engine's per-peer loadout table (four entries of 0x9F8, 8 modulo 16 as in the game) and the registry that lists
  * it, at free places in the image. The globals that lead to them are set as the game sets them at startup. */
@@ -15,6 +15,11 @@
 #define FAKE_ENGINE_GLOBAL 0x3326340u
 #define FAKE_REGISTRY_GLOBAL 0x3326E68u
 #define FAKE_SYNCED_IN_ENGINE 0x710B428u
+/* The placement system with the figure records at +0xC008, where engine init puts it: 0x65DA300 behind the arena whose
+ * +0x60E7208 is the per-peer table. */
+#define FAKE_UPS_POINTER 0x347CE60u
+#define FAKE_UPS (FAKE_SYNCED_TABLE - 0x60E7208u + 0x65DA300u)
+#define FAKE_UPS_SIZE 0x1B218u
 
 typedef struct FakeHost
 {
