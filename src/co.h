@@ -134,6 +134,33 @@ int co_complex_rolls(int is_host, int own_on, int host_row);
 #define CO_SHARE_PROTOCOL 1u
 typedef struct CoHostRow { uint8_t protocol, on; } CoHostRow;
 int co_peers_is_host(void);  /* solo counts: the board it builds is its own */
+/* What the other machines said they can do. A client tells the host once it holds the host's row, with its own game
+ * peer id in the message; a machine that said nothing is unknown, never assumed able. */
+#define CO_PEERS_MAX 16u
+enum { CO_PEER_UNKNOWN, CO_PEER_OFF, CO_PEER_ON };
+typedef struct CoCapability { uint8_t protocol, on, reserved[6]; uint64_t peer; } CoCapability;
+typedef struct CoReports { struct { uint64_t peer; uint8_t capability; } rows[CO_PEERS_MAX]; uint32_t count; } CoReports;
+int co_capability_read(const void* data, uint32_t bytes, uint64_t* peer);
+void co_reports_note(CoReports* reports, uint64_t peer, int capability);
+int co_reports_get(const CoReports* reports, uint64_t peer);
+/* At launch, as host: 1 when the mission's mark must go, because this machine's part is off or a machine in a slot
+ * (`present`, 0 for a free one; `own` is this machine) is not known to be able. The override text decides for itself. */
+int co_launch_clears(const CoReports* reports, const uint64_t* present, uint32_t slots, uint64_t own, int own_on, int override_set);
+/* A join, as host: into a mission whose seed is marked only a machine known to be able comes; an unknown one is held
+ * for the limit (its message is on the way), then refused. */
+enum { CO_JOIN_ADMIT, CO_JOIN_HOLD, CO_JOIN_DENY };
+#define CO_JOIN_LIMIT_MS 10000u
+int co_join_decision(int marked, int capability, uint64_t waited_ms);
+/* The live side (co_peers.c). `start` once at game load; `tick` on the game thread: the host keeps its row set, a
+ * client sends its message once it holds the row, each tried again while HellForge refuses. `launch_install` hooks
+ * the seed string's build so a host's launch drops the mark when not every machine can make the mission. */
+#define CO_SESSION_OBJECT 0x347CEF0u
+#define CO_LAUNCH_STRING 0x12D2CF0u
+#define CO_GAME_STATE 0x3326340u
+void co_peers_start(uintptr_t game);
+void co_peers_tick(uint64_t now_ms);
+const CoReports* co_peers_reports(void);
+const char* co_launch_install(uintptr_t game);
 int co_peers_host_row(void); /* CO_HOST_ROW_: as this machine holds it now */
 
 /* The mark (co_mark.c): a level-11 mission entry's seed carries whether its operation is complex. `install` hooks the

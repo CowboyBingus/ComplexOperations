@@ -54,3 +54,43 @@ uint32_t co_complex_entry_seed(uint32_t mission_seed, uint32_t difficulty, uint3
     if (difficulty != CO_COMPLEX_LEVEL) return mission_seed;
     return co_seed_marked(mission_seed, rolls && co_complex_roll(operation_seed, planet, CO_COMPLEX_CHANCE));
 }
+
+int co_capability_read(const void* data, uint32_t bytes, uint64_t* peer)
+{
+    const CoCapability* c = (const CoCapability*)data;
+    if (bytes != sizeof *c || c->protocol != CO_SHARE_PROTOCOL || c->peer == 0) return CO_PEER_UNKNOWN; /* not a message this build reads */
+    *peer = c->peer;
+    return c->on ? CO_PEER_ON : CO_PEER_OFF;
+}
+
+void co_reports_note(CoReports* r, uint64_t peer, int capability)
+{
+    uint32_t i = 0;
+    if (peer == 0) return;
+    while (i < r->count && r->rows[i].peer != peer) i++;
+    if (i == CO_PEERS_MAX) return; /* no room: the machine stays unknown, which admits it to nothing */
+    r->rows[i].peer = peer; r->rows[i].capability = (uint8_t)capability;
+    if (i == r->count) r->count++;
+}
+
+int co_reports_get(const CoReports* r, uint64_t peer)
+{
+    for (uint32_t i = 0; i < r->count; i++) if (r->rows[i].peer == peer) return r->rows[i].capability;
+    return CO_PEER_UNKNOWN;
+}
+
+int co_launch_clears(const CoReports* r, const uint64_t* present, uint32_t slots, uint64_t own, int own_on, int override_set)
+{
+    if (override_set) return 0;
+    if (!own_on) return 1;
+    for (uint32_t i = 0; i < slots; i++)
+        if (present[i] != 0 && present[i] != own && co_reports_get(r, present[i]) != CO_PEER_ON) return 1;
+    return 0;
+}
+
+int co_join_decision(int marked, int capability, uint64_t waited_ms)
+{
+    if (!marked || capability == CO_PEER_ON) return CO_JOIN_ADMIT;
+    if (capability == CO_PEER_OFF) return CO_JOIN_DENY;
+    return waited_ms < CO_JOIN_LIMIT_MS ? CO_JOIN_HOLD : CO_JOIN_DENY;
+}

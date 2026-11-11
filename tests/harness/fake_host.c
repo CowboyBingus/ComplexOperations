@@ -105,6 +105,8 @@ static int Send(HfMod* mod, uint64_t to, const void* data, uint32_t bytes)
     return 0;
 }
 
+static int Subscribe(HfMod* mod, uint32_t kind, HfListener listener, void* user, int32_t priority) { g_fake.subscribed = kind; return 0; }
+
 static uintptr_t DifficultyRow(uint32_t level) { return level == 11 ? g_fake.levelRow : 0; }
 static uint32_t LoadPhase(HfMod* mod) { return g_fake.loadPhase; }
 static int OnGameThread(HfMod* mod, HfTickCallback callback, void* user) { g_fake.tick = callback; return 1; }
@@ -162,6 +164,7 @@ const HfApi* fake_host_reset(const char* build)
     g_api.load_phase = LoadPhase;
     g_api.on_game_thread = OnGameThread;
     g_api.session = Session;
+    g_api.subscribe = Subscribe;
     g_api.share_get = ShareGet;
     g_api.share_set = ShareSet;
     g_api.send = Send;

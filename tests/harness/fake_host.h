@@ -42,7 +42,7 @@ typedef struct FakeHost
     HfTickCallback tick;      /* the last on_game_thread callback */
     /* The session: the role, the host's row as this machine holds it (0 bytes: none), what share_set and send answer
      * (1 refuses) and what they were last given. */
-    uint32_t role;
+    uint32_t role, subscribed;
     uint8_t row[64]; uint32_t rowBytes;
     int shareRefused, shareSets, sendRefused, sends;
     uint64_t sentTo; uint8_t sent[64]; uint32_t sentBytes;
