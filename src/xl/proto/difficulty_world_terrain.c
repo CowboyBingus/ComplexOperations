@@ -4609,6 +4609,23 @@ static int TileThreads(void)
     return 1;
 }
 
+/* The most stamp runners that may hold an engine worker at once. A stamp runner keeps its worker for the whole
+ * planning, and the frame's own job (game 0xAB41F0, queue 11) is popped only by the lower half of the regular workers
+ * (exe 0x626A0C..0x626A39: N = [exe+0x23608E4], half = max(1, (N+1)/2) when byte [exe+0x1B135E9] is set, else every
+ * worker). With every one of those held, the game thread waits at game 0xAB6260 and the connection goes unanswered
+ * for the whole planning, so one of them is left free. -1: not known, or off (HELLFORGE_XL_TILE_CAP=0, research). */
+static int StampRunnerCap(void)
+{
+    uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
+    uint32_t n = 0; uint8_t halves = 0;
+    static int off = -1;
+    if (off < 0) { char v[8] = ""; off = GetEnvironmentVariableA("HELLFORGE_XL_TILE_CAP", v, sizeof v) > 0 && v[0] == '0'; }
+    if (off || SafeRead(exe + 0x23608E4u, &n, 4) || SafeRead(exe + 0x1B135E9u, &halves, 1) || n == 0 || n > 256) return -1;
+    uint32_t serve = halves ? (n + 1) / 2 : n;
+    if (serve < 1) serve = 1;
+    return (int)serve - 1;
+}
+
 /* A runner's engine job: r9 = its element of the submitted array, the runner. */
 static uint64_t TileRunnerJob(uint64_t a, uint64_t b, uint64_t c, uint64_t runner)
 {
@@ -4894,6 +4911,13 @@ static void TerrainStamps(uint64_t records, uint32_t end, uint32_t at91, uint64_
     }
     /* runners and slots: runner 0 is the generator's; slot 0 is g_terrain.block */
     int R = TileThreads();
+    int cap = StampRunnerCap();
+    if (cap >= 0 && R > cap + 1)
+    {
+        static int noted;
+        if (!noted) { noted = 1; Note("difficulty: stamps: %d runners, not %d: one worker of the frame's own job queue stays free", cap + 1, R); }
+        R = cap + 1;
+    }
     if (compare && pass == 0) R = 1;
     static uint8_t* slotBlock[STAMP_SLOTS_MAX];
     static StampCandidate* slotCand[STAMP_SLOTS_MAX];
