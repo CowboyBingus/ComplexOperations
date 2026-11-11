@@ -157,8 +157,29 @@ int co_launch_clears(const CoReports* reports, const uint64_t* present, uint32_t
 /* A join, as host: into a mission whose seed is marked only a machine known to be able comes; an unknown one is held
  * for the limit (its message is on the way), then refused. */
 enum { CO_JOIN_ADMIT, CO_JOIN_HOLD, CO_JOIN_DENY };
-#define CO_JOIN_LIMIT_MS 10000u
+#define CO_JOIN_LIMIT_MS 15000u
 int co_join_decision(int marked, int capability, uint64_t waited_ms);
+/* 1 when a generation seed string ("f3fb", the mission seed in 8 hex digits, 8 more, 2, the level in 2) is a level-11
+ * mission's with the mark. */
+int co_seed_text_marked(const char* text);
+/* The join gate (co_join.c): the host's confirmation of a join, 0x108C760(L, peer, join id, the peer's reported id,
+ * int), held the way the game holds one (slot state 4) while the session's seed string is marked and the peer has not
+ * said what it can do, and refused as "Denied" when it cannot or stays silent for the limit. `gate` is the detour's
+ * decision for one call: CO_JOIN_ADMIT means the game's own function decides. */
+#define CO_JOIN_GATE 0x108C760u
+#define CO_HOST_UPDATE 0x108A440u  /* (L): every session update, on the thread the gate runs on */
+#define CO_JOIN_REMOVE 0x108B6B0u  /* (L, peer): the peer's slot and its place in the sync lists */
+#define CO_JOIN_DENIED 0xBE3CF0u   /* (peer, join id, reason, extra): the client shows "Denied" */
+const char* co_join_check(uintptr_t game);
+const char* co_join_install(uintptr_t game);
+int co_join_gate(uintptr_t sync, uint64_t peer, uint64_t join, uint64_t reported, uint32_t value, uint64_t now_ms);
+#ifdef CO_TEST
+void co_join_test_reset(void);
+void co_join_test_image(uint8_t* image, uint8_t slots);
+void co_join_test_calls(void* gate, void* update, void* remove, void* denied, uint32_t slots);
+uint64_t co_join_test_confirm(uint64_t sync, uint64_t peer, uint64_t join, uint64_t reported, uint32_t value);
+uint64_t co_join_test_update(uint64_t sync);
+#endif
 /* The live side (co_peers.c). `start` once at game load; `tick` on the game thread: the host keeps its row set, a
  * client sends its message once it holds the row, each tried again while HellForge refuses. `launch_install` hooks
  * the seed string's build so a host's launch drops the mark when not every machine can make the mission. */

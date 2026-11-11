@@ -64,6 +64,7 @@ static void Start(const char* name)
     memcpy(image + STOCK, kStock, sizeof kStock); memcpy(image + STOCK + 48, &disk, 4);
     fake_stock_chains(image, disk); /* its keyed generator steps, which the mod chains in front of */
     fake_stock_rows(image);         /* and its distance rows, behind the game's row readers */
+    co_join_test_image(image, 4);
     co_capacity_test_commit(CO_COMPLEX_COMMIT_MB);
     co_capacity_init();
     co_capacity_game((uintptr_t)image);
@@ -99,7 +100,7 @@ int main(void)
     CHECK(co_capacity_poll(1) == 1 && !co_capacity_needs()->stock_stubs && !co_complex_on());
 
     const uint32_t sites[] = {kCoWorldReaders[7].rva, kCoPageReaders[3].rva + 1u, kCoPageImmediates[5].rva, CO_HUD_FIND_SITE + 20u, CO_MARK_FILL + 3u, CO_LAUNCH_STRING + 9u,
-        CO_ROW_OUTPOSTS_SITE + 2u, 0xF7D9B6u + 6u};
+        CO_ROW_OUTPOSTS_SITE + 2u, 0xF7D9B6u + 6u, 0x108C878u + 3u};
     for (size_t i = 0; i < sizeof sites / sizeof sites[0]; i++)
     {
         Start("one of the mod's sites is another game's");

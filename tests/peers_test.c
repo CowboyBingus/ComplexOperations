@@ -79,6 +79,8 @@ int main(void)
     CHECK(co_join_decision(1, CO_PEER_ON, 0) == CO_JOIN_ADMIT && co_join_decision(1, CO_PEER_OFF, 0) == CO_JOIN_DENY);
     CHECK(co_join_decision(1, CO_PEER_UNKNOWN, 0) == CO_JOIN_HOLD && co_join_decision(1, CO_PEER_UNKNOWN, CO_JOIN_LIMIT_MS - 1) == CO_JOIN_HOLD);
     CHECK(co_join_decision(1, CO_PEER_UNKNOWN, CO_JOIN_LIMIT_MS) == CO_JOIN_DENY);
+    /* 15 s: a client sends once it holds the host's row, which HellForge may refuse for about 2 s after it joins */
+    CHECK(CO_JOIN_LIMIT_MS == 15000u && co_join_decision(1, CO_PEER_UNKNOWN, 14999) == CO_JOIN_HOLD && co_join_decision(1, CO_PEER_UNKNOWN, 15000) == CO_JOIN_DENY);
 
     game = Start("the host's row");
     co_peers_start(game);

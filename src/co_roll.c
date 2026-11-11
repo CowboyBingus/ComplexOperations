@@ -35,3 +35,14 @@ int co_complex_roll(uint32_t operation_seed, uint32_t planet, uint32_t chance_65
 uint32_t co_seed_marked(uint32_t mission_seed, int complex) { return complex ? mission_seed | CO_SEED_MARK : mission_seed & ~CO_SEED_MARK; }
 
 int co_seed_is_complex(uint32_t mission_seed) { return (mission_seed & CO_SEED_MARK) != 0; }
+
+static int Hex(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+
+/* The text keeps the seed's 32 bits, highest digit first: the mark is the lowest bit of digit 11. Another version's
+ * text, or one cut short, is no complex mission's. */
+int co_seed_text_marked(const char* text)
+{
+    if (text[0] != 'f' || text[1] != '3' || text[2] != 'f' || text[3] != 'b') return 0;
+    for (int i = 4; i < 24; i++) if (Hex(text[i]) < 0) return 0;
+    return Hex(text[22]) * 16 + Hex(text[23]) == (int)CO_COMPLEX_LEVEL && co_seed_is_complex((uint32_t)Hex(text[11]));
+}

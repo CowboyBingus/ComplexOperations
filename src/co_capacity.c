@@ -77,13 +77,14 @@ static const char* OwnSites(uintptr_t game)
 {
     const char* why;
     if ((why = co_pages_check(game)) != NULL || (why = co_hud_check(game)) != NULL || (why = co_mark_check(game)) != NULL ||
-        (why = co_launch_check(game)) != NULL || (why = co_rows_check(game)) != NULL) return why;
+        (why = co_launch_check(game)) != NULL || (why = co_rows_check(game)) != NULL ||
+        (why = co_join_check(game)) != NULL) return why;
     return NULL;
 }
 
 /* Every need, then one line when the part is off. What a complex operation lacks in this build, so that it is never on
- * (CO_COMPLEX_COMPLETE): the chains before HellForge's nav, ship and spawner steps, the join gate's detour and the
- * drain of a running preview. */
+ * (CO_COMPLEX_COMPLETE): the chains before HellForge's nav, ship and spawner steps, and the pools and lists of a
+ * 16384 m world, which must be in before the engine's plugins are set up. */
 static void Settle(void)
 {
     CoComplexNeeds* n = &g_capacity.needs;
@@ -114,7 +115,8 @@ int co_complex_start(void)
 {
     const char* why;
     if (!co_complex_on()) return 0;
-    if ((why = co_rows_install(g_capacity.game)) == NULL && (why = CoXlInstall(g_capacity.game)) == NULL && (why = co_mark_install(g_capacity.game)) == NULL) why = co_launch_install(g_capacity.game);
+    if ((why = co_rows_install(g_capacity.game)) == NULL && (why = co_join_install(g_capacity.game)) == NULL &&
+        (why = CoXlInstall(g_capacity.game)) == NULL && (why = co_mark_install(g_capacity.game)) == NULL) why = co_launch_install(g_capacity.game);
     if (why == NULL) return 1;
     g_capacity.on = 0; /* what did go in runs the game's own code on every level: nothing is complex without the mark */
     co_log("complex operations are off: %s", why);
@@ -153,4 +155,6 @@ uint32_t co_gen_block(void) { return g_capacity.have.block_bytes; }
 
 #ifdef CO_TEST
 void co_capacity_test_commit(uint32_t mb) { g_commitTest = mb; }
+/* A machine whose complex part is on or off, for the parts that only ask. */
+void co_capacity_test_on(int on) { g_capacity.settled = 1; g_capacity.on = on; }
 #endif
