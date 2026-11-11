@@ -54,8 +54,8 @@ respawns. The mod's code goes in with the counts (see Session lists) and works f
 | Director and position lists from the frame allocator | Room for sixteen | Eight only |
 
 The fixes for rooms of eight go in a build for eight only, the one whose avatar manager holds more than eight. 19 code
-sites change in a build for four, 31 in a build for eight. For four avatars or fewer the culls, the anchor and the
-encounter give the game's own result.
+sites change in a build for four, 31 in a build for eight. For four avatars or fewer the culls and the encounter give
+the game's own result. The anchor starts the fourth score at 0, which the game leaves unset.
 
 Limits that remain:
 
