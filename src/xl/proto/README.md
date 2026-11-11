@@ -45,6 +45,8 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
 | `difficulty_stream.c`, `difficulty_world_move.c`, `_destroy.c`, `_terrain.c`, `difficulty_net_patience.c`, `living_world_defer.c` | Play code asks the mission in play (`g_world.live`, `g_worldLevelLive`, `liveLevels`), not the level set up last. |
 | `difficulty_world.c`, `difficulty_world_towns.c` | A level init drops what the last generation left: record addresses, open nature windows, the city shift, an armed towns run, the HUD order, the height copy's level. |
 | `living_world.c`, `living_world_intent.c` | The per-mission resets count missions (`g_lwMission`) instead of comparing level addresses. |
+| `difficulty_world.c` | Level init asks `co_generation_decision` where it asked for difficulty 11; the complex level's radii stub (`../co_normal.c`) goes in behind HellForge's. |
+| `living_world.c`, `difficulty_stream.c`, `difficulty_world_terrain.c` | `hellforge_lw_test` and `hellforge_research_stream_observer` are not exported. |
 | `difficulty_world.c` | The HUD's three stubs come from `../co_normal.c`: each runs the game's own bytes unless the mission in play is complex, and the row state hook passes a normal mission through. |
 
 What the build does instead of an edit:

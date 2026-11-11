@@ -1070,7 +1070,7 @@ static const char* InstallWorldStreamStep(DifficultyInstall* d)
 /* Research export (Lua): make the streamer treat world-space (x, y) as one more player position, or take it away.
  * The state is set and cleared under g_streamLock; it survives level changes until turned off. 0 when the streamer is
  * not installed. */
-HF_LUA_API int hellforge_research_stream_observer(int on, float x, float y)
+static int hellforge_research_stream_observer(int on, float x, float y)
 {
     AcquireSRWLockExclusive(&g_streamLock);
     if (g_streamInstallState != 1)

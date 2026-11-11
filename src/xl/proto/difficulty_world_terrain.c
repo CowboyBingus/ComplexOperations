@@ -6372,7 +6372,7 @@ static void NearCraterReport(void)
     Note("difficulty: near terrain: craters: %d of %d hidden coarse nodes have finite bounds again", open, g_nearShown.coarseCount);
 }
 
-__declspec(dllexport) int hellforge_research_stream_observer(int on, float x, float y); /* difficulty_stream.c */
+static int hellforge_research_stream_observer(int on, float x, float y); /* difficulty_stream.c */
 static void NearEyePoll(void)
 {
     ULONGLONG now = GetTickCount64();

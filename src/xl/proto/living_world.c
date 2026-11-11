@@ -1701,7 +1701,7 @@ static void LwWallSample(void)
 static SRWLOCK g_lwCmdLock = SRWLOCK_INIT;
 static char g_lwCmd[8][128];
 static int g_lwCmdCount, g_lwCmdSeq;
-__declspec(dllexport) int hellforge_lw_test(const char* cmd)
+static int hellforge_lw_test(const char* cmd) /* the harness called it by name; the mod ships no test entry */
 {
     if (cmd == NULL) return -1;
     int seq = -1;
