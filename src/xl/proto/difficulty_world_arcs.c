@@ -300,7 +300,7 @@ static void ObjectiveArcs(uint64_t a, uint64_t pass, uint64_t clusters, uint32_t
     static int off = -1;
     if (off < 0) { char t[4] = ""; off = GetEnvironmentVariableA("HELLFORGE_XL_ARCS", t, sizeof t) > 0 && t[0] == '0'; }
     uint64_t lg = 0, records = 0, countAt = 0; uint8_t level = 0;
-    if (g_difficulty.missions < 2 || g_difficultyGame == 0 || SafeRead(pass + 0x18, &lg, 8) || lg == 0 || SafeRead(lg + 0xF9, &level, 1) || level != DIF_VANILLA + 1) return;
+    if (g_difficulty.missions < 2 || g_difficultyGame == 0 || SafeRead(pass + 0x18, &lg, 8) || lg == 0 || SafeRead(lg + 0xF9, &level, 1) || level != DIF_VANILLA + 1 || !LevelComplex((uintptr_t)lg)) return;
     if (off) { Note("difficulty: extra large maps: mission arcs: off (HELLFORGE_XL_ARCS=0, research: every peer must match)"); return; }
     const char* why = NULL;
     static ArcSet set; /* under g_arcDealLock */

@@ -101,6 +101,7 @@ int co_seed_is_complex(uint32_t mission_seed);
 #define CO_COMPLEX_LEVEL 11u
 #define CO_COMPLEX_CHANCE 16384u     /* in 1/65536: one level-11 operation in four */
 #define CO_COMPLEX_COMMIT_MB 28672u  /* commit an extra large map was measured to reach */
+#define CO_COMPLEX_MISSIONS 3u      /* an operation's missions, all on the one map */
 typedef struct CoComplexNeeds
 {
     int capacity_call, regions, live_load, capacity_granted; /* at the mod's start */

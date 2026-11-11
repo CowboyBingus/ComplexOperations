@@ -1,14 +1,21 @@
-/* STAND-INS, not the real thing. The prototype was built into a HellForge that had its own level 11 install; these are
- * the names of that install the prototype's files read, with the values that HellForge build had, so the files
- * compile. Nothing here installs or moves anything: the stock level 11 is HellForge's. Each part says what has to take
- * its place; the generation block's layout is no stand-in any more.
+/* The names of HellForge's level 11 install that the prototype's files read. The prototype was built into a HellForge
+ * with its own level 11; here level 11 is stock HellForge's, and each part below says where its values come from now.
+ * What is still a stand-in is marked STAND-IN.
  * Only for co_xl.c. */
 #ifndef CO_XL_STANDIN_H
 #define CO_XL_STANDIN_H
 
+#include "co_normal.h"
+
 /* ---- the level and its settings ------------------------------------------------------------------------------------
- * To replace: the settings of a complex operation, set when an operation rolled one (co_roll.c), and the stock level's
- * row through HfApi.difficulty_row(11). All zero here: map_scale 0 is "no larger map" to every reader. */
+ * A complex level's settings, in the names the prototype reads them by. HellForge's level 11 keeps its own row
+ * (HfApi.difficulty_row(11), never written); these are only what a complex mission adds to it. The values are the
+ * prototype's level (HellForge fork, examples/mods/extra-large-maps/src/extra_large_maps.c): map scale 20, a world of
+ * 16384 m (:13), and an operation's three missions on the one map (:30). Its other settings (:16-29: minutes, points,
+ * patrols, objectives 8 / 2, outposts x 3, the flags) are HellForge's level 11's own and stay the row's.
+ * STAND-IN left: `flags`. The prototype asks it for HF_DIFFICULTY_SECOND_PRIMARY together with g_mixBase, HellForge's
+ * private table of the mission rows that mix; no HfApi call reads either, so the objective fill takes every row as one
+ * that does not mix. */
 #define DIF_VANILLA 10u
 typedef struct Difficulty
 {
@@ -21,9 +28,21 @@ typedef struct Difficulty
     float mapScale, outpostScale, minutes;
     uint32_t optional, major, flags, missions;
 } Difficulty;
-static Difficulty g_difficulty;
-static uintptr_t g_difficultyGame;       /* game.dll once the install ran: 0, so its readers stay off */
+static Difficulty g_difficulty = {.name = "complex operation", .mapScale = CO_COMPLEX_MAP_SCALE, .missions = CO_COMPLEX_MISSIONS};
+static uintptr_t g_difficultyGame;       /* game.dll once the install ran: 0 before, so its readers stay off */
+/* The objectives an operation's missions want together: the row's per-mission counts times the missions (the fork's
+ * difficulty.c:741-744). The selection itself is held to its room on the reader's copy (co_rows.c). */
 static uint32_t g_operationOptional, g_operationMajor;
+static const char* CoXlSettings(uintptr_t game)
+{
+    const uintptr_t row = g_coApi->difficulty_row(CO_COMPLEX_LEVEL);
+    uint32_t counts[2];
+    if (row == 0 || g_coApi->read(row + 0x28, counts, sizeof counts) != 0) return "difficulty 11's row could not be read";
+    g_operationOptional = counts[0] * CO_COMPLEX_MISSIONS; g_operationMajor = counts[1] * CO_COMPLEX_MISSIONS;
+    g_difficulty.mod = g_coMod;
+    g_difficultyGame = game;
+    return NULL;
+}
 #define g_cityZoneRatio (co_rows_city_ratio()) /* level 10's city factor over the complex row's */
 static int LargerMaps(void) { return g_difficulty.mapScale > 1.0f; }
 /* The install's work in progress. The prototype's steps read the game's base from it and nothing else. */

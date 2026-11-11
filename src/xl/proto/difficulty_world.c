@@ -549,6 +549,28 @@ static int WorldDataWritable(uint64_t at, size_t bytes)
     }
     return 1;
 }
+/* Whether a level is a complex one, by its address: level init decides it (WorldLevel) before anything else of the
+ * level asks, and previews are set up on other threads meanwhile, so the last inits are kept, not one. */
+static SRWLOCK g_levelKindLock = SRWLOCK_INIT;
+static struct { uintptr_t level; int complex; } g_levelKind[16];
+static uint32_t g_levelKindNext;
+static void LevelKindSet(uintptr_t level, int complex)
+{
+    AcquireSRWLockExclusive(&g_levelKindLock);
+    uint32_t i = 0;
+    while (i < 16u && g_levelKind[i].level != level) i++;
+    if (i == 16u) i = g_levelKindNext++ % 16u;
+    g_levelKind[i].level = level; g_levelKind[i].complex = complex;
+    ReleaseSRWLockExclusive(&g_levelKindLock);
+}
+static int LevelComplex(uintptr_t level)
+{
+    int complex = 0;
+    AcquireSRWLockShared(&g_levelKindLock);
+    for (uint32_t i = 0; i < 16u; i++) if (g_levelKind[i].level == level) complex = g_levelKind[i].complex;
+    ReleaseSRWLockShared(&g_levelKindLock);
+    return level != 0 && complex;
+}
 static SRWLOCK g_explorationLock = SRWLOCK_INIT; /* every run of the pass, one at a time: previews generate on other threads */
 static uint64_t WorldPassExploration(uint64_t a, uint64_t b, uint64_t c, uint64_t e)
 {
@@ -684,7 +706,7 @@ static uint64_t WorldObjectiveFill(uint64_t level, uint64_t b, uint64_t row, uin
         g_hudOrderCount = n;
     }
     difficulty = 0;
-    if (g_difficulty.missions > 1 && g_operationOptional != 0 && g_difficultyGame != 0 && ids != 0 && n > 0 && n <= 32 && r < DIF_MISSION_ROWS &&
+    if (g_difficulty.missions > 1 && LevelComplex((uintptr_t)level) && g_operationOptional != 0 && g_difficultyGame != 0 && ids != 0 && n > 0 && n <= 32 && r < DIF_MISSION_ROWS &&
         g_objectiveListPlaces > n && g_objectiveListPlaces <= 64 && !SafeRead(level + 0xF9, &difficulty, 1) && difficulty == DIF_VANILLA + 1 &&
         !SafeRead(ids, list, 4ull * n))
     {
@@ -5304,6 +5326,7 @@ static void WorldLevel(uintptr_t level, uintptr_t preview)
             co_peers_host_row() == CO_HOST_ROW_NONE ? "no answer from the host" : "the host makes complex operations and this machine cannot");
     if (complex) scale = (float)g_world.scale;
     if (g_genComplex != NULL) *g_genComplex = (uint8_t)complex; /* the radii stub, later in this level init */
+    LevelKindSet(level, complex);
     co_rows_level(complex); /* the distance row its passes read */
     WorldLevelForget();
     g_world.values->size = scale > 1.0f ? 2048.0f * scale : 0.0f;

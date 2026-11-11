@@ -1,7 +1,7 @@
 /* The extra large world's prototype, as one unit: the files it was written in (proto/, as they were in HellForge's
  * loader) behind the loader's helper names (co_shim.h) and the stand-ins for the level install it was part of
  * (co_xl_standin.h). The files share static state and rely on the order below, which is the loader's.
- * Nothing here runs yet: every install is reached through CoXlInstall alone, and nothing calls it. */
+ * Every install is reached through CoXlInstall (co_complex_start), but the entity records' hook (CoXlEarly). */
 #define CO_XL_UNIT
 /* The research calls the loader's Lua bridge exported stay plain functions: the mod's DLL exports none of them. */
 #define HF_LUA_API
@@ -79,12 +79,13 @@ void CoXlTestRecords(int state) { g_entityRecordsState = state; }
 
 /* Every install of the prototype, in the loader's order: what it did when game.dll was loaded, then the level
  * install's check and steps, then the tick. NULL, or why a step refused. The loader ran these at three different
- * moments and only for an extra large level; when each may run in the mod, and for which operation, is not settled,
- * so this is not called. With the stand-in settings every step that asks for a larger map returns at once. */
+ * moments; the mod runs them once level 11 is installed and the complex part is on. The world, the objective fill and
+ * the arcs ask each level whether it is complex; the status volumes, weld notes and tactical map have not been shown to. */
 const char* CoXlInstall(uintptr_t game)
 {
     DifficultyInstall d = {game};
     const char* why;
+    if ((why = CoXlSettings(game)) != NULL) return why;
     InstallDaylight(game);
     LwInstallNavConnectNote();
     LwInstallHitNotes();
