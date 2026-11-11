@@ -430,7 +430,8 @@ static unsigned InGroup(uint8_t group, unsigned* caves)
  * these writes for a mod that is not live. */
 typedef struct CoRegistryEntry { uint64_t at; uint32_t type, pad; } CoRegistryEntry;
 _Static_assert(sizeof(CoRegistryEntry) == 16, "a registry entry is 16 bytes");
-#define CO_REGISTRY_ROOM 0x51Bu   /* entries the largest list has room for; a higher count is not the reviewed registry */
+/* A count above its list's room is not the reviewed registry, and reading that far would leave the list. */
+_Static_assert(sizeof kCoSyncedRooms == sizeof kCoSyncedLists, "a room for every list");
 
 /* The registry entries of the table at `table`: one in each list, or 0. */
 static int FindEntries(uintptr_t table, uintptr_t entries[3])
@@ -441,7 +442,7 @@ static int FindEntries(uintptr_t table, uintptr_t entries[3])
     {
         uint32_t count = 0;
         entries[list] = 0;
-        if (g_coApi->read(registry + kCoSyncedLists[list], &count, 4) != 0 || count > CO_REGISTRY_ROOM) return 0;
+        if (g_coApi->read(registry + kCoSyncedLists[list], &count, 4) != 0 || count > kCoSyncedRooms[list]) return 0;
         for (uint32_t i = 0; i < count; i++)
         {
             CoRegistryEntry entry;
@@ -516,6 +517,7 @@ void co_counts_undo(void)
     g_on = 0;
     Back(CO_COUNT_SITES, CO_COUNT_CLEARS, CO_COUNT_CAVES);
     SyncedBack();
+    co_registry_back();
     if (g_caves) VirtualFree((void*)g_caves, 0, MEM_RELEASE);
     g_caves = 0;
 }
@@ -568,6 +570,10 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
     /* The table moves before any site bounds it by eight. */
     if (Active(CO_G_SYNCED) && !SyncedMove())
     { VirtualFree((void*)g_caves, 0, MEM_RELEASE); g_caves = 0; co_log("session: %s", kStays); return; }
+    /* Each of the eight cards registers a widget: their registry list has room for eight before the card loop counts
+     * to eight. */
+    if (Active(CO_G_LOADOUT) && !co_registry_cards(g_game))
+    { SyncedBack(); VirtualFree((void*)g_caves, 0, MEM_RELEASE); g_caves = 0; co_log("session: %s", kStays); return; }
     g_context = context;
     g_extension = extension;
     /* The game cannot run on a mix: whatever is written goes back when one write fails. */
@@ -615,6 +621,7 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
     return;
 failed:
     SyncedBack();
+    co_registry_back();
     VirtualFree((void*)g_caves, 0, MEM_RELEASE);
     g_caves = 0;
     co_log("session: a count site could not be written; %s", kStays);
@@ -728,13 +735,15 @@ uint32_t co_counts_test_join_index(uint8_t* flags)
     JoinIndex(&regs);
     return (uint32_t)regs.r8;
 }
-/* The number of the write that changes the site or cave at rva, from the first of the counts (the table move's
- * writes first); -1 when this build does not write it. */
-/* The writes of the table move (the pointer and three registry entries), made before the first site. */
+/* The writes of the table move (the pointer and three registry entries), made before the first site. The card list's
+ * sites (co_registry.c) follow them. */
 int co_counts_test_move_writes(void) { return Active(CO_G_SYNCED) ? 4 : 0; }
+unsigned co_registry_test_sites(void);
+/* The number of the write that changes the site or cave at rva, from the first of the counts (the table move's and
+ * the card list's writes first); -1 when this build does not write it. */
 int co_counts_test_write_of(uint32_t rva)
 {
-    int n = co_counts_test_move_writes();
+    int n = co_counts_test_move_writes() + (Active(CO_G_LOADOUT) ? (int)co_registry_test_sites() : 0);
     for (size_t i = 0; i < CO_COUNT_SITES; i++)
     {
         const CoCountSite* s = &kCoCountSites[i];

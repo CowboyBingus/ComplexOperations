@@ -433,11 +433,12 @@ for _, _, _, _, shape in MESSAGES:
 h.append('};\nstatic const uint32_t kCoMessageHandlers[] = {%s};\n' % ', '.join('0x%Xu' % m[0] for m in MESSAGES))
 # The per-peer loadout table the mod moves before group 7 is written (loadout_sites.SYNCED_MOVE).
 m = loadout_sites.SYNCED_MOVE
-assert m['new_size'] == 2 * m['old_size'] == 8 * m['entry'] and len(m['registry_lists']) == 3
+assert m['new_size'] == 2 * m['old_size'] == 8 * m['entry'] and len(m['registry_lists']) == len(m['registry_rooms']) == 3
 h.append('#define CO_SYNCED_POINTER 0x%Xu\n#define CO_SYNCED_ENGINE 0x%Xu\n#define CO_SYNCED_MEMBER 0x%Xu\n#define CO_SYNCED_REGISTRY 0x%Xu\n'
          % (m['pointer'], m['engine'], m['member'], m['registry']))
 h.append('#define CO_SYNCED_TYPE 0x%Xu\n#define CO_SYNCED_OLD_SIZE 0x%Xu\n#define CO_SYNCED_NEW_SIZE 0x%Xu\n' % (m['registry_type'], m['old_size'], m['new_size']))
 h.append('static const uint32_t kCoSyncedLists[] = {%s};\n' % ', '.join('0x%Xu' % x for x in m['registry_lists']))
+h.append('static const uint32_t kCoSyncedRooms[] = {%s};\n' % ', '.join('%du' % x for x in m['registry_rooms']))
 assert len(cave_groups) == len(caves) == len(CAVES)
 open(out, 'w').writelines(h)
 open(HERE + '/../tests/co_stack_code.h', 'w').writelines(stack_sites.test_header(dump))

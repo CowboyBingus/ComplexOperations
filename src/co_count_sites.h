@@ -1166,3 +1166,4 @@ static const uint32_t kCoMessageHandlers[] = {0xBBD6F0u, 0xBA9440u, 0xBBE230u, 0
 #define CO_SYNCED_OLD_SIZE 0x27E0u
 #define CO_SYNCED_NEW_SIZE 0x4FC0u
 static const uint32_t kCoSyncedLists[] = {0x2078u, 0x7230u, 0x7248u};
+static const uint32_t kCoSyncedRooms[] = {4u, 1u, 1u};

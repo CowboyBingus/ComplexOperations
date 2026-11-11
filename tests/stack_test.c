@@ -27,6 +27,8 @@ unsigned co_counts_test_stack(void);
 void co_pods_test_reset(void);
 void co_managers_test_reset(void);
 void co_ui_test_reset(void);
+void co_registry_test_fill(uint8_t* image);
+void co_registry_test_reset(void);
 
 #define SESSION_INIT 0x134D740u
 #define SESSION_GLOBAL 0x347CEF0u
@@ -122,9 +124,11 @@ static void Start(const char* name)
     co_session_test_reset();
     co_counts_test_reset();
     co_ui_test_reset();
+    co_registry_test_reset();
     api = fake_host_reset(CO_GAME_BUILD);
     co_session_test_fill(g_fake.image);
     co_counts_test_fill(g_fake.image);
+    co_registry_test_fill(g_fake.image);
     memcpy(g_fake.image + SESSION_GLOBAL, &none, 8);
     if (hellforge_mod_init(api, g_mod) == 0 && g_fake.loaded != NULL) g_fake.loaded(g_mod, HF_EVENT_GAME_LOADED, NULL);
 }
