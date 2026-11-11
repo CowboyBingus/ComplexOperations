@@ -26,10 +26,10 @@ def moved(v, region):
 
 def le32(v): return struct.pack('<I', v & 0xFFFFFFFF).hex()
 
-# 8 card centres (fraction of the screen width) for the init card loop; the game's own table at 0x21D8FB8 has
-# {0.138, 0.38, 0.62, 0.862}. Even spacing. The 111.0 at 0x1466B07 is the second float of the pair 0x14476A0
-# stores at widget +0x4/+0x8, not a width; the card's width is not set in this loop (open: overlap at 1/8 spacing).
-CARD_X = [(i + 0.5) / 8 for i in range(8)]
+# 8 card centres (anchor x, a fraction of the 1920-wide container) for the init card loop, which reads one float a
+# card from r12 (0x1466B17); the game's table at 0x21D8FB8 has {0.138, 0.38, 0.62, 0.862}. The cards are drawn at
+# scale 0.5 (CARD_SCALE): 210-wide panels with the game's gap halved to 22, so a pitch of 232 and margins of 43.
+CARD_X = [(960.0 + (i - 3.5) * 232.0) / 1920.0 for i in range(8)]
 
 # --- 1. allocation size (factory 0x14984E0, screen type 11 case 0x1498AE1) ---------------------------------------
 ALLOC = [
@@ -585,7 +585,23 @@ def _caves():
         (0x147061F, '41c6859539270000', ''.join(' cmp byte ptr [rsp+0x%x], 0\n jne %d1f\n mov qword ptr [r13+0x%x], 0\n%d1:\n'
                                                 % (0x38 + k, k, NR + k * 0x9F0 + 0x9E8, k) for k in range(4, 8)) +
          ' mov byte ptr [r13+0x273995], 0\n jmp game+0x1470627', '146fc40 records 4..7 peer id clear'),
-    ] + GUARDS8
+    ] + CARD_SCALE + FIGURE_SLOT + GUARDS8
+
+# Eight cards at the game's size overlap: the init card loop sets each card root's scale to 0.5 before its pivot, so
+# the panel, its text and its figure image draw at half size. rsi is the card for the whole loop and rcx, rdx are
+# loaded again behind the replaced store; the setter returns early on an equal value and tests the parent for null.
+CARD_SCALE = [
+    (0x1466B38, '48c74424400000003f', 'mov rcx, rsi\n mov rdx, 0x3f0000003f000000\n call game+0x1447ED0\n'
+     ' mov qword ptr [rsp+0x40], 0x3f000000\n jmp game+0x1466B41', '1465840 init card loop: card scale 0.5'),
+]
+
+# The figure preview has four slots (a z table of four, a viewport switch with cases 0 to 3); slot 4 and up take the
+# default case, which draws over card 1. They get -1, the "no figure" the game passes for a peer it does not find.
+# Every reader that indexes by the slot tests -1 or the spawned flag first. Only cards of a build for eight reach 4.
+FIGURE_SLOT = [
+    (0x18A1A60, '40534883ec30', 'cmp edx, 4\n jb 1f\n mov edx, -1\n1: push rbx\n sub rsp, 0x30\n jmp game+0x18A1A66',
+     '18a1a60 figure slot: 4 and up get none'),
+]
 
 # The mod's loadout guards (gen_count_sites.py GUARDS) bound an index by 4 before a map read or a record; they also
 # stop -1 ("no peer", "no index"), which the game reads unchecked. In this build each is replaced by the same cave

@@ -124,6 +124,10 @@ int co_counts_test_host_scores(const void* arguments);
 #define LOADOUT_BOUND 0x14674BBu    /* mov edi,4: a loop over the loadout screen's cards */
 #define LOADOUT_MAP 0xB901EBu       /* mov eax,[r9+0x27d8]: the loadout screen's card of a player */
 #define LOADOUT_CAVE 0x1471848u     /* lea rbx,[rsi+0x53a78]: the cards, with the loop count set in the cave */
+#define CARD_ANCHORS 0x1466AD4u     /* lea r12,[the cards' anchor x table]: the init card loop */
+#define CARD_SCALE 0x1466B38u       /* mov qword [rsp+0x40],0x3f000000: a card's pivot, before its setter */
+#define CARD_SCALE_SET 0x1447ED0u   /* a function: a widget's scale, the pair packed in rdx */
+#define FIGURE_SLOT 0x18A1A60u      /* a function: a card figure's preview slot in edx, -1 for none */
 #define SYNCED_CLEAR 0x1381254u     /* mov r8d,0x27e0: the memset of the per-peer loadout table */
 #define SYNCED_SEARCH 0x1395221u    /* cmp ecx,4: a search of that table by peer id */
 #define SYNCED_GONE 0x1087122u      /* cmp eax,4: the search for a peer that left */
@@ -547,7 +551,7 @@ int main(void)
         static char line[96];
         uint32_t value;
         snprintf(line, sizeof line, "players: the loadout screen has eight records and cards (%u code sites changed)", co_counts_test_loadout());
-        CHECK(co_counts_test_loadout() == 471u && fake_host_logged(line) == (players == 8));
+        CHECK(co_counts_test_loadout() == 473u && fake_host_logged(line) == (players == 8));
         memcpy(&value, image + LOADOUT_SIZE + 1, 4);
         CHECK(image[LOADOUT_SIZE] == 0xBA && value == (players == 8 ? 0x36FA70u : 0x2739D0u));
         CHECK(image[LOADOUT_BOUND] == 0xBF && image[LOADOUT_BOUND + 1] == players);
@@ -559,6 +563,67 @@ int main(void)
         CHECK((cave != NULL) == (players == 8));
         if (cave != NULL) CHECK(memcmp(cave, kCount, sizeof kCount) == 0 && Leads(cave + 13, 0x147184Fu));
         else CHECK(image[LOADOUT_CAVE] == 0x48);
+
+        /* mov r13d,8; lea r12,[the table]: eight anchors 232 apart in the 1920-wide container, so half-size panels
+         * (210 wide) keep a gap of 22 and the row stays inside it. */
+        static const uint8_t kAnchors[] = {0x41, 0xBD, 0x08, 0x00, 0x00, 0x00, 0x4C, 0x8D, 0x25};
+        cave = Cave(CARD_ANCHORS, 7);
+        CHECK((cave != NULL) == (players == 8));
+        if (cave != NULL)
+        {
+            int32_t to;
+            float x[8];
+            CHECK(memcmp(cave, kAnchors, sizeof kAnchors) == 0 && cave[13] == 0xE9 && Leads(cave + 14, 0x1466ADBu));
+            memcpy(&to, cave + 9, 4);
+            memcpy(x, cave + 13 + to, sizeof x);
+            for (int i = 0; i < 8; i++) CHECK(x[i] * 1920.0f > 147.99f + 232.0f * (float)i && x[i] * 1920.0f < 148.01f + 232.0f * (float)i);
+            CHECK(x[0] * 1920.0f - 105.0f > 40.0f && x[7] * 1920.0f + 105.0f < 1880.0f);
+        }
+        else CHECK(image[CARD_ANCHORS] == 0x4C);
+
+        /* Run: a stub puts the card in rsi and jumps to the scale cave; the setter's stand-in keeps rdx at the card's
+         * scale (+0x14), and where the cave goes back the test returns the pivot it stored at [rsp+0x40]. */
+        typedef uint64_t (*ScaleFn)(void*, const void*);
+        static const uint8_t kScale[] = {0x48, 0x89, 0xF1, 0x48, 0xBA, 0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x00, 0x3F, 0xE8};
+        static const uint8_t kPivot[] = {0x48, 0xC7, 0x44, 0x24, 0x40, 0x00, 0x00, 0x00, 0x3F, 0xE9};
+        /* push rsi; mov rsi,rcx; sub rsp,0x50; mov qword [rsp+0x40],-1; jmp rdx */
+        static const uint8_t kScaleIn[] = {0x56, 0x48, 0x89, 0xCE, 0x48, 0x83, 0xEC, 0x50, 0x48, 0xC7, 0x44, 0x24, 0x40, 0xFF, 0xFF, 0xFF, 0xFF,
+                                           0xFF, 0xE2};
+        static const uint8_t kSetter[] = {0x48, 0x89, 0x51, 0x14, 0xC3};     /* mov [rcx+0x14],rdx; ret */
+        /* mov rax,[rsp+0x40]; add rsp,0x50; pop rsi; ret */
+        static const uint8_t kScaleBack[] = {0x48, 0x8B, 0x44, 0x24, 0x40, 0x48, 0x83, 0xC4, 0x50, 0x5E, 0xC3};
+        cave = Cave(CARD_SCALE, 9);
+        CHECK((cave != NULL) == (players == 8));
+        if (cave != NULL)
+        {
+            static uint8_t card[0x40];
+            const float half[2] = {0.5f, 0.5f};
+            CHECK(memcmp(cave, kScale, sizeof kScale) == 0 && Leads(cave + 14, CARD_SCALE_SET) && memcmp(cave + 18, kPivot, sizeof kPivot) == 0 &&
+                  Leads(cave + 28, 0x1466B41u));
+            Landing(CARD_SCALE_SET, kSetter, sizeof kSetter);
+            Landing(0x1466B41u, kScaleBack, sizeof kScaleBack);
+            Landing(ENTER + 0x1C0u, kScaleIn, sizeof kScaleIn);
+            memset(card, 0xC5, sizeof card);
+            CHECK(((ScaleFn)(uintptr_t)(g_fake.image + ENTER + 0x1C0u))(card, cave) == 0x3F000000u);
+            CHECK(memcmp(card + 0x14, half, sizeof half) == 0 && card[0x13] == 0xC5 && card[0x1C] == 0xC5);
+        }
+        else CHECK(memcmp(image + CARD_SCALE, kPivot, sizeof kPivot - 1) == 0);
+
+        /* Run: the figure slot's cave. Where it goes back the test undoes the replaced push and sub and returns the
+         * slot (add rsp,0x30; pop rbx; mov eax,edx; ret): 0 to 3 arrive as they are, 4 and up as -1. */
+        static const uint8_t kSlot[] = {0x83, 0xFA, 0x04, 0x72, 0x05, 0xBA, 0xFF, 0xFF, 0xFF, 0xFF, 0x53, 0x48, 0x83, 0xEC, 0x30, 0xE9};
+        static const uint8_t kSlotBack[] = {0x48, 0x83, 0xC4, 0x30, 0x5B, 0x89, 0xD0, 0xC3};
+        cave = Cave(FIGURE_SLOT, 6);
+        CHECK((cave != NULL) == (players == 8));
+        if (cave != NULL)
+        {
+            static const uint32_t kSlots[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 0x80000000u, 0xFFFFFFFFu};
+            CHECK(memcmp(cave, kSlot, sizeof kSlot) == 0 && Leads(cave + 16, 0x18A1A66u));
+            Landing(0x18A1A66u, kSlotBack, sizeof kSlotBack);
+            for (size_t i = 0; i < sizeof kSlots / sizeof kSlots[0]; i++)
+                CHECK(((CardFn)(uintptr_t)cave)(NULL, kSlots[i]) == (kSlots[i] < 4 ? kSlots[i] : 0xFFFFFFFFu));
+        }
+        else CHECK(image[FIGURE_SLOT] == 0x40 && image[FIGURE_SLOT + 1] == 0x53);
     }
     {
         /* A build for eight gives the mission summary eight rows and cards in a bigger allocation and bounds the rows'
@@ -1532,6 +1597,8 @@ int main(void)
             {"one changed loadout guard", GUARD_SITE, 4, 0},
             {"one changed loadout site", LOADOUT_MAP, 1, 1},
             {"one changed loadout cave site", LOADOUT_CAVE, 2, 1},
+            {"one changed card scale site", CARD_SCALE, 8, 1},
+            {"one changed figure slot site", FIGURE_SLOT, 1, 1},
             {"one changed site of the per-peer table", SYNCED_SEARCH, 1, 1},
             {"one changed mission summary site", SUMMARY_SIZE, 1, 1},
         };
@@ -1581,7 +1648,8 @@ int main(void)
         CHECK(fake_host_logged("players: the per-peer loadout table could not be moved") && !fake_host_logged("a count site could not be written"));
     }
     {
-        const uint32_t kEight[] = {LOADOUT_SIZE, LOADOUT_MAP, SYNCED_CLEAR, SYNCED_GONE, LOADOUT_CAVE, SUMMARY_SIZE, SUMMARY_CARDS};
+        const uint32_t kEight[] = {LOADOUT_SIZE, LOADOUT_MAP, SYNCED_CLEAR, SYNCED_GONE, LOADOUT_CAVE, CARD_SCALE, FIGURE_SLOT, SUMMARY_SIZE,
+                                   SUMMARY_CARDS};
         for (size_t i = 0; i < sizeof kEight / sizeof kEight[0]; i++)
         {
             static char name[64];
