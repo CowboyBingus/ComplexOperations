@@ -97,6 +97,8 @@ if [[ -z $hellforge ]]; then
     hellforge=$HOME/HellForge
 fi
 sdk=$hellforge/native/mod-sdk
+# After the SDK: its overlay header, for a checkout whose SDK has none yet.
+includes=(-I "$sdk" -I "$root/src/xl/sdk-fallback" -I "$root/src")
 if [[ ! -f $sdk/hellforge_mod.h ]]; then
     echo "No HellForge mod SDK at $sdk (pass --hellforge <HellForge-Open checkout>)." >&2
     exit 1
@@ -118,7 +120,8 @@ tmp=$build/tmp
 mkdir -p -- "$tmp"
 export TMPDIR="$tmp" TMP="$tmp" TEMP="$tmp"
 
-mapfile -t sources < <(find "$root/src" -type f -name '*.c' -print | sort)
+# src/xl/proto holds files that are parts of one unit (src/xl/co_xl.c includes them); none is compiled on its own.
+mapfile -t sources < <(find "$root/src" -type f -name '*.c' -not -path "$root/src/xl/proto/*" -print | sort)
 if ((${#sources[@]} == 0)); then
     echo "No C sources under $root/src." >&2
     exit 1
@@ -132,7 +135,7 @@ fi
 dll=$root/complex_operations.dll
 if ! $no_dll; then
     if ! "$zig" cc -std=c11 -target x86_64-windows-gnu -shared -O2 -Wall -Werror -Wno-unused-parameter ${CO_CFLAGS:-} \
-        "${defines[@]}" -I "$sdk" -I "$root/src" "${sources[@]}" -o "$dll"; then
+        "${defines[@]}" "${includes[@]}" "${sources[@]}" -o "$dll"; then
         echo 'The DLL did not compile.' >&2
         exit 1
     fi
@@ -166,7 +169,7 @@ elif $test_mode; then
         local test_file=$2
         local exe=$out/${id}_test.exe
         if ! "$zig" cc -std=c11 -target x86_64-windows-gnu -O2 -g -Wall -Werror -Wno-unused-parameter -DCO_TEST \
-            "${defines[@]}" -I "$sdk" -I "$root/src" -I "$root/tests" \
+            "${defines[@]}" "${includes[@]}" -I "$root/tests" \
             "$test_file" "${sources[@]}" "${harness[@]}" -o "$exe"; then
             printf '%s: did not compile\n' "$id"
             failed=$((failed + 1))

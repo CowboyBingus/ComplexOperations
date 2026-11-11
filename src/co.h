@@ -24,6 +24,8 @@ void co_pods_install(uintptr_t game);
 
 /* Free address space within reach of a 32-bit offset from `target`; 0 when there is none. */
 uintptr_t co_alloc_near(uintptr_t target, size_t size);
+/* The same with the allocation type given: MEM_RESERVE alone takes the address space only. */
+uintptr_t co_alloc_near_as(uintptr_t target, size_t size, uint32_t type);
 
 /* Eight slots in the per-player component managers (co_managers.c). `install` once with game.dll's base; `state` in
  * the state constructor's hook with the component block, before the game's constructor runs. */
@@ -31,6 +33,10 @@ void co_managers_install(uintptr_t game);
 void co_managers_state(uintptr_t block);
 /* 1 while the managers have eight slots. The join limit and the guards of the score manager's loot rows follow it. */
 int co_managers_moved(void);
+/* For code that reads a manager itself: where the member the game has at `offset` of the manager held at `global` is
+ * now, and how many players the manager takes now. Both change when the managers move or move back. */
+uint32_t co_managers_offset(uint32_t global, uint32_t offset);
+uint32_t co_managers_slots(uint32_t global);
 #ifdef CO_CANARY
 void co_managers_canary(int fill);
 void co_session_canary(int fill);
@@ -80,5 +86,9 @@ void co_extract_boosters_ready(uintptr_t game);
 int co_seats_on(void);
 uint32_t co_seat_node(uintptr_t entity, uint32_t seat);
 void co_boosters_update(uintptr_t b);
+
+/* Whether an operation is a complex operation (co_roll.c): the same answer on every peer, from the operation record's
+ * seed and planet. `chance_65536` is the chance in 1/65536; 65536 and above is always. */
+int co_complex_roll(uint32_t operation_seed, uint32_t planet, uint32_t chance_65536);
 
 #endif

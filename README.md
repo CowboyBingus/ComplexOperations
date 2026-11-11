@@ -419,6 +419,8 @@ Pelican), which are not in this folder.
 | `tests/registry_test.c` | The list's move in each build, run through the game's loads; refusal on changed code or a card in the list, rollback of a failed write. |
 | `tests/ui_test.c` | The guards for four, the map's move with the state, the HUD's and tags' move at the HUD's init, refusal on changed code and rollback of a failed write. |
 | `tests/engine_test.c` | The engine's sites: written, refused on changed code, taken back on a failed write. |
+| `src/xl/co_shim.h`, `co_shim.c` | The loader's helpers those files call, over the SDK and the mod's own parts. |
+| `tests/shim_test.c` | The player list read at the game's offsets, and at the moved ones in a build for eight. |
 | `tests/harness/` | The stand-in loader and game image the tests run against. |
 
 ## How it stays safe
