@@ -7,6 +7,8 @@
 
 #include "co_normal.h"
 #include "co_mix.h"
+#include "co_nav.h"
+#include "co_text.h"
 
 /* ---- the level and its settings ------------------------------------------------------------------------------------
  * A complex level's settings, in the names the prototype reads them by. HellForge's level 11 keeps its own row
@@ -100,15 +102,24 @@ static int g_hudGrouped;
  * step learns its address. The one reader (the objectives note's "markers last shown") reads nothing while it is 0. */
 static uintptr_t g_markerMap;
 static volatile LONG* g_spawnerPlacesFull;    /* the director's spawner list of 1024: its full counter */
-static uintptr_t g_navExe;                    /* helldivers2.exe once the nav grid step ran */
-static float* g_navWorldTile;                 /* the nav tile size of an extra large world */
-static uint32_t g_navWorldScale = 1;
+
+/* ---- the navigation grid ---------------------------------------------------------------------------------------------
+ * The mod's own step (co_nav.c): the engine once it is in, and the tile size it wrote for a complex level. A reader
+ * that compares a nav world's tiles with it finds a complex level's grid and no other. */
+#define g_navExe (co_nav_exe())
+#define g_navWorldTile (co_nav_world_tile())
+#define g_navWorldScale ((uint32_t)(co_nav_exe() != 0 ? WorldScaleFor(g_difficulty.mapScale) : 1u))
+
+/* ---- the HUD's changing texts ----------------------------------------------------------------------------------------
+ * HellForge has no call for them: the mod answers its rows' ids behind the engine's lookup (co_text.c). The engine's
+ * text is NULL until that is in, and the rows then keep the objective's name alone. */
+#define CO_HUD_TEXT_FIRST 0x6F424800u /* 16 rows x HUD_TEXT_IDS ids from here, none of them a text of the engine's */
+#define g_engineText (co_text_engine())
+#define g_textDynamic (*co_text_dynamic())
 
 /* ---- loader state with no HfApi call -------------------------------------------------------------------------------
- * To replace: a text call in HfApi (the HUD's changing texts), and the spawn event's caller for one test trace. */
-typedef const char* (*EngineTextFn)(uint32_t id, void* a, void* b, void* c);
-static EngineTextFn g_engineText;
-static const char* (*g_textDynamic)(uint32_t id);
+ * The spawn event's caller is a thread's value inside HellForge's own hook. Its one reader is a research trace of the
+ * living world, which then names such a spawn's caller "not game.dll". */
 static uintptr_t g_spawnCaller;
 
 /* ---- real code, the same in stock HellForge ------------------------------------------------------------------------

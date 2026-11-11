@@ -133,6 +133,9 @@ const char* CoXlInstall(uintptr_t game)
     if ((why = WorldSitesFailed(game)) != NULL) return why;
     WeldResearchInstall(game);
     if (!ApiCodeMatches(game + CO_STAMP_QUERY, CO_STAMP_QUERY_PIN)) return "the stamp index's query is not the game's code this mod was made for";
+    /* the grouped rows' copy counts; refused, a row keeps the objective's name alone */
+    if ((why = co_text_install(g_coApi->module_base("helldivers2.exe", NULL), CO_HUD_TEXT_FIRST, 16u * HUD_TEXT_IDS)) != NULL)
+        Note("difficulty: HUD: %s; no copy counts", why);
     if ((why = InstallWorld(&d)) != NULL || (why = InstallWorldStreamStep(&d)) != NULL || (why = InstallMapHud(&d)) != NULL) return why;
     if (LoaderHook("the stamp index query's count (at most its places on a complex level)", game + CO_STAMP_QUERY, (void*)IndexQueryClamped, (void**)&g_indexQuery))
         return "the stamp index's query could not be hooked";

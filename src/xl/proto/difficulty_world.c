@@ -874,7 +874,7 @@ static void HudTextOn(void)
     if (g_hudTextOn != 0) return;
     g_hudTextOn = -1;
     if (ApiCodeMatches(g_world.game + HUD_TITLE, kHudTitlePin) != 1) { Note("difficulty: HUD: the row title setter is not the reviewed code; no copy counts"); return; }
-    for (int j = 0; j < 16; j++) for (int t = 0; t < HUD_TEXT_IDS; t++) g_hudText[j].ids[t] = 0x6F420000u | (uint32_t)(0x4800 + j * HUD_TEXT_IDS + t);
+    for (int j = 0; j < 16; j++) for (int t = 0; t < HUD_TEXT_IDS; t++) g_hudText[j].ids[t] = CO_HUD_TEXT_FIRST + (uint32_t)(j * HUD_TEXT_IDS + t);
     g_textDynamic = HudText;
     g_hudTextOn = 1;
 }

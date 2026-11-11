@@ -200,6 +200,9 @@ const char* co_nav_install(uintptr_t game)
     return "difficulty 11's navigation steps could not be chained";
 }
 
+uintptr_t co_nav_exe(void) { return g_nav.page != NULL ? g_nav.exe : 0; }
+const float* co_nav_world_tile(void) { return g_nav.page != NULL ? g_nav.tile : NULL; }
+
 #ifdef CO_TEST
 void co_nav_test_reset(void) { memset(&g_nav, 0, sizeof g_nav); }
 uintptr_t co_nav_test_page(void) { return (uintptr_t)g_nav.page; }

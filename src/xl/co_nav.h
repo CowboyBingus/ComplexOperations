@@ -28,6 +28,10 @@ const char* co_nav_install(uintptr_t game);
 /* What a stub calls before a grid is set up. The ship's call first runs `ship` (play's world back to the game's). */
 void co_nav_retile(uint32_t id, uintptr_t level);
 void co_nav_ship(void (*ship)(void));
+/* For the grid's readers: the engine once the steps are in (0 before), and the tile size last written for a level
+ * whose tiles are neither 128 nor 256 m, a complex level's 512 (NULL before the install, 0 until such a level). */
+uintptr_t co_nav_exe(void);
+const float* co_nav_world_tile(void);
 
 #ifdef CO_TEST
 void co_nav_test_reset(void);
