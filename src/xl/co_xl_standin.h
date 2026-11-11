@@ -6,6 +6,7 @@
 #define CO_XL_STANDIN_H
 
 #include "co_normal.h"
+#include "co_mix.h"
 
 /* ---- the level and its settings ------------------------------------------------------------------------------------
  * A complex level's settings, in the names the prototype reads them by. HellForge's level 11 keeps its own row
@@ -13,9 +14,8 @@
  * prototype's level (HellForge fork, examples/mods/extra-large-maps/src/extra_large_maps.c): map scale 20, a world of
  * 16384 m (:13), and an operation's three missions on the one map (:30). Its other settings (:16-29: minutes, points,
  * patrols, objectives 8 / 2, outposts x 3, the flags) are HellForge's level 11's own and stay the row's.
- * STAND-IN left: `flags`. The prototype asks it for HF_DIFFICULTY_SECOND_PRIMARY together with g_mixBase, HellForge's
- * private table of the mission rows that mix; no HfApi call reads either, so the objective fill takes every row as one
- * that does not mix. */
+ * `flags` holds only HF_DIFFICULTY_SECOND_PRIMARY, and only when HellForge's level 11 mixes missions: that and the
+ * rows it mixes (g_mixBase) are worked out again from the game's tables (co_mix.c), HellForge keeping both to itself. */
 #define DIF_VANILLA 10u
 typedef struct Difficulty
 {
@@ -33,8 +33,14 @@ static uintptr_t g_difficultyGame;       /* game.dll once the install ran: 0 bef
 /* The objectives an operation's missions want together: the row's per-mission counts times the missions (the fork's
  * difficulty.c:741-744). The selection itself is held to its room on the reader's copy (co_rows.c). */
 static uint32_t g_operationOptional, g_operationMajor;
+#define DIF_MISSION_ROWS CO_MIX_ROWS
+static uint8_t g_mixBase[DIF_MISSION_ROWS]; /* the rows HellForge mixes a partner mission into */
 static const char* CoXlSettings(uintptr_t game)
 {
+    const char* why;
+    int mixing = 0;
+    if ((why = co_mix_read(game, g_mixBase, &mixing)) != NULL) return why;
+    g_difficulty.flags = mixing ? HF_DIFFICULTY_SECOND_PRIMARY : 0u;
     const uintptr_t row = g_coApi->difficulty_row(CO_COMPLEX_LEVEL);
     uint32_t counts[2];
     if (row == 0 || g_coApi->read(row + 0x28, counts, sizeof counts) != 0) return "difficulty 11's row could not be read";
@@ -90,8 +96,6 @@ typedef struct LocationSite { uint32_t rva; uint8_t at; uint32_t value; } Locati
 static int g_hudGrouped;                      /* the HUD's objective rows grouped by instance */
 static uintptr_t g_markerMap;                 /* the map marker list of 64 */
 static volatile LONG* g_spawnerPlacesFull;    /* the director's spawner list of 1024: its full counter */
-#define DIF_MISSION_ROWS 162u
-static uint8_t g_mixBase[DIF_MISSION_ROWS];   /* second-primary mixes by mission row */
 static uintptr_t g_navExe;                    /* helldivers2.exe once the nav grid step ran */
 static float* g_navWorldTile;                 /* the nav tile size of an extra large world */
 static uint32_t g_navWorldScale = 1;
