@@ -77,7 +77,8 @@ const uint32_t* co_extract_test_extra(void);
 #define PLAYERS 0x3326468u
 #define EFFECTS 0x37CB600u
 #define EFFECTS_LEA 0x856993u
-#define EFFECTS_MOVED 0x37CC000u   /* where a test puts the list as HellForge's stratagems move it */
+#define EFFECTS_MOVED 0x37CC000u   /* where a test puts the list as HellForge's stratagems move it: above the lea */
+#define EFFECTS_BELOW 0x400000u    /* and below it: a negative displacement */
 #define B_NOW 0x14u
 
 typedef uint64_t (*InitFn)(uint64_t, uint64_t, uint64_t, uint64_t);
@@ -779,6 +780,20 @@ int main(void)
             CHECK(Update(co_boosters_update, "L514 A15 ", kFour));
             memcpy(&value, g_record + 4, 4);
             CHECK(value == moved);
+            /* HellForge may put the list below game.dll's code: the displacement is negative and must sign-extend. */
+            const uint32_t below = 0x40400000u;
+            memcpy(g_moved + 0x50, &below, 4);
+            PutPointer(EFFECTS_BELOW + 15 * 8, g_moved);
+            ListAt(EFFECTS_BELOW);
+            Players(4, kFour);
+            g_has = 1;
+            CHECK(Update(co_boosters_update, "U514 R15 ", kFour));
+            Players(5, kFive20);
+            g_has = 0;
+            memset(g_record, 0, sizeof g_record);
+            CHECK(Update(co_boosters_update, "L514 A15 ", kFour));
+            memcpy(&value, g_record + 4, 4);
+            CHECK(value == below);
             for (uint32_t at = EFFECTS_LEA; at < EFFECTS_LEA + 10; at++)
                 CHECK(co_counts_test_booster_open(at) == (at >= EFFECTS_LEA + 3 && at < EFFECTS_LEA + 7));
             ListAt(EFFECTS);
