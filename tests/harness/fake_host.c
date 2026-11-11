@@ -86,6 +86,25 @@ static int GenerationCapacity(HfMod* mod, const HfGenerationCapacity* want, HfGe
     return want != NULL && g_fake.capacityRefused;
 }
 
+static void Session(HfMod* mod, HfSession* out) { memset(out, 0, sizeof *out); out->role = g_fake.role; }
+static uint32_t ShareGet(HfMod* mod, uint64_t key, void* value, uint32_t capacity)
+{
+    if (g_fake.rowBytes != 0 && capacity >= g_fake.rowBytes) memcpy(value, g_fake.row, g_fake.rowBytes);
+    return g_fake.rowBytes;
+}
+static int ShareSet(HfMod* mod, uint64_t key, const void* value, uint32_t bytes)
+{
+    if (g_fake.shareRefused || g_fake.role == HF_SESSION_JOINER || bytes > sizeof g_fake.row) return 1;
+    memcpy(g_fake.row, value, bytes); g_fake.rowBytes = bytes; g_fake.shareSets++;
+    return 0;
+}
+static int Send(HfMod* mod, uint64_t to, const void* data, uint32_t bytes)
+{
+    if (g_fake.sendRefused || bytes > sizeof g_fake.sent) return 1;
+    g_fake.sentTo = to; memcpy(g_fake.sent, data, bytes); g_fake.sentBytes = bytes; g_fake.sends++;
+    return 0;
+}
+
 static uintptr_t DifficultyRow(uint32_t level) { return level == 11 ? g_fake.levelRow : 0; }
 static uint32_t LoadPhase(HfMod* mod) { return g_fake.loadPhase; }
 static int OnGameThread(HfMod* mod, HfTickCallback callback, void* user) { g_fake.tick = callback; return 1; }
@@ -142,6 +161,10 @@ const HfApi* fake_host_reset(const char* build)
     g_api.difficulty_row = DifficultyRow;
     g_api.load_phase = LoadPhase;
     g_api.on_game_thread = OnGameThread;
+    g_api.session = Session;
+    g_api.share_get = ShareGet;
+    g_api.share_set = ShareSet;
+    g_api.send = Send;
     return &g_api;
 }
 

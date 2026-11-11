@@ -121,6 +121,24 @@ uint32_t co_complex_entry_seed(uint32_t mission_seed, uint32_t difficulty, uint3
 #define CO_GEN_WAIT_MS 60000u   /* HellForge installs level 11 up to 20 s after the game loaded */
 void co_capacity_init(void);
 int co_capacity_poll(uint64_t now_ms);
+/* Whether this machine decides complex operations for the boards it builds: the host when its part is on; a client
+ * only with the host's row saying on (its own war table then shows what the host's does). */
+int co_complex_rolls(int is_host, int own_on, int host_row);
+
+/* The session as the complex part asks it (co_peers.c). The host's answer is one row of the mod's shared table. */
+#define CO_SHARE_KEY 0x434F2D434F4D504Cull /* "CO-COMPL" */
+#define CO_SHARE_PROTOCOL 1u
+typedef struct CoHostRow { uint8_t protocol, on; } CoHostRow;
+int co_peers_is_host(void);  /* solo counts: the board it builds is its own */
+int co_peers_host_row(void); /* CO_HOST_ROW_: as this machine holds it now */
+
+/* The mark (co_mark.c): a level-11 mission entry's seed carries whether its operation is complex. `install` hooks the
+ * entry fill, or says why not; `entry` is the hook's work behind the game's own fill. */
+#define CO_MARK_FILL 0x11E6340u
+#define CO_WAR_OBJECT 0x347CEE8u
+const char* co_mark_install(uintptr_t game);
+void co_mark_entry(uintptr_t game, uint32_t slot, uint32_t difficulty, uint32_t operation_seed, uintptr_t entry, int rolls);
+
 const CoComplexNeeds* co_capacity_needs(void);
 int co_complex_on(void);
 /* Where a region of the generator's block lies and how many elements it holds (HF_GEN_ names): 0 until settled and
