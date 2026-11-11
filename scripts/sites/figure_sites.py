@@ -321,6 +321,19 @@ SLOT_CAVES = [
      ' mov rcx, qword ptr [rsp+0x88]\n cmp r13d, 4\n jb game+0x139790D\n lea r8d, [r13-8]\n cmp r8d, 4\n'
      ' mov r8d, 0\n jmp game+0x139790D',
      '1397670 player figure flag: records 8..11 too'),
+    # 1398800 copies the owner's weathering and wound decals to a figure. It finds the owner in the player manager
+    # (r8, count edx, eax 0) by `cmp esi, [r8+0x3b4+0x20*i]`, esi the record slot. Records 8..11 are players 4..7: the
+    # search compares r9d instead. r9 is dead at both places (written at 0x1398BDD and 0x1398D46 before any read, and
+    # 0x1398DD3 goes into a call); esi stays the record slot, which the code behind uses as record and viewport.
+    # The cave does the whole search; the game's loop behind the replaced lea is no longer reached.
+    (0x1398B6B, '498d88b4030000',
+     ' mov r9d, esi\n cmp r9d, 8\n jb 1f\n cmp r9d, 12\n jae 1f\n sub r9d, 4\n1: lea rcx, [r8+0x3b4]\n'
+     '2: cmp r9d, dword ptr [rcx]\n je game+0x1398B85\n inc eax\n add rcx, 0x20\n cmp eax, edx\n jb 2b\n jmp game+0x1398DD3',
+     '1398800 weathering owner: records 8..11 are players 4..7'),
+    (0x1398D2B, '498d88b4030000',
+     ' mov r9d, esi\n cmp r9d, 8\n jb 1f\n cmp r9d, 12\n jae 1f\n sub r9d, 4\n1: lea rcx, [r8+0x3b4]\n'
+     '2: cmp r9d, dword ptr [rcx]\n je game+0x1398F83\n inc eax\n add rcx, 0x20\n cmp eax, edx\n jb 2b\n jmp game+0x1398D44',
+     '1398800 decal owner: records 8..11 are players 4..7'),
 ]
 
 # --- CARD: positions 4..7 on records and viewports 8..11 ------------------------------------------------------------

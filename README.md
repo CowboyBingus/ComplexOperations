@@ -143,7 +143,8 @@ The eight cards stand in one row at half the game's size, 232 reference units ap
 Each card's 3D figure has a record in the game's placement system, which holds eight. The weapon pictures on the screen
 use records 4 to 7, so cards 5 to 8 take records 8 to 11. The build for eight moves the eight records to a block of
 twelve in the mod's memory and gives 228 code fields the distance to it. The loops over the records, the player
-lookup and the figure's place in the shared image count to twelve, through 7 changed sites and 8 caves. The figures
+lookup and the figure's place in the shared image count to twelve, through 11 changed sites and 10 caves. Two of
+the caves find the owner of records 8 to 11 for the figure's weathering and wound decals. The figures
 draw as tiles of a 4 x 2 image at half width.
 
 The figures move only when no record is in use. When they cannot move, cards 5 to 8 show no figure, as before.
@@ -164,8 +165,7 @@ Limits that remain:
 
 - The text on the cards is half size too: small but legible at 1280 x 720.
 - Card 5's figure is seen in a game, on host and joiner. Cards 6 to 8 are not yet.
-- The figures of cards 5 to 8 carry no weathering and no wound decals: the game finds those by the record's number as
-  a player index, and their records are 8 to 11.
+- Weathering and wound decals on the figures of cards 5 to 8 are not yet seen in a game.
 
 ## Mission
 

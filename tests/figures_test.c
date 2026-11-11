@@ -54,6 +54,7 @@ typedef uint32_t (*ValueFn)(uint32_t value, const void* target);
 typedef void (*ReadFn)(void* unused, uint32_t* out, uint32_t equipment, uint32_t record);
 typedef const float* (*TableFn)(void);
 typedef uint32_t (*SlotFn)(void* frame, uint64_t slot, const void* target);
+typedef uint32_t (*OwnerFn)(void* manager, uint32_t slot, uint32_t count, const void* target);
 
 static int g_failed;
 static const char* g_case;
@@ -70,6 +71,7 @@ static const uint8_t kLoop[] = {0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0x53, 0x48, 
                                 0x73, 0x08, 0x89, 0x43, 0x10, 0x5B, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5C, 0xC3};
 static const uint8_t kFrame[] = {0x53, 0x55, 0x48, 0x89, 0xCB, 0x48, 0x89, 0xD5, 0x41, 0xFF, 0xD0, 0x5D, 0x5B, 0xC3};
 static const uint8_t kSlot[] = {0x55, 0x56, 0x48, 0x89, 0xCD, 0x48, 0x89, 0xD6, 0x41, 0xFF, 0xD0, 0x5E, 0x5D, 0xC3};
+static const uint8_t kOwner[] = {0x56, 0x89, 0xD6, 0x44, 0x89, 0xC2, 0x49, 0x89, 0xC8, 0x31, 0xC0, 0x41, 0xFF, 0xD1, 0x5E, 0xC3};
 static const uint8_t kSetne[] = {0x0F, 0x95, 0xC0, 0x0F, 0xB6, 0xC0, 0xC3};
 static const uint8_t kEbp[] = {0x55, 0x89, 0xCD, 0xFF, 0xD2, 0x5D, 0xC3};
 static const uint8_t kR13[] = {0x41, 0x55, 0x41, 0x89, 0xCD, 0x48, 0x81, 0xEC, 0x90, 0x00, 0x00, 0x00, 0xFF, 0xD2,
@@ -302,6 +304,32 @@ int main(void)
         }
     }
 
+    /* The owner searches of the weathering and the decals: a record slot's player by index (the player manager's
+     * rows of 0x20 from +0x3B4), records 8 to 11 as players 4 to 7; the row found, or the game's way out with the count. */
+    {
+        g_case = "a figure's owner";
+        static const uint32_t kIndex[] = {0, 5, 2, 7, 4};
+        static const struct { uint32_t site, found, none; } kSearch[] = {{0x1398B6Bu, 0x1398B85u, 0x1398DD3u}, {0x1398D2Bu, 0x1398F83u, 0x1398D44u}};
+        const OwnerFn owner = (OwnerFn)Thunk(kOwner, sizeof kOwner);
+        static uint8_t manager[0x600];
+        for (uint32_t i = 0; i < 5; i++) memcpy(manager + 0x3B4 + 0x20 * i, &kIndex[i], 4);
+        for (size_t k = 0; k < 2 && owner != NULL; k++)
+        {
+            const uint8_t* cave = Cave(kSearch[k].site, 7);
+            CHECK(cave != NULL);
+            Landing(kSearch[k].found, kRet, sizeof kRet);
+            Landing(kSearch[k].none, kRet, sizeof kRet); /* one byte: a rebased instruction follows; eax is the count */
+            for (uint32_t slot = 0; slot < 14 && cave != NULL; slot++)
+            {
+                const uint32_t player = slot >= 8 && slot < 12 ? slot - 4 : slot;
+                uint32_t want = 5;
+                for (uint32_t i = 0; i < 5; i++) if (kIndex[i] == player) want = i;
+                CHECK(owner(manager, slot, 5, cave) == want);
+                if (want == 4) CHECK(owner(manager, slot, 4, cave) == 4); /* past the count: not found */
+            }
+        }
+    }
+
     /* The release loop's tail: records 0 to 3, then 8 to 11, with the mask bit and the unit field of each. */
     {
         g_case = "the release loop";
@@ -408,6 +436,7 @@ int main(void)
         CHECK(Bytes(0x18A1B94u, "488d0de5589400") && Bytes(0x139C2D1u, "4183ff040f8265fdffff"));
         CHECK(Bytes(0x139884Du, "48c7855001000000000000") && Bytes(0x13988EEu, "80bc355001000000") &&
               Bytes(0x1398926u, "c684355001000001") && Bytes(0x1398936u, "c684355001000000"));
+        CHECK(Bytes(0x1398B6Bu, "498d88b4030000") && Bytes(0x1398D2Bu, "498d88b4030000"));
     }
 
     /* A refusal leaves the figures out, says why once, and the rows they replace go in. */
