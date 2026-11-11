@@ -11,6 +11,10 @@
 #define FAKE_STOCK_GRID 5.0f
 #define FAKE_STOCK_FACTOR 6.0f
 void fake_stock_chains(uint8_t* image, float disk);
+/* The map's marker slots as its mission step leaves them (difficulty_missions.c: PrepareMarkerStubs, JumpToMarkerStubs):
+ * the game's 16 and 10, and the two guards of a 17th slot, 0x20 apart. fake_stock_chains calls it. */
+#define FAKE_STOCK_MARKERS (FAKE_STOCK_STUBS + 0xE00u)
+void fake_stock_markers(uint8_t* image);
 uint32_t fake_stock_stub(int chain);
 
 /* The row readers as HellForge leaves them: the game's bytes at the three copies' ends, the seven distance reads on

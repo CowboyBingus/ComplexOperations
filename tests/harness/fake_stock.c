@@ -11,6 +11,7 @@
 #include "xl/co_stamp_sites.h"
 #include "xl/co_weld_sites.h"
 #include "xl/co_pocket_sites.h"
+#include "xl/co_marker_sites.h"
 
 static void Rel(uint8_t* image, uint32_t at, uint32_t target) { const int32_t rel = (int32_t)(target - (at + 4u)); memcpy(image + at, &rel, 4); }
 
@@ -67,6 +68,23 @@ void fake_stock_chains(uint8_t* image, float disk)
     /* FixUnreachableAreas is the game's but for the restart step above */
     for (int i = 0; i < 3; i++) memcpy(image + kCoPocketSites[i].rva, kCoPocketSites[i].bytes, kCoPocketSites[i].length);
     for (size_t i = 0; i < sizeof kCoPocketPins / sizeof kCoPocketPins[0]; i++) memcpy(image + kCoPocketPins[i].rva, kCoPocketPins[i].bytes, kCoPocketPins[i].length);
+    fake_stock_markers(image);
+}
+
+void fake_stock_markers(uint8_t* image)
+{
+    for (size_t i = 0; i < sizeof kCoMarkerLimits / sizeof kCoMarkerLimits[0]; i++) memcpy(image + kCoMarkerLimits[i].rva, kCoMarkerLimits[i].bytes, kCoMarkerLimits[i].length);
+    for (uint32_t i = 0; i < 2; i++)
+    {
+        const CoMarkerGuard* g = &kCoMarkerGuards[i];
+        const uint32_t stub = FAKE_STOCK_MARKERS + 0x20u * i, n = g->length;
+        const uint8_t head[7] = {0x83, 0x7C, 0x24, 0x40, 16, 0x0F, 0x83};
+        memcpy(image + stub, head, sizeof head); Rel(image, stub + 7, g->leave);
+        memcpy(image + stub + 11, g->game, n);
+        image[stub + 11 + n] = 0xE9; Rel(image, stub + 12 + n, g->rva + n);
+        memset(image + g->rva, 0x90, n);
+        image[g->rva] = 0xE9; Rel(image, g->rva + 1, stub);
+    }
 }
 
 void fake_stock_rows(uint8_t* image)

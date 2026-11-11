@@ -30,7 +30,8 @@ void co_nav_plan(float disk, float radius, CoNavPlan* plan)
 
 uint32_t co_level_limit(int which, int complex)
 {
-    static const uint32_t limits[CO_LIMITS][2] = {{128, 1024}, {16, 64}, {10, 32}, {16, 256}, {16383, 131071}};
+    /* the map's markers stay the game's on both kinds: its arrays lie in the map object (co_markers.h) */
+    static const uint32_t limits[CO_LIMITS][2] = {{128, 1024}, {16, 16}, {10, 10}, {16, 256}, {16383, 131071}};
     return which >= 0 && which < CO_LIMITS ? limits[which][complex != 0] : 0;
 }
 

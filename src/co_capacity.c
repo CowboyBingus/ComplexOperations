@@ -14,6 +14,7 @@
 #include "xl/co_stamps.h"
 #include "xl/co_weld.h"
 #include "xl/co_pocket.h"
+#include "xl/co_markers.h"
 
 /* What the extra large world's code was written for. Stamps, places and the place set are HellForge's own sizes. */
 static const HfGenerationCapacity kWant = {.size = sizeof(HfGenerationCapacity), .locations = CO_GEN_LOCATIONS, .minimap_proxies = 32768u,
@@ -139,7 +140,8 @@ static void Settle(void)
         n->records = CoXlRecords() > 0;
         n->stock_stubs = co_radii_check(g_capacity.game) == NULL && co_chain_check(g_capacity.game, NULL) == NULL &&
             co_nav_check(g_capacity.game, NULL) == NULL && co_stamps_check(g_capacity.game) == NULL &&
-            co_weld_check(g_capacity.game) == NULL && co_pocket_check(g_capacity.game) == NULL;
+            co_weld_check(g_capacity.game) == NULL && co_pocket_check(g_capacity.game) == NULL &&
+            co_markers_check(g_capacity.game) == NULL;
         n->own_sites = (site = OwnSites(g_capacity.game)) == NULL;
         n->commit_free_mb = CommitFree();
         why = co_complex_refusal(n);

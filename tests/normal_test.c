@@ -59,8 +59,8 @@ int main(void)
 
     g_case = "the limits";
     CHECK(co_level_limit(CO_LIMIT_SPAWNERS, 0) == 128 && co_level_limit(CO_LIMIT_SPAWNERS, 1) == 1024);
-    CHECK(co_level_limit(CO_LIMIT_MARKER_SLOTS, 0) == 16 && co_level_limit(CO_LIMIT_MARKER_SLOTS, 1) == 64);
-    CHECK(co_level_limit(CO_LIMIT_MARKER_TRACKERS, 0) == 10 && co_level_limit(CO_LIMIT_MARKER_TRACKERS, 1) == 32);
+    CHECK(co_level_limit(CO_LIMIT_MARKER_SLOTS, 0) == 16 && co_level_limit(CO_LIMIT_MARKER_SLOTS, 1) == 16);
+    CHECK(co_level_limit(CO_LIMIT_MARKER_TRACKERS, 0) == 10 && co_level_limit(CO_LIMIT_MARKER_TRACKERS, 1) == 10);
     CHECK(co_level_limit(CO_LIMIT_WELD_VERTICES, 0) == 16 && co_level_limit(CO_LIMIT_WELD_VERTICES, 1) == 256);
     CHECK(co_level_limit(CO_LIMIT_STAMP_SLOTS, 0) == 16383 && co_level_limit(CO_LIMIT_STAMP_SLOTS, 1) == 131071);
     CHECK(co_level_limit(CO_LIMITS, 1) == 0 && co_level_limit(-1, 0) == 0);

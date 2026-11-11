@@ -93,7 +93,9 @@ typedef struct LocationSite { uint32_t rva; uint8_t at; uint32_t value; } Locati
 /* ---- state other install steps left behind -------------------------------------------------------------------------
  * To replace: each with the mod's own step once it has one. As they are, every reader takes its "not installed" path. */
 static int g_hudGrouped;                      /* the HUD's objective rows grouped by instance */
-static uintptr_t g_markerMap;                 /* the map marker list of 64 */
+/* Not a stand-in: the map's markers stay the game's 16 slots and 10 trackers in the map object (co_markers.h), so no
+ * step learns its address. The one reader (the objectives note's "markers last shown") reads nothing while it is 0. */
+static uintptr_t g_markerMap;
 static volatile LONG* g_spawnerPlacesFull;    /* the director's spawner list of 1024: its full counter */
 static uintptr_t g_navExe;                    /* helldivers2.exe once the nav grid step ran */
 static float* g_navWorldTile;                 /* the nav tile size of an extra large world */
