@@ -9,6 +9,7 @@
 #include "co_early_sites.h"
 #include "xl/co_beside_sites.h"
 #include "xl/co_stamp_sites.h"
+#include "xl/co_weld_sites.h"
 
 static void Rel(uint8_t* image, uint32_t at, uint32_t target) { const int32_t rel = (int32_t)(target - (at + 4u)); memcpy(image + at, &rel, 4); }
 
@@ -59,6 +60,9 @@ void fake_stock_chains(uint8_t* image, float disk)
     memcpy(image + CO_STAMP_CHECK_SITE, kCoStampCheckStock, sizeof kCoStampCheckStock);
     memcpy(image + CO_STAMP_SLOTS_SITE, kCoStampSlotsStock, sizeof kCoStampSlotsStock);
     memcpy(image + CO_STAMP_LAYOUT_SITE, kCoStampLayoutStock, sizeof kCoStampLayoutStock);
+    /* and its structured step the weld's pool of 576 blocks, in the game's weld */
+    for (size_t i = 0; i < sizeof kCoWeldValues / sizeof kCoWeldValues[0]; i++) memcpy(image + kCoWeldValues[i].rva, kCoWeldValues[i].stock, kCoWeldValues[i].length);
+    for (int i = 0; i < 3; i++) memcpy(image + kCoWeldFull[i].rva, kCoWeldFull[i].bytes, kCoWeldFull[i].length);
 }
 
 void fake_stock_rows(uint8_t* image)

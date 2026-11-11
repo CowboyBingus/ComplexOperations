@@ -85,9 +85,8 @@ static inline int CoObjlistStamps(int32_t* starts, int32_t* counts)
 /* The generation's own share of the location table; the rest is the stamp window's. The extra large world's rule, not
  * the block's: the table must hold more (CO_GEN_LOCATIONS is asked for). */
 #define DIF_GEN_LOCATIONS 16384u
-/* STAND-IN: the weld pool's count with 576 blocks of 256 vertices, the prototype's own pool. Read by research notes
- * only; the pool's step is not in the mod, and stock's pool has other places. */
-#define DIF_WELD_COUNT 0x168CC60u
+/* The weld pool's count behind 576 blocks of 256 vertices (co_weld.c lays the pool out so). Read by research notes. */
+#define DIF_WELD_COUNT CO_WELD_COUNT
 /* Row type of the block's site tables (proto/important_sites.h, proto/route_sites.h; not compiled: HellForge moves them). */
 typedef struct LocationSite { uint32_t rva; uint8_t at; uint32_t value; } LocationSite;
 

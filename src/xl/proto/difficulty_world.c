@@ -5357,6 +5357,7 @@ static void WorldLevel(uintptr_t level, uintptr_t preview)
     g_worldOpAt = 0xFFFFFFFFu;
     InterlockedIncrement(&g_worldOpRun);
     co_stamps_level(complex); /* the index's slots and cell width, read by its constructor */
+    co_weld_level(complex);   /* a weld block's places */
     WorldIndex(level, 2048.0f * scale);
     LONG full = g_worldIndexFull != NULL ? *g_worldIndexFull : 0;
     if (full != g_worldIndexFullSeen)

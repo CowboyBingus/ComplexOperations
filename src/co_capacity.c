@@ -12,6 +12,7 @@
 #include "xl/co_pages.h"
 #include "xl/co_rows.h"
 #include "xl/co_stamps.h"
+#include "xl/co_weld.h"
 
 /* What the extra large world's code was written for. Stamps, places and the place set are HellForge's own sizes. */
 static const HfGenerationCapacity kWant = {.size = sizeof(HfGenerationCapacity), .locations = CO_GEN_LOCATIONS, .minimap_proxies = 32768u,
@@ -116,7 +117,7 @@ int co_capacity_normal(void)
 
 /* Every need, then one line when the part is off. What a complex operation lacks in this build, so that it is never on
  * (CO_COMPLEX_COMPLETE):
- * - the lists the generator and a mission fill on a 16384 m world (weld pool, footprint list, spawners 1024,
+ * - the lists the generator and a mission fill on a 16384 m world (footprint list, spawners 1024,
  *   markers 64, the pocket search, the clusters' divisor) and HellForge's limits for them on a normal level
  *   (co_level_limit): HellForge's level 11 has its own step at most of these sites;
  * - the status volumes' unit registry: the prototype's five stubs leave two more uses of the game's own list
@@ -135,7 +136,8 @@ static void Settle(void)
         /* hooked or moved: the game builds its entity state on its own time, and a move that fails then turns the part off */
         n->records = CoXlRecords() > 0;
         n->stock_stubs = co_radii_check(g_capacity.game) == NULL && co_chain_check(g_capacity.game, NULL) == NULL &&
-            co_nav_check(g_capacity.game, NULL) == NULL && co_stamps_check(g_capacity.game) == NULL;
+            co_nav_check(g_capacity.game, NULL) == NULL && co_stamps_check(g_capacity.game) == NULL &&
+            co_weld_check(g_capacity.game) == NULL;
         n->own_sites = (site = OwnSites(g_capacity.game)) == NULL;
         n->commit_free_mb = CommitFree();
         why = co_complex_refusal(n);
@@ -158,7 +160,7 @@ int co_complex_start(void)
     if (!co_complex_on()) return 0;
     if ((why = co_rows_install(g_capacity.game)) == NULL && (why = co_drain_install(g_capacity.game)) == NULL &&
         (why = co_join_install(g_capacity.game)) == NULL && (why = co_nav_install(g_capacity.game)) == NULL &&
-        (why = co_stamps_install(g_capacity.game)) == NULL &&
+        (why = co_stamps_install(g_capacity.game)) == NULL && (why = co_weld_install(g_capacity.game)) == NULL &&
         (why = CoXlInstall(g_capacity.game)) == NULL && (why = co_mark_install(g_capacity.game)) == NULL) why = co_launch_install(g_capacity.game);
     if (why == NULL) return 1;
     g_capacity.on = 0; /* what did go in runs the game's own code on every level: nothing is complex without the mark */
