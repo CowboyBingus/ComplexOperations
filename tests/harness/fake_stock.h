@@ -13,4 +13,10 @@
 void fake_stock_chains(uint8_t* image, float disk);
 uint32_t fake_stock_stub(int chain);
 
+/* The row readers as HellForge leaves them: the game's bytes at the three copies' ends, the seven distance reads on
+ * its table of eleven rows (row 11: level 10's doubled), and level 10's row with its radii. Sets difficulty_row(10). */
+#define FAKE_STOCK_DISTANCE 0x3111000u
+#define FAKE_STOCK_ROW_TEN 0x3112000u
+void fake_stock_rows(uint8_t* image);
+
 #endif

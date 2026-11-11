@@ -9,6 +9,7 @@
 #include "xl/co_chain.h"
 #include "xl/co_normal.h"
 #include "xl/co_pages.h"
+#include "xl/co_rows.h"
 
 /* What the extra large world's code was written for. Stamps, places and the place set are HellForge's own sizes. */
 static const HfGenerationCapacity kWant = {.size = sizeof(HfGenerationCapacity), .locations = CO_GEN_LOCATIONS, .minimap_proxies = 32768u,
@@ -76,13 +77,13 @@ static const char* OwnSites(uintptr_t game)
 {
     const char* why;
     if ((why = co_pages_check(game)) != NULL || (why = co_hud_check(game)) != NULL || (why = co_mark_check(game)) != NULL ||
-        (why = co_launch_check(game)) != NULL) return why;
+        (why = co_launch_check(game)) != NULL || (why = co_rows_check(game)) != NULL) return why;
     return NULL;
 }
 
 /* Every need, then one line when the part is off. What a complex operation lacks in this build, so that it is never on
- * (CO_COMPLEX_COMPLETE): the chains before HellForge's keyed generator steps and its nav, ship and spawner steps, the
- * row readers' copies, the distance row's copy, the join gate's detour and the drain of a running preview. */
+ * (CO_COMPLEX_COMPLETE): the chains before HellForge's nav, ship and spawner steps, the join gate's detour and the
+ * drain of a running preview. */
 static void Settle(void)
 {
     CoComplexNeeds* n = &g_capacity.needs;
@@ -113,7 +114,7 @@ int co_complex_start(void)
 {
     const char* why;
     if (!co_complex_on()) return 0;
-    if ((why = CoXlInstall(g_capacity.game)) == NULL && (why = co_mark_install(g_capacity.game)) == NULL) why = co_launch_install(g_capacity.game);
+    if ((why = co_rows_install(g_capacity.game)) == NULL && (why = CoXlInstall(g_capacity.game)) == NULL && (why = co_mark_install(g_capacity.game)) == NULL) why = co_launch_install(g_capacity.game);
     if (why == NULL) return 1;
     g_capacity.on = 0; /* what did go in runs the game's own code on every level: nothing is complex without the mark */
     co_log("complex operations are off: %s", why);

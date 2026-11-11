@@ -5297,6 +5297,7 @@ static void WorldLevel(uintptr_t level, uintptr_t preview)
         co_generation_decision(&generation, level, seed, retry == 1, difficulty, co_peers_is_host(), co_complex_on(), co_peers_host_row()) == CO_MISSION_COMPLEX;
     if (complex) scale = (float)g_world.scale;
     if (g_genComplex != NULL) *g_genComplex = (uint8_t)complex; /* the radii stub, later in this level init */
+    co_rows_level(complex); /* the distance row its passes read */
     WorldLevelForget();
     g_world.values->size = scale > 1.0f ? 2048.0f * scale : 0.0f;
     WorldWrite(scale, preview == 0);

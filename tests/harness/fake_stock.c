@@ -2,6 +2,8 @@
 
 #include "fake_stock.h"
 #include "xl/co_chain.h"
+#include "xl/co_rows.h"
+#include "fake_host.h"
 
 static void Rel(uint8_t* image, uint32_t at, uint32_t target) { const int32_t rel = (int32_t)(target - (at + 4u)); memcpy(image + at, &rel, 4); }
 
@@ -47,4 +49,27 @@ void fake_stock_chains(uint8_t* image, float disk)
         memcpy(image + c->site, jump, c->length);
         Rel(image, c->site + 1u, stub);
     }
+}
+
+void fake_stock_rows(uint8_t* image)
+{
+    static const float radii[4] = {0.5f, 0.625f, 0.75f, 0.875f};
+    const CoDistanceSite* sites = co_distance_sites();
+    const int32_t table = (int32_t)FAKE_STOCK_DISTANCE;
+    float rows[11 * 3];
+    for (int level = 0; level < 10; level++)
+        for (int k = 0; k < 3; k++) rows[level * 3 + k] = level == 9 ? (k == 2 ? 0.90f : 0.85f) : 0.25f + 0.0625f * (float)level;
+    for (int k = 0; k < 3; k++) rows[30 + k] = rows[27 + k] * 2.0f;
+    memcpy(image + CO_DISTANCE_GAME, rows, 10 * 3 * sizeof(float));
+    memcpy(image + FAKE_STOCK_DISTANCE, rows, sizeof rows);
+    for (int i = 0; i < CO_DISTANCE_SITES; i++)
+    {
+        memcpy(image + sites[i].rva, sites[i].bytes, sites[i].at);
+        memcpy(image + sites[i].rva + sites[i].at, &table, 4);
+    }
+    memcpy(image + CO_ROW_RADII_SITE, kCoRowRadii, sizeof kCoRowRadii);
+    memcpy(image + CO_ROW_OUTPOSTS_SITE, kCoRowOutposts, sizeof kCoRowOutposts);
+    memcpy(image + CO_ROW_OBJECTIVES_SITE, kCoRowObjectives, sizeof kCoRowObjectives);
+    memcpy(image + FAKE_STOCK_ROW_TEN + 0xF0u, radii, sizeof radii);
+    g_fake.levelTen = (uintptr_t)image + FAKE_STOCK_ROW_TEN;
 }

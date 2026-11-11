@@ -38,6 +38,7 @@ typedef struct FakeHost
     int capacityRefused;
     HfGenerationCapacity capacity, wanted;
     uintptr_t levelRow;       /* difficulty_row(11) */
+    uintptr_t levelTen;       /* difficulty_row(10) */
     uint32_t loadPhase;
     HfTickCallback tick;      /* the last on_game_thread callback */
     /* The session: the role, the host's row as this machine holds it (0 bytes: none), what share_set and send answer

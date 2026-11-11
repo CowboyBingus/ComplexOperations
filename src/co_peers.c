@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "co.h"
+#include "xl/co_rows.h"
 #include "hellforge_net.h"
 
 #define HAS(call) (g_coApi != NULL && g_coApi->size >= offsetof(HfApi, call) + sizeof(void*))
@@ -71,6 +72,8 @@ void co_peers_tick(uint64_t now_ms)
     /* another lobby's reports and message are not this one's; no event says the host changed, so the role is asked */
     if (s.role != g_peers.role) { memset(&g_peers.reports, 0, sizeof g_peers.reports); g_peers.sent = 0; g_peers.role = s.role; }
     const int on = co_complex_on();
+    /* the objective reader has no level in reach: it asks what this machine does with a marked seed now */
+    co_rows_honours(co_complex_decision(co_peers_is_host(), on, co_peers_host_row(), co_seed_marked(0, 1)) == CO_MISSION_COMPLEX);
     if (s.role == HF_SESSION_HOST)
     {
         const CoHostRow want = {CO_SHARE_PROTOCOL, (uint8_t)on};

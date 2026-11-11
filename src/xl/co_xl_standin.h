@@ -24,7 +24,7 @@ typedef struct Difficulty
 static Difficulty g_difficulty;
 static uintptr_t g_difficultyGame;       /* game.dll once the install ran: 0, so its readers stay off */
 static uint32_t g_operationOptional, g_operationMajor;
-static float g_cityZoneRatio = 1.0f;
+#define g_cityZoneRatio (co_rows_city_ratio()) /* level 10's city factor over the complex row's */
 static int LargerMaps(void) { return g_difficulty.mapScale > 1.0f; }
 /* The install's work in progress. The prototype's steps read the game's base from it and nothing else. */
 typedef struct DifficultyInstall { uintptr_t game; } DifficultyInstall;
