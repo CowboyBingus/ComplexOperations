@@ -234,7 +234,10 @@ static void WorldIndex(uintptr_t level, float world)
 {
     uintptr_t p = 0, memory = 0;
     float now = 0.0f;
-    if (SafeRead(level + 0x2C0, &p, 8) || p == 0 || SafeRead(p, &now, 4) || now == world || SafeRead(p + 0x48, &memory, 8) || memory == 0)
+    uint32_t slots = 0;
+    /* built for another world, or with another level's slots (the reset after a level builds it as that level's) */
+    if (SafeRead(level + 0x2C0, &p, 8) || p == 0 || SafeRead(p, &now, 4) || SafeRead(p + 8 + 0x1C, &slots, 4) ||
+        (now == world && slots == co_stamps_slots() + 1u) || SafeRead(p + 0x48, &memory, 8) || memory == 0)
         return;
     WorldIndexSize size = (WorldIndexSize)(g_world.game + DIF_INDEX_SIZE);
     uint32_t bytes = size(now, now, now / 64.0f);
@@ -5353,6 +5356,7 @@ static void WorldLevel(uintptr_t level, uintptr_t preview)
     if (g_world.below != NULL) g_world.below[3] = 0; /* op 0x2B's instances refused at the table's limit, this level */
     g_worldOpAt = 0xFFFFFFFFu;
     InterlockedIncrement(&g_worldOpRun);
+    co_stamps_level(complex); /* the index's slots and cell width, read by its constructor */
     WorldIndex(level, 2048.0f * scale);
     LONG full = g_worldIndexFull != NULL ? *g_worldIndexFull : 0;
     if (full != g_worldIndexFullSeen)

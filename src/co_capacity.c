@@ -11,6 +11,7 @@
 #include "xl/co_normal.h"
 #include "xl/co_pages.h"
 #include "xl/co_rows.h"
+#include "xl/co_stamps.h"
 
 /* What the extra large world's code was written for. Stamps, places and the place set are HellForge's own sizes. */
 static const HfGenerationCapacity kWant = {.size = sizeof(HfGenerationCapacity), .locations = CO_GEN_LOCATIONS, .minimap_proxies = 32768u,
@@ -94,9 +95,10 @@ void co_capacity_early(void)
     if (!g_capacity.asked || game == 0 || n->early) return;
     if (!n->capacity_call || !n->regions || n->live_load || !n->capacity_granted) return; /* the poll names the reason */
     if (CommitFree() < CO_COMPLEX_COMMIT_MB) { g_capacity.early = "not enough memory free for an extra large map"; return; }
-    if ((g_capacity.early = OwnSites(game)) != NULL) return;
+    if ((g_capacity.early = OwnSites(game)) != NULL || (g_capacity.early = co_stamps_room_check(game)) != NULL) return;
     if ((g_capacity.early = co_early_install(game, g_coApi->module_base("helldivers2.exe", NULL))) != NULL) return;
     CoXlEarly(game);
+    co_stamps_room(game); /* refused: the engine's room stays, and the poll finds the stamp index too small for the part */
     n->early = 1;
     co_log("the engine has room for a world of %.0f m: physics bodies and static actors 1048576, a navigation grid of %u x %u cells", (double)CO_EARLY_WORLD, CO_EARLY_CELLS, CO_EARLY_CELLS);
 }
@@ -114,9 +116,9 @@ int co_capacity_normal(void)
 
 /* Every need, then one line when the part is off. What a complex operation lacks in this build, so that it is never on
  * (CO_COMPLEX_COMPLETE):
- * - the lists the generator and a mission fill on a 16384 m world (stamp index 131071, weld pool, footprint list,
- *   spawners 1024, markers 64, the pocket search, the clusters' divisor) and HellForge's limits for them on a normal
- *   level (co_level_limit): HellForge's level 11 has its own step at most of these sites;
+ * - the lists the generator and a mission fill on a 16384 m world (weld pool, footprint list, spawners 1024,
+ *   markers 64, the pocket search, the clusters' divisor) and HellForge's limits for them on a normal level
+ *   (co_level_limit): HellForge's level 11 has its own step at most of these sites;
  * - the status volumes' unit registry: the prototype's five stubs leave two more uses of the game's own list
  *   (an append at 0x13CC3F6, a read at 0x13CC03F), so nothing installs it;
  * - a client's way out of a level init it should not be in (it gets a normal level and a log line). */
@@ -133,7 +135,7 @@ static void Settle(void)
         /* hooked or moved: the game builds its entity state on its own time, and a move that fails then turns the part off */
         n->records = CoXlRecords() > 0;
         n->stock_stubs = co_radii_check(g_capacity.game) == NULL && co_chain_check(g_capacity.game, NULL) == NULL &&
-            co_nav_check(g_capacity.game, NULL) == NULL;
+            co_nav_check(g_capacity.game, NULL) == NULL && co_stamps_check(g_capacity.game) == NULL;
         n->own_sites = (site = OwnSites(g_capacity.game)) == NULL;
         n->commit_free_mb = CommitFree();
         why = co_complex_refusal(n);
@@ -156,6 +158,7 @@ int co_complex_start(void)
     if (!co_complex_on()) return 0;
     if ((why = co_rows_install(g_capacity.game)) == NULL && (why = co_drain_install(g_capacity.game)) == NULL &&
         (why = co_join_install(g_capacity.game)) == NULL && (why = co_nav_install(g_capacity.game)) == NULL &&
+        (why = co_stamps_install(g_capacity.game)) == NULL &&
         (why = CoXlInstall(g_capacity.game)) == NULL && (why = co_mark_install(g_capacity.game)) == NULL) why = co_launch_install(g_capacity.game);
     if (why == NULL) return 1;
     g_capacity.on = 0; /* what did go in runs the game's own code on every level: nothing is complex without the mark */

@@ -8,6 +8,7 @@
 #include "fake_host.h"
 #include "co_early_sites.h"
 #include "xl/co_beside_sites.h"
+#include "xl/co_stamp_sites.h"
 
 static void Rel(uint8_t* image, uint32_t at, uint32_t target) { const int32_t rel = (int32_t)(target - (at + 4u)); memcpy(image + at, &rel, 4); }
 
@@ -53,6 +54,11 @@ void fake_stock_chains(uint8_t* image, float disk)
         memcpy(image + c->site, jump, c->length);
         Rel(image, c->site + 1u, stub);
     }
+    /* the same step of its install gives the stamp index its 16383 slots */
+    memcpy(image + CO_STAMP_ADD_SITE, kCoStampAddStock, sizeof kCoStampAddStock);
+    memcpy(image + CO_STAMP_CHECK_SITE, kCoStampCheckStock, sizeof kCoStampCheckStock);
+    memcpy(image + CO_STAMP_SLOTS_SITE, kCoStampSlotsStock, sizeof kCoStampSlotsStock);
+    memcpy(image + CO_STAMP_LAYOUT_SITE, kCoStampLayoutStock, sizeof kCoStampLayoutStock);
 }
 
 void fake_stock_rows(uint8_t* image)
@@ -111,6 +117,7 @@ void fake_stock_early(uint8_t* image)
     memcpy(&rel, kCoEarlyCellRead + 4, 4);
     memcpy(image + CO_EARLY_CELL_READ + 8u + (uint32_t)rel, &cell, 4);
     memset(image + CO_EARLY_SETUP, 0, 8);
+    memcpy(image + CO_STAMP_CELL_SITE, kCoStampCellGame, sizeof kCoStampCellGame);
     memcpy(exe + CO_EARLY_TILE_READ, kCoEarlyTileRead, 8);
 }
 

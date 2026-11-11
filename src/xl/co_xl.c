@@ -21,6 +21,8 @@
 #include "co_nav.h"
 #include "co_beside.h"
 #include "co_beside_sites.h"
+#include "co_stamps.h"
+#include "co_stamp_sites.h"
 
 /* Seven of the copied files' functions were called from loader code that did not come along (the watch thread, the
  * ship's level change, the density rules of a later branch); they are unused until their callers are written. */
@@ -52,6 +54,29 @@
 #include "proto/difficulty_tacmap.c"
 #include "proto/test_daylight.c"
 #pragma clang diagnostic pop
+
+/* The index query (0xC05360: rcx index, edx key, r8d, r9 buffer, [rsp+0x28] its places) writes at most its places and
+ * returns every hit; four callers loop over the count with fixed buffers, and a complex level's dense cells pass them.
+ * So a complex level's query returns at most its places, and a tile run's own index answers 0 while it is empty (its
+ * count [P+4]; the query stores only to its stack and the buffer). Any other level's query is the game's. */
+typedef uint32_t (*IndexQueryFn)(uint64_t, uint32_t, uint32_t, uint64_t, uint32_t);
+static IndexQueryFn g_indexQuery;
+static uint32_t IndexQueryClamped(uint64_t index, uint32_t key, uint32_t mode, uint64_t buffer, uint32_t places)
+{
+    if (!co_stamps_complex()) return g_indexQuery(index, key, mode, buffer, places);
+    if (g_tileHeaders != NULL)
+    {
+        uint64_t d = index - 8u - (uint64_t)(uintptr_t)g_tileHeaders;
+        if (d < (uint64_t)TILE_RUNNERS_MAX * TILE_HEADER_STRIDE && d % TILE_HEADER_STRIDE == 0 && *(volatile uint32_t*)(g_tileHeaders + d + 4) == 0)
+        {
+            TileRunner* r = TileRunnerSelf(); /* a runner counts its own: one shared counter from every runner thrashes */
+            if (r != NULL) r->emptyQueries++; else InterlockedIncrement64(&g_emptyIndexQueries);
+            return 0;
+        }
+    }
+    uint32_t hits = g_indexQuery(index, key, mode, buffer, places);
+    return hits < places ? hits : places;
+}
 
 /* The game thread's part, in the order the loader's tick called it. */
 static void CoXlTick(HfMod* mod, float dt, void* user)
@@ -98,7 +123,10 @@ const char* CoXlInstall(uintptr_t game)
     DescInstallNotes();
     if ((why = WorldSitesFailed(game)) != NULL) return why;
     WeldResearchInstall(game);
+    if (!ApiCodeMatches(game + CO_STAMP_QUERY, CO_STAMP_QUERY_PIN)) return "the stamp index's query is not the game's code this mod was made for";
     if ((why = InstallWorld(&d)) != NULL || (why = InstallWorldStreamStep(&d)) != NULL || (why = InstallMapHud(&d)) != NULL) return why;
+    if (LoaderHook("the stamp index query's count (at most its places on a complex level)", game + CO_STAMP_QUERY, (void*)IndexQueryClamped, (void**)&g_indexQuery))
+        return "the stamp index's query could not be hooked";
     co_nav_ship(WorldShip); /* the ship's navigation step is where play's world goes back to the game's */
     if (g_coApi->on_game_thread(g_coMod, CoXlTick, NULL) == 0) return "the game thread's tick could not be registered";
     return NULL;
