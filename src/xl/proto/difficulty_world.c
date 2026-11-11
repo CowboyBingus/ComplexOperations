@@ -5293,8 +5293,15 @@ static void WorldLevel(uintptr_t level, uintptr_t preview)
     /* complex or not is this generation's: the host's decision in the seed the generation began with ([lg+0x8]; a
      * retry, [lg+0xF950] == 1, has another seed in the level and keeps the answer) */
     static CoGeneration generation;
-    int complex = g_world.scale > 1 && !SafeRead(level + 0xF9, &difficulty, 1) && !SafeRead(level + 0x8, &seed, 4) && !SafeRead(level + 0xF950, &retry, 4) &&
-        co_generation_decision(&generation, level, seed, retry == 1, difficulty, co_peers_is_host(), co_complex_on(), co_peers_host_row()) == CO_MISSION_COMPLEX;
+    int decision = CO_MISSION_NORMAL;
+    if (g_world.scale > 1 && !SafeRead(level + 0xF9, &difficulty, 1) && !SafeRead(level + 0x8, &seed, 4) && !SafeRead(level + 0xF950, &retry, 4))
+        decision = co_generation_decision(&generation, level, seed, retry == 1, difficulty, co_peers_is_host(), co_complex_on(), co_peers_host_row());
+    const int complex = decision == CO_MISSION_COMPLEX;
+    /* a client that should not be in this mission: no way out of a level init is known, so the level is a normal one
+     * and the log says so once per generation; the launch and join gates are what keep a machine from getting here */
+    if (decision == CO_MISSION_LEAVE && retry != 1)
+        co_log("complex operations: this machine should have left before this level 11 mission (%s); its level is a normal one",
+            co_peers_host_row() == CO_HOST_ROW_NONE ? "no answer from the host" : "the host makes complex operations and this machine cannot");
     if (complex) scale = (float)g_world.scale;
     if (g_genComplex != NULL) *g_genComplex = (uint8_t)complex; /* the radii stub, later in this level init */
     co_rows_level(complex); /* the distance row its passes read */
