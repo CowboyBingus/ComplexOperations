@@ -114,4 +114,19 @@ int co_complex_decision(int is_host, int own_on, int host_row, uint32_t mission_
 int co_complex_stays(int own_on, int host_row);
 uint32_t co_complex_entry_seed(uint32_t mission_seed, uint32_t difficulty, uint32_t operation_seed, uint32_t planet, int rolls);
 
+/* Room in the map generator (co_capacity.c). `init` asks HellForge for it, from hellforge_mod_init only. `poll` reads
+ * what was given once level 11 is installed, or gives up at `now_ms` past the wait: 1 once settled, with one log line
+ * when the complex part is off. `on` is 1 only when every need holds. */
+#define CO_GEN_LOCATIONS 65024u /* everything placed on an extra large map; also the most HellForge gives */
+#define CO_GEN_WAIT_MS 60000u   /* HellForge installs level 11 up to 20 s after the game loaded */
+void co_capacity_init(void);
+int co_capacity_poll(uint64_t now_ms);
+const CoComplexNeeds* co_capacity_needs(void);
+int co_complex_on(void);
+/* Where a region of the generator's block lies and how many elements it holds (HF_GEN_ names): 0 until settled and
+ * moved, so code that reads the block finds nothing to read before. `block` is the block's size. */
+uint32_t co_gen_at(int region);
+uint32_t co_gen_places(int region);
+uint32_t co_gen_block(void);
+
 #endif

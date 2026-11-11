@@ -51,9 +51,9 @@ static struct
 {
     uintptr_t level, gen, P;           /* the level, its generation block and stamp index the window belongs to */
     uint32_t base, high;               /* the first window slot (the generation's count) and one past the highest used */
-    uint32_t freeCount, freeList[DIF_LOCATIONS];
-    uint32_t plan[DIF_LOCATIONS];      /* slot -> plan entry */
-    uint64_t handle[DIF_LOCATIONS];    /* slot -> its index handle */
+    uint32_t freeCount, freeList[CO_LOCATIONS_MAX];
+    uint32_t plan[CO_LOCATIONS_MAX];     /* slot -> plan entry */
+    uint64_t handle[CO_LOCATIONS_MAX];   /* slot -> its index handle */
     uint16_t* reach;                   /* plan entry -> the distance it enters within (m); kept across levels (not reset) */
     uint32_t reachRoom;                /* reach's room */
     uint32_t entered, left, refusedFull, refusedIndex, refusedBodies, poseChecked, poseEqual, enteredFar, farHeld, evictedFar, farLive;
@@ -171,7 +171,7 @@ static int WindowReadyLocked(void)
     { Note("difficulty: extra large maps: stamp window off: the stamp index's insert (0x%X) or remove (0x%X) is not the reviewed one", WINDOW_INSERT, WINDOW_REMOVE); return 0; }
     uintptr_t gen = 0, P = 0;
     if (SafeRead(g_stream.level + 0x2C8, &gen, 8) || gen == 0 || SafeRead(g_stream.level + 0x2C0, &P, 8) || P == 0 ||
-        (uintptr_t)g_stream.array != gen + 0x11A7280u)
+        (uintptr_t)g_stream.array != gen + DIF_LOCATIONS_A_NEW)
     { Note("difficulty: extra large maps: stamp window off: the level's block or stamp index does not read, or the streamer's records are not the level's table"); return 0; }
     g_win.gen = gen; g_win.P = P;
     g_win.base = g_win.high = g_stream.count;

@@ -1,7 +1,9 @@
 /* Complex Operations: the mod's entry point. */
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <windows.h>
 
 #include "co.h"
 
@@ -18,6 +20,15 @@ void co_log(const char* format, ...)
     if (g_coApi != NULL) g_coApi->log(g_coMod, "%s", text);
 }
 
+/* HellForge installs level 11 after the game-loaded event, on its own thread: the layout is asked for each game update
+ * until it is there. */
+static void CapacityTick(HfMod* mod, float dt, void* user)
+{
+    (void)mod; (void)dt; (void)user;
+    static int done;
+    if (!done) done = co_capacity_poll(GetTickCount64());
+}
+
 static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
 {
     (void)mod; (void)event; (void)user;
@@ -30,6 +41,7 @@ static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
     co_avatars_install(game);
     co_session_install(game);
     co_engine_install(g_coApi->module_base("helldivers2.exe", &size));
+    if (g_coApi->size < offsetof(HfApi, on_game_thread) + sizeof(void*) || g_coApi->on_game_thread(g_coMod, CapacityTick, NULL) == 0) co_log("complex operations are off: the game thread's callback was refused");
 }
 
 HF_MOD_EXPORT int hellforge_mod_init(const HfApi* api, HfMod* mod)
@@ -44,5 +56,6 @@ HF_MOD_EXPORT int hellforge_mod_init(const HfApi* api, HfMod* mod)
         return 1;
     }
     if (api->on(mod, HF_EVENT_GAME_LOADED, OnGameLoaded, NULL) != 0) { co_log("the game-loaded event could not be registered"); return 1; }
+    co_capacity_init(); /* the game makes the generator's block once: only now is in time */
     return 0;
 }

@@ -4139,7 +4139,7 @@ static uintptr_t StampIndex(TileRunner* r, uintptr_t level, uint8_t* T, float ex
         r->memoryBytes = r->memory ? bytes : 0;
     }
     if (r->header == NULL || r->memory == NULL || SafeRead(level, r->header, 0x2068)) return 0;
-    uintptr_t p = (uintptr_t)r->header, memory = (uintptr_t)r->memory, table = (uintptr_t)(T + 0x11A7280);
+    uintptr_t p = (uintptr_t)r->header, memory = (uintptr_t)r->memory, table = (uintptr_t)(T + DIF_LOCATIONS_A_NEW);
     memcpy((void*)p, &extent, 4);
     memset((void*)memory, 0, bytes);
     memset((void*)(p + 0x50), 0, 0x2000);
@@ -4716,7 +4716,7 @@ static void StampTile2B(TileRunner* r, StampSlot* s, int inlineJobs)
     const float* rings = g_stampPar.rings;
     for (uint32_t i = 0; i < n; i++)
     {
-        const uint8_t* loc = T + 0x11A7280 + (size_t)i * 0xE0;
+        const uint8_t* loc = T + DIF_LOCATIONS_A_NEW + (size_t)i * 0xE0;
         float xy[2], box[4]; uint32_t type = 0; uint16_t flags = 0;
         memcpy(xy, loc, 8); memcpy(box, loc + 0xB0, 16); memcpy(&type, loc + 0xD8, 4); memcpy(&flags, loc + 0xD4, 2);
         if (xy[0] < margin || xy[0] >= margin + core || xy[1] < margin || xy[1] >= margin + core) { s->why[0]++; continue; }
@@ -5145,7 +5145,7 @@ static void TerrainStamps(uint64_t records, uint32_t end, uint32_t at91, uint64_
             planned++;
             continue;
         }
-        memcpy((void*)(uintptr_t)(gen + 0x11A7280u + 0xE0ull * n), c->loc, 0xE0);
+        memcpy((void*)(uintptr_t)(gen + DIF_LOCATIONS_A_NEW + 0xE0ull * n), c->loc, 0xE0);
         memcpy((void*)(uintptr_t)(gen + DIF_LOCATIONS_B_NEW + 0x40ull * n), c->extra, 0x40);
         uint8_t scratch[16];
         uint32_t* slot = insert(P + 8, lo[0], lo[1], hi[0], hi[1], scratch);
@@ -5181,7 +5181,7 @@ static void TerrainStamps(uint64_t records, uint32_t end, uint32_t at91, uint64_
         for (uint32_t i = 0; i < n; i++)
         {
             float xy[2], box[4];
-            if (SafeRead(gen + 0x11A7280u + 0xE0ull * i, xy, 8) || SafeRead(gen + 0x11A7280u + 0xE0ull * i + 0xB0, box, 16)) continue;
+            if (SafeRead(gen + DIF_LOCATIONS_A_NEW + 0xE0ull * i, xy, 8) || SafeRead(gen + DIF_LOCATIONS_A_NEW + 0xE0ull * i + 0xB0, box, 16)) continue;
             float dx = xy[0] - half - g_stamps.centre[0], dy = xy[1] - half - g_stamps.centre[1], d = sqrtf(dx * dx + dy * dy);
             int b = 0; while (b < 8 && d >= edge[b]) b++;
             if (i < n0) own[b]++; else { mine[b]++; area[b] += fabs((double)(box[2] - box[0]) * (double)(box[3] - box[1])); }

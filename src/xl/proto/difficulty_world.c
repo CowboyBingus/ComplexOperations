@@ -503,9 +503,7 @@ static LONG g_worldIndexFullSeen;
  * level's locations (G+0x11A7108) and important ones (G+0x11A715C) before and after, and its time. */
 typedef uint64_t (*WorldPassFn)(uint64_t, uint64_t, uint64_t, uint64_t);
 static uintptr_t g_worldLevel;
-static uint32_t g_importantList = 0x8996B0u; /* G + this: the important locations (difficulty_block.c moves them) */
 static int32_t phaseBefore66 = -1; /* research: the road units when op 0x66 began */
-static uint32_t g_routeNodes = 0x8C4E40u, g_routeEdges = 0x937348u, g_routePoints = 0x9568E4u; /* G + these: the route graph (difficulty_block.c moves it) */
 typedef struct TileRunner TileRunner;
 static inline TileRunner* TileRunnerSelf(void); /* below: a stamp planning runner on this thread */
 static void WorldPassNote(const char* name, uint32_t before[2], uint64_t start)
@@ -1519,7 +1517,6 @@ static void WorldZoneGridNote(void)
  * (record + 8, record, context). Runs once per level as SetupTerrainMerge (op 0x38) begins (see WorldDispatch).
  * HELLFORGE_XL_TILE=<extent in m> (256..2048) turns it on; 768 keeps the route cells within the game's arrays. */
 #define GEN_BLOCK_SIZE_VANILLA 0x11A7268u
-static uint32_t WorldBlockSize(void); /* difficulty_block.c: the enlarged block of a larger map */
 #define GEN_BLOCK_SIZE (g_world.current > 1.0f ? WorldBlockSize() : GEN_BLOCK_SIZE_VANILLA)
 static uint64_t g_rec25, g_tileContext;
 static LONG g_tileDone = -1;
@@ -3223,14 +3220,16 @@ static void WorldObjectiveUnplacedNote(uintptr_t block)
         SafeRead(pass + 0x18, &entries, 8) || SafeRead(pass + 0x20, &set, 8) || set == 0 || SafeRead(set + 0xD4, &objectives, 4))
     { Note("difficulty: objectives research: op 0x15's pass could not be read"); return; }
     SafeRead(g_worldLevel + 0xF9, &lvl, 1); SafeRead(block + 0x11A715Cu, &important, 4);
-    if (objectives > 48) objectives = 48;
-    if (important > 1024) important = 1024;
+    int32_t starts, counts;
+    if (!CoObjlistStamps(&starts, &counts)) return;
+    if (objectives > DIF_OBJLIST_PLACES) objectives = DIF_OBJLIST_PLACES;
+    if (important > DIF_IMPORTANT) important = DIF_IMPORTANT;
     for (uint32_t u = 0; u < g_unplacedCount; u++)
         for (uint32_t o = 0; o < objectives; o++)
         {
             uint32_t id = 0, first = 0, count = 0;
             if (SafeRead(set + 4 + 4ull * o, &id, 4) || id != g_unplacedIds[u]) continue;
-            SafeRead(set - 0xF0 + 4ull * o, &first, 4); SafeRead(set + 0x100 + 4ull * o, &count, 4);
+            SafeRead(set + starts + 4ll * o, &first, 4); SafeRead(set + counts + 4ll * o, &count, 4);
             Note("difficulty: objectives research: %08x (list place %u): op 0x15 gave %u entries from %u; level %u", id, o, count, first, lvl);
             for (uint32_t j = 0; j < count && j < 12; j++)
             {
@@ -3272,12 +3271,14 @@ static void WorldNatureResearch15(uint64_t pass, uint64_t context)
         set == 0 || SafeRead(set + 0xD4, &objectives, 4))
     { Note("difficulty: nature research: op 0x15's pass could not be read"); return; }
     SafeRead(context + 0xD0, &select, 4); SafeRead(context + 0xD4, &selectArg, 4);
-    if (objectives > 48) objectives = 48;
+    int32_t starts, counts;
+    if (!CoObjlistStamps(&starts, &counts)) return;
+    if (objectives > DIF_OBJLIST_PLACES) objectives = DIF_OBJLIST_PLACES;
     /* R1: per objective, its entries' definitions by kind list */
     for (uint32_t o = 0; o < objectives; o++)
     {
         uint32_t id = 0, first = 0, count = 0, one = 0, three = 0, both = 0, neither = 0, e8[8] = {0}, b160 = 0; float wmin = 1e30f, wmax = -1e30f;
-        SafeRead(set + 4 + 4ull * o, &id, 4); SafeRead(set - 0xF0 + 4ull * o, &first, 4); SafeRead(set + 0x100 + 4ull * o, &count, 4); /* layout L48 (difficulty_block.c) */
+        SafeRead(set + 4 + 4ull * o, &id, 4); SafeRead(set + starts + 4ll * o, &first, 4); SafeRead(set + counts + 4ll * o, &count, 4);
         for (uint32_t j = 0; j < count && j < 4096; j++)
         {
             uint16_t ix[3] = {0}; uint64_t holder = 0, cats = 0, defs = 0;
@@ -3543,7 +3544,7 @@ static void WorldCityBudget(uintptr_t gen, uint32_t op)
     for (uint32_t i = 0; i < count && i < 65536; i++)
     {
         float p[2];
-        if (SafeRead(gen + 0x11A7280u + 0xE0ull * i + 0xB0, p, 8)) break;
+        if (SafeRead(gen + DIF_LOCATIONS_A_NEW + 0xE0ull * i + 0xB0, p, 8)) break;
         for (int k = 0; k < g_cities.count; k++)
         {
             float dx = p[0] - g_cities.x[k], dy = p[1] - g_cities.y[k], r = 1.5f * g_cities.radius;
@@ -4251,7 +4252,7 @@ static void WorldMemoryTick(void)
 /* Evidence (content over the whole map): the op that appended each location (locations are only appended, so an index
  * keeps its op), and locations-<level>.tsv after op 0x2B: index, op, position in world metres (the generator's less half
  * the world; x east, y north), type (+0xD8) and flags (+0xD4) of each 0xE0 record. */
-static uint8_t g_locationOp[DIF_LOCATIONS];
+static uint8_t g_locationOp[CO_LOCATIONS_MAX];
 static void WorldLocationsNote(uintptr_t block, uint32_t total)
 {
     uint32_t offset = 0;

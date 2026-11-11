@@ -590,7 +590,7 @@ static void MacroStamps(void)
     uint32_t raised = 0; float most = 0;
     for (uint32_t k = 0; k < count; k++)
     {
-        uintptr_t rec = gen + 0x11A7280u + 0xE0ull * k;
+        uintptr_t rec = gen + DIF_LOCATIONS_A_NEW + 0xE0ull * k;
         float xy[2], h = 0;
         if (SafeRead(rec, xy, 8) || SafeRead(rec + 0xC0, &h, 4) || !isfinite(xy[0]) || !isfinite(xy[1]) || !isfinite(h)) continue;
         float m = MacroAt(xy[0], xy[1]);

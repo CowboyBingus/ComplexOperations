@@ -313,17 +313,14 @@ static void ObjectiveArcs(uint64_t a, uint64_t pass, uint64_t clusters, uint32_t
     uint8_t entryBlock[ARC_MOST], entryMain[ARC_MOST], blockRow[ARC_BLOCKS];
     uint16_t row = 0;
     const uintptr_t rows = g_difficultyGame + DIF_MISSIONS;
-    /* the list's place is the one the game's code was moved to (kObjectiveListSites' value for S, G+0x8BC570), which
-     * the layout's own macro no longer names */
-    uint32_t listAt = 0;
-    for (size_t i = 0; i < sizeof kObjectiveListSites / sizeof kObjectiveListSites[0] && listAt == 0; i++)
-        if (kObjectiveListSites[i].old == 0x8BC570u && kObjectiveListSites[i].width == 4) listAt = kObjectiveListSites[i].value;
+    /* the list's place is the one HellForge moved the game's code to */
+    const uint32_t listAt = CO_OBJLIST_AT;
     const uint64_t G = clusters - DIF_CLUSTERS_NEW, S = G + listAt;
     AcquireSRWLockExclusive(&g_arcDealLock);
     ArcSet* s = &set;
     memset(s, 0, sizeof *s);
     /* the level's own list and records: the generation block the clusters lie in */
-    if (g_objectiveListPlaces != DIF_OBJLIST_PLACES || listAt == 0 || n == 0 || n > 64 || SafeRead(a + 0x18, &records, 8) || records != G + g_importantList ||
+    if (DIF_OBJLIST_PLACES == 0 || DIF_OBJLIST_PLACES > ARC_MOST || DIF_CLUSTERS_NEW == 0 || listAt == 0 || n == 0 || n > 64 || SafeRead(a + 0x18, &records, 8) || records != G + g_importantList ||
         SafeRead(a + 0x28, &countAt, 8) || countAt == 0 || SafeRead(countAt, &count, 4) || count > DIF_IMPORTANT) why = "the generation block is not the moved one";
     else if (SafeRead(S, &row, 2) || row >= DIF_MISSION_ROWS || SafeRead(S + 0xD4, &listed, 4) || listed == 0 || listed > DIF_OBJLIST_PLACES ||
         SafeRead(S + 4, ids, 4ull * listed)) why = "the level's objective list could not be read";

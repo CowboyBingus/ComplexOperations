@@ -1,7 +1,7 @@
 /* STAND-INS, not the real thing. The prototype was built into a HellForge that had its own level 11 install; these are
  * the names of that install the prototype's files read, with the values that HellForge build had, so the files
- * compile. Nothing here installs or moves anything: the stock level 11 is HellForge's, and how this mod gets the room
- * the values below describe on top of it is not decided. Each part says what has to take its place.
+ * compile. Nothing here installs or moves anything: the stock level 11 is HellForge's. Each part says what has to take
+ * its place; the generation block's layout is no stand-in any more.
  * Only for co_xl.c. */
 #ifndef CO_XL_STANDIN_H
 #define CO_XL_STANDIN_H
@@ -30,23 +30,40 @@ static int LargerMaps(void) { return g_difficulty.mapScale > 1.0f; }
 typedef struct DifficultyInstall { uintptr_t game; } DifficultyInstall;
 
 /* ---- the generation block's layout ---------------------------------------------------------------------------------
- * To replace: the layout the game's code really has once the block's capacity is settled. These are the offsets and
- * counts of the prototype's HellForge (65024 locations); stock HellForge moves the same block with other numbers. */
-#define DIF_LOCATIONS 65024u
+ * HellForge owns the block: every offset and count is the one it reports (co_capacity.c), read at each use, and 0 until
+ * the block has moved, so nothing is read from a layout the game does not have. */
+#define CO_LOCATIONS_MAX CO_GEN_LOCATIONS /* the tables the mod keeps per location: the most HellForge gives */
+static inline uint32_t CoLocations(void) { uint32_t n = co_gen_places(HF_GEN_LOCATIONS_A); return n < CO_LOCATIONS_MAX ? n : CO_LOCATIONS_MAX; }
+#define DIF_LOCATIONS (CoLocations())
+#define DIF_LOCATIONS_A_NEW (co_gen_at(HF_GEN_LOCATIONS_A))
+#define DIF_LOCATIONS_B_NEW (co_gen_at(HF_GEN_LOCATIONS_B))
+#define DIF_CLUSTERS_NEW (co_gen_at(HF_GEN_CLUSTERS))
+#define DIF_IMPORTANT (co_gen_places(HF_GEN_IMPORTANT))
+#define g_importantList (co_gen_at(HF_GEN_IMPORTANT))
+#define g_routeNodes (co_gen_at(HF_GEN_ROUTE_NODES))
+#define g_routeEdges (co_gen_at(HF_GEN_ROUTE_EDGES))
+#define g_routePoints (co_gen_at(HF_GEN_ROUTE_POINTS))
+static uint32_t WorldBlockSize(void) { return co_gen_block(); }
+/* The objective list is one record; its place is its row field (ids at +4, the count at +0xD4). HellForge's holds 30
+ * objectives, and the mod's lists are bounded by what it reports, whatever that is. */
+#define DIF_OBJLIST_PLACES (co_gen_places(HF_GEN_OBJECTIVE_LIST))
+#define g_objectiveListPlaces DIF_OBJLIST_PLACES
+#define CO_OBJLIST_AT (co_gen_at(HF_GEN_OBJECTIVE_LIST))
+/* Each objective's stamp entries (first, count) in the record with 30 places: HellForge's difficulty_block.c, "layout
+ * L30". Another count is another record, whose places the mod does not know: 0, and the research notes say nothing. */
+static inline int CoObjlistStamps(int32_t* starts, int32_t* counts)
+{
+    if (DIF_OBJLIST_PLACES != 30u) return 0;
+    *starts = -0x78; *counts = -0xF0;
+    return 1;
+}
+/* The generation's own share of the location table; the rest is the stamp window's. The extra large world's rule, not
+ * the block's: the table must hold more (CO_GEN_LOCATIONS is asked for). */
 #define DIF_GEN_LOCATIONS 16384u
-#define DIF_LOCATIONS_B_NEW 0x1F8B280u
-#define DIF_OBJLIST_PLACES 48u
-#define DIF_CLUSTERS_NEW 0x270B530u
-#define DIF_IMPORTANT 1024u
-#define DIF_BLOCK_NEW 0x28682D0u
-#define DIF_WELD_COUNT 0x168CC60u /* the weld pool's count with 576 blocks of 256 vertices */
-static uint32_t g_objectiveListPlaces = 16; /* 48 once the list has moved */
-static uint32_t WorldBlockSize(void) { return DIF_BLOCK_NEW; }
-/* The objective list's moved place, as the arcs find it: the one row of the install's table they match. The value is
- * the prototype's, and it lies inside that layout's own locations array; the real place must come with the layout. */
-static const struct { uint32_t rva; uint8_t length, at, width; uint32_t old, value; uint8_t pin[8]; } kObjectiveListSites[1] = {
-    {0xC1AD93u, 8, 4, 4, 0x8BC570u, 0x15AD370u, {0x4D, 0x8D, 0xBC, 0x24, 0x70, 0xC5, 0x8B, 0x00}}};
-/* Row type of the block's site tables (proto/important_sites.h, proto/route_sites.h; not compiled until the block is). */
+/* STAND-IN: the weld pool's count with 576 blocks of 256 vertices, the prototype's own pool. Read by research notes
+ * only; the pool's step is not in the mod, and stock's pool has other places. */
+#define DIF_WELD_COUNT 0x168CC60u
+/* Row type of the block's site tables (proto/important_sites.h, proto/route_sites.h; not compiled: HellForge moves them). */
 typedef struct LocationSite { uint32_t rva; uint8_t at; uint32_t value; } LocationSite;
 
 /* ---- state other install steps left behind -------------------------------------------------------------------------

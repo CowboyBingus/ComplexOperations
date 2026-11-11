@@ -73,6 +73,23 @@ static int Hook(HfMod* mod, uintptr_t target, void* detour, void** original)
     return 0;
 }
 
+static int GenerationCapacity(HfMod* mod, const HfGenerationCapacity* want, HfGenerationCapacity* have)
+{
+    if (want != NULL && !g_fake.capacityRefused) g_fake.wanted = *want;
+    if (have != NULL && g_fake.capacity.size != 0)
+    {
+        const uint32_t size = have->size < g_fake.capacity.size ? have->size : g_fake.capacity.size;
+        HfGenerationCapacity now = g_fake.capacity;
+        now.size = have->size;
+        memcpy(have, &now, size);
+    }
+    return want != NULL && g_fake.capacityRefused;
+}
+
+static uintptr_t DifficultyRow(uint32_t level) { return level == 11 ? g_fake.levelRow : 0; }
+static uint32_t LoadPhase(HfMod* mod) { return g_fake.loadPhase; }
+static int OnGameThread(HfMod* mod, HfTickCallback callback, void* user) { g_fake.tick = callback; return 1; }
+
 /* The registry's first list holds two other systems around the table's entry; the other two lists hold its entry only.
  * {list, count, the table's entry} */
 static void Registry(uint8_t* image)
@@ -121,6 +138,10 @@ const HfApi* fake_host_reset(const char* build)
     g_api.write = Write;
     g_api.code_matches = CodeMatches;
     g_api.hook = Hook;
+    g_api.generation_capacity = GenerationCapacity;
+    g_api.difficulty_row = DifficultyRow;
+    g_api.load_phase = LoadPhase;
+    g_api.on_game_thread = OnGameThread;
     return &g_api;
 }
 

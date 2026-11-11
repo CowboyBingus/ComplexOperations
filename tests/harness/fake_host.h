@@ -33,6 +33,13 @@ typedef struct FakeHost
     int hookCount;
     HfEventCallback loaded;
     char log[8192];
+    /* The map generator's room: the request's answer (1 refuses), what `have` reads back (size 0: a HellForge without
+     * the regions fills none of them), and the last request. */
+    int capacityRefused;
+    HfGenerationCapacity capacity, wanted;
+    uintptr_t levelRow;       /* difficulty_row(11) */
+    uint32_t loadPhase;
+    HfTickCallback tick;      /* the last on_game_thread callback */
 } FakeHost;
 
 extern FakeHost g_fake;
