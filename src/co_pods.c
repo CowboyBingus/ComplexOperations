@@ -115,8 +115,10 @@ static uint8_t g_rows[(CO_ROW_CAP + CO_NEW_PODS) * CO_ROW], g_rowsNext[(CO_ROW_C
 static uintptr_t g_game, g_manager, g_block;
 static int g_state; /* 0 waiting for the constructor, 1 eight slots, -1 left as the game has it */
 
+uintptr_t co_alloc_near(uintptr_t target, size_t size) { return co_alloc_near_as(target, size, MEM_RESERVE | MEM_COMMIT); }
+
 /* Free address space within 1.75 GB of `target`, above it first: the code reaches the manager by a 32-bit offset. */
-uintptr_t co_alloc_near(uintptr_t target, size_t size)
+uintptr_t co_alloc_near_as(uintptr_t target, size_t size, uint32_t type)
 {
     const uintptr_t span = 0x70000000u, grain = 0x10000u;
     for (int up = 1; up >= 0; up--)
@@ -129,7 +131,7 @@ uintptr_t co_alloc_near(uintptr_t target, size_t size)
             uintptr_t end = (uintptr_t)m.BaseAddress + m.RegionSize;
             if (m.State == MEM_FREE && end - at >= size)
             {
-                void* p = VirtualAlloc((void*)at, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+                void* p = VirtualAlloc((void*)at, size, type, PAGE_READWRITE);
                 if (p) return (uintptr_t)p;
             }
             if (up) at = (end + grain - 1) & ~(grain - 1);

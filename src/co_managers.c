@@ -241,6 +241,30 @@ void co_managers_install(uintptr_t game) { g_game = game; }
 
 int co_managers_moved(void) { return g_state == 1; }
 
+/* An array the mover gave a new offset has a site with exactly the game's offset; a member with none stayed. */
+uint32_t co_managers_offset(uint32_t global, uint32_t offset)
+{
+    if (g_state != 1) return offset;
+    for (size_t i = 0; i < CO_MANAGER_SITES; i++)
+    {
+        const CoManagerSite* s = &kCoManagerSites[i];
+        if (s->kind == CO_MGR_ARRAY && s->old == offset && kCoManagers[s->manager].global == global && Active(s)) return offset + (uint32_t)s->add;
+    }
+    return offset;
+}
+
+/* The game's own count is the value its capacity checks hold. */
+uint32_t co_managers_slots(uint32_t global)
+{
+    for (size_t i = 0; i < CO_MANAGER_SITES; i++)
+    {
+        const CoManagerSite* s = &kCoManagerSites[i];
+        if (s->kind != CO_MGR_CAP || kCoManagers[s->manager].global != global) continue;
+        return g_state == 1 && Active(s) ? kCoManagers[s->manager].slots : s->old;
+    }
+    return 0;
+}
+
 #ifdef CO_TEST
 void co_managers_test_fill(uint8_t* image)
 {
