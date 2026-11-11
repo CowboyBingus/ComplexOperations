@@ -84,8 +84,14 @@ static const char* OwnSites(uintptr_t game)
 }
 
 /* Every need, then one line when the part is off. What a complex operation lacks in this build, so that it is never on
- * (CO_COMPLEX_COMPLETE): the chains before HellForge's nav, ship and spawner steps, and the pools and lists of a
- * 16384 m world, which must be in before the engine's plugins are set up. */
+ * (CO_COMPLEX_COMPLETE):
+ * - the pools and lists of a 16384 m world (the 32 x 32 nav grid's layout, physics pools, broadphase, stamp index, weld
+ *   pool, footprint list, spawner and marker lists, the pocket search): the engine lays them out once, before this
+ *   start can run, and with them the stock limits a normal level keeps (co_level_limit);
+ * - the world's settings, still the stand-in's (xl/co_xl_standin.h): with map scale 0 the world's install returns at
+ *   once, so no level is complex and the generator chains and the radii stub never go in;
+ * - the world's pins at the sites HellForge's town and living-world steps already changed;
+ * - a client's way out of a level init it should not be in (it gets a normal level and a log line). */
 static void Settle(void)
 {
     CoComplexNeeds* n = &g_capacity.needs;
