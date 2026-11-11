@@ -36,6 +36,32 @@ build for four keeps the avatar manager as the game has it.
 
 This alone lets no fifth player join: the session's own lists still hold four. It is the base the later parts need.
 
+## Stack arrays
+
+Some of the game's functions copy every avatar, or every player, into an array on the stack with room for four or
+eight. Four players already make five or more avatars for a moment: a body stays in the manager while its player
+respawns. The mod's code goes in with the counts (see Session lists) and works for any number of avatars.
+
+| Function | Fix | Builds |
+|---|---|---|
+| Cover and hellpod culls: the candidate farthest from all avatars goes | Code of the mod's sums the distances from the live positions | Both |
+| Reinforcement anchor: the best-placed avatar | A running best instead of a score per avatar | Both |
+| Encounter stage: the enemy calls spread over the avatars | Code of the mod's shuffles and calls as the game does | Both |
+| HUD sample counter: containers carried per player slot | Room for sixteen slots; replaces the guard for four | Both |
+| Lobby live upload: positions of up to four players | Players past four are left out | Both |
+| Voice lines by the nearest Helldiver | Only avatars 1 to 8 speak | Eight only |
+| Spawn exclusion around avatars (three lists of eight) | Avatars past eight are left out | Eight only |
+| Director and position lists from the frame allocator | Room for sixteen | Eight only |
+
+The fixes for rooms of eight go in a build for eight only, the one whose avatar manager holds more than eight. 19 code
+sites change in a build for four, 31 in a build for eight. For four avatars or fewer the culls, the anchor and the
+encounter give the game's own result.
+
+Limits that remain:
+
+- The director keeps per-player pacing for eight avatars; avatars 9 to 16 get none.
+- The encounter shuffle and the anchor are checked against the game's code in the unit tests only.
+
 ## Session lists
 
 The session keeps its peers in arrays of four, packed in one object. The lists that will hold eight stay in place.
@@ -50,9 +76,9 @@ code of its own beside the game's (14) or a hook of the function (3).
 Other tables of the game stay at four entries and are indexed by a player index with no check, or filled with no
 bound. Among them are the galactic map's cursors, the game state's player rows, the loadout screen's cards, the mission
 result's and the mission summary's rows, the Activity record's lists (see Mission), the clan records and the clan
-station's rows. 79 guards cover the accesses to them: an index past the table's end skips the access, and for 0 to 3
-nothing changes. 68 guards are code beside the game's; 11 are a compare changed in place. The guards go in and out
-together with the counts. A build for eight keeps 31 of them. The loadout screen's 19 and the mission summary's 4 make
+station's rows. 78 guards cover the accesses to them: an index past the table's end skips the access, and for 0 to 3
+nothing changes. 67 guards are code beside the game's; 11 are a compare changed in place. The guards go in and out
+together with the counts. A build for eight keeps 30 of them. The loadout screen's 19 and the mission summary's 4 make
 way for their eight cards and rows (see Loadout screen and Mission); the galactic map's 24 and the name tags' 1 are
 its own (see Galactic map, Squad HUD and name tags).
 
@@ -217,7 +243,8 @@ the game drops four and more. It goes in on its own: when it cannot, the peer li
 
 ## State
 
-- The galactic map, squad HUD, name tags, mission, mission summary, Activity record and clan changes are checked against the game's code and in the unit tests only.
+- The galactic map, squad HUD, name tags, mission, mission summary, Activity record, clan, avatar manager and stack
+  array changes are checked against the game's code and in the unit tests only.
 - Tested with one player: all eight pods are entered on foot, launch, and are there again after the return; missions
   and returns work with the lists counting to eight. A mission from a new pod after a completed mission's summary
   works; the mission was ended through the game's own handler, not by flying an extraction.
@@ -286,13 +313,17 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `scripts/gen_session_sites.py` | Writes `co_session_sites.h` from the site list and a dump of the game's code. Holds the lobby's member lists' sites; assembles their stubs with GNU `as`. |
 | `tests/managers_test.c` | The same refusals for the player managers, the loot rows' sites and caves among them. Runs the caves. |
 | `tests/avatars_test.c` | The avatar manager in each build: its sites with a state and a second one, refusal on changed code and rollback of a failed write. |
+| `src/co_avatars.c` | The stack fixes' code: the culls' distance sums and the encounter's shuffle and calls. |
+| `scripts/sites/stack_sites.py` | The stack fixes' sites and caves for each build, and the game's code their test runs. |
+| `tests/stack_test.c` | The stack fixes in each build, refusal and rollback. Runs the game's code beside the patched code on the same avatars and compares the results. |
+| `tests/co_stack_code.h` | The game's code for that test. Generated; do not edit. |
 | `tests/session_test.c` | The same for the session lists, and that sites and stubs lead to the new place. Runs the lobby copies' stubs. |
 | `src/co_counts.c` | The session lists' counts: sites, code caves, the hooks for entries 4 to 7. The guards, the loot rows' guards and the Activity record's participants too. |
 | `src/co_count_sites.h` | Their code sites and the caves' code. Generated; do not edit. |
 | `scripts/sites/count_sites.tsv` | The reviewed count sites: one row for each instruction. |
 | `scripts/sites/loadout_sites.py` | The loadout screen's sites and caves for eight, and the per-peer loadout table's move and bounds. |
 | `scripts/sites/summary_sites.py` | The mission summary's sites and caves for eight, and its guards for four. |
-| `scripts/gen_count_sites.py` | Writes `co_count_sites.h`; assembles the caves with GNU `as`. Holds the guards, the member lists' caps, the lobby's size and the loot rows' guards. |
+| `scripts/gen_count_sites.py` | Writes `co_count_sites.h` and `tests/co_stack_code.h`; assembles the caves with GNU `as`. Holds the guards, the member lists' caps, the lobby's size and the loot rows' guards. |
 | `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards and the mission result's slots in both managers' states, the Activity record's participants and post, and the join limit without the managers. The mission summary in each build. |
 | `src/co_ui.c` | The tables a build for eight moves at run time: the galactic map's cursors, the squad HUD's panel, the name tags' rows. Guards for four, the move, its undo, the hook of the HUD's init. |
 | `src/co_ui_sites.h` | Their code sites and caves. Generated; do not edit. |
@@ -329,6 +360,7 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `the pod manager and the ship's pod table have 8 slots` | The code is in place. |
 | `7 component managers have 8 slots` | The player managers are in place. |
 | `the avatar manager has 16 slots for players and their bodies` | A build for eight players: the avatar manager moved with them. |
+| `... code sites keep the game's stack arrays for avatars and players inside their room` | The stack fixes are in place. |
 | `10 arrays of the session lists and the lobby's member lists moved` | Those arrays are in the mod's memory. |
 | `the session lists count to eight` | The lists' code counts to eight; the line says how many players get in. |
 | `... guards keep the lists in messages inside the game's buffers` | The message guards are in place. |

@@ -17,14 +17,17 @@
 #   7 only for eight players: the bounds of the per-peer loadout table, which the mod moves to room for eight first;
 #   8 the score manager's loot rows (always): the bounds by index that follow the player managers' state (LOOT);
 #   9 only for eight players: the mission summary with eight rows and cards (sites/summary_sites.py); its guards for
-#     four rows are group 6.
+#     four rows are group 6;
+#   10 the stack arrays that four players' avatars and bodies overrun (sites/stack_sites.py, always);
+#   11 only for eight players: the stack and frame arrays with room for eight avatars (sites/stack_sites.py).
+# It also writes tests/co_stack_code.h: the game's code the tests run beside the stack fixes.
 # An instruction of a moved array carries a distance the session step rewrites; those four bytes are not compared.
 import os, re, struct, sys
 
-G_COUNT, G_GUARD, G_NET, G_EIGHT, G_TEST, G_LOADOUT, G_GUARD4, G_SYNCED, G_LOOT, G_SUMMARY = range(10)
+G_COUNT, G_GUARD, G_NET, G_EIGHT, G_TEST, G_LOADOUT, G_GUARD4, G_SYNCED, G_LOOT, G_SUMMARY, G_STACK, G_STACK8 = range(12)
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE + '/sites')
-import cave_asm, loadout_sites, map_sites, summary_sites, tag_sites
+import cave_asm, loadout_sites, map_sites, stack_sites, summary_sites, tag_sites
 dump = open(sys.argv[1], 'rb').read()
 out = sys.argv[2] if len(sys.argv) > 2 else HERE + '/../src/co_count_sites.h'
 
@@ -107,7 +110,8 @@ CALL = '''
     pop rax
     popfq
 '''
-# Callbacks, by number (the index in kCountCallbacks in co_counts.c). 8 to 13 are kept for the wire and extraction caves.
+# Callbacks, by number (the index in kCountCallbacks in co_counts.c). 8 to 13 are kept for the wire and extraction caves;
+# 18 and 19 are the stack fixes' (stack_sites.py).
 FIND_RSI, FIND_R11, GATE, VALUES, LAST_SLOT, MESSAGE, TEST_SLOT, TEST_INDEX = range(8)
 SCORE_INDEX, SCORE_ROW, PARTICIPANT, RECORD = range(14, 18)
 # (rva, bytes the jump replaces, code; `game+0x..` is an address in the game, CALL(n) the call of callback n)
@@ -287,12 +291,17 @@ LOADOUT_SITES, LOADOUT_CAVES = loadout_sites.build(dump)
 # cursors and the name tags in co_ui.c, which keeps them at four until the tables move. Here they are the build for
 # four's.
 GUARDS += summary_sites.GUARD4 + map_sites.GUARD4 + tag_sites.GUARD4
+# A stack fix gives room where a guard dropped the entry: the guard goes.
+assert set(stack_sites.REPLACES) <= {rva for rva, _, _ in GUARDS}
+GUARDS = [g for g in GUARDS if g[0] not in stack_sites.REPLACES]
 GUARD_SITES += map_sites.GUARD4_SITES
 OFF = set(loadout_sites.MOD_OFF) | {rva for rva, _, _ in summary_sites.GUARD4 + map_sites.GUARD4 + map_sites.GUARD4_SITES + tag_sites.GUARD4}
 assert OFF <= {rva for rva, _, _ in GUARD_SITES} | {rva for rva, _, _ in GUARDS}
 rows_by_group = ((G_GUARD, GUARD_SITES), (G_EIGHT, EIGHT_SITES), (G_COUNT, MIRROR_CAPS), (G_COUNT, RECORD_SITES),
                  (G_LOADOUT, [(r, o, n) for r, o, n, _ in LOADOUT_SITES]), (G_SYNCED, [(r, o, n) for r, o, n, _ in loadout_sites.SYNCED_SITES]),
-                 (G_SUMMARY, [(r, o, n) for r, o, n, _ in summary_sites.INPLACE]))
+                 (G_SUMMARY, [(r, o, n) for r, o, n, _ in summary_sites.INPLACE]),
+                 (G_STACK, [(r, o, n) for r, o, n, _, eight in stack_sites.INPLACE if not eight]),
+                 (G_STACK8, [(r, o, n) for r, o, n, _, eight in stack_sites.INPLACE if eight]))
 for group, rows in rows_by_group:
     for rva, old, new in rows:
         old = bytes.fromhex(old); new = bytes.fromhex(new)
@@ -345,10 +354,11 @@ EIGHT_CAVES = [(0x103D11D, 'ba 04 00 00 00 41 89 96 4c 03 00 00', 'mov edx, 4\n 
 LOADOUT_CAVES = [(rva, replaced, text) for rva, replaced, text, _ in LOADOUT_CAVES]
 SUMMARY_CAVES = [(rva, replaced, text) for rva, replaced, text, _, _ in summary_sites.CAVES]
 SUMMARY_CAVES += [(rva, replaced, text) for rva, replaced, text, _ in summary_sites.GUARD8]
+STACK_CAVES = [(rva, replaced, text) for rva, replaced, text, _, _ in stack_sites.CAVES]
 cave_groups = ([G_COUNT] * len(CAVES) + [G_GUARD4 if rva in OFF else G_GUARD for rva, _, _ in GUARDS] + [G_NET] * len(NET_GUARDS) +
                [G_EIGHT] * len(EIGHT_CAVES) + [G_TEST] * len(TEST_CAVES) + [G_LOADOUT] * len(LOADOUT_CAVES) + [G_LOOT] * len(LOOT) +
-               [G_SUMMARY] * len(SUMMARY_CAVES))
-CAVES += GUARDS + NET_GUARDS + EIGHT_CAVES + TEST_CAVES + LOADOUT_CAVES + LOOT + SUMMARY_CAVES
+               [G_SUMMARY] * len(SUMMARY_CAVES) + [G_STACK8 if eight else G_STACK for _, _, _, _, eight in stack_sites.CAVES])
+CAVES += GUARDS + NET_GUARDS + EIGHT_CAVES + TEST_CAVES + LOADOUT_CAVES + LOOT + SUMMARY_CAVES + STACK_CAVES
 # In place, with the cave above: the first loop's count is a copy of that constant.
 sites.append((0x108D2DD, bytes.fromhex('8b ef 90'), bytes.fromhex('8d 6f 04'), 0xFF, G_COUNT))
 assert dump[0x108D2DD:0x108D2E0] == bytes.fromhex('8b ef 90')
@@ -370,11 +380,11 @@ manager_caves = rows('co_manager_sites.h', 'kCoManagerCaves')
 taken += [(rva, rva + size) for rva, size in manager_caves]
 taken += [(rva + at, rva + at + 4) for rva, at in rows('co_manager_sites.h') + rows('co_pod_sites.h') if (rva, at) not in manager_caves]
 assert len(taken) > 1400
-# The build for four leaves out groups 5, 7 and 9, the build for eight group 6: they may share bytes, a build may not.
+# The build for four leaves out groups 5, 7, 9 and 11, the build for eight group 6: they may share bytes, a build may not.
 own = [(rva, rva + len(old), skip != 0xFF, group) for rva, old, _, skip, group in sites] + [(rva, rva + 8, True, G_COUNT) for rva, _, _ in CLEARS]
 own += [(rva, rva + len(bytes.fromhex(replaced)), False, group) for (rva, replaced, _), group in zip(CAVES, cave_groups)]
 own.sort()
-for left_out in ((G_LOADOUT, G_SYNCED, G_SUMMARY), (G_GUARD4,)):
+for left_out in ((G_LOADOUT, G_SYNCED, G_SUMMARY, G_STACK8), (G_GUARD4,)):
     build = [o for o in own if o[3] not in left_out]
     for (a, b, _, _), (c, _, _, _) in zip(build, build[1:]): assert b <= c, (hex(a), hex(c))
 for a, b, shared, _ in own:
@@ -430,7 +440,9 @@ h.append('#define CO_SYNCED_TYPE 0x%Xu\n#define CO_SYNCED_OLD_SIZE 0x%Xu\n#defin
 h.append('static const uint32_t kCoSyncedLists[] = {%s};\n' % ', '.join('0x%Xu' % x for x in m['registry_lists']))
 assert len(cave_groups) == len(caves) == len(CAVES)
 open(out, 'w').writelines(h)
+open(HERE + '/../tests/co_stack_code.h', 'w').writelines(stack_sites.test_header(dump))
 print('%d sites, %d clears, %d caves (%d bytes)' % (len(sites), len(CLEARS), len(caves), len(blob)))
 for group, name in enumerate(('counts', 'guards', 'message guards', 'eight players only', 'test option only', 'loadout (eight only)',
-                               'guards (four only)', 'loadout table (eight)', 'loot rows', 'summary (eight only)')):
+                               'guards (four only)', 'loadout table (eight)', 'loot rows', 'summary (eight only)', 'stack arrays',
+                               'stack arrays (eight)')):
     print('  %-20s %3d sites, %2d caves' % (name, sum(s[4] == group for s in sites), cave_groups.count(group)))

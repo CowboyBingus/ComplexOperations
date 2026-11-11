@@ -58,4 +58,12 @@ void co_ui_install(uintptr_t game);
 void co_ui_state(uintptr_t block);
 int co_ui_guarded(void);
 
+/* What a cave's callback sees: the registers as the game had them, in the order the cave pushed them (co_counts.c). */
+typedef struct CoRegs { uint64_t r15, r14, r13, r12, r11, r10, r9, r8, rdi, rsi, rbp, rbx, rdx, rcx, rax, flags; } CoRegs;
+
+/* The stack fixes' callbacks for avatars (co_avatars.c), in the counts' caves. `install` once with game.dll's base. */
+void co_avatars_install(uintptr_t game);
+void co_avatars_dist_sum(CoRegs* regs);
+void co_avatars_enc_spread(CoRegs* regs);
+
 #endif
