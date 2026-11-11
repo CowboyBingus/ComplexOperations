@@ -40,6 +40,9 @@ _Static_assert(sizeof kCoCountCode <= CO_CAVE_ROOM, "the caves' code must fit th
  * manager's loot guards (CO_G_LOOT) ask the player managers' state each time, so they fit both of its states. The mission
  * summary's eight rows and cards (CO_G_SUMMARY) replace its guards for four rows, as the loadout screen's do. */
 enum { CO_G_COUNT, CO_G_GUARD, CO_G_NET, CO_G_EIGHT, CO_G_TEST, CO_G_LOADOUT, CO_G_GUARD4, CO_G_SYNCED, CO_G_LOOT, CO_G_SUMMARY };
+/* Eight only, each on its own: the HiveMind's multipliers past four players, the Pelican's seats 8 and 9 and every
+ * player's boosters. They stand alone, so a changed byte in one leaves that one out and not the session lists. */
+enum { CO_G_DIFFICULTY = 15, CO_G_SEATS, CO_G_BOOSTERS };
 /* Test builds only (--test-first-slot): the host gives joining peers slots and player indexes from this number on,
  * so that two game instances reach the code for players 5 to 8. Zero is off. */
 #ifndef CO_TEST_FIRST_SLOT
@@ -87,8 +90,13 @@ static uint32_t g_ignored;        /* a bit for each message shape that was logge
 static int g_toldFour;            /* the join limit's fall back to four was logged */
 static uintptr_t g_syncedOld, g_syncedNew, g_syncedBlock;
 
+static uint32_t g_refused;        /* the groups of their own left out at the last apply */
+
+static int OwnGroup(uint8_t group) { return group >= CO_G_DIFFICULTY && group <= CO_G_BOOSTERS; }
+
 static int Active(uint8_t group)
 {
+    if (OwnGroup(group)) return CO_PLAYERS == 8 && !(g_refused >> group & 1u);
     return group <= CO_G_NET || group == CO_G_LOOT || ((group == CO_G_EIGHT || group == CO_G_LOADOUT || group == CO_G_SYNCED || group == CO_G_SUMMARY) && CO_PLAYERS == 8) ||
            (group == CO_G_GUARD4 && CO_PLAYERS == 4) || (group == CO_G_TEST && CO_TEST_FIRST_SLOT != 0);
 }
@@ -293,10 +301,32 @@ static void Record(CoRegs* regs)
     g_furtherCount = 0;
 }
 
+/* C1, the seat getter for type 40 (rdx the count): the mod's block of ten seats once they are on, else the game's
+ * records with the count of eight the cave already wrote. */
+static void SeatData(CoRegs* regs)
+{
+    if (!co_seats_on()) { regs->rax = g_game + CO_SEAT_RECORDS; return; }
+    *(uint32_t*)(uintptr_t)regs->rdx = 10;
+    regs->rax = (uint64_t)(uintptr_t)kCoSeatBlock;
+}
+
+/* L1, the entrance's seat list (rcx the game's lists): with seats 8 and 9 in it once they are on. */
+static void SeatList(CoRegs* regs)
+{
+    regs->rax = co_seats_on() ? (uint64_t)(uintptr_t)(kCoSeatBlock + CO_SEAT_LIST_AT) : regs->rcx + 6u * 0x1Cu;
+}
+
+/* V1, seat 8 or 9: the carry flag says it exists, for the cave's jb. */
+static void SeatValid(CoRegs* regs) { regs->flags = (regs->flags & ~(uint64_t)1) | (uint64_t)co_seats_on(); }
+
+/* B1, the per-frame booster update; rcx is B. */
+static void Boosters(CoRegs* regs) { co_boosters_update((uintptr_t)regs->rcx); }
+
 /* By the numbers in gen_count_sites.py; 8 to 13 are kept for other caves. */
 static void (*const kCountCallbacks[])(CoRegs*) = {
     FindByRsi, FindByR11, JoinGate, ClearValueKeys, LastSlotState, MessageFits, JoinSlot, JoinIndex,
     [14] = LootIndex, LootRow, Participant, Record,
+    [40] = SeatData, SeatList, SeatValid, Boosters,
 };
 #define CO_CALLBACKS (sizeof kCountCallbacks / sizeof kCountCallbacks[0])
 
@@ -519,21 +549,60 @@ void co_counts_undo(void)
     g_caves = 0;
 }
 
+/* A group of its own is left out, once, with what that means. */
+static void Refuse(uint8_t group, uint32_t rva)
+{
+    static const char* const kWhat[] = {"the HiveMind's multipliers stop at four players",
+                                        "the Pelican keeps six passenger seats", "boosters of players 5 to 8 are not loaded"};
+    if (g_refused >> group & 1u) return;
+    g_refused |= 1u << group;
+    co_log("%s: the code at game+0x%X is not the reviewed one; %s", group == CO_G_SEATS ? "extraction" : "players", rva,
+           kWhat[group - CO_G_DIFFICULTY]);
+}
+
+/* The game's seat records and entrance list that the mod's seat block copies. */
+static int SeatDataMatches(void)
+{
+    uint8_t records[sizeof kCoSeatGame], entrance[sizeof kCoSeatEntrance];
+    return g_coApi->read(g_game + CO_SEAT_RECORDS, records, sizeof records) == 0 && memcmp(records, kCoSeatGame, sizeof records) == 0 &&
+           g_coApi->read(g_game + CO_SEAT_LISTS + 6u * 0x1Cu, entrance, sizeof entrance) == 0 &&
+           memcmp(entrance, kCoSeatEntrance, sizeof entrance) == 0;
+}
+
 /* Called by the session step once the arrays are moved and their old places zeroed. */
 void co_counts_apply(uintptr_t context, uintptr_t extension)
 {
     static const char kStays[] = "the session lists count to four as before";
     if (g_on || g_hooks != 1 || g_game == 0) return;
+    g_refused = 0;
+    if (Active(CO_G_SEATS))
+    {
+        const uint32_t at = co_extract_seats_ready(g_game);
+        if (at != 0 || !SeatDataMatches()) Refuse(CO_G_SEATS, at != 0 ? at : CO_SEAT_RECORDS);
+    }
+    if (Active(CO_G_BOOSTERS))
+    {
+        const uint32_t at = co_extract_boosters_ready(g_game);
+        if (at != 0) Refuse(CO_G_BOOSTERS, at);
+    }
     for (size_t i = 0; i < CO_COUNT_SITES; i++)
         if (Active(kCoCountSites[i].group) && !SiteMatches(&kCoCountSites[i]))
-        { co_log("session: the code at game+0x%X is not the reviewed one; %s", kCoCountSites[i].rva, kStays); return; }
+        {
+            if (OwnGroup(kCoCountSites[i].group)) { Refuse(kCoCountSites[i].group, kCoCountSites[i].rva); continue; }
+            co_log("session: the code at game+0x%X is not the reviewed one; %s", kCoCountSites[i].rva, kStays);
+            return;
+        }
     for (size_t i = 0; i < CO_COUNT_CAVES; i++)
     {
         uint8_t bytes[12];
         const CoCountCave* c = &kCoCountCaves[i];
         if (!Active(c->group)) continue;
         if (g_coApi->read(g_game + c->rva, bytes, c->size) != 0 || memcmp(bytes, c->replaced, c->size) != 0)
-        { co_log("session: the code at game+0x%X is not the reviewed one; %s", c->rva, kStays); return; }
+        {
+            if (OwnGroup(c->group)) { Refuse(c->group, c->rva); continue; }
+            co_log("session: the code at game+0x%X is not the reviewed one; %s", c->rva, kStays);
+            return;
+        }
         if (c->callback != 0xFF && (c->callback >= CO_CALLBACKS || kCountCallbacks[c->callback] == NULL))
         { co_log("session: the cave at game+0x%X has no callback %u; %s", c->rva, (unsigned)c->callback, kStays); return; }
     }
@@ -608,6 +677,12 @@ void co_counts_apply(uintptr_t context, uintptr_t extension)
             co_log("players: the per-peer loadout table moved to room for eight peers (%u code sites changed)", InGroup(CO_G_SYNCED, NULL));
         if (Active(CO_G_SUMMARY))
             co_log("players: the mission summary has eight rows and cards (%u code sites changed)", InGroup(CO_G_SUMMARY, NULL));
+        if (Active(CO_G_DIFFICULTY))
+            co_log("players: the HiveMind's difficulty multipliers go on past four players (%u caves)", InGroup(CO_G_DIFFICULTY, NULL));
+        if (Active(CO_G_SEATS))
+            co_log("extraction: the Pelican's seats 8 and 9 are in place (%u caves); they open once its unit has their nodes",
+                   InGroup(CO_G_SEATS, NULL));
+        if (Active(CO_G_BOOSTERS)) co_log("players: the boosters of all eight players are loaded (%u cave)", InGroup(CO_G_BOOSTERS, NULL));
     }
     return;
 failed:
@@ -641,6 +716,8 @@ void co_counts_test_fill(uint8_t* image)
 {
     for (size_t i = 0; i < CO_COUNT_SITES; i++) memcpy(image + kCoCountSites[i].rva, kCoCountSites[i].old, kCoCountSites[i].size);
     for (size_t i = 0; i < CO_COUNT_CAVES; i++) memcpy(image + kCoCountCaves[i].rva, kCoCountCaves[i].replaced, kCoCountCaves[i].size);
+    memcpy(image + CO_SEAT_RECORDS, kCoSeatGame, sizeof kCoSeatGame);
+    memcpy(image + CO_SEAT_LISTS + 6u * 0x1Cu, kCoSeatEntrance, sizeof kCoSeatEntrance);
     for (size_t i = 0; i < CO_COUNT_CLEARS; i++)
     {
         const uint8_t head[] = {0x33, 0xC0, 0x89, kCoCountClears[i].mov};
@@ -666,6 +743,7 @@ void co_counts_test_reset(void)
     g_hooks = -1;
     g_ignored = 0;
     g_toldFour = 0;
+    g_refused = 0;
     g_furtherCount = 0;
     memset(g_extras, 0, sizeof g_extras);
 }
@@ -694,7 +772,7 @@ uintptr_t co_counts_test_synced_table(void) { return g_syncedNew; }
 unsigned co_counts_test_sites(void)
 {
     unsigned n = (unsigned)CO_COUNT_CLEARS;
-    for (uint8_t group = CO_G_COUNT; group <= CO_G_SUMMARY; group++)
+    for (uint8_t group = CO_G_COUNT; group <= CO_G_BOOSTERS; group++)
         if (Active(group)) n += InGroup(group, NULL);
     return n;
 }
@@ -748,6 +826,15 @@ int co_counts_test_write_of(uint32_t rva)
     return -1;
 }
 int co_counts_test_on(void) { return g_on; }
+/* The sites and caves of a group, whether this build writes it, and the groups left out at the last apply. */
+unsigned co_counts_test_group(uint8_t group) { return InGroup(group, NULL); }
+int co_counts_test_active(uint8_t group) { return Active(group); }
+uint32_t co_counts_test_refused(void) { return g_refused; }
+/* The callbacks of the extraction caves, as the caves call them. */
+uint64_t co_counts_test_seat_data(uint32_t* count) { CoRegs regs = {0}; regs.rdx = (uint64_t)(uintptr_t)count; SeatData(&regs); return regs.rax; }
+uint64_t co_counts_test_seat_list(uint64_t lists) { CoRegs regs = {0}; regs.rcx = lists; SeatList(&regs); return regs.rax; }
+uint64_t co_counts_test_seat_valid(uint64_t flags) { CoRegs regs = {0}; regs.flags = flags; SeatValid(&regs); return regs.flags; }
+const uint8_t* co_counts_test_seat_block(size_t* size) { *size = sizeof kCoSeatBlock; return kCoSeatBlock; }
 uintptr_t co_counts_test_caves(void) { return g_caves; }
 uint32_t co_counts_test_ready(uintptr_t sync) { return SlotsReadyDetour(sync); }
 uint32_t co_counts_test_free(uintptr_t sync) { return SlotsFreeDetour(sync); }

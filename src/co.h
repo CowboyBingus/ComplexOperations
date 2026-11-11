@@ -58,4 +58,11 @@ void co_ui_install(uintptr_t game);
 void co_ui_state(uintptr_t block);
 int co_ui_guarded(void);
 
+/* Extraction for eight (co_extract.c), for caves co_counts.c writes. `ready` once before they go in: 0, or the place of
+ * game code they call that is not the reviewed one. co_seats_on is 1 once the Pelican's unit was seen with both nodes. */
+uint32_t co_extract_seats_ready(uintptr_t game);
+uint32_t co_extract_boosters_ready(uintptr_t game);
+int co_seats_on(void);
+void co_boosters_update(uintptr_t b);
+
 #endif

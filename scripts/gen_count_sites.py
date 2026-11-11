@@ -17,14 +17,19 @@
 #   7 only for eight players: the bounds of the per-peer loadout table, which the mod moves to room for eight first;
 #   8 the score manager's loot rows (always): the bounds by index that follow the player managers' state (LOOT);
 #   9 only for eight players: the mission summary with eight rows and cards (sites/summary_sites.py); its guards for
-#     four rows are group 6.
+#     four rows are group 6;
+#  15 only for eight players: the HiveMind's difficulty multipliers for five to eight players (sites/difficulty_sites.py);
+#  16 only for eight players: the Pelican's seats 8 and 9, behind the mod's check of its unit's nodes, and
+#  17 only for eight players: every player's boosters (both sites/extract_sites.py).
+# Groups 15 to 17 are refused one by one: a changed byte leaves its group out and the rest goes in.
 # An instruction of a moved array carries a distance the session step rewrites; those four bytes are not compared.
 import os, re, struct, sys
 
 G_COUNT, G_GUARD, G_NET, G_EIGHT, G_TEST, G_LOADOUT, G_GUARD4, G_SYNCED, G_LOOT, G_SUMMARY = range(10)
+G_DIFFICULTY, G_SEATS, G_BOOSTERS = 15, 16, 17
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE + '/sites')
-import cave_asm, loadout_sites, map_sites, summary_sites, tag_sites
+import cave_asm, difficulty_sites, extract_sites, loadout_sites, map_sites, summary_sites, tag_sites
 dump = open(sys.argv[1], 'rb').read()
 out = sys.argv[2] if len(sys.argv) > 2 else HERE + '/../src/co_count_sites.h'
 
@@ -107,7 +112,8 @@ CALL = '''
     pop rax
     popfq
 '''
-# Callbacks, by number (the index in kCountCallbacks in co_counts.c). 8 to 13 are kept for the wire and extraction caves.
+# Callbacks, by number (the index in kCountCallbacks in co_counts.c). 8 to 13 are kept for the wire caves; 40 to 43 are
+# extract_sites.py's.
 FIND_RSI, FIND_R11, GATE, VALUES, LAST_SLOT, MESSAGE, TEST_SLOT, TEST_INDEX = range(8)
 SCORE_INDEX, SCORE_ROW, PARTICIPANT, RECORD = range(14, 18)
 # (rva, bytes the jump replaces, code; `game+0x..` is an address in the game, CALL(n) the call of callback n)
@@ -345,10 +351,13 @@ EIGHT_CAVES = [(0x103D11D, 'ba 04 00 00 00 41 89 96 4c 03 00 00', 'mov edx, 4\n 
 LOADOUT_CAVES = [(rva, replaced, text) for rva, replaced, text, _ in LOADOUT_CAVES]
 SUMMARY_CAVES = [(rva, replaced, text) for rva, replaced, text, _, _ in summary_sites.CAVES]
 SUMMARY_CAVES += [(rva, replaced, text) for rva, replaced, text, _ in summary_sites.GUARD8]
+DIFFICULTY_CAVES = [(rva, replaced, text) for rva, replaced, text, _ in difficulty_sites.build(dump)[1]]
+EXTRACT_CAVES = extract_sites.build(dump)[1]
 cave_groups = ([G_COUNT] * len(CAVES) + [G_GUARD4 if rva in OFF else G_GUARD for rva, _, _ in GUARDS] + [G_NET] * len(NET_GUARDS) +
                [G_EIGHT] * len(EIGHT_CAVES) + [G_TEST] * len(TEST_CAVES) + [G_LOADOUT] * len(LOADOUT_CAVES) + [G_LOOT] * len(LOOT) +
-               [G_SUMMARY] * len(SUMMARY_CAVES))
-CAVES += GUARDS + NET_GUARDS + EIGHT_CAVES + TEST_CAVES + LOADOUT_CAVES + LOOT + SUMMARY_CAVES
+               [G_SUMMARY] * len(SUMMARY_CAVES) + [G_DIFFICULTY] * len(DIFFICULTY_CAVES) + [g for _, _, _, _, g in EXTRACT_CAVES])
+CAVES += (GUARDS + NET_GUARDS + EIGHT_CAVES + TEST_CAVES + LOADOUT_CAVES + LOOT + SUMMARY_CAVES + DIFFICULTY_CAVES +
+          [(rva, replaced, text) for rva, replaced, text, _, _ in EXTRACT_CAVES])
 # In place, with the cave above: the first loop's count is a copy of that constant.
 sites.append((0x108D2DD, bytes.fromhex('8b ef 90'), bytes.fromhex('8d 6f 04'), 0xFF, G_COUNT))
 assert dump[0x108D2DD:0x108D2E0] == bytes.fromhex('8b ef 90')
@@ -428,9 +437,20 @@ h.append('#define CO_SYNCED_POINTER 0x%Xu\n#define CO_SYNCED_ENGINE 0x%Xu\n#defi
          % (m['pointer'], m['engine'], m['member'], m['registry']))
 h.append('#define CO_SYNCED_TYPE 0x%Xu\n#define CO_SYNCED_OLD_SIZE 0x%Xu\n#define CO_SYNCED_NEW_SIZE 0x%Xu\n' % (m['registry_type'], m['old_size'], m['new_size']))
 h.append('static const uint32_t kCoSyncedLists[] = {%s};\n' % ', '.join('0x%Xu' % x for x in m['registry_lists']))
+# The Pelican's seat block (sites/extract_sites.py) and the game's bytes it is made from, which the mod compares first.
+block = extract_sites.seat_block(dump)
+h.append('#define CO_SEAT_RECORDS 0x%Xu\n#define CO_SEAT_LISTS 0x%Xu\n#define CO_SEAT_LIST_AT 0x%Xu\n'
+         % (extract_sites.RECORDS, extract_sites.LISTS, extract_sites.LIST_AT))
+h.append('static const uint8_t kCoSeatGame[] = {%s};\n' % c_bytes(dump[extract_sites.RECORDS:extract_sites.RECORDS + 8 * extract_sites.RECORD]))
+h.append('static const uint8_t kCoSeatEntrance[] = {%s};\n' % c_bytes(dump[extract_sites.LISTS + 6 * extract_sites.LIST:
+                                                                            extract_sites.LISTS + 7 * extract_sites.LIST]))
+h.append('static _Alignas(16) const uint8_t kCoSeatBlock[] = {\n')
+for i in range(0, len(block), 24): h.append('    ' + c_bytes(block[i:i + 24]) + ',\n')
+h.append('};\n')
 assert len(cave_groups) == len(caves) == len(CAVES)
 open(out, 'w').writelines(h)
 print('%d sites, %d clears, %d caves (%d bytes)' % (len(sites), len(CLEARS), len(caves), len(blob)))
-for group, name in enumerate(('counts', 'guards', 'message guards', 'eight players only', 'test option only', 'loadout (eight only)',
-                               'guards (four only)', 'loadout table (eight)', 'loot rows', 'summary (eight only)')):
+for group, name in list(enumerate(('counts', 'guards', 'message guards', 'eight players only', 'test option only', 'loadout (eight only)',
+                                    'guards (four only)', 'loadout table (eight)', 'loot rows', 'summary (eight only)'))) + [
+                   (G_DIFFICULTY, 'difficulty (eight)'), (G_SEATS, 'Pelican seats (eight)'), (G_BOOSTERS, 'boosters (eight)')]:
     print('  %-20s %3d sites, %2d caves' % (name, sum(s[4] == group for s in sites), cave_groups.count(group)))
