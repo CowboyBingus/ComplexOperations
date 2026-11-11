@@ -131,8 +131,8 @@ Limits that remain:
 - A friend's full lobby without the mod shows four of eight places; Steam refuses the join.
 - Joining another lobby with the squad takes only the players in host slots 0 to 3 along; slots 4 to 7 stay behind.
 - A public lobby of a build for eight shows in HellForge's lobby browser, on the map and in Quick Play only with a
-  HellForge that counts a lobby's squad from its places (pull request 351). With an older one, players join by a
-  friend's lobby or an invite.
+  HellForge that counts a lobby's squad from its places (pull request 351, in dev). With an older one, players join
+  by a friend's lobby or an invite. Seen in a game with two test installs: a stranger's map scan finds the lobby.
 
 ## Loadout screen
 
