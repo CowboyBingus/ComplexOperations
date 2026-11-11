@@ -9,7 +9,7 @@
  * table's bounds; a failed write or a changed byte leaves all of it as the game has it. The score manager's loot rows
  * are bounded where the managers keep them now, the mission result adds the loot of slots 4 to 7 without a row for them,
  * the Activity record's lists stop at their room while its post lists every participant with the local peer in the
- * record and it waits for every non-local one's answer; without the post's hook or with one of its sites changed it
+ * record and it waits for every non-local one's answer, made by either record maker; without the post's hook or with one of its sites changed it
  * keeps four and the rest goes in. A build for eight takes four players while the managers have four slots. The clan records' and the clan station's
  * handlers skip a player index of four or more in every build; the galactic map's cursors do in a build for four (a
  * build for eight moves them, tests/ui_test.c). A build for eight gives the mission summary eight rows
@@ -144,6 +144,10 @@ int co_counts_test_host_scores(const void* arguments);
 #define ANSWER_C 0x12E6C15u         /* and in a third over every waiting record: the record rax, the peer rdi */
 #define ANSWER_C_ZERO 0x12E6C4Du
 #define ACTIVITY_DROP 0x12E6A0Fu    /* lea ecx,[rdx-1]: a record in state 2 or 3 leaves the table (rax) */
+#define ACTIVITY_WAIT2 0x12E67B1u   /* mov [rbp+rax*8-0x41],rcx: the second record maker's peers to wait for */
+#define ACTIVITY_MADE2 0x12E682Eu   /* inc dword [rsi+0x1100]: the second maker's record is in the table */
+#define DROP_WORLD 0x13F8657u       /* lea eax,[rcx-1]: the world update's time-out drops a record (rdx) */
+#define DROP_TABLE 0x12E64F7u       /* lea eax,[rcx-1]: the same drop in 0x12E63E0 (rdx) */
 #define ENTER 0x34C0000u            /* free in the stand-in: the test's ways into the caves */
 #define MANAGER_SIZE 0x380A0u       /* the score manager with its loot rows moved */
 #define CLAN_PAIR 0x12919A0u        /* a function: a clan pair by the player index in r8d */
@@ -927,12 +931,12 @@ int main(void)
          * mission result's slot guard and the Activity record's caves are in every build; the result's load by score slot
          * is the managers' site, no jump. The loot rows' clears and sums are the managers' caves, not these. */
         static const struct { uint32_t rva, size; } kLoot[] = {
-            {0x6311D4u, 8}, {0x631514u, 6}, {0x631693u, 7}, {LOOT_RESULT, 10}, {ACTIVITY, 5}, {0xA56E91u, 5}, {0x12E67B1u, 5}, {ACTIVITY_MADE, 6},
+            {0x6311D4u, 8}, {0x631514u, 6}, {0x631693u, 7}, {LOOT_RESULT, 10}, {ACTIVITY, 5}, {0xA56E91u, 5}, {ACTIVITY_WAIT2, 5}, {ACTIVITY_MADE, 6},
+            {ACTIVITY_MADE2, 6}, {DROP_WORLD, 6}, {DROP_TABLE, 6},
         };
-        /* cmp eax,3; jae on to the next id: the second record maker's list of the peers whose answer it waits for; the
-         * first's goes to its callback instead (cmp eax,3; jb the store) */
-        static const uint8_t kPending[] = {0x83, 0xF8, 0x03, 0x0F, 0x83}, kWaitStore[] = {0x83, 0xF8, 0x03, 0x0F, 0x82};
-        static const uint8_t kStore[] = {0x48, 0x89, 0x4C, 0xC5, 0xE8, 0xE9};
+        /* cmp eax,3; jb the store, else the callback: both record makers' lists of the peers whose answer they wait for */
+        static const uint8_t kWaitStore[] = {0x83, 0xF8, 0x03, 0x0F, 0x82};
+        static const uint8_t kStore[] = {0x48, 0x89, 0x4C, 0xC5, 0xE8, 0xE9}, kStore2[] = {0x48, 0x89, 0x4C, 0xC5, 0xBF, 0xE9};
         CHECK(g_fake.image[RESULT_GATE] == 0x83 && g_fake.image[RESULT_GATE + 2] == (players == 8 ? 7 : 3));
         CHECK(fake_host_logged("players: the score manager's loot rows by index are bounded where the managers keep them (3 caves)"));
         for (size_t i = 0; i < sizeof kLoot / sizeof kLoot[0]; i++) CHECK(Cave(kLoot[i].rva, kLoot[i].size) != NULL);
@@ -944,8 +948,14 @@ int main(void)
             memcpy(&to, cave + 5, 4);
             CHECK(memcmp(cave, kWaitStore, sizeof kWaitStore) == 0 && memcmp(cave + 9 + to, kStore, sizeof kStore) == 0 && Leads(cave + 15 + to, 0xA56E96u));
         }
-        cave = Cave(0x12E67B1u, 5);
-        if (cave != NULL) CHECK(memcmp(cave, kPending, sizeof kPending) == 0 && Leads(cave + 5, 0x12E67BEu));
+        cave = Cave(ACTIVITY_WAIT2, 5);
+        if (cave != NULL)
+        {
+            int32_t to;
+            memcpy(&to, cave + 5, 4);
+            CHECK(memcmp(cave, kWaitStore, sizeof kWaitStore) == 0 && memcmp(cave + 9 + to, kStore2, sizeof kStore2) == 0 && Leads(cave + 15 + to, 0x12E67B6u) &&
+                  Leads(cave + 5 + to, 0x12E67BEu));
+        }
         /* the three replaced instructions, then cmp r13d,4; jb the load; test dl,dl; je the slot without row values */
         static const uint8_t kSlot[] = {0x4D, 0x01, 0xE9, 0x89, 0x44, 0x24, 0x3C, 0x41, 0x89, 0xC2, 0x41, 0x83, 0xFD, 0x04, 0x0F, 0x82};
         static const uint8_t kFlagged[] = {0x84, 0xD2, 0x0F, 0x84};
@@ -1155,6 +1165,123 @@ int main(void)
         co_counts_test_post_original(NULL);
     }
     {
+        /* Run: the second record maker (0x12E6690) waits for the non-local peers 4 to 7 as the first does. Its caller
+         * gives the four participants; its list takes three peers and the cave the rest, kept under the key once the
+         * record is counted. A first maker's call that stopped at a full table left participants: they stay out. */
+        static const uint8_t kEnterWait[] = {0x55, 0x48, 0x89, 0xCD, 0x89, 0xD0, 0x4C, 0x89, 0xC1, 0x41, 0xFF, 0xE1};
+        static const uint8_t kStoredRbp[] = {0x5D, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3}, kSkippedRbp[] = {0x5D, 0x31, 0xC0, 0xC3};
+        static const uint8_t kMade[] = {0x56, 0x48, 0x89, 0xCE, 0x48, 0x89, 0xD1, 0x41, 0xFF, 0xE0};
+        static const uint8_t kCounted[] = {0x8B, 0x86, 0x00, 0x11, 0x00, 0x00, 0x5E, 0xC3};
+        static const uint8_t kEnterR10[] = {0x49, 0x89, 0xCA, 0x49, 0x89, 0xD3, 0x4C, 0x89, 0xC2, 0x41, 0xFF, 0xE1};
+        static const uint8_t kNext[] = {0xB8, 0x00, 0x01, 0x00, 0x00, 0xC3}, kPost[] = {0xB8, 0x00, 0x02, 0x00, 0x00, 0xC3};
+        static const uint8_t kScanEdx[] = {0x8D, 0x82, 0x00, 0x03, 0x00, 0x00, 0xC3};
+        /* a time-out's drop: push rdi; xchg rcx,rdx; jmp r8 (the record in rdx, the count in ecx)  /  pop rdi; ret */
+        static const uint8_t kEnterDrop[] = {0x57, 0x48, 0x87, 0xCA, 0x41, 0xFF, 0xE0}, kDroppedRdi[] = {0x5F, 0xC3};
+        static uint8_t table[32 * 0x88 + 0x10];
+        static uint64_t pending[8], frame[16], context[0xB3A0 / 8];
+        const uint64_t tableAt = (uint64_t)(uintptr_t)table;
+        const PostFn post = (PostFn)fake_host_detour(ACTIVITY_POST);
+        const uint8_t* wait = Cave(ACTIVITY_WAIT2, 5);
+        const uint8_t* made = Cave(ACTIVITY_MADE2, 6);
+        const uint8_t* key = Cave(ANSWER_B, 8);
+        const uint8_t* zero = Cave(ANSWER_B_ZERO, 8);
+        const uint8_t* drop[2] = {Cave(DROP_WORLD, 6), Cave(DROP_TABLE, 6)};
+        const StoreFn store = (StoreFn)(uintptr_t)(g_fake.image + ENTER + 0x180u);
+        const MadeFn count = (MadeFn)(uintptr_t)(g_fake.image + ENTER + 0x60u);
+        const AnswerFn run = (AnswerFn)(uintptr_t)(g_fake.image + ENTER + 0x120u);
+        const MadeFn dropped = (MadeFn)(uintptr_t)(g_fake.image + ENTER + 0x1A0u);
+        CHECK(post != NULL && wait != NULL && made != NULL && key != NULL && zero != NULL && drop[0] != NULL && drop[1] != NULL);
+        if (post != NULL && wait != NULL && made != NULL && key != NULL && zero != NULL && drop[0] != NULL && drop[1] != NULL)
+        {
+            Landing(ENTER + 0x180u, kEnterWait, sizeof kEnterWait);
+            Landing(0x12E67B6u, kStoredRbp, sizeof kStoredRbp);
+            Landing(0x12E67BEu, kSkippedRbp, sizeof kSkippedRbp);
+            Landing(ENTER + 0x60u, kMade, sizeof kMade);
+            Landing(0x12E6834u, kCounted, sizeof kCounted);
+            Landing(ENTER + 0x120u, kEnterR10, sizeof kEnterR10);
+            Landing(0x12E6B8Au, kNext, sizeof kNext);
+            Landing(0x12E6B5Fu, kPost, sizeof kPost);
+            Landing(0x12E6B28u, kScanEdx, sizeof kScanEdx);
+            Landing(ENTER + 0x1A0u, kEnterDrop, sizeof kEnterDrop);
+            Landing(0x13F865Du, kDroppedRdi, sizeof kDroppedRdi);
+            Landing(0x12E64FDu, kDroppedRdi, sizeof kDroppedRdi);
+            memset(table, 0, sizeof table);
+            memcpy(g_fake.image + ACTIVITY_TABLE, &tableAt, 8);
+            co_counts_test_post_original(Capture);
+            /* 1 to 8 players; the game's loop leaves the local peer out, so the cave sees the others */
+            for (uint32_t players = 1; players <= 8; players++)
+            {
+                const uint32_t others = players - 1, kept = others < 3 ? others : 3u, further = others - kept;
+                const uint64_t name = 0x4D00u + players;
+                uint8_t* record = table + others * 0x88u;
+                uint64_t ids[8];
+                uint32_t place = 0, left = kept, posts = 0, last = 0;
+                for (uint32_t i = 0; i < others; i++) ids[i] = 0x7600u + players * 0x10u + i;
+                for (uint32_t i = 0; i < 7; i++) co_counts_test_participant((uintptr_t)frame + 0x68u, (uintptr_t)context, i < 4 ? i : 4u, 0x7700u + i);
+                memset(pending, 0, sizeof pending);
+                for (uint32_t i = 0; i < others; i++)
+                {
+                    const uint32_t stored = store((uint8_t*)pending + 0x41, place, ids[i], wait);
+                    CHECK(stored == (place < 3));
+                    place += stored;
+                }
+                CHECK(place == kept && memcmp(pending, ids, kept * 8u) == 0 && pending[3] == 0);
+                /* the record as the maker writes it: the caller's four participants, the peers' list, state 1 */
+                memset(record, 0, 0x88);
+                *(uint64_t*)record = name;
+                *(uint32_t*)(record + 0x10) = kept;
+                memcpy(record + 0x18, pending, kept * 8u);
+                for (uint32_t i = 0; i < 4; i++) *(uint64_t*)(record + 0x50 + i * 8u) = 0x7800u + i;
+                *(uint32_t*)(record + 0x70) = 4;
+                *(uint32_t*)(record + 0x80) = 1;
+                *(uint32_t*)(table + 0x1100) = others;
+                CHECK(count(table, others * 0x88u, made) == players);
+                CHECK(co_counts_test_waiting(name) == (further != 0 ? (int)further : -1));
+                /* every peer answers once, the game's list first (odd counts) or the further peers first: the game's
+                 * count tests stay on "pending" while one is left, and only the last answer posts */
+                for (uint32_t i = 0; i < others; i++)
+                {
+                    const uint32_t at = players % 2 ? i : (i + kept) % others;
+                    uint32_t got;
+                    if (at < kept)
+                    {
+                        /* the count's first test sends it to the scan, which takes the peer off the game's list */
+                        CHECK(run(record, ids[at], left, key) == 0x300u + left);
+                        *(uint32_t*)(record + 0x10) = --left;
+                        got = run(record, ids[at], left, zero);
+                    }
+                    else got = run(record, ids[at], left, key);
+                    CHECK(got == 0x100u || got == 0x200u || got == 0x300u + left);
+                    posts += got == 0x200u;
+                    last = got == 0x200u;
+                }
+                CHECK(left == 0 && (others == 0 || (posts == 1 && last)) && co_counts_test_waiting(name) == -1);
+                g_postedCount = 0;
+                post(0, 1, 2, (const uint64_t*)(record + 0x50), 4);
+                CHECK(g_postedCount == 4 && g_posted[3] == 0x7803u);
+            }
+            /* the time-out's two inlined drops free a record's lists as 0x12E69D0's does */
+            for (int d = 0; d < 2; d++)
+            {
+                uint8_t* record = table + 8 * 0x88u;
+                const uint64_t name = 0x4E00u + (uint32_t)d;
+                for (uint32_t i = 0; i < 7; i++) co_counts_test_participant((uintptr_t)frame + 0x68u, (uintptr_t)context, i < 4 ? i : 4u, 0x7900u + i);
+                for (uint32_t i = 0; i < 7; i++) store((uint8_t*)pending + 0x41, i < 3 ? i : 3u, 0x7A00u + i, wait);
+                memset(record, 0, 0x88);
+                *(uint64_t*)record = name;
+                *(uint32_t*)(record + 0x70) = 4;
+                *(uint32_t*)(record + 0x80) = 2;
+                *(uint32_t*)(table + 0x1100) = 9;
+                co_counts_test_record((uintptr_t)table, 8 * 0x88u);
+                CHECK(co_counts_test_waiting(name) == 4);
+                CHECK(dropped(record, 9, drop[d]) == 8u && co_counts_test_waiting(name) == -1);
+                post(0, 1, 2, (const uint64_t*)(record + 0x50), 4);
+                CHECK(g_postedCount == 4);
+            }
+        }
+        co_counts_test_post_original(NULL);
+    }
+    {
         /* Run: the record waits for the answers of the non-local peers 4 to 7 as for its own three. Eight ready peers,
          * the local one first: the record's list gets three, the mod's list the other four. An answer takes its peer
          * off either list; the game's count tests stay on "pending" (0x100) while the mod's list is not empty, the
@@ -1187,7 +1314,7 @@ int main(void)
         static char line[128];
         snprintf(line, sizeof line, "session: an Activity record lists every participant and waits for each one's answer (%u code sites changed)",
                  co_counts_test_activity_sites());
-        CHECK(co_counts_test_activity() == 1 && co_counts_test_activity_sites() == 8u && fake_host_logged(line));
+        CHECK(co_counts_test_activity() == 1 && co_counts_test_activity_sites() == 11u && fake_host_logged(line));
         CHECK(post != NULL && wait != NULL && drop != NULL && Cave(ACTIVITY_MADE, 6) != NULL);
         for (int i = 0; i < 3; i++) CHECK(key[i] != NULL && zero[i] != NULL);
         if (post != NULL && wait != NULL && drop != NULL && key[0] && key[1] && key[2] && zero[0] && zero[1] && zero[2])
@@ -1497,7 +1624,8 @@ int main(void)
             CHECK(fake_host_logged(line) == concern);
             if (concern) CHECK(g_fake.writes == moves && Cave(LOOT_INDEX, 8) == NULL && g_fake.image[RESULT_GATE + 2] == 3);
         }
-        const uint32_t kWrites[] = {LOOT_INDEX, LOOT_RESULT, ACTIVITY, ACTIVITY_WAIT, 0x12E67B1u, ACTIVITY_MADE, ANSWER_A, ANSWER_C_ZERO, ACTIVITY_DROP,
+        const uint32_t kWrites[] = {LOOT_INDEX, LOOT_RESULT, ACTIVITY, ACTIVITY_WAIT, ACTIVITY_WAIT2, ACTIVITY_MADE, ANSWER_A, ANSWER_C_ZERO, ACTIVITY_DROP,
+                                    ACTIVITY_MADE2, DROP_WORLD, DROP_TABLE,
                                     RESULT_GATE, CLAN_RECORD, CLAN_OWN, CLAN_ROW_AGAIN, SUMMARY_GUARD};
         for (size_t i = 0; i < sizeof kWrites / sizeof kWrites[0]; i++)
         {
@@ -1648,11 +1776,13 @@ int main(void)
     /* The Activity record's further participants and answers need the post's hook: other code there, a failed hook or
      * a changed site of theirs leaves them out. The rest goes in, the record's and the clan guards too; the record keeps
      * four participants and three peers to wait for, and the log says why. */
-    for (int how = 0; how < 5; how++)
+    for (int how = 0; how < 8; how++)
     {
         static const char* const kHow[] = {"the post is other code", "the post cannot be hooked", "one changed Activity record count",
-                                           "one changed answer site", "one changed drop site"};
-        static const uint32_t kChanged[] = {0, 0, ACTIVITY_MADE + 2, ANSWER_B_ZERO + 5, ACTIVITY_DROP + 1};
+                                           "one changed answer site", "one changed drop site", "one changed second record count",
+                                           "one changed world update drop", "one changed table update drop"};
+        static const uint32_t kSite[] = {0, 0, ACTIVITY_MADE, ANSWER_B_ZERO, ACTIVITY_DROP, ACTIVITY_MADE2, DROP_WORLD, DROP_TABLE};
+        static const uint32_t kChanged[] = {0, 0, ACTIVITY_MADE + 2, ANSWER_B_ZERO + 5, ACTIVITY_DROP + 1, ACTIVITY_MADE2 + 2, DROP_WORLD + 4, DROP_TABLE + 5};
         static char line[160];
         Start(kHow[how]);
         co_counts_test_reset();
@@ -1677,12 +1807,13 @@ int main(void)
                      how == 0 ? "is not the code the mod was made for (a game update or another mod)" : "could not be hooked");
         else
             snprintf(line, sizeof line, "session: the code at game+0x%X is not the reviewed one; Activity records list and wait for four players",
-                     how == 2 ? ACTIVITY_MADE : how == 3 ? ANSWER_B_ZERO : ACTIVITY_DROP);
+                     kSite[how]);
         CHECK(fake_host_logged(line));
         CHECK(Cave(CLAN_PAIR, 5) != NULL && Cave(CLAN_ROW, 5) != NULL && g_fake.image[CLAN_OWN + 2] == 4 && Cave(LOOT_INDEX, 8) != NULL);
-        CHECK(Cave(ACTIVITY, 5) != NULL && Cave(ACTIVITY_WAIT, 5) != NULL && Cave(0x12E67B1u, 5) != NULL);
+        CHECK(Cave(ACTIVITY, 5) != NULL && Cave(ACTIVITY_WAIT, 5) != NULL && Cave(ACTIVITY_WAIT2, 5) != NULL);
         CHECK(g_fake.image[ACTIVITY_MADE] == 0xFF && g_fake.image[ANSWER_A] == 0x44 && g_fake.image[ANSWER_B] == 0x41 && g_fake.image[ANSWER_C_ZERO] == 0x45 &&
-              g_fake.image[ACTIVITY_DROP] == 0x8D);
+              g_fake.image[ACTIVITY_DROP] == 0x8D && g_fake.image[ACTIVITY_MADE2] == 0xFF && g_fake.image[DROP_WORLD] == 0x8D &&
+              g_fake.image[DROP_TABLE] == 0x8D);
         {
             /* the record's lists stay at their room and nothing waits in the mod's memory */
             static const uint8_t kEnterWait[] = {0x55, 0x48, 0x89, 0xCD, 0x89, 0xD0, 0x4C, 0x89, 0xC1, 0x41, 0xFF, 0xE1};
@@ -1690,11 +1821,18 @@ int main(void)
             static uint8_t table[32 * 0x88 + 0x10];
             static uint64_t pending[8];
             const uint8_t* wait = Cave(ACTIVITY_WAIT, 5);
-            if (wait != NULL)
+            const uint8_t* wait2 = Cave(ACTIVITY_WAIT2, 5);
+            if (wait != NULL && wait2 != NULL)
             {
                 Landing(ENTER + 0x180u, kEnterWait, sizeof kEnterWait);
                 Landing(0xA56E96u, kStoredRbp, sizeof kStoredRbp);
                 Landing(0xA56E9Eu, kSkippedRbp, sizeof kSkippedRbp);
+                Landing(0x12E67B6u, kStoredRbp, sizeof kStoredRbp);
+                Landing(0x12E67BEu, kSkippedRbp, sizeof kSkippedRbp);
+                memset(pending, 0, sizeof pending);
+                for (uint32_t i = 0; i < 7; i++)
+                    CHECK(((StoreFn)(uintptr_t)(g_fake.image + ENTER + 0x180u))((uint8_t*)pending + 0x41, i < 3 ? i : 3u, 0x7600u + i, wait2) == (i < 3));
+                CHECK(pending[2] == 0x7602u && pending[3] == 0);
                 memset(pending, 0, sizeof pending);
                 for (uint32_t i = 0; i < 7; i++)
                     CHECK(((StoreFn)(uintptr_t)(g_fake.image + ENTER + 0x180u))((uint8_t*)pending + 0x18, i < 3 ? i : 3u, 0x7500u + i, wait) == (i < 3));
