@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "harness/fake_host.h"
+#include "harness/fake_stock.h"
 #include "xl/co_normal.h"
 #include "xl/co_pages.h"
 #include "xl/co_page_sites.h"
@@ -60,6 +61,7 @@ static void Start(const char* name)
     const float disk = 1022.0f / 1024.0f;
     memcpy(image + CO_RADII_SITE, jump, 7); memcpy(image + CO_RADII_SITE + 1, &to, 4);
     memcpy(image + STOCK, kStock, sizeof kStock); memcpy(image + STOCK + 48, &disk, 4);
+    fake_stock_chains(image, disk); /* its keyed generator steps, which the mod chains in front of */
     co_capacity_test_commit(CO_COMPLEX_COMMIT_MB);
     co_capacity_init();
     co_capacity_game((uintptr_t)image);
@@ -86,6 +88,10 @@ int main(void)
     const float other = 800.0f / 1024.0f;
     memcpy(g_fake.image + STOCK + 48, &other, 4);
     CHECK(co_capacity_poll(1) == 1 && !co_capacity_needs()->stock_stubs && fake_host_logged("larger-map steps"));
+    Start("a generator step of difficulty 11 is another");
+    g_fake.image[fake_stock_stub(4) + 9] ^= 1;
+    CHECK(co_capacity_poll(1) == 1 && !co_capacity_needs()->stock_stubs && !co_complex_on() && co_complex_start() == 0 && Untouched());
+    CHECK(Lines("complex operations are off") == 1 && fake_host_logged("larger-map steps are not the ones this mod was built for"));
     Start("no radii step");
     memset(g_fake.image + CO_RADII_SITE, 0x90, 7);
     CHECK(co_capacity_poll(1) == 1 && !co_capacity_needs()->stock_stubs && !co_complex_on());

@@ -47,6 +47,7 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
 | `living_world.c`, `living_world_intent.c` | The per-mission resets count missions (`g_lwMission`) instead of comparing level addresses. |
 | `difficulty_world.c` | Level init asks `co_generation_decision` where it asked for difficulty 11; the complex level's radii stub (`../co_normal.c`) goes in behind HellForge's. |
 | `living_world.c`, `difficulty_stream.c`, `difficulty_world_terrain.c` | `hellforge_lw_test` and `hellforge_research_stream_observer` are not exported. |
+| `difficulty_world.c` | The install ends with `../co_chain.c`: the mod's stubs in front of HellForge's keyed generator steps. |
 | `difficulty_world.c` | The HUD's three stubs come from `../co_normal.c`: each runs the game's own bytes unless the mission in play is complex, and the row state hook passes a normal mission through. |
 
 What the build does instead of an edit:

@@ -16,6 +16,7 @@
 #include "co_xl_standin.h"
 #include "co_pages.h"
 #include "co_normal.h"
+#include "co_chain.h"
 
 /* Seven of the copied files' functions were called from loader code that did not come along (the watch thread, the
  * ship's level change, the density rules of a later branch); they are unused until their callers are written. */

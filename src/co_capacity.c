@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include "co.h"
+#include "xl/co_chain.h"
 #include "xl/co_normal.h"
 #include "xl/co_pages.h"
 
@@ -92,7 +93,7 @@ static void Settle(void)
     const int capacity = n->capacity_call && n->regions && !n->live_load && n->capacity_granted && n->level_11 && n->moved;
     if (capacity && g_capacity.game != 0)
     {
-        n->stock_stubs = co_radii_check(g_capacity.game) == NULL;
+        n->stock_stubs = co_radii_check(g_capacity.game) == NULL && co_chain_check(g_capacity.game, NULL) == NULL;
         n->own_sites = (site = OwnSites(g_capacity.game)) == NULL;
         n->commit_free_mb = CommitFree();
         why = co_complex_refusal(n);

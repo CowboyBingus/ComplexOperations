@@ -6459,6 +6459,8 @@ static const char* InstallWorld(DifficultyInstall* d)
         }
     }
     else Note("difficulty: extra large maps: SpeedTree's cell bitmap clear is not the reviewed one; it is not guarded");
+    /* a complex level's generator constants, in front of HellForge's own steps (../co_chain.c), before a level can be one */
+    { const char* why = co_chain_install(game, (uintptr_t)g_genComplex); if (why != NULL) return why; }
     rel = DifficultyJumpRel(game + DIF_WORLD_SIZE_SITE, (uintptr_t)block); memcpy(jump + 1, &rel, 4);
     g_world.scale = scale;
     if (ApiWrite(game + DIF_WORLD_SIZE_SITE, jump, 9)) { g_world.scale = 1; return "the level's size could not be made larger"; }
