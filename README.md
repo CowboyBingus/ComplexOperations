@@ -163,7 +163,9 @@ A build for four leaves the screen and the table as the game has them and keeps 
 Limits that remain:
 
 - The text on the cards is half size too: small but legible at 1280 x 720.
-- The figures of cards 5 to 8 are not yet seen in a game.
+- Card 5's figure is seen in a game, on host and joiner. Cards 6 to 8 are not yet.
+- The figures of cards 5 to 8 carry no weathering and no wound decals: the game finds those by the record's number as
+  a player index, and their records are 8 to 11.
 
 ## Mission
 

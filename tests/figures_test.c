@@ -53,6 +53,7 @@ typedef void (*FrameFn)(void* f, void* frame, const void* target);
 typedef uint32_t (*ValueFn)(uint32_t value, const void* target);
 typedef void (*ReadFn)(void* unused, uint32_t* out, uint32_t equipment, uint32_t record);
 typedef const float* (*TableFn)(void);
+typedef uint32_t (*SlotFn)(void* frame, uint64_t slot, const void* target);
 
 static int g_failed;
 static const char* g_case;
@@ -68,6 +69,8 @@ static const uint8_t kLoop[] = {0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0x53, 0x48, 
                                 0x04, 0x4C, 0x8B, 0x73, 0x08, 0xFF, 0xD2, 0x44, 0x89, 0x3B, 0x44, 0x89, 0x63, 0x04, 0x4C, 0x89,
                                 0x73, 0x08, 0x89, 0x43, 0x10, 0x5B, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5C, 0xC3};
 static const uint8_t kFrame[] = {0x53, 0x55, 0x48, 0x89, 0xCB, 0x48, 0x89, 0xD5, 0x41, 0xFF, 0xD0, 0x5D, 0x5B, 0xC3};
+static const uint8_t kSlot[] = {0x55, 0x56, 0x48, 0x89, 0xCD, 0x48, 0x89, 0xD6, 0x41, 0xFF, 0xD0, 0x5E, 0x5D, 0xC3};
+static const uint8_t kSetne[] = {0x0F, 0x95, 0xC0, 0x0F, 0xB6, 0xC0, 0xC3};
 static const uint8_t kEbp[] = {0x55, 0x89, 0xCD, 0xFF, 0xD2, 0x5D, 0xC3};
 static const uint8_t kR13[] = {0x41, 0x55, 0x41, 0x89, 0xCD, 0x48, 0x81, 0xEC, 0x90, 0x00, 0x00, 0x00, 0xFF, 0xD2,
                                0x48, 0x81, 0xC4, 0x90, 0x00, 0x00, 0x00, 0x41, 0x5D, 0xC3};
@@ -199,6 +202,8 @@ int main(void)
             CHECK(co_counts_test_write_of(co_counts_test_figure_field(i, &at, &old)) == -1);
         }
         CHECK(Bytes(0x13995D4u, "4183ff08") && Bytes(0x18A1B94u, "488d0de5589400") && Bytes(0x13951A9u, "83fd047326"));
+        CHECK(Bytes(0x139884Du, "48c7855001000000000000") && Bytes(0x13988EEu, "80bc355001000000") &&
+              Bytes(0x1398926u, "c684355001000001") && Bytes(0x1398936u, "c684355001000000"));
         printf("%s\n", g_failed ? "figures: failures" : "figures: all cases passed");
         return g_failed != 0;
     }
@@ -239,7 +244,9 @@ int main(void)
      * cleared, the others and the old place stay. */
     {
         g_case = "the world destroys";
-        static const uint32_t kOfWorld[] = {1, 9, 11};
+        static const uint32_t kOfWorld[] = {1u << 1 | 1u << 9 | 1u << 11, 1u << 8, 1u << 9, 1u << 10, 1u << 11}; /* record masks */
+        uint8_t header[0x280]; /* the count, mask and ring behind the game's records: no destroy writes there */
+        memcpy(header, Ups() + RECORDS + OLD_SIZE, sizeof header);
         const uint64_t world = 0x5555, other = 0x77;
         static uint8_t object[0x4000];
         const DestroyFn destroy = (DestroyFn)Thunk(kDestroy, sizeof kDestroy);
@@ -250,20 +257,48 @@ int main(void)
         CHECK(Cave(0x138FFE9u, 6) != NULL && Cave(0x1394A2Du, 7) != NULL);
         Landing(0x138FFEFu, kRet, sizeof kRet);
         Landing(0x1394A34u, kRet, sizeof kRet);
-        for (int pass = 0; pass < 2 && destroy != NULL && byWorld != NULL; pass++)
+        for (int pass = 0; pass < 10 && destroy != NULL && byWorld != NULL; pass++)
         {
-            for (uint32_t k = 0; k < 12; k++) memcpy(records + k * STRIDE, &other, 8);
-            for (size_t j = 0; j < 3; j++) memcpy(records + kOfWorld[j] * STRIDE, &world, 8);
-            if (pass == 0) destroy(object, 0x1234, g_fake.image + 0x138FF5Bu);
+            const uint32_t ofWorld = kOfWorld[pass / 2];
+            for (uint32_t k = 0; k < 12; k++) memcpy(records + k * STRIDE, ofWorld >> k & 1u ? &world : &other, 8);
+            if (pass % 2 == 0) destroy(object, 0x1234, g_fake.image + 0x138FF5Bu);
             else byWorld(world, g_fake.image + 0x13949A0u);
             for (uint32_t k = 0; k < 12; k++)
             {
                 uint64_t value;
-                const int ofWorld = k == 1 || k == 9 || k == 11;
                 memcpy(&value, records + k * STRIDE, 8);
-                CHECK(value == (ofWorld ? (pass == 0 ? 0x1234u : 0u) : other));
+                CHECK(value == (ofWorld >> k & 1u ? (pass % 2 == 0 ? 0x1234u : 0u) : other));
             }
-            CHECK(memcmp(before, (const void*)old, OLD_SIZE) == 0);
+            CHECK(memcmp(before, (const void*)old, OLD_SIZE) == 0 && memcmp(header, Ups() + RECORDS + OLD_SIZE, sizeof header) == 0);
+        }
+    }
+
+    /* The update's slot flags: sixteen bytes at rbp+0x140, one per record slot, clear of the frame's next bytes (the
+     * game's eight at rbp+0x150 end at its stack cookie). */
+    {
+        g_case = "the update's slot flags";
+        const SlotFn at = (SlotFn)Thunk(kSlot, sizeof kSlot);
+        static uint8_t frame[0x180], want[0x180];
+        CHECK(Bytes(0x139884Du, "0f57c00f11854001000090") && Bytes(0x13988EEu, "80bc354001000000") &&
+              Bytes(0x1398926u, "c684354001000001") && Bytes(0x1398936u, "c684354001000000"));
+        Landing(0x1398858u, kRet, sizeof kRet);
+        Landing(0x13988F6u, kSetne, sizeof kSetne);
+        Landing(0x139892Eu, kRet, sizeof kRet);
+        Landing(0x139893Eu, kRet, sizeof kRet);
+        memset(frame, 0xAA, sizeof frame);
+        memset(want, 0xAA, sizeof want);
+        memset(want + 0x140, 0, 16);
+        if (at != NULL) at(frame, 0, g_fake.image + 0x139884Du);
+        CHECK(memcmp(frame, want, sizeof frame) == 0);
+        for (uint64_t slot = 0; slot < 12 && at != NULL; slot++)
+        {
+            CHECK(at(frame, slot, g_fake.image + 0x13988EEu) == 0);
+            at(frame, slot, g_fake.image + 0x1398926u);
+            want[0x140 + slot] = 1;
+            CHECK(memcmp(frame, want, sizeof frame) == 0 && at(frame, slot, g_fake.image + 0x13988EEu) == 1);
+            at(frame, slot, g_fake.image + 0x1398936u);
+            want[0x140 + slot] = 0;
+            CHECK(memcmp(frame, want, sizeof frame) == 0 && at(frame, slot, g_fake.image + 0x13988EEu) == 0);
         }
     }
 
@@ -371,6 +406,8 @@ int main(void)
         CHECK(((const uint8_t*)old)[2 * STRIDE] == mark && ((const uint8_t*)old)[3 * STRIDE - 1] == mark);
         CHECK(Bytes(0x13995D4u, "4183ff08") && Bytes(0x130417Cu, "3bb008c50000") && Bytes(0x13951A9u, "83fd047326"));
         CHECK(Bytes(0x18A1B94u, "488d0de5589400") && Bytes(0x139C2D1u, "4183ff040f8265fdffff"));
+        CHECK(Bytes(0x139884Du, "48c7855001000000000000") && Bytes(0x13988EEu, "80bc355001000000") &&
+              Bytes(0x1398926u, "c684355001000001") && Bytes(0x1398936u, "c684355001000000"));
     }
 
     /* A refusal leaves the figures out, says why once, and the rows they replace go in. */
@@ -393,7 +430,7 @@ int main(void)
             Init();
             CHECK(co_counts_test_on() == 1 && co_counts_test_refused() == 1u << G_FIGURES && fake_host_logged(kRefusals[i].line));
             CHECK(co_counts_test_figure_records() == 0 && co_counts_test_active(G_FIGURES4));
-            CHECK(Bytes(0x13995D4u, "4183ff08") && Bytes(0x18A1B94u, "488d0de5589400"));
+            CHECK(Bytes(0x13995D4u, "4183ff08") && Bytes(0x18A1B94u, "488d0de5589400") && Bytes(0x139884Du, "48c7855001000000000000"));
             /* The replaced rows: the figure slot's cave of the build for eight and the per-peer table's bound. */
             CHECK(Cave(0x18A1A60u, 6) != NULL && Bytes(0x13951A9u, "83fd087326"));
         }

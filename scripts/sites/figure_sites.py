@@ -380,7 +380,9 @@ def build(dump):
 # The game's code the tests run on the moved records: both world destroys from their load of UPS to the caves' way
 # back, the release loop's tail (inc, rol, add, then the cave) and 0x139C330, which reads equipment id r8d of record
 # r9d into [rdx] through a REL row with UPS as the base and the record in the index.
-TEST_CODE = [(0x138FF5B, 0x138FFEF), (0x13949A0, 0x1394A34), (0x139C2C4, 0x139C2DB), (0x139C330, 0x139C353)]
+TEST_CODE = [(0x138FF5B, 0x138FFEF), (0x13949A0, 0x1394A34), (0x139C2C4, 0x139C2DB), (0x139C330, 0x139C353),
+             # the update's slot flags: zeroed, read, set, cleared (rbp the frame, rsi the record slot)
+             (0x139884D, 0x1398858), (0x13988EE, 0x13988F6), (0x1398926, 0x139892E), (0x1398936, 0x139893E)]
 
 def test_header(dump):
     """tests/co_figure_code.h: the TEST_CODE ranges' bytes."""
