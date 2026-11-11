@@ -14,7 +14,7 @@ It runs on game build 25480438 only. On any other build it logs the reason and c
 | New pods | Four more launchers of the bridge's level become pods: hellpod5 to hellpod8. |
 | Launch | The launch cutscene fires pod n + 4 together with pod n. |
 | Briefing camera | Pods 5 to 8 get a briefing camera of their own. |
-| Player managers | Seven per-player component managers hold eight players instead of four (see below). |
+| Player managers | Seven per-player component managers hold eight players instead of four; a build for eight gives the avatar manager sixteen slots (see below). |
 
 The mod needs the bridge with the eight-pod bay: level data that places the four launchers (with the names
 hellpod5 to hellpod8), four briefing cameras and the bay's lamps. Without that data it leaves a normal ship with four
@@ -28,6 +28,11 @@ The game keeps one record for each player in seven managers: player, score, cust
 inventory, ship customization and ship modules. Each has four slots. The mod builds all seven in its own memory with
 eight slots and changes the 1,115 code sites that address them, the score manager's loot rows among them. 6 caves do
 the loot rows' code that the game wrote out for four rows (see Mission).
+
+A build for eight also moves the avatar manager from eight slots to sixteen. Players' bodies hold a slot too, so
+eight players and their bodies need more than eight. Its 2,700 code sites follow the same rules: 2,675 array offsets,
+20 distances from the component block, 4 capacity checks and 1 constant that folds a slot's start with an array. A
+build for four keeps the avatar manager as the game has it.
 
 This alone lets no fifth player join: the session's own lists still hold four. It is the base the later parts need.
 
@@ -150,7 +155,6 @@ Limits that remain:
 - The mission result's loot rows hold score slots 1 to 4 only.
 - With five to eight players the Activity record waits for the answers of three other players. The others are paid
   without it.
-- The avatar manager's eight places, which dead players' bodies may also hold, are not covered yet.
 - The summary's cards 5 to 8 use the game's layout for four (a layout mode, not a count): where they appear on screen
   is not known.
 - The summary's list of best entries keeps four.
@@ -268,9 +272,9 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `src/co_mod.c` | The entry point: the build check and the game-loaded event. |
 | `src/co_pods.c` | The eight pods: memory, code sites, hooks. |
 | `src/co_pod_sites.h` | The code sites that address the manager and the pod table. Generated; do not edit. |
-| `src/co_managers.c` | The seven player managers: memory, code sites and the loot rows' caves. |
+| `src/co_managers.c` | The seven player managers and, in a build for eight, the avatar manager: memory, code sites and the loot rows' caves. |
 | `src/co_manager_sites.h` | Their code sites and caves. Generated; do not edit. |
-| `scripts/sites/` | The reviewed site lists of the seven managers. |
+| `scripts/sites/` | The reviewed site lists of the seven managers and the avatar manager. |
 | `scripts/gen_manager_sites.py` | Writes `co_manager_sites.h` from those lists and a dump of the game's code; assembles the loot rows' caves with GNU `as`. |
 | `hellforge-recipe.json`, `.literals` | The bay's level, geometry and collision data as a HellForge recipe. |
 | `scripts/pod_sites.tsv` | The reviewed site list of the pod manager: one row for each instruction. |
@@ -281,6 +285,7 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `src/co_session_sites.h` | Their code sites. Generated; do not edit. |
 | `scripts/gen_session_sites.py` | Writes `co_session_sites.h` from the site list and a dump of the game's code. Holds the lobby's member lists' sites; assembles their stubs with GNU `as`. |
 | `tests/managers_test.c` | The same refusals for the player managers, the loot rows' sites and caves among them. Runs the caves. |
+| `tests/avatars_test.c` | The avatar manager in each build: its sites with a state and a second one, refusal on changed code and rollback of a failed write. |
 | `tests/session_test.c` | The same for the session lists, and that sites and stubs lead to the new place. Runs the lobby copies' stubs. |
 | `src/co_counts.c` | The session lists' counts: sites, code caves, the hooks for entries 4 to 7. The guards, the loot rows' guards and the Activity record's participants too. |
 | `src/co_count_sites.h` | Their code sites and the caves' code. Generated; do not edit. |
@@ -323,6 +328,7 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 |---|---|
 | `the pod manager and the ship's pod table have 8 slots` | The code is in place. |
 | `7 component managers have 8 slots` | The player managers are in place. |
+| `the avatar manager has 16 slots for players and their bodies` | A build for eight players: the avatar manager moved with them. |
 | `10 arrays of the session lists and the lobby's member lists moved` | Those arrays are in the mod's memory. |
 | `the session lists count to eight` | The lists' code counts to eight; the line says how many players get in. |
 | `... guards keep the lists in messages inside the game's buffers` | The message guards are in place. |

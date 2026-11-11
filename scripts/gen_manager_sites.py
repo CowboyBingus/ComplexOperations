@@ -3,10 +3,11 @@
 # reviewed lists in scripts/sites/ and a dump of the game's code:
 #   scripts/gen_manager_sites.py <game.dll image dump> [out]
 # A manager is a struct inside the game's component block with four slots and the next manager right behind it. The
-# mod builds each one in its own memory with eight slots. Four kinds of site:
+# mod builds each one in its own memory with eight slots; the avatar manager (eight slots, players' bodies too) with
+# sixteen, in a build for eight players only (SLOTS, EIGHT_ONLY). Four kinds of site:
 #   BLOCK  reaches the manager from the block (block + displacement): gets the distance to the new struct
 #   ARRAY  reaches a per-slot array that eight slots of its neighbour would overrun: the array has a new offset
-#   CAP    the capacity check `cmp eax,4`, or another four in a loop over a moved array
+#   CAP    the capacity check `cmp eax,4` (the avatar's `cmp eax,8`), or another four in a loop over a moved array
 #   CODE   four bytes of code replaced
 # and caves: code the game wrote out for four rows of a moved array, done for eight in code of the mod's (CAVES).
 # Every row is checked against the dump here, and again by the mod against the running game before it writes.
@@ -22,9 +23,21 @@ MANAGERS = {
     'ship_customization': (0x33267B8, 0x3CA0,   0x2B8,   0x620,   [(0x90, 0x98, 0x398), (0x98, 0x1D8, 0x3A0)]),
     'ship_modules_sync':  (0x3326998, 0x4148,   0x267E8, 0x73548, [(0x88, 0x26528, 0x26948), (0x26528, 0x26688, 0x73288)]),
     'player':             (0x3326468, 0xEA0818, 0x428,   0x9E8,   [(0x108, 0x2C8, 0x4A8), (0x2C8, 0x3A8, 0x828)]),
+    # A0 (slot pointers at +0x110) grows in place into A1's old room; A1..A4 and pool C move behind the old end, each at
+    # its old offset modulo 16. A1's distance is a multiple of 32 (FOLD below).
+    'avatar':             (0x3326D20, 0x956128, 0x5497C8, 0xFDC258, [(0x150, 0x53D8B0, 0x5497D0), (0x53D8B0, 0x546A70, 0xFC4690),
+                                                                   (0x546A70, 0x547830, 0xFD6A10), (0x547830, 0x547BF0, 0xFD8590),
+                                                                   (0x547D24, 0x5497C4, 0xFD8D14)]),
 }
-# Sites the lists miss, found later: (manager, rva, offset of the disp32, old value)
-EXTRA = [('player', 0xACC65B, 3, 0x2C8)]
+# Slots before and after (CAP checks the first and writes the second); four and eight unless named here.
+SLOTS = {'avatar': (8, 16)}
+# Managers only a build for eight players moves; a build for four leaves them as the game has them.
+EIGHT_ONLY = {'avatar'}
+# Sites the lists miss, found later: (manager, rva, offset of the disp32, old value[, what it adds])
+# The avatar's FOLD at 0xA4F4FD: add r9,0xE6; shl r9,5 reaches A1 + 0x1B70 of a slot (0xE6 x 32 = 0x150 + 0x1B70) with
+# no array offset of its own, so it adds A1's distance divided by 32.
+EXTRA = [('player', 0xACC65B, 3, 0x2C8), ('avatar', 0xA4F4FD, 3, 0xE6, (0x5497D0 - 0x150) // 32)]
+assert (0x5497D0 - 0x150) % 32 == 0
 # More site lists of a manager. Score's loot tables (four rows of 0x18 by score slot at +0xC440, four by player index at
 # +0xC4A0) move behind the manager, so that eight rows of each fit.
 LISTS = {'score': ['patch_sites_score.tsv', 'patch_sites_score_loot.tsv']}
@@ -70,6 +83,7 @@ def assemble(text):
 # (another object, or the manager itself, which patch_sites covers), except at the sites of BLOCK_ONLY.
 NOT_BLOCK = {('ship_modules_sync', 'fn 0x569490'), ('ship_modules_sync', 'fn 0x571250'), ('ship_modules_sync', 'fn 0xbc2d30')}
 BLOCK_ONLY = {0x57142E, 0xBD13E7}
+CLASSB = ['classb_final.tsv', 'classb_avatar.tsv']
 # Block sites the list misses: the statistics reset at 0x56FFF0 reaches the block through a second global.
 EXTRA_BLOCK = [('ship_customization', 0x57009B, 4), ('ship_modules_sync', 0x5700C5, 0), ('kill_streak', 0x5700D1, 0)]
 only = None
@@ -92,10 +106,11 @@ for mi, m in enumerate(names):
         old = struct.unpack_from('<I', raw, at)[0]; assert dump[rva:rva + len(raw)] == raw, (m, hex(rva))
         assert old == int(c[4], 16) and delta(m, old) is not None, (m, line)
         rows.append((rva, at, old, mi, delta(m, old), 'CO_MGR_ARRAY'))
-    for em, rva, at, old in EXTRA:
+    for em, rva, at, old, *add in EXTRA:
         if em == m:
-            assert struct.unpack_from('<I', dump, rva + at)[0] == old and delta(m, old) is not None; rows.append((rva, at, old, mi, delta(m, old), 'CO_MGR_ARRAY'))
-    for line in open(HERE + 'classb_final.tsv').read().splitlines():
+            assert struct.unpack_from('<I', dump, rva + at)[0] == old and (add or delta(m, old) is not None)
+            rows.append((rva, at, old, mi, add[0] if add else delta(m, old), 'CO_MGR_ARRAY'))
+    for line in [l for f in CLASSB for l in open(HERE + f).read().splitlines()]:
         c = line.split('\t')
         if c[0] != m or (m, c[3]) in NOT_BLOCK and int(c[2], 16) not in BLOCK_ONLY: continue
         rva, field = int(c[2], 16), int(c[1], 16); want = struct.pack('<I', off + field)
@@ -110,7 +125,8 @@ for mi, m in enumerate(names):
     for line in open(HERE + 'cap_sites.tsv').read().splitlines()[1:]:
         c = line.split('\t')
         if c[0] != m: continue
-        rva = int(c[3], 16); assert dump[rva:rva + 3] == bytes([0x83, 0xF8, 0x04]), hex(rva); rows.append((rva, 2, 4, mi, 0, 'CO_MGR_CAP')); caps += 1
+        old = SLOTS.get(m, (4, 8))[0]
+        rva = int(c[3], 16); assert dump[rva:rva + 3] == bytes([0x83, 0xF8, old]), hex(rva); rows.append((rva, 2, old, mi, 0, 'CO_MGR_CAP')); caps += 1
     assert caps == 4, (m, caps)
     for em, rva, raw, at in LOOPS:
         raw = bytes.fromhex(raw)
@@ -149,9 +165,9 @@ for r in dup: print('DUP %x at %d old %x %s add %x %s' % (r[0], r[1], r[2], name
 assert not dup, 'a site is listed twice'
 out = ['/* Generated by scripts/gen_manager_sites.py from scripts/sites/; do not edit. Game build 25480438. */',
        '#ifndef CO_MANAGER_SITES_H', '#define CO_MANAGER_SITES_H', '',
-       '/* {name, the global that holds it, offset in the block, size, new size} */',
+       '/* {name, the global that holds it, offset in the block, size, new size, slots, the build that moves it (players)} */',
        'static const CoManager kCoManagers[] = {']
-out += ['    {"%s", 0x%Xu, 0x%Xu, 0x%Xu, 0x%Xu},' % (m, *MANAGERS[m][:4]) for m in names]
+out += ['    {"%s", 0x%Xu, 0x%Xu, 0x%Xu, 0x%Xu, %d, %d},' % (m, *MANAGERS[m][:4], SLOTS.get(m, (4, 8))[1], 8 if m in EIGHT_ONLY else 4) for m in names]
 out += ['};', '', '/* {rva, offset of the value in the instruction, its vanilla value, manager, what the new array offset adds,',
         ' * kind, the instruction bytes before the value} */', 'static const CoManagerSite kCoManagerSites[] = {']
 for rva, at, old, mi, add, kind in sorted(rows):

@@ -5,14 +5,22 @@
  * that reach a manager from the block get the distance to the new struct, the arrays that eight slots of a neighbour
  * would overrun get a new offset behind the old end, and the capacity checks say 8. Everything else finds the manager
  * through the global the game's own code binds, so it follows without a change. Code the game wrote out for four rows of
- * a moved array goes to a cave beside the game's code that does all eight, written and undone with the rest. */
+ * a moved array goes to a cave beside the game's code that does all eight, written and undone with the rest.
+ * A build for eight also moves the avatar manager the same way, from eight slots to sixteen: players' bodies hold a
+ * slot too, so eight players need more than eight. */
 #include <string.h>
 #include <windows.h>
 
 #include "co.h"
 
 typedef enum CoManagerKind { CO_MGR_BLOCK, CO_MGR_ARRAY, CO_MGR_CAP, CO_MGR_CODE } CoManagerKind;
-typedef struct CoManager { const char* name; uint32_t global, offset, size, newSize; } CoManager;
+typedef struct CoManager
+{
+    const char* name;
+    uint32_t global, offset, size, newSize;
+    uint8_t slots;    /* what the capacity checks say once it has moved */
+    uint8_t players;  /* the smallest build (CO_PLAYERS) that moves it */
+} CoManager;
 typedef struct CoManagerSite
 {
     uint32_t rva;
@@ -35,7 +43,6 @@ typedef struct CoManagerCave
 #define CO_MANAGERS (sizeof kCoManagers / sizeof kCoManagers[0])
 #define CO_MANAGER_SITES (sizeof kCoManagerSites / sizeof kCoManagerSites[0])
 #define CO_MANAGER_CAVES (sizeof kCoManagerCaves / sizeof kCoManagerCaves[0])
-#define CO_MANAGER_SLOTS 8u
 /* A cave's room: its code and the jump back. */
 #define CO_MGR_CAVE_ROOM 0x50u
 _Static_assert(CO_MANAGER_CAVES * CO_MGR_CAVE_ROOM <= 0x1000u, "the caves must fit their page");
@@ -46,11 +53,12 @@ static uint32_t g_place[CO_MANAGERS];
 static int g_state; /* 0 not moved, 1 eight slots, -1 left as the game has it */
 
 static size_t SiteSize(const CoManagerSite* s) { return s->kind == CO_MGR_CAP ? 1u : 4u; }
+static int Active(const CoManagerSite* s) { return kCoManagers[s->manager].players <= CO_PLAYERS; }
 
 /* 0 when the new struct is too far from the block for the instruction. */
 static int SiteValue(const CoManagerSite* s, uint32_t* value)
 {
-    if (s->kind == CO_MGR_CAP) { *value = CO_MANAGER_SLOTS; return 1; }
+    if (s->kind == CO_MGR_CAP) { *value = kCoManagers[s->manager].slots; return 1; }
     if (s->kind == CO_MGR_ARRAY) { *value = s->old + (uint32_t)s->add; return 1; }
     if (s->kind == CO_MGR_CODE) { *value = (uint32_t)s->add; return 1; }
     const CoManager* m = &kCoManagers[s->manager];
@@ -64,7 +72,8 @@ static void Undo(size_t sites, size_t caves)
 {
     for (size_t j = 0; j < caves; j++) g_coApi->write(g_game + kCoManagerCaves[j].rva, kCoManagerCaves[j].replaced, kCoManagerCaves[j].size);
     for (size_t j = 0; j < sites; j++)
-        g_coApi->write(g_game + kCoManagerSites[j].rva + kCoManagerSites[j].at, &kCoManagerSites[j].old, SiteSize(&kCoManagerSites[j]));
+        if (Active(&kCoManagerSites[j]))
+            g_coApi->write(g_game + kCoManagerSites[j].rva + kCoManagerSites[j].at, &kCoManagerSites[j].old, SiteSize(&kCoManagerSites[j]));
 }
 
 static void Release(void)
@@ -112,6 +121,7 @@ static void Move(uintptr_t block)
     {
         const CoManagerSite* s = &kCoManagerSites[i];
         uint8_t bytes[12];
+        if (!Active(s)) continue;
         if (g_coApi->read(g_game + s->rva, bytes, s->at + SiteSize(s)) != 0 || memcmp(bytes, s->pin, s->at) != 0 ||
             memcmp(bytes + s->at, &s->old, SiteSize(s)) != 0)
         {
@@ -130,7 +140,8 @@ static void Move(uintptr_t block)
         }
     }
     g_used = 0;
-    for (size_t i = 0; i < CO_MANAGERS; i++) { g_place[i] = (uint32_t)g_used; g_used += (kCoManagers[i].newSize + 0xFFFu) & ~(size_t)0xFFFu; }
+    for (size_t i = 0; i < CO_MANAGERS; i++)
+        if (kCoManagers[i].players <= CO_PLAYERS) { g_place[i] = (uint32_t)g_used; g_used += (kCoManagers[i].newSize + 0xFFFu) & ~(size_t)0xFFFu; }
     g_memory = co_alloc_near(block, g_used);
     if (g_memory == 0) { co_log("players: no free memory within 2 GB of the entity state; four player slots as before"); return; }
     g_caves = co_alloc_near(g_game + 0x1000000u, 0x1000u);
@@ -141,6 +152,7 @@ static void Move(uintptr_t block)
     {
         const CoManagerSite* s = &kCoManagerSites[i];
         uint32_t value;
+        if (!Active(s)) continue;
         /* The game cannot run on a mix: the sites written so far go back. */
         if (!SiteValue(s, &value) || g_coApi->write(g_game + s->rva + s->at, &value, SiteSize(s)) != 0)
         {
@@ -160,8 +172,18 @@ static void Move(uintptr_t block)
             return;
         }
     g_state = 1;
-    co_log("players: %u component managers have %u slots (%u code sites changed)", (unsigned)CO_MANAGERS, CO_MANAGER_SLOTS,
-           (unsigned)CO_MANAGER_SITES);
+    {
+        unsigned managers = 0, sites = 0, avatars = 0;
+        for (size_t i = 0; i < CO_MANAGERS; i++) managers += kCoManagers[i].slots == 8u;
+        for (size_t i = 0; i < CO_MANAGER_SITES; i++)
+        {
+            if (!Active(&kCoManagerSites[i])) continue;
+            if (kCoManagers[kCoManagerSites[i].manager].slots == 8u) sites++;
+            else avatars++;
+        }
+        co_log("players: %u component managers have 8 slots (%u code sites changed)", managers, sites);
+        if (avatars != 0) co_log("players: the avatar manager has 16 slots for players and their bodies (%u code sites changed)", avatars);
+    }
     co_log("players: the score manager's loot rows are cleared and added for eight rows (%u caves)", (unsigned)CO_MANAGER_CAVES);
 }
 
@@ -178,6 +200,7 @@ void co_managers_canary(int fill)
     for (size_t i = 0; i < CO_MANAGERS; i++)
     {
         uint8_t* old = (uint8_t*)(g_block + kCoManagers[i].offset);
+        if (kCoManagers[i].players > CO_PLAYERS) continue;
         if (fill) { memset(old, 0xC5, kCoManagers[i].size); g_told[i] = 0; continue; }
         for (uint32_t at = 0; at < kCoManagers[i].size && !g_told[i]; at++)
             if (old[at] != 0xC5)
@@ -232,7 +255,20 @@ void co_managers_test_reset(void)
 int co_managers_test_state(void) { return g_state; }
 uintptr_t co_managers_test_memory(void) { return g_memory; }
 uintptr_t co_managers_test_place(unsigned i) { return g_memory + g_place[i]; }
-unsigned co_managers_test_sites(void) { return (unsigned)CO_MANAGER_SITES; }
+/* The sites this build writes. */
+unsigned co_managers_test_sites(void)
+{
+    unsigned n = 0;
+    for (size_t i = 0; i < CO_MANAGER_SITES; i++) n += Active(&kCoManagerSites[i]);
+    return n;
+}
+/* The manager's number by name; -1 when this build does not move it. */
+int co_managers_test_index(const char* name)
+{
+    for (size_t i = 0; i < CO_MANAGERS; i++)
+        if (strcmp(kCoManagers[i].name, name) == 0) return kCoManagers[i].players <= CO_PLAYERS ? (int)i : -1;
+    return -1;
+}
 /* Sets the state the other steps see, without memory: for their tests only. */
 void co_managers_test_force(int state) { g_state = state; }
 unsigned co_managers_test_caves(void) { return (unsigned)CO_MANAGER_CAVES; }
@@ -240,10 +276,15 @@ uintptr_t co_managers_test_cave_room(void) { return g_caves; }
 /* The number of the write that changes the site or cave at rva; -1 for none. */
 int co_managers_test_write_of(uint32_t rva)
 {
+    int n = 0;
     for (size_t i = 0; i < CO_MANAGER_SITES; i++)
-        if (kCoManagerSites[i].rva == rva) return (int)i;
+    {
+        if (!Active(&kCoManagerSites[i])) continue;
+        if (kCoManagerSites[i].rva == rva) return n;
+        n++;
+    }
     for (size_t i = 0; i < CO_MANAGER_CAVES; i++)
-        if (kCoManagerCaves[i].rva == rva) return (int)(CO_MANAGER_SITES + i);
+        if (kCoManagerCaves[i].rva == rva) return n + (int)i;
     return -1;
 }
 #endif
