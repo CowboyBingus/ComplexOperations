@@ -177,6 +177,15 @@ int main(void)
     image[CO_NAV_SHIP_SITE] = 0xE8;
     CHECK(!co_nav_plain((uintptr_t)image) && co_nav_install((uintptr_t)image) != NULL && g_fake.writes == 0);
 
+    g_case = "the pages near the exe come from the space taken at the start";
+    {
+        const uintptr_t exe = (uintptr_t)g_fake.exe;
+        CHECK(co_near_exe_reserve(0, 0) == 0 && co_near_exe_reserve(exe, FAKE_EXE_SIZE) == 1 && co_near_exe_reserve(exe, FAKE_EXE_SIZE) == 1);
+        const uintptr_t a = co_alloc_near(exe + 0x1000u, 0x1000), b = co_alloc_near(exe + FAKE_EXE_SIZE - 1u, 0x2000);
+        CHECK(a != 0 && b == a + 0x1000u && *(volatile uint8_t*)b == 0); /* committed, one after the other */
+        const uintptr_t other = co_alloc_near((uintptr_t)g_fake.image, 0x1000); /* not the exe: searched as before */
+        CHECK(other != 0 && (other < a || other >= a + 0x100000u));
+    }
     if (g_failed) { printf("early: %d checks failed\n", g_failed); return 1; }
     printf("early: all cases passed\n");
     return 0;

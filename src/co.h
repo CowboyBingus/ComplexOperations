@@ -26,6 +26,10 @@ void co_pods_install(uintptr_t game);
 uintptr_t co_alloc_near(uintptr_t target, size_t size);
 /* The same with the allocation type given: MEM_RESERVE alone takes the address space only. */
 uintptr_t co_alloc_near_as(uintptr_t target, size_t size, uint32_t type);
+/* Reserves the space every page within reach of helldivers2.exe comes from: taken as the mod starts, since the game's
+ * heaps fill what lies near the exe before the complex part installs. co_alloc_near_as then answers a target inside
+ * the exe's image with committed pages from it, while it has room. 0 when the space could not be had. */
+int co_near_exe_reserve(uintptr_t exe, size_t image);
 
 /* Eight slots in the per-player component managers (co_managers.c). `install` once with game.dll's base; `state` in
  * the state constructor's hook with the component block, before the game's constructor runs. */

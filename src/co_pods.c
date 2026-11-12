@@ -117,8 +117,40 @@ static int g_state; /* 0 waiting for the constructor, 1 eight slots, -1 left as 
 
 uintptr_t co_alloc_near(uintptr_t target, size_t size) { return co_alloc_near_as(target, size, MEM_RESERVE | MEM_COMMIT); }
 
-/* Free address space within 1.75 GB of `target`, above it first: the code reaches the manager by a 32-bit offset. */
+#define CO_EXE_ARENA 0x100000u /* the exe-near pages of every step come to about 64 KB */
+static struct { SRWLOCK lock; uintptr_t exe, end, arena; size_t used; } g_near = {SRWLOCK_INIT};
+
+static uintptr_t Search(uintptr_t target, size_t size, uint32_t type);
+
+int co_near_exe_reserve(uintptr_t exe, size_t image)
+{
+    if (exe == 0 || image == 0) return 0;
+    if (g_near.arena != 0) return 1;
+    const uintptr_t arena = Search(exe, CO_EXE_ARENA, MEM_RESERVE);
+    if (arena == 0) return 0;
+    AcquireSRWLockExclusive(&g_near.lock);
+    g_near.exe = exe; g_near.end = exe + image; g_near.arena = arena; g_near.used = 0;
+    ReleaseSRWLockExclusive(&g_near.lock);
+    return 1;
+}
+
 uintptr_t co_alloc_near_as(uintptr_t target, size_t size, uint32_t type)
+{
+    const size_t pages = (size + 0xFFFu) & ~(size_t)0xFFFu;
+    uintptr_t block = 0;
+    AcquireSRWLockExclusive(&g_near.lock);
+    if (g_near.arena != 0 && target >= g_near.exe && target < g_near.end && pages <= CO_EXE_ARENA - g_near.used &&
+        VirtualAlloc((void*)(g_near.arena + g_near.used), pages, MEM_COMMIT, PAGE_READWRITE) != NULL)
+    {
+        block = g_near.arena + g_near.used;
+        g_near.used += pages;
+    }
+    ReleaseSRWLockExclusive(&g_near.lock);
+    return block != 0 ? block : Search(target, size, type);
+}
+
+/* Free address space within 1.75 GB of `target`, above it first: the code reaches the manager by a 32-bit offset. */
+static uintptr_t Search(uintptr_t target, size_t size, uint32_t type)
 {
     const uintptr_t span = 0x70000000u, grain = 0x10000u;
     for (int up = 1; up >= 0; up--)

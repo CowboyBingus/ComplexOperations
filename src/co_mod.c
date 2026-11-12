@@ -66,7 +66,11 @@ HF_MOD_EXPORT int hellforge_mod_init(const HfApi* api, HfMod* mod)
         co_log("needs game build %s; this is %s", CO_GAME_BUILD, build != NULL ? build : "unknown");
         return 1;
     }
-    co_nav_reserve(0, api->module_base("helldivers2.exe", NULL)); /* before the game's heaps exist */
+    size_t image = 0;
+    const uintptr_t exe = api->module_base("helldivers2.exe", &image);
+    /* before the game's heaps exist: they fill the space near the exe that the steps' pages need */
+    if (!co_near_exe_reserve(exe, image)) co_log("no room within reach of helldivers2.exe at 0x%llx as the mod loaded", (unsigned long long)exe);
+    co_nav_reserve(0, exe);
     if (api->on(mod, HF_EVENT_GAME_LOADED, OnGameLoaded, NULL) != 0) { co_log("the game-loaded event could not be registered"); return 1; }
     co_capacity_init(); /* the game makes the generator's block once: only now is in time */
     return 0;
