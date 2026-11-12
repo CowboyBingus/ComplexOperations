@@ -392,17 +392,19 @@ Open items:
 - An obstacle filed while the world was disarmed keeps the tiles it was filed in. This can happen to obstacles that
   live on from a complex level into the next level. The ship's own obstacles are not affected: the ship's grid is set
   at the start of its set-up, before they are filed, and HellForge's ship step runs there too.
+- When the log has `early ship retile skipped:` or `early ship retile off:`, the grid is set at the end of the
+  ship's set-up instead, and the ship's own obstacles keep the grid they were filed under.
 - That also corrects HellForge's ship navigation after a 256 m mission, where HellForge alone files the ship's
   obstacles under the 256 m grid. HellForge's own fix is pull request 378.
 
 ### Cancelled preview
 
-Two guards act on every level, only where the game would go wrong:
+With the part on, two guards act on every level, only where the game would go wrong:
 
-- **Cancelled preview.** A mission that starts while a complex mission's war-table preview is still placing its
-  stamps waits for that preview to stop. The preview stops at its next tile and leaves its plan out of the mission.
-  The wait has no limit, so a mission start can wait out the rest of a refresh run. It logs a line at 2 s and every
-  10 s after.
+- **Cancelled preview.** A mission that starts while any level generation is still running waits for it to end: a
+  complex or a normal war-table preview, or a refresh run. A complex preview stops at its next tile and leaves its plan
+  out of the mission. The wait has no limit, so a mission start can wait out the rest of a refresh run. It logs a line
+  at 2 s and every 10 s after.
 - **Runners.** Stamp or terrain runners that do not return within 30 s are dropped for the session, with the line
   `did not return within 30 s`; the dispatcher's thread builds the rest.
 
