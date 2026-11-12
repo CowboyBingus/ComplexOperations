@@ -136,8 +136,10 @@ static void DestroyQueueDetour(uint64_t world, uint32_t* handles, uint32_t n)
 /* Each frame on the game thread (WorldStreamTick): the waiting handles that resolve now go to the original. Off a
  * complex mission every one left is dropped: it was asked of the complex mission's world, and stock never carries a
  * world's destroy list into another world. */
+static void GuardNote(void);
 static void DestroyTick(void)
 {
+    GuardNote();
     if (g_destroyQueue == NULL || g_destroyWaiting == 0) return;
     AcquireSRWLockExclusive(&g_destroyWaitLock);
     if (!DestroyComplex()) { g_destroyWaiting = 0; ReleaseSRWLockExclusive(&g_destroyWaitLock); return; }
@@ -161,10 +163,10 @@ static void DestroyTick(void)
     ReleaseSRWLockExclusive(&g_destroyWaitLock);
 }
 
-static void DestroyNote(void)
+/* The pose and body-sync guards act on every level, so their counts are noted from the per-frame tick too: the
+ * streaming note is silent on a normal level (gate 10, ruling G1). Two reads a frame when nothing changed. */
+static void GuardNote(void)
 {
-    static LONG last[4] = {-1, -1, -1, -1};
-    LONG now[4] = {g_destroyHeld, g_destroyPassed + g_destroyTimedOut, g_destroyStale, g_destroyFull};
     static LONG poseNoted;
     LONG skipped = g_poseSkipped != NULL ? *g_poseSkipped : 0;
     if (skipped != poseNoted) { poseNoted = skipped; Note("difficulty: extra large maps: poses for units that are gone skipped: %ld", (long)skipped); }
@@ -187,6 +189,12 @@ static void DestroyNote(void)
         bodyNoted = dead;
         Note("difficulty: extra large maps: moved bodies of units that are gone left out of the pose sync: %ld", (long)dead);
     }
+}
+
+static void DestroyNote(void)
+{
+    static LONG last[4] = {-1, -1, -1, -1};
+    LONG now[4] = {g_destroyHeld, g_destroyPassed + g_destroyTimedOut, g_destroyStale, g_destroyFull};
     static LONG roomNoted;
     if (g_destroyRoomHeld != roomNoted) { roomNoted = g_destroyRoomHeld; Note("difficulty: extra large maps: destroys held until the world's destroy list had room: %ld", (long)roomNoted); }
     if (memcmp(now, last, sizeof now) == 0 || (now[0] == 0 && now[2] == 0 && now[3] == 0)) return;
