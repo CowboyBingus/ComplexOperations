@@ -313,7 +313,9 @@ and the ship build stock's 8 x 8 tiles of it:
   the jump leads into the trim's own block and that block holds the reviewed code. Any other form still turns off its
   navmesh boosts and rebuilds.
 - If the engine's bytes differ from the reviewed ones, neither stub goes in. Each normal level then builds all 1024
-  tiles and logs that its world is not armed, which fails the stock-tiles check.
+  tiles and logs that its world is not armed, which fails the stock-tiles check. A nav world of id 4 or more does the
+  same: the stubs hold four worlds.
+- The stubs, the armed worlds and the priority table take one 0x4000-byte block near the exe: address space only.
 
 Open items:
 
