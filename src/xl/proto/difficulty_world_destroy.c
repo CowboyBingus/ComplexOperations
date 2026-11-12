@@ -93,7 +93,15 @@ static void DestroyQueueDetour(uint64_t world, uint32_t* handles, uint32_t n)
         int state = DestroyHandleState(handles[i]);
         if (state == 0)
         {
-            if (room - (LONG)k <= 0) { DestroyHold(world, handles[i]); InterlockedIncrement(&g_destroyRoomHeld); continue; }
+            if (room - (LONG)k <= 0)
+            {
+                DestroyHold(world, handles[i]);
+                /* logged here as well as in DestroyNote, which runs only while streaming defers: a normal level must
+                 * show a held destroy too (gate 10, T1 ruling U3); powers of two keep a long burst to a few lines */
+                const LONG held = InterlockedIncrement(&g_destroyRoomHeld);
+                if ((held & (held - 1)) == 0) Note("difficulty: extra large maps: destroy of a live unit held until the world's destroy list had room (%ld so far)", (long)held);
+                continue;
+            }
             pass[k++] = handles[i];
             if (k == 256) { g_destroyQueue(world, pass, k); room -= (LONG)k; k = 0; }
             continue;

@@ -257,6 +257,9 @@ One level-11 operation in four is a complex operation. HellForge owns difficulty
 - A normal level-11 mission with the mod loaded is the mission it is without the mod at the same generation seed.
   The mod clears the lowest bit of every normal level-11 mission's seed, so an odd seed generates as the even one
   below it.
+- Two engine numbers differ from a game without the mod, with no effect on play:
+  - Entity ids made after the ship are 4 higher, one per extra hellpod of the eight-pod bay.
+  - Reused unit handles come in another order. The bay is the likely cause; nothing looks these up except by equality.
 
 The living world runs every complex mission. Its director patrols are off; instead the host keeps squads as records
 that walk the map's routes, and brings a squad online as the game's own patrol group near the players, its losses
@@ -575,6 +578,7 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `the HiveMind's multipliers stop at four players`, `the Pelican keeps six passenger seats`, `boosters of players 5 to 8 are not loaded` | That part is off and the rest goes in; the reason stands before it. |
 | `navigation: nav world N is not armed for stock's 8 x 8 tiles (...)` | That normal level builds all 32 x 32 tiles; the reason stands in brackets. |
 | `navigation: ...; normal levels build the whole 32 x 32 grid` | The engine's bytes are not the reviewed ones: the two tile stubs are off. |
+| `difficulty: extra large maps: destroy of a live unit held until the world's destroy list had room (N so far)` | The game's destroy list was full; the destroy waits a frame. Logged at counts 1, 2, 4 and so on. |
 | `TEST BUILD, not for play` | Built with `--test-first-slot`. |
 | `the session lists count to four as before` | The count change is off; the reason stands before it. |
 | `the bridge is not the one with the eight-pod bay` | The level data is missing: four pods. |
