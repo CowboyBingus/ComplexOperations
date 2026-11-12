@@ -277,6 +277,10 @@ void CoXlTestEarlyStep(uint64_t records, uint64_t index, uint64_t mask) { EarlyP
 /* What WorldDispatch runs at each op before the level's own (kill heights, water, sea), and what stays to put back. */
 void CoXlTestLowered(uint64_t op) { WorldKillHeight(); WorldDryTypes(op); WorldNoSea(op); }
 void CoXlTestPending(uint32_t* kill, uint32_t* dry, uint32_t* sea) { *kill = g_killHeight.count; *dry = g_dry.count; *sea = g_sea.count; }
+/* The town filters' widening at a complex level's op 0x2B record and the put-back at a level's first op. */
+void CoXlTestTownsWiden(uint64_t record) { TownsWidenLevels(record); }
+void CoXlTestTownsRestore(void) { TownsRestore(); }
+uint32_t CoXlTestTownsPending(void) { return g_townWide.count; }
 void CoXlTestMission(uintptr_t level, int complex)
 {
     InterlockedIncrement(&g_world.levels);

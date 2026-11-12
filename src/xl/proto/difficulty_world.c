@@ -2676,6 +2676,7 @@ static void TerrainStamps(uint64_t records, uint32_t end, uint32_t at91, uint64_
 static void TerrainDiagAfter(uint64_t records, uint64_t index, uint32_t at, uint32_t op);
 /* difficulty_world_towns.c: towns at a vanilla town's shape, x3 */
 static void TownsArm(uint64_t records, uint32_t at, uint64_t context, uintptr_t gen);
+static void TownsRestore(void);
 static void TownsAfter(uint64_t records, uint32_t at, uint64_t index, uint64_t context, uint64_t g, uint64_t h, uintptr_t gen);
 static void TownsForget(uint64_t pass);
 
@@ -4735,6 +4736,7 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
     TerrainDiagBefore(records, index, (uint32_t)d, &diagAt, &diagOp);
     {
         uint32_t i = 0, o = 0xFFFFFFFFu;
+        TownsRestore(); /* every level's first op, before any reader of the town filters */
         if (!SafeRead(index, &i, 4) && !SafeRead(records + (uint64_t)i * 0x19B0u, &o, 4)) { WorldKillHeight(); WorldDryTypes(o); WorldNoSea(o); } /* once a level, before op 0x0A */
     }
     if (g_world.current == 8.0f) WorldCamInstall();
