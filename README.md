@@ -261,6 +261,26 @@ One level-11 operation in four is a complex operation. HellForge owns difficulty
   - Entity ids made after the ship are 4 higher, one per extra hellpod of the eight-pod bay.
   - Reused unit handles come in another order. The bay is the likely cause; nothing looks these up except by equality.
 
+The game sizes some engine room once, as it starts, before any mission is known. So when the part is on, every level
+gets the room a 16 km world needs:
+
+| Room | Game or HellForge | With the mod |
+|---|---|---|
+| Physics world (broadphase) | 3072 m | 17408 m: the map and 512 m around it |
+| Havok world's bodies | 0x40000 | 0x100000 |
+| Static actors | 0x40000 | 0x100000 |
+| Connectors | 0x40000 | 0x400000 |
+| Navigation grid extents | 1024 | 4096 |
+| Navigation grid cell size | 128 | 32, so the grid has 32 x 32 tiles (see below) |
+
+Measured on one city mission at difficulty 11 (12 runs without the mod, 4 with it):
+
+- Memory committed at the start of play: about 0.6 GB more (9.33 to 9.40 GB against 8.72 to 8.79 GB).
+- Time to the start of play: the same, about 45 s.
+- Time until the navigation grid has no tiles left to build: up to 0.8 s longer (98.1 to 99.7 s against 97.3 to
+  98.9 s).
+- The navigation build scheduler: 5 to 6 µs a call on average, at most 43 µs, against 0.5 µs.
+
 The living world runs every complex mission. Its director patrols are off; instead the host keeps squads as records
 that walk the map's routes, and brings a squad online as the game's own patrol group near the players, its losses
 kept. Each group of players near each other gets 1.5 times the game's patrol budget, 72 solo and 96 in co-op, and the
