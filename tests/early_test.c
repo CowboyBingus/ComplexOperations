@@ -148,7 +148,7 @@ int main(void)
     for (int k = 5; k < 10; k++) CHECK(image[CO_NAV_SHIP_SITE + k] == 0x90);
     if (page != NULL)
     {
-        const uint64_t retile = (uint64_t)(uintptr_t)co_nav_retile, system = (uint64_t)(uintptr_t)image + CO_NAV_SYSTEM;
+        const uint64_t retile = (uint64_t)(uintptr_t)co_nav_retile, step = (uint64_t)(uintptr_t)co_nav_ship_step, system = (uint64_t)(uintptr_t)image + CO_NAV_SYSTEM;
         memcpy(&rel, image + CO_NAV_SITE + 1, 4);
         CHECK((uintptr_t)image + CO_NAV_SITE + 5u + (intptr_t)rel == (uintptr_t)page);
         memcpy(&rel, image + CO_NAV_SHIP_SITE + 1, 4);
@@ -158,7 +158,7 @@ int main(void)
         CHECK(memcmp(page + 126, &system, 8) == 0 && memcmp(page + 134, kNavStock + 134, 7) == 0);
         memcpy(&rel, page + 141, 4);
         CHECK((uintptr_t)page + 145u + (intptr_t)rel == (uintptr_t)image + CO_NAV_BACK);
-        CHECK(memcmp(page + 0x100, kNavShipStock, 65) == 0 && memcmp(page + 0x100 + 65, &retile, 8) == 0 && memcmp(page + 0x100 + 73, kNavShipStock + 73, 67) == 0);
+        CHECK(memcmp(page + 0x100, kNavShipStock, 65) == 0 && memcmp(page + 0x100 + 65, &step, 8) == 0 && memcmp(page + 0x100 + 73, kNavShipStock + 73, 67) == 0);
         memcpy(&rel, page + 0x100 + 140, 4);
         CHECK((uintptr_t)page + 0x100u + 144u + (intptr_t)rel == (uintptr_t)image + CO_NAV_SHIP_BACK);
     }

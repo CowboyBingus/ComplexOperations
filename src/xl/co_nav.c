@@ -14,6 +14,12 @@ static struct
     uint8_t* page;
     float* tile;          /* near the exe: a tile size the engine has no constant for */
     void (*ship)(void);
+    /* The ship's grid is set in the PrepareShip enter, before the ship's carvers are filed under the old one; the
+     * Ship enter's step then skips the two retiles only for the id this token holds (id + 1), which every other
+     * retile clears. */
+    uint64_t (*prepare)(void* state, uintptr_t game);
+    uintptr_t hfShip;     /* HellForge's ship stub, whose pinned function is the second step; 0 without one */
+    volatile LONG token, early;
 } g_nav;
 
 void co_nav_ship(void (*ship)(void)) { g_nav.ship = ship; }
@@ -102,13 +108,28 @@ size_t co_nav_whole(uint8_t* out, uintptr_t code, int ship, uintptr_t retile, ui
 size_t co_nav_stub(uint8_t* out, uintptr_t code, int ship, uintptr_t retile, uintptr_t stock)
 {
     /* HellForge's own stub up to where the registers are back: the same call, with the mod's function */
-    const size_t head = ship ? 129 : 124, call = ship ? 65 : 60;
-    memcpy(out, ship ? kNavShipStock : kNavStock, head);
-    memcpy(out + call, &retile, 8);
-    out[head] = 0xE9;
-    const int32_t rel = (int32_t)((int64_t)stock - (int64_t)(code + head + 5u));
-    memcpy(out + head + 1u, &rel, 4);
-    return head + 5u;
+    if (!ship)
+    {
+        memcpy(out, kNavStock, 124);
+        memcpy(out + 60, &retile, 8);
+        out[124] = 0xE9;
+        const int32_t rel = (int32_t)((int64_t)stock - (int64_t)(code + 129u));
+        memcpy(out + 125, &rel, 4);
+        return 129;
+    }
+    /* The ship's: a non-zero return skips HellForge's retile, going on at its stub's own call to the game (+129).
+     * Only flag-free instructions (movdqu, lea, pop) lie between the test and the branch. */
+    static const uint8_t test[2] = {0x84, 0xC0}, lea[8] = {0x48, 0x8D, 0xA4, 0x24, 0x88, 0x00, 0x00, 0x00};
+    memcpy(out, kNavShipStock, 75);
+    memcpy(out + 65, &retile, 8);
+    memcpy(out + 75, test, 2);
+    memcpy(out + 77, kNavShipStock + 75, 36);
+    memcpy(out + 113, lea, 8);
+    memcpy(out + 121, kNavShipStock + 118, 11);
+    const int32_t skip = (int32_t)((int64_t)(stock + 129u) - (int64_t)(code + 138u)), on = (int32_t)((int64_t)stock - (int64_t)(code + 143u));
+    out[132] = 0x0F; out[133] = 0x85; memcpy(out + 134, &skip, 4);
+    out[138] = 0xE9; memcpy(out + 139, &on, 4);
+    return CO_NAV_SHIP_STUB;
 }
 
 /* The grid is the 32 x 32 one and its block holds it: the 12-byte array behind the tiles' list ends before the back
@@ -129,7 +150,7 @@ static void NotArmed(uint32_t id, const char* why)
     co_log("navigation: nav world %u is not armed for stock's 8 x 8 tiles (%s); it builds all 32 x 32", id, why);
 }
 
-void co_nav_retile(uint32_t id, uintptr_t level)
+static void Retile(uint32_t id, uintptr_t level)
 {
     const uintptr_t exe = g_nav.exe;
     uintptr_t worlds = 0, world = 0;
@@ -137,7 +158,6 @@ void co_nav_retile(uint32_t id, uintptr_t level)
     uint16_t grid[2] = {0, 0};
     float disk = 0.0f, radius = 0.0f;
     CoNavPlan plan;
-    if (level == 0 && g_nav.ship != NULL) g_nav.ship();
     co_navtrim_disarm(id); /* armed again below only for a normal level or the ship whose bounds were written */
     /* any other grid is HellForge's to retile, in its own step right behind this one */
     if (exe == 0 || g_coApi->read(exe + CO_NAV_COUNT, &count, 4) != 0 || id >= count || g_coApi->read(exe + CO_NAV_WORLDS, &worlds, 8) != 0 || worlds == 0 ||
@@ -171,6 +191,102 @@ void co_nav_retile(uint32_t id, uintptr_t level)
      * world would keep stock's bounds on a grid that is not remapped; the line below names that level. */
     if (armed && co_navtrim_arm(id, world, plan.stockLow, plan.stockHigh) != 0) why = "the stubs refused it";
     if (why != NULL) NotArmed(id, why);
+}
+
+void co_nav_retile(uint32_t id, uintptr_t level)
+{
+    InterlockedExchange(&g_nav.token, 0);
+    Retile(id, level);
+}
+
+int co_nav_ship_step(uint32_t id, uintptr_t level)
+{
+    if (g_nav.ship != NULL) g_nav.ship();
+    if (InterlockedExchange(&g_nav.token, 0) == (LONG)id + 1) return 1;
+    Retile(id, level);
+    return 0;
+}
+
+#define CO_NAV_ID 0x10F0u /* the game object's main nav world id, set once at its creation (game 0xAB1B31) */
+
+/* The world of `id`, or 0. */
+static uintptr_t World(uint32_t id)
+{
+    uintptr_t worlds = 0, world = 0;
+    uint32_t count = 0;
+    if (g_nav.exe == 0 || g_coApi->read(g_nav.exe + CO_NAV_COUNT, &count, 4) != 0 || id >= count ||
+        g_coApi->read(g_nav.exe + CO_NAV_WORLDS, &worlds, 8) != 0 || worlds == 0 || g_coApi->read(worlds + 8u * (uintptr_t)id, &world, 8) != 0) return 0;
+    return world;
+}
+
+/* Live carvers, walking the free list from its head as the insert pops it: slot 0 is never handed out, so it is neither
+ * free nor live. -1 when the list does not end at -1 within the slots. */
+static int64_t Live(uintptr_t world, uint32_t* slots)
+{
+    const uintptr_t grid = world + 0x6710u;
+    uintptr_t pool = 0;
+    uint32_t n = 0, spare = 0;
+    uint16_t stride = 0;
+    int32_t at = -1;
+    if (g_coApi->read(grid + 0x1C, &n, 4) != 0 || g_coApi->read(grid + 0x24, &stride, 2) != 0 || g_coApi->read(grid + 0x2C, &at, 4) != 0 ||
+        g_coApi->read(grid + 0x30, &pool, 8) != 0 || pool == 0 || n == 0) return -1;
+    *slots = n;
+    for (; at != -1; spare++)
+        if (at <= 0 || (uint32_t)at >= n || spare >= n - 1u || g_coApi->read(pool + (uintptr_t)stride * (uint32_t)at, &at, 4) != 0) return -1;
+    return (int64_t)n - 1 - spare;
+}
+
+/* The ship's two retiles, before anything of the ship is filed. A world still building (bit 1 of +0x20, set by the
+ * last level's update until the leave request clears it) keeps the old order: retiling it here could meet a tile build. */
+static void Early(uintptr_t game)
+{
+    uint32_t id = 0, flags = 0, slots = 0;
+    InterlockedExchange(&g_nav.token, 0);
+    if (!g_nav.early) return;
+    const uintptr_t world = g_coApi->read(game + CO_NAV_ID, &id, 4) == 0 ? World(id) : 0;
+    if (world == 0 || g_coApi->read(world + 0x20, &flags, 4) != 0)
+    { co_log("navigation: early ship retile skipped: nav world %u could not be read; the ship's set-up retiles it", id); return; }
+    if (flags & 2u)
+    { co_log("navigation: early ship retile skipped: nav world %u is building (flags 0x%X); the ship's set-up retiles it", id, flags); return; }
+    if (g_nav.hfShip != 0 && !Stock(g_nav.game, g_nav.hfShip, 1))
+    {
+        InterlockedExchange(&g_nav.early, 0);
+        co_log("navigation: early ship retile off: HellForge's ship step is not the pinned form; the ship's set-up retiles as before");
+        return;
+    }
+    const int64_t live = Live(world, &slots);
+    if (live < 0) co_log("navigation: early ship retile: nav world %u, the carver free list does not end", id);
+    else co_log("navigation: early ship retile: nav world %u, %lld of %u carver slots live", id, (long long)live, slots);
+    Retile(id, 0);
+    if (g_nav.hfShip != 0)
+    {
+        void (*second)(uint32_t, uintptr_t) = NULL;
+        g_coApi->read(g_nav.hfShip + 65u, &second, 8); /* pinned as HellForge's own call by Stock() */
+        if (second != NULL) second(id, 0);
+    }
+    InterlockedExchange(&g_nav.token, (LONG)id + 1);
+}
+
+static uint64_t Prepare(void* state, uintptr_t game)
+{
+    Early(game);
+    return g_nav.prepare(state, game);
+}
+
+/* Off, with one line, when any pin fails: the Ship enter's step then retiles as it always did. */
+static void EarlyInstall(uintptr_t game, uintptr_t exe, uintptr_t hfShip)
+{
+    const char* why = NULL;
+    if (!g_coApi->code_matches(game + CO_NAV_PREPARE, CO_NAV_PREPARE_PIN) || !g_coApi->code_matches(game + CO_NAV_PREPARE_CALL, CO_NAV_PREPARE_CALL_PIN) ||
+        !g_coApi->code_matches(game + CO_NAV_SHIP_CALL, CO_NAV_SHIP_CALL_PIN) || !g_coApi->code_matches(game + CO_NAV_SHIP_KEEP, CO_NAV_SHIP_KEEP_PIN) ||
+        !g_coApi->code_matches(exe + CO_NAV_LEAVE, CO_NAV_LEAVE_PIN) || !g_coApi->code_matches(exe + CO_NAV_SCHED, CO_NAV_SCHED_PIN))
+        why = "the PrepareShip enter or the nav world's flags are not the code this mod was made for";
+    else if (hfShip != 0 && !Stock(game, hfShip, 1)) why = "HellForge's ship step is not the pinned form";
+    else if (g_coApi->hook(g_coMod, game + CO_NAV_PREPARE, (void*)Prepare, (void**)&g_nav.prepare) != 0 || g_nav.prepare == NULL)
+        why = "the PrepareShip enter could not be hooked";
+    if (why != NULL) { g_nav.prepare = NULL; co_log("navigation: early ship retile off: %s; the ship's set-up retiles as before", why); return; }
+    g_nav.hfShip = hfShip;
+    InterlockedExchange(&g_nav.early, 1);
 }
 
 static int Point(uintptr_t site, uintptr_t to)
@@ -214,12 +330,12 @@ const char* co_nav_install(uintptr_t game)
     if (plain)
     {
         co_nav_whole(page, (uintptr_t)page, 0, (uintptr_t)co_nav_retile, game);
-        co_nav_whole(page + 0x100, (uintptr_t)page + 0x100, 1, (uintptr_t)co_nav_retile, game);
+        co_nav_whole(page + 0x100, (uintptr_t)page + 0x100, 1, (uintptr_t)co_nav_ship_step, game);
     }
     else
     {
         co_nav_stub(page, (uintptr_t)page, 0, (uintptr_t)co_nav_retile, stubs[0]);
-        co_nav_stub(page + 0x100, (uintptr_t)page + 0x100, 1, (uintptr_t)co_nav_retile, stubs[1]);
+        co_nav_stub(page + 0x100, (uintptr_t)page + 0x100, 1, (uintptr_t)co_nav_ship_step, stubs[1]);
     }
     if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &old)) return "the navigation grid's steps could not be made to run";
     FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
@@ -228,7 +344,7 @@ const char* co_nav_install(uintptr_t game)
     {
         if (Take(game + CO_NAV_SITE, sizeof kNavGame, (uintptr_t)page) == 0)
         {
-            if (Take(game + CO_NAV_SHIP_SITE, sizeof kNavShipGame, (uintptr_t)page + 0x100) == 0) { g_nav.page = page; Trim(exe); return NULL; }
+            if (Take(game + CO_NAV_SHIP_SITE, sizeof kNavShipGame, (uintptr_t)page + 0x100) == 0) { g_nav.page = page; Trim(exe); EarlyInstall(game, exe, 0); return NULL; }
             g_coApi->write(game + CO_NAV_SITE, kNavGame, sizeof kNavGame);
         }
         g_nav.exe = 0; g_nav.tile = NULL;
@@ -236,7 +352,7 @@ const char* co_nav_install(uintptr_t game)
     }
     if (Point(game + CO_NAV_SITE, (uintptr_t)page) == 0)
     {
-        if (Point(game + CO_NAV_SHIP_SITE, (uintptr_t)page + 0x100) == 0) { g_nav.page = page; Trim(exe); return NULL; }
+        if (Point(game + CO_NAV_SHIP_SITE, (uintptr_t)page + 0x100) == 0) { g_nav.page = page; Trim(exe); EarlyInstall(game, exe, stubs[1]); return NULL; }
         Point(game + CO_NAV_SITE, stubs[0]);
     }
     g_nav.exe = 0; g_nav.tile = NULL;
@@ -247,7 +363,7 @@ uintptr_t co_nav_exe(void) { return g_nav.page != NULL ? g_nav.exe : 0; }
 const float* co_nav_world_tile(void) { return g_nav.page != NULL ? g_nav.tile : NULL; }
 
 #ifdef CO_TEST
-void co_nav_test_reset(void) { memset(&g_nav, 0, sizeof g_nav); memset(&g_reserve, 0, sizeof g_reserve); co_navtrim_test_reset(); }
+void co_nav_test_reset(void) { memset((void*)&g_nav, 0, sizeof g_nav); memset(&g_reserve, 0, sizeof g_reserve); co_navtrim_test_reset(); }
 uintptr_t co_nav_test_page(void) { return (uintptr_t)g_nav.page; }
 const uint8_t* co_nav_test_reserved(void) { return g_reserve.page; }
 const float* co_nav_test_tile(void) { return g_nav.tile; }

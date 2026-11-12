@@ -13,6 +13,18 @@
 #define CO_NAV_TILE_READ 0x89A85Eu   /* exe: the terrain build's tile size, movss xmm0, [rip+128.0] */
 #define CO_NAV_TILE_128 0x16A9DB0u   /* exe: the two floats HellForge points it at */
 #define CO_NAV_TILE_256 0x16AA7C0u
+#define CO_NAV_PREPARE 0xAC55B0u   /* the PrepareShip enter: the state in rcx, the game in rdx */
+#define CO_NAV_PREPARE_PIN "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8B DA 48 8B F1"
+#define CO_NAV_PREPARE_CALL 0xAB3149u /* the state switch: both enters get the game object (rdi) in rdx */
+#define CO_NAV_PREPARE_CALL_PIN "48 8D 8F 30 C2 0A 00 48 8B D7 E8 58 24 01 00"
+#define CO_NAV_SHIP_CALL 0xAB3110u
+#define CO_NAV_SHIP_CALL_PIN "48 8D 8F 18 51 01 00 48 8B D7 E8 01 69 02 00"
+#define CO_NAV_SHIP_KEEP 0xAD9A4Au /* the Ship enter keeps rdx in r14, which its site reads the id from */
+#define CO_NAV_SHIP_KEEP_PIN "4C 8B F2"
+#define CO_NAV_LEAVE 0x7B7EE5u      /* exe: the leave request clears the world's building bit (+0x20, bit 1) */
+#define CO_NAV_LEAVE_PIN "8B 42 20 A8 01 74 09 83 E0 FD 83 C8 04 89 42 20"
+#define CO_NAV_SCHED 0x7B8246u      /* exe: the tile scheduler builds only with bits 0 and 1 set */
+#define CO_NAV_SCHED_PIN "41 8B 4B 20 83 E1 03 80 F9 03"
 static const uint8_t kNavGame[15] = {0x48, 0x8B, 0x05, 0x93, 0xE5, 0x70, 0x02, 0xFF, 0x50, 0x08, 0xE9, 0xDF, 0x1F, 0x00, 0x00};
 static const uint8_t kNavShipGame[10] = {0x41, 0x8B, 0x8E, 0xF0, 0x10, 0x00, 0x00, 0xFF, 0x50, 0x08};
 static const uint8_t kNavExe[23] = {0x48, 0x83, 0xEC, 0x28, 0x39, 0x0D, 0xC6, 0xBC, 0x00, 0x02, 0x0F, 0x86, 0xE7, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x05, 0xB1, 0xBC, 0x00, 0x02};
