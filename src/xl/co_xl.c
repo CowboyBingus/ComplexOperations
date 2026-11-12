@@ -264,6 +264,16 @@ void CoXlTestHide(uint64_t handle) { g_hide.handle = handle; g_hide.level = g_wo
 uint64_t CoXlTestHideHandle(void) { return g_hide.handle; }
 void CoXlTestMoveHold(int on) { MoveHold(on); }
 LONG64 CoXlTestMoveHoldSince(void) { return g_moveHoldSince; }
+/* A level init's effect on the generator's side alone: the next level, complex (8) or not (1). */
+void CoXlTestGenLevel(float current) { InterlockedIncrement(&g_world.levels); g_world.current = current; }
+/* The stamp packages a level requested early (EarlyPackages): held as a level that ended before its record 94 leaves them. */
+void CoXlTestEarlyHeld(const uint64_t* ids, uint32_t count)
+{
+    g_early.level = g_world.levels; g_early.state = 1; g_early.count = count;
+    memcpy(g_early.list, ids, count * sizeof *ids);
+}
+int CoXlTestEarlyState(void) { return g_early.state; }
+void CoXlTestEarlyStep(uint64_t records, uint64_t index, uint64_t mask) { EarlyPackages(records, 0, index, mask); }
 void CoXlTestMission(uintptr_t level, int complex)
 {
     InterlockedIncrement(&g_world.levels);

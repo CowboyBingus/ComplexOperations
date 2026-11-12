@@ -4571,13 +4571,12 @@ static void EarlyPackages(uint64_t records, uint64_t context, uint64_t index, ui
 {
     static int on = -1;
     if (on < 0) { char v[8] = ""; on = !(GetEnvironmentVariableA("HELLFORGE_XL_EARLY_PACKAGES", v, sizeof v) > 0 && v[0] == '0'); }
-    if (!on || g_worldLevel == 0 || !(g_world.current > 1.0f)) return;
+    if (!on || g_worldLevel == 0) return;
     uint64_t block = 0, gen = 0; /* the records' block ([level+0x2A8]) and the generator block G ([level+0x2C8]) */
-    if (SafeRead(g_worldLevel + 0x2A8, &block, 8) || block != records || SafeRead(g_worldLevel + 0x2C8, &gen, 8) || gen == 0) return;
-    uint32_t i = 0;
-    if (SafeRead(index, &i, 4)) return;
+    if (SafeRead(g_worldLevel + 0x2A8, &block, 8) || block != records) return;
     /* a level that ended (or generated again) before its record 94: the early requests are released as the teardown
-     * releases record 94's ([api+0x10]+0x308(list, count), 0xF70B58..0xF70B77), on a main-thread step */
+     * releases record 94's ([api+0x10]+0x308(list, count), 0xF70B58..0xF70B77), on a main-thread step. Any next
+     * level's, a normal one too: none of them may run with another level's packages held. */
     if (g_early.level != g_world.levels && g_early.state == 1) { g_early.state = 3; }
     if (g_early.state == 3 && mask == 0)
     {
@@ -4587,7 +4586,9 @@ static void EarlyPackages(uint64_t records, uint64_t context, uint64_t index, ui
         Note("difficulty: early packages: level %ld ended before its record 94: its %u early packages released", (long)g_early.level, g_early.count);
         g_early.state = -1; g_early.level = -1;
     }
-    if (g_early.state == 3) return;
+    if (g_early.state == 3 || !(g_world.current > 1.0f) || SafeRead(g_worldLevel + 0x2C8, &gen, 8) || gen == 0) return;
+    uint32_t i = 0;
+    if (SafeRead(index, &i, 4)) return;
     if (g_early.level != g_world.levels)
     {
         g_early.level = g_world.levels; g_early.state = -1; g_early.count = 0;
