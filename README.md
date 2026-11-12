@@ -254,7 +254,9 @@ One level-11 operation in four is a complex operation. HellForge owns difficulty
 - A PC that cannot make one plays normal missions. An example is a PC with less than 28 GB of memory free to commit
   when the game starts. Such a player is denied only when hot-joining a running complex mission.
 - The mod's log says why the part is off: a line that starts with `complex operations are off:`.
-- A normal level-11 mission with the mod loaded is the mission it is without the mod.
+- A normal level-11 mission with the mod loaded is the mission it is without the mod at the same generation seed.
+  The mod clears the lowest bit of every normal level-11 mission's seed, so an odd seed generates as the even one
+  below it.
 
 The living world runs every complex mission. Its director patrols are off; instead the host keeps squads as records
 that walk the map's routes, and brings a squad online as the game's own patrol group near the players, its losses
