@@ -543,15 +543,13 @@ static float LwEnvFloat(const char* name, float fallback)
     return v > 0 ? v : fallback;
 }
 
-/* Complex Operations' guards are in place when its jumps and the raised gate are in the game's code. */
+/* The density guards (../co_density.c) serve complex missions: installed, and the pair table guarded. */
 static int LwDensityOn(void)
 {
     ULONGLONG now = GetTickCount64();
     if (g_lwDensity.on >= 0 && now - g_lwDensity.checkedAt < 5000) return g_lwDensity.on;
     g_lwDensity.checkedAt = now;
-    uint8_t room = 0, slot[5] = {0}, pair = 0; uint32_t gate = 0;
-    int guards = !SafeRead(g_lw.game + 0x952F53u, &room, 1) && room == 0xE9 && !SafeRead(g_lw.game + 0x952F65u, &gate, 4) && gate == 0x400u &&
-        !SafeRead(g_lw.game + 0x953942u, slot, 5) && memcmp(slot, "\xE9\x32\x07\x00\x00", 5) == 0 && !SafeRead(g_lw.game + 0xA2BE29u, &pair, 1) && pair == 0xE9;
+    int guards = co_density_on();
     char t[8] = "";
     if (GetEnvironmentVariableA("HELLFORGE_LW_DENSITY", t, sizeof t) > 0 && t[0] == '0') guards = 0;
     if (guards != g_lwDensity.on)

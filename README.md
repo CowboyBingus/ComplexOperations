@@ -258,10 +258,21 @@ One level-11 operation in four is a complex operation. HellForge owns difficulty
 
 The living world runs every complex mission. Its director patrols are off; instead the host keeps squads as records
 that walk the map's routes, and brings a squad online as the game's own patrol group near the players, its losses
-kept. Without Complex Operations' density guards in the game's code the squads share one budget for the map: 48
-enemies solo, 64 in co-op. The mod also keeps a complex level's destruction records, render version tables, tree
-extents and navmesh boundary requests within what the game holds. On a normal mission and on the ship none of this
-acts, and the difficulty rows stay the game's.
+kept. Each group of players near each other gets 1.5 times the game's patrol budget, 72 solo and 96 in co-op, and the
+map holds at most 190 such enemies. The game's list of 256 navmesh boundary requests a frame limits the host to about
+232 walking enemies in all.
+
+On a complex mission the mod's density guards apply:
+
+- The game's own enemies keep their room: the 70-enemy room, the breach release and the despawner count them
+  without the living world's squads.
+- A full squad-slot table and more than 64 kinds of enemy in the spawn budget are refused instead of crashing, and so
+  is a nearly full ray queue. The AI job gate for new spawns rises from 448 to 1024.
+- Mission locations' pickups, markers and samples spawn when a player comes within 600 m.
+
+The mod also keeps a complex level's destruction records, render version tables, tree extents and navmesh boundary
+requests within what the game holds. On a normal mission and on the ship none of this acts: each changed place in the
+game's code runs the game's own instructions, and the difficulty rows stay the game's.
 
 The part needs a HellForge with pull requests 362, 364 and 366: dev after 2026-11-11, or the first release after it.
 With an older HellForge the part is off and the rest of the mod works.

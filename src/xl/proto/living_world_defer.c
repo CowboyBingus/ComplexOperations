@@ -193,24 +193,19 @@ static void LwDeferNote(void)
         pick < 0 ? 0.0 : (double)g_lwDefer.list[pick].y, (double)sqrtf(best));
 }
 
-/* Writes a site's bytes: the call to the entry, a jmp to resume, the rest int3. */
-static int LwDeferPatch(uintptr_t site, size_t size, const uint8_t* head, size_t headSize, void* entry)
+static size_t LwDeferHex(const char* hex, uint8_t* out, size_t room)
 {
-    uint8_t patch[96];
-    if (size > sizeof patch || size < headSize + 12) return 1;
-    memset(patch, 0xCC, sizeof patch);
-    memcpy(patch, head, headSize);
-    uint64_t fn = (uint64_t)(uintptr_t)entry;
-    memcpy(patch + headSize, &fn, 8);
-    size_t at = headSize + 8;
-    patch[at] = 0xFF; patch[at + 1] = 0xD0; patch[at + 2] = 0xEB; patch[at + 3] = (uint8_t)(size - (at + 4));
-    return ApiWrite(site, patch, size);
+    size_t n = 0; unsigned v;
+    while (n < room && sscanf(hex, " %2x", &v) == 1) { out[n++] = (uint8_t)v; hex += hex[0] == ' ' ? 3 : 2; }
+    return n;
 }
 
-/* The setup pass's 44 bytes become: mov rcx,r12; mov rdx,rbx; lea r8,[rbp-0x50]; mov rax,LwDeferEntry; call rax;
- * jmp 0xFDAAB6. The loop after 0xFDAAB6 reads only nonvolatile registers (rsi, r15, rbp, r12, r13).
- * The sample spawner's 65 become: mov rcx,rbx; lea rdx,[rbp-0x70]; mov rax,LwDeferSampleEntry; call rax; jmp 0x79D630.
- * Its params are rbp-0x70, the info rbp-0x10 and the list (+0x50) rbp+0x890; 0x79D630 on sets edi and r8 again. */
+/* Two switched sites (../co_switch.h): a complex mission runs the mod's path, any other level the game's 44 and 65
+ * bytes as they are. The setup pass's mod path: mov rcx,r12; mov rdx,rbx; lea r8,[rbp-0x50]; mov rax,LwDeferEntry;
+ * call rax; jmp 0xFDAAB6 (the game's rcx is [r12] and r8 rbp-0x48 there, LwDeferSpawnNow's arguments). The loop after
+ * 0xFDAAB6 reads only nonvolatile registers (rsi, r15, rbp, r12, r13). The sample spawner's: mov rcx,rbx;
+ * lea rdx,[rbp-0x70]; mov rax,LwDeferSampleEntry; call rax; jmp 0x79D630. Its params are rbp-0x70, the info rbp-0x10
+ * and the list (+0x50) rbp+0x890; 0x79D630 on sets edi and r8 again. */
 static void LwInstallSpawnSources(void);
 static void LwInstallRender(void); /* living_world_render.c */
 static void LwInstallDefer(void)
@@ -218,22 +213,27 @@ static void LwInstallDefer(void)
     if (!LwEnabled() || g_lwDefer.installed) return;
     LwInstallAlloc(); /* the extra large world's own guards go in with the complex part (../co_xl.c) */
     uintptr_t game = g_lw.game;
-    /* entries are kept back only with the density guards in the game's code; without them the patch would only
-     * reroute every mission's setup pass */
+    /* entries are kept back only with the density guards; without them the setup passes stay the game's */
     if (LwDensityOn() != 1)
     { Note("living world: no density guards: mission locations' loose entities spawn at setup"); LwInstallSpawnSources(); LwInstallPassTimes(); return; }
-    if (!ApiCodeMatches(game + LW_DEFER_SITE, kLwDeferPin) || !ApiCodeMatches(game + LW_DEFER_SPAWN, "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18"))
-    { Note("living world: the level entities' setup pass is not the reviewed code; its entities spawn at setup"); return; }
-    static const uint8_t setup[] = {0x49, 0x8B, 0xCC, 0x48, 0x8B, 0xD3, 0x4C, 0x8D, 0x45, 0xB0, 0x48, 0xB8};
-    if (LwDeferPatch(game + LW_DEFER_SITE, 44, setup, sizeof setup, (void*)LwDeferEntry))
-    { Note("living world: the level entities' setup pass could not be written"); return; }
+    static uint8_t setupPin[44], samplePin[65];
+    static const uint8_t setup[] = {0x49, 0x8B, 0xCC, 0x48, 0x8B, 0xD3, 0x4C, 0x8D, 0x45, 0xB0, 0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xD0};
+    static const uint8_t sample[] = {0x48, 0x8B, 0xCB, 0x48, 0x8D, 0x55, 0x90, 0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xD0};
+    LwDeferHex(kLwDeferPin, setupPin, sizeof setupPin);
+    LwDeferHex(kLwDeferSamplePin, samplePin, sizeof samplePin);
+    const CoSwitchSite sites[LW_DEFER_SITES] = {
+        {.rva = LW_DEFER_SITE, .size = 44, .pin = setupPin, .copy = 44, .back = LW_DEFER_SITE + 44u, .rel = {40}, .mod = setup,
+         .modLen = sizeof setup, .modBack = LW_DEFER_SITE + 44u, .fix = {{12, CO_FIX_IMM64, (uintptr_t)LwDeferEntry}}, .fill = 0xCC,
+         .what = "the level entities' setup pass"},
+        {.rva = LW_DEFER_SAMPLE_SITE, .size = 65, .pin = samplePin, .copy = 65, .back = LW_DEFER_SAMPLE_SITE + 65u, .rel = {3, 14, 61},
+         .mod = sample, .modLen = sizeof sample, .modBack = LW_DEFER_SAMPLE_SITE + 65u,
+         .fix = {{9, CO_FIX_IMM64, (uintptr_t)LwDeferSampleEntry}}, .fill = 0xCC, .what = "the sample spawner"}};
+    if (!ApiCodeMatches(game + LW_DEFER_SPAWN, "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18"))
+    { Note("living world: SpawnEntity is not the reviewed code; mission locations' entities spawn at setup"); return; }
+    const char* why = co_switch_install(game, sites, LW_DEFER_SITES, CO_SWITCH_DEFER);
+    if (why != NULL) { Note("living world: %s is not the reviewed code or could not be switched; its entities spawn at setup", why); return; }
     g_lwDefer.installed = 1;
-    Note("living world: mission locations' loose entities wait until a player is within %.0f m (extra large maps, density on)", (double)LW_DEFER_NEAR);
-    static const uint8_t sample[] = {0x48, 0x8B, 0xCB, 0x48, 0x8D, 0x55, 0x90, 0x48, 0xB8};
-    if (!ApiCodeMatches(game + LW_DEFER_SAMPLE_SITE, kLwDeferSamplePin) ||
-        LwDeferPatch(game + LW_DEFER_SAMPLE_SITE, 65, sample, sizeof sample, (void*)LwDeferSampleEntry))
-        Note("living world: the sample spawner is not the reviewed code; samples spawn at setup");
-    else Note("living world: samples wait as well (the sample spawner, game.dll 0x%X)", LW_DEFER_SAMPLE_SITE);
+    Note("living world: on complex missions, mission locations' loose entities and samples wait until a player is within %.0f m", (double)LW_DEFER_NEAR);
     LwInstallSpawnSources();
     LwInstallPassTimes();
 }

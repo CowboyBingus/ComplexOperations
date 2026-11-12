@@ -33,6 +33,8 @@
 #include "co_locate.h"
 #include "co_spawners.h"
 #include "co_patrols.h"
+#include "co_density.h"
+#include "co_switch.h"
 
 /* Six of the copied files' functions were called from loader code that did not come along (the watch thread, the
  * ship's level change, the density rules of a later branch); they are unused until their callers are written. */
@@ -99,6 +101,7 @@ static void CoXlTick(HfMod* mod, float dt, void* user)
     LivingTick();
     DaylightTick();
     TacTick();
+    co_density_tick(dt);
 }
 
 /* As game.dll is loaded: the records' move must be hooked before the game builds its entity state, and a process moves
@@ -121,6 +124,8 @@ static void CoXlLiving(uintptr_t game)
     const char* why;
     /* its squads take the place of the mission's director patrols: without the patrols' switch it stays off */
     if (LwEnabled() && (why = co_patrols_install(game)) != NULL) { g_lw.state = -1; Note("living world: off: %s", why); }
+    /* without the density guards it runs one budget for the map, and the setup passes stay the game's */
+    if (LwEnabled() && (why = co_density_install(game)) != NULL) Note("living world: no density guards: %s", why);
     LwInstallNavConnectNote();
     LwInstallHitNotes();
     LwInstallSmashSpares();
