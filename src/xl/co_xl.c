@@ -59,7 +59,6 @@
 #include "proto/difficulty_net_patience.c"
 #include "proto/difficulty_world_move.c"
 #include "proto/living_world.c"
-#include "proto/living_world_mover.c" /* after living_world.c (g_lw); the loader includes it from a later living_world.c */
 #include "proto/difficulty_tacmap.c"
 #include "proto/test_daylight.c"
 #pragma clang diagnostic pop
@@ -130,7 +129,6 @@ const char* CoXlInstall(uintptr_t game)
     LwInstallSmashSpares();
     LwInstallNoise();
     LwInstallDefer();
-    if (LwEnabled()) LwInstallMover(); /* the living world's own guard: its callers are the living world's */
     DescInstallNotes();
     if ((why = WorldSitesFailed(game)) != NULL) return why;
     WeldResearchInstall(game);

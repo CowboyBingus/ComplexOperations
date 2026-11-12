@@ -10,8 +10,8 @@ the last section.
 
 | Files | Source | Commit |
 |---|---|---|
-| 39 files: every file here except the two below | HellForge, branch `ds/mission-arcs`, `native/mod-loader/` | `0e90b26374173cb6ff743aac7fec3bfcc7d7062b` |
-| `safe_read.c`, `living_world_mover.c` | HellForge, branch `ds/living-world`, `native/mod-loader/` | `7b9a836039fe6771eabaa53385214633c6a5a668` (both last changed in `acf4a4da`) |
+| 29 files: every file here except the ones below | HellForge, branch `ds/mission-arcs`, `native/mod-loader/` | `0e90b26374173cb6ff743aac7fec3bfcc7d7062b` |
+| `living_world*.c`, `living_world_defer_list.h`, `safe_read.c` (13 files) | HellForge, branch `ds/living-world`, `native/mod-loader/` | `b3de43d9259530f5e4a9ff2a787e26e49c9ea000` |
 | `../overlay/hellforge_overlay_host.h` | HellForge, branch `ds/mission-arcs`, `native/overlay/` | `0e90b263` |
 | `../sdk-fallback/hellforge_overlay.h` | HellForge, branch `ds/mission-arcs`, `native/mod-sdk/` | `0e90b263` |
 
@@ -23,16 +23,13 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
 | Files | Use |
 |---|---|
 | 24 `.c` files named in `../co_xl.c` | Included there, in the loader's order. |
-| `living_world_*.c` (but `living_world_mover.c`), `tacmap_*.c`, `tacmap.h`, `world_sites.h`, `living_world_defer_list.h` | Included by the files above. |
-| `living_world_mover.c` | Included by `../co_xl.c` after `living_world.c`. In its own branch `living_world.c` includes it. |
+| `living_world_*.c`, `tacmap_*.c`, `tacmap.h`, `world_sites.h`, `living_world_defer_list.h` | Included by the files above. |
 | `safe_read.c` | Included by `../co_shim.c`: the mod's guarded read. |
 | `important_sites.h`, `route_sites.h` | Not compiled. They are tables of the generation block's move, which is HellForge's. |
 
 ## What is left out
 
 - The loader's own level 11 install and the fork's edits to it. `../co_xl_standin.h` gives the names these files read.
-- The density rules' calls into `living_world_mover.c` (`LwMoverRoom`, `LwMoverPending`, `LwMoverSent`, `LwMoverNote`).
-  They are in a later `living_world_density.c` that was not copied.
 - The loader's `PhysicsPools` with the fork's pool sizes, broadphase and navigation cells. `../../co_early.c` writes
   them beside HellForge's own, and `../co_xl.c` hooks the entity records' move from the same moment (`CoXlEarly`).
 - The callers of `EntityRecordsWatch` and `StatusWatch`: the loader's watch thread. The first only notes a count.
@@ -70,6 +67,7 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
 | `difficulty_status.c` | The registry's stubs, list and hash are `../co_status.c`'s (seven sites, all or none, installed by `co_complex_start`); `StatusWatch` is called from the game thread's tick, moves the hash and notes skipped units. |
 | `difficulty_world.c` | The mission in play sets where a loot container's location is looked up (`../co_locate.c`): the moved array on a complex mission. |
 | `difficulty_world.c` | The HUD rows' text ids start at `CO_HUD_TEXT_FIRST` (`../co_xl_standin.h`); `../co_text.c` answers them behind the engine's lookup. |
+| `living_world.c` | The tick's cost by section is logged by a research build only (`CO_RESEARCH`). |
 
 What the build does instead of an edit:
 

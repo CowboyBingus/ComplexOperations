@@ -8,14 +8,21 @@
 #define LW_FLAT_MODULES 31            /* key bits 26-30: the module, 0 game.dll, 1-30 in the order first seen, 31 the rest */
 #define LW_FLAT_OFFSET 0x3FFFFFFu
 #define LW_FLAT_CHAINS 1024           /* the last quarter is kept for the other threads' chains */
+#define LW_FLAT_ROOT 0x8000           /* the stack's outermost bytes, copied for the top-down view */
+#define LW_FLAT_DEPTH 28              /* outermost engine and game functions kept per sample */
+#define LW_FLAT_ROOT_KEYS 128
+#define LW_FLAT_PARENTS 10            /* HELLFORGE_LW_PROFILE_SITES=lo-hi,...: functions whose call sites are counted */
+#define LW_FLAT_SITES 96
 #define LW_FLAT_FENCE 0x106030u       /* helldivers2.exe: the wait for a render fence, to LW_FLAT_FENCE_END */
 #define LW_FLAT_FENCE_END 0x106173u
 static struct {
     HANDLE thread; int on; volatile uintptr_t base; volatile uint32_t frame;
     volatile float ms[256];                      /* the last frames' lengths, by frame number */
-    struct { uint32_t frame, key, caller, chain[4]; } ring[LW_FLAT_RING]; uint32_t head, tail;
+    struct { uint32_t frame, key, caller, chain[4], root[LW_FLAT_DEPTH], site[LW_FLAT_PARENTS]; } ring[LW_FLAT_RING]; uint32_t head, tail;
+    struct { uint32_t lo, hi; int game; struct { uint32_t at, count[2]; } site[LW_FLAT_SITES]; } parent[LW_FLAT_PARENTS]; int parents;
     uint32_t key[LW_FLAT_KEYS], count[4][LW_FLAT_KEYS], total[4], dropped;   /* 0 frames up to 33 ms, 1 over; 2, 3 the busiest other thread */
-    uint8_t stack[LW_FLAT_STACK];
+    uint8_t stack[LW_FLAT_STACK], rootStack[LW_FLAT_ROOT]; size_t rootLen;
+    struct { uint32_t fn, count[2]; } root[LW_FLAT_DEPTH][LW_FLAT_ROOT_KEYS];
     uintptr_t module[LW_FLAT_MODULES]; int modules;
     struct { uint32_t fn[4], count[4]; } chain[LW_FLAT_CHAINS]; int chains;
     DWORD gameThread; uint32_t fenceRun;
@@ -61,6 +68,37 @@ static uint32_t LwFlatCaller(size_t len)
     return LW_FLAT_CALLER;
 }
 
+/* HELLFORGE_LW_PROFILE_CHAINS=lo-hi,... (helldivers2.exe offsets, hex): a sample stopped in one of these ranges, on
+ * the game thread or a sampled worker, gets the chain of its callers, and the ranges themselves are left out of every chain,
+ * so listing a leaf and its known callers shows who is further up. */
+static struct { uint32_t lo[8], hi[8]; int count; } g_lwFlatWalk;
+static int LwFlatWalked(uintptr_t offset)
+{
+    for (int i = 0; i < g_lwFlatWalk.count; i++) if (offset >= g_lwFlatWalk.lo[i] && offset < g_lwFlatWalk.hi[i]) return 1;
+    return 0;
+}
+
+static void LwFlatWalkList(void)
+{
+    char list[200] = "";
+    GetEnvironmentVariableA("HELLFORGE_LW_PROFILE_CHAINS", list, sizeof list);
+    for (const char* c = list; *c && g_lwFlatWalk.count < 8; )
+    {
+        unsigned lo = 0, hi = 0; int used = 0;
+        if (sscanf(c, "%x-%x%n", &lo, &hi, &used) < 2 || hi <= lo) break;
+        g_lwFlatWalk.lo[g_lwFlatWalk.count] = lo; g_lwFlatWalk.hi[g_lwFlatWalk.count++] = hi;
+        c += used; if (*c == ',') c++;
+    }
+}
+
+/* Whether a stack slot's value may be a return address a chain takes. */
+static int LwFlatChainSlot(uintptr_t v, uintptr_t exe, int anyModule)
+{
+    if (v > exe + 0x1000u && v - exe < 0x4000000u) return !LwFlatWalked(v - exe);
+    if (v > g_lw.game + 0x1000u && v - g_lw.game < 0x4000000u) return 1;
+    return anyModule && v > 0x10000u && v < 0x7FFFFFFFFFFFull;
+}
+
 /* Stopped in a system library (a wait, mostly): the first four engine or game functions up the copied stack say which
  * wait it is. Slots are taken as return addresses when they point after a call in helldivers2.exe or game.dll; a
  * stale slot can add a wrong one, so a chain is a hint. */
@@ -73,14 +111,45 @@ static void LwFlatChain(size_t len, uint32_t* chain, int anyModule)
     for (size_t i = 0; i + 8 <= len && n < 4; i += 8)
     {
         uintptr_t v; memcpy(&v, g_lwFlat.stack + i, 8);
-        int inGame = v > g_lw.game + 0x1000u && v - g_lw.game < 0x4000000u, inExe = v > exe + 0x1000u && v - exe < 0x4000000u;
-        if (!inGame && !inExe && !(anyModule && v > 0x10000u && v < 0x7FFFFFFFFFFFull)) continue;
+        if (!LwFlatChainSlot(v, exe, anyModule)) continue;
         DWORD64 base = 0;
         PRUNTIME_FUNCTION f = RtlLookupFunctionEntry(v, &base, NULL);
         if (f == NULL || !LwProfCallBefore((const uint8_t*)v)) continue;
         uint32_t fn = LwFlatModule((uintptr_t)base) << 26 | (f->BeginAddress & LW_FLAT_OFFSET);
         if (n == 0 || chain[n - 1] != fn) chain[n++] = fn;
     }
+}
+
+/* The flat view has no hot spot, so the same samples are also read from the other end: the outermost engine and game
+ * functions on the stack (the main loop, then the phase of the frame it called, and so on down), by depth. Slots are
+ * taken as return addresses as in LwFlatChain; one that is not adds a level, the same in every sample. */
+static void LwFlatRoot(uint32_t* root)
+{
+    static uintptr_t exe;
+    if (exe == 0) exe = (uintptr_t)GetModuleHandleA(NULL);
+    int n = 0;
+    memset(root, 0, LW_FLAT_DEPTH * sizeof *root);
+    for (size_t i = g_lwFlat.rootLen & ~(size_t)7; i >= 8 && n < LW_FLAT_DEPTH; i -= 8)
+    {
+        uintptr_t v; memcpy(&v, g_lwFlat.rootStack + i - 8, 8);
+        if (!(v > g_lw.game + 0x1000u && v - g_lw.game < 0x4000000u) && !(v > exe + 0x1000u && v - exe < 0x4000000u)) continue;
+        DWORD64 base = 0;
+        PRUNTIME_FUNCTION f = RtlLookupFunctionEntry(v, &base, NULL);
+        if (f == NULL || !LwProfCallBefore((const uint8_t*)v)) continue;
+        uint32_t fn = LwFlatModule((uintptr_t)base) << 26 | (f->BeginAddress & LW_FLAT_OFFSET);
+        if (n == 0 || root[n - 1] != fn) root[n++] = fn;
+    }
+}
+
+static void LwFlatRootCount(const uint32_t* root, int slow)
+{
+    for (int d = 0; d < LW_FLAT_DEPTH && root[d]; d++)
+        for (int k = 0; k < LW_FLAT_ROOT_KEYS; k++)
+        {
+            if (g_lwFlat.root[d][k].fn != root[d] && g_lwFlat.root[d][k].fn != 0) continue;
+            g_lwFlat.root[d][k].fn = root[d]; g_lwFlat.root[d][k].count[slow]++;
+            break;
+        }
 }
 
 static void LwFlatChainCount(const uint32_t* chain, int slow)
@@ -106,6 +175,78 @@ static void LwFlatCount(uint32_t key, int slow)
 }
 
 /* A sample is counted once its frame has ended and the game thread has written that frame's length. */
+/* The call a listed engine function is inside: the innermost return address into its range, on the copied stack. A
+ * function's calls all store that address in one slot, so no earlier call's value is left there; 1 means the sample
+ * stopped in the function's own code. */
+static uint32_t LwFlatSite(uintptr_t rip, size_t len, uint32_t lo, uint32_t hi, int game)
+{
+    uintptr_t exe = game ? g_lw.game : (uintptr_t)GetModuleHandleA(NULL);
+    if (rip - exe >= lo && rip - exe < hi) return 1;
+    for (int pass = 0; pass < 2; pass++)
+    {
+        const uint8_t* stack = pass ? g_lwFlat.rootStack : g_lwFlat.stack;
+        size_t n = pass ? g_lwFlat.rootLen : len;
+        for (size_t i = 0; i + 8 <= n; i += 8)
+        {
+            uintptr_t v; memcpy(&v, stack + i, 8);
+            if (v - exe > lo && v - exe < hi && LwProfCallBefore((const uint8_t*)v)) return (uint32_t)(v - exe);
+        }
+    }
+    return 0;
+}
+
+static void LwFlatSiteCount(const uint32_t* site, int slow)
+{
+    for (int p = 0; p < g_lwFlat.parents; p++)
+        for (int k = 0; site[p] && k < LW_FLAT_SITES; k++)
+        {
+            if (g_lwFlat.parent[p].site[k].at != site[p] && g_lwFlat.parent[p].site[k].at != 0) continue;
+            g_lwFlat.parent[p].site[k].at = site[p]; g_lwFlat.parent[p].site[k].count[slow]++;
+            break;
+        }
+}
+
+/* HELLFORGE_LW_PROFILE_SITES=lo-hi,... (helldivers2.exe offsets, hex; a leading g for game.dll's). */
+static void LwFlatParents(void)
+{
+    char sites[256] = "";
+    GetEnvironmentVariableA("HELLFORGE_LW_PROFILE_SITES", sites, sizeof sites);
+    for (const char* c = sites; *c && g_lwFlat.parents < LW_FLAT_PARENTS; )
+    {
+        unsigned lo = 0, hi = 0; int used = 0, game = *c == 'g';
+        if (sscanf(c += game, "%x-%x%n", &lo, &hi, &used) < 2 || hi <= lo) break;
+        g_lwFlat.parent[g_lwFlat.parents].game = game;
+        g_lwFlat.parent[g_lwFlat.parents].lo = lo; g_lwFlat.parent[g_lwFlat.parents++].hi = hi;
+        c += used; if (*c == ',') c++;
+    }
+}
+
+/* The busiest call site of a parent not yet printed, -1 when none is left. */
+static int LwFlatSiteBest(int p, int slow, const uint8_t* used)
+{
+    int best = -1;
+    for (int k = 0; k < LW_FLAT_SITES; k++)
+        if (!used[k] && g_lwFlat.parent[p].site[k].count[slow] && (best < 0 || g_lwFlat.parent[p].site[k].count[slow] > g_lwFlat.parent[p].site[best].count[slow])) best = k;
+    return best;
+}
+
+static void LwFlatSites(int slow)
+{
+    for (int p = 0; p < g_lwFlat.parents && g_lwFlat.total[slow]; p++)
+    {
+        uint8_t used[LW_FLAT_SITES] = {0};
+        char line[700]; size_t at = 0; uint64_t all = 0;
+        for (int k = 0; k < LW_FLAT_SITES; k++) all += g_lwFlat.parent[p].site[k].count[slow];
+        for (int n = 0, best; n < 16 && at < sizeof line - 24 && (best = LwFlatSiteBest(p, slow, used)) >= 0; n++)
+        {
+            used[best] = 1;
+            at += (size_t)snprintf(line + at, sizeof line - at, " %X %.2f%%", g_lwFlat.parent[p].site[best].at, 100.0 * g_lwFlat.parent[p].site[best].count[slow] / g_lwFlat.total[slow]);
+        }
+        Note("living world: frame profile, %s, inside %s %X (%.2f%% of the samples; 1 = its own code), by return address:%s", slow ? "frames over 33 ms" : "frames up to 33 ms",
+            g_lwFlat.parent[p].game ? "game.dll" : "exe", g_lwFlat.parent[p].lo, 100.0 * (double)all / g_lwFlat.total[slow], line);
+    }
+}
+
 static void LwFlatDrain(void)
 {
     uint32_t now = g_lwFlat.frame;
@@ -119,6 +260,8 @@ static void LwFlatDrain(void)
         LwFlatCount(key, slow);
         if (caller) LwFlatCount(caller, slow);
         LwFlatChainCount(g_lwFlat.ring[(g_lwFlat.tail - 1) & (LW_FLAT_RING - 1)].chain, slow);
+        LwFlatRootCount(g_lwFlat.ring[(g_lwFlat.tail - 1) & (LW_FLAT_RING - 1)].root, slow);
+        LwFlatSiteCount(g_lwFlat.ring[(g_lwFlat.tail - 1) & (LW_FLAT_RING - 1)].site, slow);
     }
 }
 
@@ -132,8 +275,13 @@ static int LwFlatRecord(uintptr_t rip, size_t len, uint32_t frame)
     g_lwFlat.ring[g_lwFlat.head].frame = frame;
     g_lwFlat.ring[g_lwFlat.head].key = key;
     g_lwFlat.ring[g_lwFlat.head].caller = key >> 26 ? LwFlatCaller(len) : 0;
-    if (!engine) LwFlatChain(len, g_lwFlat.ring[g_lwFlat.head].chain, 0);
+    uint32_t* chain = g_lwFlat.ring[g_lwFlat.head].chain;
+    if (!engine) LwFlatChain(len, chain, 0);
+    else if (rip > exe && LwFlatWalked(rip - exe)) { LwFlatChain(len, chain, 0); memmove(chain + 1, chain, 3 * sizeof *chain); chain[0] = key; }
     else memset(g_lwFlat.ring[g_lwFlat.head].chain, 0, sizeof g_lwFlat.ring[0].chain);
+    LwFlatRoot(g_lwFlat.ring[g_lwFlat.head].root);
+    for (int p = 0; p < LW_FLAT_PARENTS; p++)
+        g_lwFlat.ring[g_lwFlat.head].site[p] = p < g_lwFlat.parents ? LwFlatSite(rip, len, g_lwFlat.parent[p].lo, g_lwFlat.parent[p].hi, g_lwFlat.parent[p].game) : 0;
     uint32_t inner = g_lwFlat.ring[g_lwFlat.head].chain[0];
     g_lwFlat.head = (g_lwFlat.head + 1) & (LW_FLAT_RING - 1);
     return !engine && inner >> 26 == LwFlatModule(exe) && (inner & LW_FLAT_OFFSET) >= LW_FLAT_FENCE && (inner & LW_FLAT_OFFSET) < LW_FLAT_FENCE_END;
@@ -159,6 +307,8 @@ static uintptr_t LwFlatSnap(HANDLE thread, uintptr_t base, size_t* len)
     int ok = GetThreadContext(thread, &c);
     *len = ok && c.Rsp < base ? (base - c.Rsp < LW_FLAT_STACK ? (size_t)(base - c.Rsp) : LW_FLAT_STACK) : 0;
     if (*len) memcpy(g_lwFlat.stack, (const void*)(uintptr_t)c.Rsp, *len);
+    g_lwFlat.rootLen = ok && c.Rsp < base ? (base - c.Rsp < LW_FLAT_ROOT ? (size_t)(base - c.Rsp) : LW_FLAT_ROOT) : 0;
+    if (g_lwFlat.rootLen) memcpy(g_lwFlat.rootStack, (const void*)(base - g_lwFlat.rootLen), g_lwFlat.rootLen);
     ResumeThread(thread);
     return ok ? (uintptr_t)c.Rip : 0;
 }
@@ -226,15 +376,63 @@ static void LwFlatHot(int kind)
     uintptr_t rip = LwFlatSnap(g_lwFlatOthers.thread[g_lwFlatOthers.hot], g_lwFlatOthers.base[g_lwFlatOthers.hot], &len);
     if (rip == 0) return;
     g_lwFlat.total[kind]++;
-    LwFlatCount(LwFlatFunction(rip), kind);
-    if ((rip >= g_lw.game && rip - g_lw.game < 0x4000000u) || (rip >= exe && rip - exe < 0x4000000u)) return;
+    int fine = rip > exe && LwFlatWalked(rip - exe);
+    LwFlatCount(fine ? LwFlatModule(exe) << 26 | ((uint32_t)(rip - exe) & LW_FLAT_OFFSET & ~0xFu) : LwFlatFunction(rip), kind);
+    if (g_lwFlatWalk.count ? !LwFlatWalked(rip - exe) : (rip >= g_lw.game && rip - g_lw.game < 0x4000000u) || (rip >= exe && rip - exe < 0x4000000u)) return;
     LwFlatChain(len, chain, 1);
+    if (g_lwFlatWalk.count) { memmove(chain + 1, chain, 3 * sizeof *chain); chain[0] = LwFlatFunction(rip); }
     LwFlatChainCount(chain, kind);
+}
+
+static volatile LONG g_lwFlatRepick;
+/* The other threads by processor time since the first reading, busiest first; how many were taken. */
+static int LwFlatAllPick(int* picked, int most)
+{
+    int count = 0;
+    for (int i = 0; i < g_lwFlatOthers.count; i++) g_lwFlatOthers.cpu[i] = LwFlatCpu(g_lwFlatOthers.thread[i]) - g_lwFlatOthers.cpu[i];
+    for (; count < most && count < g_lwFlatOthers.count; count++)
+    {
+        int best = 0;
+        for (int i = 1; i < g_lwFlatOthers.count; i++) if (g_lwFlatOthers.cpu[i] > g_lwFlatOthers.cpu[best]) best = i;
+        picked[count] = best; g_lwFlatOthers.cpu[best] = 0;
+    }
+    Note("living world: test: frame profile: %d of %d other threads are sampled in turn", count, g_lwFlatOthers.count);
+    return count;
+}
+
+/* Test command "profile repick": the busiest thread changes over a mission (the nav cell builds end minutes after
+ * landing), so the pick starts again from now and the other threads' counts with it. */
+static void LwFlatRepick(void)
+{
+    for (int i = 0; i < g_lwFlatOthers.count; i++) g_lwFlatOthers.cpu[i] = LwFlatCpu(g_lwFlatOthers.thread[i]);
+    for (int k = 2; k < 4; k++) { memset(g_lwFlat.count[k], 0, sizeof g_lwFlat.count[k]); g_lwFlat.total[k] = 0; }
+    for (int i = 0; i < g_lwFlat.chains; i++) g_lwFlat.chain[i].count[2] = g_lwFlat.chain[i].count[3] = 0;
+}
+
+/* HELLFORGE_LW_PROFILE_ALL=1: the 14 other threads with the most processor time between the 3rd and the 6th second
+ * are stopped in turn, one a sample, and counted as "the busiest other thread at other times": what the workers run. */
+static int LwFlatAll(void)
+{
+    static int on = -1, picked[14], count;
+    static uint32_t tick;
+    if (on < 0) { char t[4] = ""; on = GetEnvironmentVariableA("HELLFORGE_LW_PROFILE_ALL", t, sizeof t) > 0 && t[0] == '1'; }
+    if (!on) return 0;
+    tick++;
+    if (InterlockedExchange(&g_lwFlatRepick, 0)) { LwFlatRepick(); tick = 3001; count = 0; }
+    if (tick == 3000)
+    {
+        LwFlatOthersList();
+        for (int i = 0; i < g_lwFlatOthers.count; i++) g_lwFlatOthers.cpu[i] = LwFlatCpu(g_lwFlatOthers.thread[i]);
+    }
+    if (tick == 6000) { char t[4] = ""; count = LwFlatAllPick(picked, GetEnvironmentVariableA("HELLFORGE_LW_PROFILE_ONE", t, sizeof t) > 0 && t[0] == '1' ? 1 : 14); }
+    if (tick > 6000 && count > 0) { g_lwFlatOthers.hot = picked[tick % (uint32_t)count]; LwFlatHot(3); }
+    return 1;
 }
 
 static void LwFlatOthers(int longWait)
 {
     static uint32_t tick;
+    if (LwFlatAll()) return;
     if (tick++ % 4 != 0) return;
     if (g_lwFlatOthers.hot >= 0) LwFlatHot(longWait ? 2 : 3);
     else if (longWait) LwFlatFind();
@@ -265,6 +463,8 @@ static void LwFlatFrame(double ms)
         char t[4] = "";
         g_lwFlat.on = GetEnvironmentVariableA("HELLFORGE_LW_PROFILE", t, sizeof t) > 0 && t[0] == '2' ? 1 : -1;
         g_lwFlat.base = (uintptr_t)((NT_TIB*)NtCurrentTeb())->StackBase;
+        LwFlatParents();
+        LwFlatWalkList();
         g_lwFlat.gameThread = GetCurrentThreadId();
         if (g_lwFlat.on > 0 && ((g_lwFlat.thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, GetCurrentThreadId())) == NULL ||
             CreateThread(NULL, 0, LwFlatThread, NULL, 0, NULL) == NULL)) g_lwFlat.on = -1;
@@ -301,13 +501,13 @@ static void LwFlatTop(int slow, int callers)
         callers ? "game callers of the rest" : "functions", g_lwFlat.total[slow], g_lwFlat.dropped, line);
 }
 
-/* The six commonest chains under the system-library samples of one kind, innermost function first. */
+/* The commonest chains under the system-library samples of one kind, innermost function first. */
 static void LwFlatChains(int slow)
 {
     static uint8_t used[LW_FLAT_CHAINS];
     char line[1000]; size_t at = 0;
     memset(used, 0, sizeof used);
-    for (int n = 0; n < (slow >= 2 ? 10 : 6) && g_lwFlat.total[slow] && at < sizeof line - 80; n++)
+    for (int n = 0; n < 14 && g_lwFlat.total[slow] && at < sizeof line - 80; n++)
     {
         int best = -1;
         for (int k = 0; k < g_lwFlat.chains; k++)
@@ -322,11 +522,41 @@ static void LwFlatChains(int slow)
     Note("living world: frame profile, %s, chains under system calls (%d kinds):%s", g_lwFlatKind[slow], g_lwFlat.chains, line);
 }
 
+/* The most-sampled function at one depth that `used` does not mark yet; -1 when none is left. */
+static int LwFlatRootBest(int d, int slow, const uint8_t* used)
+{
+    int best = -1;
+    for (int k = 0; k < LW_FLAT_ROOT_KEYS && g_lwFlat.root[d][k].fn; k++)
+        if (!used[k] && g_lwFlat.root[d][k].count[slow] && (best < 0 || g_lwFlat.root[d][k].count[slow] > g_lwFlat.root[d][best].count[slow])) best = k;
+    return best;
+}
+
+/* One line per depth from the outermost function inward: the functions seen there and their share of the samples. */
+static void LwFlatRoots(int slow)
+{
+    for (int d = 0; d < LW_FLAT_DEPTH && g_lwFlat.total[slow]; d++)
+    {
+        uint8_t used[LW_FLAT_ROOT_KEYS] = {0};
+        char line[600]; size_t at = 0;
+        int first = LwFlatRootBest(d, slow, used);   /* a depth every sample shares (start-up, the main loop) says nothing */
+        if (first < 0 || g_lwFlat.root[d][first].count[slow] * 200ull >= g_lwFlat.total[slow] * 199ull) continue;
+        for (int n = 0, best; n < 12 && at < sizeof line - 28 && (best = LwFlatRootBest(d, slow, used)) >= 0; n++)
+        {
+            used[best] = 1;
+            at += (size_t)snprintf(line + at, sizeof line - at, " %u:%X %.1f%%", g_lwFlat.root[d][best].fn >> 26, g_lwFlat.root[d][best].fn & LW_FLAT_OFFSET,
+                100.0 * g_lwFlat.root[d][best].count[slow] / g_lwFlat.total[slow]);
+        }
+        if (at) Note("living world: frame profile, %s, from the outside in, depth %d:%s", g_lwFlatKind[slow], d, line);
+    }
+}
+
 /* With the 30 s notes. The counts run on for the whole level: the slow frames are few, so they need the time. */
 static void LwFlatNote(void)
 {
     if (g_lwFlat.on <= 0) return;
     for (int kind = 0; kind < 4; kind++) LwFlatTop(kind >> 1, kind & 1);
+    LwFlatRoots(0); LwFlatRoots(1);
+    LwFlatSites(0); LwFlatSites(1);
     LwFlatTop(2, 0);
     LwFlatTop(3, 0);
     for (int slow = 0; slow < 4; slow++) LwFlatChains(slow);

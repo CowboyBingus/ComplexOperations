@@ -499,7 +499,15 @@ static void LwDensityOnline(const float* pos, uint32_t members); static int LwDe
 static void LwLodTick(void); static void LwLodNote(void); static void LwLodCmd(int on); static int LwLodFullUnits(void); /* living_world_lod.c */
 static void LwDeferTick(uintptr_t lg, uint32_t seed); static void LwDeferNote(void); static void LwSpawnSourcesNote(int seq); /* living_world_defer.c */
 static void LwSyncDump(int seq); /* living_world_density.c */
+static volatile LONG g_lwFlatRepick;                    /* living_world_flat.c */
 static LwSquad g_lwSquads[LW_SQUADS_MAX];
+/* The table is 14 MB, so a pass over all of it each tick costs more than the squads' own work (0.5 ms of the tick's
+ * 1.8 at 228 units). g_lwEvery marks the squads that need every tick (pending, online, or held by a test); the others
+ * (offline, walking their routes) are visited one slice in eight a tick, with the time summed since their last visit. */
+#define LW_SLICES 8
+static uint8_t g_lwEvery[LW_SQUADS_MAX];
+static struct { uint32_t n; float dt[LW_SLICES]; } g_lwSlice;
+static uint8_t LwEveryOf(const LwSquad* q) { return q->state == LW_PENDING || q->state == LW_ONLINE || q->cycled == 1 || q->pulled == 2; }
 static struct
 {
     uintptr_t dir, lg; uint32_t seed;
@@ -752,6 +760,7 @@ static int LwRoomFor(uint32_t members)
 
 static int LwGround(float x, float y, float* z);
 static int g_lwTestVisible; /* test command "spawn visible": the point must be in a player's sight instead of out of it */
+static int g_lwTestHold;    /* test command "hold 1": no squad goes offline for distance (a measurement keeps its count); 2: and no boundary request check */
 static uint32_t g_lwTestUnseen; /* "spawn visible" points no player sees */
 static int LwSeenByAny(const float* p, float range);
 static int LwPlace(uintptr_t slot, float* pos);
@@ -885,6 +894,7 @@ static void LwOnline(LwSquad* q)
         (int)(q - g_lwSquads), (double)pos[0], (double)pos[1], (double)pos[2], (double)sqrtf(LwDist2(wanted, pos[0], pos[1])),
         (double)sqrtf(LwNearestPlayer2(pos[0], pos[1])), cap, size, (unsigned long long)q->definition);
     q->reqZ = pos[2]; q->arrived = 0; q->viewed = 0; q->checkedCount = 0; q->appearSeen = 0; q->appearGap = 1e9f; q->farOn = 0; q->inView = 0; q->lookAt = 0;
+    g_lwEvery[q - g_lwSquads] = 1;
     q->state = LW_PENDING; q->rec = rec; q->cap = (uint8_t)cap; q->since = GetTickCount64(); q->jobSet = 0; q->farSince = 0; q->seenCount = 0; q->lost = 0; q->squad = 0;
     g_lwWorld.onlineUnits += (int)cap; q->alive = (uint8_t)cap; LwDensityOnline(pos, cap);
     LwRecentAdd(pos);
@@ -1614,7 +1624,7 @@ static void LwOnlineTick(LwSquad* q, int* removals)
     {
         /* offline only once it has been beyond R_off of every player, every member at alert 0, for LW_FAR_MS without a break */
         float d2 = LwNearestPlayer2(at[0], at[1]);
-        int calm = g_lwWorld.playersAt > 0 && d2 > LW_R_OFF * LW_R_OFF;
+        int calm = g_lwWorld.playersAt > 0 && d2 > LW_R_OFF * LW_R_OFF && !g_lwTestHold;
         float keep = LwSquadBand(q) + LW_FAR_MARGIN;
         if (calm && d2 < keep * keep) /* in view range: it stays while a player sees it (sightlines), checked once a second */
         {
@@ -1848,7 +1858,7 @@ static void LwTestStage(int seq, float d)
             tried++;
             if (!LwGround(x, y, &here[2]) || !LwSeenByAny(here, band)) continue;
             q->pos[0] = x; q->pos[1] = y; q->node = (uint16_t)LwNearestNode(x, y); q->pathLen = q->pathAt = 0; q->retry = 0;
-            q->pulled = 2;
+            q->pulled = 2; g_lwEvery[q - g_lwSquads] = 1;
             Note("living world: test command %d: stage: squad %d (%u alive, band %.0f m) held offline at (%.0f, %.0f), %.0f m from player 1, in its sight (%d points tried)",
                 seq, pick, q->survivors, (double)band, (double)x, (double)y, (double)dd, tried);
             return;
@@ -2402,7 +2412,8 @@ static void LwTestCommands(void)
     {
         char mode[16] = ""; float d = 0, deg = 0; int idx = -1, seq = seq0 + c;
         Note("living world: test command %d: %s", seq, cmds[c]);
-        if (sscanf(cmds[c], "spawn %15s %f %f %d", mode, &d, &deg, &idx) >= 2) LwTestSpawn(seq, mode, d, deg, idx);
+        if (strcmp(cmds[c], "profile repick") == 0) InterlockedExchange(&g_lwFlatRepick, 1);
+        else if (sscanf(cmds[c], "spawn %15s %f %f %d", mode, &d, &deg, &idx) >= 2) LwTestSpawn(seq, mode, d, deg, idx);
         else if (sscanf(cmds[c], "offline %d", &idx) == 1 && idx >= 0 && idx < g_lwWorld.count && g_lwSquads[idx].state == LW_ONLINE) g_lwSquads[idx].forceOff = 1;
         else if (strncmp(cmds[c], "kill garrison", 13) == 0) LwKillArm();
         else if (strncmp(cmds[c], "clear garrison", 14) == 0) { unsigned id = 0; sscanf(cmds[c], "clear garrison %x", &id); LwTestClear(seq, id); }
@@ -2420,6 +2431,7 @@ static void LwTestCommands(void)
         else if (sscanf(cmds[c], "zoom %f %f", &d, &deg) == 2 && d >= 1.0f && d <= 8.0f && deg > 0 && deg <= 20000) LwTestZoom(seq, d, deg);
         else if (sscanf(cmds[c], "budget %d", &idx) == 1) LwDensityBudgetCmd(idx);
         else if (sscanf(cmds[c], "lod %d", &idx) == 1) LwLodCmd(idx);
+        else if (sscanf(cmds[c], "hold %d", &idx) == 1) g_lwTestHold = idx;
         else if (strcmp(cmds[c], "census") == 0) { LwSyncCensus(seq); LwSpawnSourcesNote(seq); }
         else if (strncmp(cmds[c], "status", 6) == 0)
             for (int i = 0; i < g_lwWorld.count; i++)
@@ -2454,8 +2466,47 @@ static void LwGroundNote(void)
     g_lwWorld.heights = g_lwWorld.underGround = g_lwWorld.overGround = 0; g_lwWorld.worstUnder = g_lwWorld.worstOver = 0;
 }
 
+/* The tick's scans and test instruments that run before the squads' own ticks. */
+static void LwTickScans(void)
+{
+    LwAvatarDeathWatch(); /* test runs: who killed the local Helldiver */
+    LwSafeLanding(); /* test runs: out of a pod among enemies, moved clear */
+    LwTestKeepAlive(); /* test runs: the Helldiver healed to full */
+    LwDrawnTick(); /* the main view's drawn state of far squads (test instrument, HELLFORGE_LW_DRAWN=1) */
+    LwTestCommands(); /* test commands from the harness (hellforge_lw_test), run here on the game thread */
+    LwNoiseDrain(); /* Phase 2a: noises since the last tick send squads to investigate */
+    LwFightScan(); /* Phase 2b: fights and calls for help draw squads in (once a second) */
+    LwTerritoryTick(); /* Phase 2d: regions, their strength, and the squads' homes */
+    LwRetakeScan(); /* Phase 2c: squads retake cleared plain garrisons (every 10 s) */
+    LwIntentTrace(); /* test runs only: intent changes and positions for the evidence graphics */
+    if (LwTestTraceOn()) LwAggroTrace();
+}
+
+/* The budget: living members of online squads, the request of pending ones; the far ones' share is returned. */
+static int LwTickSums(int* units, int* waiting)
+{
+    int farSum = 0;
+    for (int i = 0; i < g_lwWorld.count; i++)
+    {
+        const LwSquad* q = &g_lwSquads[i];
+        if (!g_lwEvery[i]) continue;
+        int n = q->state == LW_PENDING ? q->cap : q->state == LW_ONLINE ? q->alive : 0;
+        *units += n; if (q->farOn) farSum += n;
+        *waiting |= q->state == LW_OFFLINE && q->cycled == 1;
+    }
+    g_lwWorld.onlineUnits = *units; g_lwWorld.farUnits = farSum;
+    return farSum;
+}
+
+/* Test instrument: the tick's processor time by section (time-stamp counter, shares logged with the cost note), to
+ * see which part of the tick to make cheaper. LW_SECT switches the running section. */
+enum { LW_S_BEFORE, LW_S_SETUP, LW_S_SUMS, LW_S_DENSITY, LW_S_SCANS, LW_S_OFFLINE, LW_S_ONLINE, LW_S_AFTER, LW_S_COUNT };
+static struct { uint64_t ticks[LW_S_COUNT], at; int cur; } g_lwSect;
+#define LW_SECT(n) do { if (g_lwSect.cur != (n)) { uint64_t t_ = __builtin_ia32_rdtsc(); g_lwSect.ticks[g_lwSect.cur] += t_ - g_lwSect.at; g_lwSect.at = t_; g_lwSect.cur = (n); } } while (0)
+
 static void LwSquadsTick(void)
 {
+    LW_SECT(LW_S_SETUP);
     LwSmashTableUpdate();
     uintptr_t dir, lg = LwLevel();
     uint32_t seed = 0, levelState = 0;
@@ -2470,6 +2521,7 @@ static void LwSquadsTick(void)
         g_lwRandom ^= seed | 1u;
         g_lwNodeCount = 0;
         g_lwWhy[0] = 0;
+        memset(g_lwEvery, 0, sizeof g_lwEvery); memset(&g_lwSlice, 0, sizeof g_lwSlice);
     }
     if (g_lwWorld.populated < 0) return;
     LwPlayers();
@@ -2486,31 +2538,23 @@ static void LwSquadsTick(void)
     if (dt > 1.0f) dt = 1.0f;
     g_lwWorld.last = now;
     if (now - g_lwWorld.effAt > 5000) { int eff = LwEffectiveCap(dir); if (eff > 0) g_lwWorld.eff = eff; g_lwWorld.effAt = now; }
+    LW_SECT(LW_S_SUMS);
     int requested = 0, removals = 0, online = 0, waiting = 0, units = 0, attempts = 0, farTries = 0; /* separate budgets: far checks never starve near squads (lw16l) */
     float r = g_lwWorld.radius;
-    for (int i = 0; i < g_lwWorld.count; i++) /* the budget: living members of online squads, the request of pending ones */
-        units += g_lwSquads[i].state == LW_PENDING ? g_lwSquads[i].cap : g_lwSquads[i].state == LW_ONLINE ? g_lwSquads[i].alive : 0;
-    g_lwWorld.onlineUnits = units;
-    int farUnits = 0;
-    for (int i = 0; i < g_lwWorld.count; i++)
-        if (g_lwSquads[i].farOn) farUnits += g_lwSquads[i].state == LW_PENDING ? g_lwSquads[i].cap : g_lwSquads[i].state == LW_ONLINE ? g_lwSquads[i].alive : 0;
-    g_lwWorld.farUnits = farUnits;
+    int farUnits = LwTickSums(&units, &waiting);
+    LW_SECT(LW_S_DENSITY);
     LwDensityTick(dt); /* bubbles and their budgets, before any squad asks for room */
-    LwAvatarDeathWatch(); /* test runs: who killed the local Helldiver */
-    LwSafeLanding(); /* test runs: out of a pod among enemies, moved clear */
-    LwTestKeepAlive(); /* test runs: the Helldiver healed to full */
-    LwDrawnTick(); /* the main view's drawn state of far squads (test instrument, HELLFORGE_LW_DRAWN=1) */
-    LwTestCommands(); /* test commands from the harness (hellforge_lw_test), run here on the game thread */
-    LwNoiseDrain(); /* Phase 2a: noises since the last tick send squads to investigate */
-    LwFightScan(); /* Phase 2b: fights and calls for help draw squads in (once a second) */
-    LwTerritoryTick(); /* Phase 2d: regions, their strength, and the squads' homes */
-    LwRetakeScan(); /* Phase 2c: squads retake cleared plain garrisons (every 10 s) */
-    LwIntentTrace(); /* test runs only: intent changes and positions for the evidence graphics */
-    if (LwTestTraceOn()) LwAggroTrace();
-    for (int i = 0; i < g_lwWorld.count && !waiting; i++) waiting = g_lwSquads[i].state == LW_OFFLINE && g_lwSquads[i].cycled == 1;
+    LW_SECT(LW_S_SCANS);
+    LwTickScans();
+    uint32_t slice = g_lwSlice.n++ % LW_SLICES;
+    for (int k = 0; k < LW_SLICES; k++) g_lwSlice.dt[k] += dt;
+    const float tickDt = dt;
     for (int i = 0; i < g_lwWorld.count; i++)
     {
+        if (!g_lwEvery[i] && (uint32_t)i % LW_SLICES != slice) continue;
         LwSquad* q = &g_lwSquads[i];
+        dt = g_lwEvery[i] ? tickDt : g_lwSlice.dt[slice];
+        LW_SECT(q->state == LW_OFFLINE ? LW_S_OFFLINE : LW_S_ONLINE);
         if (q->state == LW_OFFLINE)
         {
             const char* why = NULL; char whyBuf[128]; /* test notes for a staged squad (pulled 2): the gate it fails */
@@ -2573,6 +2617,10 @@ static void LwSquadsTick(void)
         else if (q->state == LW_ONLINE) { LwOnlineTick(q, &removals); online++; }
     }
     g_lwWorld.online = online;
+    for (int i = 0; i < g_lwWorld.count; i++) /* the visited ones' marks, from what the visit left */
+        if (g_lwEvery[i] || (uint32_t)i % LW_SLICES == slice) g_lwEvery[i] = LwEveryOf(&g_lwSquads[i]);
+    g_lwSlice.dt[slice] = 0;
+    LW_SECT(LW_S_AFTER);
     LwLodTick(); /* after the squads' ticks: tiers from this tick's members and positions */
     LwWallSample();
     if (now - g_lwWorld.noteAt > 30000)
@@ -4043,7 +4091,9 @@ static void LivingTick(void)
     if (!LwEnabled()) return;
     LARGE_INTEGER a, b, f;
     QueryPerformanceCounter(&a);
+    g_lwSect.at = __builtin_ia32_rdtsc(); g_lwSect.cur = LW_S_BEFORE;
     LivingTickBody();
+    LW_SECT(LW_S_COUNT - 1); g_lwSect.ticks[LW_S_AFTER] += __builtin_ia32_rdtsc() - g_lwSect.at;
     QueryPerformanceCounter(&b); QueryPerformanceFrequency(&f);
     double ms = (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart;
     g_lwCost.sum += ms; g_lwCost.ticks++; if (ms > g_lwCost.worst) g_lwCost.worst = ms;
@@ -4053,6 +4103,15 @@ static void LivingTick(void)
     {
         Note("living world: cost: %.3f ms a tick on average, %.2f ms at worst, over %u ticks (%d squads)", g_lwCost.sum / g_lwCost.ticks, g_lwCost.worst,
             g_lwCost.ticks, g_lwWorld.count);
+#ifdef CO_RESEARCH /* the frame profiler's share by section is a research note */
+        uint64_t all = 1;
+        for (int k = 0; k < LW_S_COUNT; k++) all += g_lwSect.ticks[k];
+        Note("living world: cost by section (%% of the tick): before the squads %.0f, setup %.0f, sums %.0f, density %.0f, scans %.0f, offline squads %.0f, pending and online squads %.0f, after %.0f",
+            100.0 * (double)g_lwSect.ticks[0] / (double)all, 100.0 * (double)g_lwSect.ticks[1] / (double)all, 100.0 * (double)g_lwSect.ticks[2] / (double)all,
+            100.0 * (double)g_lwSect.ticks[3] / (double)all, 100.0 * (double)g_lwSect.ticks[4] / (double)all, 100.0 * (double)g_lwSect.ticks[5] / (double)all,
+            100.0 * (double)g_lwSect.ticks[6] / (double)all, 100.0 * (double)g_lwSect.ticks[7] / (double)all);
+#endif
+        memset(g_lwSect.ticks, 0, sizeof g_lwSect.ticks);
         g_lwCost.sum = g_lwCost.worst = 0; g_lwCost.ticks = 0; g_lwCost.at = now;
     }
 }
@@ -4075,5 +4134,7 @@ static void LivingTickBody(void)
 #include "living_world_flat.c" /* test instrument: whole-frame sampling profile (KB xl-destruction-record-map-full) */
 #include "living_world_alloc.c" /* test instrument: large commits by caller (after living_world_flat.c: its function keys) */
 #include "living_world_trees.c" /* the tree cell limits never shrink within a level */
+#include "living_world_render.c" /* fix: the render device's version tables kept short (KB xl-living-world-frame-budget) */
 #include "living_world_records.c" /* test fix: the destruction records' room and hash (KB xl-destruction-record-map-full) */
+#include "living_world_mover.c" /* the 256 navmesh boundary requests a frame (KB living-world-mover-query-overflow) */
 #include "living_world_defer.c" /* mission locations' loose entities spawned near the players (KB living-world-density) */

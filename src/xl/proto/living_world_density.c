@@ -6,6 +6,7 @@
 
 #define LW_BUBBLE 500.0f       /* players within this of each other share one bubble (2 x R_on, D) */
 #define LW_SYNC_MAX 1900u      /* the synchronizer holds 2048 networked entities on every peer, unchecked (S4) */
+#define LW_SYNC_A_UNIT 4u
 #define LW_UPLOAD_KBPS 5000.0f /* host upload at 7 peers; scaled by the peer count (D, the decision rule) */
 
 static struct
@@ -410,6 +411,7 @@ static void LwPassNote(uint32_t frames)
 }
 
 static void LwRecNote(void); /* living_world_records.c */
+static void LwMoverNote(void); static int LwMoverRoom(uint32_t members); static void LwMoverSent(uint32_t members); static uint32_t LwMoverPending(void); /* living_world_mover.c */
 static void LwTreeNote(void); /* living_world_trees.c */
 /* Test note with the frame times: loader units by their squad's distance to the nearest player and in a player's
  * view, to set against the slow frames (the online count alone does not predict them). */
@@ -444,6 +446,7 @@ static void LwFramesNote(void)
             g_lwSlowGaps.gap[0], g_lwSlowGaps.gap[1], g_lwSlowGaps.gap[2], g_lwSlowGaps.gap[3], g_lwSlowGaps.gap[4], g_lwSlowGaps.gap[5]);
     memset(g_lwSlowGaps.gap, 0, sizeof g_lwSlowGaps.gap);
     LwRecNote();
+    LwMoverNote();
     LwTreeNote();
     LwNearNote();
     LwAllocNote();
@@ -665,8 +668,14 @@ static void LwDensityTick(float dt)
  * starts "the cap" so a far or event squad refused by it still swaps out filler (LwSwapForFar, LwHoldForIntent). */
 static int LwDensityRoom(const float* pos, uint32_t members, uint32_t held, char* why, size_t whyLen)
 {
-    if (g_lwDensity.sync && g_lwDensity.sync + members + 1 > LW_SYNC_MAX)
-    { g_lwDensity.refusedSync++; snprintf(why, whyLen, "the networked entities: %u + %u over %u", g_lwDensity.sync, members + 1, LW_SYNC_MAX); return 0; }
+    /* a unit brings 3 to 4.5 networked entities (itself, weapons, attachments; measured), and those of squads sent in
+     * the last seconds are not in the count yet: forced spawns once took it to 2031 past this check */
+    uint32_t coming = LW_SYNC_A_UNIT * (LwMoverPending() + members);
+    static uint32_t max;   /* HELLFORGE_LW_SYNC_MAX lowers it, so a test reaches the refusal at an ordinary unit count */
+    if (max == 0) { float v = LwEnvFloat("HELLFORGE_LW_SYNC_MAX", (float)LW_SYNC_MAX); max = v >= 1.0f && v < (float)LW_SYNC_MAX ? (uint32_t)v : LW_SYNC_MAX; }
+    if (g_lwDensity.sync && g_lwDensity.sync + coming > max)
+    { g_lwDensity.refusedSync++; snprintf(why, whyLen, "the networked entities: %u + %u over %u", g_lwDensity.sync, coming, max); return 0; }
+    if (g_lwTestHold != 2 && !LwMoverRoom(members)) { snprintf(why, whyLen, "the boundary requests: no room for %u more", members); return 0; }
     if (g_lwDensity.budgetKbps > 0 && g_lwDensity.kbps > g_lwDensity.budgetKbps)
     { g_lwDensity.refusedUpload++; snprintf(why, whyLen, "the upload: %.0f kbit/s over %.0f", (double)g_lwDensity.kbps, (double)g_lwDensity.budgetKbps); return 0; }
     int b = LwBubbleOf(pos[0], pos[1]), full = g_lwDensity.fullMax > 0 ? LwLodFullUnits() : 0;
@@ -682,6 +691,7 @@ static int LwDensityRoom(const float* pos, uint32_t members, uint32_t held, char
  * found no place kept its bubble closed to the others for the tick.) */
 static void LwDensityOnline(const float* pos, uint32_t members)
 {
+    LwMoverSent(members);
     int b = LwDensityOn() == 1 ? LwBubbleOf(pos[0], pos[1]) : -1;
     if (b >= 0) g_lwDensity.units[b] += (int)members;
 }

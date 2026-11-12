@@ -212,10 +212,13 @@ static int LwDeferPatch(uintptr_t site, size_t size, const uint8_t* head, size_t
  * The sample spawner's 65 become: mov rcx,rbx; lea rdx,[rbp-0x70]; mov rax,LwDeferSampleEntry; call rax; jmp 0x79D630.
  * Its params are rbp-0x70, the info rbp-0x10 and the list (+0x50) rbp+0x890; 0x79D630 on sets edi and r8 again. */
 static void LwInstallSpawnSources(void);
+static void LwInstallRender(void); /* living_world_render.c */
 static void LwInstallDefer(void)
 {
     if (!LwEnabled() || g_lwDefer.installed) return;
     LwInstallRecords();
+    LwInstallRender();
+    LwInstallMover();
     LwInstallTrees();
     LwInstallAlloc();
     uintptr_t game = g_lw.game;
