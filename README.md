@@ -282,25 +282,34 @@ Measured on one city mission at difficulty 11, 8 runs without the mod and 4 with
 
 ### On every level
 
-With the part on, these differ from a game without the mod on every level, the ship and the war-table previews. Each
-adds room, or acts only where the game would read or write out of bounds:
+These differ from a game without the mod on every level, the ship and the war-table previews. Each adds room, or
+acts only where the game would read or write out of bounds. What turns each group on differs.
+
+In every build, with the part on or off:
 
 - Session lists and managers move to blocks with eight entries (see Session lists); guards keep indexes 4 and up off
   the game's four-entry lists.
 - The hellpod manager and the ship's pod table move; their capacity goes from 4 to 8.
 - HellForge's generation block grows from 21.7 to 40.4 MB: 65024 locations, a minimap 8 times larger, important and
   linked lists of 1024.
+- Five readers of the peer count in the exe read 4 bits, not 3.
+- Every level-11 war-table entry's seed has bit 0 cleared for a normal operation and set for a complex one.
+- Address space: 1 MB near the exe and pages near both modules.
+
+On a PC that passes the early check (the room below, at least 28 GB of memory free to commit at the start):
+
+- The engine room in the table above, and the 32 x 32 navigation grid with the trim's 0x4000-byte block near the exe.
 - Entity records have 16384 slots.
 - Stamp index cells take 0x5000 bytes, not 0x548; the built index is the same.
+
+With the part on:
+
 - Each structured map's Voronoi step takes and clears 0x168CC68 bytes of weld pool, not 0x174C68.
 - The status registry has a list of 24576 and a hash of 65536. Past 4096 units the mod skips where the game crashes.
 - The render world is 2 times larger and render pools 0 and 1 are 4 times larger. Sample groups take 0x81008 bytes,
   route-cell lists are sized for cells plus locations, and the upload allocator links at the tail.
 - The layer heightfield copy, the object walk's 0 handle, the pose-sync drop, the owner-NULL stubs and about 16 more
   guards act only where the game would fault.
-- Five readers of the peer count in the exe read 4 bits, not 3.
-- Every level-11 war-table entry's seed has bit 0 cleared for a normal operation and set for a complex one.
-- Address space: 1 MB near the exe, pages near both modules and the trim's 0x4000-byte block.
 
 Not yet proven to act as the game does:
 
