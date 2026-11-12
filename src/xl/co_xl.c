@@ -162,7 +162,7 @@ const char* CoXlInstall(uintptr_t game)
     InstallDaylight(game);
     CoXlLiving(game);
     if ((why = CoXlGuards(game)) != NULL) return why;
-    if ((why = co_steer_install(g_coApi->module_base("helldivers2.exe", NULL))) != NULL) Note("steering: no guard for an empty AI world: %s", why);
+    /* co_steer_install stays out until the empty AI-world slot has a proved cause (DESIGN-AUDIT, d495db9 ruling R1-R4) */
     DescInstallNotes();
     if ((why = WorldSitesFailed(game)) != NULL) return why;
     WeldResearchInstall(game);
