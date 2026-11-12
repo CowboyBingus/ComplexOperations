@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include "co.h"
+#include "xl/co_nav.h"
 
 const HfApi* g_coApi;
 HfMod* g_coMod;
@@ -41,6 +42,7 @@ static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
     size_t size = 0;
     uintptr_t game = g_coApi->module_base("game.dll", &size);
     if (game == 0) { co_log("game.dll was not found; nothing changed"); return; }
+    co_nav_reserve(game, 0);
     co_ui_install(game);
     co_pods_install(game);
     co_counts_install(game);
@@ -64,6 +66,7 @@ HF_MOD_EXPORT int hellforge_mod_init(const HfApi* api, HfMod* mod)
         co_log("needs game build %s; this is %s", CO_GAME_BUILD, build != NULL ? build : "unknown");
         return 1;
     }
+    co_nav_reserve(0, api->module_base("helldivers2.exe", NULL)); /* before the game's heaps exist */
     if (api->on(mod, HF_EVENT_GAME_LOADED, OnGameLoaded, NULL) != 0) { co_log("the game-loaded event could not be registered"); return 1; }
     co_capacity_init(); /* the game makes the generator's block once: only now is in time */
     return 0;

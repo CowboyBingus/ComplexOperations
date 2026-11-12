@@ -139,7 +139,9 @@ int main(void)
     const float sizes[2] = {128.0f, 256.0f};
     memcpy(g_fake.exe + CO_NAV_TILE_128, &sizes[0], 4); memcpy(g_fake.exe + CO_NAV_TILE_256, &sizes[1], 4);
     CHECK(co_nav_plain((uintptr_t)image) && co_nav_check((uintptr_t)image, NULL) != NULL);
-    CHECK(co_nav_install((uintptr_t)image) == NULL);
+    co_nav_reserve(0, (uintptr_t)g_fake.exe); co_nav_reserve((uintptr_t)image, 0); /* the pages taken early are the ones used */
+    const uintptr_t early = (uintptr_t)co_nav_test_reserved();
+    CHECK(early != 0 && co_nav_install((uintptr_t)image) == NULL && co_nav_test_page() == early && co_nav_test_reserved() == NULL);
     const uint8_t* page = (const uint8_t*)co_nav_test_page();
     CHECK(page != NULL && image[CO_NAV_SITE] == 0xE9 && image[CO_NAV_SHIP_SITE] == 0xE9);
     for (int k = 5; k < 15; k++) CHECK(image[CO_NAV_SITE + k] == 0x90);

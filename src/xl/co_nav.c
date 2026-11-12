@@ -17,6 +17,17 @@ static struct
 
 void co_nav_ship(void (*ship)(void)) { g_nav.ship = ship; }
 
+/* Taken before the game's large allocations can fill the space within reach of the two images (co_nav_reserve). */
+static struct { uint8_t* page; float* tile; } g_reserve;
+
+void co_nav_reserve(uintptr_t game, uintptr_t exe)
+{
+    if (exe != 0 && g_reserve.tile == NULL && g_nav.tile == NULL && (g_reserve.tile = (float*)co_alloc_near(exe, 0x1000)) == NULL)
+        co_log("navigation: no page free within reach of helldivers2.exe at 0x%llx as the mod loaded", (unsigned long long)exe);
+    if (game != 0 && g_reserve.page == NULL && g_nav.page == NULL && (g_reserve.page = (uint8_t*)co_alloc_near(game, 0x1000)) == NULL)
+        co_log("navigation: no page free within reach of game.dll at 0x%llx as it loaded", (unsigned long long)game);
+}
+
 static int Same(uintptr_t at, const uint8_t* bytes, size_t size)
 {
     uint8_t now[160];
@@ -165,9 +176,12 @@ const char* co_nav_install(uintptr_t game)
     const int plain = co_nav_plain(game);
     if (!plain && (why = co_nav_check(game, stubs)) != NULL) return why;
     const uintptr_t exe = g_coApi->module_base("helldivers2.exe", NULL);
-    uint8_t* page = (uint8_t*)co_alloc_near(game, 0x1000);
-    float* tile = (float*)co_alloc_near(exe, 0x1000);
-    if (page == NULL || tile == NULL) return "no memory near the game for the navigation grid's steps";
+    co_nav_reserve(game, exe);
+    uint8_t* page = g_reserve.page;
+    float* tile = g_reserve.tile;
+    if (page == NULL) return "no memory near the game for the navigation grid's steps";
+    if (tile == NULL) return "no memory near helldivers2.exe for the navigation grid's tile size";
+    g_reserve.page = NULL; g_reserve.tile = NULL;
     if (plain)
     {
         co_nav_whole(page, (uintptr_t)page, 0, (uintptr_t)co_nav_retile, game);
@@ -204,7 +218,8 @@ uintptr_t co_nav_exe(void) { return g_nav.page != NULL ? g_nav.exe : 0; }
 const float* co_nav_world_tile(void) { return g_nav.page != NULL ? g_nav.tile : NULL; }
 
 #ifdef CO_TEST
-void co_nav_test_reset(void) { memset(&g_nav, 0, sizeof g_nav); }
+void co_nav_test_reset(void) { memset(&g_nav, 0, sizeof g_nav); memset(&g_reserve, 0, sizeof g_reserve); }
 uintptr_t co_nav_test_page(void) { return (uintptr_t)g_nav.page; }
+const uint8_t* co_nav_test_reserved(void) { return g_reserve.page; }
 const float* co_nav_test_tile(void) { return g_nav.tile; }
 #endif

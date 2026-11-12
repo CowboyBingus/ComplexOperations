@@ -25,6 +25,9 @@ size_t co_nav_whole(uint8_t* out, uintptr_t code, int ship, uintptr_t retile, ui
 /* Checks, then points HellForge's two jumps at the mod's stubs, or takes the two sites when they are the game's. NULL, or why; both jumps are HellForge's again after a
  * failure. */
 const char* co_nav_install(uintptr_t game);
+/* Takes the install's two pages, one within reach of each image, while the game has not filled that space yet: at
+ * the mod's start for the exe, as game.dll loads for the game. Either may be 0; a page already taken is kept. */
+void co_nav_reserve(uintptr_t game, uintptr_t exe);
 /* What a stub calls before a grid is set up. The ship's call first runs `ship` (play's world back to the game's). */
 void co_nav_retile(uint32_t id, uintptr_t level);
 void co_nav_ship(void (*ship)(void));
@@ -36,6 +39,7 @@ const float* co_nav_world_tile(void);
 #ifdef CO_TEST
 void co_nav_test_reset(void);
 uintptr_t co_nav_test_page(void);
+const uint8_t* co_nav_test_reserved(void);
 const float* co_nav_test_tile(void);
 #endif
 
