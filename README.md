@@ -270,16 +270,62 @@ gets the room a 16 km world needs:
 | Havok world's bodies | 0x40000 | 0x100000 |
 | Static actors | 0x40000 | 0x100000 |
 | Connectors | 0x40000 | 0x400000 |
-| Navigation grid extents | 1024 | 4096 |
-| Navigation grid cell size | 128 | 32, so the grid has 32 x 32 tiles (see below) |
+| Navigation grid | 8 x 8 tiles, extents 1024 | 32 x 32 tiles over four times the bounds, extents 4096 (see below) |
 
-Measured on one city mission at difficulty 11 (12 runs without the mod, 4 with it):
+Measured on one city mission at difficulty 11, 8 runs without the mod and 4 with it:
 
 - Memory committed at the start of play: about 0.6 GB more (9.33 to 9.40 GB against 8.72 to 8.79 GB).
 - Time to the start of play: the same, about 45 s.
-- Time until the navigation grid has no tiles left to build: up to 0.8 s longer (98.1 to 99.7 s against 97.3 to
-  98.9 s).
+- Time until the navigation grid has no tiles left to build: about 1 s longer on average (99.0 s against 97.9 s;
+  98.1 to 99.7 s against 97.3 to 98.9 s).
 - The navigation build scheduler: 5 to 6 µs a call on average, at most 43 µs, against 0.5 µs.
+
+### On every level
+
+With the part on, these differ from a game without the mod on every level, the ship and the war-table previews. Each
+adds room, or acts only where the game would read or write out of bounds:
+
+- Session lists and managers move to blocks with eight entries (see Session lists); guards keep indexes 4 and up off
+  the game's four-entry lists.
+- The hellpod manager and the ship's pod table move; their capacity goes from 4 to 8.
+- HellForge's generation block grows from 21.7 to 40.4 MB: 65024 locations, a minimap 8 times larger, important and
+  linked lists of 1024.
+- Entity records have 16384 slots.
+- Stamp index cells take 0x5000 bytes, not 0x548; the built index is the same.
+- Each structured map's Voronoi step takes and clears 0x168CC68 bytes of weld pool, not 0x174C68.
+- The status registry has a list of 24576 and a hash of 65536. Past 4096 units the mod skips where the game crashes.
+- The render world is 2 times larger and render pools 0 and 1 are 4 times larger. Sample groups take 0x81008 bytes,
+  route-cell lists are sized for cells plus locations, and the upload allocator links at the tail.
+- The layer heightfield copy, the object walk's 0 handle, the pose-sync drop, the owner-NULL stubs and about 16 more
+  guards act only where the game would fault.
+- Five readers of the peer count in the exe read 4 bits, not 3.
+- Every level-11 war-table entry's seed has bit 0 cleared for a normal operation and set for a complex one.
+- Address space: 1 MB near the exe, pages near both modules and the trim's 0x4000-byte block.
+
+Not yet proven to act as the game does:
+
+- The route line width at game+0xF53116 is scaled by a ratio. It equals the game's only when that ratio is 2.0.
+- The AI task guard leaves a guard point's task out past 1792 of 2048 tasks.
+- The stamp instance buffer is 8 times larger, Hive Lord labelling uses another algorithm and scatter owner bitsets
+  are 512 wide. Equal results are not proven.
+
+### After a complex level
+
+On the ship, the network timeouts drop from 60 to 10 s, and a 4096 x 4096 one-mip texture stays allocated.
+
+Not yet proven to be reset before the ship or the next level:
+
+- Kill heights, water and the sea plane stay lowered.
+- Early packages stay held.
+- The near-tile detours can act on the ship until the next level init.
+- The terrain spawn slot can stay swapped when a generation is dropped between op 0x69 and the next near step.
+- Town filters and the camera interface.
+- A normal level whose record map is not empty at its first batch keeps the scatter multiplier.
+- Obstacles filed while a nav world was disarmed (Open items below).
+- The generation state is process-wide: a normal generation overlapping a complex preview's level init is not proven
+  impossible.
+
+### On a complex mission
 
 The living world runs every complex mission. Its director patrols are off; instead the host keeps squads as records
 that walk the map's routes, and brings a squad online as the game's own patrol group near the players, its losses
@@ -296,8 +342,10 @@ On a complex mission the mod's density guards apply:
 - Mission locations' pickups, markers and samples spawn when a player comes within 600 m.
 
 The mod also keeps a complex level's destruction records, render version tables, tree extents and navmesh boundary
-requests within what the game holds. On a normal mission and on the ship none of this acts: each changed place in the
-game's code runs the game's own instructions, and the difficulty rows stay the game's.
+requests within what the game holds. On a normal mission and on the ship none of these density and complex-level
+guards acts, and the difficulty rows stay the game's.
+
+### Navigation grid
 
 The navigation grid of every world has 32 x 32 tiles, room for a complex level's 16 km. A normal level-11 mission
 and the ship build stock's 8 x 8 tiles of it:
@@ -325,10 +373,14 @@ Open items:
 - An obstacle filed while the world was disarmed keeps the tiles it was filed in. This can happen to obstacles that
   live on from a complex level into the next level.
 
+### Cancelled preview
+
 One guard acts on every level, only where the game would go wrong:
 
 - **Cancelled preview.** A mission that starts while a complex mission's war-table preview is still placing its
   stamps waits for that preview to stop. The preview stops at its next tile and leaves its plan out of the mission.
+
+### Requirements
 
 The part needs a HellForge with pull requests 362, 364 and 366: dev after 2026-11-11, or the first release after it.
 With an older HellForge the part is off and the rest of the mod works.
