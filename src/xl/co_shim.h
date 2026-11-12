@@ -65,6 +65,9 @@ int co_evp_health_of(uintptr_t game, uint32_t entity, uintptr_t* record, int32_t
 uintptr_t co_evp_unit_graph(uint32_t unit);
 int co_evp_unit_position(uint32_t unit, float* position);
 int co_act_pins(uintptr_t game, const ActPin* pins, size_t count);
+/* `pattern` (hex bytes, spaces allowed) at exe address `at`: the host's check, or else the bytes read before any hook
+ * with the tile stubs' jumps read as the engine's code they lead to, as co_act_pins reads its exe pins. */
+int co_exe_code_matches(uintptr_t at, const char* pattern);
 int co_act_mission(uintptr_t game, int* host, uint32_t* modeEntity);
 int co_act_health_of(uintptr_t game, uint32_t entity, ActHealth* h);
 uint32_t co_act_local_avatar(uintptr_t game, int dead, ActHealth* h, const char** why);
@@ -97,6 +100,7 @@ static inline HANDLE OpenLog(const wchar_t* name) { return co_open_log(name); }
 static inline int SafeRead(uintptr_t address, void* buffer, size_t size) { return co_safe_read(address, buffer, size); }
 static inline int ApiWrite(uintptr_t address, const void* data, size_t size) { return g_coApi->write(address, data, size); }
 static inline int ApiCodeMatches(uintptr_t address, const char* pattern) { return g_coApi->code_matches(address, pattern); }
+static inline int ExeCodeMatches(uintptr_t address, const char* pattern) { return co_exe_code_matches(address, pattern); }
 static inline uintptr_t ApiModuleBase(const char* module, size_t* size) { return g_coApi->module_base(module, size); }
 static inline int LoaderHook(const char* what, uintptr_t target, void* detour, void** original) { return co_loader_hook(what, target, detour, original); }
 static inline uint8_t* FindNearGame(uintptr_t game, size_t bytes, DWORD type) { return co_find_near_game(game, bytes, type); }

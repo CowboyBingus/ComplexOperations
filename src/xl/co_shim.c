@@ -332,6 +332,17 @@ static int ActBytes(uintptr_t at, const char* hex, int exe)
     return !memcmp(got, want, n);
 }
 
+int co_exe_code_matches(uintptr_t at, const char* pattern)
+{
+    char hex[513];
+    size_t n = 0;
+    if (g_coApi->code_matches(at, pattern)) return 1;
+    for (; *pattern; pattern++)
+        if (*pattern != ' ') { if (n + 1 >= sizeof hex) return 0; hex[n++] = *pattern; }
+    hex[n] = 0;
+    return n > 0 && n % 2 == 0 && ActBytes(at, hex, 1);
+}
+
 int co_act_pins(uintptr_t game, const ActPin* pins, size_t count)
 {
     uintptr_t exe = g_coApi != NULL ? g_coApi->module_base("helldivers2.exe", NULL) : 0;

@@ -563,7 +563,7 @@ static void LwInstallNavJob(void)
     float m[4] = {0};
     int ok = !strcmp(g_build, "25480438") && !SafeRead(e + 0x16AA6E0u, m, sizeof m) && m[0] == 2.0f && m[1] == 2.0f;
     for (size_t i = 0; ok && i < sizeof g_lwNjPins / sizeof g_lwNjPins[0]; i++)
-        if (!ApiCodeMatches(e + g_lwNjPins[i].rva, g_lwNjPins[i].bytes)) { Note("living world: nav job: exe+0x%X is not the reviewed code", g_lwNjPins[i].rva); ok = 0; }
+        if (!ExeCodeMatches(e + g_lwNjPins[i].rva, g_lwNjPins[i].bytes)) { Note("living world: nav job: exe+0x%X is not the reviewed code", g_lwNjPins[i].rva); ok = 0; }
     if (!ok) { Note("living world: nav job lever not installed: not the reviewed build"); return; }
     g_lwNj.exe = e; g_lwNj.notedAt = GetTickCount64();
     g_lwNj.cell = (LwNjCellFn)(e + 0x7ACDD0u); g_lwNj.gather = (LwNjGatherFn)(e + 0x7ADA50u);
