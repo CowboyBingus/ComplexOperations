@@ -10,7 +10,7 @@
 # All static, from the dump; the C callbacks are in src/co_avatars.c.
 
 # Callback numbers: the index in kCountCallbacks (co_counts.c).
-AV_DIST_SUM, ENC_SPREAD = 18, 19
+AV_DIST_SUM, ENC_SPREAD, DORMANCY = 18, 19, 20
 # The guard of gen_count_sites.GUARDS that SC2 replaces: it kept slots 4 and up out of the list, SC2 gives them room.
 REPLACES = [0x18437DD]
 
@@ -109,10 +109,24 @@ inplace('DL2', 0x950B7E, 'ba 20 00 00 00', 'ba 40 00 00 00', 1)
 inplace('DL3', 0x950B99, '44 8d 42 e4', '44 8d 42 c4', 1)                                 # align stays 4 for size 0x40
 cave('AP1', 0xA139FD, '48 8b 49 10 8d 50 60', 'mov rcx, qword ptr [rcx+0x10]\n mov edx, 0xc0\n jmp game+0xA13A04', 1)
 
+# 0xA04910, the dormancy pass: player positions in vec3[4] at rsp+0x48, the stack cookie right behind; the fill has no
+# bound and the pass then takes each entity's nearest player from the array. The positions go to the mod's vec3[8]
+# (DORMANCY fills it with the game's default and gives it in r14). The old room holds two pointers instead: the array
+# at rsp+0x50 for the fill, its first z at rsp+0x48 for the two search loops. Nothing else reads that room, and the
+# pass has one caller (0x57175F, the world's update), so one array serves.
+cave('DP1', 0xA04982, 'f2 0f 11 44 24 48', '''CALL(%d)
+ mov qword ptr [rsp+0x50], r14
+ lea r14, [r14+8]
+ mov qword ptr [rsp+0x48], r14
+ jmp game+0xA049AA''' % DORMANCY, 1)
+inplace('DP2', 0xA049B9, '4c 8d 74 24 48', '4c 8b 74 24 50', 1)   # lea r14,[rsp+0x48] -> mov r14,[rsp+0x50]
+inplace('DP3', 0xA04D46, '48 8d 4c 24 50', '48 8b 4c 24 48', 1)   # lea rcx,[rsp+0x50] -> mov rcx,[rsp+0x48]
+inplace('DP4', 0xA04EAB, '48 8d 4c 24 50', '48 8b 4c 24 48', 1)
+
 # The game's code the tests run as it is, beside the patched code: the cull sums (phase 1 and the sum loop), the
-# reinforcement anchor's search, and the whole encounter stage change.
+# reinforcement anchor's search, the whole encounter stage change and the whole dormancy pass.
 VANILLA = [(0x8C8DCB, 0x8C8EB3), (0x8C904B, 0x8C92CA), (0x92F138, 0x92F20F), (0x92F24F, 0x92F25D), (0x92F614, 0x92F89C),
-           (0xACB951, 0xACBA52), (0x9FAA30, 0x9FAC36)]
+           (0xACB951, 0xACBA52), (0x9FAA30, 0x9FAC36), (0xA04910, 0xA04FB1)]
 
 
 def test_header(dump):

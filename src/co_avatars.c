@@ -14,6 +14,7 @@
 #define CO_NULL_ID 0x3483C20u     /* the id of no entity */
 #define CO_ENC_STATE 0x3483C38u   /* the random state of the encounter's shuffle */
 #define CO_ENC_CALL 0x9FAC40u     /* one enemy call towards the avatar index in edx; -1 for none */
+#define CO_NO_POSITION 0x37982A0u /* the vec3 the dormancy pass gives a player without an avatar */
 #define CO_AVATAR_ROOM 16u        /* the avatar manager's slots in a build for eight; a build for four has eight */
 
 typedef void (*EncFn)(uint64_t, uint32_t);
@@ -94,4 +95,14 @@ void co_avatars_enc_spread(CoRegs* regs)
         *state = s;
     }
     for (uint32_t c = 0; c < calls; c++) call(0, order[c % n]);
+}
+
+/* The dormancy pass's player positions: the game keeps four on its stack with the cookie behind them, and fills one per
+ * player. Eight here, each the game's default first, as the pass starts its own four; r14 takes the array. The pass
+ * runs once a frame from the world's update, so one array is enough. */
+void co_avatars_dormancy(CoRegs* regs)
+{
+    static _Alignas(16) float positions[8][3];
+    for (uint32_t i = 0; i < 8; i++) __builtin_memcpy(positions[i], (const void*)(g_game + CO_NO_POSITION), sizeof positions[i]);
+    regs->r14 = (uint64_t)(uintptr_t)positions;
 }

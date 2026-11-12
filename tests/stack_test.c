@@ -372,6 +372,134 @@ static void Encounter(uint32_t calls, uint64_t seed, EncResult* out)
     CHECK(*(const uint32_t*)(g_encounter + 0x40) == 1 && *(const uint32_t*)(g_encounter + 0x44) == 105);
 }
 
+/* ---- The dormancy pass: one entity, its type's radius, and the players around it ---- */
+#define DORMANCY 0xA04910u
+#define DP_SITE 0xA04982u
+#define PLAYERS_GLOBAL 0x3326468u   /* count at +0x84, a player's avatar handle at +0x3A8 + 0x20 * index */
+#define UNITS_GLOBAL 0x3326508u     /* a hash of ids to records of 0x308, the position at +0x2E0 */
+#define TYPES_GLOBAL 0x346BF98u     /* +0xF12660 points at 26 buckets {key, row}, then rows {flag, radius, interval} */
+#define TYPES_AT 0xF12660u
+#define SKIP_ID 0x3483C4Cu          /* a player with this id keeps the default position */
+#define AVATAR_ID 0xFD9BA0u         /* (out, handle): the id of a player's avatar */
+#define COOKIE 0x263C010u
+#define NO_POSITION 0x37982A0u
+#define DP_PLAYER 0x2000u
+#define DP_ENTITY 0x3000u
+#define DP_SKIPPED 0x7FFFFFF1u
+static const uint64_t kCookie = 0x00C0FFEE5EEDF00Du;
+static const float kHere[3] = {40.0f, -12.5f, 3.0f};
+static int g_cookieKept;
+static void CookieCheck(uint64_t value) { g_cookieKept = value == kCookie; }
+
+static uint8_t g_players[0xA00], g_units[0x70], g_unitRecords[16 * 0x308], g_types[0x1A0 + 12], g_pass[0x60], g_dormant[0x18];
+static uint32_t g_unitBuckets[2 * BUCKETS];
+static uint64_t g_dormants[1], g_typesAt;
+static float g_timers[1];
+
+static void Unit(uint32_t id, uint32_t record, const float* position)
+{
+    const uint32_t mult = 0x9E3779B1u;
+    memcpy(g_unitRecords + record * 0x308u + 0x2E0u, position, 12);
+    for (uint32_t k = 0; k < BUCKETS; k++)
+    {
+        const uint32_t s = (k + mult * id) & (BUCKETS - 1u);
+        if (g_unitBuckets[2 * s] == EMPTY) { g_unitBuckets[2 * s] = id; g_unitBuckets[2 * s + 1] = record; break; }
+    }
+}
+
+/* The pass over one entity at kHere with a radius of 10 and `n` players: player `close` beside it, the rest far off;
+ * player `skipped` has no avatar and so the default position, which is `nowhere`. 1 when the entity goes dormant. */
+static int Dormant(uint32_t n, int close, int skipped, const float* nowhere)
+{
+    static const uint8_t kAvatarId[] = {0x89, 0x11, 0x48, 0x89, 0xC8, 0xC3};   /* mov [rcx],edx; mov rax,rcx; ret */
+    static const uint32_t kFloats[][2] = {{0x23C6538u, 0x2F800000u}, {0x23C75E8u, 0x41A00000u}, {0x23C7EF8u, 0x7F7FFFFFu}};
+    const uint32_t size = BUCKETS, empty = EMPTY, mult = 0x9E3779B1u, none = NONE_ID, skip = DP_SKIPPED, one = 1, key = 5, entity = DP_ENTITY;
+    const uint64_t buckets = (uint64_t)(uintptr_t)g_unitBuckets, records = (uint64_t)(uintptr_t)g_unitRecords;
+    const uint64_t list = (uint64_t)(uintptr_t)g_dormants, timers = (uint64_t)(uintptr_t)g_timers;
+    const float radius = 10.0f, interval = 2.0f, dt = 1.0f;
+    uint64_t* stack = (uint64_t*)FRAME;
+
+    memset(g_players, 0, sizeof g_players);
+    memset(g_units, 0, sizeof g_units);
+    memset(g_unitRecords, 0, sizeof g_unitRecords);
+    memset(g_types, 0, sizeof g_types);
+    memset(g_pass, 0, sizeof g_pass);
+    memset(g_dormant, 0, sizeof g_dormant);
+    for (uint32_t i = 0; i < 2 * BUCKETS; i += 2) { g_unitBuckets[i] = EMPTY; g_unitBuckets[i + 1] = 0xBADu; }
+    memcpy(g_players + 0x84, &n, 4);
+    for (uint32_t i = 0; i < n; i++)
+    {
+        const uint32_t id = (int)i == skipped ? skip : DP_PLAYER + i;
+        const float away[3] = {kHere[0] + 100.0f + 10.0f * (float)i, kHere[1], kHere[2] - 50.0f};
+        const float beside[3] = {kHere[0] + 1.0f, kHere[1] - 2.0f, kHere[2] + 0.5f};
+        memcpy(g_players + 0x3A8 + 0x20 * i, &id, 4);
+        if ((int)i != skipped) Unit(id, i, (int)i == close ? beside : away);
+    }
+    Unit(DP_ENTITY, 15, kHere);
+    memcpy(g_units + 0x40, &buckets, 8);
+    memcpy(g_units + 0x48, &size, 4);
+    memcpy(g_units + 0x4C, &empty, 4);
+    memcpy(g_units + 0x50, &mult, 4);
+    memcpy(g_units + 0x68, &records, 8);
+    memcpy(g_types + 16 * 5, &key, 4);
+    memcpy(g_types + 0x1A0 + 4, &radius, 4);
+    memcpy(g_types + 0x1A0 + 8, &interval, 4);
+    memcpy(g_pass + 0x4, &one, 4);
+    memcpy(g_pass + 0x20, &one, 4);
+    memcpy(g_pass + 0x48, &list, 8);
+    memcpy(g_pass + 0x58, &timers, 8);
+    memcpy(g_dormant, &key, 4);
+    memcpy(g_dormant + 8, &entity, 4);
+    g_dormants[0] = (uint64_t)(uintptr_t)g_dormant;
+    g_timers[0] = 0.0f;
+
+    Global(PLAYERS_GLOBAL, g_players);
+    Global(UNITS_GLOBAL, g_units);
+    g_typesAt = (uint64_t)(uintptr_t)g_types;
+    Global(TYPES_GLOBAL, (const void*)((uintptr_t)&g_typesAt - TYPES_AT));
+    memcpy(g_fake.image + NULL_ID, &none, 4);
+    memcpy(g_fake.image + SKIP_ID, &skip, 4);
+    memcpy(g_fake.image + COOKIE, &kCookie, 8);
+    memcpy(g_fake.image + NO_POSITION, nowhere, 12);
+    for (size_t i = 0; i < sizeof kFloats / sizeof kFloats[0]; i++) memcpy(g_fake.image + kFloats[i][0], &kFloats[i][1], 4);
+    Put(AVATAR_ID, kAvatarId, sizeof kAvatarId);
+    JumpTo(COOKIE_CHECK, (const void*)CookieCheck);
+
+    memset(g_stack, 0xA5, sizeof g_stack);
+    memset(&g_cpu, 0, sizeof g_cpu);
+    stack[-1] = (uint64_t)(uintptr_t)RunExit;
+    g_cpu.gp[RSP] = FRAME - 8;
+    g_cpu.gp[RCX] = (uint64_t)(uintptr_t)g_pass;
+    memcpy(g_cpu.xmm[1], &dt, 4);
+    memset(g_cpu.xmm[11], 0x3C, 16);
+    g_cookieKept = -1;
+    RunAt(g_fake.image + DORMANCY);
+    CHECK(g_cpu.gp[RSP] == FRAME);
+    {
+        static const uint8_t kRet = 0xC3;
+        Put(COOKIE_CHECK, &kRet, 1);
+    }
+    /* the pass's saved xmm11 lies behind the cookie */
+    if (g_cookieKept == 1) for (int i = 0; i < 16; i++) g_cookieKept &= g_cpu.xmm[11][i] == 0x3C;
+    return (*(const uint32_t*)(g_dormant + 0x14) & 2u) != 0;
+}
+
+/* Every player in turn beside the entity, and none: dormant only with none. `players` is the most the pass has room for. */
+static void DormancyCases(uint32_t players)
+{
+    static const float kFar[3] = {9000.0f, 9000.0f, 9000.0f};
+    for (uint32_t n = 0; n <= players; n++)
+        for (int close = -1; close < (int)n; close++)
+        {
+            const int dormant = Dormant(n, close, -1, kFar);
+            CHECK(dormant == (close < 0) && g_cookieKept == 1);
+            if (dormant != (close < 0) || g_cookieKept != 1) printf("  %u players, %d beside: dormant %d, cookie %d\n", n, close, dormant, g_cookieKept);
+        }
+    /* a player without an avatar stands at the default position: far away, then at the entity */
+    for (uint32_t n = 1; n <= players; n++)
+        CHECK(Dormant(n, -1, (int)n - 1, kFar) == 1 && g_cookieKept == 1 && Dormant(n, -1, (int)n - 1, kHere) == 0 && g_cookieKept == 1);
+}
+
 #define ENC_COUNTS 9
 #define ENC_CALLS 5
 static const uint32_t kEncCalls[ENC_CALLS] = {0, 1, 3, 7, 10};
@@ -380,7 +508,7 @@ int main(void)
 {
     static uint32_t ec[CASES], hp[CASES], search[SCORE_SETS];
     static EncResult enc[ENC_COUNTS][ENC_CALLS];
-    const unsigned stack = CO_PLAYERS == 8 ? 31u : 19u;
+    const unsigned stack = CO_PLAYERS == 8 ? 35u : 19u;
 
     Start("the reviewed game");
     LoadGame();
@@ -400,6 +528,10 @@ int main(void)
             Avatars(kSets[11], n, 0);
             Encounter(kEncCalls[c], 0x0123456789ABCDEFu + n * 31u + (uint64_t)c, &enc[n][c]);
         }
+    /* The dormancy pass has room for four players; a fifth's position lies on its stack cookie. */
+    DormancyCases(4);
+    (void)Dormant(5, 4, -1, kHere);
+    CHECK(g_cookieKept == 0);
     CHECK(search[0] == 0 && search[2] == 0 && search[3] == 0 && search[5] == 4 && search[6] == 15 && search[7] == 15);
     CHECK(enc[0][0].calls == 1 && enc[0][0].called[0] == 0xFFFFFFFFu && enc[3][3].calls == 7);
 
@@ -443,6 +575,9 @@ int main(void)
         for (uint32_t i = 0; i < 16 && got.calls == 16; i++) seen |= 1u << got.called[i];
         CHECK(got.calls == 16 && seen == 0xFFFFu);
     }
+    /* The dormancy pass counts every player of a build for eight. */
+    CHECK((g_fake.image[DP_SITE] == 0xE9) == (CO_PLAYERS == 8));
+    DormancyCases(CO_PLAYERS);
     /* SC1 fills sixteen entries at rbp-0x70 with the game's pattern; SC2 stores slots 0 to 15 there and drops the rest. */
     {
         uint8_t* frame = (uint8_t*)FRAME;
@@ -471,10 +606,10 @@ int main(void)
 
     /* A changed byte at a fix refuses the counts with it; a fix of the build for eight is not read in a build for four. */
     {
-        static const uint32_t kChanged[] = {EC_SITE + 1, ENC_SITE + 3, SC_STORE + 4, LV_SITE + 2, 0xACB6A7u + 5, DL_SITE + 1, VO_SITE};
+        static const uint32_t kChanged[] = {EC_SITE + 1, ENC_SITE + 3, SC_STORE + 4, LV_SITE + 2, 0xACB6A7u + 5, DL_SITE + 1, VO_SITE, DP_SITE + 1, 0xA04D46u + 2};
         for (size_t i = 0; i < sizeof kChanged / sizeof kChanged[0]; i++)
         {
-            const int eightOnly = kChanged[i] == DL_SITE + 1 || kChanged[i] == VO_SITE;
+            const int eightOnly = kChanged[i] == DL_SITE + 1 || kChanged[i] == VO_SITE || kChanged[i] == DP_SITE + 1 || kChanged[i] == 0xA04D46u + 2;
             Start("one changed stack site");
             g_fake.image[kChanged[i]] ^= 0x01;
             Init();

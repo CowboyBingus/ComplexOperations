@@ -77,6 +77,7 @@ typedef struct CoRegs { uint64_t r15, r14, r13, r12, r11, r10, r9, r8, rdi, rsi,
 void co_avatars_install(uintptr_t game);
 void co_avatars_dist_sum(CoRegs* regs);
 void co_avatars_enc_spread(CoRegs* regs);
+void co_avatars_dormancy(CoRegs* regs);
 
 /* Extraction for eight (co_extract.c), for caves co_counts.c writes. `ready` once before they go in; the seats' gives 0,
  * or the place of game code they call that is not the reviewed one (co_counts.c checks the boosters'). co_seats_on is 1

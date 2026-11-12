@@ -55,9 +55,11 @@ respawns. The mod's code goes in with the counts (see Session lists) and works f
 | Voice lines by the nearest Helldiver | Only avatars 1 to 8 speak | Eight only |
 | Spawn exclusion around avatars (three lists of eight) | Avatars past eight are left out | Eight only |
 | Director and position lists from the frame allocator | Room for sixteen | Eight only |
+| Dormancy pass: far entities sleep by the nearest player (four positions, the stack cookie behind) | The positions of eight players in the mod's memory | Eight only |
 
-The fixes for rooms of eight go in a build for eight only, the one whose avatar manager holds more than eight. 19 code
-sites change in a build for four, 31 in a build for eight. For four avatars or fewer the culls and the encounter give
+The fixes for rooms of eight go in a build for eight only, the one whose avatar manager holds more than eight. So does
+the dormancy pass's: it counts players, and only a build for eight has a fifth. 19 code sites change in a build for
+four, 35 in a build for eight. For four avatars or fewer the culls and the encounter give
 the game's own result. The anchor starts the fourth score at 0, which the game leaves unset.
 
 Limits that remain:
@@ -127,6 +129,9 @@ count the host posts for friends go to eight too. 7 sites and 1 cave do this, wi
 
 Limits that remain:
 
+- Where HellForge's Steam broker runs, the host needs a HellForge whose broker lets a lobby have eight members: the nightly
+  of 2026-11-11 or later (0.4.0-beta allows four). With an older one the host has no Steam lobby and nobody can
+  join; `steam-broker.log` then says `refused ISteamMatchmaking::CreateLobby: cMaxMembers out of range`.
 - A lobby's entry in a message to other players lists four members at most.
 - A friend's full lobby without the mod shows four of eight places; Steam refuses the join.
 - Joining another lobby with the squad takes only the players in host slots 0 to 3 along; slots 4 to 7 stay behind.

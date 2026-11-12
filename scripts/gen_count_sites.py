@@ -124,7 +124,7 @@ CALL = '''
     pop rax
     popfq
 '''
-# Callbacks, by number (the index in kCountCallbacks in co_counts.c). 8 to 10 are the hostability scores'; 18 and 19
+# Callbacks, by number (the index in kCountCallbacks in co_counts.c). 8 to 10 are the hostability scores'; 18 to 20
 # the stack fixes' (stack_sites.py), 30 to 36 the Activity record's, 40 to 44 extract_sites.py's.
 FIND_RSI, FIND_R11, GATE, VALUES, LAST_SLOT, MESSAGE, TEST_SLOT, TEST_INDEX = range(8)
 HOST_APPEND, HOST_BUILD, HOST_SCORES = range(8, 11)
