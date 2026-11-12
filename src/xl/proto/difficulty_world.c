@@ -4728,6 +4728,18 @@ static void FpsLiftStep(uint64_t records, uint64_t index, uint32_t count)
     if (g_fpsLift.on && !SafeRead(index, &i, 4) && i + 1 >= count) FpsLiftEnd("the level's last record");
 }
 
+/* Op 0xB5 (0xF43E80, context [b+0x18], graph [context+0xF728]) labels the Hive Lord graph's regions with a byte, so
+ * only a 256th region gets label 0 and counts in sizes[0] ([graph+0x20], zeroed by op 0xB4; 0xF44044). Up to 255
+ * regions kHiveSearch's labelling is the game's; past them it may differ, which a run's log then shows. */
+static void HiveLordNote(uint64_t b)
+{
+    uint64_t context = 0, graph = 0, sizes = 0;
+    uint32_t first = 0;
+    if (SafeRead(b + 0x18, &context, 8) || context == 0 || SafeRead(context + 0xF728, &graph, 8) || graph == 0 ||
+        SafeRead(graph + 0x20, &sizes, 8) || sizes == 0 || SafeRead(sizes, &first, 4) || first == 0) return;
+    Note("difficulty: extra large maps: Hive Lord graph past 255 regions on a normal level: %u nodes with label 0", first);
+}
+
 static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
 {
     FpsLiftStep(records, index, (uint32_t)d);
@@ -4924,6 +4936,7 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
     uint64_t r = g_worldDispatch(records, b, index, d, e, f, g, h);
     if (objCaps) { g_world.values->capMul = 1; ReleaseSRWLockExclusive(&g_explorationLock); }
     if (sortLock) ReleaseSRWLockExclusive(&g_sortContextLock);
+    if (vanilla2B && vanillaOp == 0xB5) HiveLordNote(b);
     if (g_kfOn) { g_kfOn = 0; if (g_kfMismatch) Note("difficulty: objectives research: the KindFilter replay disagreed with the game %ld times of %ld", (long)g_kfMismatch, (long)g_kfCount); }
     {
         uint32_t now = 0xFFFFFFFFu, done = watch ? at : vanillaAt, doneOp = watch ? op : vanillaOp;
@@ -5117,6 +5130,7 @@ static volatile LONG g_stampTileRun; /* TerrainStamps' tile op 0x2B is running: 
 static uint64_t WorldPlaceJob(uint64_t a, uint64_t b, uint64_t c, uint64_t job)
 {
     if (job == 0) return g_placeJob(a, b, c, job); /* every level: a vanilla map gives the numbers to compare with */
+    const float current = g_world.current; /* before the job runs: level init waits for the old job (co_drain.c) */
     uint32_t range[2] = {0, 0}, items = 0;
     uint64_t context = 0, list = 0;
     SafeRead(job + 0x4C, range, 8);
@@ -5128,7 +5142,7 @@ static uint64_t WorldPlaceJob(uint64_t a, uint64_t b, uint64_t c, uint64_t job)
      * 0xF35030 reads every job's records through it, count +0x54): 128 MB, about 440k records, committed by the system
      * only where written, followed by a reserved page so a job past even that faults in place. Jobs split the items in 8
      * equal ranges, so the region is picked by the range's start. */
-    if (g_world.current > 1.0f && items != 0)
+    if (current > 1.0f && items != 0)
     {
         static uint8_t* regions[8];
         uint32_t slot = (uint32_t)((uint64_t)range[0] * 8u / items);
@@ -5145,6 +5159,11 @@ static uint64_t WorldPlaceJob(uint64_t a, uint64_t b, uint64_t c, uint64_t job)
     uint64_t r = g_placeJob(a, b, c, job);
     QueryPerformanceCounter(&end);
     QueryPerformanceFrequency(&hz);
+    /* A job that ran in the shared buffer (kPlaceBuffer) equals the game's only up to the game's 3072 records; the
+     * count is level data, so a run's log shows when a normal level passed it. */
+    uint32_t made = 0;
+    if (current <= 1.0f && !SafeRead(job + 0x54, &made, 4) && made > 0xC00u)
+        Note("difficulty: extra large maps: op 0x2B job past the game's 3072 instances on a normal level: %u", made);
     if (g_stampTileRun) return r;
     /* The job's slice (+0x20, capacity +0x38 records of 0x130, cleared at the job's start, 0xF3253B): records written
      * (a box or a resource) and those of them without a resource (+0x90), which become locations without one. */
@@ -5670,33 +5689,45 @@ static const char* InstallAttachGuard(uintptr_t game)
  * +-0.5 x thickness in the same space, before the gui transform. Vanilla (4096 pixels over 2048 m, 2 px/m) draws w pixels
  * = 0.5 w m; a 16 km world (0.25 px/m) drew 4 w m, 8 x as wide. The stub scales the thickness by xmm6 / 2, so the line
  * is 0.5 w m at any world size; vanilla's factor is 1. The near tiles' replay keeps settings+0x2C and scales the gui by
- * 8 (positions and thickness alike), so their lines are 0.5 w m too. */
-static const uint8_t kRouteWidthStub[30] = {
+ * 8 (positions and thickness alike), so their lines are 0.5 w m too. Off a complex level (g_genComplex) the game's
+ * instructions run: vanilla's xmm6 of 2.0 rests on data, not code. cmp edi, [rbx+8] sets the flags again for the jae. */
+static const uint8_t kRouteWidthStub[36] = {
     0xF3, 0x0F, 0x10, 0x7B, 0xFC,       /*  0 movss xmm7, [rbx-4] (the edge's width) */
-    0xF3, 0x0F, 0x59, 0xFE,             /*  5 mulss xmm7, xmm6 (pixels per metre) */
-    0xF3, 0x0F, 0x59, 0x3D, 0, 0, 0, 0, /*  9 mulss xmm7, [rip -> 0.5 at stub+0x20] (rel32 at 13) */
-    0xFF, 0xC7,                         /* 17 inc edi */
-    0x3B, 0x7B, 0x08,                   /* 19 cmp edi, [rbx+8] */
-    0xE9, 0, 0, 0, 0,                   /* 22 jmp 0xF53120 (the jae; rel32 at 23) */
-    0xCC, 0xCC, 0xCC};
+    0x80, 0x3D, 0, 0, 0, 0, 0x00,       /*  5 cmp byte [rip -> g_genComplex], 0 (rel32 at 7) */
+    0x74, 0x0C,                         /* 12 je 26 (not complex: the width as is) */
+    0xF3, 0x0F, 0x59, 0xFE,             /* 14 mulss xmm7, xmm6 (pixels per metre) */
+    0xF3, 0x0F, 0x59, 0x3D, 0, 0, 0, 0, /* 18 mulss xmm7, [rip -> 0.5 at stub+0x30] (rel32 at 22) */
+    0xFF, 0xC7,                         /* 26 inc edi */
+    0x3B, 0x7B, 0x08,                   /* 28 cmp edi, [rbx+8] */
+    0xE9, 0, 0, 0, 0};                  /* 31 jmp 0xF53120 (the jae; rel32 at 32) */
+/* The stub at `stub` (0x40 bytes), testing the byte at `flag` and going on at `back` (game+0xF53120). */
+static void RouteWidthBuild(uint8_t* stub, uintptr_t flag, uintptr_t back)
+{
+    memset(stub, 0xCC, 0x40);
+    memcpy(stub, kRouteWidthStub, sizeof kRouteWidthStub);
+    const float half = 0.5f;
+    memcpy(stub + 0x30, &half, 4);
+    int32_t rel = (int32_t)((int64_t)flag - (int64_t)(uintptr_t)(stub + 12)); memcpy(stub + 7, &rel, 4);
+    rel = (int32_t)((stub + 0x30) - (stub + 26)); memcpy(stub + 22, &rel, 4);
+    rel = (int32_t)((int64_t)back - (int64_t)(uintptr_t)(stub + 36)); memcpy(stub + 32, &rel, 4);
+}
 static const char* InstallRouteWidth(uintptr_t game)
 {
     if (!ApiCodeMatches(game + 0xF53086u, "F3 0F 10 B2 20 01 00 00") || !ApiCodeMatches(game + 0xF530A2u, "F3 0F 5E F0") ||
         !ApiCodeMatches(game + 0xF53113u, "8B 7B 04 F3 0F 10 7B FC FF C7 3B 7B 08 0F 83 B1 00 00 00") ||
         !ApiCodeMatches(game + 0xF531C2u, "F3 0F 11 7C 24 20 41 FF 52 48"))
         return "op 0x0D's route lines are not the reviewed ones; their width stays in pixels (8 x wide on a 16 km map)";
+    if (g_genComplex == NULL) return "op 0x0D's route line width has no level kind to test; it stays in pixels";
     uint8_t* stub = AllocateNearGame(game, 0x40);
     if (stub == NULL) return "no memory within 2 GB of game.dll for op 0x0D's route line width";
-    memcpy(stub, kRouteWidthStub, sizeof kRouteWidthStub);
-    const float half = 0.5f;
-    memcpy(stub + 0x20, &half, 4);
-    int32_t rel = (int32_t)((stub + 0x20) - (stub + 17)); memcpy(stub + 13, &rel, 4);
-    rel = (int32_t)(game + 0xF53120u - (uintptr_t)(stub + 27)); memcpy(stub + 23, &rel, 4);
+    if (!InRel32((int64_t)(uintptr_t)g_genComplex - (int64_t)(uintptr_t)(stub + 12)))
+        return "op 0x0D's route line width cannot reach the level kind; it stays in pixels";
+    RouteWidthBuild(stub, (uintptr_t)g_genComplex, game + 0xF53120u);
     DWORD protect;
     VirtualProtect(stub, 0x40, PAGE_EXECUTE_READ, &protect);
     FlushInstructionCache(GetCurrentProcess(), stub, 0x40);
     uint8_t jump[10] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90, 0x90};
-    rel = DifficultyJumpRel(game + 0xF53116u, (uintptr_t)stub); memcpy(jump + 1, &rel, 4);
+    int32_t rel = DifficultyJumpRel(game + 0xF53116u, (uintptr_t)stub); memcpy(jump + 1, &rel, 4);
     if (ApiWrite(game + 0xF53116u, jump, 10)) return "op 0x0D's route line width could not be written";
     return NULL;
 }

@@ -189,6 +189,11 @@ static void GuardNote(void)
         bodyNoted = dead;
         Note("difficulty: extra large maps: moved bodies of units that are gone left out of the pose sync: %ld", (long)dead);
     }
+    /* The task guard acts on every level and no code bounds a level's guard points, so a run's log shows when it
+     * acted. The stub only ever increments its count: read without a lock. */
+    static LONG tasksNoted;
+    LONG left = g_tasksLeftOut != NULL ? *g_tasksLeftOut : 0;
+    if (left != tasksNoted) { tasksNoted = left; Note("difficulty: extra large maps: AI guard points left out at mission load (1792 of 2048 tasks in use): %ld", (long)left); }
 }
 
 static void DestroyNote(void)

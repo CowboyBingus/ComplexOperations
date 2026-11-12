@@ -6891,7 +6891,36 @@ static void NearScatterViewInstall(void)
  * inserted it with a null owner; nothing in the engine checks) no longer reads through null: the entry's count is set to
  * 1 and vanilla's keep-the-bit path runs, which counts it down to 0 and erases it (0x215B72 / 0x215F74), so the maps
  * stay consistent; the misses are counted and noted. */
-static struct { int on; float* extent; volatile LONG* missRemove; volatile LONG* missReown; LONG notedRemove, notedReown; } g_scatOwner;
+static struct { int on; float* extent; volatile LONG* missRemove; volatile LONG* missReown; LONG notedRemove, notedReown; volatile LONG* outside; LONG notedOutside; } g_scatOwner;
+
+/* The set's entry (exe 0x1D49A0, mov r8d, [rcx+0xA4]; cell x in edx, y in rdx >> 32) counts the cells outside the box
+ * where the game's 64-wide bitset and the mod's wider one hold the same bits (x -31..30, y -32..31), so a run's log
+ * shows a level where they differ. It keeps every register but r8, and the flags, as the game has them at 0x1D49A7. */
+static const uint8_t kScatterSetStub[52] = {
+    0x9C,                                     /*  0 pushfq */
+    0x50,                                     /*  1 push rax */
+    0x48, 0x8B, 0xC2,                         /*  2 mov rax, rdx */
+    0x48, 0xC1, 0xF8, 0x20,                   /*  5 sar rax, 32 (y) */
+    0x83, 0xF8, 0xE0,                         /*  9 cmp eax, -32 */
+    0x7C, 0x11,                               /* 12 jl 31 */
+    0x83, 0xF8, 0x1F,                         /* 14 cmp eax, 31 */
+    0x7F, 0x0C,                               /* 17 jg 31 */
+    0x83, 0xFA, 0xE1,                         /* 19 cmp edx, -31 (x) */
+    0x7C, 0x07,                               /* 22 jl 31 */
+    0x83, 0xFA, 0x1E,                         /* 24 cmp edx, 30 */
+    0x7F, 0x02,                               /* 27 jg 31 */
+    0xEB, 0x07,                               /* 29 jmp 38 */
+    0xF0, 0xFF, 0x05, 0, 0, 0, 0,             /* 31 lock inc dword [rip -> the count] (rel32 at 34) */
+    0x58,                                     /* 38 pop rax */
+    0x9D,                                     /* 39 popfq */
+    0x44, 0x8B, 0x81, 0xA4, 0x00, 0x00, 0x00, /* 40 mov r8d, [rcx+0xA4] (the moved instruction) */
+    0xE9, 0, 0, 0, 0};                        /* 47 jmp 0x1D49A7 (rel32 at 48) */
+static void ScatterSetBuild(uint8_t* stub, uintptr_t count, uintptr_t back)
+{
+    memcpy(stub, kScatterSetStub, sizeof kScatterSetStub);
+    int32_t rel = (int32_t)((int64_t)count - (int64_t)(uintptr_t)(stub + 38)); memcpy(stub + 34, &rel, 4);
+    rel = (int32_t)((int64_t)back - (int64_t)(uintptr_t)(stub + 52)); memcpy(stub + 48, &rel, 4);
+}
 
 static void ScatterOwnerNote(void)
 {
@@ -6901,6 +6930,12 @@ static void ScatterOwnerNote(void)
     {
         g_scatOwner.notedRemove = r; g_scatOwner.notedReown = o;
         Note("difficulty: scatter: instances removed or re-owned with no owner entry (skipped, as a no-op): %ld removes, %ld re-owns so far", (long)r, (long)o);
+    }
+    LONG out = g_scatOwner.outside != NULL ? *g_scatOwner.outside : 0;
+    if (out != g_scatOwner.notedOutside) /* it only grows from 0: noted once it is not 0 */
+    {
+        g_scatOwner.notedOutside = out;
+        Note("difficulty: scatter: owner cell sets outside the game's bitset box (x -31..30, y -32..31): %ld so far", (long)out);
     }
 }
 
@@ -6926,6 +6961,9 @@ static void ScatterOwnerInstall(void)
     g_scatOwner.extent = (float*)page; *g_scatOwner.extent = wide;
     g_scatOwner.missRemove = (volatile LONG*)(page + 8); g_scatOwner.missReown = (volatile LONG*)(page + 12);
     *g_scatOwner.missRemove = 0; *g_scatOwner.missReown = 0;
+    static const char kSetPin[] = "44 8B 81 A4 00 00 00 4C 8B CA 4C 8B D1 41 8B C0 8B 49 20 99 2B C2 C1 E1 05 D1 F8 41 8D 14 01 49 C1 E9 20";
+    const int setCounted = ApiCodeMatches(exe + 0x1D49A0u, kSetPin) && ApiCodeMatches(exe + 0x1D4998u, "CC CC CC CC CC CC CC CC");
+    if (setCounted) { *(volatile LONG*)(page + 16) = 0; ScatterSetBuild(page + 0xC0, (uintptr_t)(page + 16), exe + 0x1D49A7u); }
     /* the two stubs: [mov], cmp qword [rax], 0; jne ok; lock inc [count]; mov dword [rax+8], 1; jmp keep; ok: test dil, dil;
      * jne keep; jmp clear */
     uint8_t* stubs[2] = {page + 0x40, page + 0x80};
@@ -6968,6 +7006,15 @@ static void ScatterOwnerInstall(void)
         if (d != (intptr_t)(int32_t)d) { Note("difficulty: scatter: the owner stubs are out of reach"); return; }
         int32_t rel = (int32_t)d; memcpy(jump + 1, &rel, 4);
         if (ApiWrite(sites[k], jump, (size_t)lens[k])) { Note("difficulty: scatter: an owner lookup could not be guarded"); return; }
+    }
+    if (!setCounted) Note("difficulty: scatter: the owner bitset's set is not the reviewed code; cells outside the game's box are not counted");
+    else
+    {
+        uint8_t jump[7] = {0xE9, 0, 0, 0, 0, 0x90, 0x90};
+        intptr_t d = (intptr_t)(page + 0xC0) - (intptr_t)(exe + 0x1D49A5u);
+        int32_t rel = (int32_t)d; memcpy(jump + 1, &rel, 4);
+        if (d != (intptr_t)(int32_t)d || ApiWrite(exe + 0x1D49A0u, jump, 7)) Note("difficulty: scatter: the owner bitset's set could not be counted");
+        else g_scatOwner.outside = (volatile LONG*)(page + 16);
     }
     g_scatOwner.on = 1;
     Note("difficulty: scatter: owner cell bitsets cover +-%.0f m (vanilla +-2048 m); removes and re-owns with no owner entry are skipped", (double)wide);
