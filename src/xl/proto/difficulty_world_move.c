@@ -1146,3 +1146,15 @@ static void MoveInstall(uintptr_t game)
     g_moveInstalled = 1;
     Note("difficulty: moving tiles: installed (level update 0x%X, crater hold 0x%X / 0x%X)", MOVE_LEVEL_UPDATE, MOVE_CRATER_UPDATE, MOVE_CRATER_RENDER);
 }
+
+/* A level init (ship 0) or the ship's set-up (ship 1): a complex mission that ended inside a tile build or before its
+ * op 0x69 spawn never reached the code that ends these, and each would act on the next levels. A complex level sets
+ * all of them up after its own level init (0x69, the replay, a build in play), so this clears only an older level's. */
+static void NearLevelLeft(int ship)
+{
+    NearOneMipDisarm();
+    InterlockedExchange(&g_nearActive, 0);
+    MoveHold(0);
+    /* only the ship: a level init advances g_world.levels, which every tile and hide gate already compares */
+    if (ship) { NearTilesClear(); g_hide.handle = 0; }
+}

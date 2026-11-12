@@ -2665,6 +2665,7 @@ static void MacroStamps(void); /* difficulty_world_macro.c */
 static int TerrainNearStep(uint64_t records, uint32_t end, uint32_t at, uint32_t op, uint64_t context, uint64_t g, uint64_t h);
 static void NearOneMipLevel(void);
 static void NearOneMipDrop(void);
+static void NearLevelLeft(int ship); /* difficulty_world_move.c */
 static int TerrainOn(void);
 static int TerrainMatDispatch(uint32_t op, uint64_t context);
 static void TerrainMatPatch(int on);
@@ -5247,6 +5248,7 @@ static void WorldLevel(uintptr_t level, uintptr_t preview)
 {
     LevelInitBegins(); /* first: nothing of this level is written while the last generation's tiles still run */
     NearOneMipDrop(); /* the previous extra large level's one-mip heightmap is not this level's */
+    NearLevelLeft(0);
     uint8_t difficulty = 0;
     uint32_t seed = 0, retry = 0;
     float scale = 1.0f;
@@ -5297,6 +5299,7 @@ static void WorldShip(void)
 {
     FpsLiftEnd("the ship");
     NearOneMipDrop();
+    NearLevelLeft(1);
     if (co_pages_ship() & CO_PAGES_LIVE) { NetPositionRange(1.0f); InterlockedIncrement(&g_world.switches); }
     g_world.live = co_pages_scale(CO_PAGES_LIVE);
     if (g_hudLive != NULL) *g_hudLive = 0;
