@@ -5245,6 +5245,10 @@ static void WorldLevel(uintptr_t level, uintptr_t preview)
     if (g_world.scale > 1 && !SafeRead(level + 0xF9, &difficulty, 1) && !SafeRead(level + 0x8, &seed, 4) && !SafeRead(level + 0xF950, &retry, 4))
         decision = co_generation_decision(&generation, level, seed, retry == 1, difficulty, co_peers_is_host(), co_complex_on(), co_peers_host_row());
     const int complex = decision == CO_MISSION_COMPLEX;
+    /* one line per mission generation: which seed the decision came from, and which machine made it */
+    if (g_world.scale > 1 && difficulty == CO_COMPLEX_LEVEL && preview == 0 && retry != 1)
+        co_log("complex operations: level 11 mission, seed %08X: %s (%s)", seed, complex ? "a complex mission" : "a normal mission",
+            co_peers_is_host() ? "this machine hosts" : "the host's mark");
     /* a client that should not be in this mission: no way out of a level init is known, so the level is a normal one
      * and the log says so once per generation; the launch and join gates are what keep a machine from getting here */
     if (decision == CO_MISSION_LEAVE && retry != 1)
