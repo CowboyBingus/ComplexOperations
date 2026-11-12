@@ -129,6 +129,9 @@ count the host posts for friends go to eight too. 7 sites and 1 cave do this, wi
 
 Limits that remain:
 
+- Where HellForge's Steam broker runs, the host needs a HellForge whose broker lets a lobby have eight members (in dev;
+  0.4.0-beta and the nightly of 2026-11-06 allow four). With an older one the host has no Steam lobby and nobody can
+  join; `steam-broker.log` then says `refused ISteamMatchmaking::CreateLobby: cMaxMembers out of range`.
 - A lobby's entry in a message to other players lists four members at most.
 - A friend's full lobby without the mod shows four of eight places; Steam refuses the join.
 - Joining another lobby with the squad takes only the players in host slots 0 to 3 along; slots 4 to 7 stay behind.
