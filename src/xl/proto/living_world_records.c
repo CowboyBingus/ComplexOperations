@@ -10,6 +10,7 @@
 #define LW_REC_MAP 0xC5F48u      /* keys pointer +0, capacity +8, empty key +0xC, multiplier +0x10 */
 #define LW_REC_ROOM 0x7000u      /* the counter's records are 0x10000-0x16FFF; a ring (0x13E0760) has 0x17000 on */
 #define LW_REC_SCATTER 0x9E3779B1u
+#define LW_REC_GAME 1u           /* the constructor's multiplier (0x13DF88C), the map's only writer of it */
 
 typedef uintptr_t (*LwRecInsertFn)(uintptr_t a, uintptr_t entries, uint32_t count, uintptr_t d);
 typedef void (*LwRecResetFn)(uintptr_t world);
@@ -17,16 +18,21 @@ static struct { void *insertOrig, *resetOrig, *builtOrig; volatile LONG dropped,
 static void LwRecScatter(uintptr_t world, const char* when);
 static void LwTreeLevel(void); /* living_world_trees.c */
 
+/* The multiplier a level of the mission in play hashes with: the scatter on a complex one, the game's on any other. */
+static uint32_t LwRecWanted(void) { return LwLive() ? LW_REC_SCATTER : LW_REC_GAME; }
+/* The map's slots as its setup gave them (the game's 0x8000, HellForge's 0x10000): every probe masks with count - 1. */
+static int LwRecSlots(const volatile uint32_t* map) { uint32_t n = map[2]; return n != 0 && (n & (n - 1)) == 0; }
+
 /* A level's first batch (counter 0): the map is cleared at each level by a path not found yet (not 0x13E1730), so the
- * multiplier is checked here too and set if that path reset it while the map is still empty. */
+ * multiplier is checked here too and set for this level while the map is still empty. */
 static void LwRecLevel(uintptr_t world)
 {
     volatile uint32_t* map = (volatile uint32_t*)(world + LW_REC_MAP);
     const volatile uint32_t* keys = (const volatile uint32_t*)*(volatile uintptr_t*)(world + LW_REC_MAP);
     uint32_t used = 0;
-    for (uint32_t i = 0; i < map[2] && i < 0x8000u; i++) used += keys[2 * i] != map[3];
-    if (map[4] != LW_REC_SCATTER && used == 0) LwRecScatter(world, "found empty at a level's start");
-    else Note("living world: destruction records: a level's first batch, multiplier 0x%X, %u keys before it, %ld left out last level",
+    for (uint32_t i = 0; LwRecSlots(map) && i < map[2]; i++) used += keys[2 * i] != map[3];
+    if (map[4] != LwRecWanted() && used == 0) LwRecScatter(world, "found empty at a level's start");
+    else if (LwLive()) Note("living world: destruction records: a level's first batch, multiplier 0x%X, %u keys before it, %ld left out last level",
         map[4], used, InterlockedExchange(&g_lwRec.dropped, 0));
     InterlockedExchange(&g_lwRec.told, 0);
     LwTreeLevel();
@@ -37,11 +43,11 @@ static void LwRecLevel(uintptr_t world)
 static uintptr_t LwRecInsert(uintptr_t a, uintptr_t entries, uint32_t count, uintptr_t d)
 {
     uintptr_t world;
-    if (count && LwLive() && EvpPtr(g_lw.game + LW_REC_WORLD, &world))
+    if (count && EvpPtr(g_lw.game + LW_REC_WORLD, &world))
     {
         uint32_t used = EvpU32(world + LW_REC_COUNTER, 0), room = used < g_lwRec.room ? g_lwRec.room - used : 0;
-        if (used == 0) LwRecLevel(world);
-        if (count > room)
+        if (used == 0) LwRecLevel(world); /* a normal level's too: it hashes with the game's multiplier again */
+        if (count > room && LwLive())
         {
             InterlockedAdd(&g_lwRec.dropped, (LONG)(count - room));
             if (InterlockedExchange(&g_lwRec.told, 1) == 0)
@@ -67,8 +73,8 @@ static void LwRecNote(void)
 static void LwRecScatter(uintptr_t world, const char* when)
 {
     volatile uint32_t* map = (volatile uint32_t*)(world + LW_REC_MAP);
-    if (map[2] == 0x8000u && LwLive()) map[4] = LW_REC_SCATTER;
-    Note("living world: destruction records %s (%ld left out before); multiplier 0x%X", when, InterlockedExchange(&g_lwRec.dropped, 0), map[4]);
+    if (LwRecSlots(map) && map[4] != LwRecWanted()) map[4] = LwRecWanted();
+    if (LwLive()) Note("living world: destruction records %s (%ld left out before); multiplier 0x%X", when, InterlockedExchange(&g_lwRec.dropped, 0), map[4]);
     InterlockedExchange(&g_lwRec.told, 0);
 }
 
@@ -85,7 +91,8 @@ static void LwRecReset(uintptr_t world)
 }
 
 /* The pins hold the facts the fix rests on: the record numbering (0x13E02C7), the insert's probe reading capacity and
- * multiplier (0x13E030B), the other writers' bases (0x13E078E, 0x13E0B77) and the constructor's capacity (0x13DF877). */
+ * multiplier (0x13E030B), the other writers' bases (0x13E078E, 0x13E0B77) and the constructor's multiplier (0x13DF88C).
+ * The capacity is read from the map: HellForge's larger maps set it up with 0x10000 slots through 0x13DF870. */
 static void LwInstallRecords(void)
 {
     static int done;
@@ -100,7 +107,7 @@ static void LwInstallRecords(void)
         !ApiCodeMatches(g + 0x13E030Bu, "45 8B 8E 50 5F 0C 00 45 8B 96 58 5F 0C 00 44 0F AF D3") ||
         !ApiCodeMatches(g + 0x13E0B77u, "41 81 C0 00 74 01 00") ||
         !ApiCodeMatches(g + 0x13E078Eu, "8D 82 00 70 01 00") ||
-        !ApiCodeMatches(g + 0x13DF877u, "48 C7 83 50 5F 0C 00 00 80 00 00") ||
+        !ApiCodeMatches(g + 0x13DF88Cu, "C7 83 58 5F 0C 00 01 00 00 00") ||
         !ApiCodeMatches(g + LW_REC_RESET, "48 89 5C 24 08 57 48 83 EC 20 33 FF 48 8B D9 48 89 B9 78 AF 1E 00"))
     { Note("living world: the destruction records are not the reviewed code; not changed"); return; }
     if (LoaderHook("living world: destruction record room", g + LW_REC_INSERT, (void*)LwRecInsert, &g_lwRec.insertOrig) ||
@@ -112,5 +119,5 @@ static void LwInstallRecords(void)
         LoaderHook("living world: destruction record multiplier", g + LW_REC_RESET, (void*)LwRecReset, &g_lwRec.resetOrig) ||
         g_lwRec.resetOrig == NULL)
     { Note("living world: the destruction records' constructor or reset could not be hooked; room only"); return; }
-    Note("living world: destruction records capped at %u, map multiplier 0x%X from the next world", g_lwRec.room, LW_REC_SCATTER);
+    Note("living world: on complex levels the destruction records are capped at %u, map multiplier 0x%X", g_lwRec.room, LW_REC_SCATTER);
 }

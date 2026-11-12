@@ -72,6 +72,8 @@ static int Hook(HfMod* mod, uintptr_t target, void* detour, void** original)
     g_fake.hooks[g_fake.hookCount].target = rva;
     g_fake.hooks[g_fake.hookCount++].detour = detour;
     *original = (void*)Original;
+    for (size_t i = 0; i < sizeof g_fake.originals / sizeof g_fake.originals[0]; i++)
+        if (g_fake.originals[i].target == target && g_fake.originals[i].original != NULL) *original = g_fake.originals[i].original;
     return 0;
 }
 

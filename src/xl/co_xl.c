@@ -128,6 +128,21 @@ static void CoXlLiving(uintptr_t game)
     LwInstallDefer();
 }
 
+/* The extra large world's guards (proto/living_world_*.c): each acts on a complex level whether or not the living
+ * world runs, and is the game's code on any other. The records' room and the boundary requests' list keep the game's
+ * memory whole on a complex level, so the part refuses without them; the other two only keep frames short. */
+static const char* CoXlGuards(uintptr_t game)
+{
+    if (g_lw.game == 0) g_lw.game = game; /* the living world sets it once its own pins hold */
+    LwInstallRecords();
+    LwInstallRender();
+    LwInstallMover();
+    LwInstallTrees();
+    if (g_lwRec.insertOrig == NULL) return "the destruction records' room on a complex level could not be guarded";
+    if (g_lwMover.passOrig == NULL) return "the navmesh boundary requests on a complex level could not be guarded";
+    return NULL;
+}
+
 /* Every install of the prototype, in the loader's order: what it did when game.dll was loaded, then the level
  * install's check and steps, then the tick. NULL, or why a step refused. The loader ran these at three different
  * moments; the mod runs them once level 11 is installed and the complex part is on. The world, the objective fill and
@@ -140,6 +155,7 @@ const char* CoXlInstall(uintptr_t game)
     if ((why = CoXlSettings(game)) != NULL) return why;
     InstallDaylight(game);
     CoXlLiving(game);
+    if ((why = CoXlGuards(game)) != NULL) return why;
     DescInstallNotes();
     if ((why = WorldSitesFailed(game)) != NULL) return why;
     WeldResearchInstall(game);
@@ -171,4 +187,6 @@ void CoXlTestLwPins(uint8_t* image)
 }
 int CoXlTestLiving(uintptr_t game) { if (!LwEnabled()) return 0; CoXlLiving(game); return 1; }
 LONG CoXlTestNoiseHead(void) { return g_lwNoiseHead; }
+const char* CoXlTestGuards(uintptr_t game) { return CoXlGuards(game); }
+void CoXlTestRenderShrink(uintptr_t map, void (*rehash)(uintptr_t, uint32_t)) { g_lwRender.rehash = (uintptr_t)rehash; LwRenderShrink(map); }
 #endif

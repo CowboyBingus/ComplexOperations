@@ -68,6 +68,10 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
 | `difficulty_world.c` | The mission in play sets where a loot container's location is looked up (`../co_locate.c`): the moved array on a complex mission. |
 | `difficulty_world.c` | The HUD rows' text ids start at `CO_HUD_TEXT_FIRST` (`../co_xl_standin.h`); `../co_text.c` answers them behind the engine's lookup. |
 | `living_world.c` | The tick's cost by section is logged by a research build only (`CO_RESEARCH`). |
+| `living_world*.c`, `difficulty_world.c` | The living world is on without a switch and acts only while the mission in play is complex (`LwLive`; `LwLiveSet` follows the live page). The patrol rows are read, never written: `../co_patrols.c` switches the patrols off. |
+| `living_world.c` | The nav leave fix's stub tests a flag; the walls' reach is -0 on any other mission; the walls' request count is research-only. |
+| `living_world_defer.c` | The setup pass is rerouted only with the density guards in the game's code. The four guards are installed by `../co_xl.c` (`CoXlGuards`). |
+| `living_world_records.c` | The map's slots are read (HellForge's 0x10000 too). The multiplier is the scatter on a complex level and the game's 1 on any other; the pin is the constructor's multiplier, not its capacity. |
 
 What the build does instead of an edit:
 

@@ -216,11 +216,7 @@ static void LwInstallRender(void); /* living_world_render.c */
 static void LwInstallDefer(void)
 {
     if (!LwEnabled() || g_lwDefer.installed) return;
-    LwInstallRecords();
-    LwInstallRender();
-    LwInstallMover();
-    LwInstallTrees();
-    LwInstallAlloc();
+    LwInstallAlloc(); /* the extra large world's own guards go in with the complex part (../co_xl.c) */
     uintptr_t game = g_lw.game;
     /* entries are kept back only with the density guards in the game's code; without them the patch would only
      * reroute every mission's setup pass */
