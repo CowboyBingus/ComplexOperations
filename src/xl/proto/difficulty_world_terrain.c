@@ -701,6 +701,7 @@ static struct
 {
     int on, count, draw, slotCount, started;
     LONG level;                 /* the level the section is for: its runners stop when another level begins */
+    LONG inits;                 /* g_levelInits as it began: a job of a cancelled level builds nothing */
     ULONGLONG waitSince; int stallNoted;
     int list[1024];
     volatile LONG nextTile, slotOf[1024];
@@ -764,8 +765,12 @@ static uint64_t CoarseJob(uint64_t a, uint64_t b, uint64_t c, uint64_t runner)
     (void)a; (void)b; (void)c;
     TileRunner* r = (TileRunner*)(uintptr_t)runner;
     TlsSetValue(g_tileRunnerTls, r);
-    if (!g_tileStop && g_world.levels == g_coarse.level) CoarseOne(r, 1);
+    /* a cancelled preview's job ends without waiting for its tiles: the next level init waits for this one's instead
+     * (LevelInitBegins), and once it has begun no tile of the old level starts */
+    AcquireSRWLockShared(&g_sectionLock);
+    if (!g_tileStop && g_world.levels == g_coarse.level && g_levelInits == g_coarse.inits) CoarseOne(r, 1);
     else InterlockedDecrement(&g_coarse.pending);
+    ReleaseSRWLockShared(&g_sectionLock);
     TlsSetValue(g_tileRunnerTls, NULL);
     MemoryBarrier();
     InterlockedExchange(&g_coarse.busy[r->id], 0);
@@ -862,7 +867,7 @@ static int CoarseStart(uint64_t records, uint32_t end, uint64_t context, uint64_
         *(volatile uint32_t*)(lg + 0x2D7C) = g_coarse.disk; *(volatile float*)spacingAt = g_coarse.spacing; g_tileSectionHeld = 0;
         return 0;
     }
-    g_coarse.on = 1; g_coarse.level = g_world.levels; g_coarse.waitSince = 0; g_coarse.stallNoted = 0;
+    g_coarse.on = 1; g_coarse.level = g_world.levels; g_coarse.inits = g_levelInits; g_coarse.waitSince = 0; g_coarse.stallNoted = 0;
     Note("difficulty: terrain: %d tiles on %d runners (%d slots), drawn in tile order", g_coarse.count, g_coarse.started, g_coarse.slotCount);
     return 1;
 }
@@ -4797,8 +4802,31 @@ static void StampRunnerLoop(TileRunner* r)
     }
 }
 
-/* After the level's op 0x2B has finished (difficulty_world.c's WorldDispatch). */
+/* The generation a stamp section runs for. It is gone once the game cancels it (the reset 0xF70D10 clears its job's
+ * run flag [[lg+0xF718]+9], the flag 0xF6E420 runs on) or another level init has begun; the section then stops at
+ * its next tile or candidate and puts nothing of its plan into the level. */
+static struct { uintptr_t lg; LONG inits; } g_section;
+static int SectionGone(void)
+{
+    uintptr_t rec = 0;
+    uint8_t run = 1;
+    return g_levelInits != g_section.inits || g_worldLevel != g_section.lg ||
+        (!SafeRead(g_section.lg + 0xF718, &rec, 8) && rec != 0 && !SafeRead(rec + 9, &run, 1) && run == 0);
+}
+
+static void TerrainStampsRun(uint64_t records, uint32_t end, uint32_t at91, uint64_t context, uint64_t g, uint64_t h, uintptr_t gen);
+/* After the level's op 0x2B has finished (difficulty_world.c's WorldDispatch). The section holds the lock a level init
+ * waits for (LevelInitBegins): what it writes back to the level and the block lands before the next level clears them. */
+static void SectionBegin(void) { AcquireSRWLockExclusive(&g_sectionLock); g_section.lg = g_worldLevel; g_section.inits = g_levelInits; }
+static void SectionEnd(void) { ReleaseSRWLockExclusive(&g_sectionLock); }
 static void TerrainStamps(uint64_t records, uint32_t end, uint32_t at91, uint64_t context, uint64_t g, uint64_t h, uintptr_t gen)
+{
+    SectionBegin();
+    TerrainStampsRun(records, end, at91, context, g, h, gen);
+    SectionEnd();
+}
+
+static void TerrainStampsRun(uint64_t records, uint32_t end, uint32_t at91, uint64_t context, uint64_t g, uint64_t h, uintptr_t gen)
 {
     if (g_world.below != NULL && g_world.current > 1.0f)
     {
@@ -4974,8 +5002,10 @@ static void TerrainStamps(uint64_t records, uint32_t end, uint32_t at91, uint64_
     uint64_t emptyQueries = 0;
     LARGE_INTEGER w0, w1; QueryPerformanceCounter(&w0);
     if (!g_stampPar.inlineJobs) TlsSetValue(g_tileRunnerTls, NULL);
+    int gone = 0;
     while (commit < tiles)
     {
+        if ((gone = SectionGone()) != 0) break; /* the runners stop at their tile's end (g_tileStop below) */
         int progress = 0;
         while (commit < tiles && slotOf[commit] >= 0 && g_stampPar.slots[slotOf[commit]].state == STAMP_SLOT_DONE)
         {
@@ -5063,6 +5093,7 @@ static void TerrainStamps(uint64_t records, uint32_t end, uint32_t at91, uint64_
         for (int i = 0; i < STAMP_SLOTS_MAX; i++) if (slotCand[i] != NULL) { VirtualFree(slotCand[i], 0, MEM_RELEASE); slotCand[i] = NULL; }
         TileRunnersRelease();
     }
+    if (gone) { Note("difficulty: stamps: the generation was cancelled after %d of %d tiles; its stamps are dropped", commit, tiles); return; }
     Note("difficulty: stamps: the tiles ran on %d runners (%d engine jobs started, %d slots; %s; the generator ran %d of %d tiles' %s itself) in %.1f s",
         R, started, g_stampPar.slotCount, g_stampPar.stageB ? "the runners built them" : "the generator built them", selfRuns, tiles,
         g_stampPar.stageB ? "build and op 0x2B" : "op 0x2B", tTiles);
@@ -5113,6 +5144,8 @@ static void TerrainStamps(uint64_t records, uint32_t end, uint32_t at91, uint64_
     uint32_t planned = 0, planBlocked[2] = {0};
     for (uint32_t k = 0; k < g_stamps.count; k++)
     {
+        /* a cancelled generation's block is cleared by the next level init; its counts and plan are left unwritten */
+        if ((k & 255u) == 0 && SectionGone()) { Note("difficulty: stamps: the generation was cancelled while its stamps went in; the rest are dropped"); return; }
         StampCandidate* c = &g_stamps.cand[k];
         float box[4]; memcpy(box, c->loc + 0xB0, 16);
         float lo[2] = {fminf(box[0], box[2]), fminf(box[1], box[3])}, hi[2] = {fmaxf(box[0], box[2]), fmaxf(box[1], box[3])};

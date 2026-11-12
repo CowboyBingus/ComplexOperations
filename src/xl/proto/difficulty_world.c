@@ -573,6 +573,17 @@ static int WorldDataWritable(uint64_t at, size_t bytes)
     }
     return 1;
 }
+/* A level init against the tile work of the generation it replaces (difficulty_world_terrain.c). The game starts a
+ * mission's level init over a cancelled preview without waiting for its job, and a stamp section is one dispatcher
+ * call of many seconds: level init waits here, so it clears the block only once the old generation's tiles are done. */
+static SRWLOCK g_sectionLock = SRWLOCK_INIT;
+static volatile LONG g_levelInits;
+static void LevelInitBegins(void)
+{
+    AcquireSRWLockExclusive(&g_sectionLock);
+    InterlockedIncrement(&g_levelInits);
+    ReleaseSRWLockExclusive(&g_sectionLock);
+}
 /* Whether a level is a complex one, by its address: level init decides it (WorldLevel) before anything else of the
  * level asks, and previews are set up on other threads meanwhile, so the last inits are kept, not one. */
 static SRWLOCK g_levelKindLock = SRWLOCK_INIT;
@@ -5234,6 +5245,7 @@ static void WorldLevelForget(void)
  * the war table's record, 0 for a mission; a retry of the same generation comes with the same one. */
 static void WorldLevel(uintptr_t level, uintptr_t preview)
 {
+    LevelInitBegins(); /* first: nothing of this level is written while the last generation's tiles still run */
     NearOneMipDrop(); /* the previous extra large level's one-mip heightmap is not this level's */
     uint8_t difficulty = 0;
     uint32_t seed = 0, retry = 0;

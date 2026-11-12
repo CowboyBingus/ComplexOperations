@@ -35,6 +35,7 @@
 #include "co_patrols.h"
 #include "co_density.h"
 #include "co_switch.h"
+#include "co_steer.h"
 
 /* Six of the copied files' functions were called from loader code that did not come along (the watch thread, the
  * ship's level change, the density rules of a later branch); they are unused until their callers are written. */
@@ -161,6 +162,7 @@ const char* CoXlInstall(uintptr_t game)
     InstallDaylight(game);
     CoXlLiving(game);
     if ((why = CoXlGuards(game)) != NULL) return why;
+    if ((why = co_steer_install(g_coApi->module_base("helldivers2.exe", NULL))) != NULL) Note("steering: no guard for an empty AI world: %s", why);
     DescInstallNotes();
     if ((why = WorldSitesFailed(game)) != NULL) return why;
     WeldResearchInstall(game);
@@ -194,4 +196,9 @@ int CoXlTestLiving(uintptr_t game) { if (!LwEnabled()) return 0; CoXlLiving(game
 LONG CoXlTestNoiseHead(void) { return g_lwNoiseHead; }
 const char* CoXlTestGuards(uintptr_t game) { return CoXlGuards(game); }
 void CoXlTestRenderShrink(uintptr_t map, void (*rehash)(uintptr_t, uint32_t)) { g_lwRender.rehash = (uintptr_t)rehash; LwRenderShrink(map); }
+/* A level init's first step for `level`, and a stamp section's hold and cancel test (proto/difficulty_world_terrain.c). */
+void CoXlTestLevelInit(uintptr_t level) { LevelInitBegins(); g_worldLevel = level; }
+void CoXlTestSectionBegin(void) { SectionBegin(); }
+int CoXlTestSectionGone(void) { return SectionGone(); }
+void CoXlTestSectionEnd(void) { SectionEnd(); }
 #endif

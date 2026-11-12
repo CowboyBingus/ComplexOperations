@@ -276,6 +276,13 @@ The mod also keeps a complex level's destruction records, render version tables,
 requests within what the game holds. On a normal mission and on the ship none of this acts: each changed place in the
 game's code runs the game's own instructions, and the difficulty rows stay the game's.
 
+Two guards act on every level, only where the game would go wrong:
+
+- **Cancelled preview.** A mission that starts while a complex mission's war-table preview is still placing its
+  stamps waits for that preview to stop. The preview stops at its next tile and leaves its plan out of the mission.
+- **Steering query.** When the steering query names a nav world that has no AI world, it gets no wall segments instead
+  of crashing. The log names the id the first time.
+
 The part needs a HellForge with pull requests 362, 364 and 366: dev after 2026-11-11, or the first release after it.
 With an older HellForge the part is off and the rest of the mod works.
 
