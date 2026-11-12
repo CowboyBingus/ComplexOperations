@@ -30,13 +30,22 @@ int co_drain(uintptr_t level, void (*reset)(uintptr_t), void (*step)(uintptr_t),
     uint32_t state = 0;
     uint8_t retry = 1;
     int steps = 0;
-    if (g_coApi->read(level + RETRY, &retry, 1) != 0 || retry != 0 || g_coApi->read(level + STATE, &state, 4) != 0 || state < 1 || state > 4) return 0;
+    if (g_coApi->read(level + RETRY, &retry, 1) != 0 || retry != 0 || g_coApi->read(level + STATE, &state, 4) != 0 || state < 1 || state > 5) return 0;
     const uint64_t since = now();
+    uint64_t next = CO_DRAIN_NOTE_MS;
     for (;;)
     {
-        if (g_coApi->read(level + STATE, &state, 4) != 0 || state == 0 || state > 4) return steps;
-        if (now() - since >= CO_DRAIN_LIMIT_MS) return -1;
-        /* the reset handles 1 and 3 only; the step turns 2 into 3, and 4 into 0 once the job and its tokens are done */
+        if (g_coApi->read(level + STATE, &state, 4) != 0 || state == 0 || state > 5) return steps;
+        /* no limit, as the game's regenerate: a level init beside the old job would share its process-wide state. The
+         * lines make a wait that does not end visible in the log. */
+        const uint64_t waited = now() - since;
+        if (waited >= next)
+        {
+            co_log("complex operations: a mission's level init still waits for the level generator: state %u, %llu ms", state, (unsigned long long)waited);
+            do next += CO_DRAIN_EVERY_MS; while (next <= waited);
+        }
+        /* the reset handles 1 and 3 only; the step turns 2 into 3, 5 into 3 once the other pipeline is done, and 4 into
+         * 0 once the job and its tokens are done */
         if (state == 1 || state == 3) reset(level);
         step(level);
         steps++;
@@ -54,8 +63,7 @@ static void InitDetour(uint64_t level, uint64_t rdx, uint32_t r8, uint64_t previ
 #endif
         const uint64_t since = Now();
         const int steps = co_drain((uintptr_t)level, g_reset, g_step, Now);
-        if (steps > 0) co_log("complex operations: a preview was still generating at a mission's level init: ended in %d steps, %u ms", steps, (uint32_t)(Now() - since));
-        else if (steps < 0) co_log("complex operations: a preview was still generating at a mission's level init and did not end in %u ms: the level starts as the game starts it", CO_DRAIN_LIMIT_MS);
+        if (steps > 0) co_log("complex operations: a preview was still generating at a mission's level init: ended in %d steps, waited %u ms", steps, (uint32_t)(Now() - since));
     }
     g_init(level, rdx, r8, preview);
 }
