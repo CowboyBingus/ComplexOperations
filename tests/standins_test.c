@@ -28,6 +28,7 @@ static const char* g_case;
 #define KNOWN 0x1234ABCDu
 #define NAME 0x322000u    /* in the exe: a text the engine has, and its empty one */
 #define EMPTY 0x322040u
+#define ROOT 0x1A101E0u   /* the string tables' root the lookup reads first */
 
 static uint8_t* g_exe;
 static uint8_t* Reset(const char* name)
@@ -70,11 +71,15 @@ static void Engine(void)
 {
     static const uint8_t body[] = {0x81, 0xF9, 0, 0, 0, 0, 0x48, 0x8D, 0x05, 0, 0, 0, 0, 0x48, 0x8D, 0x15, 0, 0, 0, 0, 0x48, 0x0F, 0x44, 0xC2,
         0x48, 0x83, 0xC4, 0x20, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5F, 0xC3};
-    const uint32_t at = CO_TEXT_LOOKUP + sizeof kCoTextLookup, known = KNOWN;
+    static const uint8_t root[] = {0x48, 0x8B, 0x05, 0x7D, 0xE5, 0x6E, 0x01}; /* the root's load, as the engine has it */
+    const uint32_t at = CO_TEXT_LOOKUP + sizeof kCoTextLookup + sizeof root, known = KNOWN;
+    const uint64_t loaded = 1;
     int32_t rel;
     DWORD old;
     memcpy(g_exe + CO_TEXT_ENTRY, kCoTextEntry, sizeof kCoTextEntry);
     memcpy(g_exe + CO_TEXT_LOOKUP, kCoTextLookup, sizeof kCoTextLookup);
+    memcpy(g_exe + CO_TEXT_LOOKUP + sizeof kCoTextLookup, root, sizeof root);
+    memcpy(g_exe + ROOT, &loaded, sizeof loaded); /* the texts are loaded */
     memcpy(g_exe + at, body, sizeof body);
     memcpy(g_exe + at + 2, &known, 4);
     rel = (int32_t)(EMPTY - (at + 13u)); memcpy(g_exe + at + 9, &rel, 4);
@@ -127,7 +132,7 @@ int main(void)
     }
     CHECK(co_text_install(exe, FIRST, 64) == NULL && g_fake.hookCount == 1); /* once */
 
-    const uint32_t other[] = {CO_TEXT_ENTRY, CO_TEXT_ENTRY + 4u, CO_TEXT_LOOKUP + 2u, CO_TEXT_LOOKUP + 27u};
+    const uint32_t other[] = {CO_TEXT_ENTRY, CO_TEXT_ENTRY + 4u, CO_TEXT_LOOKUP + 2u, CO_TEXT_LOOKUP + 27u, CO_TEXT_LOOKUP + 31u};
     for (size_t i = 0; i < sizeof other / sizeof other[0]; i++)
     {
         image = Reset("the lookup is another's code");
@@ -139,6 +144,19 @@ int main(void)
     Engine();
     CHECK(co_text_install((uintptr_t)g_exe, KNOWN - 3u, 8) != NULL && g_fake.hookCount == 0 && co_text_engine() == NULL);
     CHECK(co_text_install((uintptr_t)g_exe, KNOWN + 1u, 8) == NULL && g_fake.hookCount == 1);
+    image = Reset("the texts are not loaded yet");
+    Engine();
+    memset(g_exe + ROOT, 0, 8); /* the title screen: the engine would read through the root, so it is not asked */
+    CHECK(co_text_install((uintptr_t)g_exe, KNOWN - 3u, 8) == NULL && g_fake.hookCount == 1);
+    co_text_test_original(g_exe + CO_TEXT_LOOKUP);
+    {
+        const LookupFn lookup = (LookupFn)g_fake.hooks[0].detour;
+        *co_text_dynamic() = Rows;
+        g_asked = 0;
+        /* an id the engine has a text for keeps it, and the rows are not asked for it */
+        CHECK(strcmp(lookup(KNOWN, 0, 0, 0), "LAUNCH ICBM") == 0 && g_asked == 0 && lookup(KNOWN + 1u, 0, 0, 0)[0] == 0 && g_asked == 1);
+        *co_text_dynamic() = NULL;
+    }
     image = Reset("the hook is refused");
     Engine();
     g_fake.noHook = (uintptr_t)g_exe + CO_TEXT_LOOKUP - (uintptr_t)image;
