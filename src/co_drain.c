@@ -5,6 +5,9 @@
 #include <windows.h>
 
 #include "co.h"
+#ifdef CO_RESEARCH
+#include "xl/co_aiw_log.h"
+#endif
 
 #define STATE 0x1E4u  /* in the level generator: 0 idle, 1 generating, 2 passes done, 3 finished, 4 cancelling, 5 another pipeline */
 #define RETRY 0xF950u /* a retry of the same generation: the game's own loop is around this call */
@@ -46,6 +49,9 @@ static void InitDetour(uint64_t level, uint64_t rdx, uint32_t r8, uint64_t previ
 {
     if (preview == 0 && level != 0) /* a mission's; a preview's own level init is the preview tick's business */
     {
+#ifdef CO_RESEARCH
+        co_aiw_log_mission((uintptr_t)level);
+#endif
         const uint64_t since = Now();
         const int steps = co_drain((uintptr_t)level, g_reset, g_step, Now);
         if (steps > 0) co_log("complex operations: a preview was still generating at a mission's level init: ended in %d steps, %u ms", steps, (uint32_t)(Now() - since));

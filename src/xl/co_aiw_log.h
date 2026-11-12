@@ -19,8 +19,12 @@
 
 /* Hooks the three functions once, with helldivers2.exe's and game.dll's bases. NULL, or why nothing was hooked. */
 const char* co_aiw_log_install(uintptr_t exe, uintptr_t game);
+/* A mission's level init (co_drain.c): the queue's and the main world's ids, one line. Nothing before the install. */
+void co_aiw_log_mission(uintptr_t level);
 #ifdef CO_TEST
 void co_aiw_log_test_reset(void);
+/* The caller the hooks see, in place of their return address; 0 for the real one. */
+void co_aiw_log_test_from(uintptr_t at);
 #endif
 #endif
 

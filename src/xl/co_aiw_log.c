@@ -26,6 +26,22 @@ static const Pin kPins[] = {
     {0x7DAF99u, "48 8B 1C 18"},
 };
 
+/* game.dll, where the ids part reads. The boundary job 0x134A530 takes its queue from [0x347CD70] (0x134A545) and
+ * passes [queue+4] as the nav id (0x134A560). The main world's create 0xAB0EE0 works on [0x3326340] (0xAB0F31), stores
+ * the returned nav id at +0x10F0 (0xAB1B31), copies it to [queue+4] and sets the queue (0xAB1F2C..0xAB1F48). */
+#define GAME_QUEUE 0x347CD70u
+#define GAME_WORLD 0x3326340u
+#define WORLD_ID 0x10F0u
+#define MAIN_CREATE_RETURN 0xAB1B2Fu
+static const Pin kGamePins[] = {
+    {0x134A545u, "48 8B 2D 24 28 13 02"},
+    {0x134A560u, "8B 4D 04"},
+    {0xAB0F31u, "48 8B 35 08 54 87 02"},
+    {0xAB1B2Cu, "41 FF D2 33 D2 89 86 F0 10 00 00"},
+    {0xAB1F2Cu, "8B 86 F0 10 00 00 48 8D 8E C8 AB 9D 07 89 41 04"},
+    {0xAB1F48u, "48 89 0D 21 AE 9C 02"},
+};
+
 typedef uint32_t (*CreateFn)(uint64_t owner, uint64_t rdx, uint64_t settings, uint64_t r9);
 typedef void (*DestroyFn)(uint32_t id);
 typedef uint32_t (*QueryFn)(uint32_t id, void* query, void* segments, uint32_t room);
@@ -37,7 +53,7 @@ static struct
     CreateFn create;
     DestroyFn destroy;
     QueryFn query;
-    volatile LONG seq, nullSeen;
+    volatile LONG seq, nullSeen, mainSeen;
     volatile LONG seenHead, seenTail;
     int said;
 } g_aiw;
@@ -76,9 +92,24 @@ static int State(char* out, size_t size)
     return n;
 }
 
+/* The queue the boundary job reads and the main world's id, read with the host's guarded reads: either can be unset. */
+static int Ids(char* out, size_t size)
+{
+    if (g_aiw.game == 0) return snprintf(out, size, "ids unread: no game.dll");
+    uint64_t queue = 0, world = 0;
+    uint32_t queueId = 0, worldId = 0;
+    const int q = g_coApi->read(g_aiw.game + GAME_QUEUE, &queue, 8) == 0 && queue != 0 && g_coApi->read((uintptr_t)queue + 4u, &queueId, 4) == 0;
+    const int w = g_coApi->read(g_aiw.game + GAME_WORLD, &world, 8) == 0 && world != 0 && g_coApi->read((uintptr_t)world + WORLD_ID, &worldId, 4) == 0;
+    char qs[16] = "unread", ws[16] = "unread";
+    if (q) snprintf(qs, sizeof qs, "%u", queueId);
+    if (w) snprintf(ws, sizeof ws, "%u", worldId);
+    return snprintf(out, size, "queue 0x%llX [queue+4] %s | main world 0x%llX [world+0x10F0] %s | %s", (unsigned long long)queue, qs,
+                    (unsigned long long)world, ws, !q || !w ? "ids not both read" : queueId == worldId ? "ids equal" : "ids differ");
+}
+
 static void Line(const char* format, ...)
 {
-    char text[200], state[640];
+    char text[400], state[640];
     va_list args;
     va_start(args, format);
     vsnprintf(text, sizeof text, format, args);
@@ -98,16 +129,35 @@ static void RingCheck(LONG seq)
 }
 static void RingSeen(void) { InterlockedExchange(&g_aiw.seenHead, (LONG)U32(CO_AIW_HEAD)); InterlockedExchange(&g_aiw.seenTail, (LONG)U32(CO_AIW_TAIL)); }
 
+/* The hooks' caller: their return address, or the test's stand-in. */
+#ifdef CO_TEST
+static uintptr_t g_testFrom;
+#endif
+static uintptr_t From(uintptr_t at)
+{
+#ifdef CO_TEST
+    if (g_testFrom != 0) return g_testFrom;
+#endif
+    return at;
+}
+
 /* Lines before and after the call: a crash inside it still leaves the first on disk (the loader writes each line). */
 static uint32_t Create(uint64_t owner, uint64_t rdx, uint64_t settings, uint64_t r9)
 {
-    char from[96];
+    char from[96], ids[200];
     const LONG seq = InterlockedIncrement(&g_aiw.seq);
-    Where((uintptr_t)__builtin_return_address(0), from, sizeof from);
+    const uintptr_t at = From((uintptr_t)__builtin_return_address(0));
+    Where(at, from, sizeof from);
     RingCheck(seq);
     Line("aiw #%ld create before: from %s tid %lu owner 0x%llX rdx %d settings %d r9 %d", seq, from, GetCurrentThreadId(), (unsigned long long)owner, rdx != 0, settings != 0, r9 != 0);
     const uint32_t id = g_aiw.create(owner, rdx, settings, r9);
     Line("aiw #%ld create after: id %u", seq, id);
+    /* the ids before the main world's create stores its own (0xAB1B31) and sets the queue (0xAB1F48) */
+    if (g_aiw.game != 0 && at == g_aiw.game + MAIN_CREATE_RETURN && InterlockedCompareExchange(&g_aiw.mainSeen, 1, 0) == 0)
+    {
+        Ids(ids, sizeof ids);
+        Line("aiw #%ld main world create after: id %u returned, not yet stored | %s", seq, id, ids);
+    }
     RingSeen();
     return id;
 }
@@ -129,11 +179,12 @@ static uint32_t Query(uint32_t id, void* query, void* segments, uint32_t room)
 {
     if ((id >= 4 || U64(CO_AIW_SLOTS + 0x80u * id) == 0) && InterlockedCompareExchange(&g_aiw.nullSeen, 1, 0) == 0)
     {
-        char from[96];
-        const uintptr_t at = (uintptr_t)__builtin_return_address(0);
+        char from[96], ids[200];
+        const uintptr_t at = From((uintptr_t)__builtin_return_address(0));
         Where(at, from, sizeof from);
-        Line("aiw: the steering query asked nav id %u with an empty AI-world slot, from %s tid %lu%s", id, from, GetCurrentThreadId(),
-             g_aiw.game != 0 && at == g_aiw.game + 0x134A58Eu ? " (the boundary job)" : "");
+        Ids(ids, sizeof ids);
+        Line("aiw: the steering query asked nav id %u with an empty AI-world slot, from %s tid %lu%s | %s", id, from, GetCurrentThreadId(),
+             g_aiw.game != 0 && at == g_aiw.game + 0x134A58Eu ? " (the boundary job)" : "", ids);
     }
     return g_aiw.query(id, query, segments, room);
 }
@@ -147,6 +198,13 @@ static const char* Install(uintptr_t exe, uintptr_t game)
         {
             static char why[96];
             snprintf(why, sizeof why, "the engine's code at exe+0x%X is not the code this log was made for", kPins[i].rva);
+            return why;
+        }
+    for (size_t i = 0; game != 0 && i < sizeof kGamePins / sizeof kGamePins[0]; i++)
+        if (g_coApi->code_matches(game + kGamePins[i].rva, kGamePins[i].hex) != 1)
+        {
+            static char why[96];
+            snprintf(why, sizeof why, "the game's code at game.dll+0x%X is not the code this log was made for", kGamePins[i].rva);
             return why;
         }
     g_aiw.exe = exe;
@@ -169,8 +227,18 @@ const char* co_aiw_log_install(uintptr_t exe, uintptr_t game)
     return why;
 }
 
+/* Both mission level-init sites (0xAB88D0, 0xAB8900) pass r9 0; a preview's (0x10042E7) passes its record. */
+void co_aiw_log_mission(uintptr_t level)
+{
+    char ids[200];
+    if (g_aiw.create == NULL) return;
+    Ids(ids, sizeof ids);
+    Line("aiw: mission level init: generator 0x%llX tid %lu | %s", (unsigned long long)level, GetCurrentThreadId(), ids);
+}
+
 #ifdef CO_TEST
-void co_aiw_log_test_reset(void) { memset((void*)&g_aiw, 0, sizeof g_aiw); }
+void co_aiw_log_test_reset(void) { memset((void*)&g_aiw, 0, sizeof g_aiw); g_testFrom = 0; }
+void co_aiw_log_test_from(uintptr_t at) { g_testFrom = at; }
 #endif
 #else
 typedef int co_aiw_log_research_only; /* a normal build compiles none of it */

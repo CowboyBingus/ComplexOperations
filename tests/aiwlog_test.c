@@ -1,6 +1,7 @@
 /* The nav world ids' log (research build only): lines before and after each create and destroy with the id, the
- * caller, the ring and the slots; a ring move between calls; one line for the first empty-slot query; the game's
- * code still runs every time; a pin mismatch refuses with a line. Run on a fake engine that pops and pushes ids. */
+ * caller, the ring and the slots; a ring move between calls; one line for the first empty-slot query with the queue's
+ * and the main world's ids, also at the main world's create and each mission's level init; the game's code still runs
+ * every time; a pin mismatch refuses with a line. Run on a fake engine that pops and pushes ids. */
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -44,10 +45,23 @@ static void EngineDestroy(uint32_t id)
     (*U32(CO_AIW_TAIL))++;
 }
 static uint32_t EngineQuery(uint32_t id, void* query, void* segments, uint32_t room) { g_queries++; return 7; }
+static int g_inits;
+static void EngineInit(uint64_t level, uint64_t rdx, uint32_t r8, uint64_t preview) { g_inits++; }
 
 typedef uint32_t (*CreateFn)(uint64_t, uint64_t, uint64_t, uint64_t);
 typedef void (*DestroyFn)(uint32_t);
 typedef uint32_t (*QueryFn)(uint32_t, void*, void*, uint32_t);
+
+/* game.dll's queue and main world, in the fake image: the host's guarded reads reach only there */
+#define QUEUE 0x2100000u
+#define WORLD 0x2000000u
+static void Ids(uint32_t queueId, uint32_t worldId)
+{
+    *(uint64_t*)(g_fake.image + 0x347CD70u) = (uint64_t)(uintptr_t)(g_fake.image + QUEUE);
+    *(uint64_t*)(g_fake.image + 0x3326340u) = (uint64_t)(uintptr_t)(g_fake.image + WORLD);
+    *(uint32_t*)(g_fake.image + QUEUE + 4u) = queueId;
+    *(uint32_t*)(g_fake.image + WORLD + 0x10F0u) = worldId;
+}
 
 static void* Detour(uint32_t rva) { return fake_host_detour((uintptr_t)g_exe + rva - (uintptr_t)g_fake.image); }
 
@@ -62,12 +76,17 @@ static void Fresh(void)
     g_creates = g_destroys = g_queries = 0;
 }
 
-int main(void)
+static void Engine(void)
 {
-    Fresh();
     g_fake.originals[0].target = (uintptr_t)g_exe + CO_AIW_CREATE; g_fake.originals[0].original = (void*)EngineCreate;
     g_fake.originals[1].target = (uintptr_t)g_exe + CO_AIW_DESTROY; g_fake.originals[1].original = (void*)EngineDestroy;
     g_fake.originals[2].target = (uintptr_t)g_exe + CO_AIW_QUERY; g_fake.originals[2].original = (void*)EngineQuery;
+}
+
+int main(void)
+{
+    Fresh();
+    Engine();
 
     g_case = "the install";
     CHECK(co_aiw_log_install((uintptr_t)g_exe, (uintptr_t)g_fake.image) == NULL);
@@ -107,11 +126,16 @@ int main(void)
     destroy(1);
     CHECK(fake_host_logged("aiw: the ring moved outside create and destroy: head 2 -> 3, tail 5 -> 5 (seen before #5)"));
 
-    g_case = "the first empty-slot query: one line, the game's query still runs";
+    g_case = "the first empty-slot query: one line with the ids, the game's query still runs";
+    char want[256];
+    const unsigned long long queueAt = (unsigned long long)(uintptr_t)(g_fake.image + QUEUE), worldAt = (unsigned long long)(uintptr_t)(g_fake.image + WORLD);
+    Ids(1, 1);
     g_fake.log[0] = 0;
     uint8_t in[0x60], out[0x40];
     CHECK(query(1, in, out, 0x40) == 7 && g_queries == 1);
     CHECK(fake_host_logged("aiw: the steering query asked nav id 1 with an empty AI-world slot, from aiwlog_test.exe+0x"));
+    snprintf(want, sizeof want, " | queue 0x%llX [queue+4] 1 | main world 0x%llX [world+0x10F0] 1 | ids equal | ring head ", queueAt, worldAt);
+    CHECK(fake_host_logged(want));
     CHECK(!fake_host_logged("(the boundary job)"));
     CHECK(query(0, in, out, 0x40) == 7 && g_queries == 2);
     CHECK(!fake_host_logged("nav id 0 with an empty"));
@@ -119,6 +143,55 @@ int main(void)
     g_case = "a second install keeps the first and says nothing";
     g_fake.log[0] = 0;
     CHECK(co_aiw_log_install((uintptr_t)g_exe, (uintptr_t)g_fake.image) == NULL && g_fake.log[0] == 0);
+
+    g_case = "a mission's level init: the ids, through the generator's start; a preview's: nothing";
+    {
+        static uint8_t level[0x10000]; /* state 0: no preview to drain */
+        co_drain_test_calls((void*)EngineInit, NULL, NULL);
+        *(uint32_t*)(g_fake.image + QUEUE + 4u) = 3; /* a rewrite after the create shows here */
+        g_fake.log[0] = 0;
+        co_drain_test_init((uint64_t)(uintptr_t)(g_fake.image + 0x1500000u), 0, 0, 0);
+        snprintf(want, sizeof want, "aiw: mission level init: generator 0x%llX tid ", (unsigned long long)(uintptr_t)(g_fake.image + 0x1500000u));
+        CHECK(g_inits == 1 && fake_host_logged(want));
+        snprintf(want, sizeof want, " | queue 0x%llX [queue+4] 3 | main world 0x%llX [world+0x10F0] 1 | ids differ | ring head ", queueAt, worldAt);
+        CHECK(fake_host_logged(want));
+        g_fake.log[0] = 0;
+        co_drain_test_init((uint64_t)(uintptr_t)level, 0, 0, (uint64_t)(uintptr_t)level);
+        CHECK(g_inits == 2 && g_fake.log[0] == 0);
+        co_drain_test_reset();
+    }
+
+    g_case = "the main world's create: the ids once, before the game stores its own";
+    Fresh();
+    Engine();
+    CHECK(co_aiw_log_install((uintptr_t)g_exe, (uintptr_t)g_fake.image) == NULL);
+    create = (CreateFn)Detour(CO_AIW_CREATE);
+    destroy = (DestroyFn)Detour(CO_AIW_DESTROY);
+    *(uint64_t*)(g_fake.image + 0x3326340u) = worldAt; /* set before the create (0x4EE564); the queue is not yet (0xAB1F48) */
+    co_aiw_log_test_from((uintptr_t)g_fake.image + 0xAB1B2Fu);
+    g_fake.log[0] = 0;
+    CHECK(create != NULL && create(0x4000, 1, 1, 1) == 0);
+    CHECK(fake_host_logged("aiw #1 create before: from game.dll+0xAB1B2F"));
+    snprintf(want, sizeof want, "aiw #1 main world create after: id 0 returned, not yet stored | queue 0x0 [queue+4] unread | main world 0x%llX [world+0x10F0] 0 | ids not both read | ring head 1", worldAt);
+    CHECK(fake_host_logged(want));
+    destroy(0);
+    g_fake.log[0] = 0;
+    CHECK(create(0x4000, 1, 1, 1) == 1 && fake_host_logged("aiw #3 create after: id 1") && !fake_host_logged("main world create after"));
+
+    g_case = "the boundary job's empty-slot query with the ids apart";
+    Ids(2, 1);
+    co_aiw_log_test_from((uintptr_t)g_fake.image + 0x134A58Eu);
+    g_fake.log[0] = 0;
+    query = (QueryFn)Detour(CO_AIW_QUERY);
+    CHECK(query != NULL && query(0, in, out, 0x40) == 7);
+    snprintf(want, sizeof want, "nav id 0 with an empty AI-world slot, from game.dll+0x134A58E tid %lu (the boundary job) | queue 0x%llX [queue+4] 2 | main world 0x%llX [world+0x10F0] 1 | ids differ", GetCurrentThreadId(), queueAt, worldAt);
+    CHECK(fake_host_logged(want));
+    co_aiw_log_test_from(0);
+
+    g_case = "no install, no mission line";
+    Fresh();
+    co_aiw_log_mission((uintptr_t)g_fake.image);
+    CHECK(g_fake.log[0] == 0);
 
     g_case = "a filled slot asks nothing of the log";
     Fresh();
@@ -134,6 +207,13 @@ int main(void)
     g_fake.noMatch[0] = (uintptr_t)g_exe + 0x78F366u - (uintptr_t)g_fake.image;
     CHECK(co_aiw_log_install((uintptr_t)g_exe, (uintptr_t)g_fake.image) != NULL && g_fake.hookCount == 0);
     CHECK(fake_host_logged("aiw log: off: the engine's code at exe+0x78F366 is not the code this log was made for"));
+    Fresh();
+    g_fake.noMatch[0] = 0x134A560u;
+    CHECK(co_aiw_log_install((uintptr_t)g_exe, (uintptr_t)g_fake.image) != NULL && g_fake.hookCount == 0);
+    CHECK(fake_host_logged("aiw log: off: the game's code at game.dll+0x134A560 is not the code this log was made for"));
+    Fresh();
+    g_fake.noMatch[0] = 0x134A560u; /* no game.dll: its code is not asked */
+    CHECK(co_aiw_log_install((uintptr_t)g_exe, 0) == NULL);
     Fresh();
     CHECK(co_aiw_log_install(0, 0) != NULL && fake_host_logged("aiw log: off: helldivers2.exe was not found"));
 
