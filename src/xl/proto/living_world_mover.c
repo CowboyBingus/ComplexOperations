@@ -39,6 +39,7 @@ static void LwMoverPass(uintptr_t system)
     volatile uint32_t* count = (volatile uint32_t*)(system + LW_MOVER_COUNT);
     uintptr_t records = *(volatile uintptr_t*)(system + LW_MOVER_RECORDS);
     uint32_t n = *count, cut = n, asked = 0;
+    if (!LwLive()) { g_lwMover.asked = 0; ((LwMoverPassFn)g_lwMover.passOrig)(system); return; }
     if (list != NULL && records != 0) cut = LwMoverCut(system, records, n, *list < LW_MOVER_ROOM ? LW_MOVER_ROOM - *list : 0, &asked);
     g_lwMover.asked = (LONG)asked;
     if ((LONG)asked > g_lwMover.peak) g_lwMover.peak = (LONG)asked;
@@ -49,7 +50,7 @@ static void LwMoverPass(uintptr_t system)
 
 static uint32_t LwMoverAppend(uint32_t* list, const void* request)
 {
-    if (*list >= LW_MOVER_CAP) { InterlockedIncrement(&g_lwMover.dropped); return 0; }
+    if (*list >= LW_MOVER_CAP && LwLive()) { InterlockedIncrement(&g_lwMover.dropped); return 0; }
     return ((LwMoverAppendFn)g_lwMover.appendOrig)(list, request);
 }
 

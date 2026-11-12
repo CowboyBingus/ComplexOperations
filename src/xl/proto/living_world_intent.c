@@ -37,7 +37,7 @@ typedef void (*LwNoiseFn)(void*, uint8_t, uint32_t, const float*, uint32_t, floa
 static LwNoiseFn g_lwNoiseOrig;
 static void LwNoiseDetour(void* unused, uint8_t type, uint32_t source, const float* pos, uint32_t mode, float loudness, uint32_t warn)
 {
-    if (pos && type != 0 && type < 30)
+    if (pos && type != 0 && type < 30 && LwLive())
     {
         LONG h = g_lwNoiseHead;
         LwNoise* n = &g_lwNoise[(uint32_t)h % LW_NOISE_RING];

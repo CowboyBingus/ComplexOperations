@@ -60,7 +60,8 @@ static int LwEnabled(void)
 {
     if (g_lw.state != 0) return g_lw.state > 0;
     char t[4] = "";
-    g_lw.state = GetEnvironmentVariableA("HELLFORGE_LIVING_WORLD", t, sizeof t) > 0 && t[0] == '1' ? 1 : -1;
+    /* on with the complex part; only a research build reads the switch, to turn it off (=0) */
+    g_lw.state = GetEnvironmentVariableA("HELLFORGE_LIVING_WORLD", t, sizeof t) > 0 && t[0] == '0' ? -1 : 1;
     if (g_lw.state < 0) return 0;
     uintptr_t game = ApiModuleBase("game.dll", NULL);
     if (game == 0 || strcmp(g_build, "25480438") || !ActPins(game, kLwPins, sizeof kLwPins / sizeof kLwPins[0]))
@@ -73,9 +74,13 @@ static int LwEnabled(void)
     g_lw.spawn = (LwSpawnFn)(game + 0x953580u); g_lw.remove = (LwRemoveFn)(game + 0xFDC310u);
     g_lw.unseat = (LwUnseatFn)(game + 0x636240u); g_lw.setJob = (LwSetJobFn)(game + 0x7F5120u); g_lw.goal = (LwGoalFn)(game + 0xA13520u);
     g_lw.pinsOk = 1;
-    Note("living world: on (HELLFORGE_LIVING_WORLD=1): the director's patrols are replaced by the loader's squads (host only)");
+    Note("living world: on for complex operations: their missions' director patrols are replaced by the loader's squads (host only)");
     return 1;
 }
+
+/* The mission in play is complex (the live page's scale, co_pages.h). Every part of the living world asks this, on
+ * whichever thread it runs: a normal mission, the ship and a war-table preview never see it act. */
+static int LwLive(void) { return g_world.live > 1.0f; }
 
 /* A write to the game's heap data (records the game keeps, never its image): guarded, no protection change, not a patch. */
 static int LwPoke(uintptr_t address, const void* data, size_t size)
@@ -148,12 +153,12 @@ static void LwRemoveSquad(uint32_t squad)
 
 /* ---- the off switch (Phase 0 conclusion 1; timing "After audit 0f") -------------------------------------------------- */
 
-/* Every row the director copies gets patrol caps 0, from the moment the rows exist, before any mission's first world
- * update; kept for the session. Each level's caps are saved first: the population follows vanilla's numbers. */
+/* Each level's patrol caps, read and kept: the population follows the game's numbers (LwEffectiveCap). The rows stay
+ * the game's; a complex mission's patrols are switched off at the director's gate (../co_patrols.h). */
 static void LwPatrolsOff(void)
 {
     static const uint32_t caps[3] = {0x2AC, 0x2B0, 0x2B4};
-    uint32_t rows = 0, zero = 0;
+    uint32_t rows = 0;
     for (uint32_t level = 1; level <= DIF_VANILLA + 1; level++)
     {
         int ready = 0;
@@ -162,13 +167,12 @@ static void LwPatrolsOff(void)
         uint32_t now[3];
         if (SafeRead(row + caps[0], &now[0], 4) || SafeRead(row + caps[1], &now[1], 4) || SafeRead(row + caps[2], &now[2], 4)) continue;
         if (!g_lw.savedOk[level - 1]) { memcpy(g_lw.saved[level - 1], now, sizeof now); g_lw.savedOk[level - 1] = 1; }
-        for (int k = 0; k < 3; k++) if (now[k] != 0) ApiWrite(row + caps[k], &zero, 4);
         rows++;
     }
     if (rows != g_lw.rowsZeroed)
     {
         g_lw.rowsZeroed = rows;
-        Note("living world: the director's patrol caps are 0 in %u difficulty rows (level 10's were %u / %u / %u)", rows, g_lw.saved[9][0], g_lw.saved[9][1],
+        Note("living world: the director's patrol caps of %u difficulty rows are read (level 10's are %u / %u / %u)", rows, g_lw.saved[9][0], g_lw.saved[9][1],
             g_lw.saved[9][2]);
     }
 }
@@ -2939,6 +2943,7 @@ static const ActPin kLwNavPins[] = {
  * reads before its section array and crashes at 0x99CCE0. Vanilla builds cells in under a second, the loader's rebuilds
  * of built cells take 20-110 s. The fix keeps the game's state honest: right where it sets -1, it also clears 0x8 (a
  * successful reload sets 0x8 again at 0x7B9252); no branch lands in 0x7B9060..0x7B9065. */
+static volatile uint8_t* g_lwLeaveFix; /* the fix's flag */
 static void LwInstallNavLeaveFix(void)
 {
     static int done;
@@ -2948,20 +2953,26 @@ static void LwInstallNavLeaveFix(void)
     if (!ApiCodeMatches(exe + 0x7B905Fu, "C7 43 60 FF FF FF FF 41 F7 47 0C 00 01 00 00") ||
         !ApiCodeMatches(exe + 0x7B9053u, "E8") || !ApiCodeMatches(exe + 0x7B91AFu, "8B 43 5C 83 E0 EF 83 C8 04"))
     { Note("living world: the nav completion is not the reviewed code; rebuilt cells are left as the game keeps them"); return; }
-    uint8_t* block = AllocateNearGame(exe, 0x1000);
+    uint8_t* block = AllocateNearGame(exe, 0x2000); /* the stub's page, then its flag's (read-write) */
     if (block == NULL) { Note("living world: no memory within 2 GB of the game's exe for the nav completion fix"); return; }
-    uint8_t code[16] = {0xC7, 0x43, 0x60, 0xFF, 0xFF, 0xFF, 0xFF, /* mov dword [rbx+0x60], -1 */
+    /* the flag is 1 while the mission in play is complex (LwLiveSet); the test at 0x7B9066 sets the flags again */
+    uint8_t code[25] = {0xC7, 0x43, 0x60, 0xFF, 0xFF, 0xFF, 0xFF, /* mov dword [rbx+0x60], -1 */
+        0x80, 0x3D, 0, 0, 0, 0, 0x00,                                 /* cmp byte [rip+flag], 0 (rel32 at 9, next 14) */
+        0x74, 0x04,                                                   /* je 20 */
         0x83, 0x63, 0x5C, 0xF7,                                       /* and dword [rbx+0x5C], ~0x8 */
-        0xE9, 0, 0, 0, 0};                                            /* jmp 0x7B9066 (rel32 at 12, next 16) */
-    int64_t back = (int64_t)(exe + 0x7B9066u) - (int64_t)(uintptr_t)(block + 16), to = (int64_t)(uintptr_t)block - (int64_t)(exe + 0x7B905Fu + 5);
+        0xE9, 0, 0, 0, 0};                                            /* jmp 0x7B9066 (rel32 at 21, next 25) */
+    int64_t back = (int64_t)(exe + 0x7B9066u) - (int64_t)(uintptr_t)(block + 25), to = (int64_t)(uintptr_t)block - (int64_t)(exe + 0x7B905Fu + 5);
     if (!InRel32(back) || !InRel32(to)) { Note("living world: the nav completion fix is out of reach of the exe"); return; }
-    int32_t rel = (int32_t)back; memcpy(code + 12, &rel, 4);
+    int32_t rel = (int32_t)back; memcpy(code + 21, &rel, 4);
+    rel = 0x1000 - 14; memcpy(code + 9, &rel, 4);
+    block[0x1000] = (uint8_t)LwLive();
+    g_lwLeaveFix = block + 0x1000;
     memcpy(block, code, sizeof code);
     DWORD protect; VirtualProtect(block, 0x1000, PAGE_EXECUTE_READ, &protect); FlushInstructionCache(GetCurrentProcess(), block, 0x1000);
     uint8_t jump[7] = {0xE9, 0, 0, 0, 0, 0x90, 0x90};
     rel = (int32_t)to; memcpy(jump + 1, &rel, 4);
     if (ApiWrite(exe + 0x7B905Fu, jump, sizeof jump)) { Note("living world: the nav completion could not be written"); return; }
-    Note("living world: a rebuilt cell's completion while the nav is stopping clears its built flag with its section (leave crash fix)");
+    Note("living world: on a complex mission a rebuilt cell's completion while the nav is stopping clears its built flag with its section (leave crash fix)");
 }
 
 /* Section swaps applied at once (audit 1f, crashes 0xCB1223 / 0xC2F662; KB crash-cb1223-navcut-section-swap "Design
@@ -3051,7 +3062,7 @@ static int LwNavDrain(uintptr_t w, int idx)
 static uintptr_t LwNavUnload(uintptr_t w, uint32_t* id, uint8_t graph)
 {
     int idx = LwAiwIndex(w);
-    if (idx >= 0 && g_lwSwap.asyncMode(w))
+    if (idx >= 0 && LwLive() && g_lwSwap.asyncMode(w))
     {
         if (LwNavDrain(w, idx)) g_lwSwap.swap[idx] = 1;
         else { g_lwSwap.swap[idx] = 0; g_lwSwap.refused++; InterlockedExchange(&g_lwSwap.unsafe, 1); }
@@ -3062,6 +3073,7 @@ static uintptr_t LwNavLoad(uintptr_t w, uint32_t* out, uintptr_t inst, void* p4,
 {
     uintptr_t r = g_lwSwap.load(w, out, inst, p4, graph, p6);
     int idx = LwAiwIndex(w);
+    if (idx >= 0 && !LwLive()) g_lwSwap.swap[idx] = 0; /* a normal mission's swaps stay the game's */
     if (idx < 0 || !g_lwSwap.swap[idx]) return r;
     g_lwSwap.swap[idx] = 0;
     LARGE_INTEGER a, b, f; QueryPerformanceCounter(&a);
@@ -3564,7 +3576,7 @@ static int LwSmashMate(uint32_t owner, uint32_t target)
 /* from the zone processor's candidate loop: 1 = skip this candidate */
 static int LwSmashSpares(uint32_t owner, uint32_t target)
 {
-    if (!LwSmashMate(owner, target)) return 0;
+    if (!LwLive() || !LwSmashMate(owner, target)) return 0;
     InterlockedIncrement(&g_lwSpared);
     return 1;
 }
@@ -3585,7 +3597,7 @@ static int LwSmashSpares(uint32_t owner, uint32_t target)
  * or hit submitter; KB spawn-losses follow-up 7). The pass's rsp is 16-aligned (r11 = entry rsp, four pushes, 0x508). */
 static int LwSmashBlastSpares(uintptr_t record, uint32_t target)
 {
-    if (*(volatile uint32_t*)(record + 0xC) != 0x106 || !LwSmashMate(*(volatile uint32_t*)(record + 0x14), target)) return 0;
+    if (!LwLive() || *(volatile uint32_t*)(record + 0xC) != 0x106 || !LwSmashMate(*(volatile uint32_t*)(record + 0x14), target)) return 0;
     InterlockedIncrement(&g_lwBlastSpared);
     return 1;
 }
@@ -3728,7 +3740,7 @@ static void LwInstallWallReach(uintptr_t game)
     int64_t back = (int64_t)(game + LW_WALL_BACK) - (int64_t)(uintptr_t)(block + 27);
     if (!InRel32(back)) { Note("living world: the walls' reach stub is out of reach of game.dll"); return; }
     rel = (int32_t)back; memcpy(block + 23, &rel, 4);
-    *(float*)(block + 0x1000) = 0.0f;
+    *(float*)(block + 0x1000) = -0.0f; /* x + -0 is x for every sum, a reach of -0 too: the game's value */
     DWORD protect;
     VirtualProtect(block, 0x1000, PAGE_EXECUTE_READ, &protect);
     FlushInstructionCache(GetCurrentProcess(), block, 0x1000);
@@ -3741,6 +3753,9 @@ static void LwInstallWallReach(uintptr_t game)
     /* Measurement: the steering consumer 0x134AD60 reads each request's segment count at 0x134CB8B (mov r13d,
      * [rdi+rsi+0x60]; test r13d, r13d; je 0x134D306). The queue's count is 0 again by the late tick, so the share of
      * requests with no wall is counted there: lock inc (it may run on worker threads), the test redone before going on. */
+#ifndef CO_RESEARCH
+    return; /* a research instrument */
+#endif
     if (!ApiCodeMatches(game + 0x134CB8Bu, "44 8B 6C 37 60 45 85 ED 0F 84 6D 07 00 00")) { Note("living world: the steering walls' reader is not the reviewed one; no wall count"); return; }
     uint8_t* count = AllocateNearGame(game, 0x2000);
     if (count == NULL) return;
@@ -4088,7 +4103,7 @@ static struct { double sum, worst; uint32_t ticks; ULONGLONG at; } g_lwCost;
 static void LivingTickBody(void);
 static void LivingTick(void)
 {
-    if (!LwEnabled()) return;
+    if (!LwEnabled() || !LwLive()) return;
     LARGE_INTEGER a, b, f;
     QueryPerformanceCounter(&a);
     g_lwSect.at = __builtin_ia32_rdtsc(); g_lwSect.cur = LW_S_BEFORE;
@@ -4126,6 +4141,14 @@ static void LivingTickBody(void)
     if (EvpPtr(g_lw.game + LW_DIRECTOR, &dir)) LwNavTick(dir);
     LwGarrisonsTick();
     LwSquadsTick();
+}
+
+/* The mission in play has changed kind (difficulty_world.c, as the live page is set): what the stubs read. A normal
+ * mission starts with the walls' reach the game's and the leave fix off. */
+static void LwLiveSet(int complex)
+{
+    if (!complex && g_lwWallReach != NULL) *g_lwWallReach = -0.0f; /* the stub's add leaves every reach as it is */
+    if (g_lwLeaveFix != NULL) *g_lwLeaveFix = (uint8_t)(complex != 0);
 }
 
 #include "living_world_intent.c" /* Phase 2: squad intents (investigate noise) */

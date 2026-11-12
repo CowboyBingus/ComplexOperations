@@ -222,6 +222,10 @@ static void LwInstallDefer(void)
     LwInstallTrees();
     LwInstallAlloc();
     uintptr_t game = g_lw.game;
+    /* entries are kept back only with the density guards in the game's code; without them the patch would only
+     * reroute every mission's setup pass */
+    if (LwDensityOn() != 1)
+    { Note("living world: no density guards: mission locations' loose entities spawn at setup"); LwInstallSpawnSources(); LwInstallPassTimes(); return; }
     if (!ApiCodeMatches(game + LW_DEFER_SITE, kLwDeferPin) || !ApiCodeMatches(game + LW_DEFER_SPAWN, "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18"))
     { Note("living world: the level entities' setup pass is not the reviewed code; its entities spawn at setup"); return; }
     static const uint8_t setup[] = {0x49, 0x8B, 0xCC, 0x48, 0x8B, 0xD3, 0x4C, 0x8D, 0x45, 0xB0, 0x48, 0xB8};

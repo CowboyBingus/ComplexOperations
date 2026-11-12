@@ -37,7 +37,7 @@ static void LwRecLevel(uintptr_t world)
 static uintptr_t LwRecInsert(uintptr_t a, uintptr_t entries, uint32_t count, uintptr_t d)
 {
     uintptr_t world;
-    if (count && EvpPtr(g_lw.game + LW_REC_WORLD, &world))
+    if (count && LwLive() && EvpPtr(g_lw.game + LW_REC_WORLD, &world))
     {
         uint32_t used = EvpU32(world + LW_REC_COUNTER, 0), room = used < g_lwRec.room ? g_lwRec.room - used : 0;
         if (used == 0) LwRecLevel(world);
@@ -67,7 +67,7 @@ static void LwRecNote(void)
 static void LwRecScatter(uintptr_t world, const char* when)
 {
     volatile uint32_t* map = (volatile uint32_t*)(world + LW_REC_MAP);
-    if (map[2] == 0x8000u) map[4] = LW_REC_SCATTER;
+    if (map[2] == 0x8000u && LwLive()) map[4] = LW_REC_SCATTER;
     Note("living world: destruction records %s (%ld left out before); multiplier 0x%X", when, InterlockedExchange(&g_lwRec.dropped, 0), map[4]);
     InterlockedExchange(&g_lwRec.told, 0);
 }

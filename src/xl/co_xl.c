@@ -113,6 +113,18 @@ int CoXlRecords(void) { return g_entityRecordsState; }
 void CoXlTestRecords(int state) { g_entityRecordsState = state; }
 #endif
 
+/* The living world: on with the complex part when the game is the reviewed build. Each of its parts acts only while
+ * the mission in play is complex (LwLive); a normal mission, the ship and a preview see the game's code. */
+static void CoXlLiving(uintptr_t game)
+{
+    (void)game;
+    LwInstallNavConnectNote();
+    LwInstallHitNotes();
+    LwInstallSmashSpares();
+    LwInstallNoise();
+    LwInstallDefer();
+}
+
 /* Every install of the prototype, in the loader's order: what it did when game.dll was loaded, then the level
  * install's check and steps, then the tick. NULL, or why a step refused. The loader ran these at three different
  * moments; the mod runs them once level 11 is installed and the complex part is on. The world, the objective fill and
@@ -124,11 +136,7 @@ const char* CoXlInstall(uintptr_t game)
     const char* why;
     if ((why = CoXlSettings(game)) != NULL) return why;
     InstallDaylight(game);
-    LwInstallNavConnectNote();
-    LwInstallHitNotes();
-    LwInstallSmashSpares();
-    LwInstallNoise();
-    LwInstallDefer();
+    CoXlLiving(game);
     DescInstallNotes();
     if ((why = WorldSitesFailed(game)) != NULL) return why;
     WeldResearchInstall(game);
@@ -143,3 +151,21 @@ const char* CoXlInstall(uintptr_t game)
     if (g_coApi->on_game_thread(g_coMod, CoXlTick, NULL) == 0) return "the game thread's tick could not be registered";
     return NULL;
 }
+
+#ifdef CO_TEST
+/* The mission in play's kind as level init and the ship set it, and the living world's installs, on a fake game. */
+void CoXlTestLive(int complex) { g_world.live = complex ? CO_COMPLEX_MAP_SCALE : 1.0f; LwLiveSet(complex); }
+/* The living world's pins written into a fake image: the reviewed build's bytes where its code rests on them. */
+void CoXlTestLwPins(uint8_t* image)
+{
+    for (size_t i = 0; i < sizeof kLwPins / sizeof kLwPins[0]; i++)
+        for (size_t k = 0; kLwPins[i].hex[2 * k] != 0; k++)
+        {
+            unsigned v = 0;
+            sscanf(kLwPins[i].hex + 2 * k, "%2x", &v);
+            image[kLwPins[i].rva + k] = (uint8_t)v;
+        }
+}
+int CoXlTestLiving(uintptr_t game) { if (!LwEnabled()) return 0; CoXlLiving(game); return 1; }
+LONG CoXlTestNoiseHead(void) { return g_lwNoiseHead; }
+#endif

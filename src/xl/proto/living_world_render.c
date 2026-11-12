@@ -20,6 +20,7 @@ static struct { void* endOrig; uintptr_t rehash, after; volatile LONG shrunk, to
  * next growth, so a table near its need is not rehashed back and forth. */
 static void LwRenderShrink(uintptr_t map)
 {
+    if (!LwLive()) return; /* a normal mission's tables are the game's */
     uint32_t size = *(volatile uint32_t*)map, used = *(volatile uint32_t*)(map + 0x18), buckets = *(volatile uint32_t*)(map + 0x1C);
     if (size < LW_RT_LONG || used > buckets / 8) return;
     ((LwRenderRehashFn)g_lwRender.rehash)(map, used * 4 + 19);

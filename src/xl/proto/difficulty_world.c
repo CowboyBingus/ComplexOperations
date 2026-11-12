@@ -194,6 +194,7 @@ static void NetPositionRange(float scale)
 }
 
 static volatile uint8_t* g_hudLive; /* 1 while the mission in play is complex: the stubs and the row state test it */
+static void LwLiveSet(int complex); /* living_world.c */
 /* A level is set up. The generator's side follows every level, a war-table preview too: its page, the thinning's
  * thresholds, the immediates and the city zone's factor have one reader, the generation in flight. Play's side (its
  * page and the network's position range) follows a mission only: the ship is played while previews generate. */
@@ -214,6 +215,7 @@ static void WorldWrite(float scale, int mission)
     g_world.live = co_pages_scale(CO_PAGES_LIVE);
     if (g_hudLive != NULL) *g_hudLive = g_world.live > 1.0f;
     co_locate_live(g_world.live > 1.0f); /* where a loot container's location is looked up */
+    LwLiveSet(g_world.live > 1.0f);
     if (changed) InterlockedIncrement(&g_world.switches);
 }
 
@@ -5283,6 +5285,7 @@ static void WorldShip(void)
     g_world.live = co_pages_scale(CO_PAGES_LIVE);
     if (g_hudLive != NULL) *g_hudLive = 0;
     co_locate_live(0);
+    LwLiveSet(0);
     g_worldLevelLive = 0; g_world.liveLevels = 0;
     co_spawners_mission(0);
 }

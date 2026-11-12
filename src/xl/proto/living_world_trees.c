@@ -46,7 +46,7 @@ static void LwTreeLimits(uintptr_t owner, const float* low, const float* high)
     if (low[0] < -1e30f || high[0] > 1e30f) return;
     LONG level = (LONG)g_world.levels;
     if (InterlockedExchange(&g_lwTree.level, level) != level) LwTreeLevel();
-    if (!LwTreeInMission()) { LwTreeLevel(); return; } /* the ship's views: the next mission starts from nothing */
+    if (!LwTreeInMission() || !LwLive()) { LwTreeLevel(); return; } /* the ship's views: the next mission starts from nothing */
     InterlockedIncrement(&g_lwTree.calls);
     LwTreeAxis((int32_t*)(owner + 0x1B4u), 0);
     LwTreeAxis((int32_t*)(owner + 0x1BCu), 1);
