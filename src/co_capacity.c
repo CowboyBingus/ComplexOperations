@@ -122,15 +122,12 @@ int co_capacity_normal(void)
     return 0;
 }
 
-/* Every need, then one line when the part is off. What a complex operation lacks in this build, so that it is never on
- * (CO_COMPLEX_COMPLETE):
- * - the generator's lists on a 16384 m world, each beside HellForge's own step: the city footprint list (0x8000) and
- *   the city location reserve (0xF994A5), the pocket search and reconnect, the clusters' divisor;
- * - a mission's lists: spawners 1024, map markers 64, the status volumes' unit registry (its two more uses of the
- *   game's list, 0x13CC3F6 and 0x13CC03F, and a caller for its install);
- * - an operation's three missions past 30 objectives: the objective list of 48, the result rows, a partner mission
- *   per extra mission;
- * - a client's way out of a level init it should not be in (it gets a normal level and a log line). */
+/* Every need, then one line when the part is off. What a complex operation does without, each by its own limit:
+ * - its map shows the game's 16 objective markers (xl/co_markers.h: the map's code cannot be changed per mission);
+ * - its objective list is HellForge's 30 places (xl/co_objectives.c), so the mission result and the summary keep
+ *   their 32 rows, and the one partner mission HellForge mixes is repeated for the other missions;
+ * - a client in a level init it should not be in gets a normal level and a log line: the host's launch rule and its
+ *   join gate (co_join.c) keep such a client out before that. */
 static void Settle(void)
 {
     CoComplexNeeds* n = &g_capacity.needs;

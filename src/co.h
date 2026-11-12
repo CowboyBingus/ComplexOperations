@@ -148,8 +148,7 @@ void co_capacity_early(void);
 /* Once the poll has settled, whatever it decided: what a normal level needs in a process with the engine's room (the
  * navigation grid's plan per level). 1 when there is nothing to do or it went in. */
 int co_capacity_normal(void);
-/* What a complex operation still lacks in this build (the list is in co_capacity.c): while 0 the part is never on,
- * whatever the machine has. */
+/* 0 builds a mod whose complex part is never on, whatever the machine has: the rest of the mod alone. */
 #define CO_COMPLEX_COMPLETE 0
 /* Once the part is on: every install of it. 1 when all went in; else the part is off again and the log says why. */
 int co_complex_start(void);

@@ -36,12 +36,10 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
 - The loader's `PhysicsPools` with the fork's pool sizes, broadphase and navigation cells. `../../co_early.c` writes
   them beside HellForge's own, and `../co_xl.c` hooks the entity records' move from the same moment (`CoXlEarly`).
 - The callers of `EntityRecordsWatch` and `StatusWatch`: the loader's watch thread. The first only notes a count.
-  The second installs the status volumes' larger unit registry, whose five stubs leave two uses of the game's own list
-  as they are (an append at 0x13CC3F6, a read at 0x13CC03F, in functions no call in the image reaches): it stays
-  uninstalled until those are covered.
-- The fork's edits to the loader's level install that are neither here nor in HellForge: the city footprint list and
-  location reserve, the pocket search, the clusters' divisor, spawners 1024, markers 64, the objective list of 48
-  with the result rows, a partner per extra mission, the location site 0xF73E79.
+  The second is called from the game thread's tick (`../co_xl.c`); the registry it installed is `../co_status.c`'s.
+- The fork's edits to the loader's level install that the mod does without: markers 64 (the map keeps 16,
+  `../co_markers.h`), the objective list of 48 with the result rows (the list stays at 30, `../co_objectives.c`), a
+  different partner per extra mission (HellForge's one partner is repeated).
 
 ## Edits to the copied files
 
@@ -75,5 +73,5 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
 
 What the build does instead of an edit:
 
-- `../co_xl.c` turns `-Wunused-function` off around the includes, for the seven functions named above.
+- `../co_xl.c` turns `-Wunused-function` off around the includes, for the six functions named above.
 - `../co_xl.c` defines `HF_LUA_API` as empty, so three research functions are not exported from the mod's DLL.

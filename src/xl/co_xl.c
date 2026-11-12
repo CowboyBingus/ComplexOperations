@@ -33,7 +33,7 @@
 #include "co_locate.h"
 #include "co_spawners.h"
 
-/* Seven of the copied files' functions were called from loader code that did not come along (the watch thread, the
+/* Six of the copied files' functions were called from loader code that did not come along (the watch thread, the
  * ship's level change, the density rules of a later branch); they are unused until their callers are written. */
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-function"
@@ -117,7 +117,8 @@ void CoXlTestRecords(int state) { g_entityRecordsState = state; }
 /* Every install of the prototype, in the loader's order: what it did when game.dll was loaded, then the level
  * install's check and steps, then the tick. NULL, or why a step refused. The loader ran these at three different
  * moments; the mod runs them once level 11 is installed and the complex part is on. The world, the objective fill and
- * the arcs ask each level whether it is complex; the status volumes, weld notes and tactical map have not been shown to. */
+ * the arcs ask each level whether it is complex; the status volumes' registry is the process's
+ * (co_status.c); the weld notes and the tactical map have not been shown to. */
 const char* CoXlInstall(uintptr_t game)
 {
     DifficultyInstall d = {game};
