@@ -208,10 +208,28 @@ static size_t LwDeferHex(const char* hex, uint8_t* out, size_t room)
  * and the list (+0x50) rbp+0x890; 0x79D630 on sets edi and r8 again. */
 static void LwInstallSpawnSources(void);
 static void LwInstallRender(void); /* living_world_render.c */
+static void LwInstallAllocStats(void); /* living_world_allocstats.c */
+static void LwInstallSrwWake(void); /* living_world_srwwake.c */
+static void LwInstallRegistry(void); /* living_world_registry.c */
+static void LwInstallZeroBox(void); /* living_world_zerobox.c */
+static void LwInstallVbox(void); /* living_world_vbox.c */
+static void LwInstallTasks(void); /* living_world_tasks.c, test only */
+static void LwInstallBp(void); /* living_world_bp.c, test only */
+static void LwInstallPairs(void); /* living_world_pairs.c */
+static void LwInstallAnimRate(void); static void LwInstallFrameHeap(void); /* living_world_animrate_cmd.c, living_world_frameheap.c */
+static void LwInstallBpBuild(void); /* living_world_bpbuild.c, test instrument */
+static void LwInstallFrec(void); /* living_world_frec.c, test only */
 static void LwInstallDefer(void)
 {
     if (!LwEnabled() || g_lwDefer.installed) return;
-    LwInstallAlloc(); /* the extra large world's own guards go in with the complex part (../co_xl.c) */
+    /* the frame-time levers a release ships, each acting on complex levels only (LwLiveSet) */
+    LwInstallVbox(); LwCorpseInit(); LwAibInit();
+#ifdef CO_RESEARCH /* levers without a leave proof or a verdict, and the instruments: a release installs none of them */
+    LwInstallAllocStats(); LwInstallSrwWake(); LwInstallRegistry();
+    LwInstallTasks();
+    LwInstallBp(); LwInstallPairs(); LwInstallBpBuild(); LwInstallSemCap(); LwInstallRenderHelp(); LwInstallFrec(); LwInstallAnimRate(); LwInstallFrameHeap();
+    LwInstallAlloc();
+#endif /* the extra large world's own guards go in with the complex part (../co_xl.c) */
     uintptr_t game = g_lw.game;
     /* entries are kept back only with the density guards; without them the setup passes stay the game's */
     if (LwDensityOn() != 1)

@@ -504,6 +504,32 @@ static void LwLodTick(void); static void LwLodNote(void); static void LwLodCmd(i
 static void LwDeferTick(uintptr_t lg, uint32_t seed); static void LwDeferNote(void); static void LwSpawnSourcesNote(int seq); /* living_world_defer.c */
 static void LwSyncDump(int seq); /* living_world_density.c */
 static volatile LONG g_lwFlatRepick;                    /* living_world_flat.c */
+static void LwBoxCmd(int frames);                       /* living_world_waits.c */
+static void LwDelayCmd(int us);
+static void LwDelayCycleCmd(int game, int render, int seconds);
+static void LwDelayGame(void);
+static void LwSubTick(void);
+static void LwSubCycleCmd(int seconds);
+static void LwAiTimeCmd(int us);
+static void LwVboxCmd(int mode); static void LwVboxFrame(void); /* living_world_vbox.c */
+static void LwBpCmd(int on); static void LwBpFrame(void); static void LwPcFrame(void); static void LwCorpseFrame(void); static void LwCorpseInit(void); static void LwCorpseCmd(int on); /* living_world_bp.c, living_world_corpse.c */
+static void LwBbFrame(void); /* living_world_bpbuild.c, test instrument */
+static void LwInstallNavTime(void); /* living_world_navtime.c, test instrument */
+static void LwInstallNavJob(void); static void LwNavJobCmd(int mode); static void LwNjFrame(void); /* living_world_navjob.c */
+static void LwAibFrame(void); static void LwAibInit(void); static void LwAibCmd(int us, int raiseMs); /* living_world_aibudget.c */
+static void LwSemFrame(void); static void LwInstallSemCap(void); static void LwSemCapCmd(int on); /* living_world_semcap.c */
+static void LwRhFrame(void); static void LwInstallRenderHelp(void); static void LwRenderHelpCmd(int on); /* living_world_renderhelp.c */
+static void LwAllocStatsCmd(int mode); /* living_world_allocstats.c */
+static void LwSrwWakeCmd(int on); /* living_world_srwwake.c */
+static void LwRegistryCmd(int on); static void LwRegNote(void); /* living_world_registry.c */
+static void LwZeroBoxCmd(int on); static void LwZbNote(void); /* living_world_zerobox.c */
+static void LwPfFrame(int mission); static void LwPfTestCmd(const char* cmd); /* living_world_pairs.c */
+static void LwAffFrame(void); static void LwAffinityCmd(int on); /* living_world_affinity.c */
+static void LwFrecCmd(int phase); static void LwFrecText(const char* a); static void LwFrCmdTime(LONGLONG t0, LONGLONG before); static LONGLONG LwFrInstrM(void); static void LwRmCmd(const char* a); /* living_world_rmsg.c */ static void LwArCmd(const char* cmd); static void LwArFrame(void); /* living_world_frec.c, living_world_animrate_cmd.c */
+static void LwFhCmd(const char* a); static void LwFhFrame(void); static void LwFhNote(void); /* living_world_frameheap.c */
+static void LwSkinFrame(void); static void LwSkinCmd(const char* c); /* living_world_skin.c */
+static void LwTasksCmd(const char* args);              /* living_world_tasks.c */
+static void LwFlatSitesCmd(const char* sites);          /* living_world_flat.c */
 static LwSquad g_lwSquads[LW_SQUADS_MAX];
 /* The table is 14 MB, so a pass over all of it each tick costs more than the squads' own work (0.5 ms of the tick's
  * 1.8 at 228 units). g_lwEvery marks the squads that need every tick (pending, online, or held by a test); the others
@@ -1713,9 +1739,18 @@ static void LwWallSample(void)
  * The camera: CM = [game+0x346D560], [CM+0x3C] its world position (subagent viewdist, P); the third-person camera
  * stands behind the Helldiver, so player - camera is the screen's direction across the ground. */
 static SRWLOCK g_lwCmdLock = SRWLOCK_INIT;
-static char g_lwCmd[8][128];
+static char g_lwCmd[8][288];
 static int g_lwCmdCount, g_lwCmdSeq;
+static int LwTestCall(const char* cmd);
+/* The harness's test commands; the frame recorder flags the frames they run in and books their time (LwFrCmdTime). */
 static int hellforge_lw_test(const char* cmd) /* the harness called it by name; the mod ships no test entry */
+{
+    LARGE_INTEGER t0; LONGLONG before = LwFrInstrM(); QueryPerformanceCounter(&t0);
+    int seq = LwTestCall(cmd);
+    LwFrCmdTime(t0.QuadPart, before);
+    return seq;
+}
+static int LwTestCall(const char* cmd)
 {
     if (cmd == NULL) return -1;
     int seq = -1;
@@ -1723,6 +1758,18 @@ static int hellforge_lw_test(const char* cmd) /* the harness called it by name; 
     {                                                                   /* also on a client, where no living world ticks */
         AcquireSRWLockExclusive(&g_lwCmdLock); seq = ++g_lwCmdSeq; ReleaseSRWLockExclusive(&g_lwCmdLock);
         if (cmd[0] == 'd') LwSyncDump(seq); else { LwSyncCensus(seq); LwSpawnSourcesNote(seq); LwDeferNote(); }
+        return seq;
+    }
+    if (strncmp(cmd, "frec ", 5) == 0) /* the frame recorder, also with the living world off: the game thread runs the Lua */
+    {
+        AcquireSRWLockExclusive(&g_lwCmdLock); seq = ++g_lwCmdSeq; ReleaseSRWLockExclusive(&g_lwCmdLock);
+        LwFrecText(cmd);
+        return seq;
+    }
+    if (strncmp(cmd, "rmsg ", 5) == 0) /* the render phase timer, the same way */
+    {
+        AcquireSRWLockExclusive(&g_lwCmdLock); seq = ++g_lwCmdSeq; ReleaseSRWLockExclusive(&g_lwCmdLock);
+        LwRmCmd(cmd);
         return seq;
     }
     AcquireSRWLockExclusive(&g_lwCmdLock);
@@ -2396,7 +2443,25 @@ static void LwTestKeepAlive(void)
     if (on < 0) { char t[4] = ""; on = GetEnvironmentVariableA("HELLFORGE_LW_TEST_ALIVE", t, sizeof t) > 0 && t[0] == '1'; if (on) Note("living world: test: the local Helldiver is kept alive (healed to full each tick; test runs only)"); }
     if (!on) return;
     ActHealth h; const char* why = "";
-    if (!ActLocalAvatar(g_lw.game, 0, &h, &why) || h.max <= 0 || h.health >= h.max) return;
+    uint32_t avatar = ActLocalAvatar(g_lw.game, 0, &h, &why);
+    if (!avatar || h.max <= 0) return;
+    /* The game's own invulnerability byte (health extension +0x18, set for dropship passengers; KB
+     * test-avatar-invulnerability): the damage gate 0x92388C and the health update's 0x920486 leave such a record alone. */
+    static int pins = -1; static ULONGLONG flagNotedAt;
+    uintptr_t g = g_lw.game, ext; uint8_t flag = 0;
+    if (pins < 0)
+    {
+        pins = ApiCodeMatches(g + 0x91DE20u, "48 89 5C 24 18 48 89 7C 24 20 41 56 48 83 EC 20 3B 15 EA 5D B6 02 45 0F B6 F0 48 8B 3D 47 88 A0 02 8B DA 0F 84 F7 00 00 00") &&
+            ApiCodeMatches(g + 0x91DEDEu, "44 88 74 28 18") && ApiCodeMatches(g + 0x92388Cu, "44 38 6C 08 18 0F 85 9A 24 00 00") &&
+            ApiCodeMatches(g + 0x920486u, "80 7C 1F 18 00 0F 85 7B 0B 00 00");
+        Note(pins ? "living world: test: keep alive uses the game's invulnerability flag" : "living world: test: keep alive: the invulnerability setter is not this build's; healing only");
+    }
+    if (pins && h.owned && EvpPtr(h.manager + 0x1060, &ext) && !SafeRead(ext + (uintptr_t)h.index * 0x1C + 0x18, &flag, 1) && flag == 0)
+    {
+        ((void (*)(void*, uint32_t, uint8_t))(g + 0x91DE20u))(NULL, avatar, 1);
+        if (GetTickCount64() - flagNotedAt > 10000) { flagNotedAt = GetTickCount64(); Note("living world: test: keep alive: the Helldiver's invulnerability flag set (entity %u, health %d of %d)", avatar, h.health, h.max); }
+    }
+    if (h.health >= h.max) return;
     int before = h.health;
     ActHealNow(NULL, g_lw.game, (float)h.max);
     if (GetTickCount64() - notedAt > 10000) { notedAt = GetTickCount64(); Note("living world: test: keep alive: the Helldiver healed from %d of %d", before, h.max); }
@@ -2404,7 +2469,7 @@ static void LwTestKeepAlive(void)
 static void LwKillArm(void);
 static void LwTestCommands(void)
 {
-    char cmds[8][128]; int n, seq0;
+    char cmds[8][288]; int n, seq0;
     static int on = -1; /* test runs only (audit 1d, 11): the exported channel acts only with HELLFORGE_LW_TEST_TRACE=1 */
     if (on < 0) { char t[4] = ""; on = GetEnvironmentVariableA("HELLFORGE_LW_TEST_TRACE", t, sizeof t) > 0 && t[0] == '1'; }
     AcquireSRWLockExclusive(&g_lwCmdLock);
@@ -2414,9 +2479,34 @@ static void LwTestCommands(void)
     if (!on) { if (n) Note("living world: test commands ignored: %d (HELLFORGE_LW_TEST_TRACE is not 1)", n); return; }
     for (int c = 0; c < n; c++)
     {
-        char mode[16] = ""; float d = 0, deg = 0; int idx = -1, seq = seq0 + c;
+        char mode[16] = ""; float d = 0, deg = 0; int idx = -1, seq = seq0 + c, ia = 0, ib = 0, ic = 0;
         Note("living world: test command %d: %s", seq, cmds[c]);
-        if (strcmp(cmds[c], "profile repick") == 0) InterlockedExchange(&g_lwFlatRepick, 1);
+        if (sscanf(cmds[c], "box %d", &idx) == 1) LwBoxCmd(idx);
+        else if (sscanf(cmds[c], "delay cycle %d %d %d", &ia, &ib, &ic) == 3 && ic > 1) LwDelayCycleCmd(ia, ib, ic);
+        else if (sscanf(cmds[c], "delay %d", &idx) == 1) LwDelayCmd(idx);
+        else if (sscanf(cmds[c], "substep cycle %d", &idx) == 1) LwSubCycleCmd(idx);
+        else if (sscanf(cmds[c], "aitime %d", &idx) == 1) LwAiTimeCmd(idx);
+        else if (sscanf(cmds[c], "aibudget %d %d", &ia, &ib) == 2) LwAibCmd(ia, ib);
+        else if (sscanf(cmds[c], "aibudget %d", &idx) == 1) LwAibCmd(idx, 0);
+        else if (strncmp(cmds[c], "tasks ", 6) == 0) LwTasksCmd(cmds[c] + 6);
+        else if (sscanf(cmds[c], "vbox %d", &idx) == 1) LwVboxCmd(idx);
+        else if (sscanf(cmds[c], "bp %d", &idx) == 1) LwBpCmd(idx);
+        else if (sscanf(cmds[c], "corpse %d", &idx) == 1) LwCorpseCmd(idx);
+        else if (sscanf(cmds[c], "semcap %d", &idx) == 1) LwSemCapCmd(idx);
+        else if (sscanf(cmds[c], "renderhelp %d", &idx) == 1) LwRenderHelpCmd(idx);
+        else if (sscanf(cmds[c], "allocstats %d", &idx) == 1) LwAllocStatsCmd(idx);
+        else if (sscanf(cmds[c], "srwwake %d", &idx) == 1) LwSrwWakeCmd(idx);
+        else if (sscanf(cmds[c], "registry %d", &idx) == 1) LwRegistryCmd(idx);
+        else if (sscanf(cmds[c], "zerobox %d", &idx) == 1) LwZeroBoxCmd(idx);
+        else if (sscanf(cmds[c], "navjob %d", &idx) == 1) LwNavJobCmd(idx);
+        else if (strncmp(cmds[c], "skin", 4) == 0) LwSkinCmd(cmds[c]);
+        else if (strncmp(cmds[c], "animrate", 8) == 0) LwArCmd(cmds[c]);
+        else if (strncmp(cmds[c], "frameheap", 9) == 0) LwFhCmd(cmds[c]);
+        else if (strncmp(cmds[c], "pair", 4) == 0) LwPfTestCmd(cmds[c]); /* "pairs N", "pairground L" */
+        else if (sscanf(cmds[c], "affinity %d", &idx) == 1) LwAffinityCmd(idx);
+        else if (sscanf(cmds[c], "frec %d", &idx) == 1) LwFrecCmd(idx);
+        else if (strncmp(cmds[c], "profile sites ", 14) == 0) LwFlatSitesCmd(cmds[c] + 14);
+        else if (strcmp(cmds[c], "profile repick") == 0) InterlockedExchange(&g_lwFlatRepick, 1);
         else if (sscanf(cmds[c], "spawn %15s %f %f %d", mode, &d, &deg, &idx) >= 2) LwTestSpawn(seq, mode, d, deg, idx);
         else if (sscanf(cmds[c], "offline %d", &idx) == 1 && idx >= 0 && idx < g_lwWorld.count && g_lwSquads[idx].state == LW_ONLINE) g_lwSquads[idx].forceOff = 1;
         else if (strncmp(cmds[c], "kill garrison", 13) == 0) LwKillArm();
@@ -2471,19 +2561,28 @@ static void LwGroundNote(void)
 }
 
 /* The tick's scans and test instruments that run before the squads' own ticks. */
+/* Test instrument: the time of each periodic job in this tick, named in the slow-tick note (LivingTick). */
+enum { LW_J_TEST, LW_J_FRAMES, LW_J_NOISE, LW_J_FIGHT, LW_J_TERRITORY, LW_J_RETAKE, LW_J_TRACE, LW_J_DENSITY, LW_J_COUNT };
+static uint64_t g_lwJobTicks[LW_J_COUNT];
+#define LW_TIMED(j, call) do { uint64_t t0_ = __builtin_ia32_rdtsc(); call; g_lwJobTicks[j] += __builtin_ia32_rdtsc() - t0_; } while (0)
+
 static void LwTickScans(void)
 {
-    LwAvatarDeathWatch(); /* test runs: who killed the local Helldiver */
-    LwSafeLanding(); /* test runs: out of a pod among enemies, moved clear */
-    LwTestKeepAlive(); /* test runs: the Helldiver healed to full */
-    LwDrawnTick(); /* the main view's drawn state of far squads (test instrument, HELLFORGE_LW_DRAWN=1) */
-    LwTestCommands(); /* test commands from the harness (hellforge_lw_test), run here on the game thread */
-    LwNoiseDrain(); /* Phase 2a: noises since the last tick send squads to investigate */
-    LwFightScan(); /* Phase 2b: fights and calls for help draw squads in (once a second) */
-    LwTerritoryTick(); /* Phase 2d: regions, their strength, and the squads' homes */
-    LwRetakeScan(); /* Phase 2c: squads retake cleared plain garrisons (every 10 s) */
-    LwIntentTrace(); /* test runs only: intent changes and positions for the evidence graphics */
-    if (LwTestTraceOn()) LwAggroTrace();
+    LW_TIMED(LW_J_TEST, {
+        LwAvatarDeathWatch(); /* test runs: who killed the local Helldiver */
+        LwSafeLanding(); /* test runs: out of a pod among enemies, moved clear */
+        LwTestKeepAlive(); /* test runs: the Helldiver healed to full */
+        LwDrawnTick(); /* the main view's drawn state of far squads (test instrument, HELLFORGE_LW_DRAWN=1) */
+        { LARGE_INTEGER c0; LONGLONG before = LwFrInstrM(); int had = g_lwCmdCount; QueryPerformanceCounter(&c0);
+          LwTestCommands(); /* test commands from the harness (hellforge_lw_test), run here on the game thread */
+          if (had) LwFrCmdTime(c0.QuadPart, before); } /* booked and flagged in the frame they run in */
+        LwDelayGame(); });
+    LW_TIMED(LW_J_FRAMES, { LwSubTick(); LwVboxFrame(); LwBpFrame(); LwBbFrame(); LwPcFrame(); LwCorpseFrame(); LwAibFrame(); LwSemFrame(); LwRhFrame(); LwAffFrame(); LwSkinFrame(); LwArFrame(); LwFhFrame(); });
+    LW_TIMED(LW_J_NOISE, LwNoiseDrain()); /* Phase 2a: noises since the last tick send squads to investigate */
+    LW_TIMED(LW_J_FIGHT, LwFightScan()); /* Phase 2b: fights and calls for help draw squads in (once a second) */
+    LW_TIMED(LW_J_TERRITORY, LwTerritoryTick()); /* Phase 2d: regions, their strength, and the squads' homes */
+    LW_TIMED(LW_J_RETAKE, LwRetakeScan()); /* Phase 2c: squads retake cleared plain garrisons (every 10 s) */
+    LW_TIMED(LW_J_TRACE, { LwIntentTrace(); if (LwTestTraceOn()) LwAggroTrace(); }); /* test runs only */
 }
 
 /* The budget: living members of online squads, the request of pending ones; the far ones' share is returned. */
@@ -2547,7 +2646,7 @@ static void LwSquadsTick(void)
     float r = g_lwWorld.radius;
     int farUnits = LwTickSums(&units, &waiting);
     LW_SECT(LW_S_DENSITY);
-    LwDensityTick(dt); /* bubbles and their budgets, before any squad asks for room */
+    LW_TIMED(LW_J_DENSITY, LwDensityTick(dt)); /* bubbles and their budgets, before any squad asks for room */
     LW_SECT(LW_S_SCANS);
     LwTickScans();
     uint32_t slice = g_lwSlice.n++ % LW_SLICES;
@@ -2633,6 +2732,8 @@ static void LwSquadsTick(void)
         LwDensityNote();
         LwLodNote();
         LwDeferNote();
+        LwRegNote(); LwZbNote();
+        LwFhNote();
         if (g_lwWalls.requests)
             Note("living world: steering walls (30 s): %u requests, %u with no wall segment (%.1f%%), G %.1f m", g_lwWalls.requests,
                 g_lwWalls.empty, 100.0 * g_lwWalls.empty / g_lwWalls.requests, (double)(g_lwWallReach ? *g_lwWallReach : 0));
@@ -3726,6 +3827,8 @@ static void LwInstallWallReach(uintptr_t game)
     if (!LwEnabled()) return; /* audit 1b: the leave fix patched the exe with the living world off; only its rebuilds need it */
     LwInstallNavLeaveFix();
     LwInstallNavSwapSync();
+    LwInstallNavTime(); /* test instrument; after the swap sync, whose pins read 0xBB19B0 */
+    LwInstallNavJob(); /* after the nav time instrument, which it refuses to share 0x7B8A10 and 0x7B7590 with */
     if (g_lwWallReach != NULL) return;
     if (!ApiCodeMatches(game + LW_WALL_SITE, "F3 0F 58 C8 0F 28 C5 F3 0F 59 CE 0F 28 F2") ||
         !ApiCodeMatches(game + 0x59CCFEu, "C7 44 24 78 00 00 80 40"))
@@ -4100,11 +4203,31 @@ static void LwTraceTick(void)
 
 static struct { double sum, worst; uint32_t ticks; ULONGLONG at; } g_lwCost;
 
+/* Test instrument: a tick over 1.5 ms is noted with its sections and periodic jobs (ms), at most 6 times in 30 s, to
+ * find the periodic work behind the 3 ms worst ticks. Time-stamp counts become ms by the tick's own QPC time. */
+static void LwSlowTickNote(double ms, uint64_t tsc, const uint64_t* sect0, ULONGLONG now)
+{
+    static ULONGLONG windowAt; static int noted;
+    if (ms < 1.5 || tsc == 0) return;
+    if (now - windowAt >= 30000) { windowAt = now; noted = 0; }
+    if (noted++ >= 6) return;
+    double k = ms / (double)tsc;
+    Note("living world: test: slow tick %.2f ms: before %.2f, setup %.2f, sums %.2f, density %.2f, scans %.2f, offline %.2f, online %.2f, after %.2f; "
+        "jobs: test hooks %.2f, frame hooks %.2f, noises %.2f, fight scan %.2f, territory %.2f, retake scan %.2f, traces %.2f, density %.2f", ms,
+        k * (double)(g_lwSect.ticks[0] - sect0[0]), k * (double)(g_lwSect.ticks[1] - sect0[1]), k * (double)(g_lwSect.ticks[2] - sect0[2]),
+        k * (double)(g_lwSect.ticks[3] - sect0[3]), k * (double)(g_lwSect.ticks[4] - sect0[4]), k * (double)(g_lwSect.ticks[5] - sect0[5]),
+        k * (double)(g_lwSect.ticks[6] - sect0[6]), k * (double)(g_lwSect.ticks[7] - sect0[7]),
+        k * (double)g_lwJobTicks[0], k * (double)g_lwJobTicks[1], k * (double)g_lwJobTicks[2], k * (double)g_lwJobTicks[3],
+        k * (double)g_lwJobTicks[4], k * (double)g_lwJobTicks[5], k * (double)g_lwJobTicks[6], k * (double)g_lwJobTicks[7]);
+}
+
 static void LivingTickBody(void);
 static void LivingTick(void)
 {
     if (!LwEnabled() || !LwLive()) return;
     LARGE_INTEGER a, b, f;
+    uint64_t sect0[LW_S_COUNT], tsc0 = __builtin_ia32_rdtsc();
+    memcpy(sect0, g_lwSect.ticks, sizeof sect0); memset(g_lwJobTicks, 0, sizeof g_lwJobTicks);
     QueryPerformanceCounter(&a);
     g_lwSect.at = __builtin_ia32_rdtsc(); g_lwSect.cur = LW_S_BEFORE;
     LivingTickBody();
@@ -4113,6 +4236,7 @@ static void LivingTick(void)
     double ms = (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart;
     g_lwCost.sum += ms; g_lwCost.ticks++; if (ms > g_lwCost.worst) g_lwCost.worst = ms;
     ULONGLONG now = GetTickCount64();
+    LwSlowTickNote(ms, __builtin_ia32_rdtsc() - tsc0, sect0, now);
     if (!g_lwCost.at) g_lwCost.at = now;
     if (now - g_lwCost.at >= 30000 && g_lwWorld.count > 0)
     {
@@ -4133,9 +4257,11 @@ static void LivingTick(void)
 
 static void LivingTickBody(void)
 {
+    LwNjFrame(); /* the nav job cache's flushes while no nav tick runs */
     LwPatrolsOff();
-    int host = 0;
-    if (!ActMission(g_lw.game, &host, NULL) || !host) return;
+    int host = 0, mission = ActMission(g_lw.game, &host, NULL);
+    LwPfFrame(mission); /* every peer, before this frame's physics step */
+    if (!mission || !host) return;
     LwTraceTick();
     uintptr_t dir;
     if (EvpPtr(g_lw.game + LW_DIRECTOR, &dir)) LwNavTick(dir);
@@ -4145,8 +4271,24 @@ static void LivingTickBody(void)
 
 /* The mission in play has changed kind (difficulty_world.c, as the live page is set): what the stubs read. A normal
  * mission starts with the walls' reach the game's and the leave fix off. */
+static void LwInstallZeroBox(void); static void LwNjLive(int complex); /* living_world_zerobox.c, living_world_navjob.c */
+static uintptr_t LwZbSite(void); static LONG LwNjWanted(void);
+static void LwVboxLeave(void); static void LwBpLeave(void); static void LwCorpseLeave(void); static void LwAibLeave(void);
 static void LwLiveSet(int complex)
 {
+    /* the frame-time levers: on for a complex level, the game's state again before any other level's first frame */
+    if (complex) LwInstallZeroBox(); /* a try refused for a thread inside its range goes again here */
+    co_switch_live(CO_SWITCH_XL, complex);
+    LwNjLive(complex);
+    if (!complex) { LwVboxLeave(); LwBpLeave(); LwCorpseLeave(); LwAibLeave(); }
+    static int noted = -1; /* one line a change of kind, so a run shows each lever on and off */
+    if (noted != (complex != 0))
+    {
+        noted = complex != 0;
+        Note("living world: frame-time levers %s: absent SpeedTree cells %s; nav job mode %ld asked; vehicle boxes, corpse freeze, AI path budget %s",
+            complex ? "on (complex level)" : "off (any other level)", co_switch_path(LwZbSite()) == 1 ? "the empty box" : co_switch_path(LwZbSite()) == 0 ? "the game's zero box" : "not switched",
+            LwNjWanted(), complex ? "acting" : "the game's");
+    }
     if (!complex && g_lwWallReach != NULL) *g_lwWallReach = -0.0f; /* the stub's add leaves every reach as it is */
     if (g_lwLeaveFix != NULL) *g_lwLeaveFix = (uint8_t)(complex != 0);
     co_patrols_live(complex && g_lw.state > 0); /* the director's patrols, off while the squads run the mission */
@@ -4161,6 +4303,32 @@ static void LwLiveSet(int complex)
 #include "living_world_alloc.c" /* test instrument: large commits by caller (after living_world_flat.c: its function keys) */
 #include "living_world_trees.c" /* the tree cell limits never shrink within a level */
 #include "living_world_render.c" /* fix: the render device's version tables kept short (KB xl-living-world-frame-budget) */
+#include "living_world_allocstats.c" /* the tracking allocator's shared statistics atomics skipped (KB frame-cost-swarm-cap2) */
+#include "living_world_waits.c" /* test instrument: the job waits by thread and caller */
+#include "living_world_vbox.c" /* test: the motion pass asks for each vehicle box once a frame */
+#include "living_world_bp.c" /* layer 1 of the broad phase rebuilt only when marked */
+#include "living_world_bpbuild.c" /* test instrument: whole-layer builds of the broad phase and what marked them */
+#include "living_world_navtime.c" /* test instrument: the parts of the main thread's nav cell tick */
+#include "living_world_navjob.c" /* the nav job start's arrays reserved once, huge blocks kept (KB lever-navjob-registry) */
+#include "living_world_corpse.c" /* settled ring corpses frozen as in disposal */
+#include "living_world_pairs.c" /* after living_world_corpse.c: dead ragdoll bones keep only ground and trigger pairs */
+#include "living_world_aibudget.c" /* the AI path threads' time a step, raised while requests wait */
+#include "living_world_semcap.c" /* test: the worker wake tokens capped at the worker count */
+#include "living_world_srwwake.c" /* Wine's shared SRW release without the needless wake (KB frame-cost-swarm-cap2) */
+#include "living_world_registry.c" /* the unit registry lookup without its lock; old arrays kept */
+#include "living_world_zerobox.c" /* absent SpeedTree cells get the empty box; after living_world_registry.c */
+#include "living_world_affinity.c" /* test: the game and render threads on cores of their own */
+#include "living_world_renderhelp.c" /* test: the render thread runs its device chain while it waits for it */
+#include "living_world_frec.c" /* test instrument: one record a frame, frames.bin (KB render-frame-waits) */
+static void LwRmCmd(const char* a) { (void)a; } /* the render phase timer and the census are research tools outside the mod */
+#include "living_world_animrate.c" /* far units animated at a lower rate (KB lever-anim-motion-rate); after living_world_frec.c */
+#include "living_world_frameheap.c" /* the per-thread frame scratch heaps keep their pages; after living_world_frec.c, living_world_registry.c */
+#include "living_world_steamcalls.c" /* test instrument: the game thread's Steam calls by Proton call code */
+#include "living_world_tasks.c" /* test instrument: the physics task queue's timeline (KB physics-step-task-graph) */
 #include "living_world_records.c" /* test fix: the destruction records' room and hash (KB xl-destruction-record-map-full) */
 #include "living_world_mover.c" /* the 256 navmesh boundary requests a frame (KB living-world-mover-query-overflow) */
 #include "living_world_defer.c" /* mission locations' loose entities spawned near the players (KB living-world-density) */
+#include "living_world_skin.c" /* the skin palette levers' instrument: render worlds, frames, palette-job waits */
+#include "living_world_skincopy.c" /* the skin palette upload copied by helper threads */
+#include "living_world_skinreuse.c" /* far squad members and frozen ring corpses replay their skin palette */
+#include "living_world_skinset.c" /* the replaying units published by the game thread; the skin levers' switches */

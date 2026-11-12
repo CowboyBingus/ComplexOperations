@@ -69,6 +69,8 @@ int co_act_mission(uintptr_t game, int* host, uint32_t* modeEntity);
 int co_act_health_of(uintptr_t game, uint32_t entity, ActHealth* h);
 uint32_t co_act_local_avatar(uintptr_t game, int dead, ActHealth* h, const char** why);
 int co_act_enemy(uint64_t resource);
+/* The game's state (HF_STATE_*), as the loader's event code reads it; HF_STATE_NONE when it cannot be read. */
+uint32_t co_read_state(uintptr_t game);
 
 #ifdef CO_XL_UNIT
 /* The loader's names. Static, as the loader has them, so the prototype's own forward declarations still fit. */
@@ -125,6 +127,40 @@ static inline int ActMission(uintptr_t game, int* host, uint32_t* modeEntity) { 
 static inline int ActHealthOf(uintptr_t game, uint32_t entity, ActHealth* h) { return co_act_health_of(game, entity, h); }
 static inline uint32_t ActLocalAvatar(uintptr_t game, int dead, ActHealth* h, const char** why) { return co_act_local_avatar(game, dead, h, why); }
 static inline int ActEnemy(uint64_t resource) { return co_act_enemy(resource); }
+static inline uint32_t ReadState(uintptr_t game) { return co_read_state(game); }
+#define EVP_HEALTH 0x3326688u
+#define ACT_AVATAR 0x4D1C334D294DFA97ull
+
+/* The prototype's own code writes, one at a time. The host's hook installs take their own lock; these writes change
+ * the exe and ntdll in the middle of functions no hook starts at. */
+static SRWLOCK g_hookLock = SRWLOCK_INIT;
+/* The loader's records of its rewrites: the rewrite list covers game.dll only and the patch audit only the host's
+ * difficulty install, and the prototype's switched bytes are in neither. */
+static inline void NoteRewrite(uintptr_t address, size_t size) { (void)address; (void)size; }
+static inline void RecordPatch(uintptr_t address, const void* data, size_t size) { (void)address; (void)data; (void)size; }
+/* The host does not say where in a chain a hook is: the research instruments that need the first place stay off. */
+typedef struct HookTarget HookTarget;
+static inline HookTarget* HookTargetOf(uintptr_t target) { (void)target; return NULL; }
+static inline int HookPlace(const HookTarget* h, void* detour) { (void)h; (void)detour; return 0; }
+/* An IDA-style pattern's bytes and which count (0 for ?? ); the count, or 0 when malformed. */
+static inline size_t ParsePattern(const char* pattern, uint8_t bytes[256], uint8_t mask[256])
+{
+    size_t count = 0;
+    for (const char* c = pattern; c != NULL && *c && count < 256;)
+    {
+        if (*c == ' ') { c++; continue; }
+        if (c[0] == '?') { mask[count] = 0; bytes[count++] = 0; c += c[1] == '?' ? 2 : 1; continue; }
+        int v[2];
+        for (int k = 0; k < 2; k++)
+        {
+            char h = c[k];
+            v[k] = h >= '0' && h <= '9' ? h - '0' : h >= 'a' && h <= 'f' ? h - 'a' + 10 : h >= 'A' && h <= 'F' ? h - 'A' + 10 : -1;
+            if (v[k] < 0) return 0;
+        }
+        mask[count] = 1; bytes[count++] = (uint8_t)(v[0] << 4 | v[1]); c += 2;
+    }
+    return count;
+}
 #endif
 
 #endif

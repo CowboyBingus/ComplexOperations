@@ -195,4 +195,8 @@ static uintptr_t GenerationBlock(uintptr_t game)
     return block;
 }
 
+/* ---- the loader's log ------------------------------------------------------------------------------------------------
+ * The fork's WriteLog timed each line for the frame recorder; the mod's log is HellForge's, so nothing calls it. */
+static void (*volatile g_logTimer)(LONGLONG ticks);
+
 #endif

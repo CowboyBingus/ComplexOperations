@@ -70,7 +70,14 @@ static int ModPath(uint8_t* out, uintptr_t game, const CoSwitchSite* s)
     return Fix(out, s->fix) && Jump(out + s->modLen, game + s->modBack);
 }
 
+static int HostWrite(uintptr_t at, const void* data, size_t size) { return g_coApi->write(at, data, size); }
+
 const char* co_switch_install(uintptr_t game, const CoSwitchSite* sites, size_t count, int group)
+{
+    return co_switch_install_by(game, sites, count, group, HostWrite);
+}
+
+const char* co_switch_install_by(uintptr_t game, const CoSwitchSite* sites, size_t count, int group, CoSwitchWrite write)
 {
     const char* why;
     if (group < 0 || group >= CO_SWITCH_GROUPS) return "no such group of switched sites";
@@ -100,9 +107,9 @@ const char* co_switch_install(uintptr_t game, const CoSwitchSite* sites, size_t 
         memset(jump, sites[i].fill, sizeof jump);
         if (sites[i].after != NULL) memcpy(jump + 5, sites[i].after, sites[i].size - 5u);
         jump[0] = 0xE9; /* its rel32 from the site's own place, not this buffer's */
-        if (!Rel(jump + 1, game + sites[i].rva + 5u, (uintptr_t)(page + i * CO_SWITCH_ROOM)) || g_coApi->write(game + sites[i].rva, jump, sites[i].size) != 0)
+        if (!Rel(jump + 1, game + sites[i].rva + 5u, (uintptr_t)(page + i * CO_SWITCH_ROOM)) || write(game + sites[i].rva, jump, sites[i].size) != 0)
         {
-            for (size_t j = 0; j < i; j++) g_coApi->write(game + sites[j].rva, sites[j].pin, sites[j].size);
+            for (size_t j = 0; j < i; j++) write(game + sites[j].rva, sites[j].pin, sites[j].size);
             VirtualFree(page, 0, MEM_RELEASE);
             return "a switched site could not be written";
         }

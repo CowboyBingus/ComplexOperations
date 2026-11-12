@@ -31,10 +31,14 @@ typedef struct CoSwitchSite
 
 /* NULL when every site holds its pin. Reads only. */
 const char* co_switch_check(uintptr_t game, const CoSwitchSite* sites, size_t count);
-enum { CO_SWITCH_DENSITY, CO_SWITCH_DEFER, CO_SWITCH_GROUPS };
+enum { CO_SWITCH_DENSITY, CO_SWITCH_DEFER, CO_SWITCH_XL, CO_SWITCH_GROUPS };
 /* The sites as one batch of `group`: its paths in a page of their own, then the jumps. NULL, or why; on a failure
  * every site of the batch is the game's code again. Each site starts on the path co_switch_live last chose. */
 const char* co_switch_install(uintptr_t game, const CoSwitchSite* sites, size_t count, int group);
+/* The same with the sites' jumps written by `write` (0 written): a site that runs on other threads while it is
+ * installed needs them stopped (proto/living_world_zerobox.c). `game` is the base the rvas count from. */
+typedef int (*CoSwitchWrite)(uintptr_t at, const void* data, size_t size);
+const char* co_switch_install_by(uintptr_t game, const CoSwitchSite* sites, size_t count, int group, CoSwitchWrite write);
 /* The mod's paths while `on`, else the game's, for every installed site of `group`. */
 void co_switch_live(int group, int on);
 /* The path a site runs now: 1 the mod's, 0 the game's, -1 not installed. */

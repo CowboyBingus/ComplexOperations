@@ -1,6 +1,6 @@
 /* Test instrument (HELLFORGE_LW_PROFILE=2 with the frame notes): the pass times explain 2 of the 7 ms a frame that
  * 100 units cost, and none of the 45-50 ms frames. A sampler stops the game thread about every millisecond anywhere in
- * the frame and counts the function it is in, apart for the frames over 33 ms, so both can be read per function. */
+ * the frame and counts the function it is in, apart for the frames over the slow line (33 ms; HELLFORGE_LW_PROFILE_SLOW_MS), so both can be read per function. */
 #define LW_FLAT_KEYS 8192
 #define LW_FLAT_RING 8192
 #define LW_FLAT_STACK 0x2000
@@ -20,12 +20,12 @@ static struct {
     volatile float ms[256];                      /* the last frames' lengths, by frame number */
     struct { uint32_t frame, key, caller, chain[4], root[LW_FLAT_DEPTH], site[LW_FLAT_PARENTS]; } ring[LW_FLAT_RING]; uint32_t head, tail;
     struct { uint32_t lo, hi; int game; struct { uint32_t at, count[2]; } site[LW_FLAT_SITES]; } parent[LW_FLAT_PARENTS]; int parents;
-    uint32_t key[LW_FLAT_KEYS], count[4][LW_FLAT_KEYS], total[4], dropped;   /* 0 frames up to 33 ms, 1 over; 2, 3 the busiest other thread */
+    uint32_t key[LW_FLAT_KEYS], count[4][LW_FLAT_KEYS], total[4], dropped;   /* 0 frames up to the slow line, 1 over; 2, 3 the busiest other thread */
     uint8_t stack[LW_FLAT_STACK], rootStack[LW_FLAT_ROOT]; size_t rootLen;
     struct { uint32_t fn, count[2]; } root[LW_FLAT_DEPTH][LW_FLAT_ROOT_KEYS];
     uintptr_t module[LW_FLAT_MODULES]; int modules;
     struct { uint32_t fn[4], count[4]; } chain[LW_FLAT_CHAINS]; int chains;
-    DWORD gameThread; uint32_t fenceRun;
+    DWORD gameThread; uint32_t fenceRun; float slowMs;
 } g_lwFlat;
 
 /* A module's number for the keys, noted with its file name the first time so the offsets can be read offline. */
@@ -207,10 +207,8 @@ static void LwFlatSiteCount(const uint32_t* site, int slow)
 }
 
 /* HELLFORGE_LW_PROFILE_SITES=lo-hi,... (helldivers2.exe offsets, hex; a leading g for game.dll's). */
-static void LwFlatParents(void)
+static void LwFlatParentsFrom(const char* sites)
 {
-    char sites[256] = "";
-    GetEnvironmentVariableA("HELLFORGE_LW_PROFILE_SITES", sites, sizeof sites);
     for (const char* c = sites; *c && g_lwFlat.parents < LW_FLAT_PARENTS; )
     {
         unsigned lo = 0, hi = 0; int used = 0, game = *c == 'g';
@@ -219,6 +217,30 @@ static void LwFlatParents(void)
         g_lwFlat.parent[g_lwFlat.parents].lo = lo; g_lwFlat.parent[g_lwFlat.parents++].hi = hi;
         c += used; if (*c == ',') c++;
     }
+}
+
+static void LwFlatParents(void)
+{
+    char sites[256] = "";
+    GetEnvironmentVariableA("HELLFORGE_LW_PROFILE_SITES", sites, sizeof sites);
+    LwFlatParentsFrom(sites);
+}
+
+/* Test command "profile sites lo-hi,...": the game thread's counts start again with these functions' call sites, so
+ * one held session can compare states (no enemies, enemies) and go deeper without a relaunch. On the sampler's thread. */
+static struct { volatile LONG pending; char sites[256]; } g_lwFlatAgain;
+static void LwFlatRestart(void)
+{
+    for (int k = 0; k < 2; k++) { memset(g_lwFlat.count[k], 0, sizeof g_lwFlat.count[k]); g_lwFlat.total[k] = 0; }
+    for (int i = 0; i < g_lwFlat.chains; i++) g_lwFlat.chain[i].count[0] = g_lwFlat.chain[i].count[1] = 0;
+    memset(g_lwFlat.root, 0, sizeof g_lwFlat.root);
+    memset(g_lwFlat.parent, 0, sizeof g_lwFlat.parent); g_lwFlat.parents = 0;
+    LwFlatParentsFrom(g_lwFlatAgain.sites);
+}
+static void LwFlatSitesCmd(const char* sites)
+{
+    snprintf(g_lwFlatAgain.sites, sizeof g_lwFlatAgain.sites, "%s", sites);
+    InterlockedExchange(&g_lwFlatAgain.pending, 1);
 }
 
 /* The busiest call site of a parent not yet printed, -1 when none is left. */
@@ -242,7 +264,7 @@ static void LwFlatSites(int slow)
             used[best] = 1;
             at += (size_t)snprintf(line + at, sizeof line - at, " %X %.2f%%", g_lwFlat.parent[p].site[best].at, 100.0 * g_lwFlat.parent[p].site[best].count[slow] / g_lwFlat.total[slow]);
         }
-        Note("living world: frame profile, %s, inside %s %X (%.2f%% of the samples; 1 = its own code), by return address:%s", slow ? "frames over 33 ms" : "frames up to 33 ms",
+        Note("living world: frame profile, %s, inside %s %X (%.2f%% of the samples; 1 = its own code), by return address:%s", slow ? "frames over the slow line" : "frames up to the slow line",
             g_lwFlat.parent[p].game ? "game.dll" : "exe", g_lwFlat.parent[p].lo, 100.0 * (double)all / g_lwFlat.total[slow], line);
     }
 }
@@ -253,7 +275,7 @@ static void LwFlatDrain(void)
     while (g_lwFlat.tail != g_lwFlat.head && g_lwFlat.ring[g_lwFlat.tail].frame != now)
     {
         uint32_t frame = g_lwFlat.ring[g_lwFlat.tail].frame, key = g_lwFlat.ring[g_lwFlat.tail].key, caller = g_lwFlat.ring[g_lwFlat.tail].caller;
-        int slow = g_lwFlat.ms[frame & 255] > 33.0f;
+        int slow = g_lwFlat.ms[frame & 255] > g_lwFlat.slowMs;
         g_lwFlat.tail = (g_lwFlat.tail + 1) & (LW_FLAT_RING - 1);
         if (now - frame >= 200) { g_lwFlat.dropped++; continue; }
         g_lwFlat.total[slow]++;
@@ -444,6 +466,7 @@ static DWORD WINAPI LwFlatThread(LPVOID unused)
     {
         Sleep(1);
         LwFlatDrain();
+        if (InterlockedExchange(&g_lwFlatAgain.pending, 0)) LwFlatRestart();
         if (((g_lwFlat.head + 1) & (LW_FLAT_RING - 1)) == g_lwFlat.tail) continue;
         size_t len = 0;
         uint32_t frame = g_lwFlat.frame;
@@ -455,6 +478,15 @@ static DWORD WINAPI LwFlatThread(LPVOID unused)
     return 0;
 }
 
+/* 33 ms by default; 16.7 splits the samples at the 60 fps line. */
+static void LwFlatSlowLine(void)
+{
+    char line[16] = "";
+    g_lwFlat.slowMs = 33.0f;
+    if (GetEnvironmentVariableA("HELLFORGE_LW_PROFILE_SLOW_MS", line, sizeof line) > 0 && atof(line) >= 5.0) g_lwFlat.slowMs = (float)atof(line);
+    if (g_lwFlat.on > 0) Note("living world: test: frame profile: the slow line is %.1f ms", (double)g_lwFlat.slowMs);
+}
+
 /* On the game thread at each frame's end, with that frame's length. */
 static void LwFlatFrame(double ms)
 {
@@ -462,6 +494,7 @@ static void LwFlatFrame(double ms)
     {
         char t[4] = "";
         g_lwFlat.on = GetEnvironmentVariableA("HELLFORGE_LW_PROFILE", t, sizeof t) > 0 && t[0] == '2' ? 1 : -1;
+        LwFlatSlowLine();
         g_lwFlat.base = (uintptr_t)((NT_TIB*)NtCurrentTeb())->StackBase;
         LwFlatParents();
         LwFlatWalkList();
@@ -475,7 +508,7 @@ static void LwFlatFrame(double ms)
     g_lwFlat.frame++;
 }
 
-static const char* const g_lwFlatKind[4] = {"frames up to 33 ms", "frames over 33 ms", "the busiest other thread in fence waits of 8 ms and more",
+static const char* const g_lwFlatKind[4] = {"frames up to the slow line", "frames over the slow line", "the busiest other thread in fence waits of 8 ms and more",
     "the busiest other thread at other times"};
 
 /* The functions with the most samples of one kind, as module:offset with their share of that kind's samples; with

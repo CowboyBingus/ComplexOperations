@@ -411,6 +411,7 @@ static void LwPassNote(uint32_t frames)
 }
 
 static void LwRecNote(void); /* living_world_records.c */
+static void LwWaitsNote(void); /* living_world_waits.c */
 static void LwMoverNote(void); static int LwMoverRoom(uint32_t members); static void LwMoverSent(uint32_t members); static uint32_t LwMoverPending(void); /* living_world_mover.c */
 static void LwTreeNote(void); /* living_world_trees.c */
 /* Test note with the frame times: loader units by their squad's distance to the nearest player and in a player's
@@ -446,6 +447,7 @@ static void LwFramesNote(void)
             g_lwSlowGaps.gap[0], g_lwSlowGaps.gap[1], g_lwSlowGaps.gap[2], g_lwSlowGaps.gap[3], g_lwSlowGaps.gap[4], g_lwSlowGaps.gap[5]);
     memset(g_lwSlowGaps.gap, 0, sizeof g_lwSlowGaps.gap);
     LwRecNote();
+    LwWaitsNote();
     LwMoverNote();
     LwTreeNote();
     LwNearNote();

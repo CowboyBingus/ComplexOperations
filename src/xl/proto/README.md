@@ -12,6 +12,7 @@ the last section.
 |---|---|---|
 | 29 files: every file here except the ones below | HellForge, branch `ds/mission-arcs`, `native/mod-loader/` | `0e90b26374173cb6ff743aac7fec3bfcc7d7062b` |
 | `living_world*.c`, `living_world_defer_list.h`, `safe_read.c` (13 files) | HellForge, branch `ds/living-world`, `native/mod-loader/` | `b3de43d9259530f5e4a9ff2a787e26e49c9ea000` |
+| The 27 other `living_world_*.c`, and the fork's later edits to `living_world.c`, `_defer.c`, `_density.c`, `_flat.c`, `_render.c` | the same folder's uncommitted work on top of `b3de43d9`, merged three ways with the edits below | none |
 | `../overlay/hellforge_overlay_host.h` | HellForge, branch `ds/mission-arcs`, `native/overlay/` | `0e90b263` |
 | `../sdk-fallback/hellforge_overlay.h` | HellForge, branch `ds/mission-arcs`, `native/mod-sdk/` | `0e90b263` |
 
@@ -72,6 +73,14 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
 | `living_world.c` | The nav leave fix's stub tests a flag; the walls' reach is -0 on any other mission; the walls' request count is research-only. |
 | `living_world_defer.c` | The setup and sample passes are switched sites (`../co_switch.c`): the mod's path on a complex mission, the game's bytes on any other. They go in only with the density guards (`../co_density.c`). The four guards are installed by `../co_xl.c` (`CoXlGuards`). |
 | `living_world_density.c` | `LwDensityOn` asks `co_density_on` instead of reading the guards' bytes. |
+| `living_world.c` | `LwLiveSet` switches the frame-time levers with the mission's kind and logs one line at each change. The render phase timer's and the census's commands go to an empty `LwRmCmd`. |
+| `living_world_zerobox.c` | The absent SpeedTree cells' box is a switched site of group `CO_SWITCH_XL` (`../co_switch.c`), on by default. Its jump is written once with the other threads stopped, listed before any is. |
+| `living_world_navjob.c`, `living_world_vbox.c` | On by default. Their hooks pass straight to the game's code unless the mission is complex. Leaving one, the nav job returns to mode 0 with the game's vtable, and the vehicle boxes drop their copies. The nav job's completion sites are research only. |
+| `living_world_corpse.c`, `living_world_aibudget.c` | Their leave clears the mod's own state only; the AI budget writes nothing then. |
+| `living_world_bp.c` | Research only (`HELLFORGE_LW_BP=1`); its hooks act only on a complex mission. |
+| `living_world_defer.c` | Every research install of the levers and instruments is under `CO_RESEARCH`. |
+| `living_world_render.c` | The render thread's test delay is research only. |
+| `living_world_navjob.c`, `_vbox.c`, `_zerobox.c` | The exe's base is the host's `helldivers2.exe`. |
 | `living_world_records.c` | The map's slots are read (HellForge's 0x10000 too). The multiplier is the scatter on a complex level and the game's 1 on any other; the pin is the constructor's multiplier, not its capacity. |
 
 What the build does instead of an edit:

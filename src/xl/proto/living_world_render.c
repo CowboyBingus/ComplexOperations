@@ -29,10 +29,14 @@ static void LwRenderShrink(uintptr_t map)
         Note("living world: render version table: %u entries with %u in use, now %u", size, used, *(volatile uint32_t*)map);
 }
 
+static void LwDelayRender(void); /* living_world_waits.c, test only */
 static void LwRenderEnd(uintptr_t state)
 {
     ((LwRenderEndFn)g_lwRender.endOrig)(state);
     if ((uintptr_t)__builtin_return_address(0) != g_lwRender.after) return;   /* a worker's call, or another hook's */
+#ifdef CO_RESEARCH
+    LwDelayRender(); /* the render thread's test delay */
+#endif
     LwRenderShrink(state + 0x88);
     LwRenderShrink(state + 0xB0);
 }

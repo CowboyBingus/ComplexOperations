@@ -144,6 +144,7 @@ static const char* CoXlGuards(uintptr_t game)
     LwInstallRender();
     LwInstallMover();
     LwInstallTrees();
+    LwInstallZeroBox(); /* absent SpeedTree cells: a switched site, the empty box on complex levels only */
     if (g_lwRec.insertOrig == NULL) return "the destruction records' room on a complex level could not be guarded";
     if (g_lwMover.passOrig == NULL) return "the navmesh boundary requests on a complex level could not be guarded";
     return NULL;
@@ -249,6 +250,18 @@ void CoXlTestWorldLevel(uintptr_t level, uintptr_t preview)
     WorldLevel(level, preview);
 }
 void CoXlTestWorldShip(void) { WorldShip(); }
+/* The frame-time levers on a fake exe: the absent cells' switched site (1 in, -1 refused for good, 0 to try again), its
+ * path now, and the nav job and vehicle box hooks with what their leave must undo. */
+int CoXlTestZeroBox(int reset)
+{
+    if (reset) { g_lwZb.ready = 0; g_lwZb.refused = 0; }
+    LwInstallZeroBox();
+    return g_lwZb.ready ? 1 : g_lwZb.refused ? -1 : 0;
+}
+int CoXlTestZeroBoxPath(void) { return co_switch_path(g_lwZb.exe + LW_ZB_AT); }
+void CoXlTestLevers(uintptr_t game) { g_lw.game = game; LwInstallNavJob(); LwInstallVbox(); }
+void CoXlTestVboxFrame(void) { LwVboxFrame(); }
+int CoXlTestNavJob(DWORD* tid) { if (tid) *tid = g_lwNj.tid; return g_lwNj.installed ? g_lwNj.mode : -1; }
 LONG CoXlTestLevels(void) { return g_world.levels; }
 /* What op 0x38 (NearOneMipLevel) and op 0x69 (NearOneMipArm) leave once they made the copy and found the slot. */
 void CoXlTestOneMipArm(uint64_t tex, uint64_t* renderSlot)

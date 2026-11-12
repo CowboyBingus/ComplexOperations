@@ -341,7 +341,7 @@ int co_act_pins(uintptr_t game, const ActPin* pins, size_t count)
     return 1;
 }
 
-static uint32_t ReadState(uintptr_t game)
+uint32_t co_read_state(uintptr_t game)
 {
     uintptr_t g = 0;
     uint32_t state = 0;
@@ -353,7 +353,7 @@ static uint32_t ReadState(uintptr_t game)
 int co_act_mission(uintptr_t game, int* host, uint32_t* modeEntity)
 {
     uintptr_t mode, d;
-    if (ReadState(game) != HF_STATE_MISSION || !co_evp_ptr(game + 0x33266A0u, &mode) || co_evp_u32(mode + 8, 0) != 1 || !co_evp_ptr(mode + 0x38, &d)) return 0;
+    if (co_read_state(game) != HF_STATE_MISSION || !co_evp_ptr(game + 0x33266A0u, &mode) || co_evp_u32(mode + 8, 0) != 1 || !co_evp_ptr(mode + 0x38, &d)) return 0;
     if (host) *host = co_evp_u32(d + 0x14, 0) & 1;
     if (modeEntity) *modeEntity = co_evp_u32(d + 8, 0);
     return 1;
