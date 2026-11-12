@@ -309,28 +309,38 @@ With the part on:
 - The render world is 2 times larger and render pools 0 and 1 are 4 times larger. Sample groups take 0x81008 bytes,
   route-cell lists are sized for cells plus locations, and the upload allocator links at the tail.
 - The layer heightfield copy, the object walk's 0 handle, the pose-sync drop, the owner-NULL stubs and about 16 more
-  guards act only where the game would fault.
+  guards act only where the game would fault. So do two more: the Hive Lord graph's labelling equals the game's up to
+  its 255 regions, and a normal level's first batch keeps the scatter multiplier only for a record map that is not
+  empty, where the game's probe still finds every key.
 
-Not yet proven to act as the game does:
+Each of these equals the game's up to the game's own limit, and logs a line when a normal level passes that limit:
 
-- The route line width at game+0xF53116 is scaled by a ratio. It equals the game's only when that ratio is 2.0.
-- The AI task guard leaves a guard point's task out past 1792 of 2048 tasks.
-- The stamp instance buffer is 8 times larger, Hive Lord labelling uses another algorithm and scatter owner bitsets
-  are 512 wide. Equal results are not proven.
+- The route line width at game+0xF53116 is the game's on a normal level. It is scaled only on a complex level.
+- The AI task guard leaves a guard point's task out past 1792 of 2048 tasks: `AI guard points left out`.
+- The stamp instance buffer is 8 times larger: `op 0x2B job past the game's 3072 instances`.
+- Hive Lord labelling: `Hive Lord graph past 255 regions`.
+- Scatter owner bitsets are 512 wide: `owner cell sets outside the game's bitset box`.
 
 ### After a complex level
 
 On the ship, the network timeouts drop from 60 to 10 s, and a 4096 x 4096 one-mip texture stays allocated.
 
-Not yet proven to be reset before the ship or the next level:
+What a complex level changes is put back before the ship or the next level:
 
-- Kill heights, water and the sea plane stay lowered.
-- Early packages stay held.
-- The near-tile detours can act on the ship until the next level init.
-- The terrain spawn slot can stay swapped when a generation is dropped between op 0x69 and the next near step.
-- Town filters and the camera interface.
-- A normal level whose record map is not empty at its first batch keeps the scatter multiplier.
-- Obstacles filed while a nav world was disarmed (Open items below).
+- Kill heights, water and the sea plane are restored by the first level whose table holds their type. Until then
+  they stay on a list of 1024 a kind. A full list lowers nothing more and logs `to put back is full`.
+- Early packages are released at the next level's first main-thread step.
+- Every level init and the ship's set-up end the near tiles' state: the one-mip slot, the replay flag and the crater
+  hold, and on the ship the tiles. The one-mip spawn checks its level.
+- Town filters are widened on complex levels only and put back at the next level's first step, while the type still
+  holds the same rule and stamp lists. A full list of 8192 widens nothing more.
+- Obstacles in the navigation grid are filed under the ship's grid (Navigation grid below).
+
+Assumed, not proven:
+
+- The game's own kill heights and water levels are never -480 m and -501 m, the mod's marks. All 257 types read
+  hold -100 and -18.5.
+- A town rule rebuilt at the same address with the same lists would get its old filter back.
 - The generation state is process-wide: a normal generation overlapping a complex preview's level init is not proven
   impossible.
 
@@ -380,14 +390,21 @@ Open items:
   frame and sorts 1024 entries a frame for the whole level. Clearing that flag is left out: no stock code path holds
   a built tile without its navmesh, and not every reader of the tile record was traced.
 - An obstacle filed while the world was disarmed keeps the tiles it was filed in. This can happen to obstacles that
-  live on from a complex level into the next level.
+  live on from a complex level into the next level. The ship's own obstacles are not affected: the ship's grid is set
+  at the start of its set-up, before they are filed, and HellForge's ship step runs there too.
+- That also corrects HellForge's ship navigation after a 256 m mission, where HellForge alone files the ship's
+  obstacles under the 256 m grid. HellForge's own fix is pull request 378.
 
 ### Cancelled preview
 
-One guard acts on every level, only where the game would go wrong:
+Two guards act on every level, only where the game would go wrong:
 
 - **Cancelled preview.** A mission that starts while a complex mission's war-table preview is still placing its
   stamps waits for that preview to stop. The preview stops at its next tile and leaves its plan out of the mission.
+  The wait has no limit, so a mission start can wait out the rest of a refresh run. It logs a line at 2 s and every
+  10 s after.
+- **Runners.** Stamp or terrain runners that do not return within 30 s are dropped for the session, with the line
+  `did not return within 30 s`; the dispatcher's thread builds the rest.
 
 ### Requirements
 
