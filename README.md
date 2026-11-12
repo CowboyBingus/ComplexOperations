@@ -251,6 +251,13 @@ One level-11 operation in four is a complex operation. HellForge owns difficulty
 - The mod's log says why the part is off: a line that starts with `complex operations are off:`.
 - A normal level-11 mission with the mod loaded is the mission it is without the mod.
 
+The living world runs every complex mission. Its director patrols are off; instead the host keeps squads as records
+that walk the map's routes, and brings a squad online as the game's own patrol group near the players, its losses
+kept. Without Complex Operations' density guards in the game's code the squads share one budget for the map: 48
+enemies solo, 64 in co-op. The mod also keeps a complex level's destruction records, render version tables, tree
+extents and navmesh boundary requests within what the game holds. On a normal mission and on the ship none of this
+acts, and the difficulty rows stay the game's.
+
 The part needs a HellForge with pull requests 362, 364 and 366: dev after 2026-11-11, or the first release after it.
 With an older HellForge the part is off and the rest of the mod works.
 
