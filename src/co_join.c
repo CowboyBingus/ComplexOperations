@@ -10,7 +10,7 @@
 #define NO_JOINS 0x1F868u  /* in S: the game refuses every join while this byte is set */
 #define SLOTS 0x20u        /* in L: the peer slots, 0x38 each: +0 peer, +8 reported id, +0x10 int, +0x20 state, +0x28 join id */
 #define SLOT 0x38u
-#define COUNT_AT 0x108C7EDu /* the slot search's count: 4, or the mod's own count for more players */
+#define COUNT_AT 0x108C7EDu /* the slot search's count: 4, or 8 once the session step made the lists eight */
 
 static const char kGatePin[] = "40 55 53 41 55 41 56 48 8D AC 24 78 FF FF FF 48 81 EC 88 01 00 00";
 static const char kUpdatePin[] = "40 55 53 57 41 54 48 8D AC 24 A8 FD FF FF 48 81 EC 58 03 00 00";
@@ -142,12 +142,13 @@ static uint64_t UpdateDetour(uint64_t sync)
     return result;
 }
 
-/* The slot search's count, or 0 when the search is not the game's. */
+/* The slot search's count, or 0 when the search is not the game's. The session step makes it 8 in every build (the
+ * lists have room for eight even where a session takes four), so the gate walks as many slots as the game does. */
 static uint32_t Slots(uintptr_t game)
 {
     uint8_t count = 0, tail[2];
     if (g_coApi->read(game + COUNT_AT, &count, 1) != 0 || g_coApi->read(game + COUNT_AT + 1u, tail, 2) != 0 || tail[0] != 0x72 || tail[1] != 0xF0) return 0;
-    return count == 4 || count == CO_PLAYERS ? count : 0;
+    return count == 4 || count == 8 ? count : 0;
 }
 
 const char* co_join_check(uintptr_t game)

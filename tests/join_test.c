@@ -111,7 +111,7 @@ int main(void)
             CHECK(co_join_check(game) != NULL && co_join_install(game) != NULL && g_fake.hookCount == 0);
         }
         Bare("the slot search's count");
-        g_fake.image[0x108C7EDu] = 8; CHECK((co_join_check(game) == NULL) == (CO_PLAYERS == 8)); /* the mod's own count for eight */
+        g_fake.image[0x108C7EDu] = 8; CHECK(co_join_check(game) == NULL); /* the session step's count, in a build for four too */
         g_fake.image[0x108C7EDu] = 5; CHECK(co_join_check(game) != NULL);
         Bare("the install");
         CHECK(co_join_install(game) == NULL && g_fake.hookCount == 2 && g_fake.hooks[0].target == CO_HOST_UPDATE && g_fake.hooks[1].target == CO_JOIN_GATE);
