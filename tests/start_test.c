@@ -5,6 +5,7 @@
 
 #include "harness/fake_host.h"
 #include "harness/fake_stock.h"
+#include "xl/co_nav_sites.h"
 #include "xl/co_navtrim.h"
 #include "xl/co_normal.h"
 #include "xl/co_rows.h"
@@ -151,8 +152,10 @@ int main(void)
     Start("a normal level's navigation with the room made");
     co_capacity_test_commit(CO_COMPLEX_COMMIT_MB - 1u);
     CHECK(co_capacity_poll(1) == 1 && !co_complex_on() && Untouched());
-    /* 2 navigation stubs, then the 2 tile stubs that give a normal level stock's 8 x 8 tiles */
-    CHECK(co_capacity_normal() == 1 && g_fake.writes == 4 && co_navtrim_refused() == NULL && g_fake.hookCount == 0 && co_complex_start() == 0 && g_fake.writes == 4);
+    /* 2 navigation stubs, then the 2 tile stubs that give a normal level stock's 8 x 8 tiles; one hook, the ship's
+     * early retile in the PrepareShip enter */
+    CHECK(co_capacity_normal() == 1 && g_fake.writes == 4 && co_navtrim_refused() == NULL && g_fake.hookCount == 1 &&
+        g_fake.hooks[0].target == CO_NAV_PREPARE && co_complex_start() == 0 && g_fake.writes == 4);
 
     /* The start itself, last: its installs stay in. This image has no mission tables, so the world's settings refuse
      * and the part is off again with its line. */
