@@ -17,6 +17,7 @@ static const char* g_case;
 #define CHECK(what) do { if (!(what)) { printf("FAILED %s: %s\n", g_case, #what); g_failed++; } } while (0)
 #define NOISE 0x64A890u
 #define DEFER_SITE 0xFDAA8Au
+#define SPAWN 0x953580u
 
 typedef void (*NoiseFn)(void*, uint8_t, uint32_t, const float*, uint32_t, float, uint32_t);
 
@@ -38,6 +39,9 @@ int main(void)
     uint8_t* image = Reset("the living world's installs");
     uint8_t defer[44];
     CoXlTestLwPins(image);
+    /* HellForge's spawn guard has hooked the spawn request: still the reviewed code under the jump */
+    g_fake.underHook[0].rva = SPAWN; memcpy(g_fake.underHook[0].bytes, image + SPAWN, 16);
+    memcpy(image + SPAWN, "\xFF\x25\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", 14);
     memcpy(defer, image + DEFER_SITE, sizeof defer);
     CHECK(CoXlTestLiving((uintptr_t)image) == 1); /* on with no environment variable: the game is the reviewed build */
     /* no density guards in this game: the setup pass is the game's, not rerouted */

@@ -1,6 +1,7 @@
 /* The loader's helpers for the extra large world's prototype (co_shim.h), over HfApi and the mod's own parts. The
  * readers below are HellForge's event_polls.c and actions.c readers; what differs from them is said at each. */
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
@@ -316,15 +317,16 @@ static int Hex(char c)
     return -1;
 }
 
-/* Whether code or data reads as `hex`. The loader passed a range it had rewritten itself; a mod cannot know those, so
- * a pin on bytes the host changed fails here. */
+/* Whether code or data reads as `hex`, as it was before any hook: HellForge's own guards hook functions the pins name
+ * (the spawn request), and a hooked function is still the reviewed one. Bytes the host rewrote still fail here. */
 static int ActBytes(uintptr_t at, const char* hex)
 {
     uint8_t want[256], got[256];
     size_t n = strlen(hex) / 2;
     if (n > sizeof want) return 0;
     for (size_t i = 0; i < n; i++) want[i] = (uint8_t)(Hex(hex[2 * i]) << 4 | Hex(hex[2 * i + 1]));
-    return !SafeRead(at, got, n) && !memcmp(got, want, n);
+    const int hooked = g_coApi != NULL && g_coApi->size >= offsetof(HfApi, read_code) + sizeof(void*) && g_coApi->read_code != NULL;
+    return !(hooked ? g_coApi->read_code(at, got, n) : SafeRead(at, got, n)) && !memcmp(got, want, n);
 }
 
 int co_act_pins(uintptr_t game, const ActPin* pins, size_t count)

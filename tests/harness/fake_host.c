@@ -49,6 +49,19 @@ static int Read(uintptr_t address, void* buffer, size_t size)
     return 0;
 }
 
+/* The bytes before any hook: the image, with what another's hook covers put back. */
+static int ReadCode(uintptr_t address, void* buffer, size_t size)
+{
+    if (Read(address, buffer, size) != 0) return 1;
+    for (size_t i = 0; i < sizeof g_fake.underHook / sizeof g_fake.underHook[0]; i++)
+    {
+        const uintptr_t at = (uintptr_t)g_fake.image + g_fake.underHook[i].rva;
+        for (size_t k = 0; g_fake.underHook[i].rva != 0 && k < sizeof g_fake.underHook[i].bytes; k++)
+            if (at + k >= address && at + k < address + size) ((uint8_t*)buffer)[at + k - address] = g_fake.underHook[i].bytes[k];
+    }
+    return 0;
+}
+
 static int Write(uintptr_t address, const void* data, size_t size)
 {
     if (!Inside(address, size) || g_fake.writes++ == g_fake.failWriteAt) return 1;
@@ -172,6 +185,7 @@ const HfApi* fake_host_reset(const char* build)
     g_api.read = Read;
     g_api.write = Write;
     g_api.code_matches = CodeMatches;
+    g_api.read_code = ReadCode;
     g_api.hook = Hook;
     g_api.hook_ex = HookEx;
     g_api.generation_capacity = GenerationCapacity;
