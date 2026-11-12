@@ -109,7 +109,7 @@ static int Send(HfMod* mod, uint64_t to, const void* data, uint32_t bytes)
     return 0;
 }
 
-static int Subscribe(HfMod* mod, uint32_t kind, HfListener listener, void* user, int32_t priority) { g_fake.subscribed = kind; return 0; }
+static int Subscribe(HfMod* mod, uint32_t kind, HfListener listener, void* user, int32_t priority) { g_fake.subscribed = kind; return 1; } /* the SDK: 1 listening, 0 refused */
 
 static uintptr_t DifficultyRow(uint32_t level) { return level == 11 ? g_fake.levelRow : level == 10 ? g_fake.levelTen : 0; }
 static uint32_t LoadPhase(HfMod* mod) { return g_fake.loadPhase; }

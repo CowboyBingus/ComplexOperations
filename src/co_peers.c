@@ -57,7 +57,7 @@ void co_peers_start(uintptr_t game)
 {
     memset(&g_peers, 0, sizeof g_peers);
     g_peers.game = game;
-    if (!HAS(subscribe) || !HAS(send) || !HAS(share_set) || g_coApi->subscribe(g_coMod, HF_ON_MESSAGE, OnMessage, NULL, 0) != 0)
+    if (!HAS(subscribe) || !HAS(send) || !HAS(share_set) || g_coApi->subscribe(g_coMod, HF_ON_MESSAGE, OnMessage, NULL, 0) == 0)
         co_log("complex operations: this HellForge has no channel between machines; other machines stay unknown");
 }
 

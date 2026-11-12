@@ -74,13 +74,23 @@ void co_capacity_init(void)
 
 void co_capacity_game(uintptr_t game) { g_capacity.game = game; }
 
-/* What this process can still commit, in MB: an extra large map was measured to reach CO_COMPLEX_COMMIT_MB. */
+/* The commit this process can reach, in MB: what it holds now plus what the system can still give. An extra large map
+ * was measured to bring the whole process to CO_COMPLEX_COMMIT_MB, so what the game already holds counts towards it. */
+typedef struct { DWORD cb, faults; SIZE_T peakWs, ws, quotaPeakPaged, quotaPaged, quotaPeakNonPaged, quotaNonPaged, page, peakPage, priv; } CoMemCounters;
 static uint32_t CommitFree(void)
 {
     MEMORYSTATUSEX m = {.dwLength = sizeof m};
+    static BOOL (WINAPI* info)(HANDLE, void*, DWORD);
+    static int looked;
     if (g_commitTest != 0) return g_commitTest;
     if (!GlobalMemoryStatusEx(&m)) return 0;
-    return m.ullAvailPageFile >> 20 > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)(m.ullAvailPageFile >> 20);
+    if (!looked) { looked = 1; HMODULE k = GetModuleHandleA("kernel32.dll"); if (k) info = (BOOL (WINAPI*)(HANDLE, void*, DWORD))(void*)GetProcAddress(k, "K32GetProcessMemoryInfo"); }
+    CoMemCounters c = {.cb = sizeof c};
+    uint64_t held = 0;
+    /* Wine leaves PrivateUsage 0 and keeps the commit in PagefileUsage */
+    if (info != NULL && info(GetCurrentProcess(), &c, sizeof c)) held = c.priv ? c.priv : c.page;
+    const uint64_t mb = (m.ullAvailPageFile + held) >> 20;
+    return mb > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)mb;
 }
 
 /* The mod's own sites: every instruction an install of the complex part changes or hooks is the game's. Reads only. */
@@ -102,7 +112,12 @@ void co_capacity_early(void)
     const uintptr_t game = g_capacity.game;
     if (!g_capacity.asked || game == 0 || n->early) return;
     if (!n->capacity_call || !n->regions || n->live_load || !n->capacity_granted) return; /* the poll names the reason */
-    if (CommitFree() < CO_COMPLEX_COMMIT_MB) { g_capacity.early = "not enough memory free for an extra large map"; return; }
+    if ((n->commit_free_mb = CommitFree()) < CO_COMPLEX_COMMIT_MB)
+    {
+        g_capacity.early = "not enough memory free for an extra large map";
+        co_log("complex operations: %u MB of commit within reach, %u needed", n->commit_free_mb, CO_COMPLEX_COMMIT_MB);
+        return;
+    }
     if ((g_capacity.early = OwnSites(game)) != NULL || (g_capacity.early = co_stamps_room_check(game)) != NULL) return;
     if ((g_capacity.early = co_early_install(game, g_coApi->module_base("helldivers2.exe", NULL))) != NULL) return;
     CoXlEarly(game);

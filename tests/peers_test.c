@@ -85,6 +85,7 @@ int main(void)
     game = Start("the host's row");
     co_peers_start(game);
     CHECK(g_fake.subscribed == HF_ON_MESSAGE);
+    CHECK(!fake_host_logged("no channel between machines")); /* subscribe answers 1 when it listens */
     g_fake.role = HF_SESSION_SOLO; co_peers_tick(1000); CHECK(g_fake.shareSets == 0 && g_fake.sends == 0);
     g_fake.role = HF_SESSION_HOST; g_fake.shareRefused = 1; co_peers_tick(2000); CHECK(g_fake.shareSets == 0 && g_fake.rowBytes == 0);
     co_peers_tick(2500); /* within the second: not asked */
