@@ -34,6 +34,9 @@ const char* co_navtrim_refused(void);
 /* Arms nav id `id` (world `world`) with stock's bounds `low`..`high` on both axes. 0, or 1 when it cannot be. */
 int co_navtrim_arm(uint32_t id, uintptr_t world, float low, float high);
 void co_navtrim_disarm(uint32_t id);
+/* `bytes`, read at `at`, as the engine's where they cover a site holding the trim's jump into its reviewed block; any
+ * other form of a site is left as read. Other mods' pins on the two sites compare against the engine's bytes through it. */
+void co_navtrim_unpatched(uintptr_t at, uint8_t* bytes, size_t size);
 /* The world armed at `id`, or 0. */
 uintptr_t co_navtrim_armed(uint32_t id);
 

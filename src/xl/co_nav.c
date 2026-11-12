@@ -167,6 +167,8 @@ void co_nav_retile(uint32_t id, uintptr_t level)
     const float tiles[5] = {plan.tile, plan.low, plan.low, plan.high, plan.high};
     if (g_coApi->write(world + 0x6718, tiles, sizeof tiles) != 0 || g_coApi->write(world + 0x08, low, sizeof low) != 0 || g_coApi->write(world + 0x14, high, sizeof high) != 0)
     { if (normal) NotArmed(id, "its bounds could not be written"); return; }
+    /* Arming refuses only without the stubs, for an id past 4 or a null world, all ruled out above. Were it to fail, the
+     * world would keep stock's bounds on a grid that is not remapped; the line below names that level. */
     if (armed && co_navtrim_arm(id, world, plan.stockLow, plan.stockHigh) != 0) why = "the stubs refused it";
     if (why != NULL) NotArmed(id, why);
 }

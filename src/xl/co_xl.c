@@ -193,6 +193,26 @@ void CoXlTestLwPins(uint8_t* image)
         }
 }
 int CoXlTestLiving(uintptr_t game) { if (!LwEnabled()) return 0; CoXlLiving(game); return 1; }
+/* The living world's navmesh pins (all in the exe) written into a fake exe, and a complex level's nav tick with no
+ * director: 1 when it got past the pins, -1 when they refused. */
+void CoXlTestLwNavPins(uint8_t* exe)
+{
+    for (size_t i = 0; i < sizeof kLwNavPins / sizeof kLwNavPins[0]; i++)
+        for (size_t k = 0; kLwNavPins[i].hex[2 * k] != 0; k++)
+        {
+            unsigned v = 0;
+            sscanf(kLwNavPins[i].hex + 2 * k, "%2x", &v);
+            exe[kLwNavPins[i].rva + k] = (uint8_t)v;
+        }
+}
+int CoXlTestLwNavTick(uintptr_t game)
+{
+    g_lw.game = game;
+    g_lwNav.pins = 0; g_lwNav.noted = 0;
+    if (g_navWorldScale <= 1) return 0; /* not a complex level's grid: the tick does not reach the pins */
+    LwNavTick(0);
+    return g_lwNav.pins;
+}
 LONG CoXlTestNoiseHead(void) { return g_lwNoiseHead; }
 const char* CoXlTestGuards(uintptr_t game) { return CoXlGuards(game); }
 void CoXlTestRenderShrink(uintptr_t map, void (*rehash)(uintptr_t, uint32_t)) { g_lwRender.rehash = (uintptr_t)rehash; LwRenderShrink(map); }

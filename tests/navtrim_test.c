@@ -19,6 +19,9 @@
 #include "xl/co_navtrim.h"
 #include "xl/co_normal.h"
 
+void CoXlTestLwNavPins(uint8_t* exe);
+int CoXlTestLwNavTick(uintptr_t game);
+
 static int g_failed;
 static const char* g_case;
 #define CHECK(what) do { if (!(what)) { printf("FAILED %s: %s\n", g_case, #what); g_failed++; } } while (0)
@@ -300,6 +303,40 @@ int main(void)
     World();
     co_nav_retile(0, 0);
     CHECK(co_navtrim_armed(0) == (uintptr_t)g_exe + WORLD && F(0x08) == -511.75f);
+
+    /* The living world pins 0x7ACDD0 (living_world.c kLwNavPins): it reads the engine's bytes, or the trim's jump into its
+     * reviewed block; any third form refuses its nav boosts and rebuilds. */
+    for (int form = 0; form < 4; form++)
+    {
+        static const char* const kForms[] = {"the living world's pin: the trim refused, the engine's bytes", "the living world's pin: the trim's jump",
+            "the living world's pin: a jump elsewhere", "the living world's pin: the trim's block changed"};
+        image = Reset(kForms[form]);
+        CoXlTestLwNavPins(g_exe);
+        if (form == 0) g_exe[CO_NAVTRIM_FILL + 0x100u] ^= 0x04;
+        CHECK(co_nav_install((uintptr_t)image) == NULL && (co_navtrim_refused() == NULL) == (form != 0));
+        if (form == 2) { int32_t rel; memcpy(&rel, g_exe + CO_NAVTRIM_CELL + 1, 4); rel += 0x10; memcpy(g_exe + CO_NAVTRIM_CELL + 1, &rel, 4); }
+        if (form == 3)
+        {
+            uint8_t* block = (uint8_t*)co_navtrim_test_block();
+            VirtualProtect(block, 0x1000, PAGE_EXECUTE_READWRITE, &old);
+            block[0x11] ^= 0x01; /* the dispatch's step to the next slot */
+        }
+        const int want = form < 2 ? 1 : -1;
+        CHECK(CoXlTestLwNavTick((uintptr_t)image) == want);
+        CHECK(fake_host_logged("the navmesh rebuild code is not the reviewed one") == (want < 0));
+        if (want > 0) CHECK(fake_host_logged("not an extra large nav grid in rebuild mode"));
+        if (form == 3) { uint8_t* block = (uint8_t*)co_navtrim_test_block(); block[0x11] ^= 0x01; }
+    }
+    {
+        g_case = "the living world's pin: the set-up site in a pinned range";
+        uint8_t bytes[0x20];
+        memcpy(bytes, g_exe + CO_NAVTRIM_SET, sizeof bytes);
+        co_navtrim_unpatched((uintptr_t)g_exe + CO_NAVTRIM_SET, bytes, sizeof bytes);
+        CHECK(memcmp(bytes, kCoNavSet, sizeof bytes) == 0 && g_exe[CO_NAVTRIM_SET_SITE] == 0xE9);
+        memcpy(bytes, g_exe + CO_NAVTRIM_CELL + 2, 8); /* a range that starts inside the jump */
+        co_navtrim_unpatched((uintptr_t)g_exe + CO_NAVTRIM_CELL + 2, bytes, 8);
+        CHECK(memcmp(bytes, kCoNavCell + 2, 8) == 0);
+    }
 
     VirtualProtect(g_code, 0x1000, PAGE_READWRITE, &old);
     if (g_failed) { printf("navtrim: %d checks failed\n", g_failed); return 1; }

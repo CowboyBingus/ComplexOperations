@@ -140,7 +140,7 @@ static const char* Pins(uintptr_t exe)
 
 /* The stubs' code: the dispatch, the engine's cell step on stock's grid with each ret made `add eax, 0x000C000C; ret`
  * (its one rel8 across the first ret, at +0x63, moves by 5), then the set-up stub. */
-static int Build(uint8_t* b, uintptr_t exe)
+static int Build(uint8_t* b, uintptr_t at, uintptr_t exe) /* `b` the bytes, `at` where they run */
 {
     uint8_t* body = b + sizeof kCellHead;
     memcpy(b, kCellHead, sizeof kCellHead);
@@ -160,10 +160,11 @@ static int Build(uint8_t* b, uintptr_t exe)
         table[2 * c] = (int32_t)c;
         table[2 * c + 1] = inner ? kCoNavStockPrio[(y - 12u) * 8u + (x - 12u)] : CO_NAVTRIM_OUTER - (int32_t)c;
     }
-    return Rel(b + CELL_BACK, (uintptr_t)b + CELL_BACK + 4u, exe + CO_NAVTRIM_CELL + 10u) &&
-        Rel(b + 0x100 + SET_BACK1, (uintptr_t)b + 0x100 + SET_BACK1 + 4u, exe + CO_NAVTRIM_SET_BACK) &&
-        Rel(b + 0x100 + SET_BACK2, (uintptr_t)b + 0x100 + SET_BACK2 + 4u, exe + CO_NAVTRIM_SET_BACK);
+    return Rel(b + CELL_BACK, at + CELL_BACK + 4u, exe + CO_NAVTRIM_CELL + 10u) &&
+        Rel(b + 0x100 + SET_BACK1, at + 0x100 + SET_BACK1 + 4u, exe + CO_NAVTRIM_SET_BACK) &&
+        Rel(b + 0x100 + SET_BACK2, at + 0x100 + SET_BACK2 + 4u, exe + CO_NAVTRIM_SET_BACK);
 }
+#define CELL_CODE (sizeof kCellHead + 0x85u)
 
 /* E9 and its rel32 over the first 5 bytes; the bytes behind stay the engine's (no branch lands in them). */
 static int Jump(uintptr_t site, uintptr_t to)
@@ -182,7 +183,7 @@ const char* co_navtrim_install(uintptr_t exe)
     if (b == NULL) return g_trim.refused = "no memory within reach of helldivers2.exe for the tile stubs";
     g_reserved = NULL;
     g_trim.block = b; g_trim.exe = exe;
-    if (!Build(b, exe)) return g_trim.refused = "the tile stubs are out of reach of helldivers2.exe";
+    if (!Build(b, (uintptr_t)b, exe)) return g_trim.refused = "the tile stubs are out of reach of helldivers2.exe";
     if (!VirtualProtect(b, DATA, PAGE_EXECUTE_READ, &old)) return g_trim.refused = "the tile stubs could not be made to run";
     FlushInstructionCache(GetCurrentProcess(), b, DATA);
     if (!Jump(exe + CO_NAVTRIM_SET_SITE, (uintptr_t)b + 0x100u)) return g_trim.refused = "the navigation set-up stub could not be written";
@@ -194,6 +195,32 @@ const char* co_navtrim_install(uintptr_t exe)
     g_trim.in = 1;
     g_trim.refused = NULL;
     return NULL;
+}
+
+/* The installed block still holds what Build wrote: both stubs' code and the priority table. */
+static int Reviewed(void)
+{
+    static uint8_t want[TABLE + 8u * CELLS];
+    const uint8_t* b = g_trim.block;
+    return Build(want, (uintptr_t)b, g_trim.exe) && memcmp(b, want, CELL_CODE) == 0 && memcmp(b + 0x100, want + 0x100, sizeof kSet) == 0 &&
+        memcmp(b + TABLE, want + TABLE, 8u * CELLS) == 0;
+}
+
+void co_navtrim_unpatched(uintptr_t at, uint8_t* bytes, size_t size)
+{
+    static const struct { uint32_t site, to; const uint8_t* engine; } kSites[] = {
+        {CO_NAVTRIM_CELL, 0, kCoNavCell}, {CO_NAVTRIM_SET_SITE, 0x100, kCoNavSet + (CO_NAVTRIM_SET_SITE - CO_NAVTRIM_SET)}};
+    if (!g_trim.in) return;
+    for (size_t i = 0; i < sizeof kSites / sizeof kSites[0]; i++)
+    {
+        const uintptr_t site = g_trim.exe + kSites[i].site;
+        uint8_t now[5], jump[5] = {0xE9};
+        if (site + 5u <= at || site >= at + size) continue;
+        if (g_coApi->read(site, now, 5) != 0 || !Rel(jump + 1, site + 5u, (uintptr_t)g_trim.block + kSites[i].to) || memcmp(now, jump, 5) != 0 || !Reviewed())
+            continue;
+        for (size_t k = 0; k < 5; k++)
+            if (site + k >= at && site + k < at + size) bytes[site + k - at] = kSites[i].engine[k];
+    }
 }
 
 const char* co_navtrim_refused(void) { return g_trim.in ? NULL : g_trim.refused != NULL ? g_trim.refused : "the tile stubs are not in"; }

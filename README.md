@@ -286,6 +286,9 @@ and the ship build stock's 8 x 8 tiles of it:
 - Each priority stays at its tile's place in the array, because the scheduler and the raisers index the array by tile.
   So tiles of equal priority may build in another order than stock's. Their content is the same.
 - A complex level disarms its world and builds all 1024 tiles.
+- The living world's check of the engine's code reads the trim's jump at 0x7ACDD0 as the engine's bytes, but only while
+  the jump leads into the trim's own block and that block holds the reviewed code. Any other form still turns off its
+  navmesh boosts and rebuilds.
 - If the engine's bytes differ from the reviewed ones, neither stub goes in. Each normal level then builds all 1024
   tiles and logs that its world is not armed, which fails the stock-tiles check.
 

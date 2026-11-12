@@ -7,6 +7,7 @@
 #include <wchar.h>
 
 #include "co_shim.h"
+#include "co_navtrim.h"
 
 /* SafeRead as the prototype has it: small reads copied in place, a fault turned into the failure return. */
 #include "proto/safe_read.c"
@@ -319,21 +320,24 @@ static int Hex(char c)
 
 /* Whether code or data reads as `hex`, as it was before any hook: HellForge's own guards hook functions the pins name
  * (the spawn request), and a hooked function is still the reviewed one. Bytes the host rewrote still fail here. */
-static int ActBytes(uintptr_t at, const char* hex)
+static int ActBytes(uintptr_t at, const char* hex, int exe)
 {
     uint8_t want[256], got[256];
     size_t n = strlen(hex) / 2;
     if (n > sizeof want) return 0;
     for (size_t i = 0; i < n; i++) want[i] = (uint8_t)(Hex(hex[2 * i]) << 4 | Hex(hex[2 * i + 1]));
     const int hooked = g_coApi != NULL && g_coApi->size >= offsetof(HfApi, read_code) + sizeof(void*) && g_coApi->read_code != NULL;
-    return !(hooked ? g_coApi->read_code(at, got, n) : SafeRead(at, got, n)) && !memcmp(got, want, n);
+    if (hooked ? g_coApi->read_code(at, got, n) : SafeRead(at, got, n)) return 0;
+    if (exe) co_navtrim_unpatched(at, got, n); /* the tile stubs' jumps read as the engine's code they lead to */
+    return !memcmp(got, want, n);
 }
 
 int co_act_pins(uintptr_t game, const ActPin* pins, size_t count)
 {
-    uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
+    uintptr_t exe = g_coApi != NULL ? g_coApi->module_base("helldivers2.exe", NULL) : 0;
+    if (exe == 0) exe = (uintptr_t)GetModuleHandleW(NULL);
     for (size_t i = 0; i < count; i++)
-        if (!ActBytes((pins[i].exe ? exe : game) + pins[i].rva, pins[i].hex)) return 0;
+        if (!ActBytes((pins[i].exe ? exe : game) + pins[i].rva, pins[i].hex, pins[i].exe)) return 0;
     return 1;
 }
 
