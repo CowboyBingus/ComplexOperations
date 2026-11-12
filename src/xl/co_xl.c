@@ -274,6 +274,9 @@ void CoXlTestEarlyHeld(const uint64_t* ids, uint32_t count)
 }
 int CoXlTestEarlyState(void) { return g_early.state; }
 void CoXlTestEarlyStep(uint64_t records, uint64_t index, uint64_t mask) { EarlyPackages(records, 0, index, mask); }
+/* What WorldDispatch runs at each op before the level's own (kill heights, water, sea), and what stays to put back. */
+void CoXlTestLowered(uint64_t op) { WorldKillHeight(); WorldDryTypes(op); WorldNoSea(op); }
+void CoXlTestPending(uint32_t* kill, uint32_t* dry, uint32_t* sea) { *kill = g_killHeight.count; *dry = g_dry.count; *sea = g_sea.count; }
 void CoXlTestMission(uintptr_t level, int complex)
 {
     InterlockedIncrement(&g_world.levels);
