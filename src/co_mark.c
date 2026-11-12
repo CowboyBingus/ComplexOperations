@@ -19,6 +19,18 @@ typedef uint64_t (*FillFn)(uint64_t a, uint64_t b, uint64_t settings, uint64_t d
 static FillFn g_fill;
 static uintptr_t g_game;
 
+/* One line per level-11 operation, the first time its missions are filled: a player or a tester can tell which
+ * operation on the war table is complex. The table refills often, so each pair is told once. */
+static void Told(uint16_t planet, uint32_t operation_seed, int complex)
+{
+    static struct { uint32_t seed; uint16_t planet; } told[64];
+    static uint32_t count;
+    for (uint32_t i = 0; i < count && i < 64u; i++) if (told[i].seed == operation_seed && told[i].planet == planet) return;
+    told[count % 64u].seed = operation_seed; told[count % 64u].planet = planet; count++;
+    co_log("complex operations: planet %u, operation %08X: %s", planet, operation_seed,
+        complex < 0 ? "no roll (the part is off)" : complex ? "a complex operation" : "a normal operation");
+}
+
 void co_mark_entry(uintptr_t game, uint32_t slot, uint32_t difficulty, uint32_t operation_seed, uintptr_t entry, int rolls)
 {
     uint64_t war = 0;
@@ -31,6 +43,7 @@ void co_mark_entry(uintptr_t game, uint32_t slot, uint32_t difficulty, uint32_t 
     if (g_coApi->read((uintptr_t)war + BOARD + slot * 0x5Cu + 0x10u, &planet, 2) != 0 || g_coApi->read(entry + 0x34, &seed, 4) != 0) return;
     seed = co_complex_entry_seed(seed, difficulty, operation_seed, planet, rolls);
     memcpy((void*)(entry + 0x34), &seed, 4);
+    Told(planet, operation_seed, rolls ? co_seed_is_complex(seed) : -1);
 }
 
 static uint64_t FillDetour(uint64_t a, uint64_t b, uint64_t settings, uint64_t d, uint64_t slot, uint64_t placement, uint64_t difficulty,
