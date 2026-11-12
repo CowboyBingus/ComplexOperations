@@ -216,6 +216,19 @@ int CoXlTestLwNavTick(uintptr_t game)
 LONG CoXlTestNoiseHead(void) { return g_lwNoiseHead; }
 const char* CoXlTestGuards(uintptr_t game) { return CoXlGuards(game); }
 void CoXlTestRenderShrink(uintptr_t map, void (*rehash)(uintptr_t, uint32_t)) { g_lwRender.rehash = (uintptr_t)rehash; LwRenderShrink(map); }
+/* The route width's and the scatter set's stubs built at `stub`, and the notes of the guards that act on every level. */
+void CoXlTestRouteWidthBuild(uint8_t* stub, uintptr_t flag, uintptr_t back) { RouteWidthBuild(stub, flag, back); }
+void CoXlTestScatterSetBuild(uint8_t* stub, uintptr_t count, uintptr_t back) { ScatterSetBuild(stub, count, back); }
+void CoXlTestScatterSetNote(volatile LONG* count)
+{
+    static volatile LONG none[2];
+    g_scatOwner.on = 1; g_scatOwner.missRemove = &none[0]; g_scatOwner.missReown = &none[1]; g_scatOwner.outside = count;
+    ScatterOwnerNote();
+}
+void CoXlTestTaskNote(volatile LONG* count) { g_tasksLeftOut = count; GuardNote(); }
+void CoXlTestWorldCurrent(float current) { g_world.current = current; }
+uint64_t CoXlTestPlaceJob(uint64_t job, uint64_t (*original)(uint64_t, uint64_t, uint64_t, uint64_t)) { g_placeJob = original; return WorldPlaceJob(0, 0, 0, job); }
+void CoXlTestHiveLordNote(uint64_t b) { HiveLordNote(b); }
 /* A level init's first step for `level`, and a stamp section's hold and cancel test (proto/difficulty_world_terrain.c). */
 void CoXlTestLevelInit(uintptr_t level) { LevelInitBegins(); g_worldLevel = level; }
 void CoXlTestSectionBegin(void) { SectionBegin(); }
