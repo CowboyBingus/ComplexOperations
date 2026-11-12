@@ -394,6 +394,8 @@ Open items:
   at the start of its set-up, before they are filed, and HellForge's ship step runs there too.
 - When the log has `early ship retile skipped:` or `early ship retile off:`, the grid is set at the end of the
   ship's set-up instead, and the ship's own obstacles keep the grid they were filed under.
+- While the eight-pod bay is loaded, it changes the ship's navmesh in its four centre tiles, so their face counts
+  differ from stock's. Without the bay's level data they equal stock's.
 - That also corrects HellForge's ship navigation after a 256 m mission, where HellForge alone files the ship's
   obstacles under the 256 m grid. HellForge's own fix is pull request 378.
 
