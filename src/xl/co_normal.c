@@ -23,9 +23,10 @@ void co_nav_plan(float disk, float radius, CoNavPlan* plan)
 {
     /* HellForge's bounds less 12 tiles and plus 12: its 8 x 8 tiles are the grid's inner ones, 12..19 */
     plan->grid = 32;
+    plan->stockLow = plan->stockHigh = 0.0f;
     if (co_level_complex(disk)) { plan->low = -8190.0f; plan->high = 8194.0f; plan->tile = 512.0f; }
-    else if (radius > 682.0f) { plan->low = -4095.75f; plan->high = 4096.25f; plan->tile = 256.0f; }
-    else { plan->low = -2047.75f; plan->high = 2048.25f; plan->tile = 128.0f; }
+    else if (radius > 682.0f) { plan->low = -4095.75f; plan->high = 4096.25f; plan->tile = 256.0f; plan->stockLow = -1023.75f; plan->stockHigh = 1024.25f; }
+    else { plan->low = -2047.75f; plan->high = 2048.25f; plan->tile = 128.0f; plan->stockLow = -511.75f; plan->stockHigh = 512.25f; }
 }
 
 uint32_t co_level_limit(int which, int complex)

@@ -5,6 +5,7 @@
 #include "xl/co_rows.h"
 #include "xl/co_nav.h"
 #include "xl/co_nav_sites.h"
+#include "xl/co_navtrim.h"
 #include "fake_host.h"
 #include "co_early_sites.h"
 #include "xl/co_beside_sites.h"
@@ -152,6 +153,9 @@ void fake_stock_nav(uint8_t* image)
     memcpy(exe + CO_NAV_EXE_PIN, kNavExe, sizeof kNavExe);
     memcpy(exe + CO_NAV_TILE_READ, kNavTileRead, sizeof kNavTileRead);
     memcpy(exe + CO_NAV_TILE_128, &sizes[0], 4); memcpy(exe + CO_NAV_TILE_256, &sizes[1], 4);
+    memcpy(exe + CO_NAVTRIM_CELL, kCoNavCell, sizeof kCoNavCell); memcpy(exe + CO_NAVTRIM_SET, kCoNavSet, sizeof kCoNavSet);
+    memcpy(exe + CO_NAVTRIM_FILL, kCoNavFill, sizeof kCoNavFill);
+    for (int i = 0; i < 4; i++) memcpy(exe + kCoNavFillConst[i][0], &kCoNavFillConst[i][1], 4);
 }
 
 void fake_stock_early(uint8_t* image)

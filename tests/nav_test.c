@@ -66,9 +66,10 @@ static uintptr_t Level(float disk, float radius)
     return (uintptr_t)g_fake.image + LEVEL;
 }
 static float F(uint32_t at) { float f; memcpy(&f, g_exe + WORLD + at, 4); return f; }
-static int Bounds(float low, float high, float tile)
+/* The grid's tiles are the plan's; the world's own bounds are stock's (`own`) on an armed level, the plan's on a complex one. */
+static int Bounds(float low, float high, float tile, float ownLow, float ownHigh)
 {
-    return F(0x08) == low && F(0x0C) == low && F(0x14) == high && F(0x18) == high && F(0x6718) == tile && F(0x671C) == low && F(0x6720) == low &&
+    return F(0x08) == ownLow && F(0x0C) == ownLow && F(0x14) == ownHigh && F(0x18) == ownHigh && F(0x6718) == tile && F(0x671C) == low && F(0x6720) == low &&
         F(0x6724) == high && F(0x6728) == high && F(0x10) == F(0x04) && F(0x672C) == F(0x04); /* and nothing beside them */
 }
 static uintptr_t TileRead(void) { int32_t d; memcpy(&d, g_exe + CO_NAV_TILE_READ + 4, 4); return CO_NAV_TILE_READ + 8u + (uintptr_t)(intptr_t)d; }
@@ -142,7 +143,7 @@ int main(void)
     image = Reset("the install");
     uint8_t* before = (uint8_t*)malloc(FAKE_IMAGE_SIZE);
     memcpy(before, image, FAKE_IMAGE_SIZE);
-    CHECK(co_nav_install(game) == NULL && g_fake.writes == 2 && co_nav_test_page() != 0 && co_nav_test_tile() != NULL);
+    CHECK(co_nav_install(game) == NULL && g_fake.writes == 4 && co_nav_test_page() != 0 && co_nav_test_tile() != NULL); /* and the tile stubs' two */
     {
         const uintptr_t page = co_nav_test_page();
         int32_t rel;
@@ -155,7 +156,7 @@ int main(void)
         CHECK(page + 129u + (intptr_t)rel == game + FAKE_STOCK_NAV); /* and are where the mod's go on */
         memcpy(&rel, (const uint8_t*)page + 0x100 + 130, 4);
         CHECK(page + 0x100u + 134u + (intptr_t)rel == game + FAKE_STOCK_NAV + 0x100u);
-        CHECK(co_nav_install(game) == NULL && g_fake.writes == 2);
+        CHECK(co_nav_install(game) == NULL && g_fake.writes == 4);
     }
 
     g_case = "a grid of 8 x 8";
@@ -167,26 +168,26 @@ int main(void)
     memcpy(world, g_exe + WORLD, 0x6800);
     co_nav_retile(0, Level(hellforge, 1023.0f)); co_nav_retile(0, Level(key, 8074.4f)); co_nav_retile(0, 0);
     /* HellForge's to retile: nothing written, and the ship's step still puts play's world back */
-    CHECK(g_fake.writes == 2 && memcmp(world, g_exe + WORLD, 0x6800) == 0 && TileRead() == CO_NAV_TILE_128 && g_seen.ships == 1);
+    CHECK(g_fake.writes == 4 && memcmp(world, g_exe + WORLD, 0x6800) == 0 && TileRead() == CO_NAV_TILE_128 && g_seen.ships == 1);
 
     g_case = "a grid of 32 x 32";
     World(32, -1); /* a block the grid's arrays do not fit */
     memcpy(world, g_exe + WORLD, 0x6800);
     co_nav_retile(0, Level(hellforge, 1023.0f));
-    CHECK(g_fake.writes == 2 && memcmp(world, g_exe + WORLD, 0x6800) == 0);
+    CHECK(g_fake.writes == 4 && memcmp(world, g_exe + WORLD, 0x6800) == 0 && fake_host_logged("nav world 0 is not armed"));
     World(32, 0);
     co_nav_retile(1, Level(hellforge, 1023.0f)); /* no such world */
-    CHECK(g_fake.writes == 2);
+    CHECK(g_fake.writes == 4 && fake_host_logged("nav world 1 is not armed"));
     co_nav_retile(0, Level(hellforge, 1023.0f)); /* HellForge's level 11: its 256 m tiles, bounds four times wider */
-    CHECK(Bounds(-4095.75f, 4096.25f, 256.0f) && TileRead() == CO_NAV_TILE_256);
+    CHECK(Bounds(-4095.75f, 4096.25f, 256.0f, -1023.75f, 1024.25f) && TileRead() == CO_NAV_TILE_256);
     co_nav_retile(0, Level(0.5f, 600.0f));       /* a lower level */
-    CHECK(Bounds(-2047.75f, 2048.25f, 128.0f) && TileRead() == CO_NAV_TILE_128);
+    CHECK(Bounds(-2047.75f, 2048.25f, 128.0f, -511.75f, 512.25f) && TileRead() == CO_NAV_TILE_128);
     co_nav_retile(0, Level(key, 8074.4f));       /* a complex level: 512 m, a size the engine has no constant for */
-    CHECK(Bounds(-8190.0f, 8194.0f, 512.0f) && (uintptr_t)g_exe + TileRead() == (uintptr_t)co_nav_test_tile() && *co_nav_test_tile() == 512.0f);
+    CHECK(Bounds(-8190.0f, 8194.0f, 512.0f, -8190.0f, 8194.0f) && (uintptr_t)g_exe + TileRead() == (uintptr_t)co_nav_test_tile() && *co_nav_test_tile() == 512.0f);
     CHECK(memcmp(g_exe + CO_NAV_TILE_READ, kNavTileRead, 4) == 0);
     memset(&g_seen, 0, sizeof g_seen);
     co_nav_retile(0, 0);                         /* the ship */
-    CHECK(Bounds(-2047.75f, 2048.25f, 128.0f) && TileRead() == CO_NAV_TILE_128 && g_seen.ships == 1);
+    CHECK(Bounds(-2047.75f, 2048.25f, 128.0f, -511.75f, 512.25f) && TileRead() == CO_NAV_TILE_128 && g_seen.ships == 1);
     free(world);
 
     for (int fail = 0; fail < 2; fail++)

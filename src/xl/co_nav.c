@@ -5,6 +5,7 @@
 
 #include "co_nav.h"
 #include "co_nav_sites.h"
+#include "co_navtrim.h"
 #include "co_normal.h"
 
 static struct
@@ -26,6 +27,7 @@ void co_nav_reserve(uintptr_t game, uintptr_t exe)
         co_log("navigation: no page free within reach of helldivers2.exe at 0x%llx as the mod loaded", (unsigned long long)exe);
     if (game != 0 && g_reserve.page == NULL && g_nav.page == NULL && (g_reserve.page = (uint8_t*)co_alloc_near(game, 0x1000)) == NULL)
         co_log("navigation: no page free within reach of game.dll at 0x%llx as it loaded", (unsigned long long)game);
+    co_navtrim_reserve(exe);
 }
 
 static int Same(uintptr_t at, const uint8_t* bytes, size_t size)
@@ -121,19 +123,31 @@ static int Fits(uintptr_t world)
         array != 0 && back != 0 && array + 12u * (uintptr_t)count <= back;
 }
 
+/* One line for a world left with the whole grid on a level that should have stock's tiles (a 6b FAIL, not silent). */
+static void NotArmed(uint32_t id, const char* why)
+{
+    co_log("navigation: nav world %u is not armed for stock's 8 x 8 tiles (%s); it builds all 32 x 32", id, why);
+}
+
 void co_nav_retile(uint32_t id, uintptr_t level)
 {
     const uintptr_t exe = g_nav.exe;
     uintptr_t worlds = 0, world = 0;
     uint32_t count = 0;
+    uint16_t grid[2] = {0, 0};
     float disk = 0.0f, radius = 0.0f;
     CoNavPlan plan;
     if (level == 0 && g_nav.ship != NULL) g_nav.ship();
+    co_navtrim_disarm(id); /* armed again below only for a normal level or the ship whose bounds were written */
     /* any other grid is HellForge's to retile, in its own step right behind this one */
     if (exe == 0 || g_coApi->read(exe + CO_NAV_COUNT, &count, 4) != 0 || id >= count || g_coApi->read(exe + CO_NAV_WORLDS, &worlds, 8) != 0 || worlds == 0 ||
-        g_coApi->read(worlds + 8u * (uintptr_t)id, &world, 8) != 0 || world == 0 || !Fits(world)) return;
-    if (level != 0 && (g_coApi->read(level + 0x2D7C, &disk, 4) != 0 || g_coApi->read(level + 0x2D8C, &radius, 4) != 0)) return;
+        g_coApi->read(worlds + 8u * (uintptr_t)id, &world, 8) != 0 || world == 0 || g_coApi->read(world + 0x6710, grid, 4) != 0)
+    { NotArmed(id, "its world could not be read"); return; }
+    if (grid[0] != CO_NAV_CELLS || grid[1] != CO_NAV_CELLS) return; /* HellForge's 8 x 8: stock's tiles already */
+    if (!Fits(world)) { NotArmed(id, "its block does not hold the grid's arrays"); return; }
+    if (level != 0 && (g_coApi->read(level + 0x2D7C, &disk, 4) != 0 || g_coApi->read(level + 0x2D8C, &radius, 4) != 0)) { NotArmed(id, "the level could not be read"); return; }
     co_nav_plan(disk, radius, &plan);
+    const int normal = plan.stockHigh > plan.stockLow;
     uint8_t read[4];
     if (plan.tile == 128.0f) memcpy(read, kNavTileRead + 4, 4);
     else if (plan.tile == 256.0f) memcpy(read, kNavTileRead256, 4);
@@ -145,10 +159,16 @@ void co_nav_retile(uint32_t id, uintptr_t level)
         memcpy(read, &rel, 4);
     }
     /* the terrain build's tile size first: tiles larger than it sizes its rows for are written past them */
-    if (g_coApi->write(exe + CO_NAV_TILE_READ + 4u, read, 4) != 0) return;
-    const float low[2] = {plan.low, plan.low}, high[2] = {plan.high, plan.high}, tiles[5] = {plan.tile, plan.low, plan.low, plan.high, plan.high};
-    if (g_coApi->write(world + 0x08, low, sizeof low) != 0 || g_coApi->write(world + 0x14, high, sizeof high) != 0) return;
-    g_coApi->write(world + 0x6718, tiles, sizeof tiles);
+    if (g_coApi->write(exe + CO_NAV_TILE_READ + 4u, read, 4) != 0) { if (normal) NotArmed(id, "the tile size could not be written"); return; }
+    /* an armed world's own bounds (closest navmesh, 0x7B5F00) are stock's; the grid keeps the mod's for the tile boxes */
+    const char* why = !normal ? NULL : co_navtrim_refused() != NULL ? co_navtrim_refused() : id >= CO_NAVTRIM_WORLDS ? "its nav id has no slot in the stubs" : NULL;
+    const int armed = normal && why == NULL;
+    const float low[2] = {armed ? plan.stockLow : plan.low, armed ? plan.stockLow : plan.low}, high[2] = {armed ? plan.stockHigh : plan.high, armed ? plan.stockHigh : plan.high};
+    const float tiles[5] = {plan.tile, plan.low, plan.low, plan.high, plan.high};
+    if (g_coApi->write(world + 0x6718, tiles, sizeof tiles) != 0 || g_coApi->write(world + 0x08, low, sizeof low) != 0 || g_coApi->write(world + 0x14, high, sizeof high) != 0)
+    { if (normal) NotArmed(id, "its bounds could not be written"); return; }
+    if (armed && co_navtrim_arm(id, world, plan.stockLow, plan.stockHigh) != 0) why = "the stubs refused it";
+    if (why != NULL) NotArmed(id, why);
 }
 
 static int Point(uintptr_t site, uintptr_t to)
@@ -164,6 +184,13 @@ static int Take(uintptr_t site, size_t length, uintptr_t to)
     const int32_t rel = (int32_t)((int64_t)to - (int64_t)(site + 5u));
     memset(jump, 0x90, sizeof jump); jump[0] = 0xE9; memcpy(jump + 1, &rel, 4);
     return g_coApi->write(site, jump, length);
+}
+
+/* Stock's tiles for normal levels and the ship; refused, every level keeps the whole grid and each says so as it loads. */
+static void Trim(uintptr_t exe)
+{
+    const char* why = co_navtrim_install(exe);
+    if (why != NULL) co_log("navigation: %s; normal levels build the whole 32 x 32 grid", why);
 }
 
 const char* co_nav_install(uintptr_t game)
@@ -199,7 +226,7 @@ const char* co_nav_install(uintptr_t game)
     {
         if (Take(game + CO_NAV_SITE, sizeof kNavGame, (uintptr_t)page) == 0)
         {
-            if (Take(game + CO_NAV_SHIP_SITE, sizeof kNavShipGame, (uintptr_t)page + 0x100) == 0) { g_nav.page = page; return NULL; }
+            if (Take(game + CO_NAV_SHIP_SITE, sizeof kNavShipGame, (uintptr_t)page + 0x100) == 0) { g_nav.page = page; Trim(exe); return NULL; }
             g_coApi->write(game + CO_NAV_SITE, kNavGame, sizeof kNavGame);
         }
         g_nav.exe = 0; g_nav.tile = NULL;
@@ -207,7 +234,7 @@ const char* co_nav_install(uintptr_t game)
     }
     if (Point(game + CO_NAV_SITE, (uintptr_t)page) == 0)
     {
-        if (Point(game + CO_NAV_SHIP_SITE, (uintptr_t)page + 0x100) == 0) { g_nav.page = page; return NULL; }
+        if (Point(game + CO_NAV_SHIP_SITE, (uintptr_t)page + 0x100) == 0) { g_nav.page = page; Trim(exe); return NULL; }
         Point(game + CO_NAV_SITE, stubs[0]);
     }
     g_nav.exe = 0; g_nav.tile = NULL;
@@ -218,7 +245,7 @@ uintptr_t co_nav_exe(void) { return g_nav.page != NULL ? g_nav.exe : 0; }
 const float* co_nav_world_tile(void) { return g_nav.page != NULL ? g_nav.tile : NULL; }
 
 #ifdef CO_TEST
-void co_nav_test_reset(void) { memset(&g_nav, 0, sizeof g_nav); memset(&g_reserve, 0, sizeof g_reserve); }
+void co_nav_test_reset(void) { memset(&g_nav, 0, sizeof g_nav); memset(&g_reserve, 0, sizeof g_reserve); co_navtrim_test_reset(); }
 uintptr_t co_nav_test_page(void) { return (uintptr_t)g_nav.page; }
 const uint8_t* co_nav_test_reserved(void) { return g_reserve.page; }
 const float* co_nav_test_tile(void) { return g_nav.tile; }

@@ -46,6 +46,8 @@ int main(void)
     {
         co_nav_plan(normal[i].disk, normal[i].radius, &p);
         CHECK(p.grid == 32 && p.low == normal[i].low && p.tile == normal[i].tile && p.high == p.low + 32.0f * p.tile);
+        /* stock's own bounds, as HellForge writes them: tiles 12..19 of the plan */
+        CHECK(p.stockLow == normal[i].stockLow && p.stockLow == p.low + 12.0f * p.tile && p.stockHigh == p.high - 12.0f * p.tile);
         /* tiles 12..19 are HellForge's 0..7, bit for bit: the navmesh over its world is built from the same bounds */
         for (int x = 0; x < 8; x++)
         {
@@ -56,6 +58,7 @@ int main(void)
     }
     co_nav_plan(key, 8074.4f, &p);
     CHECK(p.grid == 32 && p.low == -8190.0f && p.high == 8194.0f && p.tile == 512.0f && (p.high - p.low) / (float)p.grid == p.tile);
+    CHECK(p.stockLow == 0.0f && p.stockHigh == 0.0f); /* a complex level has no stock tiles to keep */
 
     g_case = "the limits";
     CHECK(co_level_limit(CO_LIMIT_SPAWNERS, 0) == 128 && co_level_limit(CO_LIMIT_SPAWNERS, 1) == 1024);

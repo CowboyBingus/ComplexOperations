@@ -30,7 +30,7 @@ size_t co_radii_stub(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t fla
 /* The navigation grid for a level in a process whose grid is 32 x 32 (it cannot change size per level): a complex
  * level has tiles of 512 m over 16384 m; any other has HellForge's tile size (256 m when the radius field is above
  * 682, else and on the ship 128 m) and bounds four times HellForge's, so tiles 12..19 are HellForge's eight. */
-typedef struct CoNavPlan { uint32_t grid; float low, high, tile; } CoNavPlan;
+typedef struct CoNavPlan { uint32_t grid; float low, high, tile, stockLow, stockHigh; } CoNavPlan; /* stock*: HellForge's 8 x 8 bounds, 0 on a complex level */
 void co_nav_plan(float disk, float radius, CoNavPlan* plan);
 
 /* What a list or pool takes: HellForge's limit on a normal level, the mod's on a complex one. */

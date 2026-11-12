@@ -276,6 +276,27 @@ The mod also keeps a complex level's destruction records, render version tables,
 requests within what the game holds. On a normal mission and on the ship none of this acts: each changed place in the
 game's code runs the game's own instructions, and the difficulty rows stay the game's.
 
+The navigation grid of every world has 32 x 32 tiles, room for a complex level's 16 km. A normal level-11 mission
+and the ship build stock's 8 x 8 tiles of it:
+
+- Two stubs in the exe act only on an armed world. 0x7ACDD0, the point-to-tile step, runs the engine's own
+  instructions on stock's bounds and 8 x 8 tiles, then adds 12 on each axis. 0x7B744C, behind the build-priority
+  fill, gives tiles 12 to 19 stock's 64 priorities and every other tile a priority that never gets built.
+- The world's bounds stay stock's, so the closest-navmesh clamp and every tile box are stock's.
+- Each priority stays at its tile's place in the array, because the scheduler and the raisers index the array by tile.
+  So tiles of equal priority may build in another order than stock's. Their content is the same.
+- A complex level disarms its world and builds all 1024 tiles.
+- If the engine's bytes differ from the reviewed ones, neither stub goes in. Each normal level then builds all 1024
+  tiles and logs that its world is not armed, which fails the stock-tiles check.
+
+Open items:
+
+- The 960 outer tiles keep the flag the engine sets for every tile at the build. So the scheduler finds work each
+  frame and sorts 1024 entries a frame for the whole level. Clearing that flag is left out: no stock code path holds
+  a built tile without its navmesh, and not every reader of the tile record was traced.
+- An obstacle filed while the world was disarmed keeps the tiles it was filed in. This can happen to obstacles that
+  live on from a complex level into the next level.
+
 Two guards act on every level, only where the game would go wrong:
 
 - **Cancelled preview.** A mission that starts while a complex mission's war-table preview is still placing its
@@ -482,6 +503,8 @@ Pelican), which are not in this folder.
 | `src/xl/proto/` | Its files as copied from a HellForge loader; `README.md` there says from where. Parts of `co_xl.c`. |
 | `src/xl/co_shim.h`, `co_shim.c` | The loader's helpers those files call, over the SDK and the mod's own parts. |
 | `src/xl/co_xl_standin.h` | The names of the loader's level 11 install those files read, over the mod's own parts. |
+| `src/xl/co_nav.c`, `co_navtrim.c` | The navigation grid of 32 x 32 tiles, and the two stubs that give a normal level or the ship stock's 8 x 8 tiles of it. |
+| `tests/navtrim_test.c` | The stubs against the engine's own bytes: the point-to-tile step over 25643 points per tile size, registers kept, the priority table, arming, refusals and rollback. |
 | `tests/shim_test.c` | The player list read at the game's offsets, and at the moved ones in a build for eight. |
 | `tests/harness/` | The stand-in loader and game image the tests run against. |
 
@@ -504,7 +527,7 @@ Pelican), which are not in this folder.
 ## Log
 
 The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.log` and start with `hellpods:`,
-`players:`, `session:`, `engine:` or `extraction:`.
+`players:`, `session:`, `engine:`, `extraction:` or `navigation:`.
 
 | Line | Meaning |
 |---|---|
@@ -547,6 +570,8 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `the engine's unit functions are not the reviewed ones` | The node check cannot run: six passenger seats. |
 | `the boosters of all eight players are loaded` | A build for eight players: the booster cave is in place. |
 | `the HiveMind's multipliers stop at four players`, `the Pelican keeps six passenger seats`, `boosters of players 5 to 8 are not loaded` | That part is off and the rest goes in; the reason stands before it. |
+| `navigation: nav world N is not armed for stock's 8 x 8 tiles (...)` | That normal level builds all 32 x 32 tiles; the reason stands in brackets. |
+| `navigation: ...; normal levels build the whole 32 x 32 grid` | The engine's bytes are not the reviewed ones: the two tile stubs are off. |
 | `TEST BUILD, not for play` | Built with `--test-first-slot`. |
 | `the session lists count to four as before` | The count change is off; the reason stands before it. |
 | `the bridge is not the one with the eight-pod bay` | The level data is missing: four pods. |
