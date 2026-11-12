@@ -32,6 +32,7 @@
 #include "co_city.h"
 #include "co_locate.h"
 #include "co_spawners.h"
+#include "co_patrols.h"
 
 /* Six of the copied files' functions were called from loader code that did not come along (the watch thread, the
  * ship's level change, the density rules of a later branch); they are unused until their callers are written. */
@@ -117,7 +118,9 @@ void CoXlTestRecords(int state) { g_entityRecordsState = state; }
  * the mission in play is complex (LwLive); a normal mission, the ship and a preview see the game's code. */
 static void CoXlLiving(uintptr_t game)
 {
-    (void)game;
+    const char* why;
+    /* its squads take the place of the mission's director patrols: without the patrols' switch it stays off */
+    if (LwEnabled() && (why = co_patrols_install(game)) != NULL) { g_lw.state = -1; Note("living world: off: %s", why); }
     LwInstallNavConnectNote();
     LwInstallHitNotes();
     LwInstallSmashSpares();

@@ -4149,6 +4149,7 @@ static void LwLiveSet(int complex)
 {
     if (!complex && g_lwWallReach != NULL) *g_lwWallReach = -0.0f; /* the stub's add leaves every reach as it is */
     if (g_lwLeaveFix != NULL) *g_lwLeaveFix = (uint8_t)(complex != 0);
+    co_patrols_live(complex && g_lw.state > 0); /* the director's patrols, off while the squads run the mission */
 }
 
 #include "living_world_intent.c" /* Phase 2: squad intents (investigate noise) */
