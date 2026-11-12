@@ -52,6 +52,32 @@ static void Map(uint32_t slots, uint32_t multiplier, uint32_t counter)
     memcpy(g_world + COUNTER, &counter, 4);
 }
 static uint32_t Multiplier(void) { uint32_t m; memcpy(&m, g_world + MAP + 0x10, 4); return m; }
+/* The game's probe over the map (lookup 0x5F2D21..0x5F2D6C, insert 0x13E0326..0x13E036E): slot (mult x key + i) &
+ * (slots - 1), stopping at the empty key or the key. The slot of `key` (or the first empty one), -1 after a full scan. */
+static int64_t GameProbe(uint32_t key)
+{
+    uint32_t slots, empty, mult;
+    memcpy(&slots, g_world + MAP + 8, 4); memcpy(&empty, g_world + MAP + 0xC, 4); memcpy(&mult, g_world + MAP + 0x10, 4);
+    for (uint32_t i = 0; i < slots; i++)
+    {
+        const uint32_t at = (mult * key + i) & (slots - 1u);
+        uint32_t k; memcpy(&k, g_slots + 8u * at, 4);
+        if (k == empty || k == key) return at;
+    }
+    return -1;
+}
+static void GameInsert(uint32_t key, uint32_t value)
+{
+    const int64_t at = GameProbe(key);
+    if (at >= 0) { memcpy(g_slots + 8u * (uint32_t)at, &key, 4); memcpy(g_slots + 8u * (uint32_t)at + 4u, &value, 4); }
+}
+static int GameFinds(uint32_t key, uint32_t value)
+{
+    const int64_t at = GameProbe(key);
+    uint32_t k = 0, v = 0;
+    if (at >= 0) { memcpy(&k, g_slots + 8u * (uint32_t)at, 4); memcpy(&v, g_slots + 8u * (uint32_t)at + 4u, 4); }
+    return at >= 0 && k == key && v == value;
+}
 static void Counter(uint32_t counter) { memcpy(g_world + COUNTER, &counter, 4); }
 
 int main(void)
@@ -124,6 +150,26 @@ int main(void)
         CoXlTestLive(0);
         reset((uintptr_t)g_world);
         CHECK(Multiplier() == 1);
+    }
+    /* After a complex mission the map can keep its keys into a normal level: its multiplier stays, and every record
+     * is found by the game's own probe, as under the game's multiplier (only the slots they sit in differ). */
+    g_case = "a complex mission's records at a normal level's first batch";
+    {
+        CoXlTestLive(1);
+        Map(0x8000u, 1, 0);
+        insert(0, 0, 5, 0);
+        CHECK(Multiplier() == SCATTER);
+        for (uint32_t k = 1; k <= 400; k++) GameInsert(k * 0x9E37u + 3u, k);
+        for (uint32_t k = 0; k < 24; k++) GameInsert(1u + k * 0x8000u, 1000u + k); /* one home slot: a run of collisions */
+        CoXlTestLive(0);
+        Counter(0);
+        insert(0, 0, 3, 0);
+        CHECK(g_inserted == 3 && Multiplier() == SCATTER);
+        int found = 1;
+        for (uint32_t k = 1; k <= 400; k++) found &= GameFinds(k * 0x9E37u + 3u, k);
+        for (uint32_t k = 0; k < 24; k++) found &= GameFinds(1u + k * 0x8000u, 1000u + k);
+        CHECK(found);
+        CHECK(GameProbe(0x12345678u) >= 0 && GameFinds(0x12345678u, 0) == 0); /* a key never inserted: an empty slot, a miss */
     }
     g_case = "a map whose slots are not a power of two";
     CoXlTestLive(1);

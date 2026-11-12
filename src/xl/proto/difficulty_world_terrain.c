@@ -5523,7 +5523,9 @@ static uint64_t NearOneMipSpawn(void* world, float* pose, uint32_t a, uint32_t t
     float* range, uint8_t flag)
 {
     NearSpawnFn original = (NearSpawnFn)g_oneMip.original;
-    if (!(type == kNearNames[0] && name == kNearNames[1] && g_oneMip.armed && g_oneMip.thread == GetCurrentThreadId() && g_oneMip.slot != NULL))
+    /* the level check: a slot that stayed armed past a level init serves that level's own spawn unchanged */
+    if (!(type == kNearNames[0] && name == kNearNames[1] && g_oneMip.armed && g_oneMip.thread == GetCurrentThreadId() && g_oneMip.slot != NULL &&
+        g_oneMip.level == g_world.levels))
         return original(world, pose, a, type, name, resource, hash, size, range, flag);
     uint64_t keep = *g_oneMip.slot, keepMat = g_coarseMat.slot != NULL ? *g_coarseMat.slot : 0;
     *g_oneMip.slot = g_oneMip.tex;

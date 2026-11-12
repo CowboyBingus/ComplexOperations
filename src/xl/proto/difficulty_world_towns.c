@@ -18,7 +18,8 @@
  * s = (681 / disk) x sqrt(N / 430): the route sites are a Poisson disc, so a vanilla group is the XL group scaled
  * (681 m and 430 cells are a vanilla level's disk and route cells; N this level's cells).
  * Level 11's rule and item filters (rule +0x58: max = (w >> 5) & 0xF at 0xF3275D; item +0x60: max = (w >> 6) & 0xF at
- * 0xF3526B) drop what vanilla gives level 10 at most; those are widened to 11 (harmless below 11).
+ * 0xF3526B) drop what vanilla gives level 10 at most; those are widened to 11 on a complex level and put back at
+ * the next level's first op (TownsRestore).
  * Included by hellforge_modloader.c after difficulty_world_terrain.c. */
 
 #define TOWN_GRID_SITE 0xF335B3u   /* 26 bytes, back 0xF335CD */
@@ -118,13 +119,53 @@ static const char* InstallTowns(uintptr_t game)
     return NULL;
 }
 
-/* Level 11's filters: rules and items whose maximum level is 10 (vanilla's top) take 11 too. */
+/* The widened fields, until a later level's first op puts them back. More readers than the two filters take these
+ * fields (0xF314A0, 0xF30230, 0xF99B20; co-port/fix5-readers.md), so the data is widened, not the compares. The rule
+ * data outlives the level and no level's own table of it is known at its first op: an entry is put back only while
+ * the type still holds the same rule list and the rule the same item list, and dropped once either changed or the
+ * field holds another value than the mod's. A full list widens nothing more. */
+#define TOWN_PENDING_MAX 8192u
+typedef struct { uint64_t at, type, list, rule, items; uint16_t was, mark; } TownWide;
+static struct { uint32_t count; TownWide e[TOWN_PENDING_MAX]; } g_townWide;
+
+/* 0 when the list is full. `older`: the entries kept from earlier levels, the only ones that can hold this field. */
+static int TownWideAdd(uint32_t older, const TownWide* e)
+{
+    for (uint32_t i = 0; i < older; i++) if (g_townWide.e[i].at == e->at) { g_townWide.e[i] = *e; return 1; }
+    if (g_townWide.count >= TOWN_PENDING_MAX) return 0;
+    g_townWide.e[g_townWide.count++] = *e;
+    return 1;
+}
+
+/* Any level's first dispatcher op: an earlier complex level's widened fields back to their values. */
+static void TownsRestore(void)
+{
+    static LONG doneFor = -1;
+    if (doneFor == g_world.levels) return;
+    doneFor = g_world.levels;
+    if (g_townWide.count == 0) return;
+    uint32_t keep = 0, restored = 0, dropped = 0;
+    for (uint32_t i = 0; i < g_townWide.count; i++)
+    {
+        const TownWide* e = &g_townWide.e[i];
+        uint64_t list = 0, items = 0; uint16_t now = 0;
+        const int read = !SafeRead(e->type + 0x10, &list, 8) && !SafeRead(e->rule, &items, 8) && !SafeRead(e->at, &now, 2);
+        if (read && (list != e->list || items != e->items || now != e->mark)) { dropped++; continue; }
+        if (read && WorldDataWritable(e->at, 2)) { *(volatile uint16_t*)(uintptr_t)e->at = e->was; restored++; continue; }
+        g_townWide.e[keep++] = *e;
+    }
+    g_townWide.count = keep;
+    Note("difficulty: towns: top levels put back on %u rules and stamps (%u changed: left alone; %u not readable or writable: pending)", restored, dropped, keep);
+}
+
+/* Level 11's filters: rules and items whose maximum level is 10 (vanilla's top) take 11 too, on a complex level. */
 static void TownsWidenLevels(uint64_t record)
 {
     static LONG done = -1;
     if (done == g_world.levels) return;
     done = g_world.levels;
-    uint64_t table = 0; uint32_t types = 0, rules = 0, items = 0, unwritable = 0;
+    uint64_t table = 0; uint32_t types = 0, rules = 0, items = 0, unwritable = 0, full = 0;
+    const uint32_t older = g_townWide.count;
     if (SafeRead(record + 0x50, &table, 8) || SafeRead(record + 0x160, &types, 4) || table == 0 || types > 4096) return;
     for (uint32_t t = 0; t < types; t++)
     {
@@ -134,22 +175,28 @@ static void TownsWidenLevels(uint64_t record)
         {
             uint64_t rule = list + 0x70ull * r, itemList = 0; uint16_t w = 0; uint32_t m = 0;
             if (SafeRead(rule + 0x58, &w, 2)) continue;
+            if (SafeRead(rule, &itemList, 8)) continue;
             if ((w & 0x1E0) != 0x1E0 && ((w >> 5) & 0xF) == 10)
             {
+                const TownWide e = {rule + 0x58, type, list, rule, itemList, w, (uint16_t)((w & ~0x1E0u) | (11u << 5))};
                 if (!WorldDataWritable(rule + 0x58, 2)) unwritable++;
-                else { *(volatile uint16_t*)(uintptr_t)(rule + 0x58) = (uint16_t)((w & ~0x1E0u) | (11u << 5)); rules++; }
+                else if (!TownWideAdd(older, &e)) full++;
+                else { *(volatile uint16_t*)(uintptr_t)(rule + 0x58) = e.mark; rules++; }
             }
-            if (SafeRead(rule, &itemList, 8) || SafeRead(rule + 8, &m, 4) || itemList == 0 || m > 1024) continue;
+            if (SafeRead(rule + 8, &m, 4) || itemList == 0 || m > 1024) continue;
             for (uint32_t i = 0; i < m; i++)
             {
                 uint64_t at = itemList + 0x68ull * i + 0x60;
                 if (SafeRead(at, &w, 2) || (w & 0x3C0) == 0x3C0 || ((w >> 6) & 0xF) != 10) continue;
                 if (!WorldDataWritable(at, 2)) { unwritable++; continue; }
-                *(volatile uint16_t*)(uintptr_t)at = (uint16_t)((w & ~0x3C0u) | (11u << 6)); items++;
+                const TownWide e = {at, type, list, rule, itemList, w, (uint16_t)((w & ~0x3C0u) | (11u << 6))};
+                if (!TownWideAdd(older, &e)) { full++; continue; }
+                *(volatile uint16_t*)(uintptr_t)at = e.mark; items++;
             }
         }
     }
     Note("difficulty: towns: level 11 takes %u rules and %u stamps whose top level was 10 (%u types; %u not writable)", rules, items, types, unwritable);
+    if (full) Note("difficulty: towns: the list of top levels to put back is full (%u): %u rules and stamps keep level 10 as their top on this level", TOWN_PENDING_MAX, full);
 }
 
 /* Before each dispatcher call on the level's op 0x2B record (the op runs over several calls). */

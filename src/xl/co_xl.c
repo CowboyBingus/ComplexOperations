@@ -226,6 +226,61 @@ void CoXlTestSectionEnd(void) { SectionEnd(); }
 int CoXlTestDestroyInstall(void) { InstallDestroyQueue(); return g_destroyQueue != NULL; }
 void CoXlTestDestroyTick(void) { DestroyTick(); }
 LONG CoXlTestDestroyWaiting(void) { return g_destroyWaiting; }
+/* Level init and the ship's set-up as the stubs call them, and the near terrain's state they leave or clear
+ * (proto/difficulty_world_move.c NearLevelLeft): a complex level's one-mip spawn slot, replay flag, crater hold, tiles. */
+void CoXlTestGame(uintptr_t game) { g_world.game = game; }
+void CoXlTestWorldLevel(uintptr_t level, uintptr_t preview)
+{
+    static WorldValues values;
+    if (g_world.values == NULL) g_world.values = &values;
+    WorldLevel(level, preview);
+}
+void CoXlTestWorldShip(void) { WorldShip(); }
+LONG CoXlTestLevels(void) { return g_world.levels; }
+/* What op 0x38 (NearOneMipLevel) and op 0x69 (NearOneMipArm) leave once they made the copy and found the slot. */
+void CoXlTestOneMipArm(uint64_t tex, uint64_t* renderSlot)
+{
+    uintptr_t api = 0, table = 0;
+    g_oneMip.tex = tex; g_oneMip.level = g_world.levels;
+    if (SafeRead(g_world.game + 0x3326308u, &api, 8) || SafeRead(api + 8, &table, 8)) return;
+    g_oneMip.original = (void*)(uintptr_t)*(uint64_t*)(table + 0x198);
+    g_oneMip.slot = renderSlot; g_oneMip.thread = GetCurrentThreadId(); g_oneMip.armed = 1;
+    *(uint64_t*)(table + 0x198) = (uint64_t)(uintptr_t)NearOneMipSpawn;
+}
+int CoXlTestOneMipArmed(void) { return g_oneMip.armed; }
+uint64_t CoXlTestOneMipTex(void) { return g_oneMip.tex; }
+uint64_t CoXlTestOneMipSpawn(uint32_t type, uint32_t name) { return NearOneMipSpawn(NULL, NULL, 0, type, name, 0, 0, NULL, NULL, 0); }
+void CoXlTestNearActive(LONG on, uint64_t cam) { g_nearActive = on; g_near.cam[0] = cam; }
+LONG CoXlTestNearActiveNow(void) { return g_nearActive; }
+int CoXlTestCamShift(uint64_t camera) { const float v[3] = {1, 2, 3}; float out[3]; return TerrainNearCamShift(camera, g_world.game + 0xAB0725u, v, out); }
+void CoXlTestTileAdd(float cx, float cy, const uint16_t* heights, uint32_t n, float size)
+{
+    const NearGround ground = {heights, n, size, cx, cy};
+    NearTileAdd(NearTileFree(), cx, cy, 0x1234, &ground);
+}
+int CoXlTestTilesLive(void) { return NearTilesLive(); }
+float CoXlTestVisibleAt(float x, float y) { return NearVisibleAt(x, y); }
+void CoXlTestHide(uint64_t handle) { g_hide.handle = handle; g_hide.level = g_world.levels; }
+uint64_t CoXlTestHideHandle(void) { return g_hide.handle; }
+void CoXlTestMoveHold(int on) { MoveHold(on); }
+LONG64 CoXlTestMoveHoldSince(void) { return g_moveHoldSince; }
+/* A level init's effect on the generator's side alone: the next level, complex (8) or not (1). */
+void CoXlTestGenLevel(float current) { InterlockedIncrement(&g_world.levels); g_world.current = current; }
+/* The stamp packages a level requested early (EarlyPackages): held as a level that ended before its record 94 leaves them. */
+void CoXlTestEarlyHeld(const uint64_t* ids, uint32_t count)
+{
+    g_early.level = g_world.levels; g_early.state = 1; g_early.count = count;
+    memcpy(g_early.list, ids, count * sizeof *ids);
+}
+int CoXlTestEarlyState(void) { return g_early.state; }
+void CoXlTestEarlyStep(uint64_t records, uint64_t index, uint64_t mask) { EarlyPackages(records, 0, index, mask); }
+/* What WorldDispatch runs at each op before the level's own (kill heights, water, sea), and what stays to put back. */
+void CoXlTestLowered(uint64_t op) { WorldKillHeight(); WorldDryTypes(op); WorldNoSea(op); }
+void CoXlTestPending(uint32_t* kill, uint32_t* dry, uint32_t* sea) { *kill = g_killHeight.count; *dry = g_dry.count; *sea = g_sea.count; }
+/* The town filters' widening at a complex level's op 0x2B record and the put-back at a level's first op. */
+void CoXlTestTownsWiden(uint64_t record) { TownsWidenLevels(record); }
+void CoXlTestTownsRestore(void) { TownsRestore(); }
+uint32_t CoXlTestTownsPending(void) { return g_townWide.count; }
 void CoXlTestMission(uintptr_t level, int complex)
 {
     InterlockedIncrement(&g_world.levels);

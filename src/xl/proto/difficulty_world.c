@@ -2665,6 +2665,7 @@ static void MacroStamps(void); /* difficulty_world_macro.c */
 static int TerrainNearStep(uint64_t records, uint32_t end, uint32_t at, uint32_t op, uint64_t context, uint64_t g, uint64_t h);
 static void NearOneMipLevel(void);
 static void NearOneMipDrop(void);
+static void NearLevelLeft(int ship); /* difficulty_world_move.c */
 static int TerrainOn(void);
 static int TerrainMatDispatch(uint32_t op, uint64_t context);
 static void TerrainMatPatch(int on);
@@ -2675,6 +2676,7 @@ static void TerrainStamps(uint64_t records, uint32_t end, uint32_t at91, uint64_
 static void TerrainDiagAfter(uint64_t records, uint64_t index, uint32_t at, uint32_t op);
 /* difficulty_world_towns.c: towns at a vanilla town's shape, x3 */
 static void TownsArm(uint64_t records, uint32_t at, uint64_t context, uintptr_t gen);
+static void TownsRestore(void);
 static void TownsAfter(uint64_t records, uint32_t at, uint64_t index, uint64_t context, uint64_t g, uint64_t h, uintptr_t gen);
 static void TownsForget(uint64_t pass);
 
@@ -4377,10 +4379,9 @@ static void WorldOpenEdgesPlain(uintptr_t gen)
  * sawtooth shoreline (audit 13), black puddles on the hologram (type levels down to -39 m, 9.6 % of planet 114's map), and
  * WaterLevelAt (0x13D4620) reads the 16 km water map as if it were 2 km. So each type with a level above -500 is set to
  * -501 (a vanilla city map's value) before the level's op 0x0A, once the level's map type is set (every generation
- * reader after it, h_macro's wet holds and the tiles see a dry type), and put back at the next level's first op while
- * the descriptor is still in that level's table and still holds -501 (else it was unloaded or replaced: left alone). */
+ * reader after it, h_macro's wet holds and the tiles see a dry type), and put back at the first later level whose table
+ * holds the descriptor (Pending, below). */
 #define DRY_LEVEL -501.0f
-static struct { LONG level; uint32_t count; uint64_t type[256]; float was[256]; } g_dry = {.level = -1};
 
 static int DryWritable(uint64_t at)
 {
@@ -4389,41 +4390,73 @@ static int DryWritable(uint64_t at)
     return (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) != 0 && !(mbi.Protect & PAGE_GUARD);
 }
 
-/* The previous level's water levels back, on the types still in this level's table that still read -501. */
+/* The descriptor fields a complex level lowered (water, sea plane, kill height) and their old values. The descriptors
+ * outlive the level, and a later level whose table lacks one (a war-table preview of another map) must not forget it:
+ * an entry stays until a level whose table holds the descriptor puts the value back. A descriptor of that table that
+ * reads another value than the mod's mark was reloaded with the game's own: dropped. A full list lowers nothing more,
+ * so no lowered field is ever without its saved value. */
+#define PENDING_MAX 1024u
+typedef struct { uint32_t count; uint64_t at[PENDING_MAX]; float was[PENDING_MAX]; } Pending;
+
+static void PendingRestore(Pending* p, uint64_t table, uint32_t types, uint32_t field, float mark, uint32_t* restored, uint32_t* dropped)
+{
+    uint32_t keep = 0;
+    for (uint32_t i = 0; i < p->count; i++)
+    {
+        int live = 0;
+        for (uint32_t t = 0; t < types && !live; t++) { uint64_t d = 0; live = !SafeRead(table + 8ull * t, &d, 8) && d == p->at[i]; }
+        float now = 0;
+        const int read = live && !SafeRead(p->at[i] + field, &now, 4);
+        if (read && now == mark && DryWritable(p->at[i] + field)) { *(volatile float*)(uintptr_t)(p->at[i] + field) = p->was[i]; (*restored)++; continue; }
+        if (read && now != mark) { (*dropped)++; continue; }
+        p->at[keep] = p->at[i]; p->was[keep] = p->was[i]; keep++;
+    }
+    p->count = keep;
+}
+
+/* 0 when the list is full: the caller leaves the field as it is. An older entry for the same field goes first, so a
+ * restore never writes a value older than the one this entry saves. */
+static int PendingAdd(Pending* p, uint64_t at, float was)
+{
+    uint32_t keep = 0;
+    for (uint32_t i = 0; i < p->count; i++) if (p->at[i] != at) { p->at[keep] = p->at[i]; p->was[keep] = p->was[i]; keep++; }
+    p->count = keep;
+    if (p->count >= PENDING_MAX) return 0;
+    p->at[p->count] = at; p->was[p->count] = was; p->count++;
+    return 1;
+}
+
+static Pending g_dry;
+
+/* Earlier levels' water levels back, on the types in this level's table that still read -501. */
 static void WorldDryRestore(uint64_t table, uint32_t types)
 {
     uint32_t restored = 0, dropped = 0;
-    for (uint32_t i = 0; i < g_dry.count; i++)
-    {
-        int live = 0;
-        for (uint32_t t = 0; t < types && !live; t++) { uint64_t d = 0; live = !SafeRead(table + 8ull * t, &d, 8) && d == g_dry.type[i]; }
-        float now = 0;
-        if (!live || SafeRead(g_dry.type[i] + 0xE4, &now, 4) || now != DRY_LEVEL || !DryWritable(g_dry.type[i] + 0xE4)) { dropped++; continue; }
-        *(volatile float*)(uintptr_t)(g_dry.type[i] + 0xE4) = g_dry.was[i];
-        restored++;
-    }
-    if (g_dry.count) Note("difficulty: extra large maps: water levels put back on %u types (%u no longer this level's or changed: left alone)", restored, dropped);
-    g_dry.count = 0;
+    if (g_dry.count == 0) return;
+    PendingRestore(&g_dry, table, types, 0xE4, DRY_LEVEL, &restored, &dropped);
+    Note("difficulty: extra large maps: water levels put back on %u types (%u changed: left alone; %u not this level's: pending)", restored, dropped, g_dry.count);
 }
 
 static void WorldDryAll(uint64_t table, uint32_t types, uint64_t op, uint8_t mapType)
 {
     char text[512]; size_t at = 0; text[0] = 0;
-    uint32_t refused = 0, listed = 0;
+    uint32_t refused = 0, listed = 0, lowered = 0, full = 0;
     for (uint32_t t = 0; t < types; t++)
     {
         uint64_t d = 0; float level = DRY_LEVEL;
         if (SafeRead(table + 8ull * t, &d, 8) || d == 0 || SafeRead(d + 0xE4, &level, 4) || !(level > -500.0f)) continue;
         if (!DryWritable(d + 0xE4)) { refused++; continue; }
-        g_dry.type[g_dry.count] = d; g_dry.was[g_dry.count] = level; g_dry.count++;
+        if (!PendingAdd(&g_dry, d, level)) { full++; continue; }
         *(volatile float*)(uintptr_t)(d + 0xE4) = DRY_LEVEL;
+        lowered++;
         if (at >= sizeof text - 24) continue;
         at += (size_t)snprintf(text + at, sizeof text - at, " %u (%.2f)", t, (double)level);
         listed++;
     }
     Note("difficulty: larger maps: no water on map type %u (as a vanilla city map), before op 0x%02X: %u types set to %.0f:%s%s%s",
-        mapType, (unsigned)op, g_dry.count, (double)DRY_LEVEL, g_dry.count ? text : " none had one",
-        listed < g_dry.count ? " (list cut)" : "", refused ? " (some descriptors not writable: kept)" : "");
+        mapType, (unsigned)op, lowered, (double)DRY_LEVEL, lowered ? text : " none had one",
+        listed < lowered ? " (list cut)" : "", refused ? " (some descriptors not writable: kept)" : "");
+    if (full) Note("difficulty: extra large maps: the list of water levels to put back is full (%u): %u types keep their water on this level", PENDING_MAX, full);
 }
 
 static void WorldDryTypes(uint64_t op)
@@ -4453,21 +4486,18 @@ static void WorldDryTypes(uint64_t op)
  * The larger map repeats vanilla relief, whose dips under that plane become shallow sea ponds all over the map: black
  * puddles on the hologram (16.7 % of planet 114's map at -4.5 m). -501 is a sea-less vanilla level's value; the macro
  * relief (op 0x40) then holds no sea corners. Written at op 0x0A's first dispatch (a value written at op 0x00 does not
- * reach it) and put back at the next level when the level still points at the same descriptor. */
-static struct { uint64_t P; float was; } g_sea;
+ * reach it) and put back at the first later level that points at the same descriptor (Pending: each map has its own). */
+static Pending g_sea;
 
-/* The previous level's sea back, when this level still points at that descriptor and it still reads -501. */
+/* Earlier levels' sea back, when this level points at one of their descriptors and it still reads -501. */
 static void WorldSeaBack(uint64_t P, float* sea)
 {
-    float now = 0;
-    if (g_sea.P && P == g_sea.P && !SafeRead(g_sea.P + 0x44, &now, 4) && now == DRY_LEVEL && DryWritable(g_sea.P + 0x44))
-    {
-        *(volatile float*)(uintptr_t)(g_sea.P + 0x44) = g_sea.was;
-        Note("difficulty: larger maps: the sea plane put back at %.2f m", (double)g_sea.was);
-        *sea = g_sea.was;
-    }
-    else if (g_sea.P) Note("difficulty: larger maps: the sea plane's descriptor is no longer this level's; left alone");
-    g_sea.P = 0;
+    uint32_t restored = 0, dropped = 0;
+    if (g_sea.count == 0) return;
+    PendingRestore(&g_sea, (uint64_t)(uintptr_t)&P, 1, 0x44, DRY_LEVEL, &restored, &dropped);
+    if (restored) { SafeRead(P + 0x44, sea, 4); Note("difficulty: larger maps: the sea plane put back at %.2f m", (double)*sea); }
+    else if (dropped) Note("difficulty: larger maps: the sea plane's descriptor changed since it was lowered; left alone");
+    if (g_sea.count) Note("difficulty: larger maps: %u sea planes of other maps still to put back", g_sea.count);
 }
 
 static void WorldNoSea(uint64_t op)
@@ -4477,14 +4507,15 @@ static void WorldNoSea(uint64_t op)
     uint64_t P = 0;
     float sea = DRY_LEVEL;
     int read = !SafeRead(g_worldLevel + 0x2DD0, &P, 8) && P != 0 && !SafeRead(P + 0x44, &sea, 4);
-    if (restoredFor != g_world.levels) { restoredFor = g_world.levels; WorldSeaBack(read ? P : 0, &sea); }
+    /* asked again at each op until the plane reads: the restore comes before this level's own lowering at 0x0A */
+    if (restoredFor != g_world.levels && read) { restoredFor = g_world.levels; WorldSeaBack(P, &sea); }
     if (decided == g_world.levels || !(g_world.current > 1.0f)) return;
     if (op != 0x0A) return;
     decided = g_world.levels;
     if (!read) { Note("difficulty: larger maps: the sea plane does not read at op 0x0A; it is left as it is"); return; }
     if (!(sea > -500.0f)) return;
     if (!DryWritable(P + 0x44)) { Note("difficulty: larger maps: the sea plane (%.2f m) is not writable; it stays", (double)sea); return; }
-    g_sea.P = P; g_sea.was = sea;
+    if (!PendingAdd(&g_sea, P, sea)) { Note("difficulty: larger maps: the list of sea planes to put back is full (%u); the sea stays at %.2f m", PENDING_MAX, (double)sea); return; }
     *(volatile float*)(uintptr_t)(P + 0x44) = DRY_LEVEL;
     Note("difficulty: larger maps: no sea (the plane at %.2f m set to %.0f) at op 0x0A", (double)sea, (double)DRY_LEVEL);
 }
@@ -4499,10 +4530,9 @@ static void WorldNoSea(uint64_t op)
  * it: under all ground the heightmap holds (-500 .. +500) but above the -500 m plane the coarse collision drops to under a
  * tile, so a unit that falls through still dies there. Deep water still drowns (kind 8, the water level). Written on
  * every peer (each peer applies the kill to what it owns: its Helldiver, the host its enemies), before the level's op
- * 0x0A like the water edit, and put back at the next level's first op while the descriptor is still in that level's
- * table and still holds KILL_FLOOR. */
+ * 0x0A like the water edit, and put back at the first later level whose table holds the descriptor (Pending). */
 #define KILL_FLOOR -480.0f
-static struct { uint32_t count; uint64_t type[256]; float was[256]; } g_killHeight;
+static Pending g_killHeight;
 
 static void WorldKillHeight(void)
 {
@@ -4514,31 +4544,27 @@ static void WorldKillHeight(void)
     if (types > 256) types = 256;
     doneFor = g_world.levels;
     uint32_t restored = 0, dropped = 0;
-    for (uint32_t i = 0; i < g_killHeight.count; i++)
+    if (g_killHeight.count)
     {
-        int live = 0;
-        for (uint32_t t = 0; t < types && !live; t++) { uint64_t d = 0; if (!SafeRead(table + 8ull * t, &d, 8) && d == g_killHeight.type[i]) live = 1; }
-        float now = 0;
-        if (live && !SafeRead(g_killHeight.type[i] + 0x12C, &now, 4) && now == KILL_FLOOR && DryWritable(g_killHeight.type[i] + 0x12C))
-        { *(volatile float*)(uintptr_t)(g_killHeight.type[i] + 0x12C) = g_killHeight.was[i]; restored++; }
-        else dropped++;
+        PendingRestore(&g_killHeight, table, types, 0x12C, KILL_FLOOR, &restored, &dropped);
+        Note("difficulty: extra large maps: kill heights put back on %u types (%u changed: left alone; %u not this level's: pending)", restored, dropped, g_killHeight.count);
     }
-    if (g_killHeight.count) Note("difficulty: extra large maps: kill heights put back on %u types (%u no longer this level's or changed: left alone)", restored, dropped);
-    g_killHeight.count = 0;
     if (!(g_world.current > 1.0f)) return;
     char text[512]; size_t at = 0; text[0] = 0;
-    uint32_t refused = 0;
+    uint32_t refused = 0, lowered = 0, full = 0;
     for (uint32_t t = 0; t < types; t++)
     {
         uint64_t d = 0; float kill = KILL_FLOOR;
         if (SafeRead(table + 8ull * t, &d, 8) || d == 0 || SafeRead(d + 0x12C, &kill, 4) || !isfinite(kill) || !(kill > KILL_FLOOR)) continue;
         if (!DryWritable(d + 0x12C)) { refused++; continue; }
-        g_killHeight.type[g_killHeight.count] = d; g_killHeight.was[g_killHeight.count] = kill; g_killHeight.count++;
+        if (!PendingAdd(&g_killHeight, d, kill)) { full++; continue; }
         *(volatile float*)(uintptr_t)(d + 0x12C) = KILL_FLOOR;
+        lowered++;
         if (at < sizeof text - 24) at += (size_t)snprintf(text + at, sizeof text - at, " %u (%.1f)", t, (double)kill);
     }
-    Note("difficulty: extra large maps: kill heights of %u cell types lowered to %.0f m (the relief lies lower than a vanilla map's):%s%s", g_killHeight.count,
-        (double)KILL_FLOOR, g_killHeight.count ? text : " none", refused ? " (some descriptors not writable: kept)" : "");
+    Note("difficulty: extra large maps: kill heights of %u cell types lowered to %.0f m (the relief lies lower than a vanilla map's):%s%s", lowered,
+        (double)KILL_FLOOR, lowered ? text : " none", refused ? " (some descriptors not writable: kept)" : "");
+    if (full) Note("difficulty: extra large maps: the list of kill heights to put back is full (%u): %u types keep theirs on this level", PENDING_MAX, full);
 }
 
 static void CityGatesNote(uint32_t op); /* difficulty_world_gates.c: the city ops' gates about each city, per level */
@@ -4570,13 +4596,12 @@ static void EarlyPackages(uint64_t records, uint64_t context, uint64_t index, ui
 {
     static int on = -1;
     if (on < 0) { char v[8] = ""; on = !(GetEnvironmentVariableA("HELLFORGE_XL_EARLY_PACKAGES", v, sizeof v) > 0 && v[0] == '0'); }
-    if (!on || g_worldLevel == 0 || !(g_world.current > 1.0f)) return;
+    if (!on || g_worldLevel == 0) return;
     uint64_t block = 0, gen = 0; /* the records' block ([level+0x2A8]) and the generator block G ([level+0x2C8]) */
-    if (SafeRead(g_worldLevel + 0x2A8, &block, 8) || block != records || SafeRead(g_worldLevel + 0x2C8, &gen, 8) || gen == 0) return;
-    uint32_t i = 0;
-    if (SafeRead(index, &i, 4)) return;
+    if (SafeRead(g_worldLevel + 0x2A8, &block, 8) || block != records) return;
     /* a level that ended (or generated again) before its record 94: the early requests are released as the teardown
-     * releases record 94's ([api+0x10]+0x308(list, count), 0xF70B58..0xF70B77), on a main-thread step */
+     * releases record 94's ([api+0x10]+0x308(list, count), 0xF70B58..0xF70B77), on a main-thread step. Any next
+     * level's, a normal one too: none of them may run with another level's packages held. */
     if (g_early.level != g_world.levels && g_early.state == 1) { g_early.state = 3; }
     if (g_early.state == 3 && mask == 0)
     {
@@ -4586,7 +4611,9 @@ static void EarlyPackages(uint64_t records, uint64_t context, uint64_t index, ui
         Note("difficulty: early packages: level %ld ended before its record 94: its %u early packages released", (long)g_early.level, g_early.count);
         g_early.state = -1; g_early.level = -1;
     }
-    if (g_early.state == 3) return;
+    if (g_early.state == 3 || !(g_world.current > 1.0f) || SafeRead(g_worldLevel + 0x2C8, &gen, 8) || gen == 0) return;
+    uint32_t i = 0;
+    if (SafeRead(index, &i, 4)) return;
     if (g_early.level != g_world.levels)
     {
         g_early.level = g_world.levels; g_early.state = -1; g_early.count = 0;
@@ -4709,6 +4736,7 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
     TerrainDiagBefore(records, index, (uint32_t)d, &diagAt, &diagOp);
     {
         uint32_t i = 0, o = 0xFFFFFFFFu;
+        TownsRestore(); /* every level's first op, before any reader of the town filters */
         if (!SafeRead(index, &i, 4) && !SafeRead(records + (uint64_t)i * 0x19B0u, &o, 4)) { WorldKillHeight(); WorldDryTypes(o); WorldNoSea(o); } /* once a level, before op 0x0A */
     }
     if (g_world.current == 8.0f) WorldCamInstall();
@@ -5247,6 +5275,7 @@ static void WorldLevel(uintptr_t level, uintptr_t preview)
 {
     LevelInitBegins(); /* first: nothing of this level is written while the last generation's tiles still run */
     NearOneMipDrop(); /* the previous extra large level's one-mip heightmap is not this level's */
+    NearLevelLeft(0);
     uint8_t difficulty = 0;
     uint32_t seed = 0, retry = 0;
     float scale = 1.0f;
@@ -5297,6 +5326,7 @@ static void WorldShip(void)
 {
     FpsLiftEnd("the ship");
     NearOneMipDrop();
+    NearLevelLeft(1);
     if (co_pages_ship() & CO_PAGES_LIVE) { NetPositionRange(1.0f); InterlockedIncrement(&g_world.switches); }
     g_world.live = co_pages_scale(CO_PAGES_LIVE);
     if (g_hudLive != NULL) *g_hudLive = 0;
