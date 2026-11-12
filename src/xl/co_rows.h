@@ -39,6 +39,10 @@ const CoDistanceSite* co_distance_sites(void);
 
 /* NULL when the three sites hold the game's bytes and the seven reads are the game's with one table behind them all.
  * Reads only. */
+/* The row reads are the game's code; usable before level 11 is installed. */
+const char* co_rows_code_check(uintptr_t game);
+/* HellForge's distance table is behind the reads (level 11 installed); NULL too when the code is not the game's. */
+const char* co_rows_level_check(uintptr_t game);
 const char* co_rows_check(uintptr_t game);
 /* Checks, then the three stubs and the distance copy. NULL, or why; sites written before a failure are the game's or
  * HellForge's again. */

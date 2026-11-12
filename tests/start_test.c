@@ -125,8 +125,9 @@ int main(void)
     CHECK(Lines("complex operations are off") == 1 && fake_host_logged("not enough memory free") && fake_host_logged("28671 MB can be committed, 28672 are needed"));
 
     Start("the machine's own memory");
-    co_capacity_test_commit(0); /* asked of Windows: any answer settles, and the part stays off in this build */
-    CHECK(co_capacity_poll(1) == 1 && co_capacity_needs()->commit_free_mb != 0 && !co_complex_on() && Untouched());
+    co_capacity_test_commit(0); /* asked of Windows: the part is on exactly when this machine has the commit */
+    CHECK(co_capacity_poll(1) == 1 && co_capacity_needs()->commit_free_mb != 0 && Untouched() &&
+          co_complex_on() == (co_capacity_needs()->commit_free_mb >= CO_COMPLEX_COMMIT_MB));
 
     Start("no level 11");
     g_fake.levelRow = 0;

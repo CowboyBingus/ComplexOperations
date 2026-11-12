@@ -98,7 +98,7 @@ static const char* OwnSites(uintptr_t game)
 {
     const char* why;
     if ((why = co_pages_check(game)) != NULL || (why = co_hud_check(game)) != NULL || (why = co_mark_check(game)) != NULL ||
-        (why = co_launch_check(game)) != NULL || (why = co_rows_check(game)) != NULL ||
+        (why = co_launch_check(game)) != NULL || (why = co_rows_code_check(game)) != NULL ||
         (why = co_join_check(game)) != NULL || (why = co_drain_check(game)) != NULL || (why = co_status_check(game)) != NULL) return why;
     return NULL;
 }
@@ -163,7 +163,8 @@ static void Settle(void)
             co_clusters_check(g_capacity.game, NULL) == NULL &&
             co_city_check(g_capacity.game) == NULL &&
             co_locate_check(g_capacity.game) == NULL &&
-            co_spawners_check(g_capacity.game) == NULL;
+            co_spawners_check(g_capacity.game) == NULL &&
+            co_rows_level_check(g_capacity.game) == NULL;
         n->own_sites = (site = OwnSites(g_capacity.game)) == NULL;
         n->commit_free_mb = CommitFree();
         why = co_complex_refusal(n);

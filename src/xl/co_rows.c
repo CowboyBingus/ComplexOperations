@@ -138,6 +138,28 @@ static uintptr_t DistanceTable(uintptr_t game)
     return game + (intptr_t)first; /* the base register holds game.dll */
 }
 
+/* The game's code at the row reads, as early as game.dll is loaded: HellForge moves the distance table only when it
+ * installs level 11, later, so here the seven reads may still name the game's own. */
+const char* co_rows_code_check(uintptr_t game)
+{
+    if (!Same(game + CO_ROW_RADII_SITE, kCoRowRadii, sizeof kCoRowRadii)) return "the level's radius read is not the game's code this mod was made for";
+    if (!Same(game + CO_ROW_OUTPOSTS_SITE, kCoRowOutposts, sizeof kCoRowOutposts)) return "the outposts' count read is not the game's code this mod was made for";
+    if (!Same(game + CO_ROW_OBJECTIVES_SITE, kCoRowObjectives, sizeof kCoRowObjectives)) return "the objectives' count read is not the game's code this mod was made for";
+    return DistanceTable(game) == 0 ? "the mission distance reads are not the game's code this mod was made for" : NULL;
+}
+
+/* What HellForge's level 11 leaves at the distance reads, once the code is the game's: its table, with the game's ten
+ * rows first. A read that is not the game's code is co_rows_code_check's to name. */
+const char* co_rows_level_check(uintptr_t game)
+{
+    float rows[11 * 3], game_rows[10 * 3];
+    const uintptr_t table = DistanceTable(game);
+    if (co_rows_code_check(game) != NULL) return NULL;
+    if (table == game + CO_DISTANCE_GAME || g_coApi->read(table, rows, sizeof rows) != 0 || g_coApi->read(game + CO_DISTANCE_GAME, game_rows, sizeof game_rows) != 0 ||
+        memcmp(rows, game_rows, sizeof game_rows) != 0) return "the mission distance rows are not difficulty 11's";
+    return NULL;
+}
+
 const char* co_rows_check(uintptr_t game)
 {
     float rows[11 * 3], game_rows[10 * 3];
