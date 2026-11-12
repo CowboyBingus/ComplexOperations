@@ -7,6 +7,7 @@
 
 #include "co.h"
 #include "xl/co_nav.h"
+#include "xl/co_aiw_log.h"
 
 const HfApi* g_coApi;
 HfMod* g_coMod;
@@ -49,6 +50,9 @@ static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
     co_avatars_install(game);
     co_session_install(game);
     co_engine_install(g_coApi->module_base("helldivers2.exe", &size));
+#ifdef CO_RESEARCH
+    co_aiw_log_install(g_coApi->module_base("helldivers2.exe", NULL), game); /* before any world: every nav id's life */
+#endif
     co_capacity_game(game);
     co_capacity_early(); /* this event is the first moment with game.dll's code there, and HellForge's pool sizes are in */
     co_peers_start(game);
