@@ -303,7 +303,7 @@ Open items:
 - An obstacle filed while the world was disarmed keeps the tiles it was filed in. This can happen to obstacles that
   live on from a complex level into the next level.
 
-Two guards act on every level, only where the game would go wrong:
+One guard acts on every level, only where the game would go wrong:
 
 - **Cancelled preview.** A mission that starts while a complex mission's war-table preview is still placing its
   stamps waits for that preview to stop. The preview stops at its next tile and leaves its plan out of the mission.
@@ -578,7 +578,7 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `the HiveMind's multipliers stop at four players`, `the Pelican keeps six passenger seats`, `boosters of players 5 to 8 are not loaded` | That part is off and the rest goes in; the reason stands before it. |
 | `navigation: nav world N is not armed for stock's 8 x 8 tiles (...)` | That normal level builds all 32 x 32 tiles; the reason stands in brackets. |
 | `navigation: ...; normal levels build the whole 32 x 32 grid` | The engine's bytes are not the reviewed ones: the two tile stubs are off. |
-| `difficulty: extra large maps: destroy of a live unit held until the world's destroy list had room (N so far)` | The game's destroy list was full; the destroy waits a frame. Logged at counts 1, 2, 4 and so on. |
+| `difficulty: extra large maps: destroy of a live unit held until the world's destroy list had room (N so far)` | On a complex mission the game's destroy list was full; the destroy waits a frame. Logged at counts 1, 2, 4 and so on. |
 | `TEST BUILD, not for play` | Built with `--test-first-slot`. |
 | `the session lists count to four as before` | The count change is off; the reason stands before it. |
 | `the bridge is not the one with the eight-pod bay` | The level data is missing: four pods. |

@@ -221,4 +221,15 @@ void CoXlTestLevelInit(uintptr_t level) { LevelInitBegins(); g_worldLevel = leve
 void CoXlTestSectionBegin(void) { SectionBegin(); }
 int CoXlTestSectionGone(void) { return SectionGone(); }
 void CoXlTestSectionEnd(void) { SectionEnd(); }
+/* The destroy queue's hook (proto/difficulty_world_destroy.c) on a fake exe; a mission in play as level init sets it
+ * (level 0: the ship, as WorldShip leaves it). */
+int CoXlTestDestroyInstall(void) { InstallDestroyQueue(); return g_destroyQueue != NULL; }
+void CoXlTestDestroyTick(void) { DestroyTick(); }
+LONG CoXlTestDestroyWaiting(void) { return g_destroyWaiting; }
+void CoXlTestMission(uintptr_t level, int complex)
+{
+    InterlockedIncrement(&g_world.levels);
+    g_worldLevelLive = level; g_world.liveLevels = level != 0 ? g_world.levels : 0;
+    CoXlTestLive(complex);
+}
 #endif

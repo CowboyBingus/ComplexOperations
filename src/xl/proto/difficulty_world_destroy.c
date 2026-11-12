@@ -10,7 +10,8 @@
  * first frames; static, subagent crash12e71b). Here every handle is looked at first, as the enqueue itself does: one
  * that resolves goes to the original; a pending one (generation equal, no unit yet) waits in a list and is passed on
  * once it resolves (at most DESTROY_WAIT_TICKS frames); a stale one (generation moved on, or past the count) is
- * dropped: its unit is gone already. */
+ * dropped: its unit is gone already. Only while the mission in play is complex: any other level, the ship and a
+ * normal mission's load included, gets the game's enqueue untouched (DestroyComplex). */
 
 #define DESTROY_QUEUE 0x12D2D0u
 #define DESTROY_TABLE 0x1A100F0u
@@ -20,6 +21,11 @@
 #define DESTROY_LIST 0x10030u   /* world+0x10030: the list's count; its 8192 slots at world+0x30 end there */
 #define DESTROY_ROOM (8192 - 512) /* 0x12D2D0 reserves with lock xadd and never checks for room: slot 8192 IS the count */
 #define DESTROY_WAIT_TICKS 600u
+/* World interface +0x60 (0x335710): mov [rsp+0x10],edx; sub rsp,0x28; lea rdx,[rsp+0x38]; call 0x12D2D0. A destroy
+ * through it returns to 0x335728 with `handles` at its entry rsp + 0x10, so the qword at handles - 0x10 is its caller. */
+#define DESTROY_ONE 0x335710u
+#define DESTROY_ONE_BACK 0x335728u
+static const char kDestroyOnePin[] = "89 54 24 10 48 83 EC 28 41 B8 01 00 00 00 48 8D 54 24 38 E8";
 static const char kDestroyQueuePin[] = "40 56 41 54 41 55 41 56 41 57 48 83 EC 20 45 8B E0 4C 8B F2 4C 8B E9 45 8B F8 F0 44 0F C1 B9 30 00 01 00";
 
 typedef void (*DestroyQueueFn)(uint64_t world, uint32_t* handles, uint32_t n);
@@ -30,7 +36,7 @@ static volatile LONG* g_bodyDead;    /* InstallBodySyncGuard's count of moved bo
 static const uint32_t* g_bodyDeadSeen; /* the first BODY_DEAD_KEPT of them: {unit id, body, node, actor} each */
 #define BODY_DEAD_KEPT 16
 static DestroyLockFn g_destroyLock, g_destroyUnlock;
-static uintptr_t g_destroyTableAt;
+static uintptr_t g_destroyTableAt, g_destroyOneBack;
 static SRWLOCK g_destroyWaitLock = SRWLOCK_INIT;
 static struct { uint64_t world; uint32_t handle, ticks; uintptr_t level; LONG levels; } g_destroyWait[DESTROY_WAITING]; /* levels: the next level can reuse the address */
 static volatile LONG g_destroyRoomHeld; /* destroys of live units held until the list had room */
@@ -79,15 +85,27 @@ static void DestroyHold(uint64_t world, uint32_t handle)
     ReleaseSRWLockExclusive(&g_destroyWaitLock);
 }
 
+/* The switched sites' signal: g_world.live follows the live page, which level init moves for a mission only and
+ * WorldShip puts back on the ship, so a war-table preview never makes the ship's or a normal mission's calls complex. */
+static int DestroyComplex(void) { return *(volatile float*)&g_world.live > 1.0f; }
+
+/* The return address of the game's call: through the one-handle entry it is a frame further up. */
+static uintptr_t DestroyCaller(const uint32_t* handles, void* back)
+{
+    uintptr_t from = (uintptr_t)back;
+    if (g_destroyOneBack != 0 && from == g_destroyOneBack && SafeRead((uintptr_t)handles - 0x10u, &from, 8)) from = (uintptr_t)back;
+    return from;
+}
+
 static void DestroyQueueDetour(uint64_t world, uint32_t* handles, uint32_t n)
 {
-    if (handles == NULL || n == 0) { g_destroyQueue(world, handles, n); return; }
+    if (!DestroyComplex() || handles == NULL || n == 0) { g_destroyQueue(world, handles, n); return; }
     uint32_t i = 0;
     while (i < n && DestroyHandleState(handles[i]) == 0) i++;
     LONG room = DESTROY_ROOM - DestroyListCount(world);
     if (i == n && (LONG)n <= room) { g_destroyQueue(world, handles, n); return; } /* the usual case: all exist, room for them */
     uint32_t pass[256], k = 0;
-    void* caller = __builtin_return_address(0);
+    void* back = __builtin_return_address(0);
     for (i = 0; i < n; i++)
     {
         int state = DestroyHandleState(handles[i]);
@@ -96,8 +114,8 @@ static void DestroyQueueDetour(uint64_t world, uint32_t* handles, uint32_t n)
             if (room - (LONG)k <= 0)
             {
                 DestroyHold(world, handles[i]);
-                /* logged here as well as in DestroyNote, which runs only while streaming defers: a normal level must
-                 * show a held destroy too (gate 10, T1 ruling U3); powers of two keep a long burst to a few lines */
+                /* logged here as well as in DestroyNote, which runs only while streaming defers; powers of two keep a
+                 * long burst to a few lines */
                 const LONG held = InterlockedIncrement(&g_destroyRoomHeld);
                 if ((held & (held - 1)) == 0) Note("difficulty: extra large maps: destroy of a live unit held until the world's destroy list had room (%ld so far)", (long)held);
                 continue;
@@ -108,18 +126,21 @@ static void DestroyQueueDetour(uint64_t world, uint32_t* handles, uint32_t n)
         }
         if (InterlockedIncrement(&g_destroyNotes) <= 8)
             Note("difficulty: extra large maps: a destroy asked for unit 0x%08X, which %s (caller %p); %s", handles[i], state == 1 ? "is not made yet" : "is gone",
-                caller, state == 1 ? "it waits until it is" : "dropped");
+                (void*)DestroyCaller(handles, back), state == 1 ? "it waits until it is" : "dropped");
         if (state == 2) { InterlockedIncrement(&g_destroyStale); continue; }
         DestroyHold(world, handles[i]); InterlockedIncrement(&g_destroyHeld);
     }
     if (k) g_destroyQueue(world, pass, k);
 }
 
-/* Each frame on the game thread (WorldStreamTick): the waiting handles that resolve now go to the original. */
+/* Each frame on the game thread (WorldStreamTick): the waiting handles that resolve now go to the original. Off a
+ * complex mission every one left is dropped: it was asked of the complex mission's world, and stock never carries a
+ * world's destroy list into another world. */
 static void DestroyTick(void)
 {
     if (g_destroyQueue == NULL || g_destroyWaiting == 0) return;
     AcquireSRWLockExclusive(&g_destroyWaitLock);
+    if (!DestroyComplex()) { g_destroyWaiting = 0; ReleaseSRWLockExclusive(&g_destroyWaitLock); return; }
     uint64_t roomWorld = 0;
     LONG room = 0;
     for (LONG j = 0; j < g_destroyWaiting;)
@@ -300,8 +321,9 @@ static const char* InstallDestroyQueue(void)
     if (SafeRead(exe + DESTROY_LOCK_SHARED, &lock, 8) || SafeRead(exe + DESTROY_UNLOCK_SHARED, &unlock, 8) || lock == 0 || unlock == 0)
     { Note("difficulty: extra large maps: the unit table's lock imports do not read; destroys are not checked"); return NULL; }
     g_destroyLock = (DestroyLockFn)(uintptr_t)lock; g_destroyUnlock = (DestroyLockFn)(uintptr_t)unlock; g_destroyTableAt = exe + DESTROY_TABLE;
+    g_destroyOneBack = ApiCodeMatches(exe + DESTROY_ONE, kDestroyOnePin) == 1 ? exe + DESTROY_ONE_BACK : 0;
     if (LoaderHook("the engine's destroy queue (units not made yet wait)", exe + DESTROY_QUEUE, (void*)DestroyQueueDetour, (void**)&g_destroyQueue))
     { g_destroyQueue = NULL; Note("difficulty: extra large maps: the destroy queue could not be hooked"); return NULL; }
-    Note("difficulty: extra large maps: destroys are checked first: a unit not made yet waits (up to %u frames), one gone is dropped", DESTROY_WAIT_TICKS);
+    Note("difficulty: extra large maps: on a complex mission destroys are checked first: a unit not made yet waits (up to %u frames), one gone is dropped", DESTROY_WAIT_TICKS);
     return NULL;
 }
