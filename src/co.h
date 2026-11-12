@@ -149,7 +149,7 @@ void co_capacity_early(void);
  * navigation grid's plan per level). 1 when there is nothing to do or it went in. */
 int co_capacity_normal(void);
 /* 0 builds a mod whose complex part is never on, whatever the machine has: the rest of the mod alone. */
-#define CO_COMPLEX_COMPLETE 0
+#define CO_COMPLEX_COMPLETE 1
 /* Once the part is on: every install of it. 1 when all went in; else the part is off again and the log says why. */
 int co_complex_start(void);
 int co_capacity_poll(uint64_t now_ms);

@@ -231,6 +231,29 @@ for one to four players and reads it by player count with no bound, so a fifth p
 - Five to eight continue the step from three to four players: v4 + (n - 4) x (v4 - v3), at least 0.1.
 - Spawn caps are not changed here.
 
+## Complex operations
+
+One level-11 operation in four is a complex operation. HellForge owns difficulty 11; the mod only adds to it.
+
+| Part | A complex operation |
+|---|---|
+| Map | 16 km across (a world of 16384 m), where HellForge's level 11 map is 2 km. |
+| Missions | Three missions on the one map. |
+| Objectives | Up to 30: every mission's primaries, then major and optional ones in the room left. |
+| Arcs | The objectives are dealt in arcs: each mission's primaries stand together in their own part of the map. |
+| Tactical map | 16 objective markers, as in the game. A marker goes to the next objective when one is done. |
+
+- Which operations are complex comes from the operation's seed and planet, so every player sees the same ones.
+- Every player needs the mod. The host launches a complex mission only when every player's PC can make one;
+  otherwise that mission is a normal level-11 mission.
+- A PC that cannot make one plays normal missions. An example is a PC with less than 28 GB of memory free to commit
+  when the game starts. Such a player is denied only when hot-joining a running complex mission.
+- The mod's log says why the part is off: a line that starts with `complex operations are off:`.
+- A normal level-11 mission with the mod loaded is the mission it is without the mod.
+
+The part needs a HellForge with pull requests 362, 364 and 366: dev after 2026-11-11, or the first release after it.
+With an older HellForge the part is off and the rest of the mod works.
+
 ## Extraction
 
 A build for eight gives the Pelican eight passenger seats where the game has six. 15 caves add two seats, 8 and 9 in
@@ -326,6 +349,8 @@ the game drops four and more. It goes in on its own: when it cannot, the peer li
   seat in a new pod seen by the other player.
 - Not tested: a build for eight players in a game, a player with index 4 to 7, a launch with two or more players, a
   lobby with more than four members.
+- Complex operations are checked against the game's code and in the unit tests only. None was run in a game with
+  this mod.
 - The launch sound for a lone player in pods 5 to 8 is hooked; the mod logs once when it answers for such a pod.
 
 ## Build
@@ -351,7 +376,7 @@ The tests run the mod against a stand-in game image: no game is needed.
 ## Install
 
 The mod needs a HellForge with mod SDK 17 or newer. Older ones cannot build the level data from the recipe and refuse
-the mod.
+the mod. Complex operations need a newer one still (see Complex operations).
 
 Put these four files in one folder inside HellForge's mods folder:
 
@@ -419,12 +444,14 @@ Pelican), which are not in this folder.
 | `tests/registry_test.c` | The list's move in each build, run through the game's loads; refusal on changed code or a card in the list, rollback of a failed write. |
 | `tests/ui_test.c` | The guards for four, the map's move with the state, the HUD's and tags' move at the HUD's init, refusal on changed code and rollback of a failed write. |
 | `tests/engine_test.c` | The engine's sites: written, refused on changed code, taken back on a failed write. |
-| `src/co_roll.c` | Whether an operation is a complex operation: an integer hash of its seed and planet. Not used yet. |
+| `src/co_roll.c` | Whether an operation is a complex operation: an integer hash of its seed and planet. |
 | `tests/roll_test.c` | The roll's fixed answers and its share of operations at 5, 25 and 50 %. |
-| `src/xl/` | The extra large world, built into the DLL but not installed: nothing calls `CoXlInstall`. |
+| `src/xl/` | The extra large world of a complex operation. `co_complex_start` (`src/co_capacity.c`) installs it once the part is on. |
+| `src/xl/co_spawners.c`, `co_clusters.c`, `co_city.c`, `co_pocket.c`, `co_status.c`, `co_locate.c` | A complex level's lists and searches, each beside HellForge's own step: the game's or HellForge's value on any other level. |
+| `src/xl/co_objectives.c`, `co_markers.c`, `co_text.c` | The objective list within 30 places, the check of the map's 16 markers, the grouped HUD rows' texts. |
 | `src/xl/proto/` | Its files as copied from a HellForge loader; `README.md` there says from where. Parts of `co_xl.c`. |
 | `src/xl/co_shim.h`, `co_shim.c` | The loader's helpers those files call, over the SDK and the mod's own parts. |
-| `src/xl/co_xl_standin.h` | Stand-ins for the loader's level 11 install those files read. To be replaced. |
+| `src/xl/co_xl_standin.h` | The names of the loader's level 11 install those files read, over the mod's own parts. |
 | `tests/shim_test.c` | The player list read at the game's offsets, and at the moved ones in a build for eight. |
 | `tests/harness/` | The stand-in loader and game image the tests run against. |
 

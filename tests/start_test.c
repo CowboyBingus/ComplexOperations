@@ -86,10 +86,9 @@ int main(void)
     CHECK(co_capacity_poll(1) == 1);
     const CoComplexNeeds* n = co_capacity_needs();
     CHECK(n->stock_stubs && n->own_sites && n->commit_free_mb == CO_COMPLEX_COMMIT_MB && co_complex_refusal(n) == NULL);
-    /* this build lacks parts of a complex operation: off all the same, with its own line, and nothing goes in */
-    CHECK(CO_COMPLEX_COMPLETE == 0 && !co_complex_on() && co_complex_start() == 0 && Untouched());
-    CHECK(Lines("complex operations are off") == 1 && fake_host_logged("makes none yet"));
-    CHECK(co_peers_host_row() == CO_HOST_ROW_OFF && !co_complex_rolls(co_peers_is_host(), co_complex_on(), co_peers_host_row()));
+    /* the part is on, with no line, and nothing has gone in before its start (the last case below) */
+    CHECK(CO_COMPLEX_COMPLETE == 1 && co_complex_on() && Untouched());
+    CHECK(Lines("complex operations are off") == 0 && co_complex_rolls(1, co_complex_on(), CO_HOST_ROW_NONE));
 
     Start("HellForge's radii step is another");
     g_fake.image[STOCK + 21] = 10;
@@ -151,6 +150,13 @@ int main(void)
     co_capacity_test_commit(CO_COMPLEX_COMMIT_MB - 1u);
     CHECK(co_capacity_poll(1) == 1 && !co_complex_on() && Untouched());
     CHECK(co_capacity_normal() == 1 && g_fake.writes == 2 && g_fake.hookCount == 0 && co_complex_start() == 0 && g_fake.writes == 2);
+
+    /* The start itself, last: its installs stay in. This image has no mission tables, so the world's settings refuse
+     * and the part is off again with its line. */
+    Start("the start on an image without the game's missions");
+    CHECK(co_capacity_poll(1) == 1 && co_complex_on() && co_complex_start() == 0 && !co_complex_on());
+    CHECK(Lines("complex operations are off") == 1 && fake_host_logged("the missions difficulty 11 mixes"));
+    CHECK(!co_complex_rolls(1, co_complex_on(), CO_HOST_ROW_NONE));
 
     if (g_failed) { printf("start: %d checks failed\n", g_failed); return 1; }
     printf("start: all cases passed\n");
