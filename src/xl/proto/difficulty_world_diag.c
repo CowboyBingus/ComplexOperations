@@ -886,15 +886,24 @@ static void TdCollect(void)
  * A relative folder is in the mod's own folder: the sandbox shows the game only its own session's logs and the mods.
  *   after-40-<k>  the merge's heights after SmoothHeightmap: CaptureIntermediateHeightmapStart (0x5B) runs right after
  *                 0x40 and its finalize (0x5C, first of the level) leaves the readbacks at lg + 0x18 k
- *   minimap-<id>  after CaptureMinimapTexture (0x56, previews): the ten targets 0x1004DE0 binds (0x1004F54), read back
+ *   minimap-heights, minimap-water  after CaptureMinimapTexture (0x56, previews): the preview record's CPU copies
  *   final-heights after CleanupTerrainMerge (0x66, missions): the scatter heights lg+0xD8 the level keeps */
 static int CoarseBatchNow(void); /* difficulty_world_terrain.c */
 static struct
 {
-    int on; wchar_t reference[MAX_PATH];
-    SRWLOCK lock; LONG level; int captured;
-    struct { uint32_t id, name; ULONGLONG since; } pending[12]; int pendingCount;
+    int on, table; wchar_t reference[MAX_PATH];
+    LONG level; int captured;
 } g_cc = {-1};
+
+/* The sample sizes are the exe's: with another table every image is refused, not read at a guessed size. */
+static int CcTable(void)
+{
+    uint32_t bpt[CO_COMPARE_BPT_COUNT] = {0};
+    uintptr_t exe = ApiModuleBase("helldivers2.exe", NULL);
+    g_cc.table = exe != 0 && !SafeRead(exe + CO_COMPARE_BPT, bpt, sizeof bpt) && co_compare_table_matches(bpt);
+    if (!g_cc.table) Note("coarse compare: the exe's texel sizes (exe+0x%X) are not the ones the compare knows; no image is read", CO_COMPARE_BPT);
+    return g_cc.table;
+}
 
 static int CcOn(void)
 {
@@ -910,6 +919,7 @@ static int CcOn(void)
         else if (mod != NULL && mod[0]) snprintf(folder, sizeof folder, "%s\\%s", mod, text);
         if (folder[0] && MultiByteToWideChar(CP_UTF8, 0, folder, -1, g_cc.reference, MAX_PATH) == 0) g_cc.reference[0] = 0;
         if (g_cc.on) Note("coarse compare: on; reference %s", g_cc.reference[0] ? folder : folder[0] ? "a path too long" : "none (this run's files only)");
+        if (g_cc.on) CcTable();
     }
     return g_cc.on;
 }
@@ -923,6 +933,7 @@ static const char* CcPipeline(void)
 
 static void CcImage(const char* label, const uint8_t* data, uint32_t w, uint32_t h, uint32_t bpp, uint32_t format)
 {
+    /* bpp is co_compare_sample_bytes(format): CcDescriptor refuses any other */
     size_t bytes = (size_t)w * h * bpp;
     uint64_t hash = 0xCBF29CE484222325ull;
     for (size_t i = 0; i < bytes; i++) hash = (hash ^ data[i]) * 0x100000001B3ull;
@@ -935,7 +946,7 @@ static void CcImage(const char* label, const uint8_t* data, uint32_t w, uint32_t
         for (size_t at = 0; at < bytes; at += wrote) if (!WriteFile(file, data + at, (DWORD)(bytes - at > 0x40000000u ? 0x40000000u : bytes - at), &wrote, NULL) || !wrote) break;
         CloseHandle(file);
     }
-    char against[2 * MAX_PATH + 160] = "no reference";
+    char against[4 * MAX_PATH + 160] = "no reference";
     if (g_cc.reference[0])
     {
         wchar_t path[MAX_PATH + 128];
@@ -948,39 +959,25 @@ static void CcImage(const char* label, const uint8_t* data, uint32_t w, uint32_t
         {
             DWORD got = 0; size_t at = 0;
             for (; at < bytes; at += got) if (!ReadFile(ref, other + at, (DWORD)(bytes - at > 0x40000000u ? 0x40000000u : bytes - at), &got, NULL) || !got) break;
-            if (at == bytes)
-            {
-                /* the difference in the sample's own unit: u16, f32 (when the image reads as floats) or bytes */
-                int f32 = bpp == 4 && TdLooksFloat((const uint32_t*)data, (size_t)w * h);
-                uint64_t differ = 0; double most = 0;
-                size_t samples = bpp == 2 || f32 ? (size_t)w * h : bytes;
-                for (size_t i = 0; i < samples; i++)
-                {
-                    double a, b;
-                    if (bpp == 2) { uint16_t x, y; memcpy(&x, data + 2 * i, 2); memcpy(&y, other + 2 * i, 2); a = x; b = y; }
-                    else if (f32) { float x, y; memcpy(&x, data + 4 * i, 4); memcpy(&y, other + 4 * i, 4); a = x; b = y; }
-                    else { a = data[i]; b = other[i]; }
-                    if (a != b) { differ++; if (fabs(a - b) > most) most = fabs(a - b); }
-                }
-                snprintf(against, sizeof against, "against the reference: %llu of %llu samples differ, max |d| %g (%s)", (unsigned long long)differ,
-                    (unsigned long long)samples, most, bpp == 2 ? "u16" : f32 ? "f32" : "bytes");
-            }
+            CoCompareDiff diff;
+            if (at == bytes && co_compare_diff(data, other, w, h, format, &diff) == 0)
+                snprintf(against, sizeof against, "against the reference: %llu of %llu samples differ, max |d| %g (%s)", (unsigned long long)diff.differ,
+                    (unsigned long long)diff.samples, diff.most, diff.unit);
             else snprintf(against, sizeof against, "the reference did not read");
         }
         else if (ref == INVALID_HANDLE_VALUE)
         {
             DWORD error = GetLastError();
-            char at[2 * MAX_PATH] = "?";
-            WideCharToMultiByte(CP_UTF8, 0, path, -1, at, sizeof at, NULL, NULL);
+            char at[4 * MAX_PATH] = "?";
+            if (WideCharToMultiByte(CP_UTF8, 0, path, -1, at, sizeof at, NULL, NULL) == 0) snprintf(at, sizeof at, "?");
             snprintf(against, sizeof against, "no reference file %s (error %lu)", at, (unsigned long)error);
         }
         else snprintf(against, sizeof against, "the reference is another size (%lld B)", (long long)size.QuadPart);
         if (other) VirtualFree(other, 0, MEM_RELEASE);
         if (ref != INVALID_HANDLE_VALUE) CloseHandle(ref);
     }
-    /* 0x1 reads as f32 and 0x16 is the u16 heightmap; the readback's size for other formats is not known */
-    Note("coarse compare: %s %s (batch %d): %u x %u, %u B a sample%s (format 0x%X), hash %016llX; %s", CcPipeline(), label, CoarseBatchNow(), w, h, bpp,
-        format == 0x1 || format == 0x16 ? "" : " assumed", format, (unsigned long long)hash, against);
+    Note("coarse compare: %s %s (batch %d): %u x %u, %u B a sample (format 0x%X), hash %016llX; %s", CcPipeline(), label, CoarseBatchNow(), w, h, bpp,
+        format, (unsigned long long)hash, against);
 }
 
 /* An image the game holds as {w, h, format, ?, data} (TdDescriptor's form). */
@@ -989,36 +986,15 @@ static void CcDescriptor(const char* label, uintptr_t descriptor)
     uint32_t wh[4] = {0}; uint64_t data = 0;
     if (SafeRead(descriptor, wh, 16) || SafeRead(descriptor + 0x10, &data, 8) || data < 0x10000 || wh[0] < 1 || wh[1] < 1 || wh[0] > 16384 || wh[1] > 16384)
     { Note("coarse compare: %s %s: no image", CcPipeline(), label); return; }
-    uint32_t bpp = wh[2] == 0x16 ? 2 : 4;
+    /* a readback is w x h samples of bpt[format] / 8 bytes, packed (exe 0x31DEFF..0x31DF5B) */
+    uint32_t bpp = g_cc.table ? co_compare_sample_bytes(wh[2]) : 0;
+    if (bpp == 0) { Note("coarse compare: %s %s: %u x %u, format 0x%X: no known sample size, not read", CcPipeline(), label, wh[0], wh[1], wh[2]); return; }
     size_t bytes = (size_t)wh[0] * wh[1] * bpp;
     uint8_t* copy = VirtualAlloc(NULL, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (copy == NULL) return;
     if (!SafeRead((uintptr_t)data, copy, bytes)) CcImage(label, copy, wh[0], wh[1], bpp, wh[2]);
     else Note("coarse compare: %s %s: %u x %u (format 0x%X) did not read", CcPipeline(), label, wh[0], wh[1], wh[2]);
     VirtualFree(copy, 0, MEM_RELEASE);
-}
-
-static void CcCollect(void)
-{
-    if (g_cc.on <= 0 || g_cc.pendingCount == 0) return;
-    AcquireSRWLockExclusive(&g_cc.lock);
-    uint64_t table = TdRenderTable(), ready = 0, get = 0;
-    if (table != 0 && !SafeRead(table + 0x1D0, &ready, 8) && !SafeRead(table + 0x1D8, &get, 8) && ready && get)
-        for (int k = 0; k < g_cc.pendingCount;)
-        {
-            int done = 0;
-            char label[32]; snprintf(label, sizeof label, "minimap-%08X", g_cc.pending[k].name);
-            if (((TdReadyFn)(uintptr_t)ready)(g_cc.pending[k].id))
-            {
-                uint8_t out[64] = {0};
-                void* descriptor = ((TdGetFn)(uintptr_t)get)(out, g_cc.pending[k].id);
-                if (descriptor) CcDescriptor(label, (uintptr_t)descriptor);
-                done = 1;
-            }
-            else if (GetTickCount64() - g_cc.pending[k].since > 20000) { Note("coarse compare: readback %s never came", label); done = 1; }
-            if (done) g_cc.pending[k] = g_cc.pending[--g_cc.pendingCount]; else k++;
-        }
-    ReleaseSRWLockExclusive(&g_cc.lock);
 }
 
 /* A pass whose index moved on. */
@@ -1038,31 +1014,16 @@ static void CcPass(uint32_t op)
     }
     /* a preview's 0x66 returns before its readback (settings+0x28 at 0xC17A27), so lg+0xD8 stays empty there */
     if (op == 0x66 && gen != 0 && strcmp(CcPipeline(), "preview") != 0) CcDescriptor("final-heights", gen + TD_IMAGE_BLOCK + 0xD8);
-    else if (op == 0x66) Note("coarse compare: preview final-heights: none (a preview's 0x66 reads no heights back)");
+    else if (op == 0x66 && gen != 0) Note("coarse compare: preview final-heights: none (a preview's 0x66 reads no heights back)");
     if (op == 0x56)
     {
-        /* The names are bound only to the capture's own render (0x1004F54 -> exe 0x31E070 -> 0x10F4C0, a per-call set),
-         * never in the renderer's name maps that +0x158 searches. The targets themselves are the preview record's (R =
-         * settings+0x48), made once by 0x1003330 through +0x170 (exe 0x31AF50): type 1, so +0x1A8 reads them as they are. */
-        static const uint32_t names[10] = {0x581D62D2u, 0xE94F447Cu, 0xCDE78DD2u, 0x3B7981ACu, 0xE6FEBF61u, 0x298B674Cu, 0x8EBBF7D9u, 0x53F40E98u,
-            0x60370CF1u, 0x3597C022u};
-        static const uint16_t at[10] = {0x4DA0, 0x4DA8, 0x4D98, 0x4DB0, 0x4DB8, 0x4DC0, 0x4DC8, 0x4DD0, 0x4DD8, 0x4DE0};
-        uint64_t table = TdRenderTable(), request = 0, record = 0;
-        if (table == 0 || SafeRead(table + 0x1A8, &request, 8) || !request) return;
+        /* The CPU copies the preview record R (settings+0x48) keeps, no render request: requesting a readback of the
+         * ten minimap targets stopped the render thread (exe+0x6D0296, the copy's state lookup). R+0x4DE8 is op 0x62's
+         * readback of R+0x4DA0's 64 px mip (0xF5BCEB), R+0x4E08 op 0x0B's of the water (0xF6CCFE); 0x1003C00 frees both. */
+        uint64_t record = 0;
         if (g_worldLevel == 0 || SafeRead(g_worldLevel + 0x2D68, &record, 8) || record < 0x10000) { Note("coarse compare: no preview record at 0x56"); return; }
-        AcquireSRWLockExclusive(&g_cc.lock);
-        for (int i = 0; i < 10 && g_cc.pendingCount < 12; i++)
-        {
-            uint64_t target = 0; uint8_t type = 0; uint32_t size[2] = {0};
-            if (SafeRead(record + at[i], &target, 8) || target < 0x10000 || SafeRead(target + 3, &type, 1) || SafeRead(target + 0x14, size, 8) || type != 1 ||
-                size[0] < 1 || size[1] < 1 || size[0] > 16384 || size[1] > 16384)
-            { Note("coarse compare: %s minimap-%08X: R+0x%X is not a render target (type %u)", CcPipeline(), names[i], at[i], type); continue; }
-            uint32_t id = ((TdRequestFn)(uintptr_t)request)(target);
-            if (id == 0xFFFFFFFFu) { Note("coarse compare: %s minimap-%08X: no readback", CcPipeline(), names[i]); continue; }
-            g_cc.pending[g_cc.pendingCount].id = id; g_cc.pending[g_cc.pendingCount].name = names[i];
-            g_cc.pending[g_cc.pendingCount].since = GetTickCount64(); g_cc.pendingCount++;
-        }
-        ReleaseSRWLockExclusive(&g_cc.lock);
+        CcDescriptor("minimap-heights", (uintptr_t)record + 0x4DE8);
+        CcDescriptor("minimap-water", (uintptr_t)record + 0x4E08);
     }
 }
 
@@ -1876,7 +1837,6 @@ static void TerrainDiagBefore(uint64_t records, uint64_t index, uint32_t end, ui
     int diag = TerrainDiagOn();
     if ((!diag && !CcOn()) || g_worldLevel == 0) return;
     if (SafeRead(index, at, 4) || SafeRead(records + (uint64_t)*at * 0x19B0u, op, 4)) { *at = 0xFFFFFFFFu; return; }
-    CcCollect();
     if (!diag) return;
     AcquireSRWLockExclusive(&g_td.lock);
     if (g_td.level != g_world.levels) { if (g_td.level >= 0 && !g_td.reported) TdReport(); TdLevelReset(); }
@@ -2016,7 +1976,6 @@ static void TerrainDiagTilePlan(uintptr_t block, double extent)
 /* Every game frame (packages.c): collect readbacks, count frames, write the report once generation is over. */
 static void TerrainDiagTick(void)
 {
-    CcCollect();
     if (g_td.mode <= 0) return;
     if (g_tdScatter != NULL)
     {
