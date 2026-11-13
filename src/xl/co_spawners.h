@@ -4,17 +4,22 @@
  * entries go to a list of 1024 of the mod's, which GuardForce's builder then reads; a normal mission keeps the
  * manager's list behind HellForge's guard, and the builder's loop is the game's.
  * Which list a mission has is decided at its first append: the state change clears the manager, the count with it,
- * and appends in the same call, after the mission's level init. The builder follows the list the count belongs to. */
+ * and appends in the same call, after the mission's level init. The builder follows the list the count belongs to.
+ * The builder puts its groups in a scratch block of 2 x GuardForce's capacity (192 at a mission's start) and checks no
+ * count; past it a group reads unzeroed scratch. So the block is sized for every group the builder's lists can give. */
 #ifndef CO_SPAWNERS_H
 #define CO_SPAWNERS_H
 
 #include "co.h"
 
-/* NULL when HellForge's guard is at the append and the append's body, the builder's loop and its places are the
- * game's code this was made for. Reads only. */
+/* NULL when HellForge's guard is at the append and the append's body, the builder's loop, its places and its group
+ * block are the game's code this was made for. Reads only. */
 const char* co_spawners_check(uintptr_t game);
-/* The mod's step in front of HellForge's guard, the loop's two tests and the group's places. All or none. */
+/* The mod's step in front of HellForge's guard, the loop's two tests, the group's places and the builder's group block
+ * of co_spawners_groups() groups. All or none. */
 const char* co_spawners_install(uintptr_t game);
+/* The groups GuardForce's builder can make at most: the AI's tasks, the spawners and the invasion sites, one each. */
+uint32_t co_spawners_groups(void);
 /* A mission's level init (1: complex), and the ship (0), where a complex mission's counts are logged once. */
 void co_spawners_mission(int complex);
 /* Spawner positions left out past a group's 16 places on complex missions so far; NULL before the install. */

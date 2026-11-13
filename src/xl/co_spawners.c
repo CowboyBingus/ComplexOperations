@@ -38,8 +38,13 @@ const char* co_spawners_check(uintptr_t game)
         !Same(game + CO_SPAWNER_FIRST, kCoSpawnerFirst, 13) || !Same(game + CO_SPAWNER_NEXT, kCoSpawnerNext, 13))
         return "GuardForce's spawner loop is not the game's code this mod was made for";
     if (!Same(game + CO_SPAWNER_PLACES, kCoSpawnerPlaces, sizeof kCoSpawnerPlaces)) return "GuardForce's spawner positions are not the game's code this mod was made for";
+    if (!Same(game + CO_SPAWNER_GROUPS_SITE, kCoSpawnerGroupsPin, sizeof kCoSpawnerGroupsPin)) return "GuardForce's group block is not the game's code this mod was made for";
     return NULL;
 }
+
+/* The builder makes a group per new key and checks no count, so the block holds every group its three lists can give,
+ * each list full; 2 x GuardForce's capacity is 192 at a mission's start, and the mod's spawner list alone is 1024. */
+uint32_t co_spawners_groups(void) { return CO_SPAWNER_GROUP_TASKS + co_level_limit(CO_LIMIT_SPAWNERS, 1) + CO_SPAWNER_GROUP_INVASIONS; }
 
 /* A stub being written: `p` bytes so far of the one that will run at `code`. */
 typedef struct Stub { uint8_t* out; uintptr_t code; size_t p; } Stub;
@@ -157,6 +162,11 @@ const char* co_spawners_install(uintptr_t game)
     if (!fit) { VirtualFree(page, 0, MEM_RELEASE); return "the spawner list's steps do not fit their places"; }
     if (!VirtualProtect(page, CO_SPAWNER_CELLS, PAGE_EXECUTE_READ, &old)) { VirtualFree(page, 0, MEM_RELEASE); return "the spawner list's steps could not be made to run"; }
     FlushInstructionCache(GetCurrentProcess(), page, CO_SPAWNER_CELLS);
+    /* mov r8d, groups: the alloc and the memset behind it take the size from there, on every level */
+    const uint32_t groups = co_spawners_groups();
+    uint8_t size[6] = {0x41, 0xB8};
+    memcpy(size + 2, &groups, 4);
+    if (g_coApi->write(game + CO_SPAWNER_GROUPS_SITE, size, sizeof size) != 0) { VirtualFree(page, 0, MEM_RELEASE); return "GuardForce's group block could not be sized"; }
     /* with no list of the mod's in use every stub is the game's code or HellForge's, so each write stands alone */
     for (i = 0; i < 3; i++)
     {
@@ -166,9 +176,16 @@ const char* co_spawners_install(uintptr_t game)
     if (i == 3)
     {
         Jump(jump, 6, game + CO_SPAWNER_SITE, code + CO_SPAWNER_STUB_APPEND);
-        if (g_coApi->write(game + CO_SPAWNER_SITE, jump, 6) == 0) { g_spawners.page = page; g_spawners.game = game; return NULL; }
+        if (g_coApi->write(game + CO_SPAWNER_SITE, jump, 6) == 0)
+        {
+            g_spawners.page = page; g_spawners.game = game;
+            co_log("complex operations: GuardForce's group block holds %u groups on every level (%u KB of scratch at mission load)", groups,
+                groups * CO_SPAWNER_GROUP_SIZE / 1024u);
+            return NULL;
+        }
     }
     while (i-- > 0) g_coApi->write(game + sites[i].rva, sites[i].bytes, sites[i].size);
+    g_coApi->write(game + CO_SPAWNER_GROUPS_SITE, kCoSpawnerGroupsPin, sizeof size);
     VirtualFree(page, 0, MEM_RELEASE);
     return "the director's spawner list could not be given its steps";
 }
