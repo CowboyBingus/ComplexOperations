@@ -4272,12 +4272,13 @@ static void LivingTickBody(void)
 /* The mission in play has changed kind (difficulty_world.c, as the live page is set): what the stubs read. A normal
  * mission starts with the walls' reach the game's and the leave fix off. */
 static void LwInstallZeroBox(void); static void LwNjLive(int complex); /* living_world_zerobox.c, living_world_navjob.c */
+static void SunFarRetry(void); /* xl_sun_slice.c: far shadows' site, if a thread was inside it */
 static uintptr_t LwZbSite(void); static LONG LwNjWanted(void);
 static void LwVboxLeave(void); static void LwBpLeave(void); static void LwCorpseLeave(void); static void LwAibLeave(void);
 static void LwLiveSet(int complex)
 {
     /* the frame-time levers: on for a complex level, the game's state again before any other level's first frame */
-    if (complex) LwInstallZeroBox(); /* a try refused for a thread inside its range goes again here */
+    if (complex) { LwInstallZeroBox(); SunFarRetry(); } /* a try refused for a thread inside its range goes again here */
     co_switch_live(CO_SWITCH_XL, complex);
     LwNjLive(complex);
     if (!complex) { LwVboxLeave(); LwBpLeave(); LwCorpseLeave(); LwAibLeave(); }
