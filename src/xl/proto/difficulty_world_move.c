@@ -87,7 +87,8 @@ static struct
     uint8_t one[0x19B0];
     uint8_t phase;
     /* the drop tile's maps and handle while a tile builds (g_near / g_matband hold the new tile's) */
-    int stashed; float dropCentre[2]; uint64_t dropHandle, dropTex[2], dropBand; uint32_t* dropBandPixels; int dropBandServed;
+    int stashed; float dropCentre[2]; uint64_t dropHandle, dropTex[2], dropBand; uint32_t* dropBandPixels; int dropBandServed, dropBandFramed; uint32_t dropBandFrame;
+    uint32_t pixelsFreed; /* band pixels given back once their textures were uploaded (MoveBandPixelsTick) */
     int built, failed, released;
     struct { int a, b; ULONGLONG until; } skip[16];
     struct { int used; uint64_t tex[2], band; uint32_t* pixels; uint32_t frames; } freeing[NEAR_TILES_MAX * 2];
@@ -159,6 +160,25 @@ static void MovePackageLater(void)
     g_move.pkgPending = 1; g_move.pkgFrames = 0;
 }
 
+/* A spawned tile's band pixels: read only by its texture's upload and by its spawn's readback (NearMatReadAsync, while
+ * NearSpawn runs), so they go once both are past. The drop tile's are g_matband's while no build has them stashed. */
+static void MoveBandPixelsTick(void)
+{
+    for (int k = 1; k < NEAR_TILES_MAX; k++)
+        if (g_tiles[k].live && g_tiles[k].bandPixels != NULL && NearPixelsDone(g_tiles[k].bandFramed, g_tiles[k].bandFrame))
+        {
+            VirtualFree(g_tiles[k].bandPixels, 0, MEM_RELEASE);
+            g_tiles[k].bandPixels = NULL; g_move.pixelsFreed++;
+            Note("difficulty: moving tiles: the band pixels of cell (%d, %d) given back (64 MiB, %u this level)", g_tiles[k].cell[0], g_tiles[k].cell[1], g_move.pixelsFreed);
+        }
+    if (!g_move.stashed && g_near.state == NEAR_IN && g_matband.pixels != NULL && g_matband.tex != 0 && NearPixelsDone(g_matband.framed, g_matband.frame))
+    {
+        VirtualFree(g_matband.pixels, 0, MEM_RELEASE);
+        g_matband.pixels = NULL; g_move.pixelsFreed++;
+        Note("difficulty: moving tiles: the drop tile's band pixels given back (64 MiB, %u this level)", g_move.pixelsFreed);
+    }
+}
+
 static void MoveFreeTick(int all)
 {
     MovePackageTick(all);
@@ -178,6 +198,7 @@ static void MoveRestoreDrop(void)
         g_near.tex[0] = g_move.dropTex[0]; g_near.tex[1] = g_move.dropTex[1]; g_near.handle = g_move.dropHandle;
         g_near.centre[0] = g_move.dropCentre[0]; g_near.centre[1] = g_move.dropCentre[1];
         g_matband.tex = g_move.dropBand; g_matband.pixels = g_move.dropBandPixels; g_matband.served = g_move.dropBandServed;
+        g_matband.framed = g_move.dropBandFramed; g_matband.frame = g_move.dropBandFrame;
         g_move.stashed = 0;
     }
     g_near.state = NEAR_IN;
@@ -631,6 +652,7 @@ static int MoveStart(void)
     g_move.dropTex[0] = g_near.tex[0]; g_move.dropTex[1] = g_near.tex[1]; g_move.dropHandle = g_near.handle;
     g_move.dropCentre[0] = g_near.centre[0]; g_move.dropCentre[1] = g_near.centre[1];
     g_move.dropBand = g_matband.tex; g_move.dropBandPixels = g_matband.pixels; g_move.dropBandServed = g_matband.served;
+    g_move.dropBandFramed = g_matband.framed; g_move.dropBandFrame = g_matband.frame;
     g_move.stashed = 1;
     g_near.tex[0] = g_near.tex[1] = 0; g_matband.tex = 0; g_matband.pixels = NULL;
     InterlockedExchange(&g_moveBuilding, 1);
@@ -686,6 +708,7 @@ static void MoveTileIn(uint64_t world)
     g_tiles[slot].cell[0] = g_move.cell[0]; g_tiles[slot].cell[1] = g_move.cell[1];
     g_tiles[slot].tex[0] = g_near.tex[0]; g_tiles[slot].tex[1] = g_near.tex[1];
     g_tiles[slot].band = g_matband.tex; g_tiles[slot].bandPixels = g_matband.pixels;
+    g_tiles[slot].bandFramed = g_matband.framed; g_tiles[slot].bandFrame = g_matband.frame;
     NearHideUnion(world, "a tile built in mission");
     g_move.built++;
     Note("difficulty: moving tiles: the tile of cell (%d, %d) is in after %.1f s (%u frames): ground %s, centre %.2f m (coarse %.2f m); %d tiles live; craters held %lld updates",
@@ -863,7 +886,7 @@ static void MoveTick(uint64_t level)
     if (g_move.level != g_world.levels)
     {
         g_move.level = g_world.levels; g_move.levelPtr = level; g_move.state = MV_IDLE; g_move.on = 0;
-        g_move.built = g_move.failed = g_move.released = 0;
+        g_move.built = g_move.failed = g_move.released = 0; g_move.pixelsFreed = 0;
         memset(g_move.skip, 0, sizeof g_move.skip);
         if (!(g_ring.level == g_world.levels && g_ring.applied)) { Note("difficulty: moving tiles: off for this level (no grid ring at load)"); return; }
         if (!g_tiles[0].live || g_tiles[0].level != g_world.levels) { Note("difficulty: moving tiles: off for this level (no drop tile)"); return; }
@@ -901,6 +924,7 @@ static void MoveTick(uint64_t level)
     if (!g_move.on) return;
     MoveGroundKeep(); /* before the frame's ground rays are cast */
     MoveFreeTick(0);
+    MoveBandPixelsTick();
     MovePlayers();
     if (g_move.state == MV_IDLE)
     {

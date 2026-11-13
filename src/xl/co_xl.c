@@ -235,6 +235,23 @@ int CoXlTestPlaceRegions(void) { int n = 0; for (int k = 0; k < 8; k++) n += g_p
 void CoXlTestPlaceDone(void) { g_placeFree.pending = 1; g_placeFree.thread = GetCurrentThreadId(); WorldPlaceRegionsFree(); }
 void CoXlTestPlaceFreeTry(void) { WorldPlaceRegionsFree(); }
 void CoXlTestPlaceJobsIn(LONG delta) { InterlockedAdd(&g_placeJobsIn, delta); }
+/* The band pixels' release (proto/difficulty_world_move.c): tile `slot` live with pixels its texture took at render
+ * frame `made`; the drop tile's in g_matband, with a build holding them aside or not. */
+void CoXlTestBandTile(int slot, uint32_t* pixels, uint32_t made)
+{
+    g_tiles[slot].live = 1; g_tiles[slot].level = g_world.levels; g_tiles[slot].bandPixels = pixels; g_tiles[slot].band = 0;
+    g_tiles[slot].tex[0] = g_tiles[slot].tex[1] = 0; g_tiles[slot].bandFramed = 1; g_tiles[slot].bandFrame = made;
+}
+uint32_t* CoXlTestBandTilePixels(int slot) { return g_tiles[slot].bandPixels; }
+void CoXlTestBandDrop(uint64_t tex, uint32_t* pixels, uint32_t made, int stashed)
+{
+    g_matband.tex = tex; g_matband.pixels = pixels; g_matband.framed = 1; g_matband.frame = made;
+    g_near.state = NEAR_IN; g_move.stashed = stashed;
+}
+uint32_t* CoXlTestBandDropPixels(void) { return g_matband.pixels; }
+void CoXlTestBandTick(void) { MoveBandPixelsTick(); }
+int CoXlTestRenderFrame(uint32_t* frame) { return NearRenderFrame(frame); }
+void CoXlTestBandLevelGone(void) { g_matband.tex = 0; MoveLevelGone(); }
 /* A level init's first step for `level`, and a stamp section's hold and cancel test (proto/difficulty_world_terrain.c). */
 void CoXlTestLevelInit(uintptr_t level) { LevelInitBegins(); g_worldLevel = level; }
 void CoXlTestSectionBegin(void) { SectionBegin(); }
