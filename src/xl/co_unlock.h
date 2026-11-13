@@ -14,12 +14,13 @@
 #define CO_UNLOCK_NONE 0xFFu /* no mission known */
 #define CO_UNLOCK_NOTED 64u  /* the most objective locations a note holds (the arcs' objectives) */
 
-/* The note of a generation (cluster pass, ObjectiveArcs): location index, its objective id (+0xD8) and mission. The
- * process has one level generator, so one note: a level init forgets it. */
-void co_unlock_note(uintptr_t lg, uintptr_t gen, const uint32_t* location, const uint32_t* id, const uint8_t* mission, uint32_t n);
+/* The note of a generation (cluster pass, ObjectiveArcs): location index, its objective id (+0xD8), its cluster (+0xE0)
+ * and mission. Every mission repeats the ids; the cluster tells their copies apart. An objective that shares id and
+ * cluster with another mission's is not noted. The process has one level generator, so one note: a level init forgets it. */
+void co_unlock_note(uintptr_t lg, uintptr_t gen, const uint32_t* location, const uint32_t* id, const uint64_t* cluster, const uint8_t* mission, uint32_t n);
 void co_unlock_forget(void);
-/* The noted mission of location `l`, when the note is of `lg`/`gen` and the location still has the noted id. */
-uint8_t co_unlock_noted(uintptr_t lg, uintptr_t gen, uint32_t l, uint32_t id);
+/* The noted mission of location `l`, when the note is of `lg`/`gen` and the location still has the noted id and cluster. */
+uint8_t co_unlock_noted(uintptr_t lg, uintptr_t gen, uint32_t l, uint32_t id, uint64_t cluster);
 /* 1 when the step is to hold the main: the game's map-wide answer unless both missions are known and differ. */
 int co_unlock_rule(uint8_t mainMission, uint8_t stepMission);
 

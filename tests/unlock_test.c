@@ -23,6 +23,7 @@ static const char* g_case;
 #define GEN 0x100000u
 #define LIST 0x1000u
 #define UNIT(handle) (0xABC00000ull + (handle))
+#define CLUSTER(l) (0xC1000000ull + 0xE0u * (l)) /* each location's own cluster (+0xE0) */
 
 static uint8_t* g_image;
 
@@ -30,9 +31,10 @@ static void Put64(uint32_t at, uint64_t v) { memcpy(g_image + at, &v, 8); }
 static void Put32(uint32_t at, uint32_t v) { memcpy(g_image + at, &v, 4); }
 static uint64_t At(uint32_t at) { return (uint64_t)(uintptr_t)(g_image + at); }
 
-static uint64_t TestUnitOf(uint32_t handle) { return handle != 0 && handle < 100 ? UNIT(handle) : 0; }
+static int g_noUnits; /* the unit lookup finds no unit yet */
+static uint64_t TestUnitOf(uint32_t handle) { return handle != 0 && handle < 100 && !g_noUnits ? UNIT(handle) : 0; }
 
-/* Location l: its unit's handle (0 none), objective id and x/y. */
+/* Location l: its unit's handle (0 none), objective id, x/y and its own cluster. */
 static void Location(uint32_t l, uint32_t handle, uint32_t id, float x, float y)
 {
     const uint32_t loc = GEN + LIST + 0x108u * l, record = UNIT_RECORDS + 0x100u * l;
@@ -40,6 +42,7 @@ static void Location(uint32_t l, uint32_t handle, uint32_t id, float x, float y)
     Put64(record + 0xA8, UNIT(handle));
     memcpy(g_image + loc + 0xA4, &x, 4); memcpy(g_image + loc + 0xA8, &y, 4);
     Put32(loc + 0xD8, id);
+    Put64(loc + 0xE0, CLUSTER(l));
     Put32(GEN + 0x11A715Cu, l + 1 > *(uint32_t*)(g_image + GEN + 0x11A715Cu) ? l + 1 : *(uint32_t*)(g_image + GEN + 0x11A715Cu));
 }
 static void Instance(uint32_t i, uint32_t handle)
@@ -96,8 +99,16 @@ static void World(int install)
 static void Note(void)
 {
     const uint32_t location[6] = {0, 1, 2, 3, 4, 5}, id[6] = {0xA0, 0xA1, 0xA1, 0xB0, 0xB1, 0xC0};
+    const uint64_t cluster[6] = {CLUSTER(0), CLUSTER(1), CLUSTER(2), CLUSTER(3), CLUSTER(4), CLUSTER(5)};
     const uint8_t mission[6] = {0, 0, 0, 1, 1, CO_UNLOCK_NONE};
-    co_unlock_note((uintptr_t)At(LEVEL), (uintptr_t)At(GEN), location, id, mission, 6);
+    co_unlock_note((uintptr_t)At(LEVEL), (uintptr_t)At(GEN), location, id, cluster, mission, 6);
+}
+static void Swap(uint32_t l, uint32_t k) /* two location records change places, as a reorder would leave them */
+{
+    uint8_t t[0x108];
+    memcpy(t, g_image + GEN + LIST + 0x108u * l, sizeof t);
+    memcpy(g_image + GEN + LIST + 0x108u * l, g_image + GEN + LIST + 0x108u * k, sizeof t);
+    memcpy(g_image + GEN + LIST + 0x108u * k, t, sizeof t);
 }
 
 /* Where the rel32 at `at` of a stub placed at `code` leads, as an offset in the image. */
@@ -113,12 +124,37 @@ int main(void)
     World(0);
     Note();
     const uintptr_t lg = (uintptr_t)At(LEVEL), gen = (uintptr_t)At(GEN);
-    CHECK(co_unlock_noted(lg, gen, 1, 0xA1) == 0 && co_unlock_noted(lg, gen, 4, 0xB1) == 1);
-    CHECK(co_unlock_noted(lg, gen, 4, 0xB0) == CO_UNLOCK_NONE);   /* another objective at the record now */
-    CHECK(co_unlock_noted(lg, gen, 5, 0xC0) == CO_UNLOCK_NONE);   /* a side objective: no mission */
-    CHECK(co_unlock_noted(lg + 8, gen, 1, 0xA1) == CO_UNLOCK_NONE && co_unlock_noted(lg, gen + 8, 1, 0xA1) == CO_UNLOCK_NONE);
+    CHECK(co_unlock_noted(lg, gen, 1, 0xA1, CLUSTER(1)) == 0 && co_unlock_noted(lg, gen, 4, 0xB1, CLUSTER(4)) == 1);
+    CHECK(co_unlock_noted(lg, gen, 4, 0xB0, CLUSTER(4)) == CO_UNLOCK_NONE);   /* another objective at the record now */
+    CHECK(co_unlock_noted(lg, gen, 5, 0xC0, CLUSTER(5)) == CO_UNLOCK_NONE);   /* a side objective: no mission */
+    CHECK(co_unlock_noted(lg + 8, gen, 1, 0xA1, CLUSTER(1)) == CO_UNLOCK_NONE && co_unlock_noted(lg, gen + 8, 1, 0xA1, CLUSTER(1)) == CO_UNLOCK_NONE);
     co_unlock_forget();
-    CHECK(co_unlock_noted(lg, gen, 1, 0xA1) == CO_UNLOCK_NONE);
+    CHECK(co_unlock_noted(lg, gen, 1, 0xA1, CLUSTER(1)) == CO_UNLOCK_NONE);
+
+    g_case = "another mission's copy of the id at the record";
+    {
+        /* mission 1 has a step of mission 0's id 0xA1 (location 4); a reorder brings mission 0's copy to record 4 */
+        const uint32_t location[4] = {0, 1, 3, 4}, id[4] = {0xA0, 0xA1, 0xB0, 0xA1};
+        const uint64_t cluster[4] = {CLUSTER(0), CLUSTER(1), CLUSTER(3), CLUSTER(4)}, shared[4] = {CLUSTER(0), CLUSTER(1), CLUSTER(3), CLUSTER(1)};
+        const uint8_t mission[4] = {0, 0, 1, 1};
+        co_unlock_note(lg, gen, location, id, cluster, mission, 4);
+        CHECK(co_unlock_noted(lg, gen, 4, 0xA1, CLUSTER(4)) == 1 && co_unlock_noted(lg, gen, 1, 0xA1, CLUSTER(1)) == 0);
+        CHECK(co_unlock_noted(lg, gen, 4, 0xA1, CLUSTER(1)) == CO_UNLOCK_NONE && co_unlock_noted(lg, gen, 1, 0xA1, CLUSTER(4)) == CO_UNLOCK_NONE);
+        /* both copies in one cluster: neither can be told from the other, so neither is noted */
+        co_unlock_note(lg, gen, location, id, shared, mission, 4);
+        CHECK(co_unlock_noted(lg, gen, 4, 0xA1, CLUSTER(1)) == CO_UNLOCK_NONE && co_unlock_noted(lg, gen, 1, 0xA1, CLUSTER(1)) == CO_UNLOCK_NONE);
+        CHECK(co_unlock_noted(lg, gen, 0, 0xA0, CLUSTER(0)) == 0 && co_unlock_noted(lg, gen, 3, 0xB0, CLUSTER(3)) == 1);
+        /* in play: the main of mission 0 (instance 0) with its step (instance 1, unit 2) moved from record 1 to 4 */
+        World(1);
+        Put32(GEN + LIST + 0x108u * 4 + 0xD8, 0xA1);
+        co_unlock_note(lg, gen, location, id, cluster, mission, 4);
+        const uintptr_t m = (uintptr_t)At(MANAGER);
+        CHECK(co_unlock_holds(m, 3, 1) == 0 && co_unlock_holds(m, 0, 4) == 0); /* in place: each its own mission */
+        co_unlock_note(lg, gen, location, id, cluster, mission, 4);
+        Swap(1, 4);
+        CHECK(co_unlock_holds(m, 0, 1) == 1 && co_unlock_holds(m, 3, 4) == 1); /* neither taken for the other mission's step */
+    }
+    co_unlock_forget();
 
     g_case = "a main waits for its own mission's steps";
     World(1);
@@ -137,6 +173,19 @@ int main(void)
     Note();
     Put64(LEVEL + 0x2C8u, At(GEN + 0x10000u)); /* another generation block than the noted one */
     CHECK(co_unlock_holds(m, 3, 1) == 1);
+
+    g_case = "a miss for want of a unit or a location is asked again";
+    World(1);
+    Note();
+    Put64(GEN + LIST + 0x108u * 4 + 0x98, 0); /* mission 1's step: its location does not hold the unit yet */
+    g_noUnits = 1;                            /* and no unit is found yet */
+    CHECK(co_unlock_holds(m, 0, 4) == 1);     /* the game's answer meanwhile */
+    g_noUnits = 0;
+    CHECK(co_unlock_holds(m, 0, 4) == 1);
+    Put64(GEN + LIST + 0x108u * 4 + 0x98, At(UNIT_RECORDS + 0x100u * 4));
+    CHECK(co_unlock_holds(m, 0, 4) == 0);     /* found now */
+    Put64(GEN + LIST + 0x108u * 4 + 0x98, 0);
+    CHECK(co_unlock_holds(m, 0, 4) == 0);     /* a hit is kept */
 
     g_case = "the activation pass's stub";
     World(0);
