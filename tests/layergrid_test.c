@@ -48,6 +48,10 @@ void CoXlTestProbe(char kind, float x, float y, float used, int why);
 void CoXlTestProbeCounts(long* reads, long* off, long* written);
 uint64_t CoXlTestLayerSpawn(uint64_t unit, uint64_t count, uint64_t field);
 uint64_t CoXlTestThunk(int which, float* out, uint64_t* r9, uint64_t* fifth);
+int CoXlTestUnwind(uintptr_t site, int pre, uint64_t out[4]);
+float CoXlTestSeen2(uint32_t i);
+float CoXlTestSeen2Of(float side);
+int CoXlTestThunkUnwind(uint64_t out[2], uint64_t* stackTop);
 uint64_t CoXlTestLayerSnap(uint64_t unit, uint64_t field);
 void CoXlTestLayerSpawnInstall(uintptr_t exe);
 uintptr_t CoXlTestLayerSpawnDetour(void);
@@ -216,6 +220,16 @@ static void Budgets(uint32_t bodies, uint32_t cutters)
     memcpy(exe + 0x27E0000u + 0x40, &slots, 4); memcpy(exe + 0x27E0000u + 0x4C, &bodies, 4);
     memcpy(exe + 0x27C6330u + 16u, &pool, 8);
     memcpy(exe + 0x27F0000u + 0x20, &cutters, 4); memcpy(exe + 0x27F0000u + 0x24, &room, 4);
+}
+
+/* A function with a frame and saved registers, to stand for the game function a stub is laid over. */
+__attribute__((noinline)) static int UnwindHost(volatile int* v)
+{
+    volatile int local[64];
+    for (int i = 0; i < 64; i++) local[i] = v[i & 3] * i;
+    int sum = 0;
+    for (int i = 0; i < 64; i++) sum += local[i] ^ (int)(i * 7);
+    return sum;
 }
 
 int main(void)
@@ -528,6 +542,7 @@ int main(void)
     int pLive = 0, pDue = 0; uint64_t pUnit = 0;
     CoXlTestStreamSlotState(0, &pLive, &pDue, &pUnit);
     CHECK(g_destroys == destroys + 1 && !pLive && pDue);
+    CHECK(CoXlTestSeen2(0) == CoXlTestSeen2Of(20.0f) && CoXlTestSeen2Of(20.0f) > 1.0f); /* ranked by how far its 20 m footprint is seen */
     CoXlTestLayerTile(b, 1, BX, AY);
     CHECK(fake_host_logged("1 spawned on the level's heights by a tile, 1 of them since put back on a grid, 0 kept (not the streamer's to put back), 0 waiting"));
 
@@ -615,6 +630,22 @@ int main(void)
     CHECK(CoXlTestThunk(1, out, &r9, &fifth) == 77);
     CHECK(out[0] == 0.5f && out[1] == 1.0f && out[2] == 2.0f && out[3] == 3.0f && out[4] == 4.0f && out[5] == 5.0f);
     CHECK(r9 == 0x44 && fifth == 0x5555);
+
+    Start("a stub over a game function's body unwinds as that function at the site, and the thunks have unwind data");
+    {
+        DWORD64 base = 0;
+        PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry((DWORD64)(uintptr_t)UnwindHost, &base, NULL);
+        CHECK(fe != NULL);
+        if (fe != NULL)
+        {
+            uintptr_t site = (uintptr_t)base + fe->BeginAddress + (fe->EndAddress - fe->BeginAddress) / 2; /* past its prologue */
+            uint64_t u[4] = {0};
+            CHECK(CoXlTestUnwind(site, 0, u) == 0 && u[0] == u[2] && u[1] == u[3] && u[0] >= 0x1000u && u[0] < 0x1400u);
+            CHECK(CoXlTestUnwind(site, 1, u) == 0 && u[0] == u[2] && u[1] == u[3]);
+        }
+        uint64_t t[2] = {0}, top = 0;
+        CHECK(CoXlTestThunkUnwind(t, &top) == 0 && t[1] == top + 0x98u + 8u && t[0] == 0x2000u + 0x98u / 8u);
+    }
 
     if (g_failed) { printf("layergrid: %d checks failed\n", g_failed); return 1; }
     printf("layergrid: all cases passed\n");

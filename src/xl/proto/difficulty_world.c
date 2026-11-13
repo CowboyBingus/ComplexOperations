@@ -5311,9 +5311,9 @@ static int NearLayerHeightWhy(uint64_t desc, float x, float y, float* height, in
 static void NearLayerTrace(char kind, uint32_t caller, float x, float y, float z, int result, int why, float used);
 static void NearLayerTraceSnap(uint64_t unit, int slot, int why);
 static int NearLayerIsGrid(uint64_t desc);
-static uint64_t NearLayerSpawnField(uint64_t unit, uint64_t field, int again);
+static uint64_t NearLayerField(uint64_t unit, uint64_t field);
+static void NearLayerSpawnCount(uint64_t unit, uint64_t field, uint64_t grid, int chosen);
 static int NearLayerGridEnter(uint64_t desc);
-static void NearLayerSpawnStale(uint64_t unit);
 static void NearLayerGridLeave(int k);
 /* The level's descriptor at `field`: its data kept from generation, or the kept copy lent to a stack copy whose data the
  * level has freed. A tile's grid is not the level's and is never kept. */
@@ -5368,14 +5368,16 @@ static uint64_t WorldLayerSpawn(uint64_t unit, uint64_t list, uint64_t count, ui
     if (field != 0 && (uint32_t)count != 0 && !NearLayerIsGrid(field))
     {
         WorldLayerKeep(field);
+        int chosen = 0;
         for (int tries = 0; tries < 2 && slot < 0; tries++) /* a refill that began after the choice: choose again */
         {
-            uint64_t grid = NearLayerSpawnField(unit, field, tries);
+            uint64_t grid = NearLayerField(unit, field);
             if (grid == 0) break;
+            chosen = 1;
             slot = NearLayerGridEnter(grid);
             if (slot >= 0) field = grid;
-            else if (tries == 1) NearLayerSpawnStale(unit);
         }
+        NearLayerSpawnCount(unit, field, slot >= 0 ? field : 0, chosen);
     }
     uint64_t r = g_layerSpawn(unit, list, count, field);
     NearLayerGridLeave(slot);
@@ -5449,14 +5451,17 @@ static float WorldLayerSample(uint64_t* holder, float x, float y, uintptr_t ret)
 float CoWorldLayerSampleThunk(uint64_t* holder, float x, float y);
 float (*g_coWorldLayerSample)(uint64_t*, float, float, uintptr_t) = WorldLayerSample;
 __asm__(".text\n.p2align 4\n.globl CoWorldLayerSampleThunk\nCoWorldLayerSampleThunk:\n"
+        "  .seh_proc CoWorldLayerSampleThunk\n"
         "  subq $0x78, %rsp\n"
+        "  .seh_stackalloc 0x78\n  .seh_endprologue\n"
         "  movdqu %xmm1, 0x20(%rsp)\n  movdqu %xmm2, 0x30(%rsp)\n  movdqu %xmm3, 0x40(%rsp)\n"
         "  movdqu %xmm4, 0x50(%rsp)\n  movdqu %xmm5, 0x60(%rsp)\n"
         "  movq 0x78(%rsp), %r9\n"
         "  callq *g_coWorldLayerSample(%rip)\n"
         "  movdqu 0x20(%rsp), %xmm1\n  movdqu 0x30(%rsp), %xmm2\n  movdqu 0x40(%rsp), %xmm3\n"
         "  movdqu 0x50(%rsp), %xmm4\n  movdqu 0x60(%rsp), %xmm5\n"
-        "  addq $0x78, %rsp\n  retq\n");
+        "  addq $0x78, %rsp\n  retq\n"
+        "  .seh_endproc\n");
 
 /* An engine call through the world interface ([game+0x3326308]+0x168, method 0; exe 0x32F6A0: rcx the world, edx an
  * object handle) looks the handle up (exe 0x9D8C0: 22-bit index, generation in the top byte) and calls through the
