@@ -474,6 +474,16 @@ blank.
   over the 2048 m around the player, and, while Tab is held, level 5 with the whole world full-screen.
 - On a 16 km world the map texture holds 8 m a texel.
 
+### M map
+
+M opens a full-screen tactical map on a world above 2048 m: terrain, the squad, objectives, enemy territory and
+waypoints. A right click sets this player's waypoint through the game's own ping.
+
+- The DLL adds the screen with HellForge's `add_screen` (mod SDK 17). HellForge's overlay host draws it with the game's
+  fonts, which HellForge keeps in the editor's folder.
+- M does nothing outside a mission, on a 2048 m world or while a chat line is being typed.
+- Without the overlay host, the log says so and the session has no M map; the rest of the mod runs.
+
 ## Extraction
 
 A build for eight gives the Pelican eight passenger seats where the game has six. 15 caves add two seats, 8 and 9 in

@@ -56,6 +56,11 @@ typedef struct FakeHost
     uint8_t row[64]; uint32_t rowBytes;
     int shareRefused, shareSets, sendRefused, sends;
     uint64_t sentTo; uint8_t sent[64]; uint32_t sentBytes;
+    /* Screens over the game: what add_screen answers (0 refuses, as HellForge without its overlay host), how often it
+     * was asked, and the last HfScreen and mod it was given (the loader copies the HfScreen too). */
+    int screenAnswer, screenAdds;
+    HfScreen screen;
+    HfMod* screenMod;
 } FakeHost;
 
 extern FakeHost g_fake;

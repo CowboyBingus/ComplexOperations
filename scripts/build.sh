@@ -127,8 +127,7 @@ if [[ -z $hellforge ]]; then
     hellforge=$HOME/HellForge
 fi
 sdk=$hellforge/native/mod-sdk
-# After the SDK: its overlay header, for a checkout whose SDK has none yet.
-includes=(-I "$sdk" -I "$root/src/xl/sdk-fallback" -I "$root/src")
+includes=(-I "$sdk" -I "$root/src")
 if [[ ! -f $sdk/hellforge_mod.h ]]; then
     echo "No HellForge mod SDK at $sdk (pass --hellforge <HellForge-Open checkout>)." >&2
     exit 1

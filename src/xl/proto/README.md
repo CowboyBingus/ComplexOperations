@@ -13,11 +13,8 @@ the last section.
 | 29 files: every file here except the ones below | HellForge, branch `ds/mission-arcs`, `native/mod-loader/` | `0e90b26374173cb6ff743aac7fec3bfcc7d7062b` |
 | `living_world*.c`, `living_world_defer_list.h`, `safe_read.c` (13 files) | HellForge, branch `ds/living-world`, `native/mod-loader/` | `b3de43d9259530f5e4a9ff2a787e26e49c9ea000` |
 | The 27 other `living_world_*.c`, and the fork's later edits to `living_world.c`, `_defer.c`, `_density.c`, `_flat.c`, `_render.c` | the same folder's uncommitted work on top of `b3de43d9`, merged three ways with the edits below | none |
-| `../overlay/hellforge_overlay_host.h` | HellForge, branch `ds/mission-arcs`, `native/overlay/` | `0e90b263` |
-| `../sdk-fallback/hellforge_overlay.h` | HellForge, branch `ds/mission-arcs`, `native/mod-sdk/` | `0e90b263` |
 
-The two overlay headers keep the places the tactical map's includes expect. `../mod-sdk/hellforge_overlay.h` is not a
-copy: it passes the include on to the SDK's header, or to the fallback when the SDK checkout has none.
+The tactical map's types (`HfScreen`, `HfDraw`, `HfInput`) are the mod SDK's own `hellforge_overlay.h`.
 
 ## How they are used
 
@@ -78,6 +75,7 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
 | `living_world.c` | `LwLiveSet` switches the frame-time levers with the mission's kind and logs one line at each change. The render phase timer's and the census's commands go to an empty `LwRmCmd`. |
 | `living_world_zerobox.c` | The absent SpeedTree cells' box is a switched site of group `CO_SWITCH_XL` (`../co_switch.c`), on by default. Its jump is written once with the other threads stopped, listed before any is. |
 | `living_world_navjob.c`, `living_world_vbox.c` | On by default. Their hooks pass straight to the game's code unless the mission is complex. Leaving one, the nav job returns to mode 0 with the game's vtable, and the vehicle boxes drop their copies. The nav job's completion sites are research only. |
+| `difficulty_tacmap.c` | The screen goes in through the SDK's `add_screen` on M. The fork loaded `hellforge_overlay.dll` itself, from beside the loader, and started it with fonts from other mods' folders. Refused, it logs why and the session has no map screen. |
 | `living_world_corpse.c`, `living_world_aibudget.c` | Their leave clears the mod's own state only; the AI budget writes nothing then. |
 | `living_world_bp.c` | Research only (`HELLFORGE_LW_BP=1`); its hooks act only on a complex mission. |
 | `living_world_defer.c` | Every research install of the levers and instruments is under `CO_RESEARCH`. |
