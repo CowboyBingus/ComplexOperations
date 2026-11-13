@@ -240,6 +240,9 @@ int main(void)
         uint32_t width;
         memcpy(&width, g_fake.image + 0x18A0EF5u, 4);
         CHECK(Bytes(0x18A0EF1u, "c7442450") && width == F32(390.0f));
+        /* The figure update's run-time widths multiply by the game's 390.0 (at 0x23C7AB0), not 780.0; heights stay. */
+        CHECK(Bytes(0x18A11A7u, "f30f590d0169b200"));
+        CHECK(Bytes(0x18A1262u, "f30f590d4668b200"));
     }
 
     /* The game's world destroys, through their rebased fields and the caves for 8 to 11: every record of the world is

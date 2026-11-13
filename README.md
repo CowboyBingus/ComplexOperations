@@ -151,9 +151,10 @@ The eight cards stand in one row at half the game's size, 232 reference units ap
 Each card's 3D figure has a record in the game's placement system, which holds eight. The weapon pictures on the screen
 use records 4 to 7, so cards 5 to 8 take records 8 to 11. The build for eight moves the eight records to a block of
 twelve in the mod's memory and gives 228 code fields the distance to it. The loops over the records, the player
-lookup and the figure's place in the shared image count to twelve, through 11 changed sites and 10 caves. Two of
+lookup and the figure's place in the shared image count to twelve, through 13 changed sites and 10 caves. Two of
 the caves find the owner of records 8 to 11 for the figure's weathering and wound decals. The figures
-draw as tiles of a 4 x 2 image at half width.
+draw as tiles of a 4 x 2 image at half width. The figure's update sizes the image again whenever the screen is not
+1920 x 1080 pixels; two of the sites keep that size at half width too.
 
 The figures move only when no record is in use. When they cannot move, cards 5 to 8 show no figure, as before.
 
@@ -173,7 +174,8 @@ Limits that remain:
 
 - The text on the cards is half size too: small but legible at 1280 x 720.
 - The figures of players 5 to 8 are each seen in a game, on host and joiner, in sessions of two players. More than
-  two cards at once are not yet seen.
+  two cards at once are not yet seen. Those runs were at 1280 x 720, before the fix of the figure's run-time width:
+  the figures there were drawn twice as wide as they should be.
 - The figures of players 6 to 8 showed the frost their Helldiver wore after arriving. Wound decals on the figures of
   players 5 to 8 are not yet seen in a game.
 

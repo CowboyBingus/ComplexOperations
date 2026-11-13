@@ -369,8 +369,12 @@ CARD_CAVES = [
      '18a12a0 viewport rect and image UV by record: 4 x 2 tiles'),
 ]
 # The figure image F+0x220 at half width: each tile is half as wide, so the image keeps the game's ratio to its tile.
+# The figure update sizes the image again, to (780 rootW / 1920, 780 rootH / 1080), whenever the back buffer is not the
+# 1920 x 1080 it was made for (0x18A11E0 and 0x18A10C0): both widths multiply by the game's 390.0 at 0x23C7AB0 instead.
 CARD_INPLACE = [
     (0x18A0EF1, 'c7442450' + le32(f32(780.0)), 'c7442450' + le32(f32(390.0)), '18a0d30 figure image width 780 -> 390'),
+    (0x18A11A7, 'f30f590d' + le32(0x23C7CA4 - 0x18A11AF), 'f30f590d' + le32(0x23C7AB0 - 0x18A11AF), '18a10c0 run-time width x 390'),
+    (0x18A1262, 'f30f590d' + le32(0x23C7CA4 - 0x18A126A), 'f30f590d' + le32(0x23C7AB0 - 0x18A126A), '18a11e0 run-time width x 390'),
 ]
 
 # The rows of the build for eight that these replace, at the same bytes: the figure slot's cave (4 and up get none,
