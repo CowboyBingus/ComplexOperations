@@ -1236,10 +1236,11 @@ static int TdScatterCutOp(LONG op) { return op == 0x4A || op == 0x0A || op == 0x
  * terrain_generator_zones before the replay narrows the cameras to the tile; a failed replay puts them back with
  * renders still queued. R's viewports have no SpeedTree pass. The window opens when the mover kicks the merge, closes
  * to "closing" at its teardown, and shuts once the merge's render queue ([ctx+0x50]+0x10) has read empty at the start
- * of TD_SCAT_MERGE_EMPTY_UPDATES level updates in a row: a render taken off the queue runs within the next frame
- * (frame fence exe 0x8AAF2 / 0x8A7C4). No time bound: an open window only cuts views that match the test below. */
+ * of TD_SCAT_MERGE_EMPTY_UPDATES level updates in a row. A render taken off the queue runs within the next frame
+ * (frame fence exe 0x8AAF2 / 0x8A7C4); 3 keeps a frame's margin whether the frame drains the queue before or after the
+ * level update. No time bound: an open window only cuts views that match the test below. */
 #define TD_SCAT_MERGE 0x138 /* not an op: the moving tile's merge views */
-#define TD_SCAT_MERGE_EMPTY_UPDATES 2
+#define TD_SCAT_MERGE_EMPTY_UPDATES 3
 static volatile LONG g_tdScatMerge; /* 0 shut, 1 open (the build's merge exists), 2 closing (torn down; renders may be queued) */
 static volatile LONG g_tdScatMergeBuilds, g_tdScatMergeEmpty;
 static uint32_t NearQueued(uint64_t context); /* difficulty_world_terrain.c */

@@ -3,7 +3,7 @@
  * any aspect, are left out; any other view or op (the in-game map's 0x4F among them), and any vanilla-size level, runs
  * the engine's update. The bake's cut notes once per level, the others once per record; all end at the ship. In play
  * (op 0x22), the same views are left out while a moving tile's merge window is open, and after its teardown until the
- * merge's render queue reads empty on two level updates in a row, noted once per build; the ship and a mission's level
+ * merge's render queue reads empty on three level updates in a row, noted once per build; the ship and a mission's level
  * init end it, a preview's does not. Run on the fake game. */
 #include <stdio.h>
 #include <string.h>
@@ -152,22 +152,25 @@ int main(void)
     CHECK(CoXlTestScatterUpdate(0x22, 183, View(1.0f, 2000.0f, 0, 1.0f)) == 1);
     CHECK(CoXlTestScatterUpdate(0x22, 183, View(0.5f, 1001.0f, 0, 1.0f)) == 1);
 
-    g_case = "the close waits for an empty queue on two level updates";
+    g_case = "the close waits for an empty queue on three level updates";
     CoXlTestScatterMerge(1, 0);
     CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 0);
     CoXlTestScatterMerge(2, 3); /* renders still queued */
     CoXlTestScatterMerge(2, 0);
+    CoXlTestScatterMerge(2, 0);
     CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 0);
     CoXlTestScatterMerge(2, 1); /* one more queued: the count starts again */
     CoXlTestScatterMerge(2, 0);
+    CoXlTestScatterMerge(2, 0);
     CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 0);
     CoXlTestScatterMerge(2, -1); /* no queue to read: not empty */
+    CoXlTestScatterMerge(2, 0);
     CoXlTestScatterMerge(2, 0);
     CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 0);
     CHECK(!fake_host_logged("scatter cut ends"));
     CoXlTestScatterMerge(2, 0);
     CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 1);
-    CHECK(fake_host_logged("the moving tile's scatter cut ends (build 1; the merge's render queue read empty for 2 level updates)"));
+    CHECK(fake_host_logged("the moving tile's scatter cut ends (build 1; the merge's render queue read empty for 3 level updates)"));
     CHECK(Count(kMerge) == 1);
 
     g_case = "a build that fails with renders queued";
@@ -179,7 +182,8 @@ int main(void)
     CoXlTestScatterMerge(2, 2);
     CoXlTestScatterMerge(2, 2);
     CoXlTestScatterMerge(2, 0);
-    CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 0);
+    CoXlTestScatterMerge(2, 0);
+    CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 0); /* one update short */
     CoXlTestScatterMerge(2, 0);
     CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 1);
     CHECK(fake_host_logged("scatter cut ends (build 2;"));
@@ -188,7 +192,9 @@ int main(void)
     CoXlTestScatterMerge(0, 0);
     CoXlTestScatterMerge(1, 0);
     CoXlTestScatterMerge(2, 0);
+    CoXlTestScatterMerge(2, 0);
     CoXlTestScatterMerge(0, 0);
+    CoXlTestScatterMerge(2, 0);
     CoXlTestScatterMerge(2, 0);
     CoXlTestScatterMerge(2, 0);
     CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 0);
