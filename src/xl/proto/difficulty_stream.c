@@ -86,7 +86,8 @@ enum
     kStreamRecord = 0xE0,        /* one location record */
     kStreamScanChunk = 64,       /* location records read per SafeRead while deciding */
     kStreamOutTimeout = 5000,    /* ms beyond kStreamOutRadius before a streamed location is removed */
-    kStreamRemoveBatch = 8       /* removals per removal pass (one frame) at most */
+    kStreamRemoveBatch = 8,      /* removals per removal pass (one frame) at most */
+    kStreamReplaceBatch = 32     /* stamps put back on new ground per pass at most (a tile's change flags hundreds) */
 };
 static const float kStreamStartRadius = 600.0f; /* kept at generation: inside this of the start point */
 static const float kStreamInRadius = 500.0f;    /* streamed: a player closer than this makes a location due */
@@ -137,6 +138,7 @@ typedef struct WorldStreamState
     uint32_t count, kept, deferred, bad;  /* locations, kept at the start, deferred, unreadable at capture */
     uint32_t bodiesUsed, bodySlots;       /* the mission world's physics bodies at the last scan, and its store */
     uint32_t spawned, broken, removed, respawned; /* streamed now, records skipped, removals and respawns (cumulative) */
+    uint32_t replaced;       /* removals because a tile changed the ground under them (cumulative) */
     uint32_t orderCount, orderCursor;     /* the due locations, nearest first */
     int captured, failed, generatorDone;  /* state, the capture was refused, the generator's op is at its count */
     int playerCount;
@@ -169,6 +171,7 @@ static uint8_t g_streamFormation[kStreamMaxLocations];   /* 1: a large formation
 static ULONGLONG g_streamOutSince[kStreamMaxLocations];  /* tick it first went beyond kStreamOutRadius (0: not out) */
 static uint8_t g_streamMission[kStreamMaxLocations];     /* 1: an important location's stamp (WorldStreamMissionLocked) */
 static float g_streamOut2[kStreamMaxLocations];          /* > 0: this slot's own removal radius, squared (a far window stamp) */
+static uint8_t g_streamReplace[kStreamMaxLocations];     /* 1: the ground under it changed (a tile came or went): out and in again */
 
 static SRWLOCK g_streamLock = SRWLOCK_INIT;
 static volatile LONG g_streamOwn;     /* the streamer's own call: the thread id inside it (0: none) */
@@ -194,6 +197,7 @@ static void WorldStreamClearLocked(void)
     g_stream.broken = 0;
     g_stream.removed = 0;
     g_stream.respawned = 0;
+    g_stream.replaced = 0;
     g_stream.orderCount = 0;
     g_stream.orderCursor = 0;
     g_stream.captured = 0;
@@ -223,6 +227,7 @@ static void WorldStreamClearLocked(void)
     memset(g_streamDetached, 0, sizeof g_streamDetached);
     memset(g_streamNeedsUnit, 0, sizeof g_streamNeedsUnit);
     memset(g_streamOutSince, 0, sizeof g_streamOutSince);
+    memset(g_streamReplace, 0, sizeof g_streamReplace);
 }
 
 /* Whether the whole range is committed and writable: the generator's records have their +0xA8 zeroed in place. */
@@ -382,6 +387,7 @@ static int WorldStreamRemoveLocked(uint32_t i)
     g_streamDue[i] = 0;
     g_streamOutSince[i] = 0;
     g_streamNeedsUnit[i] = 1;
+    g_streamReplace[i] = 0;
     if (g_stream.spawned > 0) g_stream.spawned--;
     g_stream.removed++;
     if (!g_stream.bodyNoted && g_stream.removed >= 20) g_stream.bodyPending = 1; /* read after the next scan (a few frames on) */
@@ -752,7 +758,7 @@ static void WorldStreamScanLocked(ULONGLONG now)
     }
     float keep = kStreamInRadius * kStreamInRadius;
     float out = kStreamOutRadius * kStreamOutRadius;
-    uint32_t order = 0, removes = 0, formationsDue = 0, bodies = 0, slots = 0;
+    uint32_t order = 0, removes = 0, replaces = 0, formationsDue = 0, bodies = 0, slots = 0;
     int budget = WorldStreamBodyStore(&bodies, &slots) && (float)bodies < kStreamFormationShare * (float)slots;
     g_stream.bodiesUsed = bodies; g_stream.bodySlots = slots;
     for (uint32_t i = 0; i < g_stream.count; i++)
@@ -765,6 +771,16 @@ static void WorldStreamScanLocked(ULONGLONG now)
             float dy = g_streamAt[i][1] - g_streamPlayerAt[p][1];
             float distance = dx * dx + dy * dy;
             if (distance < best) best = distance;
+        }
+        if (g_streamLive[i] && g_streamReplace[i]) /* its ground changed: out now, due again at once */
+        {
+            if (replaces < kStreamReplaceBatch && g_streamPoseGood[i] && !g_streamNeedsUnit[i] && g_streamUnit[i] != 0 && WorldStreamRemoveLocked(i))
+            {
+                replaces++;
+                g_stream.replaced++;
+                if (g_streamDeferred[i]) g_streamDue[i] = 1; /* a window slot is free now and enters again from the plan */
+            }
+            continue;
         }
         if (g_streamLive[i] && g_streamFormation[i]) continue; /* a far formation stays */
         if (g_streamLive[i])
