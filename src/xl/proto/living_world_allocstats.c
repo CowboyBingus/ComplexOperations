@@ -60,7 +60,7 @@ static void LwInstallAllocStats(void)
     int mode = GetEnvironmentVariableA("HELLFORGE_LW_ALLOC_STATS", t, sizeof t) > 0 ? t[0] - '0' : 0;
     if (mode < 0 || mode > 2) mode = 0;
     char x[4] = "", y[4] = ""; /* research instruments that read the byte counter */
-    if (mode && ((GetEnvironmentVariableA("HELLFORGE_XL_ALLOCS", x, sizeof x) > 0 && x[0] == '1') ||
+    if (mode && ((GetEnvironmentVariableA("HELLFORGE_XL_ALLOCS", x, sizeof x) > 0 && x[0] == '1') || MemProbeOn() ||
                  (GetEnvironmentVariableA("HELLFORGE_LW_TEST_ALLOC", y, sizeof y) > 0 && y[0] == '1')))
     { Note("living world: allocator statistics kept: an allocation instrument reads them"); return; }
     if (mode) LwAsSet(mode);

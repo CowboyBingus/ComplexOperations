@@ -104,6 +104,10 @@ static float g_streamObserverAt[2] = {0.0f, 0.0f};
 
 typedef uint8_t (*WorldStreamSpawnFn)(uint8_t* pass, uint8_t* record, uint8_t* context);
 static WorldStreamSpawnFn g_streamSpawn;
+/* The memory probe's view of one generator call (difficulty_world_memprobe.c). */
+typedef struct { uint32_t resume; LONG64 commit, da; uint32_t handles; LARGE_INTEGER t0; uintptr_t world; } MemProbeSpawnCall;
+static int MemProbeSpawnBefore(MemProbeSpawnCall* c, uint8_t* pass, uint8_t* context);
+static void MemProbeSpawnAfter(const MemProbeSpawnCall* c, uint8_t* pass);
 /* The engine calls SpawnStamps makes for a stamp unit: SpawnUnit (the world interface's +0x380) and the set-data call
  * after it (the +0xB8 object's +0x10 object, method at +8), whose 24-byte argument is {&location index, 2, 4, 0}.
  * DestroyUnit is the table's +0x388 entry. */
@@ -712,7 +716,10 @@ static uint8_t WorldStreamSpawn(uint8_t* pass, uint8_t* record, uint8_t* context
     if (g_streamOwn == (LONG)GetCurrentThreadId()) return g_streamSpawn(pass, record, context);
     InterlockedIncrement(&g_streamInside);
     int watched = WorldStreamBegin(pass, record, context);
+    MemProbeSpawnCall probe; /* research (HELLFORGE_XL_MEMPROBE=1): what each generator call keeps */
+    int probing = MemProbeOn() && g_world.current > 1.0f && MemProbeSpawnBefore(&probe, pass, context);
     uint8_t result = g_streamSpawn(pass, record, context);
+    if (probing) MemProbeSpawnAfter(&probe, pass);
     if (watched) WorldStreamEnd(pass);
     InterlockedDecrement(&g_streamInside);
     return result;

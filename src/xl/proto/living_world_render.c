@@ -37,6 +37,7 @@ static void LwRenderEnd(uintptr_t state)
 #ifdef CO_RESEARCH
     LwDelayRender(); /* the render thread's test delay */
 #endif
+    if (MemProbeOn()) g_memProbeDevice = state - 0x1340u; /* the memory probe reads the device (0x6CEDA1: lea rcx, [rdi+0x1340]) */
     LwRenderShrink(state + 0x88);
     LwRenderShrink(state + 0xB0);
 }

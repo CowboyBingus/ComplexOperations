@@ -65,6 +65,7 @@
 #include "proto/living_world.c"
 #include "proto/difficulty_tacmap.c"
 #include "proto/test_daylight.c"
+#include "proto/difficulty_world_memprobe.c"
 #pragma clang diagnostic pop
 
 /* The index query (0xC05360: rcx index, edx key, r8d, r9 buffer, [rsp+0x28] its places) writes at most its places and
