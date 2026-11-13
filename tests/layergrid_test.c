@@ -35,6 +35,7 @@ int CoXlTestStreamQueued(uint32_t i);
 void CoXlTestStreamScan(void);
 uint32_t CoXlTestStreamScanFrames(int frames);
 uint32_t CoXlTestStreamDrain(double ms, uint32_t* waiting);
+void CoXlTestStreamOutSince(uint32_t i, unsigned long long since);
 void CoXlTestStreamSlotState(uint32_t i, int* live, int* due, uint64_t* unit);
 int CoXlTestLayerWhy(uint64_t unit, uint64_t field, int* slot);
 float CoXlTestTraceGridAt(int slot, float x, float y);
@@ -332,6 +333,18 @@ int main(void)
     CHECK(live && unit == 0x1000u * (q + 1));
     CoXlTestStreamObserver(0, 0.0f, 0.0f);
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+
+    Start("removals out of reach wait in the queue once each, however many scans ask");
+    StreamGame();
+    Stream(10);
+    for (uint32_t k = 0; k < 10; k++) { Slot(k, AX + 1000.0f, AY + 4.0f * (float)k, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
+    CoXlTestStreamObserver(1, AX, AY);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && g_destroys == 0);
+    CHECK(CoXlTestStreamDrain(1.0e9, &waiting) == 4 && waiting == 4); /* 8 a scan when the player is near: 4 went */
+    CHECK(CoXlTestStreamScanFrames(0) == 0);                            /* the 2 not asked for yet, and none twice */
+    CHECK(CoXlTestStreamDrain(1.0e9, &waiting) == 4 && waiting == 2 && g_destroys == 8);
+    CHECK(CoXlTestStreamDrain(1.0e9, &waiting) == 2 && waiting == 0 && g_destroys == 10);
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
 
     Start("a level location's new unit waits under the window's budgets");
     StreamGame();
