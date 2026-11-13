@@ -77,6 +77,39 @@ int co_ui_guarded(void);
 /* What a cave's callback sees: the registers as the game had them, in the order the cave pushed them (co_counts.c). */
 typedef struct CoRegs { uint64_t r15, r14, r13, r12, r11, r10, r9, r8, rdi, rsi, rbp, rbx, rdx, rcx, rax, flags; } CoRegs;
 
+/* The loadout cards for eight (co_cards.c). The card's height in reference units, which the caves of every store of
+ * it read (780, the game's, or 498). The callbacks: `open` before the init's card loop and `ready` behind it (rdi = the
+ * screen), `layout` in front of each of its updates (rcx = the screen). */
+extern float co_card_height;
+void co_cards_open(CoRegs* regs);
+void co_cards_ready(CoRegs* regs);
+void co_cards_layout(CoRegs* regs);
+void co_cards_install(uintptr_t game);
+/* Eight cards for a complex operation, more than four players, or a player on a card past the fourth (NULL: not read). */
+int co_cards_eight(int complex, uint32_t players, const int32_t cardPlayers[8]);
+/* A card's place for a layout: the game's (nothing set), the game's four cards, or eight in two rows. x is the anchor
+ * in the 1920-wide container, y the bottom in it; the figure's scale and its y below the card's top. With four, cards
+ * 5 to 8 are parked below the window. */
+enum { CO_CARDS_GAME, CO_CARDS_FOUR, CO_CARDS_EIGHT };
+typedef struct CoCardPlace { float x, y, scale, figureScale, figureY; } CoCardPlace;
+float co_cards_scale(float rootHeight, float hudScale);
+int co_cards_place(int mode, float rootHeight, float hudScale, uint32_t card, CoCardPlace* p);
+/* An eight-card figure's camera (distance and height in metres) and its frame's clip, as a share of the frame's height
+ * from its bottom: from the slots' top to the plate. Heights in card units: the card, +0x1C30 and the slots' top. */
+typedef struct CoCardFigure { float distance, height, clipY, clipHeight; } CoCardFigure;
+void co_cards_figure(float rootHeight, float cardHeight, float partHeight, float slotsTop, CoCardFigure* out);
+/* The size a widget is at, or a running size animation's target in the table `tweens`: 1 when animating. */
+int co_cards_size_target(uintptr_t widget, uintptr_t tweens, float out[2]);
+/* An open screen's cards from four to eight: the slot to 498, each card part sized by 780 to its end at once and an
+ * open slots panel collapsed. */
+void co_cards_to_eight(uintptr_t screen);
+#ifdef CO_TEST
+void co_cards_test_mode(int mode, uintptr_t screen);
+int co_cards_test_get_mode(void);
+void co_cards_test_clock(uint64_t (*clock)(void));
+unsigned co_cards_test_complex_reads(void);
+#endif
+
 /* The stack fixes' callbacks for avatars (co_avatars.c), in the counts' caves. `install` once with game.dll's base. */
 void co_avatars_install(uintptr_t game);
 void co_avatars_dist_sum(CoRegs* regs);
@@ -118,6 +151,8 @@ typedef struct CoComplexNeeds
 enum { CO_HOST_ROW_NONE, CO_HOST_ROW_OFF, CO_HOST_ROW_ON };
 enum { CO_MISSION_NORMAL, CO_MISSION_COMPLEX, CO_MISSION_LEAVE };
 const char* co_complex_refusal(const CoComplexNeeds* needs);
+/* 1 when the refusal is that the game's code is not the build this mod was made for. */
+int co_complex_refused_build(const CoComplexNeeds* needs);
 int co_complex_decision(int is_host, int own_on, int host_row, uint32_t mission_seed);
 int co_complex_stays(int own_on, int host_row);
 /* One generation's decision. A retry of the same generation (level init again with the retry flag, another seed in
@@ -187,6 +222,8 @@ int co_reports_get(const CoReports* reports, uint64_t peer);
 /* At launch, as host: 1 when the mission's mark must go, because this machine's part is off or a machine in a slot
  * (`present`, 0 for a free one; `own` is this machine) is not known to be able. The override text decides for itself. */
 int co_launch_clears(const CoReports* reports, const uint64_t* present, uint32_t slots, uint64_t own, int own_on, int override_set);
+/* co_launch_clears on what LaunchClear reads at a launch now: 1 the mark goes, 0 it stays, -1 a client's or unread. */
+int co_launch_would_clear(void);
 /* A join, as host: into a mission whose seed is marked only a machine known to be able comes; an unknown one is held
  * for the limit (its message is on the way), then refused. */
 enum { CO_JOIN_ADMIT, CO_JOIN_HOLD, CO_JOIN_DENY };
@@ -251,6 +288,8 @@ const char* co_mark_install(uintptr_t game);
 void co_mark_entry(uintptr_t game, uint32_t slot, uint32_t difficulty, uint32_t operation_seed, uintptr_t entry, int rolls);
 
 const CoComplexNeeds* co_capacity_needs(void);
+/* 1 once the poll has settled; before that co_complex_on() is 0 though the part may still come on. */
+int co_capacity_settled(void);
 int co_complex_on(void);
 /* Where a region of the generator's block lies and how many elements it holds (HF_GEN_ names): 0 until settled and
  * moved, so code that reads the block finds nothing to read before. `block` is the block's size. */

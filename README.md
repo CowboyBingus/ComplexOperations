@@ -143,17 +143,32 @@ Limits that remain:
 
 The loadout screen keeps four arrays by player or card: the players' records, a map from player to card, its reverse
 and the cards. A build for eight allocates the screen bigger and moves the four arrays to arrays of eight at its end.
-430 code sites address the new places or count to eight; 43 more go through code beside the game's. Among those are
+430 code sites address the new places or count to eight; 59 more go through code beside the game's. Among those are
 15 guards rebuilt for eight: an index of eight or more, or none, skips the access as before.
 
-The eight cards stand in one row at half the game's size, 232 reference units apart, so they do not overlap.
+The screen shows eight cards for a complex operation, with more than four players, or when a card past the fourth has
+a player. Otherwise it keeps the game's four cards, and cards 5 to 8 wait below the window. The mode is chosen when the
+screen opens. While it is open, four cards turn into eight when the rule turns true, never back. The players are checked
+every update; the complex pick is checked four times a second, because that check reads the mission table.
+
+Eight cards stand in two rows of four. Each is 498 reference units tall instead of 780, and both rows scale together
+to fit between the screen's BRIEFING and LOADOUT tabs and its bottom line: 0.75 of the game's size at 16:9 and 21:9.
+The own card keeps its slots open with the mission stratagems, as in the game; the other cards keep theirs collapsed.
+Each figure's camera comes closer, so the figure keeps the game's size against its card. The helmet sits just under the
+name plate, and the figure is cut at the top of the slots.
+
+Each of the 15 places that store a card's height reads it from the mod's memory instead, through code beside the
+game's: the card's constructor, the screen's and the card's resizes, and the expand and collapse animations. A
+callback before the screen's card loop picks the mode and that height. Another places the cards behind the loop, and a
+third places them before each update of the screen.
 
 Each card's 3D figure has a record in the game's placement system, which holds eight. The weapon pictures on the screen
 use records 4 to 7, so cards 5 to 8 take records 8 to 11. The build for eight moves the eight records to a block of
 twelve in the mod's memory and gives 228 code fields the distance to it. The loops over the records, the player
-lookup and the figure's place in the shared image count to twelve, through 11 changed sites and 10 caves. Two of
+lookup and the figure's place in the shared image count to twelve, through 13 changed sites and 10 caves. Two of
 the caves find the owner of records 8 to 11 for the figure's weathering and wound decals. The figures
-draw as tiles of a 4 x 2 image at half width.
+draw as tiles of a 4 x 2 image at half width. The figure's update sizes the image again whenever the screen is not
+1920 x 1080 pixels; two of the sites keep that size at half width too.
 
 The figures move only when no record is in use. When they cannot move, cards 5 to 8 show no figure, as before.
 
@@ -173,7 +188,8 @@ Limits that remain:
 
 - The text on the cards is half size too: small but legible at 1280 x 720.
 - The figures of players 5 to 8 are each seen in a game, on host and joiner, in sessions of two players. More than
-  two cards at once are not yet seen.
+  two cards at once are not yet seen. Those runs were at 1280 x 720, before the fix of the figure's run-time width:
+  the figures there were drawn twice as wide as they should be.
 - The figures of players 6 to 8 showed the frost their Helldiver wore after arriving. Wound decals on the figures of
   players 5 to 8 are not yet seen in a game.
 
@@ -279,6 +295,29 @@ Measured on one city mission at difficulty 11, 8 runs without the mod and 4 with
 - Time until the navigation grid has no tiles left to build: about 1 s longer on average (99.0 s against 97.9 s;
   98.1 to 99.7 s against 97.3 to 98.9 s).
 - The navigation build scheduler: 5 to 6 µs a call on average, at most 43 µs, against 0.5 µs.
+
+### On the war table
+
+A banner beside the native operation panel, and beside the briefing's mission panel, says what a level-11 operation
+or mission starts as. It is drawn the way Know Your Constellation draws: the engine's Gui through the game's Lua, in
+the game's body font and its panel inks.
+
+| Banner | When |
+|---|---|
+| `COMPLEX OPERATION`, `3 MISSIONS ON ONE 16 KM MAP` | The launch makes a complex mission of it: yellow edge and title. |
+| `STANDARD OPERATION`, `EACH MISSION ON ITS OWN MAP` | The part is on and the roll says normal. |
+| `COMPLEX OPERATIONS OFF` | The part is off: `OFF ON THE HOST`, `OFF ON THIS PC` or `NOT THIS GAME BUILD`. |
+| `WAITING FOR HOST` | A client that has no answer from the host yet. |
+| `STARTS AS STANDARD` | The briefing, as host: a squad member's PC is not known to be able, so the launch drops the mark. |
+
+- The state comes from the functions the launch decides with, on the same inputs. A client whose answer from the host
+  is on takes the operation's roll from the board, so a table filled before that answer still shows the right state.
+- A client's briefing cannot tell whether the host's launch will drop the mark: it shows the operation's roll, and the
+  host's briefing shows `STARTS AS STANDARD`.
+- Until this PC's check of the part settles, no banner shows.
+- Other levels and other screens get no banner.
+- The banner goes right of the panel, above its top line, or one column further right when that does not fit.
+  Know Your Constellation's box never reaches either place.
 
 ### On every level
 
@@ -589,8 +628,9 @@ Pelican), which are not in this folder.
 | `scripts/sites/difficulty_sites.py` | The HiveMind's difficulty sites and their caves for eight. |
 | `scripts/sites/extract_sites.py` | The Pelican's seat caves and seat block, and the booster cave, for eight. |
 | `src/co_extract.c` | The check of the Pelican's seat nodes, and the booster update over eight. |
-| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards and the mission result's slots in both managers' states, the Activity record's participants, answers and post, and the join limit without the managers. The mission summary in each build. |
+| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards and the mission result's slots in both managers' states, the Activity record's participants, answers and post, and the join limit without the managers. The mission summary in each build. The card height's 15 caves, run with the slot at two heights. |
 | `tests/figures_test.c` | The figure records' move and way back, the game's code on the moved records, the caves for records 8 to 11, the refusals. |
+| `tests/cards_test.c` | The loadout cards' layout: eight cards in two rows at nine screen sizes against the predicted pixels, the HUD scale's limit, the game's four with cards 5 to 8 below the window, the rule for eight, and the switch from four to eight on a stand-in screen. |
 | `tests/extract_test.c` | The difficulty caves for one to eight players, the seat block, the node checks, the attach node caves and the boosters. Refusal by part and rollback of a failed write. |
 | `src/co_ui.c` | The tables a build for eight moves at run time: the galactic map's cursors, the squad HUD's panel, the name tags' rows. Guards for four, the move, its undo, the hook of the HUD's init. |
 | `src/co_ui_sites.h` | Their code sites and caves. Generated; do not edit. |
@@ -607,6 +647,9 @@ Pelican), which are not in this folder.
 | `tests/engine_test.c` | The engine's sites: written, refused on changed code, taken back on a failed write. |
 | `src/co_roll.c` | Whether an operation is a complex operation: an integer hash of its seed and planet. |
 | `tests/roll_test.c` | The roll's fixed answers and its share of operations at 5, 25 and 50 %. |
+| `src/co_tag.c` | The war-table banner: its state, the war table's readers, its place and its plan. |
+| `src/co_lua.c`, `co_gui.c` | The game's Lua and the engine's Gui from C, as Know Your Constellation's; a hook on `lua_pcall`. |
+| `tests/tag_test.c` | The banner's states, readers and launch prediction; its drawing through a real `lua51.dll` (`CO_LUA51_PATH`). |
 | `src/xl/` | The extra large world of a complex operation. `co_complex_start` (`src/co_capacity.c`) installs it once the part is on. |
 | `src/xl/co_spawners.c`, `co_clusters.c`, `co_city.c`, `co_pocket.c`, `co_status.c`, `co_locate.c` | A complex level's lists and searches, each beside HellForge's own step: the game's or HellForge's value on any other level. |
 | `src/xl/co_objectives.c`, `co_markers.c`, `co_text.c` | The objective list within 30 places, the check of the map's 16 markers, the grouped HUD rows' texts. |
@@ -637,7 +680,7 @@ Pelican), which are not in this folder.
 ## Log
 
 The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.log` and start with `hellpods:`,
-`players:`, `session:`, `engine:`, `extraction:` or `navigation:`.
+`players:`, `session:`, `engine:`, `extraction:`, `navigation:` or `war-table tag:`.
 
 | Line | Meaning |
 |---|---|
@@ -683,6 +726,11 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `navigation: nav world N is not armed for stock's 8 x 8 tiles (...)` | That normal level builds all 32 x 32 tiles; the reason stands in brackets. |
 | `navigation: ...; normal levels build the whole 32 x 32 grid` | The engine's bytes are not the reviewed ones: the two tile stubs are off. |
 | `difficulty: extra large maps: destroy of a live unit held until the world's destroy list had room (N so far)` | On a complex mission the game's destroy list was full; the destroy waits a frame. Logged at counts 1, 2, 4 and so on. |
+| `war-table tag: map, operation N: complex, banner x ...` | The banner for that state; also `briefing, operation N`. |
+| `war-table tag: map, operation N: not level 11, no banner` | That operation is another level. |
+| `war-table tag: no banner until this PC's check of the complex part has settled` | Once, while the part's check runs. |
+| `war-table tag: removed (the screen changed; N unbalanced frames)` | The banner's GUI is gone. N above 0 means the Lua stack was not left as found. |
+| `war-table tag: off: ...` | The banner is off: the game's Lua or the war table's code is not the reviewed one. |
 | `TEST BUILD, not for play` | Built with `--test-first-slot`. |
 | `the session lists count to four as before` | The count change is off; the reason stands before it. |
 | `the bridge is not the one with the eight-pod bay` | The level data is missing: four pods. |

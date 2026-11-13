@@ -23,6 +23,8 @@ typedef struct CoCountCave
     uint16_t jumps[3];        /* where the cave's jumps into the game have their rel32; 0 ends the list */
     uint16_t callAt;          /* where the callback's address goes */
     uint8_t callback;         /* its number in kCountCallbacks; 0xFF for none */
+    uint16_t dataAt;          /* where a data slot's address goes */
+    uint8_t data;             /* its number in kCountData; 0xFF for none */
 } CoCountCave;
 /* An instruction whose 32-bit field at `at` addresses a figure record of UPS; the move adds its distance there. */
 typedef struct CoFigureRel { uint32_t rva; uint8_t size, at, old[12]; } CoFigureRel;
@@ -35,7 +37,7 @@ typedef struct CoFigureRel { uint32_t rva; uint8_t size, at, old[12]; } CoFigure
 #define CO_FIGURE_CAVE_RELS (sizeof kCoFigureCaveRels / sizeof kCoFigureCaveRels[0])
 /* Room for the caves to grow into; allocated near game+0x1000000, so every jump back stays within a rel32 (checked per
  * jump when the caves are placed). */
-#define CO_CAVE_ROOM 0x4000u
+#define CO_CAVE_ROOM 0x5000u
 _Static_assert(sizeof kCoCountCode <= CO_CAVE_ROOM, "the caves' code must fit their room");
 /* A site's or cave's group. Guards go in and out with the counts: a table that stays at four entries is safe only
  * while every access to it is guarded. The rest depend on the build. The loadout screen's eight records and cards
@@ -482,15 +484,18 @@ static void SeatNode(CoRegs* regs) { regs->r8 = co_seat_node((uintptr_t)regs->rd
 /* B1, the per-frame booster update; rcx is B. */
 static void Boosters(CoRegs* regs) { co_boosters_update((uintptr_t)regs->rcx); }
 
-/* By the numbers in gen_count_sites.py; the empty slots (11 to 13, 20 to 29, 37 to 39) are free for other caves. */
+/* By the numbers in gen_count_sites.py; the empty slots (12, 13, 20 to 29, 37 to 39) are free for other caves. */
 static void (*const kCountCallbacks[])(CoRegs*) = {
     FindByRsi, FindByR11, JoinGate, ClearValueKeys, LastSlotState, MessageFits, JoinSlot, JoinIndex,
-    HostAppend, HostBuild, HostScores,
+    HostAppend, HostBuild, HostScores, co_cards_layout, co_cards_open, co_cards_ready,
     [14] = LootIndex, LootRow, Participant, Record, co_avatars_dist_sum, co_avatars_enc_spread, co_avatars_dormancy,
     [30] = Waiting, AnswerRaxRsi, AnswerR10R11, AnswerRaxRdi, Dropped, RecordWaiting, DroppedRdx,
     [40] = SeatData, SeatList, SeatValid, Boosters, SeatNode,
 };
 #define CO_CALLBACKS (sizeof kCountCallbacks / sizeof kCountCallbacks[0])
+/* The data the caves read, by the numbers in DATA(n) of the generators: the loadout card's height (loadout_sites.HEIGHTS). */
+static void* const kCountData[] = {&co_card_height};
+#define CO_DATA (sizeof kCountData / sizeof kCountData[0])
 
 /* The session init clears the keys 1 to 3 itself; its hook (co_session.c) calls this behind it. */
 void co_counts_session_init(void) { if (g_on) ClearValueKeys(NULL); }
@@ -936,6 +941,8 @@ static void Apply(uintptr_t context, uintptr_t extension)
         }
         if (c->callback != 0xFF && (c->callback >= CO_CALLBACKS || kCountCallbacks[c->callback] == NULL))
         { co_log("session: the cave at game+0x%X has no callback %u; %s", c->rva, (unsigned)c->callback, kStays); return; }
+        if (c->data != 0xFF && c->data >= CO_DATA)
+        { co_log("session: the cave at game+0x%X has no data %u; %s", c->rva, (unsigned)c->data, kStays); return; }
     }
     g_caves = co_alloc_near(g_game + 0x1000000u, CO_CAVE_ROOM);
     if (g_caves == 0 || sizeof kCoCountCode > CO_CAVE_ROOM) { co_log("session: no free memory near the game's code; %s", kStays); return; }
@@ -959,6 +966,11 @@ static void Apply(uintptr_t context, uintptr_t extension)
         {
             uint64_t callback = (uint64_t)(uintptr_t)kCountCallbacks[c->callback];
             memcpy(cave + c->callAt, &callback, 8);
+        }
+        if (c->data != 0xFF)
+        {
+            uint64_t data = (uint64_t)(uintptr_t)kCountData[c->data];
+            memcpy(cave + c->dataAt, &data, 8);
         }
     }
     /* The destroy caves' record fields lead to the figures' block; FiguresReady checked their reach. */

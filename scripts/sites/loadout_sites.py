@@ -562,7 +562,9 @@ def _caves():
         (0x1466F26, '48c787d8270000ffffffff', clear + ' jmp game+0x1466F52', '1465840 map/rev clear'),
         # init card loop: r13d is the function's 4 (enum value at 0x1466944, stride at 0x14669EA) and the card loop
         # count from here (sub r13,1 at 0x1466C4D); r12 walks the card x table, which gets eight entries
-        (0x1466AD4, '4c8d25dd24d700', 'mov r13d, 8\n lea r12, [rip+1f]\n jmp game+0x1466ADB\n .balign 4\n1:\n' + table, '1465840 card positions'),
+        # the cards' mode for this opening (co_cards_open) comes first: the constructor in the loop reads its height
+        (0x1466AD4, '4c8d25dd24d700', 'CALL(%d)\n mov r13d, 8\n lea r12, [rip+1f]\n jmp game+0x1466ADB\n .balign 4\n1:\n' % CARDS_OPEN + table,
+         '1465840 card positions'),
         # card loop of 1471740: edi=4 at 0x147176D is also a message value ([rsp+0x54] of event 0xFBC8E61E), so the
         # count is set where the loop starts
         (0x1471848, '488d9e783a0500', 'mov edi, 8\n lea rbx, [rsi+%s]\n jmp game+0x147184F' % C(0x53A78), '1471740 cards'),
@@ -585,7 +587,7 @@ def _caves():
         (0x147061F, '41c6859539270000', ''.join(' cmp byte ptr [rsp+0x%x], 0\n jne %d1f\n mov qword ptr [r13+0x%x], 0\n%d1:\n'
                                                 % (0x38 + k, k, NR + k * 0x9F0 + 0x9E8, k) for k in range(4, 8)) +
          ' mov byte ptr [r13+0x273995], 0\n jmp game+0x1470627', '146fc40 records 4..7 peer id clear'),
-    ] + CARD_SCALE + FIGURE_SLOT + GUARDS8
+    ] + CARD_SCALE + FIGURE_SLOT + GUARDS8 + HEIGHTS + LAYOUT
 
 # Eight cards at the game's size overlap: the init card loop sets each card root's scale to 0.5 before its pivot, so
 # the panel, its text and its figure image draw at half size. rsi is the card for the whole loop and rcx, rdx are
@@ -593,6 +595,58 @@ def _caves():
 CARD_SCALE = [
     (0x1466B38, '48c74424400000003f', 'mov rcx, rsi\n mov rdx, 0x3f0000003f000000\n call game+0x1447ED0\n'
      ' mov qword ptr [rsp+0x40], 0x3f000000\n jmp game+0x1466B41', '1465840 init card loop: card scale 0.5'),
+]
+
+# The card's height, 780 in the game, is a store of an immediate at each place that sizes or tweens the card: the
+# constructor's root, +0x1C30, +0x1D40 and +0x5848, L's and the card's resizes of +0x1C30 and +0x1D40, and the expand
+# and collapse tweens (0x1451BB0, from and to both ways in 0x189E2F0). That is every 780.0 immediate of L and the card
+# code but the figure's own 780 x 780 (0x18A0DBE..0x18A0F00). Each store reads the height from the mod's slot instead
+# (DATA(CARD_HEIGHT), co_cards.c), so one build can draw the game's cards or shorter ones. rax is kept with a push; no
+# flag is written.
+# (rva, [rsp+d] or [rbp+d] of the store, its length, note)
+CARD_HEIGHT = 0
+_HEIGHT_STORES = [
+    (0x146C9CE, 'rsp', 0x5C, 8, '146c2f0 +0x1C30 size'),
+    (0x146C9EF, 'rsp', 0x64, 8, '146c2f0 +0x1D40 size'),
+    (0x146CEDB, 'rsp', 0x64, 8, '146c2f0 +0x1C30 size'),
+    (0x146CEFF, 'rsp', 0x5C, 8, '146c2f0 +0x1D40 size'),
+    (0x1471363, 'rsp', 0x64, 8, '1470d90 +0x1C30 size'),
+    (0x1471384, 'rsp', 0x54, 8, '1470d90 +0x1D40 size'),
+    (0x189AE82, 'rbp', -0x2C, 7, '189ae00 card root size'),
+    (0x189AEE2, 'rbp', -0x2C, 7, '189ae00 +0x1C30 size (the init end makes it 42)'),
+    (0x189AF49, 'rbp', -0x2C, 7, '189ae00 +0x1D40 size (the init end makes it 42)'),
+    (0x189B2F5, 'rbp', -0x3C, 7, '189ae00 +0x5848 size'),
+    (0x189E149, 'rsp', 0x94, 11, '189e080 +0x1C30 tween to'),
+    (0x189E187, 'rsp', 0x94, 11, '189e080 +0x1D40 size'),
+    (0x189E23C, 'rsp', 0x94, 11, '189e080 +0x1D40 tween to'),
+    (0x189E38D, 'rbp', -0x35, 7, '189e2f0 +0x5848 tween 780 <-> 128'),
+    (0x189E3EA, 'rbp', -0x45, 7, '189e2f0 +0x1D40 tween 780 <-> 206'),
+]
+
+def _height_bytes(base, disp, size):
+    if size == 7: return 'c745' + struct.pack('<b', disp).hex() + '00004344'
+    if size == 8: return 'c74424' + struct.pack('<B', disp).hex() + '00004344'
+    return 'c78424' + le32(disp) + '00004344'
+
+def _height_cave(rva, base, disp, size, note):
+    at = disp + 8 if base == 'rsp' else disp       # the push moves rsp
+    return (rva, _height_bytes(base, disp, size),
+            'push rax\n mov rax, DATA(%d)\n mov eax, dword ptr [rax]\n mov dword ptr [%s%+#x], eax\n pop rax\n jmp game+0x%X'
+            % (CARD_HEIGHT, base, at, rva + size), 'card height from the slot: ' + note)
+
+HEIGHTS = [_height_cave(*h) for h in _HEIGHT_STORES]
+
+# The screen-set update hands L its update with a tail jump (0x1497C45, the case for L of 0x1497920; the only reference
+# to 0x1468320), after the canvas refit of the same update. The layout callback (co_cards.c) runs there every frame L is
+# updated, with rcx = L. The jump leaves the stack as at a function's entry; CALL aligns it and keeps rcx and xmm0..5.
+CARDS_LAYOUT = 11
+CARDS_OPEN = 12
+CARDS_READY = 13
+# Behind the init's card loop (0x1466C57, rdi = L) the cards are placed once: some raisers of a card's opacity run
+# outside L's update (0x1470D90 from 0xB8FF69 and 0xBA5B09, 0x189D120 from 0xB9023C and 0xBB8B8C).
+LAYOUT = [
+    (0x1497C45, 'e9d606fdff', 'CALL(%d)\n jmp game+0x1468320' % CARDS_LAYOUT, '1497920 L update: the cards\' layout first'),
+    (0x1466C57, '488d9fa81f0d00', 'CALL(%d)\n lea rbx, [rdi+0xd1fa8]\n jmp game+0x1466C5E' % CARDS_READY, '1465840 init: the cards placed'),
 ]
 
 # The figure preview has four slots (a z table of four, a viewport switch with cases 0 to 3); slot 4 and up take the

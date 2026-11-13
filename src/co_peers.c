@@ -100,21 +100,29 @@ static const uint8_t kLaunch[11] = {0x40, 0x53, 0x55, 0x56, 0x48, 0x81, 0xEC, 0x
 typedef uint64_t (*LaunchFn)(uint64_t unused, uint64_t out, uint64_t planet, uint64_t placement, uint64_t difficulty);
 static LaunchFn g_launch;
 
-static void LaunchClear(uint32_t placement, uint32_t difficulty)
+/* The launch's inputs as this machine reads them now; the war-table tag's briefing asks the same. -1 a client (its
+ * string is the host's) or a read failed, else co_launch_clears' answer. */
+int co_launch_would_clear(void)
 {
-    const uint64_t war = Pointer(g_peers.game + CO_WAR_OBJECT), session = Pointer(g_peers.game + CO_SESSION_OBJECT);
-    const uint64_t state = Pointer(g_peers.game + CO_GAME_STATE);
+    const uint64_t session = Pointer(g_peers.game + CO_SESSION_OBJECT), state = Pointer(g_peers.game + CO_GAME_STATE);
     uint64_t present[8] = {0}, own = 0;
-    uint32_t count = 0;
     uint8_t override = 1;
     HfSession s = {0};
-    if (war == 0 || session == 0 || state == 0 || !HAS(session) || g_coApi->read((uintptr_t)war + TABLE_COUNT, &count, 4) != 0) return;
+    if (session == 0 || state == 0 || !HAS(session)) return -1;
     g_coApi->session(g_coMod, &s);
-    if (s.role == HF_SESSION_JOINER) return; /* a client's string is the host's */
-    if (g_coApi->read((uintptr_t)state + 0xB0, &override, 1) != 0 || g_coApi->read((uintptr_t)session + OWN_PEER, &own, 8) != 0) return;
+    if (s.role == HF_SESSION_JOINER) return -1;
+    if (g_coApi->read((uintptr_t)state + 0xB0, &override, 1) != 0 || g_coApi->read((uintptr_t)session + OWN_PEER, &own, 8) != 0) return -1;
     const uint32_t slots = co_managers_moved() ? CO_PLAYERS : 4u;
     for (uint32_t i = 0; i < slots && i < 8u; i++) g_coApi->read((uintptr_t)session + HOST_SYNC + 0x20u + i * 0x38u, &present[i], 8);
-    if (!co_launch_clears(&g_peers.reports, present, slots < 8u ? slots : 8u, own, co_complex_on(), override != 0)) return;
+    return co_launch_clears(&g_peers.reports, present, slots < 8u ? slots : 8u, own, co_complex_on(), override != 0);
+}
+
+static void LaunchClear(uint32_t placement, uint32_t difficulty)
+{
+    const uint64_t war = Pointer(g_peers.game + CO_WAR_OBJECT);
+    uint32_t count = 0;
+    if (war == 0 || g_coApi->read((uintptr_t)war + TABLE_COUNT, &count, 4) != 0) return;
+    if (co_launch_would_clear() != 1) return;
     if (count > TABLE_ENTRIES) count = TABLE_ENTRIES;
     for (uint32_t i = 0; i < count; i++)
     {

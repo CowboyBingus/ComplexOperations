@@ -231,6 +231,7 @@ int co_capacity_poll(uint64_t now_ms)
 
 const CoComplexNeeds* co_capacity_needs(void) { return &g_capacity.needs; }
 int co_complex_on(void) { return g_capacity.settled && g_capacity.on && CoXlRecords() >= 0; }
+int co_capacity_settled(void) { return g_capacity.settled; }
 
 uint32_t co_gen_at(int region) { return region >= 0 && region < HF_GEN_REGIONS ? g_capacity.have.regions[region].at : 0; }
 uint32_t co_gen_places(int region) { return region >= 0 && region < HF_GEN_REGIONS ? g_capacity.have.regions[region].places : 0; }
@@ -240,4 +241,5 @@ uint32_t co_gen_block(void) { return g_capacity.have.block_bytes; }
 void co_capacity_test_commit(uint32_t mb) { g_commitTest = mb; }
 /* A machine whose complex part is on or off, for the parts that only ask. */
 void co_capacity_test_on(int on) { g_capacity.settled = 1; g_capacity.on = on; }
+void co_capacity_test_unsettled(void) { g_capacity.settled = 0; g_capacity.on = 0; }
 #endif
