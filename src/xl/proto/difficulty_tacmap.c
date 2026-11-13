@@ -15,7 +15,9 @@
 #define TAC_SHOW_ON_MAP 0x3326590u
 #define TAC_GUARD_FORCE 0x33265C0u
 #define TAC_EXTRACTION 0x33266F0u
-#define TAC_AVATARS 0x3326D20u     /* M: active +0x6C, owned +0x70, descriptors M + 0x110 + 8i, records M + 0x547830 + 0x78i */
+#define TAC_AVATARS 0x3326D20u     /* M: active +0x6C, owned +0x70, descriptors M + 0x110 + 8i, records TacRecord */
+#define TAC_RECORDS 0x547830u      /* the game's offset of the records in M: flags +0 (4: waypoint), waypoint +0x50 */
+#define TAC_RECORD_SIZE 0x78u
 #define TAC_NAMES 0x347CED8u       /* [..] + 0xC0 j, j < 8: peer +0, name +0x08 */
 #define TAC_MISSION_MODE 0x33266A0u /* [[..] + 0x40] == 4: no territory, as the game's map */
 #define TAC_GUARD_TYPES 0x32FCDE0u /* rows of 32 bytes; a row whose +0xC is set is never drawn */
@@ -147,6 +149,10 @@ static void TacName(uintptr_t game, uint64_t peer, char* out, size_t room)
     }
 }
 
+/* Avatar i's record in the manager m. A build for eight moves the records behind the manager's old end, and MapPing
+ * writes the waypoint there, so the offset is the mover's. */
+static uintptr_t TacRecord(uintptr_t m, uint32_t i) { return m + co_managers_offset(TAC_AVATARS, TAC_RECORDS) + TAC_RECORD_SIZE * (uintptr_t)i; }
+
 /* An avatar's heading, life and waypoint, from its unit, its health record and its record in the manager m. */
 static void TacAvatarState(uintptr_t game, uintptr_t m, uint32_t i, uint32_t entity, uint32_t unit, TacPlayer* p)
 {
@@ -157,7 +163,7 @@ static void TacAvatarState(uintptr_t game, uintptr_t m, uint32_t i, uint32_t ent
         p->yaw = atan2f(f[0], f[1]) * 57.2958f;
     uintptr_t record; int32_t health, max; uint32_t life = 0;
     if (EvpHealthOf(game, entity, &record, &health, &life, &max)) p->life = (uint8_t)(life >= 2 ? 2 : life);
-    uintptr_t w = m + 0x547830 + 0x78 * (uintptr_t)i;
+    uintptr_t w = TacRecord(m, i);
     float wp[3];
     if ((EvpU32(w, 0) & 4) && !SafeRead(w + 0x50, wp, 12)) { p->waypoint = 1; p->wx = wp[0]; p->wy = wp[1]; }
 }
@@ -272,7 +278,7 @@ static void TacTickPing(uintptr_t game, uintptr_t lg, int slot)
     /* a ping within 10 m of the waypoint takes it away, so removing is a ping at the waypoint itself */
     ((void (*)(uintptr_t, uint32_t, const float*))(game + TAC_PING))(hud + 0x3EF168, (uint32_t)slot, at);
     uintptr_t m;
-    uint32_t flags = EvpPtr(game + TAC_AVATARS, &m) ? EvpU32(m + 0x547830 + 0x78 * (uintptr_t)slot, 0) : 0;
+    uint32_t flags = EvpPtr(game + TAC_AVATARS, &m) ? EvpU32(TacRecord(m, (uint32_t)slot), 0) : 0;
     Note("difficulty: tactical map: waypoint %s at %.0f, %.0f (slot %d): now %s", remove ? "removed" : "asked", (double)at[0], (double)at[1], slot,
         flags & 4 ? "set" : "none");
 }

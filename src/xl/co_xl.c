@@ -608,4 +608,20 @@ int CoXlTestTacPing(float* x, float* y, int* remove)
     return g_tac.pingPending;
 }
 void CoXlTestTacRestart(void) { g_tac.started = 0; g_tac.screenId = 0; }
+/* The tests have no helldivers2.exe unit registry, so TacSquad finds no avatar and no own slot: the ping's tick for
+ * own slot `slot`, and avatar i's waypoint as the snapshot takes it (1 with x, y), go to the readers directly. */
+void CoXlTestTacPingAs(int slot)
+{
+    float size = 0, playable = 0;
+    TacTickPing(g_difficultyGame, TacLevel(g_difficultyGame, &size, &playable), slot);
+}
+int CoXlTestTacWaypoint(uint32_t i, float* x, float* y)
+{
+    uintptr_t m;
+    TacPlayer p = {0};
+    if (!EvpPtr(g_difficultyGame + TAC_AVATARS, &m)) return -1;
+    TacAvatarState(g_difficultyGame, m, i, 0, 0, &p);
+    *x = p.wx; *y = p.wy;
+    return p.waypoint;
+}
 #endif
