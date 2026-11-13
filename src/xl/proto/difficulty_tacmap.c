@@ -7,7 +7,6 @@
  * xl-tactical-map-data's reader recipe: the component arrays move when they grow, so each is read again every frame,
  * and an index is good for that frame only. */
 #include "tacmap.h"
-#include "../overlay/hellforge_overlay_host.h"
 #include "tacmap_terrain.c"
 #include "tacmap_draw.c"
 
@@ -35,7 +34,8 @@ static struct
     TacSnapshot work;          /* the game thread's */
     volatile LONG open;        /* the screen is open: the game thread keeps the snapshot fresh */
     TacScreen* screen;
-    int screenId;
+    int screenId;              /* HellForge's id for it; 0 none */
+    int started;               /* TacStart: 0 not yet, 1 on M, -1 no map screen this session */
     TacHeights heights;        /* g_near.global, for this level */
     volatile LONG heightsLevel;
     LONG noted;                /* this opening is in the log already */
@@ -281,9 +281,8 @@ static void TacTickPing(uintptr_t game, uintptr_t lg, int slot)
 static int TacStart(void);
 static void TacTick(void)
 {
-    static int started;
-    if (!started && g_difficultyGame && LargerMaps()) started = TacStart() ? 1 : -1;
-    if (g_tac.screen == NULL) return;
+    if (!g_tac.started && g_difficultyGame && LargerMaps()) g_tac.started = TacStart() ? 1 : -1;
+    if (g_tac.screenId <= 0) return;
     uintptr_t game = g_difficultyGame;
     float size = 0, playable = 0;
     uintptr_t lg = game ? TacLevel(game, &size, &playable) : 0;
@@ -368,8 +367,8 @@ static int TacCanOpen(void* user)
     return g_difficultyGame && TacLevel(g_difficultyGame, &size, &playable) && size > 2048.5f && !TacTyping(g_difficultyGame);
 }
 
-/* Sets the screen up with the overlay host (once, after the game loaded); 1 done. */
-static int TacInstall(int (*add_screen)(const HfScreen* screen))
+/* The screen, its locks and its worker, once a session. */
+static int TacPrepare(void)
 {
     if (g_tac.screen != NULL) return 1;
     InitializeSRWLock(&g_tac.lock);
@@ -377,69 +376,29 @@ static int TacInstall(int (*add_screen)(const HfScreen* screen))
     InitializeSRWLock(&g_tac.jobLock);
     TacHost host = {TacPing, TacPicture, NULL};
     g_tac.heightsLevel = -1;
-    g_tac.screen = TacScreenNew(&host);
     g_tac.wake = CreateEventW(NULL, FALSE, FALSE, NULL);
-    if (g_tac.screen == NULL || g_tac.wake == NULL) { Note("difficulty: tactical map: no memory; no map screen"); return 0; }
+    g_tac.screen = g_tac.wake != NULL ? TacScreenNew(&host) : NULL;
+    if (g_tac.screen == NULL) { Note("difficulty: tactical map: no memory; no map screen"); return 0; }
     HANDLE worker = CreateThread(NULL, 0, TacWorker, NULL, 0, NULL);
     if (worker == NULL) { Note("difficulty: tactical map: no worker thread; no map screen"); return 0; }
     CloseHandle(worker);
-    static const HfScreen screen = {sizeof(HfScreen), "Tactical map", 'M', HF_SCREEN_MODAL, NULL, TacDraw, TacOpened, TacCanOpen};
-    g_tac.screenId = add_screen(&screen);
-    Note("difficulty: tactical map: %s", g_tac.screenId > 0 ? "on M" : "the overlay host refused the screen");
-    return g_tac.screenId > 0;
+    return 1;
 }
 
-static void TacHostLog(void* user, const char* line) { Note("overlay: %s", line); }
-static int TacHostHook(void* user, uintptr_t target, void* detour, void** original) { return LoaderHook("overlay", target, detour, original); }
-
-/* A path beside the loader (app\sdk-shims), or `up` folders above it, in UTF-8. */
-static int TacPath(int up, const wchar_t* tail, char* out, size_t room)
-{
-    HMODULE self;
-    wchar_t path[MAX_PATH];
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)(void*)TacPath, &self) ||
-        !GetModuleFileNameW(self, path, MAX_PATH)) return 0;
-    for (int k = 0; k <= up; k++) { wchar_t* slash = wcsrchr(path, L'\\'); if (slash == NULL) return 0; *slash = 0; }
-    if (wcslen(path) + wcslen(tail) + 2 > MAX_PATH) return 0;
-    wcscat(path, L"\\"); wcscat(path, tail);
-    return WideCharToMultiByte(CP_UTF8, 0, path, -1, out, (int)room, NULL, NULL) > 0;
-}
-
-static int TacFileThere(const char* utf8)
-{
-    wchar_t wide[MAX_PATH];
-    return MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, MAX_PATH) && GetFileAttributesW(wide) != INVALID_FILE_ATTRIBUTES;
-}
-
-/* The first of a file's two places that is there: beside the loader or in the editor's folder, else in the larger
- * maps' own mod folder (a sandboxed session sees only the loader file and the enabled mods' folders). */
-static int TacFind(int up, const wchar_t* first, const wchar_t* second, char* out, size_t room)
-{
-    if (TacPath(up, first, out, room) && TacFileThere(out)) return 1;
-    return TacPath(2, second, out, room) && TacFileThere(out);
-}
-
-/* The overlay host, started with the game's fonts, and the screen added to it. */
+/* The screen on M through HellForge's add_screen (SDK 17). The loader loads its overlay host from its own folder, which
+ * a sandboxed session sees as well, and hands it the game's fonts; a mod that loads the host itself finds neither.
+ * Refused, the session has no map screen and the rest of the mod runs on. */
 static int TacStart(void)
 {
-    char host[MAX_PATH * 3], body[MAX_PATH * 3], title[MAX_PATH * 3];
-    wchar_t wide[MAX_PATH];
-    if (!TacFind(0, L"hellforge_overlay.dll", L"mods\\extra-large-maps\\hellforge_overlay.dll", host, sizeof host) ||
-        !MultiByteToWideChar(CP_UTF8, 0, host, -1, wide, MAX_PATH))
+    if (g_coApi->size < offsetof(HfApi, add_screen) + sizeof(void*) || g_coApi->add_screen == NULL)
     {
-        Note("difficulty: tactical map: hellforge_overlay.dll is not beside the loader or in mods\\extra-large-maps; no map screen");
+        Note("difficulty: tactical map: this HellForge has no add_screen (mod SDK 17); no map screen");
         return 0;
     }
-    HMODULE dll = LoadLibraryW(wide);
-    if (dll == NULL) { Note("difficulty: tactical map: no overlay host (%s, error %lu); no map screen", host, GetLastError()); return 0; }
-    HfOverlayStartFn start = (HfOverlayStartFn)(void*)GetProcAddress(dll, "hf_overlay_start");
-    HfOverlayAddScreenFn add = (HfOverlayAddScreenFn)(void*)GetProcAddress(dll, "hf_overlay_add_screen");
-    if (start == NULL || add == NULL) { Note("difficulty: tactical map: the overlay host has no hf_overlay_start/add_screen; no map screen"); return 0; }
-    int fonts = TacFind(2, L"mods\\hellforge-editor\\fs-sinclair.ttf", L"mods\\extra-large-maps\\fs-sinclair.ttf", body, sizeof body) &&
-                TacFind(2, L"mods\\hellforge-editor\\fs-sinclair-medium.ttf", L"mods\\extra-large-maps\\fs-sinclair-medium.ttf", title, sizeof title);
-    Note("difficulty: tactical map: overlay host %s, fonts %s", host, fonts ? body : "not found (the host's own)");
-    HfOverlayStart s = {sizeof s, NULL, TacHostLog, TacHostHook, NULL, fonts ? body : NULL, fonts ? title : NULL};
-    if (!TacInstall(add)) return 0;
-    if (start(&s) != 0) { Note("difficulty: tactical map: the overlay host did not start; no map screen"); return 0; }
-    return 1;
+    if (!TacPrepare()) return 0;
+    static const HfScreen screen = {sizeof(HfScreen), "Tactical map", 'M', HF_SCREEN_MODAL, NULL, TacDraw, TacOpened, TacCanOpen};
+    g_tac.screenId = g_coApi->add_screen(g_coMod, &screen);
+    if (g_tac.screenId > 0) Note("difficulty: tactical map: on M (screen %d of HellForge's overlay host)", g_tac.screenId);
+    else Note("difficulty: tactical map: HellForge refused the screen (no overlay host, or M is another screen's key: modloader.log says which); no map screen");
+    return g_tac.screenId > 0;
 }

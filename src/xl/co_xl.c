@@ -559,4 +559,15 @@ int CoXlTestCoarseFree(int k) { return g_coarse.slotOf[k] < 0 && g_coarse.slots[
 int CoXlTestCompareOn(void) { g_cc.on = 1; g_cc.reference[0] = 0; return CcTable(); }
 void CoXlTestCompareImage(const char* label, uintptr_t descriptor) { CcDescriptor(label, descriptor); }
 void CoXlTestComparePass(uint32_t op, uintptr_t level) { g_worldLevel = level; CcPass(op); g_worldLevel = 0; }
+/* The tactical map (proto/difficulty_tacmap.c): the install's game, the game thread's tick, HellForge's id for the
+ * screen, the waypoint the screen queued for the tick, and a session that has not asked for the screen yet. */
+void CoXlTestTacGame(uintptr_t game) { g_difficultyGame = game; }
+void CoXlTestTacTick(void) { TacTick(); }
+int CoXlTestTacScreen(void) { return g_tac.screenId; }
+int CoXlTestTacPing(float* x, float* y, int* remove)
+{
+    *x = g_tac.pingAt[0]; *y = g_tac.pingAt[1]; *remove = g_tac.pingRemove;
+    return g_tac.pingPending;
+}
+void CoXlTestTacRestart(void) { g_tac.started = 0; g_tac.screenId = 0; }
 #endif

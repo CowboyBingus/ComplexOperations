@@ -147,6 +147,15 @@ static int Send(HfMod* mod, uint64_t to, const void* data, uint32_t bytes)
 
 static int Subscribe(HfMod* mod, uint32_t kind, HfListener listener, void* user, int32_t priority) { g_fake.subscribed = kind; return 1; } /* the SDK: 1 listening, 0 refused */
 
+static int AddScreen(HfMod* mod, const HfScreen* screen)
+{
+    g_fake.screenAdds++;
+    g_fake.screenMod = mod;
+    memset(&g_fake.screen, 0, sizeof g_fake.screen);
+    memcpy(&g_fake.screen, screen, screen->size < sizeof g_fake.screen ? screen->size : sizeof g_fake.screen);
+    return g_fake.screenAnswer;
+}
+
 static uintptr_t DifficultyRow(uint32_t level) { return level == 11 ? g_fake.levelRow : level == 10 ? g_fake.levelTen : 0; }
 static uint32_t LoadPhase(HfMod* mod) { return g_fake.loadPhase; }
 static const char* LogsFolder(HfMod* mod) { return NULL; } /* no folder: the mod writes none of its own log files */
@@ -220,6 +229,8 @@ const HfApi* fake_host_reset(const char* build)
     g_api.share_get = ShareGet;
     g_api.share_set = ShareSet;
     g_api.send = Send;
+    g_api.add_screen = AddScreen;
+    g_fake.screenAnswer = 1;
     return &g_api;
 }
 
