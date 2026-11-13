@@ -127,6 +127,7 @@ static void FgPublish(int on)
     if (on && publish != NULL) for (int k = 0; k < FG_TEXTURES; k++) publish(kFgTex[k].name, g_fg.tex[k]);
     if (!on && unpublish != NULL) for (int k = 0; k < FG_TEXTURES; k++) unpublish(kFgTex[k].name);
     g_fg.published = on;
+    InterlockedExchange(&g_namesFarGrass, on); /* the light probe watch names the publisher (NearProbeSeen) */
 }
 
 static void FgSetting(int on)

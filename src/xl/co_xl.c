@@ -328,6 +328,24 @@ uint64_t CoXlTestNearRun(int consumer, int active, uint64_t tile0, uint64_t tile
     return NearRunAt(consumer, 1, 2, 3, 0, 5, 6, 7, 8);
 }
 void CoXlTestNearReplaying(int active) { InterlockedExchange(&g_nearActive, active); }
+/* The tile's names around the replay's own work (proto/difficulty_world_terrain.c NearNamesOpen, NearConsume): the
+ * merge's job consumer on `queue` holding `jobs` (the replay's queue or not), a bracket held around it, a light probe
+ * capture, far grass's publish, and the reset a finalize asks for, applied to G at the image's 0x3326340. */
+void CoXlTestNearConsume(uint64_t queue, int replays, void* original)
+{
+    g_nearConsume = (NearConsumeFn)original; g_nearNames.queue = replays ? queue : queue + 0x100;
+    NearConsume(queue);
+}
+int CoXlTestNearNamesOpen(void) { return NearNamesOpen(); }
+void CoXlTestNearTextures(uint64_t tile0, uint64_t tile1) { g_near.tex[0] = tile0; g_near.tex[1] = tile1; }
+void CoXlTestNearNamesClose(int opened) { NearNamesClose(opened); }
+uint64_t CoXlTestNearProbe(void* original) { g_nearProbe = (NearProbeFn)original; return NearProbe(1, 2, 3, 4, 5, 6, 7, 8, 9); }
+void CoXlTestNearProbeCounts(uint32_t* replay, uint32_t* tile, uint32_t* other) { *replay = g_probeRun.replay; *tile = g_probeRun.tile; *other = g_probeRun.other; }
+void CoXlTestNearProbeClear(void) { memset(&g_probeRun, 0, sizeof g_probeRun); }
+void CoXlTestFarGrassNames(int on) { InterlockedExchange(&g_namesFarGrass, on); }
+LONG CoXlTestNearResetState(void) { return g_nearReset.state; }
+void CoXlTestNearReset(LONG state, int pins) { g_nearReset.state = state; g_nearReset.pins = pins; }
+void CoXlTestNearResetTick(void) { NearResetTick(); }
 /* The paths the frees rest on: a dispatcher call's start, the band's stash and take, the pins asked again, the render
  * hook's order and its pins. */
 void CoXlTestDispatchBegins(uint64_t records, uint64_t index) { WorldDispatchBegins(records, index, 0); }
@@ -373,6 +391,11 @@ void CoXlTestTrimUse(void (*trim)(uint64_t), void (*stats)(void*))
 void CoXlTestTrimEvent(const char* why) { MoveTrimEvent(why); }
 int CoXlTestTrimTick(void) { return MoveTrimTick(); }
 void CoXlTestMoverSet(int state) { g_move.state = state; }
+/* The build's wall-clock frames (proto/difficulty_world_move.c MoveWallAdd): one frame of `ms` in mover state `mv`; the
+ * longest three and the count over 50 ms as the build's note gives them. */
+void CoXlTestMoveWall(double ms, int mv) { MoveWallAdd(ms, mv); }
+void CoXlTestMoveWallRead(double* wall, int* mv, uint32_t* slow) { for (int k = 0; k < 3; k++) { wall[k] = g_moveCost.wall[k]; mv[k] = g_moveCost.wallMv[k]; } *slow = g_moveCost.slow; }
+void CoXlTestMoveWallClear(void) { memset(&g_moveCost, 0, sizeof g_moveCost); }
 void CoXlTestMoverNear(int state) { g_near.state = state; }
 uint32_t CoXlTestMoverFrames(void) { return g_move.frames; }
 /* The release's render-fence gate (proto/xl_free.c): the build's world, a tile's terrain handle, the pins asked again. */

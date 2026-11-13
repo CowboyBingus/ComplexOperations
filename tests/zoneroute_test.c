@@ -18,6 +18,9 @@ int CoXlTestNearRunStep(uintptr_t level, uint64_t records, int step, void* dispa
 LONG CoXlTestNearRouteArmed(void);
 void CoXlTestNearJob(const uint8_t* job, uint64_t camera);
 void CoXlTestNearReplaying(int active);
+LONG CoXlTestNearResetState(void);
+void CoXlTestNearReset(LONG state, int pins);
+void CoXlTestNearTextures(uint64_t tile0, uint64_t tile1);
 
 static int g_failed;
 static const char* g_case;
@@ -26,6 +29,7 @@ static const char* g_case;
 enum { RECORD = 0, TILE = 1, LEVEL = 2 }; /* the plan's step kinds */
 #define API 0x3700000u   /* free room in the fake image: the api and its +0xD0 table */
 #define TABLE 0x3700200u
+#define NAMES 0x3700600u /* the api's +0x10 table: publish +0x210, unpublish +0x218 */
 #define CAM0 0x5000ull
 #define CAM1 0x6000ull
 #define GUI 0x7000ull
@@ -84,6 +88,9 @@ static int TilePixels(void) { return g_offset.n == 1 && g_offset.x == OX && g_of
 
 /* The test's dispatcher: 0x0D queues its route-distance job and the consumer takes it at once. */
 static uint32_t g_dispatched;
+static int g_published, g_publishedAtDispatch; /* the tile's names published (the step's bracket) */
+static void Publish(uint32_t name, uint64_t resource) { (void)name; (void)resource; g_published = 1; }
+static void Unpublish(uint32_t name) { (void)name; g_published = 0; }
 static LONG g_armedAtDispatch;
 static int g_consume;
 static uint64_t Dispatch(uint64_t record, uint64_t context, uint64_t index, uint64_t d, uint64_t phase, uint64_t f, uint64_t g, uint64_t h)
@@ -91,6 +98,7 @@ static uint64_t Dispatch(uint64_t record, uint64_t context, uint64_t index, uint
     (void)context; (void)d; (void)phase; (void)f; (void)g; (void)h;
     memcpy(&g_dispatched, (const void*)(uintptr_t)record, 4);
     g_armedAtDispatch = CoXlTestNearRouteArmed();
+    g_publishedAtDispatch = g_published;
     if (g_consume) Consume(CAM0, ROUTES);
     *(volatile uint32_t*)(uintptr_t)index = 1;
     return 0;
@@ -112,6 +120,10 @@ static void Setup(const char* name)
         memcpy(image + API + 0xD0, &table, 8);
         void (*offset)(uint64_t, float, float) = Offset; memcpy(image + TABLE + 0x258, &offset, 8);
         void (*scale)(uint64_t, float, float) = Scale; memcpy(image + TABLE + 0x270, &scale, 8);
+        uint64_t names = (uint64_t)(uintptr_t)(image + NAMES);
+        memcpy(image + API + 0x10, &names, 8);
+        void (*publish)(uint32_t, uint64_t) = Publish; memcpy(image + NAMES + 0x210, &publish, 8);
+        void (*unpublish)(uint32_t) = Unpublish; memcpy(image + NAMES + 0x218, &unpublish, 8);
         g_records = calloc(sizeof kOps, 0x19B0);
         for (size_t i = 0; i < sizeof kOps; i++) memcpy(g_records + i * 0x19B0, &(uint32_t){kOps[i]}, 4);
         uint64_t gen = (uint64_t)(uintptr_t)g_R; /* [level+0x2C8]: only read as there */
@@ -190,6 +202,28 @@ int main(void)
     CHECK(CoXlTestNearRunStep((uintptr_t)g_level, (uint64_t)(uintptr_t)g_records, level, (void*)Dispatch) == 1);
     CHECK(g_dispatched == 0);
     CHECK(CoXlTestNearRouteArmed() == 0);
+
+    Setup("the finalize's step (0x64) asks for the history reset; its jobs then let it go out");
+    n = Plan(AT65);
+    int finalize = StepOf(RECORD, 0x64, n);
+    CoXlTestNearReset(0, 1);
+    CHECK(finalize >= 0 && CoXlTestNearRunStep((uintptr_t)g_level, (uint64_t)(uintptr_t)g_records, finalize, (void*)Dispatch) == 1);
+    CHECK(g_dispatched == 0x64 && CoXlTestNearResetState() == 1);
+
+    Setup("a step with the tile's textures made: its dispatch sees the tile's names, the level's after");
+    n = Plan(AT65); zones = StepOf(RECORD, 0x3D, n);
+    CoXlTestNearTextures(0x1000, 0x2000);
+    g_publishedAtDispatch = 0;
+    CHECK(CoXlTestNearRunStep((uintptr_t)g_level, (uint64_t)(uintptr_t)g_records, zones, (void*)Dispatch) == 1);
+    CHECK(g_publishedAtDispatch == 1 && g_published == 0);
+    CoXlTestNearTextures(0, 0);
+
+    Setup("another op's step asks for nothing");
+    n = Plan(AT65); zones = StepOf(RECORD, 0x3D, n);
+    CoXlTestNearReset(0, 1);
+    CHECK(CoXlTestNearRunStep((uintptr_t)g_level, (uint64_t)(uintptr_t)g_records, zones, (void*)Dispatch) == 1);
+    CHECK(g_dispatched == 0x3D && CoXlTestNearResetState() == 0);
+    CoXlTestNearReset(0, 1);
 
     CoXlTestNearReplaying(0);
     if (g_failed) { printf("zoneroute: %d check(s) failed\n", g_failed); return 1; }

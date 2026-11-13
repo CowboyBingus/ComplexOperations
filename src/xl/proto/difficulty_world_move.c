@@ -1237,7 +1237,20 @@ static void MoveTick(uint64_t level)
 /* What a build costs the game thread: MoveTick's time in each frame of a build, the six longest with the build's state,
  * the replay's step and the conform's phase at the frame's start; noted once the build is over (the frame after the tile
  * is in, or after a failure). */
-static struct { double ms[6]; int mv[6], ns[6], step[6], conf[6], bld[6]; double sum; uint32_t frames; int pending; } g_moveCost;
+static struct { double ms[6]; int mv[6], ns[6], step[6], conf[6], bld[6]; double sum; uint32_t frames; int pending;
+    double wall[3]; int wallMv[3]; uint32_t slow; } g_moveCost;
+/* Wall-clock frames, level update to level update (once a frame on the game thread, 0xAB519E): the whole frame's time,
+ * render and other threads' waits included, which the game-thread cost above leaves out. */
+static struct { LARGE_INTEGER last; int mv; } g_moveWall;
+static void MoveWallAdd(double ms, int mv)
+{
+    if (ms > 50.0) g_moveCost.slow++;
+    int at = 3;
+    while (at > 0 && ms > g_moveCost.wall[at - 1]) at--;
+    if (at >= 3) return;
+    for (int k = 2; k > at; k--) { g_moveCost.wall[k] = g_moveCost.wall[k - 1]; g_moveCost.wallMv[k] = g_moveCost.wallMv[k - 1]; }
+    g_moveCost.wall[at] = ms; g_moveCost.wallMv[at] = mv;
+}
 
 static void MoveCostAdd(double ms, int mv, int ns, int step, int conf, int bld)
 {
@@ -1257,6 +1270,9 @@ static void MoveCostNote(void)
         n += snprintf(line + n, sizeof line - n, " %.0f ms (%s, near state %d, step %d, building %d, conform phase %d);", g_moveCost.ms[k],
             MoveStateName(g_moveCost.mv[k]), g_moveCost.ns[k], g_moveCost.step[k], g_moveCost.bld[k], g_moveCost.conf[k]);
     Note("difficulty: moving tiles: the build's cost on the game thread: %.0f ms over %u frames; the longest:%s", g_moveCost.sum, g_moveCost.frames, line);
+    Note("difficulty: moving tiles: the build's wall-clock frames: the longest %.0f ms (%s), %.0f ms (%s), %.0f ms (%s); %u over 50 ms",
+        g_moveCost.wall[0], MoveStateName(g_moveCost.wallMv[0]), g_moveCost.wall[1], MoveStateName(g_moveCost.wallMv[1]), g_moveCost.wall[2],
+        MoveStateName(g_moveCost.wallMv[2]), g_moveCost.slow);
     memset(&g_moveCost, 0, sizeof g_moveCost);
 }
 
@@ -1266,12 +1282,16 @@ static void MoveScatterTick(void) { TdScatterMergeTick((uint64_t)(uintptr_t)g_mo
 static void MoveLevelUpdate(uint64_t level)
 {
     MoveScatterTick();
+    NearResetTick();
     g_moveUpdate(level);
     int mv = g_move.state, ns = g_near.state, step = g_near.step, conf = g_conform.phase, bld = g_near.building;
     LARGE_INTEGER t0, t1, hz;
-    QueryPerformanceCounter(&t0);
+    QueryPerformanceCounter(&t0); QueryPerformanceFrequency(&hz);
+    if (g_moveWall.last.QuadPart != 0 && (g_moveWall.mv != MV_IDLE || g_moveCost.pending))
+        MoveWallAdd((double)(t0.QuadPart - g_moveWall.last.QuadPart) * 1000.0 / (double)hz.QuadPart, g_moveWall.mv);
+    g_moveWall.last = t0; g_moveWall.mv = mv;
     MoveTick(level);
-    QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
+    QueryPerformanceCounter(&t1);
     if (mv != MV_IDLE || g_move.state != MV_IDLE) { MoveCostAdd((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart, mv, ns, step, conf, bld); g_moveCost.pending = 1; }
     else if (g_moveCost.pending) MoveCostNote();
     FarGrassTick(level);
