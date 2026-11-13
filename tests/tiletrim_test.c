@@ -511,6 +511,24 @@ int main(void)
         memset(g_fake.image + 0x3326308u, 0, 8);
     }
 
+    g_case = "the game's slot holds the thunk 0x336AD0: accepted with its jmp to the destroy, refused without";
+    {
+        const uint64_t thunk = (uint64_t)(uintptr_t)exe + 0x336AD0u;
+        DrainWorld(thunk);
+        g_fake.strictCode = 1;
+        for (size_t i = 0; i < sizeof kDrain / sizeof kDrain[0]; i++) Hex(exe + kDrain[i].at, kDrain[i].bytes);
+        Hex(exe + 0x336AD0u, "E9 CB 73 E7 FF");
+        CHECK(CoXlTestDrainPins() == 1);
+        Hex(exe + 0x336AD0u, "E9 CB 73 E7 FE"); /* a jmp somewhere else */
+        CHECK(CoXlTestDrainPins() == 0);
+        CHECK(fake_host_logged("(the destroy's slot; the slot holds 0x"));
+        DrainWorld(fence + 1);
+        Hex(exe + 0x336AD0u, "E9 CB 73 E7 FF");
+        CHECK(CoXlTestDrainPins() == 0); /* neither the destroy nor its thunk */
+        g_fake.strictCode = 0;
+        memset(g_fake.image + 0x3326308u, 0, 8);
+    }
+
     if (g_failed) { printf("%d check(s) failed\n", g_failed); return 1; }
     printf("tiletrim: all checks passed\n");
     return 0;

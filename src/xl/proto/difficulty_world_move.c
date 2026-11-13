@@ -35,7 +35,7 @@
  *     coarse drawing hidden over the union of the live tiles (NearHideUnion).
  * A tile goes when no player has been within MOVE_KEEP of its square for MOVE_KEEP_MS, a build or not: removed from the ground
  * queries, the coarse collision raised back from the level's CPU copy (lg+0xD8), the hidden nodes shown again, the
- * terrain destroyed ([api+8]+0x1E0 -> exe 0x1ADEA0) and its textures released a few frames later. The drop tile stays.
+ * terrain destroyed ([api+8]+0x1E0 -> the thunk 0x336AD0 -> exe 0x1ADEA0) and its textures released a few frames later. The drop tile stays.
  *
  * Players: every Helldiver (as the content streamer reads them), the streamer's research observer, and the test eye
  * (HELLFORGE_XL_EYE) while it is on and within 30 m of the ground. HELLFORGE_XL_MOVE=0 turns this off. */
