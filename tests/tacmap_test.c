@@ -1,6 +1,7 @@
 /* The tactical map on M (src/xl/proto/difficulty_tacmap.c): the screen goes to HellForge through add_screen, a refusal
  * is logged with its reason and leaves the session without a map, and the M key's path runs as the overlay host runs
- * it: can_open, opened, draw frames with the mouse, the closing, opened(0). */
+ * it: can_open, opened, draw frames with the mouse, the closing, opened(0). The waypoint is read where MapPing writes
+ * it: the avatar manager's records, moved in a build for eight. */
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -13,6 +14,11 @@ void CoXlTestTacTick(void);
 int CoXlTestTacScreen(void);
 int CoXlTestTacPing(float* x, float* y, int* remove);
 void CoXlTestTacRestart(void);
+void CoXlTestTacPingAs(int slot);
+int CoXlTestTacWaypoint(uint32_t i, float* x, float* y);
+void co_managers_test_force(int state);
+void co_managers_test_reset(void);
+int co_counts_test_players(void);
 
 static int g_failed;
 static const char* g_case;
@@ -21,6 +27,14 @@ static const char* g_case;
 /* game.dll's places the map reads (difficulty_tacmap.c) */
 #define TAC_LEVELS 0x3326340u
 #define TAC_WIDGETS 0x3326E68u
+#define TAC_AVATARS 0x3326D20u
+#define TAC_MAP 0x346D538u
+#define TAC_PING 0x18B97A0u
+/* The avatars' records in the manager: the game's offset, and the one a build for eight gives them (co_manager_sites.h:
+ * every record field's site adds 11079008, MapPing's own among them). Flags +0 (4: a waypoint), the waypoint +0x50. */
+#define RECORDS 0x547830u
+#define RECORDS_MOVED 0xFD8590u
+#define AVATARS_SIZE 0x1000000u
 
 /* A mission's world and level, outside the image as the game's heap is. */
 static uint8_t g_world[0xAE300], g_lg[0x3000], g_chat[0x14000], g_widgets[0x3000];
@@ -28,6 +42,15 @@ static uint8_t g_world[0xAE300], g_lg[0x3000], g_chat[0x14000], g_widgets[0x3000
 static void PutU32(uint8_t* at, uint32_t v) { memcpy(at, &v, 4); }
 static void PutF(uint8_t* at, float v) { memcpy(at, &v, 4); }
 static void PutPtr(uint8_t* at, const void* p) { const uint64_t v = (uint64_t)(uintptr_t)p; memcpy(at, &v, 8); }
+
+/* A waypoint at x, y in avatar slot's record, the records at `records` of the manager. */
+static void Waypoint(uint8_t* avatars, uint32_t records, uint32_t slot, float x, float y)
+{
+    uint8_t* r = avatars + records + 0x78u * slot;
+    PutU32(r, 4u);
+    PutF(r + 0x50, x);
+    PutF(r + 0x54, y);
+}
 
 /* A mission of a `size` m world, its level ready, the whole of it playable; size 0: no mission. */
 static void Mission(uint8_t* game, float size)
@@ -195,6 +218,53 @@ int main(void)
         g_fake.screen.draw(g_fake.screen.user, &kDraw, &in, 1.0f / 60.0f);
         CHECK(CoXlTestTacPing(&x, &y, &remove) == 0);
     }
+
+    /* MapPing is the game's: here a ret, the waypoint already in a record. Not moved, then moved: a build for four never
+     * moves the avatar manager, so both read the game's place there. */
+    const int eight = co_counts_test_players() == 8;
+    uint8_t* avatars = VirtualAlloc(NULL, AVATARS_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    DWORD was;
+    CHECK(avatars != NULL && VirtualProtect(game + TAC_PING, 1, PAGE_EXECUTE_READWRITE, &was));
+    game[TAC_PING] = 0xC3;
+    PutPtr(game + TAC_AVATARS, avatars);
+    PutPtr(game + TAC_MAP, g_lg);
+    for (int moved = 0; moved < 2 && avatars != NULL; moved++)
+    {
+        co_managers_test_force(moved);
+        const uint32_t here = moved && eight ? RECORDS_MOVED : RECORDS, there = here == RECORDS ? RECORDS_MOVED : RECORDS;
+        float x = 0, y = 0;
+        int remove;
+        HfInput in = {sizeof in, 1134.0f, 549.0f};
+        in.pressed = in.down = HF_MOUSE_RIGHT;
+
+        g_case = !moved ? "the game's records: the waypoint MapPing set is the player's and the ping's log says so"
+            : eight ? "a build for eight, moved: the waypoint is read at the moved records" : "a build for four, \"moved\": the game's records";
+        CHECK(co_managers_offset(TAC_AVATARS, RECORDS) == here);
+        memset(avatars, 0, AVATARS_SIZE);
+        Waypoint(avatars, here, 4, 100.0f, 200.0f);
+        Waypoint(avatars, here, 5, 1234.0f, -5678.0f);
+        CHECK(CoXlTestTacWaypoint(5, &x, &y) == 1 && x == 1234.0f && y == -5678.0f);
+        CHECK(CoXlTestTacWaypoint(4, &x, &y) == 1 && x == 100.0f && y == 200.0f);
+        CHECK(CoXlTestTacWaypoint(3, &x, &y) == 0);
+        g_fake.screen.draw(g_fake.screen.user, &kDraw, &in, 1.0f / 60.0f);
+        CHECK(CoXlTestTacPing(&x, &y, &remove) == 1);
+        g_fake.log[0] = 0;
+        CoXlTestTacPingAs(5);
+        CHECK(CoXlTestTacPing(&x, &y, &remove) == 0);
+        CHECK(fake_host_logged("(slot 5): now set"));
+
+        g_case = !moved ? "the game's records: a waypoint only at the moved place is none"
+            : eight ? "a build for eight, moved: a waypoint only at the game's place is none" : "a build for four, \"moved\": none at the moved place";
+        memset(avatars, 0, AVATARS_SIZE);
+        Waypoint(avatars, there, 5, 1234.0f, -5678.0f);
+        CHECK(CoXlTestTacWaypoint(5, &x, &y) == 0);
+        g_fake.screen.draw(g_fake.screen.user, &kDraw, &in, 1.0f / 60.0f);
+        g_fake.log[0] = 0;
+        CoXlTestTacPingAs(5);
+        CHECK(fake_host_logged("(slot 5): now none"));
+    }
+    co_managers_test_force(0);
+    co_managers_test_reset();
 
     g_case = "closing (M or Esc): the map plays its close, then draw returns 0 and opened(0) follows";
     {
