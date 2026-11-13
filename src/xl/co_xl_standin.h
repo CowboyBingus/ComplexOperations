@@ -94,6 +94,9 @@ static inline int CoObjlistStamps(int32_t* starts, int32_t* counts)
 typedef struct LocationSite { uint32_t rva; uint8_t at; uint32_t value; } LocationSite;
 /* Spawner positions past a group's 16 places on complex missions (co_spawners.c); NULL before its install. */
 #define g_spawnerPlacesFull (co_spawners_places_full())
+/* Patrol spawners and alarms GuardForce's groups left out (no group, or a full list; co_spawners.c); NULL before. */
+#define g_garrisonSkipped (co_spawners_skipped(CO_SPAWNER_CELL_PATROLS))
+#define g_alarmSkipped (co_spawners_skipped(CO_SPAWNER_CELL_ALARMS))
 
 /* 1 once the HUD's three grouped stubs are in (proto/difficulty_world.c HudGroupSite): a complex mission's rows are one
  * an objective, so its list may hold every mission's primaries. Until then the objective fill adds none. */

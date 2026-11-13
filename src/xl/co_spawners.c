@@ -39,6 +39,11 @@ const char* co_spawners_check(uintptr_t game)
         return "GuardForce's spawner loop is not the game's code this mod was made for";
     if (!Same(game + CO_SPAWNER_PLACES, kCoSpawnerPlaces, sizeof kCoSpawnerPlaces)) return "GuardForce's spawner positions are not the game's code this mod was made for";
     if (!Same(game + CO_SPAWNER_GROUPS_SITE, kCoSpawnerGroupsPin, sizeof kCoSpawnerGroupsPin)) return "GuardForce's group block is not the game's code this mod was made for";
+    if (!Same(game + CO_SPAWNER_TASKS, kCoSpawnerTasks, sizeof kCoSpawnerTasks) || !Same(game + CO_SPAWNER_SITES, kCoSpawnerPlaces, sizeof kCoSpawnerPlaces) ||
+        !Same(game + CO_SPAWNER_SITES_NEXT, kCoSpawnerSitesNext, sizeof kCoSpawnerSitesNext))
+        return "GuardForce's task and invasion site appends are not the game's code this mod was made for";
+    if (!Same(game + CO_SPAWNER_ALARMS, kCoSpawnerAlarms, sizeof kCoSpawnerAlarms) || !Same(game + CO_SPAWNER_PATROLS, kCoSpawnerPatrols, sizeof kCoSpawnerPatrols))
+        return "GuardForce's alarm and patrol spawner lookups are not the game's code this mod was made for";
     return NULL;
 }
 
@@ -56,6 +61,9 @@ static void Rip(Stub* s, const uint8_t* head, size_t size, uintptr_t target, siz
     const int32_t rel = (int32_t)((int64_t)target - (int64_t)(s->code + s->p + 4u + tail));
     memcpy(s->out + s->p, &rel, 4); s->p += 4;
 }
+/* A short conditional jump whose distance `To` fills in once its target is written. */
+static size_t Jcc(Stub* s, uint8_t op) { const uint8_t j[2] = {op, 0}; Bytes(s, j, 2); return s->p - 1; }
+static void To(Stub* s, size_t at) { s->out[at] = (uint8_t)(s->p - (at + 1u)); }
 #define RIP(s, target, tail, ...) do { const uint8_t head_[] = {__VA_ARGS__}; Rip(s, head_, sizeof head_, target, tail); } while (0)
 #define BYTES(s, ...) do { const uint8_t bytes_[] = {__VA_ARGS__}; Bytes(s, bytes_, sizeof bytes_); } while (0)
 
@@ -128,6 +136,77 @@ size_t co_spawners_places_stub(uint8_t* out, uintptr_t code, uintptr_t game, uin
     return s.p;
 }
 
+/* cmp dword [reg + count], places: `modrm` names the register, with REX.B for r8 */
+static void Full(Stub* s, int rexb, uint8_t modrm, uint32_t count, uint32_t places)
+{
+    if (rexb) BYTES(s, 0x41);
+    BYTES(s, 0x81, modrm); Bytes(s, (const uint8_t*)&count, 4); Bytes(s, (const uint8_t*)&places, 4);
+}
+
+/* A group's 97th task would overwrite the count the record's copy takes as its length. Left out, the task still moves
+ * the group's centre, as the game's code behind the site does with every task. */
+size_t co_spawners_tasks_stub(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t cells)
+{
+    Stub s = {out, code, 0};
+    Bytes(&s, kCoSpawnerTasks, 9);                                /* mov eax, [rbx+0x188]; mov [rbx], r8: the count, the key */
+    Full(&s, 0, 0xBB, CO_SPAWNER_TASK_COUNT, CO_SPAWNER_GROUP_TASK_PLACES);
+    const size_t full = Jcc(&s, 0x73);
+    Bytes(&s, kCoSpawnerTasks + 9, 10);                           /* the task's index into the list, the count on */
+    RIP(&s, game + CO_SPAWNER_TASKS_BACK, 0, 0xE9);
+    To(&s, full);
+    RIP(&s, cells + CO_SPAWNER_CELL_TASKS, 0, 0xF0, 0xFF, 0x05);
+    RIP(&s, game + CO_SPAWNER_TASKS_BACK, 0, 0xE9);
+    return s.p;
+}
+
+/* An invasion site's position into the same 16 places as the spawners', on any list. */
+size_t co_spawners_sites_stub(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t cells)
+{
+    Stub s = {out, code, 0};
+    Full(&s, 1, 0xB8, CO_SPAWNER_PLACE_COUNT, CO_SPAWNER_GROUP_PLACES);
+    const size_t full = Jcc(&s, 0x73);
+    Bytes(&s, kCoSpawnerPlaces, sizeof kCoSpawnerPlaces);
+    RIP(&s, game + CO_SPAWNER_SITES_NEXT, 0, 0xE9);
+    To(&s, full);
+    RIP(&s, cells + CO_SPAWNER_CELL_SITES, 0, 0xF0, 0xFF, 0x05);
+    RIP(&s, game + CO_SPAWNER_SITES_NEXT, 0, 0xE9);
+    return s.p;
+}
+
+/* The alarms' and the patrol spawner's lookups share their form: `site` is the game's bytes, `load` the length of the
+ * entity id's load at +8; then rdx is the group and the append at `add` follows. No group (-1) or a full list: the
+ * entry is left out and the loop goes on at `next`, as the append's inc ebx would. */
+static size_t Lookup(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t cells, const uint8_t* site, size_t load, uint32_t count,
+    uint32_t places, uint32_t add, uint32_t next, uint32_t cell)
+{
+    Stub s = {out, code, 0};
+    BYTES(&s, 0x83, 0xFA, 0xFF);                                  /* cmp edx, -1: no group has the key */
+    const size_t none = Jcc(&s, 0x74);
+    Bytes(&s, site, 2); Bytes(&s, site + 4, 4);                   /* mov eax, edx; lea rdx, [rax+rax*2] */
+    Bytes(&s, site + 8 + load, 7);                                /* shl rdx, 8; add rdx, rdi: the group */
+    Full(&s, 0, 0xBA, count, places);
+    const size_t full = Jcc(&s, 0x73);
+    Bytes(&s, site + 2, 2); Bytes(&s, site + 8, load);            /* inc ebx; mov eax, the entity's id */
+    RIP(&s, game + add, 0, 0xE9);
+    To(&s, none); To(&s, full);
+    RIP(&s, cells + cell, 0, 0xF0, 0xFF, 0x05);
+    Bytes(&s, site + 2, 2);
+    RIP(&s, game + next, 0, 0xE9);
+    return s.p;
+}
+size_t co_spawners_alarms_stub(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t cells)
+{
+    return Lookup(out, code, game, cells, kCoSpawnerAlarms, 8, CO_SPAWNER_ALARM_COUNT, CO_SPAWNER_GROUP_ALARMS, CO_SPAWNER_ALARMS_ADD, CO_SPAWNER_ALARMS_NEXT,
+        CO_SPAWNER_CELL_ALARMS);
+}
+/* The group keeps one patrol spawner: the second would overwrite the count with its entity id, and a third would write
+ * that many places past the group. */
+size_t co_spawners_patrols_stub(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t cells)
+{
+    return Lookup(out, code, game, cells, kCoSpawnerPatrols, 5, CO_SPAWNER_PATROL_COUNT, CO_SPAWNER_GROUP_PATROLS, CO_SPAWNER_PATROLS_ADD,
+        CO_SPAWNER_PATROLS_NEXT, CO_SPAWNER_CELL_PATROLS);
+}
+
 static void Jump(uint8_t* jump, size_t size, uintptr_t at, uintptr_t to)
 {
     const int32_t rel = (int32_t)((int64_t)to - (int64_t)(at + 5));
@@ -136,9 +215,12 @@ static void Jump(uint8_t* jump, size_t size, uintptr_t at, uintptr_t to)
 
 const char* co_spawners_install(uintptr_t game)
 {
-    const struct { uint32_t rva; const uint8_t* bytes; uint8_t size; uint32_t stub; } sites[3] = {
+    const struct { uint32_t rva; const uint8_t* bytes; uint8_t size; uint32_t stub; } sites[] = {
         {CO_SPAWNER_FIRST, kCoSpawnerFirst, 13, CO_SPAWNER_STUB_FIRST}, {CO_SPAWNER_NEXT, kCoSpawnerNext, 13, CO_SPAWNER_STUB_NEXT},
-        {CO_SPAWNER_PLACES, kCoSpawnerPlaces, 33, CO_SPAWNER_STUB_PLACES}};
+        {CO_SPAWNER_PLACES, kCoSpawnerPlaces, 33, CO_SPAWNER_STUB_PLACES}, {CO_SPAWNER_TASKS, kCoSpawnerTasks, 19, CO_SPAWNER_STUB_TASKS},
+        {CO_SPAWNER_SITES, kCoSpawnerPlaces, 33, CO_SPAWNER_STUB_SITES}, {CO_SPAWNER_ALARMS, kCoSpawnerAlarms, 23, CO_SPAWNER_STUB_ALARMS},
+        {CO_SPAWNER_PATROLS, kCoSpawnerPatrols, 20, CO_SPAWNER_STUB_PATROLS}};
+    const int count = (int)(sizeof sites / sizeof sites[0]);
     const char* why;
     uint8_t jump[33];
     DWORD old;
@@ -158,7 +240,11 @@ const char* co_spawners_install(uintptr_t game)
     const int fit = co_spawners_append_stub(page + CO_SPAWNER_STUB_APPEND, code + CO_SPAWNER_STUB_APPEND, game, cells, guard) <= CO_SPAWNER_STUB_FIRST - CO_SPAWNER_STUB_APPEND &&
         co_spawners_first_stub(page + CO_SPAWNER_STUB_FIRST, code + CO_SPAWNER_STUB_FIRST, game, cells) <= CO_SPAWNER_STUB_NEXT - CO_SPAWNER_STUB_FIRST &&
         co_spawners_next_stub(page + CO_SPAWNER_STUB_NEXT, code + CO_SPAWNER_STUB_NEXT, game, cells) <= CO_SPAWNER_STUB_PLACES - CO_SPAWNER_STUB_NEXT &&
-        co_spawners_places_stub(page + CO_SPAWNER_STUB_PLACES, code + CO_SPAWNER_STUB_PLACES, game, cells, code + CO_SPAWNER_STUB_NEXT) <= CO_SPAWNER_STUB_END - CO_SPAWNER_STUB_PLACES;
+        co_spawners_places_stub(page + CO_SPAWNER_STUB_PLACES, code + CO_SPAWNER_STUB_PLACES, game, cells, code + CO_SPAWNER_STUB_NEXT) <= CO_SPAWNER_STUB_TASKS - CO_SPAWNER_STUB_PLACES &&
+        co_spawners_tasks_stub(page + CO_SPAWNER_STUB_TASKS, code + CO_SPAWNER_STUB_TASKS, game, cells) <= CO_SPAWNER_STUB_SITES - CO_SPAWNER_STUB_TASKS &&
+        co_spawners_sites_stub(page + CO_SPAWNER_STUB_SITES, code + CO_SPAWNER_STUB_SITES, game, cells) <= CO_SPAWNER_STUB_ALARMS - CO_SPAWNER_STUB_SITES &&
+        co_spawners_alarms_stub(page + CO_SPAWNER_STUB_ALARMS, code + CO_SPAWNER_STUB_ALARMS, game, cells) <= CO_SPAWNER_STUB_PATROLS - CO_SPAWNER_STUB_ALARMS &&
+        co_spawners_patrols_stub(page + CO_SPAWNER_STUB_PATROLS, code + CO_SPAWNER_STUB_PATROLS, game, cells) <= CO_SPAWNER_STUB_END - CO_SPAWNER_STUB_PATROLS;
     if (!fit) { VirtualFree(page, 0, MEM_RELEASE); return "the spawner list's steps do not fit their places"; }
     if (!VirtualProtect(page, CO_SPAWNER_CELLS, PAGE_EXECUTE_READ, &old)) { VirtualFree(page, 0, MEM_RELEASE); return "the spawner list's steps could not be made to run"; }
     FlushInstructionCache(GetCurrentProcess(), page, CO_SPAWNER_CELLS);
@@ -167,13 +253,14 @@ const char* co_spawners_install(uintptr_t game)
     uint8_t size[6] = {0x41, 0xB8};
     memcpy(size + 2, &groups, 4);
     if (g_coApi->write(game + CO_SPAWNER_GROUPS_SITE, size, sizeof size) != 0) { VirtualFree(page, 0, MEM_RELEASE); return "GuardForce's group block could not be sized"; }
-    /* with no list of the mod's in use every stub is the game's code or HellForge's, so each write stands alone */
-    for (i = 0; i < 3; i++)
+    /* with no list of the mod's in use every stub is the game's code or HellForge's, a bound at most, so each write
+     * stands alone */
+    for (i = 0; i < count; i++)
     {
         Jump(jump, sites[i].size, game + sites[i].rva, code + sites[i].stub);
         if (g_coApi->write(game + sites[i].rva, jump, sites[i].size) != 0) break;
     }
-    if (i == 3)
+    if (i == count)
     {
         Jump(jump, 6, game + CO_SPAWNER_SITE, code + CO_SPAWNER_STUB_APPEND);
         if (g_coApi->write(game + CO_SPAWNER_SITE, jump, 6) == 0)
@@ -181,6 +268,9 @@ const char* co_spawners_install(uintptr_t game)
             g_spawners.page = page; g_spawners.game = game;
             co_log("complex operations: GuardForce's group block holds %u groups on every level (%u KB of scratch at mission load)", groups,
                 groups * CO_SPAWNER_GROUP_SIZE / 1024u);
+            co_log("complex operations: a GuardForce group keeps at most %u tasks, %u positions, %u alarms and %u patrol spawner on every level; "
+                "an alarm or patrol spawner with no group is left out", CO_SPAWNER_GROUP_TASK_PLACES, CO_SPAWNER_GROUP_PLACES, CO_SPAWNER_GROUP_ALARMS,
+                CO_SPAWNER_GROUP_PATROLS);
             return NULL;
         }
     }
@@ -201,13 +291,20 @@ void co_spawners_mission(int complex)
         g_coApi->read(world + CO_SPAWNER_MANAGER + CO_SPAWNER_COUNT, &count, 4) == 0)
     {
         g_spawners.noted = 1;
-        co_log("complex operations: the mission's spawner list held %u of %u; so far %ld left out past it and %ld positions past a group's %u places",
-            count, co_level_limit(CO_LIMIT_SPAWNERS, 1), (long)*(volatile LONG*)(cells + CO_SPAWNER_CELL_LEFT), (long)*(volatile LONG*)(cells + CO_SPAWNER_CELL_FULL), CO_SPAWNER_GROUP_PLACES);
+        co_log("complex operations: the mission's spawner list held %u of %u; so far %ld left out past it and %ld positions past a group's %u places; "
+            "GuardForce groups left out %ld tasks, %ld invasion sites, %ld alarms and %ld patrol spawners",
+            count, co_level_limit(CO_LIMIT_SPAWNERS, 1), (long)*(volatile LONG*)(cells + CO_SPAWNER_CELL_LEFT), (long)*(volatile LONG*)(cells + CO_SPAWNER_CELL_FULL), CO_SPAWNER_GROUP_PLACES,
+            (long)*(volatile LONG*)(cells + CO_SPAWNER_CELL_TASKS), (long)*(volatile LONG*)(cells + CO_SPAWNER_CELL_SITES),
+            (long)*(volatile LONG*)(cells + CO_SPAWNER_CELL_ALARMS), (long)*(volatile LONG*)(cells + CO_SPAWNER_CELL_PATROLS));
     }
     if (complex) g_spawners.noted = 0;
     cells[CO_SPAWNER_CELL_FLAG] = complex != 0;
 }
 
+volatile long* co_spawners_skipped(uint32_t cell)
+{
+    return g_spawners.page != NULL && cell >= CO_SPAWNER_CELL_TASKS && cell <= CO_SPAWNER_CELL_PATROLS ? (volatile long*)(g_spawners.page + CO_SPAWNER_CELLS + cell) : NULL;
+}
 volatile long* co_spawners_places_full(void) { return g_spawners.page != NULL ? (volatile long*)(g_spawners.page + CO_SPAWNER_CELLS + CO_SPAWNER_CELL_FULL) : NULL; }
 
 #ifdef CO_TEST

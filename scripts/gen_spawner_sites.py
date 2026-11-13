@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Writes src/xl/co_spawner_sites.h: the enemy director's spawner list (HiveMind manager +0x82D98, 128 x 0x58, count
-# +0x85998) as HellForge's level 11 leaves it, and the game's code the mod's own list and GuardForce's group block need
-# (game build 25480438):
+# +0x85998) as HellForge's level 11 leaves it, and the game's code the mod's own list, GuardForce's group block and the
+# bounds of a group's own lists need (game build 25480438):
 #   scripts/gen_spawner_sites.py <game.dll image dump> <HellForge native/mod-loader> [out]
 # HellForge's site, pin and stub are read from its source; the game's bytes, the list's 22 users and the order of a
 # mission's level init, the manager's clear and the first append are checked on the dump.
@@ -58,7 +58,7 @@ for line in ('memcpy(spawnerStub + 14, &rel, 4);', 'memcpy(spawnerStub + 21, &re
 # and no step of its own in GuardForce's builder (0x94A270), whose loop the mod takes
 for name in glob.glob(os.path.join(stock, '*.[ch]')):
     for value in re.findall(r'0x94[AB][0-9A-Fa-f]{3}\b', open(name, errors='replace').read()):
-        assert not 0x94A270 <= int(value, 16) < 0x94B300, (name, value)
+        assert not 0x94A270 <= int(value, 16) < 0x94B498, (name, value)
 
 # ---- the game's append behind the count's load: stages key, pose, type and unit on the stack, copies 0x58 bytes to the
 # entry, counts and leaves. No instruction in it is relative to rip but the last jump; rbx (the manager) is used by the
@@ -108,6 +108,60 @@ assert game[0x94A314:0x94A317] == bytes.fromhex('4C8B15') and rel(0x94A317) == 0
 assert game[0x94A504:0x94A50B] == bytes.fromhex('413BB200C00200') and game[0x94A358:0x94A35C] == bytes.fromhex('486BD058')
 assert INVASIONS * 0x58 == 0x86FA0 - 0x859A0 and INVASIONS == 64 and game[0x94ABEF:0x94ABF6] == bytes.fromhex('4539A5A06F0800')
 assert game[0x94B1A9:0x94B1B0] == bytes.fromhex('453B95A06F0800') and game[0x94B07C:0x94B084] == bytes.fromhex('4B8B942EA0590800')
+
+# ---- a group's own lists, each with its count right behind its places and no check at its append. Every source's key
+# is one field: the level unit a marker came from, written at the marker's +8 by 0xFDF7D0 for the markers of each unit
+# and its children and handed on in r13 by 0xAD2010 to the AI's task, spawner, invasion site, alarm and patrol spawner
+# appends. How many markers one unit holds, and of which kinds, is the level's data, which the image does not bound,
+# so each append below takes a bound: past it the game writes over the count.
+assert game[0xFDF8C5:0xFDF8CD] == bytes.fromhex('4A8D147D01000000') and game[0xFDF8E0:0xFDF8E3] == bytes.fromhex('48891A')
+assert game[0xAD2045:0xAD2049] == bytes.fromhex('4C8B6A08') and game[0xAD25DA:0xAD25DF] == bytes.fromhex('4C896C2420') and rel(0xAD25E0) == 0x126FAC0
+assert game[0x126FBA4:0x126FBAF] == bytes.fromhex('488B8500010000' '49894740')  # the task's +0x40: its 5th argument
+assert game[0xAD384A:0xAD384F] == bytes.fromhex('4C896C2470') and game[0xAD38BB:0xAD38C3] == bytes.fromhex('0F118419A0590800')
+assert game[0xAD3936:0xAD393A] == bytes.fromhex('4C896D18') and game[0xAD3992:0xAD3996] == bytes.fromhex('4C896D18')
+for at, key in ((0x94A362, '4C8B4240'), (0x94A370, '4C3901'), (0x94AAC6, '483911'), (0x94B095, '483911'), (0x94B230, '4C3909'), (0x94B300, '4C3909')):
+    assert game[at:at + len(key) // 2] == bytes.fromhex(key), hex(at)
+# the AI's tasks: u32[96] from +8, count +0x188; the record's copy (0x90CDA8..0x90CDD0) is u32[96] from +0x28, count +0x1A8
+TASK_COUNT, TASKS_SITE, TASKS_BACK = 0x188, 0x94A3A3, 0x94A3B6
+tasks = bytes.fromhex('8B8388010000' '4C8903' '89748308' 'FF8388010000' '4183FD04')
+assert game[TASKS_SITE:TASKS_SITE + len(tasks)] == tasks and TASKS_SITE + 19 == TASKS_BACK and game[0x94A398:0x94A3A3] == bytes.fromhex('4B8D1C7F48C1E3084803DF')
+TASKS_PER_GROUP = (TASK_COUNT - 8) // 4
+assert TASKS_PER_GROUP == 96 == (0x1A8 - 0x28) // 4 and game[0x90CDA8:0x90CDC5] == bytes.fromhex('498D5708' '4589A5A4020000' '498D4D28' '418B8788010000' '418985A8010000')
+# the positions: the invasion sites' append is the spawners' to the byte; the record keeps one AI spawner per position
+# (0x90CF19 loop, 0x90B570 appends to u32[16] from +0x1AC, count +0x1EC)
+SITES, SITES_NEXT = 0x94B188, 0x94B1A9
+sites_next = bytes.fromhex('453B95A06F0800' '0F824AFAFFFF')
+assert game[SITES:SITES_NEXT] == places and game[SITES_NEXT:SITES_NEXT + 13] == sites_next and rel(SITES_NEXT + 9) == 0x94AC00
+assert game[0x90CF19:0x90CF20] == bytes.fromhex('4539A74C020000') and game[0x90B607:0x90B614] == bytes.fromhex('8B8AEC010000' '89BC8AAC010000')
+assert (0x1EC - 0x1AC) // 4 == 16
+# alarms and the patrol spawner: the key goes through the linked locations (0x94B1E8, 0x94B2B9) and the lookup leaves
+# -1 when no group has it (0x94B21F, 0x94B2EF), with no group at all straight to the site
+ALARM_COUNT, ALARMS, ALARMS_ADD, ALARMS_NEXT = 0x2D0, 0x94B247, 0x94B25E, 0x94B271
+alarms = bytes.fromhex('8BC2' 'FFC3' '488D1440' '438B84DDA86F0800' '48C1E208' '4803D7'
+                       '8B8AD0020000' '89848A50020000' 'FF82D0020000' '413B9DA8770800' '0F8252FFFFFF')
+assert game[ALARMS:ALARMS + len(alarms)] == alarms and ALARMS + 23 == ALARMS_ADD and ALARMS_ADD + 19 == ALARMS_NEXT and rel(ALARMS + 51) == 0x94B1D0
+assert game[0x94B21F:0x94B224] == bytes.fromhex('BAFFFFFFFF') and game[0x94B22A:0x94B22C] == bytes.fromhex('741B') and 0x94B22C + 0x1B == ALARMS
+assert game[0x94B1D6:0x94B1DE] == bytes.fromhex('4F8B94DDB06F0800') and (0x877A8 - 0x86FA8) // 0x10 == 128
+ALARMS_PER_GROUP = (ALARM_COUNT - 0x250) // 4
+assert ALARMS_PER_GROUP == 32 == (0x29C - 0x21C) // 4 and game[0x90D126:0x90D135] == bytes.fromhex('418B809C020000' '41898C801C020000')
+PATROL_COUNT, PATROLS, PATROLS_ADD, PATROLS_NEXT = 0x2D8, 0x94B317, 0x94B32B, 0x94B33E
+patrols = bytes.fromhex('8BC2' 'FFC3' '488D1440' '438B44D500' '48C1E208' '4803D7'
+                        '8B8AD8020000' '89848AD4020000' 'FF82D8020000' '413B9D30070000' '0F8255FFFFFF')
+assert game[PATROLS:PATROLS + len(patrols)] == patrols and PATROLS + 20 == PATROLS_ADD and PATROLS_ADD + 19 == PATROLS_NEXT and rel(PATROLS + 48) == 0x94B2A0
+assert game[0x94B2EF:0x94B2F4] == bytes.fromhex('BAFFFFFFFF') and game[0x94B2FA:0x94B2FC] == bytes.fromhex('741B') and 0x94B2FC + 0x1B == PATROLS
+assert game[0x94B2AA:0x94B2AF] == bytes.fromhex('4F8B5CD508') and (0x730 - 0x330) // 0x10 == 64
+PATROLS_PER_GROUP = (PATROL_COUNT - 0x2D4) // 4
+assert PATROLS_PER_GROUP == 1  # the record keeps the one spawner's pose, not a list (0x90D15A..0x90D228)
+# the group's fields end to end, and no branch in the builder lands inside a replaced run but at its start
+assert 8 + TASKS_PER_GROUP * 4 == TASK_COUNT and TASK_COUNT + 4 == 0x18C and 0x18C + 16 * 12 == 0x24C and 0x24C + 4 == 0x250
+assert 0x250 + ALARMS_PER_GROUP * 4 == ALARM_COUNT and ALARM_COUNT + 4 == 0x2D4 and 0x2D4 + PATROLS_PER_GROUP * 4 == PATROL_COUNT
+runs = ((TASKS_SITE, TASKS_BACK), (PLACES, NEXT), (SITES, SITES_NEXT), (ALARMS, ALARMS_ADD), (PATROLS, PATROLS_ADD))
+for i in range(0x94A270, 0x94B498):
+    to = []
+    if game[i] in (0xE8, 0xE9): to.append(rel(i + 1))
+    if game[i] == 0x0F and 0x80 <= game[i + 1] <= 0x8F: to.append(rel(i + 2))
+    if 0x70 <= game[i] <= 0x7F or game[i] == 0xEB: to.append(i + 2 + struct.unpack_from('<b', game, i + 1)[0])
+    assert not any(a < t < b for t in to for a, b in runs), hex(i)
 
 # ---- every user of the list: a 32-bit displacement of an entry's field or the count. The same four bytes are also a
 # call's or jump's distance (E8 / E9 before them) or begin a call or jump over 0x82D bytes (E8 / E9, 2D 08 00 00);
@@ -173,5 +227,20 @@ o = ['/* Generated by scripts/gen_spawner_sites.py from HellForge\'s source and 
      ' * groups\' sources: the AI\'s tasks and the invasion sites, each a list of this many places, and the spawners. */\n',
      '#define CO_SPAWNER_GROUPS_SITE 0x%Xu\n#define CO_SPAWNER_GROUP_SIZE 0x%Xu\n' % (GROUPS_SITE, GROUP_SIZE),
      '#define CO_SPAWNER_GROUP_TASKS %du\n#define CO_SPAWNER_GROUP_INVASIONS %du\n' % (TASKS, INVASIONS),
-     'static const uint8_t kCoSpawnerGroupsPin[%d] = {\n    %s};\n\n#endif\n' % (len(groups), hexes(groups))]
+     'static const uint8_t kCoSpawnerGroupsPin[%d] = {\n    %s};\n\n' % (len(groups), hexes(groups)),
+     '/* A group\'s own lists, each count right behind its places. The AI\'s task append (19 bytes, then the game\'s test of\n'
+     ' * the mode at its way back); the invasion sites\' positions (the spawners\' bytes) and the loop\'s test behind them. */\n',
+     '#define CO_SPAWNER_TASKS 0x%Xu\n#define CO_SPAWNER_TASKS_BACK 0x%Xu\n#define CO_SPAWNER_TASK_COUNT 0x%Xu\n#define CO_SPAWNER_GROUP_TASK_PLACES %du\n'
+     % (TASKS_SITE, TASKS_BACK, TASK_COUNT, TASKS_PER_GROUP),
+     'static const uint8_t kCoSpawnerTasks[%d] = {%s};\n' % (len(tasks), hexes(tasks)),
+     '#define CO_SPAWNER_SITES 0x%Xu\n#define CO_SPAWNER_SITES_NEXT 0x%Xu\n#define CO_SPAWNER_PLACE_COUNT 0x24Cu\n' % (SITES, SITES_NEXT),
+     'static const uint8_t kCoSpawnerSitesNext[%d] = {%s};\n' % (len(sites_next), hexes(sites_next)),
+     '/* The alarms\' and the patrol spawner\'s lookup (-1: no group) to the append and the loop\'s test: the site\'s bytes,\n'
+     ' * then the append at _ADD, then the test at _NEXT. */\n',
+     '#define CO_SPAWNER_ALARMS 0x%Xu\n#define CO_SPAWNER_ALARMS_ADD 0x%Xu\n#define CO_SPAWNER_ALARMS_NEXT 0x%Xu\n#define CO_SPAWNER_ALARM_COUNT 0x%Xu\n'
+     '#define CO_SPAWNER_GROUP_ALARMS %du\n' % (ALARMS, ALARMS_ADD, ALARMS_NEXT, ALARM_COUNT, ALARMS_PER_GROUP),
+     'static const uint8_t kCoSpawnerAlarms[%d] = {\n    %s};\n' % (len(alarms), hexes(alarms)),
+     '#define CO_SPAWNER_PATROLS 0x%Xu\n#define CO_SPAWNER_PATROLS_ADD 0x%Xu\n#define CO_SPAWNER_PATROLS_NEXT 0x%Xu\n#define CO_SPAWNER_PATROL_COUNT 0x%Xu\n'
+     '#define CO_SPAWNER_GROUP_PATROLS %du\n' % (PATROLS, PATROLS_ADD, PATROLS_NEXT, PATROL_COUNT, PATROLS_PER_GROUP),
+     'static const uint8_t kCoSpawnerPatrols[%d] = {\n    %s};\n\n#endif\n' % (len(patrols), hexes(patrols))]
 open(out, 'w').write(''.join(o))
