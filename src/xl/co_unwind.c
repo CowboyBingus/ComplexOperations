@@ -52,14 +52,16 @@ static long CoUnwindCopy(const uint8_t* info, uintptr_t gameBase, uint8_t* out, 
     return (long)size + more;
 }
 
-/* Bytes a range's own codes put under the game's Rsp once its prologue ran. */
+/* Bytes a range's own codes put under the game's Rsp once its prologue ran; ~0 for a code other than a push or a small
+ * allocation (the save offsets could not be moved by it). */
 static uint32_t CoUnwindDelta(const CoUnwindRange* r)
 {
     uint32_t delta = 0;
     for (unsigned i = 0; i < r->count; i++)
     {
         const unsigned op = (r->codes[i] >> 8) & 15u, info = r->codes[i] >> 12;
-        delta += op == 0u ? 8u : op == 2u ? info * 8u + 8u : 0u;
+        if (op != 0u && op != 2u) return ~0u;
+        delta += op == 0u ? 8u : info * 8u + 8u;
     }
     return delta;
 }
@@ -78,7 +80,7 @@ int co_unwind_block(uint8_t* block, const CoUnwindRange* ranges, int count, uint
     for (int r = 0; r < count; r++)
     {
         const uint32_t delta = CoUnwindDelta(&ranges[r]);
-        if (delta % 16u != 0 || ranges[r].count > 6) return -1; /* a save offset in 16-byte units moves by whole units */
+        if (delta == ~0u || delta % 16u != 0 || ranges[r].count > 6) return -1; /* a save offset in 16-byte units moves by whole units */
         uint8_t* parent = NULL;
         for (int c = 0; c < copies; c++) if (deltas[c] == delta) parent = parents[c];
         if (parent == NULL)

@@ -730,7 +730,9 @@ static int CoXlTestUnwindFrom(uint64_t rip, uint64_t rsp, uint64_t* out)
     out[0] = c.Rip; out[1] = c.Rsp; out[2] = c.Rbx; out[3] = c.R12; out[4] = c.Xmm6.Low;
     return 0;
 }
-int CoXlTestUnwind(uintptr_t site, int pre, uint64_t out[10])
+/* kind 0: a stub with 0x80 of its own (the smash stub's shape); 1: four pushes and 0x80 (the blast stub's, 0xA0).
+ * handler: the one the host's data may name. co_unwind_block's refusal comes back as it minus 10. */
+int CoXlTestUnwindWith(uintptr_t site, uintptr_t handler, int kind, int pre, uint64_t out[10])
 {
     DWORD64 base = 0;
     if (RtlLookupFunctionEntry(site, &base, NULL) == NULL) return -1;
@@ -738,13 +740,17 @@ int CoXlTestUnwind(uintptr_t site, int pre, uint64_t out[10])
     static uint64_t stack[0x400];
     if (block == NULL) return -2;
     memset(block, 0xCC, 0x800);
-    static const CoUnwindRange ranges[2] = {{0, 17, 0, 0, {0}}, {17, 102, 7, 1, {CO_UNWIND_ALLOC(7, 0x80)}}};
-    if (co_unwind_block(block, ranges, 2, site, 0, block + 0x800, 0x800)) return -3;
+    static const CoUnwindRange small[2] = {{0, 17, 0, 0, {0}}, {17, 102, 7, 1, {CO_UNWIND_ALLOC(7, 0x80)}}};
+    static const CoUnwindRange pushes[2] = {{0, 5, 0, 0, {0}},
+        {5, 108, 15, 5, {CO_UNWIND_ALLOC(15, 0x80), CO_UNWIND_PUSH(8, 11), CO_UNWIND_PUSH(6, 10), CO_UNWIND_PUSH(4, 9), CO_UNWIND_PUSH(2, 8)}}};
+    int rc = co_unwind_block(block, kind ? pushes : small, 2, site, handler, block + 0x800, 0x800);
+    if (rc != 0) return rc - 10;
     for (int i = 0; i < 0x400; i++) stack[i] = 0x1000u + (uint64_t)i;
     uint64_t rsp = (uint64_t)(uintptr_t)&stack[0x100];
-    if (CoXlTestUnwindFrom((uint64_t)(uintptr_t)block + (pre ? 8u : 60u), rsp, out)) return -4;
-    return CoXlTestUnwindFrom((uint64_t)site, pre ? rsp : rsp + 0x80u, out + 5);
+    if (CoXlTestUnwindFrom((uint64_t)(uintptr_t)block + (pre ? 3u : 60u), rsp, out)) return -4;
+    return CoXlTestUnwindFrom((uint64_t)site, pre ? rsp : rsp + (kind ? 0xA0u : 0x80u), out + 5);
 }
+int CoXlTestUnwind(uintptr_t site, int pre, uint64_t out[10]) { return CoXlTestUnwindWith(site, 0, 0, pre, out); }
 int CoXlTestThunkUnwind(uint64_t out[2], uint64_t* stackTop)
 {
     static uint64_t stack[0x100];

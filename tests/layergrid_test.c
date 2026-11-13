@@ -49,6 +49,7 @@ void CoXlTestProbeCounts(long* reads, long* off, long* written);
 uint64_t CoXlTestLayerSpawn(uint64_t unit, uint64_t count, uint64_t field);
 uint64_t CoXlTestThunk(int which, float* out, uint64_t* r9, uint64_t* fifth);
 int CoXlTestUnwind(uintptr_t site, int pre, uint64_t out[10]);
+int CoXlTestUnwindWith(uintptr_t site, uintptr_t handler, int kind, int pre, uint64_t out[10]);
 void CoXlTestLayerChosen(void (*fn)(uint64_t));
 void CoXlTestGridReady(int slot, LONG ready);
 void CoXlTestLayerCounts(long* grids, long* spawns, uint32_t* pending);
@@ -247,6 +248,28 @@ __asm__(".text\n.p2align 4\n.globl UnwindHost\n.globl UnwindHostBody\nUnwindHost
         "UnwindHostBody:\n  nop\n  nop\n  nop\n  nop\n  nop\n  nop\n  nop\n  nop\n"
         "  movaps 0x30(%rsp), %xmm6\n  movq 0x20(%rsp), %r12\n  addq $0x60, %rsp\n  popq %rbx\n  retq\n"
         "  .seh_endproc\n");
+
+/* A host laid out as the game's: a fragment past the root's code whose data saves xmm6 and chains to the root (a push,
+ * 0x60, r12 saved), the root naming a handler when `handler`. Registered as a table of its own. Returns a site in the
+ * fragment's body. */
+static uintptr_t ChainedHost(int handler)
+{
+    uint8_t* h = (uint8_t*)VirtualAlloc(NULL, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (h == NULL) return 0;
+    memset(h, 0xCC, 0x800);
+    static const uint8_t root[12] = {1u | 0u, 0x10, 4, 0, 0x10, 0x04 | (12 << 4), 4, 0, 0x08, 0x02 | (11 << 4), 0x02, 0x00 | (3 << 4)};
+    memcpy(h + 0x800, root, sizeof root);
+    if (handler) { h[0x800] = 1u | (UNW_FLAG_EHANDLER << 3); uint32_t at = 0x300; memcpy(h + 0x80C, &at, 4); }
+    static const uint8_t frag[8] = {1u | (UNW_FLAG_CHAININFO << 3), 0x08, 2, 0, 0x08, 0x08 | (6 << 4), 3, 0};
+    memcpy(h + 0x840, frag, sizeof frag);
+    RUNTIME_FUNCTION chain = {0x000, 0x100, 0x800};
+    memcpy(h + 0x848, &chain, sizeof chain);
+    RUNTIME_FUNCTION* table = (RUNTIME_FUNCTION*)(h + 0x900);
+    table[0] = (RUNTIME_FUNCTION){0x000, 0x100, 0x800};
+    table[1] = (RUNTIME_FUNCTION){0x100, 0x200, 0x840};
+    if (!RtlAddFunctionTable(table, 2, (DWORD64)(uintptr_t)h)) return 0;
+    return (uintptr_t)h + 0x180;
+}
 
 int main(void)
 {
@@ -673,6 +696,18 @@ int main(void)
         CHECK(CoXlTestUnwind(site, 0, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0 && u[0] >= 0x1000u && u[0] < 0x1400u);
         CHECK(u[3] != 0 && u[4] != 0); /* r12 and xmm6 came off the stack: the save offsets were applied */
         CHECK(CoXlTestUnwind(site, 1, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0);
+        CHECK(CoXlTestUnwindWith(site, 0, 1, 0, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0); /* four pushes and 0x80: 0xA0 */
+        CHECK(CoXlTestUnwindWith(site, 0, 1, 1, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0);
+        uintptr_t chained = ChainedHost(0), guarded = ChainedHost(1);
+        CHECK(chained != 0 && guarded != 0);
+        if (chained != 0 && guarded != 0)
+        {
+            CHECK(CoXlTestUnwindWith(chained, 0, 1, 0, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0 && u[3] != 0 && u[4] != 0);
+            CHECK(CoXlTestUnwindWith(chained, 0, 0, 0, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0);
+            CHECK(CoXlTestUnwindWith(chained, 0, 1, 1, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0); /* 3 bytes in: every game code */
+            CHECK(CoXlTestUnwindWith(guarded, 0, 0, 0, u) == -12);                        /* a handler not named: refused */
+            CHECK(CoXlTestUnwindWith(guarded, (guarded & ~(uintptr_t)0xFFF) + 0x300, 0, 0, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0);
+        }
         uint64_t t[2] = {0}, top = 0;
         CHECK(CoXlTestThunkUnwind(t, &top) == 0 && t[1] == top + 0x98u + 8u && t[0] == 0x2000u + 0x98u / 8u);
     }
