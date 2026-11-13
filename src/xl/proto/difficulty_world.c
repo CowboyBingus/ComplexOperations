@@ -5396,6 +5396,7 @@ static void WorldLevelForget(void)
 static void WorldLevel(uintptr_t level, uintptr_t preview)
 {
     LevelInitBegins(); /* first: nothing of this level is written while the last generation's tiles still run */
+    co_watch_level(level, preview); /* the war-table crash's watch: when each preview starts and is abandoned */
     NearOneMipDrop(); /* the previous extra large level's one-mip heightmap is not this level's */
     NearLevelLeft(0);
     uint8_t difficulty = 0;
