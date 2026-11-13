@@ -320,6 +320,8 @@ void CoXlTestLwPins(uint8_t* image)
         }
 }
 int CoXlTestLiving(uintptr_t game) { if (!LwEnabled()) return 0; CoXlLiving(game); return 1; }
+/* The living world's held place for the player at EvpPlayers index `i`, peer `peer`, read at `at` (x, y). */
+int CoXlTestLwSettle(uint32_t i, uint64_t peer, const float* at, uint64_t now, float* use) { return LwSettleAt(i, peer, at, now, use); }
 /* The living world's navmesh pins (all in the exe) written into a fake exe, and a complex level's nav tick with no
  * director: 1 when it got past the pins, -1 when they refused. */
 void CoXlTestLwNavPins(uint8_t* exe)

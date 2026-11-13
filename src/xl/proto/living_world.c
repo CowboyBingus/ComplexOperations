@@ -575,6 +575,14 @@ static float LwNearestPlayer2(float x, float y)
  * pod's path came online by sightline and nav cells were boosted under it. */
 static CoSettle g_lwSettle;
 static float g_lwHeldZ[EVT_MAX_PLAYERS]; /* the height at the place co_settle holds, per EvpPlayers index */
+static uint64_t g_lwSettlePeer[CO_SETTLE_SLOTS];
+/* co_settle keeps a place per EvpPlayers index, and the player manager shifts its array when a player joins or leaves:
+ * an index that now holds another peer starts afresh, so no player is held at another's place. */
+static int LwSettleAt(uint32_t i, uint64_t peer, const float* at, uint64_t now, float* use)
+{
+    if (i < CO_SETTLE_SLOTS && g_lwSettlePeer[i] != peer) { g_lwSettle.slot[i].seen = 0; g_lwSettlePeer[i] = peer; }
+    return co_settle_at(&g_lwSettle, i, at, now, use);
+}
 static void LwPlayers(void)
 {
     EvpPlayer list[EVT_MAX_PLAYERS];
@@ -590,7 +598,7 @@ static void LwPlayers(void)
         {
             /* co_settle's own held place, not the known slot's: a peer that joined during a long death may have taken it */
             float held[2];
-            if (co_settle_at(&g_lwSettle, (uint32_t)i, at, now, held)) { at[0] = held[0]; at[1] = held[1]; at[2] = g_lwHeldZ[i]; }
+            if (LwSettleAt((uint32_t)i, list[i].peer, at, now, held)) { at[0] = held[0]; at[1] = held[1]; at[2] = g_lwHeldZ[i]; }
             else g_lwHeldZ[i] = at[2];
             if (slot < 0) for (int j = 0; j < EVT_MAX_PLAYERS && slot < 0; j++) if (!g_lwWorld.knownAt[j] || now - g_lwWorld.knownAt[j] > LW_KNOWN_MS) slot = j;
             if (slot >= 0) { g_lwWorld.known[slot][0] = at[0]; g_lwWorld.known[slot][1] = at[1]; g_lwWorld.known[slot][2] = at[2]; g_lwWorld.knownUnit[slot] = h.unit; g_lwWorld.knownAvatar[slot] = list[i].avatar; g_lwWorld.knownLocal[slot] = (uint8_t)(list[i].local != 0); g_lwWorld.knownAt[slot] = now; g_lwWorld.knownPeer[slot] = list[i].peer; }
