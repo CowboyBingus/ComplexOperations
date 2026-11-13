@@ -16,9 +16,9 @@ static unsigned CoUnwindSlots(uint16_t code)
     return op == 6u || op > 10u ? 0u : 1u;    /* version 2's UWOP_EPILOG: refused */
 }
 
-/* The game's unwind data at `info` (and what it chains to) copied to `out` with no prologue and every code offset 0:
- * the stub stands in the body, so all of it applies (Wine measures a chained entry's codes against the offset from the
- * stub's own entry). The unwinder reads saved registers at the frame it took from the stub's Rsp, `delta` bytes under
+/* The game's unwind data at `info` (and what it chains to) copied to `out` with no prologue: the stub stands in the
+ * body, so every code applies. With no prologue the unwinder never reads the code offsets; they are zeroed in case
+ * one is read. The unwinder reads saved registers at the frame it took from the stub's Rsp, `delta` bytes under
  * the game's: the save offsets move by it. Returns the bytes written; 0 when it does not fit, -1 for another handler. */
 static long CoUnwindCopy(const uint8_t* info, uintptr_t gameBase, uint8_t* out, size_t room, uint8_t* block, uint32_t end, uint32_t delta,
     uintptr_t handler, int level)
