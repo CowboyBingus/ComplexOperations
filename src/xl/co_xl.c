@@ -18,6 +18,7 @@
 #include "co_normal.h"
 #include "co_chain.h"
 #include "co_rows.h"
+#include "co_coarse.h"
 #include "co_objectives.h"
 #include "co_nav.h"
 #include "co_beside.h"
@@ -404,4 +405,41 @@ int CoXlTestScatterUpdateAsIs(uint8_t* view)
     TdScatterUpdate(NULL, view, 0, NULL, NULL, NULL, NULL, NULL);
     return g_scatterTestCalled;
 }
+/* The coarse terrain's draw (CoarseDraw and its callbacks) over `count` tiles the test has built: every slot ready,
+ * the dispatcher the test's, no runners. The list is sorted by step as CoarseStart sorts it when batch > 1. */
+void CoXlTestCoarseSection(const int* list, int count, int columns, int batch, void* dispatch)
+{
+    g_worldDispatch = (WorldDispatchFn)dispatch;
+    memset(g_coarse.slots, 0, sizeof g_coarse.slots);
+    g_coarse.count = count < COARSE_SLOTS_MAX ? count : COARSE_SLOTS_MAX;
+    memcpy(g_coarse.list, list, (size_t)g_coarse.count * sizeof *list);
+    if (batch > 1) co_coarse_order(g_coarse.list, g_coarse.count, columns);
+    g_coarse.slotCount = g_coarse.count;
+    for (int k = 0; k < g_coarse.count; k++)
+    {
+        CoarseSlot* s = &g_coarse.slots[k];
+        s->state = STAMP_SLOT_BUILT; s->ok = 1; s->k = k; s->t = g_coarse.list[k];
+        memcpy(s->record + 0x18F0, &s->t, 4); /* past the pass: which tile, for the test's dispatcher */
+        g_coarse.slotOf[k] = k;
+    }
+    g_coarse.nextTile = g_coarse.count; g_coarse.inflight = 0; g_coarse.pending = 0; g_coarse.submit = 0; g_coarse.started = 0;
+    g_coarse.haveEntry = 0; g_coarse.waitSince = 0; g_coarse.frameTris = 0; g_coarse.frameTrisAll = 0;
+    g_terrain.columns = columns; g_terrain.next = 0; g_terrain.drawn = 0; g_terrain.failed = 0; g_terrain.frames = 0;
+    co_coarse_begin(&g_coarse.batch, columns, batch, TERRAIN_DRAW_CALLS);
+    g_coarse.on = 1;
+}
+int CoXlTestCoarseFrame(uint64_t context, uintptr_t gen)
+{
+    LARGE_INTEGER hz, t0;
+    QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
+    g_terrain.frames++;
+    return CoarseDraw(context, 0, 0, gen, t0, hz);
+}
+const CoCoarseBatch* CoXlTestCoarseBatch(int* drawn, int* failed)
+{
+    *drawn = g_terrain.drawn; *failed = g_terrain.failed;
+    return &g_coarse.batch;
+}
+const int* CoXlTestCoarseList(void) { return g_coarse.list; }
+int CoXlTestCoarseFree(int k) { return g_coarse.slotOf[k] < 0 && g_coarse.slots[k].state == STAMP_SLOT_FREE; }
 #endif

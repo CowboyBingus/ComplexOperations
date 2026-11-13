@@ -879,6 +879,193 @@ static void TdCollect(void)
     }
 }
 
+/* ---- the coarse terrain against another run (research, HELLFORGE_XL_COARSE_COMPARE) -------------------------------
+ * `1` writes each image below to the session's logs (coarse-compare-<pipeline>-<label>.bin, .txt) with a hash of all
+ * its bytes; a folder also compares each with that folder's file of the same name. Run once with
+ * HELLFORGE_XL_COARSE_BATCH=1 and once batched, the second given the first's files: 0 samples differ, or where.
+ * A relative folder is in the mod's own folder: the sandbox shows the game only its own session's logs and the mods.
+ *   after-40-<k>  the merge's heights after SmoothHeightmap: CaptureIntermediateHeightmapStart (0x5B) runs right after
+ *                 0x40 and its finalize (0x5C, first of the level) leaves the readbacks at lg + 0x18 k
+ *   minimap-<id>  after CaptureMinimapTexture (0x56, previews): the ten targets 0x1004DE0 binds (0x1004F54), read back
+ *   final-heights after CleanupTerrainMerge (0x66, missions): the scatter heights lg+0xD8 the level keeps */
+static int CoarseBatchNow(void); /* difficulty_world_terrain.c */
+static struct
+{
+    int on; wchar_t reference[MAX_PATH];
+    SRWLOCK lock; LONG level; int captured;
+    struct { uint32_t id, name; ULONGLONG since; } pending[12]; int pendingCount;
+} g_cc = {-1};
+
+static int CcOn(void)
+{
+    if (g_cc.on < 0)
+    {
+        char text[MAX_PATH] = "";
+        DWORD n = GetEnvironmentVariableA("HELLFORGE_XL_COARSE_COMPARE", text, sizeof text);
+        g_cc.on = n > 0 && n < sizeof text && text[0] != '0';
+        char folder[2 * MAX_PATH] = "";
+        const char* mod = g_coApi != NULL && g_coApi->mod_folder != NULL ? g_coApi->mod_folder(g_coMod) : NULL;
+        if (!g_cc.on || strcmp(text, "1") == 0) folder[0] = 0;
+        else if (text[0] == '\\' || text[0] == '/' || (text[0] && text[1] == ':')) snprintf(folder, sizeof folder, "%s", text);
+        else if (mod != NULL && mod[0]) snprintf(folder, sizeof folder, "%s\\%s", mod, text);
+        if (folder[0] && MultiByteToWideChar(CP_UTF8, 0, folder, -1, g_cc.reference, MAX_PATH) == 0) g_cc.reference[0] = 0;
+        if (g_cc.on) Note("coarse compare: on; reference %s", g_cc.reference[0] ? folder : folder[0] ? "a path too long" : "none (this run's files only)");
+    }
+    return g_cc.on;
+}
+
+/* The byte the level init sets for a preview ([level+0x2D48], 0xF715BE). */
+static const char* CcPipeline(void)
+{
+    uint8_t preview = 0;
+    return g_worldLevel != 0 && !SafeRead(g_worldLevel + 0x2D48, &preview, 1) && preview ? "preview" : "mission";
+}
+
+static void CcImage(const char* label, const uint8_t* data, uint32_t w, uint32_t h, uint32_t bpp, uint32_t format)
+{
+    size_t bytes = (size_t)w * h * bpp;
+    uint64_t hash = 0xCBF29CE484222325ull;
+    for (size_t i = 0; i < bytes; i++) hash = (hash ^ data[i]) * 0x100000001B3ull;
+    wchar_t name[128];
+    swprintf(name, 128, L"coarse-compare-%hs-%hs.bin", CcPipeline(), label);
+    HANDLE file = OpenLog(name);
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        DWORD wrote = 0;
+        for (size_t at = 0; at < bytes; at += wrote) if (!WriteFile(file, data + at, (DWORD)(bytes - at > 0x40000000u ? 0x40000000u : bytes - at), &wrote, NULL) || !wrote) break;
+        CloseHandle(file);
+    }
+    char against[2 * MAX_PATH + 160] = "no reference";
+    if (g_cc.reference[0])
+    {
+        wchar_t path[MAX_PATH + 128];
+        swprintf(path, MAX_PATH + 128, L"%ls\\%ls", g_cc.reference, name);
+        HANDLE ref = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        LARGE_INTEGER size = {0};
+        uint8_t* other = NULL;
+        if (ref != INVALID_HANDLE_VALUE && GetFileSizeEx(ref, &size) && (uint64_t)size.QuadPart == bytes &&
+            (other = VirtualAlloc(NULL, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)) != NULL)
+        {
+            DWORD got = 0; size_t at = 0;
+            for (; at < bytes; at += got) if (!ReadFile(ref, other + at, (DWORD)(bytes - at > 0x40000000u ? 0x40000000u : bytes - at), &got, NULL) || !got) break;
+            if (at == bytes)
+            {
+                /* the difference in the sample's own unit: u16, f32 (when the image reads as floats) or bytes */
+                int f32 = bpp == 4 && TdLooksFloat((const uint32_t*)data, (size_t)w * h);
+                uint64_t differ = 0; double most = 0;
+                size_t samples = bpp == 2 || f32 ? (size_t)w * h : bytes;
+                for (size_t i = 0; i < samples; i++)
+                {
+                    double a, b;
+                    if (bpp == 2) { uint16_t x, y; memcpy(&x, data + 2 * i, 2); memcpy(&y, other + 2 * i, 2); a = x; b = y; }
+                    else if (f32) { float x, y; memcpy(&x, data + 4 * i, 4); memcpy(&y, other + 4 * i, 4); a = x; b = y; }
+                    else { a = data[i]; b = other[i]; }
+                    if (a != b) { differ++; if (fabs(a - b) > most) most = fabs(a - b); }
+                }
+                snprintf(against, sizeof against, "against the reference: %llu of %llu samples differ, max |d| %g (%s)", (unsigned long long)differ,
+                    (unsigned long long)samples, most, bpp == 2 ? "u16" : f32 ? "f32" : "bytes");
+            }
+            else snprintf(against, sizeof against, "the reference did not read");
+        }
+        else if (ref == INVALID_HANDLE_VALUE)
+        {
+            DWORD error = GetLastError();
+            char at[2 * MAX_PATH] = "?";
+            WideCharToMultiByte(CP_UTF8, 0, path, -1, at, sizeof at, NULL, NULL);
+            snprintf(against, sizeof against, "no reference file %s (error %lu)", at, (unsigned long)error);
+        }
+        else snprintf(against, sizeof against, "the reference is another size (%lld B)", (long long)size.QuadPart);
+        if (other) VirtualFree(other, 0, MEM_RELEASE);
+        if (ref != INVALID_HANDLE_VALUE) CloseHandle(ref);
+    }
+    /* 0x1 reads as f32 and 0x16 is the u16 heightmap; the readback's size for other formats is not known */
+    Note("coarse compare: %s %s (batch %d): %u x %u, %u B a sample%s (format 0x%X), hash %016llX; %s", CcPipeline(), label, CoarseBatchNow(), w, h, bpp,
+        format == 0x1 || format == 0x16 ? "" : " assumed", format, (unsigned long long)hash, against);
+}
+
+/* An image the game holds as {w, h, format, ?, data} (TdDescriptor's form). */
+static void CcDescriptor(const char* label, uintptr_t descriptor)
+{
+    uint32_t wh[4] = {0}; uint64_t data = 0;
+    if (SafeRead(descriptor, wh, 16) || SafeRead(descriptor + 0x10, &data, 8) || data < 0x10000 || wh[0] < 1 || wh[1] < 1 || wh[0] > 16384 || wh[1] > 16384)
+    { Note("coarse compare: %s %s: no image", CcPipeline(), label); return; }
+    uint32_t bpp = wh[2] == 0x16 ? 2 : 4;
+    size_t bytes = (size_t)wh[0] * wh[1] * bpp;
+    uint8_t* copy = VirtualAlloc(NULL, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (copy == NULL) return;
+    if (!SafeRead((uintptr_t)data, copy, bytes)) CcImage(label, copy, wh[0], wh[1], bpp, wh[2]);
+    else Note("coarse compare: %s %s: %u x %u (format 0x%X) did not read", CcPipeline(), label, wh[0], wh[1], wh[2]);
+    VirtualFree(copy, 0, MEM_RELEASE);
+}
+
+static void CcCollect(void)
+{
+    if (g_cc.on <= 0 || g_cc.pendingCount == 0) return;
+    AcquireSRWLockExclusive(&g_cc.lock);
+    uint64_t table = TdRenderTable(), ready = 0, get = 0;
+    if (table != 0 && !SafeRead(table + 0x1D0, &ready, 8) && !SafeRead(table + 0x1D8, &get, 8) && ready && get)
+        for (int k = 0; k < g_cc.pendingCount;)
+        {
+            int done = 0;
+            char label[32]; snprintf(label, sizeof label, "minimap-%08X", g_cc.pending[k].name);
+            if (((TdReadyFn)(uintptr_t)ready)(g_cc.pending[k].id))
+            {
+                uint8_t out[64] = {0};
+                void* descriptor = ((TdGetFn)(uintptr_t)get)(out, g_cc.pending[k].id);
+                if (descriptor) CcDescriptor(label, (uintptr_t)descriptor);
+                done = 1;
+            }
+            else if (GetTickCount64() - g_cc.pending[k].since > 20000) { Note("coarse compare: readback %s never came", label); done = 1; }
+            if (done) g_cc.pending[k] = g_cc.pending[--g_cc.pendingCount]; else k++;
+        }
+    ReleaseSRWLockExclusive(&g_cc.lock);
+}
+
+/* A pass whose index moved on. */
+static void CcPass(uint32_t op)
+{
+    if (!CcOn()) return;
+    uintptr_t gen = TdGen();
+    if (g_cc.level != g_world.levels) { g_cc.level = g_world.levels; g_cc.captured = 0; }
+    if (op == 0x5C && !g_cc.captured && gen != 0)
+    {
+        g_cc.captured = 1;
+        for (int k = 0; k < 8; k++)
+        {
+            char label[32]; snprintf(label, sizeof label, "after-40-%d", k);
+            CcDescriptor(label, gen + TD_IMAGE_BLOCK + 0x18u * (uintptr_t)k);
+        }
+    }
+    /* a preview's 0x66 returns before its readback (settings+0x28 at 0xC17A27), so lg+0xD8 stays empty there */
+    if (op == 0x66 && gen != 0 && strcmp(CcPipeline(), "preview") != 0) CcDescriptor("final-heights", gen + TD_IMAGE_BLOCK + 0xD8);
+    else if (op == 0x66) Note("coarse compare: preview final-heights: none (a preview's 0x66 reads no heights back)");
+    if (op == 0x56)
+    {
+        /* The names are bound only to the capture's own render (0x1004F54 -> exe 0x31E070 -> 0x10F4C0, a per-call set),
+         * never in the renderer's name maps that +0x158 searches. The targets themselves are the preview record's (R =
+         * settings+0x48), made once by 0x1003330 through +0x170 (exe 0x31AF50): type 1, so +0x1A8 reads them as they are. */
+        static const uint32_t names[10] = {0x581D62D2u, 0xE94F447Cu, 0xCDE78DD2u, 0x3B7981ACu, 0xE6FEBF61u, 0x298B674Cu, 0x8EBBF7D9u, 0x53F40E98u,
+            0x60370CF1u, 0x3597C022u};
+        static const uint16_t at[10] = {0x4DA0, 0x4DA8, 0x4D98, 0x4DB0, 0x4DB8, 0x4DC0, 0x4DC8, 0x4DD0, 0x4DD8, 0x4DE0};
+        uint64_t table = TdRenderTable(), request = 0, record = 0;
+        if (table == 0 || SafeRead(table + 0x1A8, &request, 8) || !request) return;
+        if (g_worldLevel == 0 || SafeRead(g_worldLevel + 0x2D68, &record, 8) || record < 0x10000) { Note("coarse compare: no preview record at 0x56"); return; }
+        AcquireSRWLockExclusive(&g_cc.lock);
+        for (int i = 0; i < 10 && g_cc.pendingCount < 12; i++)
+        {
+            uint64_t target = 0; uint8_t type = 0; uint32_t size[2] = {0};
+            if (SafeRead(record + at[i], &target, 8) || target < 0x10000 || SafeRead(target + 3, &type, 1) || SafeRead(target + 0x14, size, 8) || type != 1 ||
+                size[0] < 1 || size[1] < 1 || size[0] > 16384 || size[1] > 16384)
+            { Note("coarse compare: %s minimap-%08X: R+0x%X is not a render target (type %u)", CcPipeline(), names[i], at[i], type); continue; }
+            uint32_t id = ((TdRequestFn)(uintptr_t)request)(target);
+            if (id == 0xFFFFFFFFu) { Note("coarse compare: %s minimap-%08X: no readback", CcPipeline(), names[i]); continue; }
+            g_cc.pending[g_cc.pendingCount].id = id; g_cc.pending[g_cc.pendingCount].name = names[i];
+            g_cc.pending[g_cc.pendingCount].since = GetTickCount64(); g_cc.pendingCount++;
+        }
+        ReleaseSRWLockExclusive(&g_cc.lock);
+    }
+}
+
 /* Which targets to read back once a pass's last step returns: only while the merge's targets exist (after
  * SetupTerrainMerge, before CleanupTerrainMerge releases them), the zone lookup once RenderZoneLookup drew it. */
 static void TdScheduleReadbacks(uint32_t op, uint32_t record)
@@ -1641,8 +1828,11 @@ static int TerrainDiagOn(void)
 static void TerrainDiagBefore(uint64_t records, uint64_t index, uint32_t end, uint32_t* at, uint32_t* op)
 {
     *at = 0xFFFFFFFFu; *op = 0xFFFFFFFFu;
-    if (!TerrainDiagOn() || g_worldLevel == 0) return;
+    int diag = TerrainDiagOn();
+    if ((!diag && !CcOn()) || g_worldLevel == 0) return;
     if (SafeRead(index, at, 4) || SafeRead(records + (uint64_t)*at * 0x19B0u, op, 4)) { *at = 0xFFFFFFFFu; return; }
+    CcCollect();
+    if (!diag) return;
     AcquireSRWLockExclusive(&g_td.lock);
     if (g_td.level != g_world.levels) { if (g_td.level >= 0 && !g_td.reported) TdReport(); TdLevelReset(); }
     if (end && end <= TD_MAX_RECORDS) { g_td.end = end; if (end > g_td.records) g_td.records = end; }
@@ -1664,10 +1854,12 @@ static void TerrainDiagBefore(uint64_t records, uint64_t index, uint32_t end, ui
 /* After it: the step's time; a record whose index moved on is done. */
 static void TerrainDiagAfter(uint64_t records, uint64_t index, uint32_t at, uint32_t op)
 {
-    if (at == 0xFFFFFFFFu || g_td.mode <= 0) return;
-    LARGE_INTEGER now, hz; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&hz);
+    if (at == 0xFFFFFFFFu) return;
     uint32_t after = at;
     SafeRead(index, &after, 4);
+    if (after != at && g_cc.on > 0) CcPass(op);
+    if (g_td.mode <= 0) return;
+    LARGE_INTEGER now, hz; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&hz);
     AcquireSRWLockExclusive(&g_td.lock);
     if (g_td.level == g_world.levels && at < TD_MAX_RECORDS)
     {
@@ -1779,6 +1971,7 @@ static void TerrainDiagTilePlan(uintptr_t block, double extent)
 /* Every game frame (packages.c): collect readbacks, count frames, write the report once generation is over. */
 static void TerrainDiagTick(void)
 {
+    CcCollect();
     if (g_td.mode <= 0) return;
     if (g_tdScatter != NULL)
     {
