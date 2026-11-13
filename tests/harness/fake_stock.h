@@ -42,7 +42,8 @@ void fake_stock_early(uint8_t* image);
 void fake_stock_beside(uint8_t* image);
 
 /* HellForge's guard of the director's spawner list (its PrepareSpawnerStub and JumpToSpawners) over the game's append,
- * and the builder's loop as the game has it. Called by fake_stock_chains. The stub at +0, its counter at +0x40. */
+ * and the builder's loop and group block as the game has them. Called by fake_stock_chains. The stub at +0, its counter
+ * at +0x40. */
 #define FAKE_STOCK_SPAWNERS 0x3117000u
 void fake_stock_spawners(uint8_t* image);
 

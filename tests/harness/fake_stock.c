@@ -232,6 +232,7 @@ void fake_stock_spawners(uint8_t* image)
     memcpy(image + CO_SPAWNER_BASE_LOAD, kCoSpawnerBaseLoad, 7); memcpy(image + CO_SPAWNER_BASE_ADD, kCoSpawnerBaseAdd, 7);
     memcpy(image + CO_SPAWNER_FIRST, kCoSpawnerFirst, 13); memcpy(image + CO_SPAWNER_NEXT, kCoSpawnerNext, 13);
     memcpy(image + CO_SPAWNER_PLACES, kCoSpawnerPlaces, sizeof kCoSpawnerPlaces);
+    memcpy(image + CO_SPAWNER_GROUPS_SITE, kCoSpawnerGroupsPin, sizeof kCoSpawnerGroupsPin);
     memcpy(image + FAKE_STOCK_SPAWNERS, kCoSpawnerGuard, sizeof kCoSpawnerGuard);
     Rel(image, FAKE_STOCK_SPAWNERS + 14u, CO_SPAWNER_ADD);
     Rel(image, FAKE_STOCK_SPAWNERS + 21u, FAKE_STOCK_SPAWNERS + 0x40u);
