@@ -7187,7 +7187,7 @@ static uint32_t NearScatterCell(int32_t x, int32_t y, int32_t size, void* unused
  * extra large map every node's box is rewritten before that test: the hit path's xy, and z the drawn ground's range
  * over the cell (and its pad), which is where the instances stand (NearScatterCell: the tile over its span, the
  * level's heights elsewhere), 1 m under and 3 m over. The call goes through a stub that keeps rsi (the layer) in a TLS
- * slot. Ranges are cached per cell (by size and index) for the level and the tile's state; only views of at most 1024
+ * slot. Ranges are cached per cell (by size, half width and index) for the level and the tile's state; only views of at most 1024
  * nodes with the tile in, and 256 new cells a call. */
 #define NEAR_SCAT_CACHE (1u << 16)
 typedef uint64_t (*NearViewFn)(uintptr_t tree, void* frustum, uint32_t stamp, float pad);
@@ -7197,7 +7197,47 @@ static struct
     SRWLOCK lock; LONG gen;
     volatile LONG64 nodes, missed, calls; ULONGLONG noted; LONG notes, level;
 } g_scatView = {.lock = SRWLOCK_INIT, .level = -1};
-static struct { uint64_t key; float lo, hi; } g_scatCache[NEAR_SCAT_CACHE]; /* zero-filled: not in the file */
+/* A cell's range, keyed by the exact bits of its layer's cell size and half width and its index: layers differ in
+ * both, and a range is only right for the square it was taken over. Size 0 is a free slot (sizes are 1 m or more). */
+typedef struct { uint32_t size, half; int32_t ix, iy; float lo, hi; } NearScatEntry;
+static NearScatEntry g_scatCache[NEAR_SCAT_CACHE]; /* zero-filled: not in the file */
+
+static uint32_t NearScatSlot(uint32_t size, uint32_t half, int32_t ix, int32_t iy)
+{
+    uint64_t k = (((uint64_t)size << 32) | half) * 0x9E3779B97F4A7C15ull;
+    k ^= (((uint64_t)(uint32_t)ix << 32) | (uint32_t)iy) * 0xC2B2AE3D27D4EB4Full;
+    return (uint32_t)((k ^ (k >> 29)) >> 32) & (NEAR_SCAT_CACHE - 1);
+}
+
+static int NearScatSame(const NearScatEntry* e, uint32_t size, uint32_t half, int32_t ix, int32_t iy)
+{
+    return e->size == size && e->half == half && e->ix == ix && e->iy == iy;
+}
+
+/* Up to 8 probes; the caller holds the lock. */
+static int NearScatFind(uint32_t size, uint32_t half, int32_t ix, int32_t iy, float* lo, float* hi)
+{
+    uint32_t slot = NearScatSlot(size, half, ix, iy);
+    for (uint32_t k = 0; k < 8; k++)
+    {
+        const NearScatEntry* e = &g_scatCache[(slot + k) & (NEAR_SCAT_CACHE - 1)];
+        if (NearScatSame(e, size, half, ix, iy)) { *lo = e->lo; *hi = e->hi; return 1; }
+        if (e->size == 0) return 0;
+    }
+    return 0;
+}
+
+/* The first free or same slot of the 8, else the last one's entry goes. The caller holds the lock exclusively. */
+static void NearScatStore(uint32_t size, uint32_t half, int32_t ix, int32_t iy, float lo, float hi)
+{
+    uint32_t slot = NearScatSlot(size, half, ix, iy);
+    for (uint32_t k = 0; k < 8; k++)
+    {
+        NearScatEntry* e = &g_scatCache[(slot + k) & (NEAR_SCAT_CACHE - 1)];
+        if (e->size == 0 || NearScatSame(e, size, half, ix, iy) || k == 7)
+        { e->size = size; e->half = half; e->ix = ix; e->iy = iy; e->lo = lo; e->hi = hi; return; }
+    }
+}
 
 static float NearScatGround(float x, float y)
 {
@@ -7209,18 +7249,11 @@ static float NearScatGround(float x, float y)
 static int NearScatRange(float size, int32_t ix, int32_t iy, float h, float* lo, float* hi, int* budget)
 {
     LONG gen = (g_world.levels * 4 + (g_nearCoarseGround.v != NULL ? 2 : 0)) ^ (g_tilesGen << 12);
-    uint32_t sbits; memcpy(&sbits, &size, 4);
-    uint64_t key = ((uint64_t)sbits << 40) ^ ((uint64_t)(uint32_t)(ix & 0xFFFFF) << 20) ^ (uint64_t)(uint32_t)(iy & 0xFFFFF) ^ 0x8000000000000000ull;
-    uint32_t slot = (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 48) & (NEAR_SCAT_CACHE - 1);
+    uint32_t sbits, hbits; memcpy(&sbits, &size, 4); memcpy(&hbits, &h, 4);
     AcquireSRWLockShared(&g_scatView.lock);
-    int fresh = g_scatView.gen == gen;
-    for (uint32_t k = 0; fresh && k < 8; k++)
-    {
-        uint32_t at = (slot + k) & (NEAR_SCAT_CACHE - 1);
-        if (g_scatCache[at].key == key) { *lo = g_scatCache[at].lo; *hi = g_scatCache[at].hi; ReleaseSRWLockShared(&g_scatView.lock); return 1; }
-        if (g_scatCache[at].key == 0) break;
-    }
+    int found = g_scatView.gen == gen && NearScatFind(sbits, hbits, ix, iy, lo, hi);
     ReleaseSRWLockShared(&g_scatView.lock);
+    if (found) return 1;
     if (g_nearCoarseGround.v == NULL || *budget <= 0) return 0;
     (*budget)--;
     float cx = ((float)ix + 0.5f) * size, cy = ((float)iy + 0.5f) * size, a = 1e9f, b = -1e9f;
@@ -7239,12 +7272,7 @@ static int NearScatRange(float size, int32_t ix, int32_t iy, float h, float* lo,
     *lo = a; *hi = b;
     AcquireSRWLockExclusive(&g_scatView.lock);
     if (g_scatView.gen != gen) { memset(g_scatCache, 0, sizeof g_scatCache); g_scatView.gen = gen; }
-    for (uint32_t k = 0; k < 8; k++)
-    {
-        uint32_t at = (slot + k) & (NEAR_SCAT_CACHE - 1);
-        if (g_scatCache[at].key == 0 || g_scatCache[at].key == key || k == 7)
-        { g_scatCache[at].key = key; g_scatCache[at].lo = a; g_scatCache[at].hi = b; break; }
-    }
+    NearScatStore(sbits, hbits, ix, iy, a, b);
     ReleaseSRWLockExclusive(&g_scatView.lock);
     return 1;
 }

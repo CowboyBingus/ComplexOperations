@@ -682,6 +682,22 @@ void CoXlTestFgFrames(const float* ms, int n, double* worst, double* mean)
 }
 int CoXlTestScatterBake(void) { return g_scatterTestBake; } /* the far-grass bake mark the engine's update ran under */
 void CoXlTestScatLimits(int bake, int* budget, uint64_t* most) { NearScatLimits(bake, budget, most); }
+void CoXlTestScatClear(void) { memset(g_scatCache, 0, sizeof g_scatCache); }
+void CoXlTestScatStore(float size, float half, int32_t ix, int32_t iy, float lo, float hi)
+{
+    uint32_t s, h; memcpy(&s, &size, 4); memcpy(&h, &half, 4);
+    NearScatStore(s, h, ix, iy, lo, hi);
+}
+int CoXlTestScatFind(float size, float half, int32_t ix, int32_t iy, float* lo, float* hi)
+{
+    uint32_t s, h; memcpy(&s, &size, 4); memcpy(&h, &half, 4);
+    return NearScatFind(s, h, ix, iy, lo, hi);
+}
+uint32_t CoXlTestScatSlot(float size, float half, int32_t ix, int32_t iy)
+{
+    uint32_t s, h; memcpy(&s, &size, 4); memcpy(&h, &half, 4);
+    return NearScatSlot(s, h, ix, iy);
+}
 int CoXlTestScatterUpdate(LONG op, LONG record, uint8_t* view)
 {
     g_genOp = op; g_genRecord = record; g_tdScatCameraPinned = 1;
