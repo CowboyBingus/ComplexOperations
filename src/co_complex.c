@@ -9,6 +9,8 @@
 
 #include "co.h"
 
+static const char kNotThisBuild[] = "the game's code is not the build this mod was made for";
+
 /* Why the complex part is off, or NULL when it is on. The order is the order a player can act on: HellForge first. */
 const char* co_complex_refusal(const CoComplexNeeds* n)
 {
@@ -20,11 +22,13 @@ const char* co_complex_refusal(const CoComplexNeeds* n)
     if (!n->moved) return "the map generator kept its own arrays";
     if (!n->early) return "the engine's pools and navigation grid were not enlarged as the game started";
     if (!n->stock_stubs) return "difficulty 11's larger-map steps are not the ones this mod was built for";
-    if (!n->own_sites) return "the game's code is not the build this mod was made for";
+    if (!n->own_sites) return kNotThisBuild;
     if (!n->records) return "the entity records kept the game's 2048 places";
     if (n->commit_free_mb < CO_COMPLEX_COMMIT_MB) return "not enough memory free for an extra large map";
     return NULL;
 }
+
+int co_complex_refused_build(const CoComplexNeeds* n) { return co_complex_refusal(n) == kNotThisBuild; }
 
 /* What a machine does at a level-11 mission: `host_row` is the host's answer as this machine holds it. */
 int co_complex_decision(int is_host, int own_on, int host_row, uint32_t mission_seed)

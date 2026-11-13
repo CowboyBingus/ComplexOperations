@@ -280,6 +280,25 @@ Measured on one city mission at difficulty 11, 8 runs without the mod and 4 with
   98.1 to 99.7 s against 97.3 to 98.9 s).
 - The navigation build scheduler: 5 to 6 µs a call on average, at most 43 µs, against 0.5 µs.
 
+### On the war table
+
+A banner beside the native operation panel, and beside the briefing's mission panel, says what a level-11 operation
+or mission starts as. It is drawn the way Know Your Constellation draws: the engine's Gui through the game's Lua, in
+the game's body font and its panel inks.
+
+| Banner | When |
+|---|---|
+| `COMPLEX OPERATION`, `3 MISSIONS ON ONE 16 KM MAP` | The launch makes a complex mission of it: yellow edge and title. |
+| `STANDARD OPERATION`, `EACH MISSION ON ITS OWN MAP` | The part is on and the roll says normal. |
+| `COMPLEX OPERATIONS OFF` | The part is off: `OFF ON THE HOST`, `OFF ON THIS PC` or `NOT THIS GAME BUILD`. |
+| `WAITING FOR HOST` | A client that has no answer from the host yet. |
+| `STARTS AS STANDARD` | The briefing, as host: a squad member's PC is not known to be able, so the launch drops the mark. |
+
+- The state comes from the functions the launch decides with, on the same inputs.
+- Other levels and other screens get no banner.
+- The banner goes right of the panel, above its top line, or one column further right when that does not fit.
+  Know Your Constellation's box never reaches either place.
+
 ### On every level
 
 These differ from a game without the mod on every level, the ship and the war-table previews. Each adds room, or
@@ -607,6 +626,9 @@ Pelican), which are not in this folder.
 | `tests/engine_test.c` | The engine's sites: written, refused on changed code, taken back on a failed write. |
 | `src/co_roll.c` | Whether an operation is a complex operation: an integer hash of its seed and planet. |
 | `tests/roll_test.c` | The roll's fixed answers and its share of operations at 5, 25 and 50 %. |
+| `src/co_tag.c` | The war-table banner: its state, the war table's readers, its place and its plan. |
+| `src/co_lua.c`, `co_gui.c` | The game's Lua and the engine's Gui from C, as Know Your Constellation's; a hook on `lua_pcall`. |
+| `tests/tag_test.c` | The banner's states, readers and launch prediction; its drawing through a real `lua51.dll` (`CO_LUA51_PATH`). |
 | `src/xl/` | The extra large world of a complex operation. `co_complex_start` (`src/co_capacity.c`) installs it once the part is on. |
 | `src/xl/co_spawners.c`, `co_clusters.c`, `co_city.c`, `co_pocket.c`, `co_status.c`, `co_locate.c` | A complex level's lists and searches, each beside HellForge's own step: the game's or HellForge's value on any other level. |
 | `src/xl/co_objectives.c`, `co_markers.c`, `co_text.c` | The objective list within 30 places, the check of the map's 16 markers, the grouped HUD rows' texts. |
@@ -637,7 +659,7 @@ Pelican), which are not in this folder.
 ## Log
 
 The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.log` and start with `hellpods:`,
-`players:`, `session:`, `engine:`, `extraction:` or `navigation:`.
+`players:`, `session:`, `engine:`, `extraction:`, `navigation:` or `war-table tag:`.
 
 | Line | Meaning |
 |---|---|
@@ -683,6 +705,9 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `navigation: nav world N is not armed for stock's 8 x 8 tiles (...)` | That normal level builds all 32 x 32 tiles; the reason stands in brackets. |
 | `navigation: ...; normal levels build the whole 32 x 32 grid` | The engine's bytes are not the reviewed ones: the two tile stubs are off. |
 | `difficulty: extra large maps: destroy of a live unit held until the world's destroy list had room (N so far)` | On a complex mission the game's destroy list was full; the destroy waits a frame. Logged at counts 1, 2, 4 and so on. |
+| `war-table tag: map, operation N: complex, banner x ...` | The banner for that state; also `briefing, operation N`. |
+| `war-table tag: map, operation N: not level 11, no banner` | That operation is another level. |
+| `war-table tag: off: ...` | The banner is off: the game's Lua or the war table's code is not the reviewed one. |
 | `TEST BUILD, not for play` | Built with `--test-first-slot`. |
 | `the session lists count to four as before` | The count change is off; the reason stands before it. |
 | `the bridge is not the one with the eight-pod bay` | The level data is missing: four pods. |

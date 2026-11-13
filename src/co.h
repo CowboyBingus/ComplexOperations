@@ -117,6 +117,8 @@ typedef struct CoComplexNeeds
 enum { CO_HOST_ROW_NONE, CO_HOST_ROW_OFF, CO_HOST_ROW_ON };
 enum { CO_MISSION_NORMAL, CO_MISSION_COMPLEX, CO_MISSION_LEAVE };
 const char* co_complex_refusal(const CoComplexNeeds* needs);
+/* 1 when the refusal is that the game's code is not the build this mod was made for. */
+int co_complex_refused_build(const CoComplexNeeds* needs);
 int co_complex_decision(int is_host, int own_on, int host_row, uint32_t mission_seed);
 int co_complex_stays(int own_on, int host_row);
 /* One generation's decision. A retry of the same generation (level init again with the retry flag, another seed in
@@ -179,6 +181,8 @@ int co_reports_get(const CoReports* reports, uint64_t peer);
 /* At launch, as host: 1 when the mission's mark must go, because this machine's part is off or a machine in a slot
  * (`present`, 0 for a free one; `own` is this machine) is not known to be able. The override text decides for itself. */
 int co_launch_clears(const CoReports* reports, const uint64_t* present, uint32_t slots, uint64_t own, int own_on, int override_set);
+/* co_launch_clears on what LaunchClear reads at a launch now: 1 the mark goes, 0 it stays, -1 a client's or unread. */
+int co_launch_would_clear(void);
 /* A join, as host: into a mission whose seed is marked only a machine known to be able comes; an unknown one is held
  * for the limit (its message is on the way), then refused. */
 enum { CO_JOIN_ADMIT, CO_JOIN_HOLD, CO_JOIN_DENY };

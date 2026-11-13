@@ -172,6 +172,12 @@ elif $test_mode; then
     export WINEPREFIX="$build/wineprefix"
     export WINEDEBUG=-all
 
+    # The tag's test draws through the game's own lua51.dll (LuaJIT 2.1); a copy outside the live install by default.
+    lua51=${CO_LUA51_PATH:-$HOME/.local/share/hellforge-prefix/pfx/drive_c/users/steamuser/Documents/HellForge/game/bin/lua51.dll}
+    if [[ -f $lua51 ]]; then
+        export CO_LUA51="Z:${lua51//\//\\}"
+    fi
+
     out=$build/tests
     mkdir -p -- "$out"
     mapfile -t harness < <(find "$root/tests/harness" -maxdepth 1 -type f -name '*.c' -print | sort)

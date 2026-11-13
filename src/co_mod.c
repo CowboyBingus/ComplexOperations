@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include "co.h"
+#include "co_tag.h"
 #include "xl/co_nav.h"
 #include "xl/co_aiw_log.h"
 
@@ -35,6 +36,7 @@ static void CapacityTick(HfMod* mod, float dt, void* user)
         co_complex_start();   /* nothing of the extra large world goes in while it is off */
     }
     co_peers_tick(now);
+    co_tag_tick();
 }
 
 static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
@@ -56,6 +58,8 @@ static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
     co_capacity_game(game);
     co_capacity_early(); /* this event is the first moment with game.dll's code there, and HellForge's pool sizes are in */
     co_peers_start(game);
+    const char* tag = co_tag_install(game);
+    if (tag != NULL) co_log("war-table tag: off: %s", tag);
     if (g_coApi->size < offsetof(HfApi, on_game_thread) + sizeof(void*) || g_coApi->on_game_thread(g_coMod, CapacityTick, NULL) == 0) co_log("complex operations are off: the game thread's callback was refused");
 }
 
