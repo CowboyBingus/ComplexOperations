@@ -428,7 +428,7 @@ static void Banner(void)
     CHECK_LUA(L, "local g = E.created[1] if g.items[7].t ~= 'COMPLEX OPERATION' or g.items[8].t ~= '3 MISSIONS ON ONE 16 KM MAP' then return 'texts' end");
     CHECK_LUA(L, "if E.atlas ~= 'id:9999aaaabbbbcccc' or E.material ~= 'id:5555666677778888' then return 'the native font material' end");
     for (int i = 0; i < CO_TAG_SETTLE; i++) Frame(L);
-    CHECK(fake_host_logged("war-table tag: map, operation 7: complex, banner x 399.3 y 612.0 w 355.3 h 47.9 (beside the panel; panel x 36.0 y 360.4 w 355.3 h 247.6, scale 0.6667)"));
+    CHECK(fake_host_logged("war-table tag: map, operation 7: complex, banner x 399.3 y 612.0 w 286.7 h 37.3 (beside the panel; panel x 36.0 y 360.4 w 355.3 h 247.6, scale 0.6667)"));
 
     g_case = "W-T3 an unchanged frame makes no Gui call";
     const double calls = Calls(L);
@@ -549,9 +549,27 @@ static int Apart(double ax, double ay, double aw, double ah, const CoTagBox* b)
     return b->x >= ax + aw || b->x + b->w <= ax || b->y >= ay + ah || b->y + b->h <= ay;
 }
 
+/* A native element measured on the 1280x720 shots (PROOFS.md W-5), in units: x from the 16:9 area's left, y down from
+ * the screen's top. */
+typedef struct Native { const char* name; double x0, y0, x1, y1; int screen; } Native;
+static const Native kNative[] = {
+    {"the chat field", 780, 0, 1136, 54, 3},
+    {"the top bar's buttons", 1152, 0, 1920, 61.5, 3},
+    {"the planet title", 54, 0, 402, 97.5, 1},
+    {"the planet title", 54, 0, 402, 67.5, 2},
+    {"the briefing tab", 126, 93, 313.5, 154.5, 2},
+};
+
+/* At least `gap` between the box and the element, with the element anchored at `left` pixels. */
+static int Clear(const Native* n, double left, double H, double s, double gap, const CoTagBox* b)
+{
+    const double x = left + n->x0 * s, y = H - n->y1 * s;
+    return Apart(x - gap * s, y - gap * s, (n->x1 - n->x0 + 2 * gap) * s, (n->y1 - n->y0 + 2 * gap) * s, b);
+}
+
 static void Places(void)
 {
-    static const double kSizes[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {2560, 1080}, {3440, 1440}};
+    static const double kSizes[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3840, 2160}, {2560, 1080}, {3440, 1440}};
     g_case = "W-5 the place";
     int beside = 0, column = 0;
     for (size_t r = 0; r < sizeof kSizes / sizeof kSizes[0]; r++)
@@ -567,37 +585,62 @@ static void Places(void)
                 if (place == CO_TAG_PLACE_NONE) continue;
                 beside += place == CO_TAG_PLACE_BESIDE;
                 column += place == CO_TAG_PLACE_COLUMN;
-                CHECK(place != CO_TAG_PLACE_BESIDE || below >= CO_TAG_HEIGHT + CO_TAG_RAISE + CO_TAG_SIDE - 1e-9);
+                CHECK(place != CO_TAG_PLACE_BESIDE || below >= CO_TAG_HEIGHT + CO_TAG_RAISE + CO_TAG_ROOF - 1e-9);
                 CHECK(b.x >= 0 && b.y >= 0 && b.x + b.w <= W && b.y + b.h <= H);
+                CHECK(b.y + b.h <= H - CO_TAG_ROOF * s + 1e-9);                                 /* under the top bar */
                 CHECK(Apart(a.x, a.y, a.w, a.h, &b));                                           /* the native panel */
                 CHECK(Apart(a.x, 0, a.w, a.y + 3 * s, &b));                                     /* KYC below it, any height */
                 const double side = a.x + a.w + 12 * s + a.w <= W - 12 * s ? a.x + a.w + 12 * s : a.x - a.w - 12 * s;
                 const double top = fmin(H - 12 * s, a.y + a.h);
                 CHECK(Apart(side, 0, a.w, top, &b));                                            /* KYC beside it, any height */
-                CHECK(fabs(b.w - a.w) < 1e-9 && fabs(b.h - CO_TAG_HEIGHT * s) < 1e-9);
+                CHECK(fabs(b.w - CO_TAG_WIDTH * s) < 1e-9 && fabs(b.h - CO_TAG_HEIGHT * s) < 1e-9);
             }
     CHECK(beside > 0 && column > 0);
-    /* the measured panels: the briefing 168 units below the top, the war table's operation panel 132 */
+
+    /* The measured panels: the war table's operation panel 132 units below the top and 371 tall, the briefing's 168 and
+     * 193. The banner sits against the panel, 6 units clear of every native element whichever way the 21:9 screens
+     * anchor them: inside the 16:9 area, or at the screen's own edge on their side. */
+    g_case = "W-5 clear of the native elements";
     for (size_t r = 0; r < sizeof kSizes / sizeof kSizes[0]; r++)
-        for (int k = 0; k < 2; k++)
+        for (int screen = 1; screen <= 2; screen++)
         {
-            const double W = kSizes[r][0], H = kSizes[r][1], s = fmin(W / 1920, H / 1080), below = k ? 132 : 168;
-            const CoTagAnchor a = {(W - fmin(W, H * 16 / 9)) / 2 + 54 * s, H - below * s - 300 * s, 533 * s, 300 * s, s, 1, 1, 1};
+            const double W = kSizes[r][0], H = kSizes[r][1], s = fmin(W / 1920, H / 1080), area = (W - fmin(W, H * 16 / 9)) / 2;
+            const double below = screen == 1 ? 132 : 168, tall = screen == 1 ? 371 : 193;
+            const CoTagAnchor a = {area + 54 * s, H - below * s - tall * s, 533 * s, tall * s, s, 1, 1, 1};
             CoTagBox b;
             CHECK(co_tag_place(&a, W, H, &b) == CO_TAG_PLACE_BESIDE);
+            CHECK(fabs(b.x - (a.x + a.w + CO_TAG_SIDE * s)) < 1e-9 && fabs(b.y - (a.y + a.h + CO_TAG_RAISE * s)) < 1e-9);
+            for (size_t n = 0; n < sizeof kNative / sizeof kNative[0]; n++)
+            {
+                if (!(kNative[n].screen & screen)) continue;
+                const double edge = kNative[n].x0 < 960 ? 0 : W - 1920 * s; /* the screen's edge on the element's side */
+                CHECK(Clear(&kNative[n], area, H, s, 6, &b));
+                CHECK(Clear(&kNative[n], edge, H, s, 6, &b));
+            }
         }
+
+    /* PROOFS.md W-5: the native panel's body text has 8-pixel capitals at 1280x720 and its title 10; this font's capitals
+     * are 0.58 of the text size (both measured). Each text fits its line at 0.6 of its size a glyph (0.57 measured). */
     g_case = "W-5 the texts";
+    CHECK(0.58 * CO_TAG_CAPTION * 720 / 1080 >= 8 && 0.58 * CO_TAG_TITLE * 720 / 1080 >= 10);
     CHECK(strcmp(co_tag_caption(CO_TAG_COMPLEX, 0), "3 MISSIONS ON ONE 16 KM MAP") == 0);
     static const int kStates[] = {CO_TAG_COMPLEX, CO_TAG_STANDARD, CO_TAG_OFF, CO_TAG_WAITING, CO_TAG_CLEARED};
     for (size_t i = 0; i < sizeof kStates / sizeof kStates[0]; i++)
         for (int why = 0; why < 4; why++)
         {
             const char* texts[2] = {co_tag_title(kStates[i]), co_tag_caption(kStates[i], why)};
-            /* a glyph at most one text size wide still leaves the side padding free */
-            CHECK(strlen(texts[0]) * CO_TAG_TITLE <= 533 - 2 * CO_TAG_PAD && strlen(texts[1]) * CO_TAG_CAPTION <= 533 - 2 * CO_TAG_PAD);
+            const double room = CO_TAG_WIDTH - 2 * CO_TAG_PAD;
+            CHECK(strlen(texts[0]) * 0.6 * CO_TAG_TITLE <= room && strlen(texts[1]) * 0.6 * CO_TAG_CAPTION <= room);
             for (int t = 0; t < 2; t++)
                 for (const char* c = texts[t]; *c; c++) CHECK((*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == ' ');
         }
+    /* the line's ink inside the body: the title's capitals under its top inset, the caption's baseline over its bottom */
+    CoTagPlan plan;
+    const CoTagBox box = {0, 0, CO_TAG_WIDTH, CO_TAG_HEIGHT};
+    co_tag_plan(CO_TAG_COMPLEX, 0, &box, 1, &plan);
+    CHECK(plan.text[0].y + 0.58 * CO_TAG_TITLE <= CO_TAG_HEIGHT - CO_TAG_BORDER - CO_TAG_INSET + 1e-9);
+    CHECK(plan.text[1].y + 0.58 * CO_TAG_CAPTION <= plan.text[0].y - CO_TAG_GAP + 1e-9);
+    CHECK(plan.text[1].y >= CO_TAG_BORDER + CO_TAG_INSET - 1e-9);
 }
 
 int main(void)

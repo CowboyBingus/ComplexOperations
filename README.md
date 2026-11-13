@@ -300,7 +300,8 @@ the game's body font and its panel inks.
   host's briefing shows `STARTS AS STANDARD`.
 - Until this PC's check of the part settles, no banner shows.
 - Other levels and other screens get no banner.
-- The banner goes right of the panel, above its top line, or one column further right when that does not fit.
+- The banner goes right of the panel, above its top line and under the top bar, or one column further right when that
+  does not fit.
   Know Your Constellation's box never reaches either place.
 
 ### On every level

@@ -142,14 +142,15 @@ int co_tag_board_mark(uintptr_t war, uint32_t index, int* marked)
 
 int co_tag_place(const CoTagAnchor* a, double width, double height, CoTagBox* out)
 {
-    const double s = a->scale, h = CO_TAG_HEIGHT * s, side = CO_TAG_SIDE * s;
+    const double s = a->scale, w = CO_TAG_WIDTH * s, h = CO_TAG_HEIGHT * s, side = CO_TAG_SIDE * s;
+    const double roof = height - CO_TAG_ROOF * s; /* below the whole top bar, wherever its parts sit across the screen */
     /* right of the panel, above its top line: no place Know Your Constellation's box can take reaches up there */
-    *out = (CoTagBox){a->x + a->w + side, a->y + a->h + CO_TAG_RAISE * s, a->w, h};
-    if (out->x + out->w <= width - side && out->y + out->h <= height - side) return CO_TAG_PLACE_BESIDE;
+    *out = (CoTagBox){a->x + a->w + side, a->y + a->h + CO_TAG_RAISE * s, w, h};
+    if (out->x + out->w <= width - side && out->y + out->h <= roof) return CO_TAG_PLACE_BESIDE;
     /* else past the column Know Your Constellation's box takes beside the panel, level with the panel's top */
-    const double top = height - side < a->y + a->h ? height - side : a->y + a->h;
-    *out = (CoTagBox){a->x + 2 * (a->w + side), top - h > side ? top - h : side, a->w, h};
-    if (out->x + out->w <= width - side && out->y + out->h <= height - side) return CO_TAG_PLACE_COLUMN;
+    const double top = roof < a->y + a->h ? roof : a->y + a->h;
+    *out = (CoTagBox){a->x + 2 * (a->w + side), top - h > side ? top - h : side, w, h};
+    if (out->x + out->w <= width - side && out->y + out->h <= roof) return CO_TAG_PLACE_COLUMN;
     return CO_TAG_PLACE_NONE;
 }
 
@@ -192,7 +193,9 @@ const char* co_tag_caption(int state, int why)
 void co_tag_plan(int state, int why, const CoTagBox* b, double s, CoTagPlan* p)
 {
     const double i = CO_TAG_INSET * s, k = CO_TAG_BORDER * s, top = b->y + b->h, x = b->x + CO_TAG_PAD * s;
-    const double content = top - (CO_TAG_BORDER + CO_TAG_INSET + CO_TAG_EDGE) * s;
+    /* a text's y is its baseline; the texts are capitals only, so each line takes its cap height and no descent */
+    const double title = top - (CO_TAG_BORDER + CO_TAG_INSET + CO_TAG_CAP * CO_TAG_TITLE) * s;
+    const double caption = title - (CO_TAG_GAP + CO_TAG_CAP * CO_TAG_CAPTION) * s;
     const int loud = state == CO_TAG_COMPLEX;
     const CoTagColour edge = loud ? kYellow : kSlate;
     p->rect[0] = (CoTagRect){b->x, b->y, b->w, b->h, CO_TAG_LAYER_SHADE, kShade};
@@ -201,9 +204,8 @@ void co_tag_plan(int state, int why, const CoTagBox* b, double s, CoTagPlan* p)
     p->rect[3] = (CoTagRect){b->x, top - k, b->w, k, CO_TAG_LAYER_BORDER, edge};
     p->rect[4] = (CoTagRect){b->x, b->y, k, b->h, CO_TAG_LAYER_BORDER, edge};
     p->rect[5] = (CoTagRect){b->x + b->w - k, b->y, k, b->h, CO_TAG_LAYER_BORDER, edge};
-    /* baselines as Know Your Constellation's heading: the title one size below the content top, the caption 1.3 below */
-    p->text[0] = (CoTagText){co_tag_title(state), CO_TAG_TITLE * s, x, content - CO_TAG_TITLE * s, CO_TAG_LAYER_TEXT, loud ? kYellow : kLabel};
-    p->text[1] = (CoTagText){co_tag_caption(state, why), CO_TAG_CAPTION * s, x, content - (CO_TAG_TITLE * 1.3 + CO_TAG_CAPTION) * s,
+    p->text[0] = (CoTagText){co_tag_title(state), CO_TAG_TITLE * s, x, title, CO_TAG_LAYER_TEXT, loud ? kYellow : kLabel};
+    p->text[1] = (CoTagText){co_tag_caption(state, why), CO_TAG_CAPTION * s, x, caption,
         CO_TAG_LAYER_TEXT, loud ? kWhite : kGrey};
 }
 
