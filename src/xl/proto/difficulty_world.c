@@ -2673,6 +2673,7 @@ static void NearOneMipLevel(void);
 static void NearOneMipDrop(void);
 static void NearLevelLeft(int ship); /* difficulty_world_move.c */
 static void FarGrassKeep(uint64_t record, uint32_t op); /* difficulty_world_fargrass.c */
+static void FarGrassLinker(uint64_t record); /* difficulty_world_fargrass.c */
 static int TerrainOn(void);
 static int TerrainMatDispatch(uint32_t op, uint64_t context);
 static void TerrainMatPatch(int on);
@@ -4888,6 +4889,7 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
         if (o == 0x0A && g_world.current == 8.0f) TerrainNearWater(records + (uint64_t)i * 0x19B0u);
         if (o == 0x6C && g_world.current == 8.0f) MacroStamps(); /* once a level, before its first call */
         if ((o == 0x4B || o == 0x67) && g_world.current == 8.0f) FarGrassKeep(records + (uint64_t)i * 0x19B0u, o);
+        if (o == 0x4A && g_world.current == 8.0f) FarGrassLinker(records + (uint64_t)i * 0x19B0u);
         if (g_world.current == 8.0f && TerrainNearStep(records, (uint32_t)d, i, o, b, g, h)) { TerrainDiagAfter(records, index, diagAt, diagOp); return 0; }
     }
     uint32_t at = 0, op = 0xFFFFFFFFu, before = 0, after = 0;

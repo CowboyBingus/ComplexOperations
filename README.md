@@ -506,7 +506,13 @@ world that bake is cut (it would grow every scatter layer to the whole map), and
   (`src/xl/proto/difficulty_world_fargrass.c`): views of 256 m, nearest first, up to 1.5 km away, then the lookup
   again. Baked ground stays baked for the mission. A moving tile waits for one view at most.
 - The DLL sets `debug_deformation_prevention` only on a 16 km level in play, and clears it at every level start and on
-  the ship. The profile saves the setting, and on a normal map the edited variants would map the wrong square.
+  the ship. On a normal map the edited variants would map the wrong square.
+- The profile never stores `true`: before each settings save, and before the renderer fills missing settings from its
+  live values, the DLL makes the profile's value `false`. Without those two hooks there is no far grass.
+- Each bake view's job waits for a frame no slower than the recent ones; a fight's frame spike holds the bakes.
+- Craters keep their cut grass: `hellforge-data.json` also edits the lookup's builder (`52d73e589aaefe80`), and before
+  each build the DLL marks every 256 m view not baked since the last build as kept. A crater on ground that is baked
+  later loses its cut.
 - The lookup holds 4 m a texel on a 16 km world (0.5 m on 2048 m): the far grass is coarser than on a normal map.
 - A research build (`--research`) takes `HELLFORGE_XL_FARGRASS=0` to turn the bakes off; a player's build reads no
   environment variables.

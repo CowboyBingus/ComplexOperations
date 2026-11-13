@@ -7198,6 +7198,7 @@ static struct
     volatile LONG64 nodes, missed, calls; ULONGLONG noted; LONG notes, level;
 } g_scatView = {.lock = SRWLOCK_INIT, .level = -1};
 static struct { uint64_t key; float lo, hi; } g_scatCache[NEAR_SCAT_CACHE]; /* zero-filled: not in the file */
+static volatile LONG g_scatBakeOver; /* bake views' layers over NearScatLimits' nodes: far grass stops for the level */
 
 static float NearScatGround(float x, float y)
 {
@@ -7269,6 +7270,11 @@ static uint64_t NearScatterView(uintptr_t tree, void* frustum, uint32_t stamp, f
         uint8_t* nodes = *(uint8_t**)(tree + 0x88);
         int budget; uint64_t most;
         NearScatLimits(t_tdScatBake, &budget, &most);
+        /* The engine builds a node for every cell in the view (0x9548C0), so a bake view's count is set by its 256 m square
+         * and the layer's cell size; over the limit its nodes would keep z-0 boxes, and the batch stops instead. */
+        if (t_tdScatBake && count > most && InterlockedIncrement(&g_scatBakeOver) <= 4)
+            Note("difficulty: far grass: a bake view's scatter layer has %llu nodes (%.1f m cells), over the %llu given the ground's range; "
+                "no more bakes this level", (unsigned long long)count, size, (unsigned long long)most);
         /* only with the tile in (before it, NearVisibleAt has no tile) */
         if (nodes != NULL && count <= most && NearTilesLive() > 0 && size >= 1.0f && size <= 4096.0f && grow >= 0.0f && grow <= 1024.0f)
         {

@@ -1423,6 +1423,7 @@ static _Thread_local int t_tdScatBake;
 #define TD_SCAT_LOCKS 256
 static SRWLOCK g_tdScatLock[TD_SCAT_LOCKS]; /* zero-filled: SRWLOCK_INIT */
 static volatile LONG64 g_tdScatOverlap;
+static volatile LONG64 g_tdScatWaitUs, g_tdScatWaitMaxUs; /* other views' waits behind a layer's lock: the hitch a bake can cause */
 static SRWLOCK* TdScatterLayerLock(const uint8_t* layer)
 {
     return layer != NULL && g_world.live == 8.0f ? &g_tdScatLock[((uintptr_t)layer / 0x238u) & (TD_SCAT_LOCKS - 1)] : NULL;
@@ -1709,7 +1710,16 @@ static void TdScatterUpdate(void* a, uint8_t* view, uint32_t c, uint8_t* layer, 
         if (n <= 4 || n == 100 || n == 10000)
             Note("difficulty: extra large maps: a scatter update waited for another view's update of its layer (%lld so far; this one %s)", (long long)n,
                 t_tdScatBake ? "a far-grass bake view" : "another view");
+        LARGE_INTEGER t0, t1, hz;
+        QueryPerformanceCounter(&t0);
         AcquireSRWLockExclusive(lock);
+        QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
+        if (!t_tdScatBake)
+        {
+            const LONG64 us = (t1.QuadPart - t0.QuadPart) * 1000000 / hz.QuadPart;
+            InterlockedAdd64(&g_tdScatWaitUs, us);
+            for (LONG64 m = g_tdScatWaitMaxUs; us > m && InterlockedCompareExchange64(&g_tdScatWaitMaxUs, us, m) != m; m = g_tdScatWaitMaxUs) {}
+        }
     }
     g_tdScatterUpdate(a, view, c, layer, e, f, g, h);
     if (lock != NULL) ReleaseSRWLockExclusive(lock);

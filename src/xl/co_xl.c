@@ -799,10 +799,17 @@ void CoXlTestFgObserver(int on, float x, float y) { g_streamObserverOn = on; g_s
 int CoXlTestFgBakeView(const uint8_t* view) { return TdScatterBakeView(view); }
 void CoXlTestFgWorld(float live) { g_world.live = live; } /* 8 on an extra large level in play (16384 m) */
 void CoXlTestFgState(int state) { g_fg.state = state; }
+/* The profile guard on a settings document, with `get` as the document's operator[]. */
+void CoXlTestFgProfileGuard(void* doc, void* get) { g_fgDocGet = (FgDocGetFn)get; FgProfileGuard(doc, "a test save"); }
+void CoXlTestScatBakeOver(LONG n) { g_scatBakeOver = n; } /* a bake view's layer over the node limit */
+int CoXlTestFgViewBaked(int i, int j) { return FgBaked(&g_fg.map, i, j); }
+void CoXlTestFgLinker(uint64_t record) { FarGrassLinker(record); } /* op 0x4A's record on an extra large level */
+void CoXlTestFgNotesReset(void) { g_fg.settingNotes = 0; g_fg.clearNoted = 0; } /* a new session's log */
 void CoXlTestFgOut(int on) { g_fg.published = on; } /* a job out, with the names published */
 int CoXlTestFgPaced(double mean, float last, uint32_t* deferred)
 {
-    g_fgFrames.before[1] = mean; g_fgFrames.lastMs = last;
+    g_fgFrames.filled = mean > 0.0 ? FG_RING : 0; g_fgFrames.lastMs = last;
+    for (int k = 0; k < FG_RING; k++) g_fgFrames.ring[k] = (float)mean;
     int r = FgPaced();
     *deferred = g_fg.deferred;
     return r;

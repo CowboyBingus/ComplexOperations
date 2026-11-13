@@ -19,7 +19,6 @@
 #define FG_PICK_FRAMES 30u    /* level updates between looks for unbaked ground */
 #define FG_SETTING_FRAMES 60u /* the setting is set again this often: an options apply resets the render settings */
 #define FG_EMPTY_UPDATES 3u   /* the queue read empty this many level updates in a row: the builder's job has run */
-#define FG_PACE_DEFER 30u     /* level updates a view waits at most for a frame as quick as the ones before the batch */
 #define FG_WAITS 1200u        /* level updates a step waits for the queue before the level's bakes stop */
 #define FG_AIM 0xF48990u      /* game: the phase-B camera's set-up (op 0x49) */
 #define FG_GENERATE 0xF3B2A0u /* game: a generator's job on the queue (op 0x4A's last call) */
@@ -58,12 +57,12 @@ static struct
     uint16_t list[FG_BATCH];
     uint64_t world, queue, settings, vp, camera, env; uint32_t unit;
     uint32_t frames, empty, waits, deferred;
-    int setting, settingNotes, edited; uint32_t settingFrames;
+    int setting, settingNotes, clearNoted, edited; uint32_t settingFrames;
     uint32_t batches, baked;
     ULONGLONG started;
 } g_fg = {.level = -1};
 
-/* Wall-clock frame times (QPC between level updates in play): the last FG_RING before a batch against the batch's own,
+/* Wall-clock frame times (QPC between level updates in play): the last FG_RING with no job out against the jobs' own,
  * so each batch line shows whether its views cost frame time. The game's dt is clamped and would hide a spike. */
 #define FG_RING 128
 static struct { LONGLONG last, hz; float ring[FG_RING], lastMs; uint32_t at, filled; double worst, sum; uint32_t n; double before[2]; LONG64 scat, overlap; } g_fgFrames;
@@ -77,7 +76,7 @@ static void FgFrame(int live)
     {
         const float ms = (float)((double)(t.QuadPart - g_fgFrames.last) * 1000.0 / (double)g_fgFrames.hz);
         g_fgFrames.lastMs = ms;
-        if (g_fg.state != FG_IDLE) { g_fgFrames.n++; g_fgFrames.sum += ms; if (ms > g_fgFrames.worst) g_fgFrames.worst = ms; }
+        if (g_fg.published) { g_fgFrames.n++; g_fgFrames.sum += ms; if (ms > g_fgFrames.worst) g_fgFrames.worst = ms; }
         else { g_fgFrames.ring[g_fgFrames.at] = ms; g_fgFrames.at = (g_fgFrames.at + 1) % FG_RING; if (g_fgFrames.filled < FG_RING) g_fgFrames.filled++; }
     }
     g_fgFrames.last = t.QuadPart;
@@ -91,11 +90,13 @@ static void FgFramesStart(void)
     g_fgFrames.worst = g_fgFrames.sum = 0; g_fgFrames.n = 0; g_fgFrames.scat = g_tdScatBakeUpdates; g_fgFrames.overlap = g_tdScatOverlap;
 }
 
-/* A job goes out after a frame no slower than a quarter over the mean before the batch, or after FG_PACE_DEFER updates. */
+/* A job goes out only after a frame no slower than a quarter over the mean of the last FG_RING without one, never by
+ * force: a fight's spike holds the views, while a lasting change of load moves the mean within FG_RING frames. */
 static int FgPaced(void)
 {
-    if (g_fgFrames.before[1] <= 0.0 || g_fgFrames.lastMs <= 1.25 * g_fgFrames.before[1] + 1.0 || g_fg.deferred >= FG_PACE_DEFER)
-    { g_fg.deferred = 0; return 1; }
+    double sum = 0;
+    for (uint32_t k = 0; k < g_fgFrames.filled; k++) sum += g_fgFrames.ring[k];
+    if (g_fgFrames.filled < 16 || g_fgFrames.lastMs <= 1.25 * sum / g_fgFrames.filled + 1.0) { g_fg.deferred = 0; return 1; }
     g_fg.deferred++;
     return 0;
 }
@@ -182,8 +183,8 @@ static void FgPublish(int on)
 
 /* The setter (exe 0x31A200 -> 0x10D880) only queues a message, so the setting is set again every FG_SETTING_FRAMES in
  * play: an options apply puts the profile's value back. The getter (0x319F30) waits on the render thread (0x105E40,
- * 0x106030), so the live value is not read. The profile saves the setting (render_settings), so it is cleared at every
- * ship and level init too. Each is logged (64 lines a session); `why` NULL is a quiet repeat. */
+ * 0x106030), so the live value is not read. A normal map must not keep it (wrong square), so it is cleared at every
+ * ship and level init too; FgProfileGuard keeps it out of the profile. Changes are logged (64 lines a session). */
 static void FgSetting(int on, const char* why)
 {
     typedef void (*SettingFn)(const char* name, const char* value);
@@ -196,6 +197,107 @@ static void FgSetting(int on, const char* why)
     }
     g_fg.setting = on && set != NULL; g_fg.settingFrames = 0;
 }
+
+/* Crater cuts in scatter_lookup (crater CS 7083c2aa68db2524) would go at every builder run: its CS 52d73e589aaefe80
+ * rewrites each texel from scatter_density. hellforge-data.json edits it to return first for a texel whose view's bit is
+ * set in zone_material_scatter_linker's spare bits 12-15 (entry (y >> 6) * 16 + (x >> 8), bit 12 + ((x >> 6) & 3)); the
+ * shader masks entries & 15 and the game fills them with slot indices below 32 (game 0xF5F530). So before each build the
+ * mod uploads the level's own linker (op 0x4A's record +8 +0x1168, 0x800 bytes) with every view not baked since the last
+ * build kept, as op 0x4A uploads it (game 0xF61418: [api+0x10]+0x158 by name, +0x208 copies at the call, exe 0x4BD71A). */
+#define FG_LINKER 0x499EAFD7u
+#define FG_BUILDER_CS 0x52D73E589AAEFE80ull
+static struct { uint16_t game[1024], sent[1024]; LONG level; int dirty, keepNotes, builder; FgMap pending; uint32_t kept; } g_fgLinker = {.level = -1};
+
+/* Op 0x4A on an extra large level: its record's linker once its first step has filled it (every entry a slot). */
+static void FarGrassLinker(uint64_t record)
+{
+    uint16_t e[1024];
+    int any = 0;
+    if (SafeRead(record + 8 + 0x1168, e, sizeof e)) return;
+    for (int k = 0; k < 1024; k++) { if (e[k] >= 32) return; any |= e[k]; }
+    if (!any) return;
+    memcpy(g_fgLinker.game, e, sizeof e);
+    g_fgLinker.level = g_world.levels;
+}
+
+static const char* FgLinkerSend(const uint16_t* entries)
+{
+    typedef void* (*FindFn)(uint32_t name);
+    typedef void (*UpdateFn)(void* resource, const void* data, uint32_t size);
+    FindFn find = (FindFn)NearApi(0x10, 0x158);
+    UpdateFn update = (UpdateFn)NearApi(0x10, 0x208);
+    void* res = find != NULL && update != NULL ? find(FG_LINKER) : NULL;
+    if (res == NULL) return "zone_material_scatter_linker is not found";
+    memcpy(g_fgLinker.sent, entries, sizeof g_fgLinker.sent);
+    update(res, g_fgLinker.sent, sizeof g_fgLinker.sent);
+    return NULL;
+}
+
+/* Whether the loaded builder is the edited one (its first new instruction, mov r1.xy, vThreadID, at stage 0x8F8 +0x304);
+ * the game's own ignores the bits, so this only says whether the cuts will stay. */
+static int FgBuilderEdited(void)
+{
+    typedef uint8_t (*CanGetFn)(uint64_t type, uint64_t name);
+    typedef uint64_t (*GetFn)(uint64_t name, uint64_t type);
+    static const uint8_t mov[16] = {0x36, 0, 0, 4, 0x32, 0, 0x10, 0, 1, 0, 0, 0, 0x46, 0, 2, 0};
+    CanGetFn canGet = (CanGetFn)NearApi(0x10, 0x388);
+    GetFn get = (GetFn)NearApi(0x10, 0x3F8);
+    uint8_t at[16];
+    const uint64_t lib = canGet != NULL && get != NULL && canGet(0xE5EE32A477239A93ull, FG_BUILDER_CS) ? get(FG_BUILDER_CS, 0xE5EE32A477239A93ull) : 0;
+    return lib != 0 && !SafeRead(lib + 0x8F8 + 0x304, at, sizeof at) && memcmp(at, mov, sizeof mov) == 0;
+}
+
+/* Before the builder's job: every view but those baked since the last build keeps its texels. */
+static void FgLinkerKeep(void)
+{
+    if (g_fgLinker.builder == 0)
+    {
+        g_fgLinker.builder = FgBuilderEdited() ? 1 : -1;
+        Note("difficulty: far grass: the scatter lookup builder is %s", g_fgLinker.builder > 0 ?
+            "the edited one (0x52D73E589AAEFE80): views not baked since the last build keep their texels and crater cuts" :
+            "the game's own (no build-data): each build puts the grass back in earlier craters");
+    }
+    uint16_t e[1024];
+    const char* why = g_fgLinker.level != g_world.levels ? "op 0x4A's linker was not read this level" : NULL;
+    g_fgLinker.kept = 0;
+    if (why == NULL)
+    {
+        for (int k = 0; k < 1024; k++) e[k] = g_fgLinker.game[k] & 0x0FFFu;
+        for (int j = 0; j < FG_N; j++)
+            for (int i = 0; i < FG_N; i++)
+                if (!FgBaked(&g_fgLinker.pending, i, j)) { e[(FG_N - 1 - j) * 16 + (i >> 2)] |= (uint16_t)(1u << (12 + (i & 3))); g_fgLinker.kept++; }
+        why = FgLinkerSend(e);
+    }
+    if (why == NULL) { g_fgLinker.dirty = 1; memset(&g_fgLinker.pending, 0, sizeof g_fgLinker.pending); return; }
+    g_fgLinker.kept = 0;
+    if (g_fgLinker.keepNotes++ < 4) Note("difficulty: far grass: crater cuts are not kept by this build: %s", why);
+}
+
+/* The profile file is written only by exe 0x77A30 (callers 0x7F9BE, 0x324587, the Lua saves), which serialises the
+ * settings document [app+0x2A8]. The renderer's fill 0x104770 copies live render settings into that document's absent
+ * render_settings keys (0x10515B), so an apply in play could store `true`. Before either, the key is made a false bool
+ * (the document's node: type in bits 0-2, 1 a bool, its value byte +8; operator[] 0x62ED0 adds what is missing). */
+#define FG_SAVE 0x77A30u
+#define FG_FILL 0x104770u
+#define FG_DOC_GET 0x62ED0u
+typedef void* (*FgDocGetFn)(void* node, const char* key);
+static FgDocGetFn g_fgDocGet;
+static void (*g_fgSave)(uintptr_t app);
+static void (*g_fgFill)(uintptr_t renderer, void* doc);
+static LONG g_fgGuardNotes;
+static void FgProfileGuard(void* doc, const char* before)
+{
+    if (doc == NULL || g_fgDocGet == NULL) return;
+    uint8_t* node = (uint8_t*)g_fgDocGet(g_fgDocGet(doc, "render_settings"), "debug_deformation_prevention");
+    uint32_t head; memcpy(&head, node, 4);
+    const uint32_t type = head & 7u;
+    if (type > 1u || (type == 1u && node[8] == 0)) return;
+    head = (head & ~6u) | 1u; memcpy(node, &head, 4); node[8] = 0;
+    if (InterlockedIncrement(&g_fgGuardNotes) <= 8)
+        Note("difficulty: far grass: the settings document's debug_deformation_prevention was %s before %s; it is false now", type ? "true" : "missing", before);
+}
+static void FgSaveGuarded(uintptr_t app) { FgProfileGuard(*(void**)(app + 0x2A8), "a profile save"); g_fgSave(app); }
+static void FgFillGuarded(uintptr_t renderer, void* doc) { FgProfileGuard(doc, "the renderer's settings fill"); g_fgFill(renderer, doc); }
 
 /* An earlier level's textures, destroyed as op 0x4B destroys them; a batch's own objects went with its world. */
 static void FgFree(void)
@@ -210,7 +312,9 @@ static void FgFree(void)
     if (g_fg.state != FG_IDLE) Note("difficulty: far grass: the level ended inside a batch; its viewport, camera and environment are left to the world");
     g_fg.state = FG_IDLE; g_fg.vp = g_fg.camera = g_fg.env = 0; g_fg.unit = 0;
     memset(&g_fg.map, 0, sizeof g_fg.map);
-    g_fg.level = -1; g_fg.off = 0; g_fg.batches = g_fg.baked = 0; g_fg.edited = 0;
+    memset(&g_fgLinker.pending, 0, sizeof g_fgLinker.pending); g_fgLinker.builder = 0;
+    if (g_fgLinker.dirty && FgLinkerSend(g_fgLinker.game) == NULL) g_fgLinker.dirty = 0; /* the game's own entries back */
+    g_fg.level = -1; g_fg.off = 0; g_fg.batches = g_fg.baked = 0; g_fg.edited = 0; g_tdScatWaitUs = g_tdScatWaitMaxUs = 0; g_scatBakeOver = 0;
     g_fgFrames.filled = g_fgFrames.at = 0; g_fgFrames.last = 0;
 }
 
@@ -252,7 +356,9 @@ static void FarGrassKeep(uint64_t record, uint32_t op)
 /* A level init or the ship's set-up: the last level's textures go, and the overlay's variant is the game's again. */
 static void FarGrassLevelLeft(void)
 {
-    FgSetting(0, g_fg.setting ? "the level is left" : "a level init or the ship");
+    /* Only the session's first clear and real changes spend a log line, so the cap lasts a long session. */
+    FgSetting(0, g_fg.setting ? "the level is left" : g_fg.clearNoted ? NULL : "a level init or the ship");
+    g_fg.clearNoted = 1;
     if (g_fg.level >= 0) FgFree();
 }
 
@@ -391,7 +497,7 @@ static int FgView(int index)
     update(g_fg.world, g_fg.unit);
     rect(g_fg.vp, r[0], r[1], r[2], r[3]);
     FgQueueView();
-    FgMark(&g_fg.map, i, j);
+    FgMark(&g_fg.map, i, j); FgMark(&g_fgLinker.pending, i, j);
     g_fg.baked++;
     return 1;
 }
@@ -412,8 +518,9 @@ static void FgScatterNote(void)
 {
     const uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL), sys = g_tdScatBakeSys;
     uintptr_t proxy = 0, vt = 0, layers = 0;
-    uint64_t live = 0, peak = 0, nodes = 0, most = 0;
+    uint64_t live = 0, peak = 0, nodes = 0, most = 0, bound = 0;
     uint32_t type = 0, count = 0, read = 0;
+    float finest = 0;
     if (!SafeRead(exe + 0x1A100D8u, &proxy, 8) && proxy != 0) { SafeRead(proxy + 0x30, &live, 8); SafeRead(proxy + 0x40, &peak, 8); }
     if (sys != 0 && !SafeRead(sys, &vt, 8) && vt == exe + 0x1673E48u && !SafeRead(sys + 8, &type, 4) && type == 0x11 && !SafeRead(sys + 0x1B8, &count, 4) &&
         count <= 64 && !SafeRead(sys + 0x1C0, &layers, 8) && layers != 0)
@@ -422,20 +529,29 @@ static void FgScatterNote(void)
             uintptr_t tree = 0; uint64_t cap = 0;
             if (SafeRead(layers + (uint64_t)i * 0x238u + 0x40, &tree, 8) || tree == 0 || SafeRead(tree + 0x98, &cap, 8)) continue;
             nodes += cap; if (cap > most) most = cap; read++;
+            /* the cells a 256 m view can touch: its square and the layer's pad (cell size +0x22C, pad +0x230) */
+            float size = 0, grow = 0;
+            if (SafeRead(layers + (uint64_t)i * 0x238u + 0x22C, &size, 4) || SafeRead(layers + (uint64_t)i * 0x238u + 0x230, &grow, 4) || !(size >= 1.0f)) continue;
+            const uint64_t side = (uint64_t)ceilf((FG_TILE + 2.0f * grow) / size) + 1;
+            if (side * side > bound) { bound = side * side; finest = size; }
         }
-    Note("difficulty: far grass: SpeedTree memory %llu MiB (peak %llu MiB); node vectors %llu KiB over %u of %u layers, the largest %llu nodes",
-        (unsigned long long)(live >> 20), (unsigned long long)(peak >> 20), (unsigned long long)(nodes * 0xE0u >> 10), read, count, (unsigned long long)most);
+    Note("difficulty: far grass: SpeedTree memory %llu MiB (peak %llu MiB); node vectors %llu KiB over %u of %u layers, the largest %llu nodes; "
+        "a bake view's layer touches %llu cells at most (%.1f m cells); %ld bake views over the limit this level",
+        (unsigned long long)(live >> 20), (unsigned long long)(peak >> 20), (unsigned long long)(nodes * 0xE0u >> 10), read, count, (unsigned long long)most,
+        (unsigned long long)bound, finest, g_scatBakeOver);
 }
 
 static void FgBatchNote(void)
 {
     g_fg.batches++;
     if (g_fg.batches > 8 && g_fg.batches % 16 != 0) return;
-    Note("difficulty: far grass: batch %u: %d views of 256 m in %.1f s (%lld scatter updates of its views; %lld updates waited for their layer); %u of %d "
-        "views baked this level; frames (wall clock) %u in the batch, worst %.1f ms, mean %.1f ms; the %u before it worst %.1f ms, mean %.1f ms", g_fg.batches,
+    Note("difficulty: far grass: batch %u: %d views of 256 m in %.1f s (%lld scatter updates of its views; %lld updates waited for their layer, "
+        "other views %.2f ms in all this level, %.2f ms at most); %u of %d views baked this level; frames (wall clock) with a job out %u, worst %.1f ms, "
+        "mean %.1f ms; the %u before the batch worst %.1f ms, mean %.1f ms; its build kept %u views' texels", g_fg.batches,
         g_fg.count, (double)(GetTickCount64() - g_fg.started) / 1000.0, (long long)(g_tdScatBakeUpdates - g_fgFrames.scat),
-        (long long)(g_tdScatOverlap - g_fgFrames.overlap), g_fg.baked, FG_N * FG_N, g_fgFrames.n, g_fgFrames.worst,
-        g_fgFrames.n ? g_fgFrames.sum / g_fgFrames.n : 0.0, g_fgFrames.filled, g_fgFrames.before[0], g_fgFrames.before[1]);
+        (long long)(g_tdScatOverlap - g_fgFrames.overlap), (double)g_tdScatWaitUs / 1000.0, (double)g_tdScatWaitMaxUs / 1000.0, g_fg.baked, FG_N * FG_N,
+        g_fgFrames.n, g_fgFrames.worst,
+        g_fgFrames.n ? g_fgFrames.sum / g_fgFrames.n : 0.0, g_fgFrames.filled, g_fgFrames.before[0], g_fgFrames.before[1], g_fgLinker.kept);
     FgScatterNote();
     WorldMemoryNote("far grass batch", 0xFFFFFFFFu, 0, 1);
 }
@@ -487,6 +603,7 @@ static void FarGrassTick(uint64_t level)
         }
         else
         {
+            FgLinkerKeep();
             g_fg.generate(g_fg.queue, g_fg.world, FG_BUILDER, 0, 0, NULL, 0, NULL, NULL, 0);
             g_fg.state = FG_SETTLE;
         }
@@ -502,6 +619,7 @@ static void FarGrassTick(uint64_t level)
     }
     if (++g_fg.empty < FG_EMPTY_UPDATES) return;
     FgPublish(0);
+    if (g_fg.state == FG_VIEW_WAIT && g_scatBakeOver != 0 && !g_fg.off) { g_fg.off = 1; g_fg.next = g_fg.count; } /* its views so far are built */
     if (g_fg.state == FG_VIEW_WAIT) { g_fg.state = g_fg.next >= g_fg.count ? FG_BUILD : FG_VIEWS; return; }
     FgEnd(0, NULL);
     FgBatchNote();
@@ -512,6 +630,15 @@ static void FarGrassInstall(uintptr_t game)
     if (g_fg.installed || !FarGrassOn()) return;
     if (ApiCodeMatches(game + FG_AIM, kFgAimPin) != 1 || ApiCodeMatches(game + FG_GENERATE, kFgGeneratePin) != 1)
     { Note("difficulty: far grass: the bake camera or the generator queue is not the reviewed code; no far grass on extra large maps"); return; }
+    /* No guard on the profile, no setting: far grass stays off. */
+    const uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
+    if (ApiCodeMatches(exe + FG_SAVE, "48 8B C4 55 53 57 48 8D A8 C8 F6 FF FF") != 1 ||
+        ApiCodeMatches(exe + FG_FILL, "48 89 5C 24 10 48 89 4C 24 08 55 56 57 41 54") != 1 ||
+        ApiCodeMatches(exe + FG_DOC_GET, "48 89 5C 24 18 48 89 6C 24 20 57 48 83 EC 30") != 1 ||
+        LoaderHook("far grass: the profile save keeps debug_deformation_prevention false", exe + FG_SAVE, (void*)FgSaveGuarded, (void**)&g_fgSave) != 0 ||
+        LoaderHook("far grass: the renderer's settings fill keeps it false", exe + FG_FILL, (void*)FgFillGuarded, (void**)&g_fgFill) != 0)
+    { Note("difficulty: far grass: the profile save or the renderer's settings fill is not the reviewed code; no far grass on extra large maps"); return; }
+    g_fgDocGet = (FgDocGetFn)(exe + FG_DOC_GET);
     g_fg.aim = (FgAimFn)(game + FG_AIM);
     g_fg.generate = (FgGenerateFn)(game + FG_GENERATE);
     g_fg.installed = 1;
