@@ -7,6 +7,7 @@
 
 #include "co.h"
 #include "co_tag.h"
+#include "co_watch.h"
 #include "xl/co_nav.h"
 #include "xl/co_aiw_log.h"
 
@@ -37,6 +38,7 @@ static void CapacityTick(HfMod* mod, float dt, void* user)
     }
     co_peers_tick(now);
     co_tag_tick();
+    co_watch_tick();
 }
 
 static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
@@ -61,6 +63,8 @@ static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
     co_peers_start(game);
     const char* tag = co_tag_install(game);
     if (tag != NULL) co_log("war-table tag: off: %s", tag);
+    const char* watch = co_watch_install(game);
+    if (watch != NULL) co_log("wartable watch: off: %s", watch);
     if (g_coApi->size < offsetof(HfApi, on_game_thread) + sizeof(void*) || g_coApi->on_game_thread(g_coMod, CapacityTick, NULL) == 0) co_log("complex operations are off: the game thread's callback was refused");
 }
 

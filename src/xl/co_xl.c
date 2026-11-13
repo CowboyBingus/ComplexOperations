@@ -39,6 +39,7 @@
 #include "co_density.h"
 #include "co_switch.h"
 #include "co_steer.h"
+#include "../co_watch.h"
 
 /* Six of the copied files' functions were called from loader code that did not come along (the watch thread, the
  * ship's level change, the density rules of a later branch); they are unused until their callers are written. */

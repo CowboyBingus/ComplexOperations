@@ -1095,6 +1095,13 @@ static int TerrainStep(uint64_t records, uint32_t end, uint32_t at, uint64_t con
     if (g_coarse.on)
     {
         int more = CoarseDraw(context, g, h, gen, t0, hz);
+        {
+            /* the war-table crash's watch: each frame that put coarse tiles on the merge's gui, dated (capped) */
+            static volatile LONG lines;
+            const uint64_t tris = g_coarse.trisFrame == g_terrain.frames ? g_coarse.frameTris : 0;
+            if (tris > 0 && InterlockedIncrement(&lines) <= 4096)
+                co_watch_mark("XL coarse batch frame %u: %llu gui triangles, %d tiles drawn", g_terrain.frames, (unsigned long long)tris, g_terrain.drawn);
+        }
         if (more > 0) return 1;
         CoarseEnd();
         g_terrain.state = 2;
@@ -1939,6 +1946,7 @@ static int MatEnter(int owner, uint64_t context, uint64_t R, float span, float c
     MatCameras(1024.0f, 1024.0f, 0.0f, 0.0f);
     MemoryBarrier();
     InterlockedExchange(&g_mat.on, 1);
+    co_watch_mark("XL material pass enters (%s, scale %.4f)", owner == MAT_LEVEL ? "the level's op 0x41" : "a near tile", (double)g_mat.s);
     return 1;
 }
 
@@ -1953,13 +1961,15 @@ static int MatLeave(uint64_t context)
     MatCameras(g_mat.back[0], g_mat.back[1], g_mat.backAt[0], g_mat.backAt[1]);
     InterlockedExchange(&g_mat.on, 0);
     g_mat.waits = 0; g_mat.quiet = 0;
+    co_watch_mark("XL material pass leaves (cameras back)");
     return 1;
 }
 
 /* The level's dispatcher, before a record runs: 1 run it, 2 run it with the pose rows in place, 0 wait. */
 static int TerrainMatDispatch(uint32_t op, uint64_t context)
 {
-    if (g_mat.on && g_mat.level != g_world.levels) InterlockedExchange(&g_mat.on, 0); /* a level that ended inside 0x41: its cameras are gone */
+    if (g_mat.on && g_mat.level != g_world.levels) /* a level that ended inside 0x41: its cameras are gone */
+    { InterlockedExchange(&g_mat.on, 0); co_watch_mark("XL material pass dropped: its level ended inside op 0x41"); }
     if (g_mat.on && g_mat.owner == MAT_LEVEL && op != 0x41) return MatLeave(context);
     if (op != 0x41) return 1;
     uintptr_t gen = 0, settings = 0, R = 0;
