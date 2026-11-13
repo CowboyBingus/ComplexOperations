@@ -3950,6 +3950,24 @@ static void WorldZoneProbe(uint64_t records, uint32_t end, uintptr_t gen)
  * after every generation op that grew the commit (private bytes; Wine reports PrivateUsage 0, so PagefileUsage) by 64 MB or more since the last note, at named phases, and
  * every 30 s while a player exists (NearReportPlayer). K32GetProcessMemoryInfo through GetProcAddress (the loader does
  * not link psapi). */
+/* The memory probe (research, HELLFORGE_XL_MEMPROBE=1; difficulty_world_memprobe.c) reads more at these notes. It only
+ * reads, so the notes below call it but keep their own behaviour when it is off. */
+static volatile LONG g_memProbeOn = -1;
+static int MemProbeOn(void)
+{
+    if (g_memProbeOn < 0)
+    {
+        char t[4] = "";
+        InterlockedExchange(&g_memProbeOn, GetEnvironmentVariableA("HELLFORGE_XL_MEMPROBE", t, sizeof t) > 0 && t[0] == '1' && !strcmp(g_build, "25480438"));
+    }
+    return g_memProbeOn > 0;
+}
+static uintptr_t g_memProbeContext, g_memProbeRecord; /* the dispatcher's context and record of the note "after" */
+static volatile uintptr_t g_memProbeDevice;          /* the render device, as the render thread's batch end has it */
+static SRWLOCK g_memProbeNoteLock = SRWLOCK_INIT;     /* the generation thread's and the game thread's notes, one at a time */
+static void MemProbeNote(const char* where, uint32_t op, uint32_t record, LONG64 commit);
+static int MemProbeAllocList(const char* where, uintptr_t exe, const uintptr_t* nodes, const LONG64* bytes, const LONG64* deltas, int n, int others, LONG64 total);
+static void MemProbeInstall(void);
 /* ---- Memory attribution (research, HELLFORGE_XL_MEMPROF=1) -------------------------------------------------------------
  * Every commit goes through ntdll's NtAllocateVirtualMemory and every release or decommit through NtFreeVirtualMemory.
  * The hooks keep, per caller, the bytes committed and the bytes still committed (live), and every memory note lists the
@@ -3964,9 +3982,10 @@ typedef LONG (NTAPI* MemProfFreeFn)(HANDLE, PVOID*, PSIZE_T, ULONG);
 static MemProfAllocFn g_memProfAlloc;
 static MemProfFreeFn g_memProfFree;
 #define MEMPROF_SLOTS 4096
-#define MEMPROF_FRAMES 6
+#define MEMPROF_FRAMES 10 /* kept per caller: six, or ten with the memory probe (g_memProfFrames) */
 #define MEMPROF_REGIONS (1u << 18)
-static struct { volatile LONG64 key; uintptr_t at[MEMPROF_FRAMES]; volatile LONG64 bytes, live, calls, shown; } g_memProf[MEMPROF_SLOTS];
+static struct { volatile LONG64 key; uintptr_t at[MEMPROF_FRAMES]; volatile LONG64 bytes, live, calls, shown, notedLive, notedBytes; } g_memProf[MEMPROF_SLOTS];
+static int g_memProfFrames = 6;
 typedef struct { volatile LONG64 base; volatile LONG64 bytes; volatile LONG slot; } MemProfRegion;
 static MemProfRegion* g_memProfRegion; /* MEMPROF_REGIONS, allocated when the research is on */
 static uintptr_t g_memProfRange[2][2];
@@ -4006,7 +4025,7 @@ static LONG NTAPI MemProfCommit(HANDLE process, PVOID* base, ULONG_PTR zero, PSI
         USHORT n = RtlCaptureStackBackTrace(1, 48, frames, NULL);
         uintptr_t at[MEMPROF_FRAMES] = {0}; int k = 0;
         uintptr_t skipLo = g_memProfRange[0][0] + 0x667000u, skipHi = g_memProfRange[0][0] + 0x66B560u;
-        for (USHORT i = 0; i < n && k < MEMPROF_FRAMES; i++)
+        for (USHORT i = 0; i < n && k < g_memProfFrames; i++)
         {
             uintptr_t f = (uintptr_t)frames[i];
             if (f >= skipLo && f < skipHi) continue;
@@ -4056,8 +4075,9 @@ static void MemProfInstall(void)
 {
     static int done;
     char t[4] = "";
-    if (done || !(GetEnvironmentVariableA("HELLFORGE_XL_MEMPROF", t, sizeof t) > 0 && t[0] == '1')) return;
+    if (done || !((GetEnvironmentVariableA("HELLFORGE_XL_MEMPROF", t, sizeof t) > 0 && t[0] == '1') || MemProbeOn())) return;
     done = 1;
+    if (MemProbeOn()) g_memProfFrames = MEMPROF_FRAMES;
     uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
     g_memProfRange[0][0] = exe; g_memProfRange[0][1] = MemProfImageEnd(exe);
     g_memProfRange[1][0] = g_world.game; g_memProfRange[1][1] = MemProfImageEnd(g_world.game);
@@ -4105,6 +4125,58 @@ static void MemProfReport(void)
     if (g_memProfLost >= (8ll << 20)) Note("difficulty: memprof: %lld MB in regions the table could not hold", (long long)(g_memProfLost >> 20));
 }
 
+/* The memory probe's report: the ten callers that grew most since the last note (8 MB or more), and at the notes that
+ * walk everything also the ten that hold most. Growth, not live, finds a caller hidden under larger old ones. */
+static void MemProfFramesText(int slot, char* where, size_t size)
+{
+    size_t used = 0; where[0] = 0;
+    for (int f = 0; f < MEMPROF_FRAMES && g_memProf[slot].at[f] != 0 && used < size; f++)
+    {
+        uintptr_t a = g_memProf[slot].at[f];
+        int x = a >= g_memProfRange[0][0] && a < g_memProfRange[0][1];
+        used += (size_t)snprintf(where + used, size - used, "%s%s+0x%llX", f ? " < " : "", x ? "x" : "g", (unsigned long long)(a - g_memProfRange[x ? 0 : 1][0]));
+    }
+}
+static void MemProfReportProbe(int byLive)
+{
+    if (g_memProfAlloc == NULL) return;
+    LONG64 other = g_memProfOther - g_memProfOtherShown;
+    if (other >= (8ll << 20)) { Note("difficulty: memprof: %lld MB committed with no game frame on the stack", other >> 20); g_memProfOtherShown += other; }
+    static char picked[MEMPROF_SLOTS];
+    static LONG64 grew[MEMPROF_SLOTS];
+    for (int i = 0; i < MEMPROF_SLOTS; i++) grew[i] = g_memProf[i].key != 0 ? g_memProf[i].live - g_memProf[i].notedLive : 0;
+    memset(picked, 0, sizeof picked);
+    for (int top = 0; top < 10; top++)
+    {
+        int best = -1; LONG64 bestGrew = (8ll << 20) - 1;
+        for (int i = 0; i < MEMPROF_SLOTS; i++) if (!picked[i] && grew[i] > bestGrew) { bestGrew = grew[i]; best = i; }
+        if (best < 0) break;
+        picked[best] = 1;
+        char where[MEMPROF_FRAMES * 20 + 8];
+        MemProfFramesText(best, where, sizeof where);
+        Note("difficulty: memprof: %+lld MB since the last note by %s (%lld MB live; %lld calls, %lld MB committed in all, %+lld since)", (long long)(bestGrew >> 20), where,
+            (long long)(g_memProf[best].live >> 20), (long long)g_memProf[best].calls, (long long)(g_memProf[best].bytes >> 20),
+            (long long)((g_memProf[best].bytes - g_memProf[best].notedBytes) >> 20));
+    }
+    if (byLive)
+    {
+        memset(picked, 0, sizeof picked);
+        for (int top = 0; top < 10; top++)
+        {
+            int best = -1; LONG64 bestLive = (64ll << 20) - 1;
+            for (int i = 0; i < MEMPROF_SLOTS; i++) if (g_memProf[i].key != 0 && !picked[i] && g_memProf[i].live > bestLive) { bestLive = g_memProf[i].live; best = i; }
+            if (best < 0) break;
+            picked[best] = 1;
+            char where[MEMPROF_FRAMES * 20 + 8];
+            MemProfFramesText(best, where, sizeof where);
+            Note("difficulty: memprof: %lld MB live (%+lld since the last note) by %s (%lld calls, %lld MB committed in all)", (long long)(bestLive >> 20),
+                (long long)(grew[best] >> 20), where, (long long)g_memProf[best].calls, (long long)(g_memProf[best].bytes >> 20));
+        }
+    }
+    for (int i = 0; i < MEMPROF_SLOTS; i++) if (g_memProf[i].key != 0) { g_memProf[i].notedLive = g_memProf[i].live; g_memProf[i].notedBytes = g_memProf[i].bytes; }
+    if (g_memProfLost >= (8ll << 20)) Note("difficulty: memprof: %lld MB in regions the table could not hold", (long long)(g_memProfLost >> 20));
+}
+
 /* ---- The game's named allocators (research, HELLFORGE_XL_ALLOCS=1; KB missions/xl-tile-memory-growth) ---------------
  * Commit counts rpmalloc's kept spans as used, so it cannot tell a leak from a cache. The game's tracking allocators
  * keep live bytes by name (checked by me in the exe): the constructor 0x5C2C40 sets name +8 (0x5C2C57) and links the
@@ -4120,7 +4192,7 @@ static void WorldAllocNote(const char* where)
     if (g_allocOn < 0)
     {
         char t[4] = "";
-        g_allocOn = GetEnvironmentVariableA("HELLFORGE_XL_ALLOCS", t, sizeof t) > 0 && t[0] == '1' && !strcmp(g_build, "25480438") &&
+        g_allocOn = ((GetEnvironmentVariableA("HELLFORGE_XL_ALLOCS", t, sizeof t) > 0 && t[0] == '1') || MemProbeOn()) && !strcmp(g_build, "25480438") &&
             ApiCodeMatches(exe + 0x5C2C57u, "48 89 51 08 4C 89 61 10") && ApiCodeMatches(exe + 0x5C2C83u, "48 8B 3D F6 04 55 01") &&
             ApiCodeMatches(exe + 0x5C2C9Eu, "48 8B 07 48 89 43 10") && ApiCodeMatches(exe + 0x5C2E51u, "F0 4C 0F C1 43 28") &&
             ApiCodeMatches(exe + 0x5C2E63u, "F0 4C 0F C1 4B 30");
@@ -4157,6 +4229,14 @@ static void WorldAllocNote(const char* where)
         for (int j = 0; j < g_allocPrevN && hit < 0; j++) if (g_allocPrev[j].node == now[i].node) hit = j;
         if (hit >= 0) before = g_allocPrev[hit].bytes;
         d[i] = now[i].bytes - before;
+    }
+    if (MemProbeOn()) /* the probe lists every change of 1 MB or more, with its parent */
+    {
+        static uintptr_t probeNode[WORLD_ALLOCS]; static LONG64 probeBytes[WORLD_ALLOCS];
+        for (int i = 0; i < n; i++) { probeNode[i] = now[i].node; probeBytes[i] = now[i].bytes; }
+        MemProbeAllocList(where, exe, probeNode, probeBytes, d, n, others, total);
+        memcpy(g_allocPrev, now, sizeof(now[0]) * (size_t)n); g_allocPrevN = n;
+        return;
     }
     for (k = 0; k < 8; k++) /* the eight largest |changes| of at least 1 MB */
     {
@@ -4204,10 +4284,19 @@ static void WorldMemoryNote(const char* where, uint32_t op, uint32_t record, int
         Note("difficulty: memory: %s at %.0fx: commit %lld MB (%+lld), working set %llu MB (peak %llu), system available %llu MB",
             where, (double)g_world.current, priv >> 20, (priv - last) >> 20, (unsigned long long)(c.ws >> 20), (unsigned long long)(c.peakWs >> 20),
             (unsigned long long)(m.ullAvailPhys >> 20));
-    MemProfReport();
-    WorldAllocNote(where);
+    if (MemProbeOn())
+    {
+        AcquireSRWLockExclusive(&g_memProbeNoteLock);
+        MemProbeNote(where, op, record, priv);
+        ReleaseSRWLockExclusive(&g_memProbeNoteLock);
+    }
+    else
+    {
+        MemProfReport();
+        WorldAllocNote(where);
+    }
 #ifdef CO_RESEARCH
-    ScatterResearchNote();
+    ScatterResearchNote(); /* also with the memory probe: its own lock, and the scatter cut's notes stay comparable */
 #endif
 }
 
@@ -4952,7 +5041,8 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
 #else
         const int force = 0;
 #endif
-        if ((watch || vanilla2B) && !SafeRead(index, &now, 4) && now != done) WorldMemoryNote("after", doneOp, done, force);
+        if (watch && MemProbeOn()) { g_memProbeContext = (uintptr_t)b; g_memProbeRecord = (uintptr_t)(records + (uint64_t)at * 0x19B0u); }
+        if ((watch || vanilla2B) && !SafeRead(index, &now, 4) && now != done) WorldMemoryNote("after", doneOp, done, force || (watch && MemProbeOn()));
     }
     if (matPatch) TerrainMatPatch(0);
     if (watch && op == 0x2B) TownsAfter(records, at, index, b, g, h, block); /* before TerrainStamps: it saves below[] */
@@ -6444,6 +6534,7 @@ static const char* InstallWorld(DifficultyInstall* d)
     LoaderHook("extra large maps' op diagnostic", game + 0xC14950u, (void*)WorldDispatch, (void**)&g_worldDispatch);
     KindFilterResearchInstall(game);
     MemProfInstall();
+    MemProbeInstall();
     TerrainDiagInstall(game);
     TerrainInstall(game);
     /* No render capacity here: the one main world is made before any level, so CoXlRenderWrite put it in as the game
