@@ -751,7 +751,37 @@ void CoXlTestMission(uintptr_t level, int complex)
 /* The engine's scatter update hook (proto/difficulty_world_diag.c) for `view` while record `record` (op `op`) runs:
  * 1 when it called the engine's update, 0 when it left the view out. */
 static int g_scatterTestCalled, g_scatterTestBake;
-static void ScatterTestEngine(void* a, uint8_t* view, uint32_t c, uint8_t* layer, void* e, void* f, void* g, void* h) { g_scatterTestCalled = 1; g_scatterTestBake = t_tdScatBake; }
+static int g_scatterTestLocked; /* the layer's lock was held while the engine's update ran */
+static void ScatterTestEngine(void* a, uint8_t* view, uint32_t c, uint8_t* layer, void* e, void* f, void* g, void* h)
+{
+    g_scatterTestCalled = 1; g_scatterTestBake = t_tdScatBake;
+    SRWLOCK* lock = &g_tdScatLock[((uintptr_t)layer / 0x238u) & (TD_SCAT_LOCKS - 1)];
+    g_scatterTestLocked = layer != NULL && !TryAcquireSRWLockExclusive(lock);
+    if (layer != NULL && !g_scatterTestLocked) ReleaseSRWLockExclusive(lock);
+}
+/* The update of `layer` for `view`; 1 when the engine's ran, and whether it ran under the layer's lock. */
+int CoXlTestScatterLayer(uint8_t* view, uint8_t* layer, int* locked)
+{
+    g_tdScatterUpdate = ScatterTestEngine; g_scatterTestCalled = 0; g_scatterTestLocked = 0;
+    TdScatterUpdate(NULL, view, 0, layer, NULL, NULL, NULL, NULL);
+    *locked = g_scatterTestLocked;
+    return g_scatterTestCalled;
+}
+void CoXlTestScatterHold(uint8_t* layer, int hold)
+{
+    SRWLOCK* lock = &g_tdScatLock[((uintptr_t)layer / 0x238u) & (TD_SCAT_LOCKS - 1)];
+    if (hold) AcquireSRWLockExclusive(lock); else ReleaseSRWLockExclusive(lock);
+}
+/* The bake's updates and the updates that waited for their layer, since the start. */
+void CoXlTestScatterCounts(LONG64* bake, LONG64* overlap) { *bake = g_tdScatBakeUpdates; *overlap = g_tdScatOverlap; }
+/* The frame times before a batch: `n` level updates `ms` apart in play, then a batch's start; the worst and the mean. */
+void CoXlTestFgFrames(const float* ms, int n, double* worst, double* mean)
+{
+    g_fgFrames.filled = g_fgFrames.at = 0;
+    for (int k = 0; k < n; k++) { g_fgFrames.ring[g_fgFrames.at] = ms[k]; g_fgFrames.at = (g_fgFrames.at + 1) % FG_RING; if (g_fgFrames.filled < FG_RING) g_fgFrames.filled++; }
+    FgFramesStart();
+    *worst = g_fgFrames.before[0]; *mean = g_fgFrames.before[1];
+}
 int CoXlTestScatterBake(void) { return g_scatterTestBake; } /* the far-grass bake mark the engine's update ran under */
 void CoXlTestScatLimits(int bake, int* budget, uint64_t* most) { NearScatLimits(bake, budget, most); }
 int CoXlTestScatterUpdate(LONG op, LONG record, uint8_t* view)
@@ -871,5 +901,20 @@ void CoXlTestFgObserver(int on, float x, float y) { g_streamObserverOn = on; g_s
 int CoXlTestFgBakeView(const uint8_t* view) { return TdScatterBakeView(view); }
 void CoXlTestFgWorld(float live) { g_world.live = live; } /* 8 on an extra large level in play (16384 m) */
 void CoXlTestFgState(int state) { g_fg.state = state; }
+/* The profile guard on a settings document, with `get` as the document's operator[]. */
+void CoXlTestFgProfileGuard(void* doc, void* get) { g_fgDocGet = (FgDocGetFn)get; FgProfileGuard(doc, "a test save"); }
+void CoXlTestScatBakeOver(LONG n) { g_scatBakeOver = n; } /* a bake view's layer over the node limit */
+int CoXlTestFgViewBaked(int i, int j) { return FgBaked(&g_fg.map, i, j); }
+void CoXlTestFgLinker(uint64_t record) { FarGrassLinker(record); } /* op 0x4A's record on an extra large level */
+void CoXlTestFgNotesReset(void) { g_fg.settingNotes = 0; g_fg.clearNoted = 0; } /* a new session's log */
+void CoXlTestFgOut(int on) { g_fg.published = on; } /* a job out, with the names published */
+int CoXlTestFgPaced(double mean, float last, uint32_t* deferred)
+{
+    g_fgFrames.filled = mean > 0.0 ? FG_RING : 0; g_fgFrames.lastMs = last;
+    for (int k = 0; k < FG_RING; k++) g_fgFrames.ring[k] = (float)mean;
+    int r = FgPaced();
+    *deferred = g_fg.deferred;
+    return r;
+}
 void CoXlTestFgRing(int a0, int a1, int b0, int b1) { g_ring.a0 = a0; g_ring.a1 = a1; g_ring.b0 = b0; g_ring.b1 = b1; } /* the mover's cells */
 #endif

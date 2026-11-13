@@ -7389,6 +7389,7 @@ static struct
     volatile LONG64 nodes, missed, calls; ULONGLONG noted; LONG notes, level;
 } g_scatView = {.lock = SRWLOCK_INIT, .level = -1};
 static struct { uint64_t key; float lo, hi; } g_scatCache[NEAR_SCAT_CACHE]; /* zero-filled: not in the file */
+static volatile LONG g_scatBakeOver; /* bake views' layers over NearScatLimits' nodes: far grass stops for the level */
 
 static float NearScatGround(float x, float y)
 {
@@ -7415,7 +7416,7 @@ static int NearScatRange(float size, int32_t ix, int32_t iy, float h, float* lo,
     if (g_nearCoarseGround.v == NULL || *budget <= 0) return 0;
     (*budget)--;
     float cx = ((float)ix + 0.5f) * size, cy = ((float)iy + 0.5f) * size, a = 1e9f, b = -1e9f;
-    int n = (int)ceilf(2.0f * h / 2.0f); /* samples every 2 m at most */
+    int n = (int)ceilf(2.0f * h / (t_tdScatBake ? 4.0f : 2.0f)); /* every 2 m at most; a far-grass bake view's 4 m, its lookup's texel */
     if (n < 2) n = 2;
     if (n > 64) n = 64;
     for (int j = 0; j <= n; j++)
@@ -7442,11 +7443,11 @@ static int NearScatRange(float size, int32_t ix, int32_t iy, float h, float* lo,
 
 /* New cells' ranges a call (the rest come on later frames, cached) and the most nodes a view may have: the player's view
  * has about 170 (the generator's whole-world sweep at load asks millions). A far-grass bake view renders once, so each of
- * its nodes gets its range now; its 256 m square holds a vanilla bake tile's nodes. */
+ * its nodes gets its range now: its 256 m square is 18 x 18 cells of 16 m with the margin, 4096 covers 4 m cells. */
 static void NearScatLimits(int bake, int* budget, uint64_t* most)
 {
-    *budget = bake ? 0x7FFFFFFF : 256;
-    *most = bake ? 65536u : 1024u;
+    *budget = bake ? 4096 : 256;
+    *most = bake ? 4096u : 1024u;
 }
 
 static uint64_t NearScatterView(uintptr_t tree, void* frustum, uint32_t stamp, float pad)
@@ -7460,6 +7461,11 @@ static uint64_t NearScatterView(uintptr_t tree, void* frustum, uint32_t stamp, f
         uint8_t* nodes = *(uint8_t**)(tree + 0x88);
         int budget; uint64_t most;
         NearScatLimits(t_tdScatBake, &budget, &most);
+        /* The engine builds a node for every cell in the view (0x9548C0), so a bake view's count is set by its 256 m square
+         * and the layer's cell size; over the limit its nodes would keep z-0 boxes, and the batch stops instead. */
+        if (t_tdScatBake && count > most && InterlockedIncrement(&g_scatBakeOver) <= 4)
+            Note("difficulty: far grass: a bake view's scatter layer has %llu nodes (%.1f m cells), over the %llu given the ground's range; "
+                "no more bakes this level", (unsigned long long)count, size, (unsigned long long)most);
         /* only with the tile in (before it, NearVisibleAt has no tile) */
         if (nodes != NULL && count <= most && NearTilesLive() > 0 && size >= 1.0f && size <= 4096.0f && grow >= 0.0f && grow <= 1024.0f)
         {

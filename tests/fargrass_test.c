@@ -29,13 +29,71 @@ int CoXlTestFgBakeView(const uint8_t* view);
 void CoXlTestFgWorld(float live);
 int CoXlTestScatterUpdate(LONG op, LONG record, uint8_t* view);
 int CoXlTestScatterBake(void);
+int CoXlTestScatterLayer(uint8_t* view, uint8_t* layer, int* locked);
+void CoXlTestScatterHold(uint8_t* layer, int hold);
+void CoXlTestScatterCounts(LONG64* bake, LONG64* overlap);
+void CoXlTestFgFrames(const float* ms, int n, double* worst, double* mean);
 void CoXlTestScatLimits(int bake, int* budget, uint64_t* most);
 void CoXlTestFgState(int state);
+void CoXlTestFgOut(int on);
+void CoXlTestFgNotesReset(void);
+void CoXlTestFgLinker(uint64_t record);
+int CoXlTestFgViewBaked(int i, int j);
+static uint8_t g_linkerRecord[0x19B0];
+static uint8_t g_linkerRes[32];
+static uint16_t g_linkerSent[1024];
+static int g_linkerSends;
+static void* FakeFind(uint32_t name) { return name == 0x499EAFD7u ? g_linkerRes : NULL; }
+static void FakeUpdate(void* res, const void* data, uint32_t size)
+{
+    if (res == g_linkerRes && size == sizeof g_linkerSent) { memcpy(g_linkerSent, data, size); g_linkerSends++; }
+}
+/* The game's linker in op 0x4A's record: zone z, material m -> slot (z + m) % 17. */
+static void LinkerRecord(int bad)
+{
+    uint16_t* e = (uint16_t*)(g_linkerRecord + 8 + 0x1168);
+    for (int k = 0; k < 1024; k++) e[k] = (uint16_t)(((k >> 5) + (k & 31)) % 17);
+    if (bad) e[5] = 40;
+    CoXlTestFgLinker((uint64_t)(uintptr_t)g_linkerRecord);
+}
+/* Whether the last upload keeps view (i, j), and every entry's slot is the game's. */
+static int LinkerKeeps(int i, int j) { return (g_linkerSent[(63 - j) * 16 + (i >> 2)] >> (12 + (i & 3))) & 1; }
+static int LinkerSlotsKept(void)
+{
+    for (int k = 0; k < 1024; k++) if ((g_linkerSent[k] & 0x0FFF) != ((k >> 5) + (k & 31)) % 17) return 0;
+    return 1;
+}
+void CoXlTestScatBakeOver(LONG n);
+void CoXlTestFgProfileGuard(void* doc, void* get);
+static uint8_t g_docRoot[24], g_docRender[24], g_docKey[24]; /* settings document nodes: type bits 0-2, value at +8 */
+static void* FakeDocGet(void* node, const char* key)
+{
+    if (node == g_docRoot && strcmp(key, "render_settings") == 0) return g_docRender;
+    if (node == g_docRender && strcmp(key, "debug_deformation_prevention") == 0) return g_docKey;
+    return NULL;
+}
+static int DocKey(uint32_t head, uint8_t value)
+{
+    memcpy(g_docKey, &head, 4); g_docKey[8] = value;
+    CoXlTestFgProfileGuard(g_docRoot, (void*)FakeDocGet);
+    uint32_t now; memcpy(&now, g_docKey, 4);
+    return (int)(now << 8 | g_docKey[8]);
+}
+int CoXlTestFgPaced(double mean, float last, uint32_t* deferred);
 void CoXlTestFgRing(int a0, int a1, int b0, int b1);
 void CoXlTestMover(float ox, float oy, int state, int merge, int a, int b);
 void CoXlTestMoverTick(uintptr_t level, float observerX, float observerY);
 
 static int g_failed;
+static volatile LONG g_holding;
+static DWORD WINAPI HoldLayer(void* layer)
+{
+    CoXlTestScatterHold((uint8_t*)layer, 1);
+    g_holding = 1;
+    Sleep(100);
+    CoXlTestScatterHold((uint8_t*)layer, 0);
+    return 0;
+}
 static const char* g_case;
 #define CHECK(what) do { if (!(what)) { printf("FAILED %s: %s\n", g_case, #what); g_failed++; } } while (0)
 
@@ -109,6 +167,41 @@ static void FakeGenerate(uint64_t queue, uint64_t world, uint32_t hash, uint64_t
     (*count)++; /* the builder's job is on the queue until the render callback drains it */
 }
 
+/* The two overlay libraries as loaded: their GPU parts, each pixel stage a DXBC container at the edit's offset. */
+static uint8_t g_lib[3][0xCE70]; /* [2]: what the engine hands for a name it has not loaded (the type's default) */
+static int g_libLoaded[2];
+static const uint64_t kLibName[2] = {0x2FA016B4649B8927ull, 0xECF7F262F57585A0ull};
+static void Libraries(int edited)
+{
+    static const uint32_t at[2][2] = {{0x1FB8, 0x7DE0}, {0x1CC8, 0x44F8}}, size[2] = {0x4F14, 0x1C20}, run[2] = {0x4B18, 0x1840};
+    static const uint8_t stock[16] = {0x32, 0, 0, 0x0F, 0xC2, 0, 0x10, 0, 0, 0, 0, 0, 0x06, 0x04, 0x10, 0};
+    static const uint8_t nops[16] = {0x3A, 0, 0, 1, 0x3A, 0, 0, 1, 0x3A, 0, 0, 1, 0x3A, 0, 0, 1};
+    static const uint8_t scale[8] = {0, 0, 0x80, 0x38, 0, 0, 0x80, 0xB8}, scale0[8] = {0, 0, 0, 0x3A, 0, 0, 0, 0xBA};
+    memset(g_lib, 0, sizeof g_lib);
+    for (int k = 0; k < 2; k++)
+    {
+        g_libLoaded[k] = 1;
+        for (int st = 0; st < 2; st++)
+        {
+            uint8_t* b = g_lib[k] + at[k][st];
+            memcpy(b, "DXBC", 4); memcpy(b + 24, &size[k], 4);
+            memcpy(b + run[k], edited ? nops : stock, 16);
+            if (k == 0) { memcpy(b + 0x1818, edited ? scale : scale0, 8); memcpy(b + 0x1894, edited ? scale : scale0, 8); }
+        }
+    }
+    memcpy(g_lib[2], g_lib[1], sizeof g_lib[1]); /* a default that would pass for library 1 */
+}
+static uint8_t FakeCanGet(uint64_t type, uint64_t name)
+{
+    for (int k = 0; k < 2; k++) if (type == 0xE5EE32A477239A93ull && name == kLibName[k]) return (uint8_t)g_libLoaded[k];
+    return 0;
+}
+static uint64_t FakeGet(uint64_t name, uint64_t type)
+{
+    for (int k = 0; k < 2; k++) if (type == 0xE5EE32A477239A93ull && name == kLibName[k]) return (uint64_t)(uintptr_t)g_lib[g_libLoaded[k] ? k : 2];
+    return 0;
+}
+
 static void Slot(uint32_t table, uint32_t slot, void* fn)
 {
     uintptr_t f = (uintptr_t)fn;
@@ -133,6 +226,9 @@ static void Start(const char* name)
     Slot(0x08, 0x100, (void*)FakeUnitUpdate); Slot(0x08, 0x468, (void*)FakeEnv); Slot(0x08, 0x478, (void*)FakeEnvDestroy);
     Slot(0x18, 0x6B0, (void*)FakeCamera); Slot(0x20, 0x20, (void*)FakeMove); Slot(0x20, 0x70, (void*)FakeFar);
     Slot(0xE0, 0x0, (void*)FakeRect); Slot(0xE0, 0x10, (void*)FakeOutput);
+    Slot(0x10, 0x388, (void*)FakeCanGet); Slot(0x10, 0x3F8, (void*)FakeGet); Slot(0x10, 0x158, (void*)FakeFind); Slot(0x10, 0x208, (void*)FakeUpdate);
+    g_linkerSends = 0; memset(g_linkerSent, 0, sizeof g_linkerSent);
+    Libraries(1);
     CoXlTestGame(game);
     CoXlTestFgInstall((void*)FakeAim, (void*)FakeGenerate);
     CoXlTestFgObserver(0, 0, 0);
@@ -291,8 +387,8 @@ int main(void)
         g_saw.envHash == 0x9F09B0185B47408Full);
     CHECK(g_saw.aims == 1 && Near(g_saw.aimSize, 2048.0f) && Near(g_saw.aimK, 8.0f) && Near(g_saw.farZ, 1002.0f));
     CHECK(g_saw.output[0] == VP && g_saw.output[1] == DENSITY);
-    int views = 0, entriesOk = 1, rectsOk = 1, ticks = 0, busyWhileQueued = 1;
-    while (CoXlTestFgBusy() && ticks < 2000)
+    int views = (int)CoXlTestFgBaked(), entriesOk = 1, rectsOk = 1, ticks = 0, busyWhileQueued = 1, freeBetween = 0; /* the first view is out */
+    while (!(g_saw.generates == 1 && !CoXlTestFgBusy()) && ticks < 4000)
     {
         uint32_t before = Queued();
         CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
@@ -309,29 +405,107 @@ int main(void)
             views++;
         }
         if (Queued() != 0 && !CoXlTestFgBusy()) busyWhileQueued = 0;
+        if (Queued() == 0 && !CoXlTestFgBusy() && g_saw.generates == 0) freeBetween++; /* a moving tile may build between views */
         if (ticks % 3 == 0 && Queued() == before) Drain(); /* the render callback, not every frame, never with a job just queued */
     }
-    CHECK(views > 4 && views <= 64 && (uint32_t)views == CoXlTestFgBaked() && entriesOk && rectsOk && busyWhileQueued);
+    CHECK(views > 4 && views <= 64 && (uint32_t)views == CoXlTestFgBaked() && entriesOk && rectsOk && busyWhileQueued && freeBetween >= views - 1);
     CHECK(g_saw.generates == 1 && g_saw.generateBehind == 0 && g_saw.generateHash == 0xC4933EE1u && g_saw.generateQueue == (uint64_t)(uintptr_t)g_queue &&
         g_saw.generateWorld == WORLD);
-    CHECK(!CoXlTestFgBusy() && g_saw.unpublished == 4 && g_saw.vpDestroys == 1 && g_saw.unitDestroys == 1 && g_saw.envDestroys == 1);
+    /* the names go out with each job and come back once it has run: views + the builder */
+    CHECK(!CoXlTestFgBusy() && g_saw.published == 4 * (views + 1) && g_saw.unpublished == 4 * (views + 1) && g_saw.vpDestroys == 1 &&
+        g_saw.unitDestroys == 1 && g_saw.envDestroys == 1);
     CHECK(g_saw.setTrue >= 2); /* set again while the batch ran */
     /* the ground near the player is baked: no second batch while the player stays */
     for (int k = 0; k < 200; k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
     CHECK(g_saw.vps == 1);
     /* the builder's job still queued when the batch waits to end: the names stay */
     CoXlTestFgObserver(1, 4000.0f, 4000.0f);
-    for (int k = 0; k < 400 && g_saw.generates < 2; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
-    CHECK(g_saw.generates == 2 && CoXlTestFgBusy());
+    const uint32_t baked = CoXlTestFgBaked();
+    for (int k = 0; k < 1000 && g_saw.generates < 2; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+    const int u = 4 * (views + 1) + 4 * (int)(CoXlTestFgBaked() - baked);
+    CHECK(g_saw.generates == 2 && CoXlTestFgBusy() && g_saw.unpublished == u);
     for (int k = 0; k < 10; k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
-    CHECK(CoXlTestFgBusy() && g_saw.unpublished == 4);
+    CHECK(CoXlTestFgBusy() && g_saw.unpublished == u);
     Drain();
     for (int k = 0; k < 2; k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
     CHECK(CoXlTestFgBusy());
     CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
-    CHECK(!CoXlTestFgBusy() && g_saw.unpublished == 8);
+    CHECK(!CoXlTestFgBusy() && g_saw.unpublished == u + 4);
     CoXlTestWorldShip();
     CHECK(CoXlTestFgSetting() == 0 && g_saw.setFalse == 1);
+
+    Start("crater cuts: each build keeps every view not baked since the last one, with the game's own slots");
+    Kept();
+    LinkerRecord(0);
+    CoXlTestFgObserver(1, 100.0f, -300.0f);
+    for (int k = 0; k < 4000 && g_saw.generates < 1; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+    {
+        CHECK(g_saw.generates == 1 && g_linkerSends == 1 && LinkerSlotsKept());
+        int keptOk = 1, kept = 0;
+        for (int j = 0; j < 64; j++)
+            for (int i = 0; i < 64; i++) { kept += LinkerKeeps(i, j); keptOk &= LinkerKeeps(i, j) != CoXlTestFgViewBaked(i, j); }
+        CHECK(keptOk && kept == 4096 - (int)CoXlTestFgBaked() && fake_host_logged("the scatter lookup builder is the game's own"));
+        const uint32_t first = CoXlTestFgBaked();
+        for (int k = 0; k < 40; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+        CoXlTestFgObserver(1, 4000.0f, 4000.0f);
+        for (int k = 0; k < 4000 && g_saw.generates < 2; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+        kept = 0;
+        for (int j = 0; j < 64; j++) for (int i = 0; i < 64; i++) kept += LinkerKeeps(i, j);
+        /* the second build rewrites its own views only: the first batch's are kept now */
+        CHECK(g_saw.generates == 2 && g_linkerSends == 2 && LinkerSlotsKept() && kept == 4096 - (int)(CoXlTestFgBaked() - first) &&
+            LinkerKeeps((int)floorf((100.0f + 8192.0f) / 256.0f), (int)floorf((-300.0f + 8192.0f) / 256.0f)));
+    }
+    for (int k = 0; k < 20; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+    CoXlTestWorldShip();
+    CHECK(g_linkerSends == 3 && LinkerSlotsKept() && !LinkerKeeps(0, 0)); /* the game's entries back at the ship */
+    CoXlTestFgObserver(0, 0.0f, 0.0f);
+
+    Start("crater cuts: no upload without the level's own linker (not read, or not slot indices)");
+    Kept();
+    LinkerRecord(0);
+    CoXlTestFgObserver(1, 100.0f, -300.0f);
+    for (int k = 0; k < 4000 && g_saw.generates < 1; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+    for (int k = 0; k < 20; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+    CHECK(g_saw.generates == 1 && g_linkerSends == 1);
+    /* the next level's op 0x4A gives no slot indices: its own upload stands, the last level's entries are not sent */
+    CoXlTestMission((uintptr_t)g_level, 1);
+    LinkerRecord(1);
+    CoXlTestFgKeep((uint64_t)(uintptr_t)g_rec4B, 0x4B);
+    CoXlTestFgKeep((uint64_t)(uintptr_t)g_rec67, 0x67);
+    CHECK(g_linkerSends == 1);
+    CoXlTestWorldShip();
+    CHECK(g_linkerSends == 1);
+    CoXlTestFgObserver(0, 0.0f, 0.0f);
+
+    Start("crater cuts: a level whose op 0x4A gave no slot indices gets no upload");
+    Kept();
+    LinkerRecord(1);
+    CoXlTestFgObserver(1, 100.0f, -300.0f);
+    for (int k = 0; k < 4000 && g_saw.generates < 1; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+    CHECK(g_saw.generates == 1 && g_linkerSends == 0 && fake_host_logged("crater cuts are not kept by this build: op 0x4A's linker was not read this level"));
+    CoXlTestWorldShip();
+    CHECK(g_linkerSends == 0);
+    CoXlTestFgObserver(0, 0.0f, 0.0f);
+
+    Start("a bake view's layer over the node limit: the views so far are built, then no more bakes this level");
+    Kept();
+    LinkerRecord(0);
+    CoXlTestFgObserver(1, 100.0f, -300.0f);
+    for (int k = 0; k < 40 && !CoXlTestFgBusy(); k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+    CHECK(CoXlTestFgBusy());
+    CoXlTestScatBakeOver(1);
+    for (int k = 0; k < 400 && !(g_saw.generates == 1 && !CoXlTestFgBusy()); k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+    CHECK(g_saw.generates == 1 && CoXlTestFgBaked() == 1);
+    {
+        int kept = 0;
+        for (int j = 0; j < 64; j++) for (int i = 0; i < 64; i++) kept += LinkerKeeps(i, j);
+        CHECK(g_linkerSends == 1 && kept == 4096); /* the over-limit view's texels are kept too */
+    }
+    CoXlTestFgObserver(1, 4000.0f, 4000.0f);
+    for (int k = 0; k < 400; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+    CHECK(g_saw.generates == 1 && g_saw.vps == 1);
+    CoXlTestWorldShip();
+    CoXlTestFgObserver(0, 0.0f, 0.0f);
 
     Start("the overlay's setting: only an extra large level in play with the textures kept");
     CoXlTestWorldCurrent(1.0f);
@@ -345,6 +519,72 @@ int main(void)
     CoXlTestFgTick(0); /* another level's update: the overlay's variant is the game's there */
     CHECK(g_saw.setFalse == 1 && CoXlTestFgSetting() == 0);
 
+    Start("a batch's next view waits while a moving tile builds, and outside play");
+    {
+        Kept();
+        CoXlTestFgObserver(1, 100.0f, -300.0f);
+        for (int k = 0; k < 40 && !CoXlTestFgBusy(); k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+        CHECK(CoXlTestFgBusy() && Queued() == 1);
+        Drain();
+        for (int k = 0; k < 3; k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+        CHECK(!CoXlTestFgBusy() && CoXlTestFgBaked() == 1); /* the first view ran; the names are back */
+        CoXlTestMover(0, 0, 1, 0, 0, 0); /* a tile build starts */
+        for (int k = 0; k < 50; k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+        CHECK(!CoXlTestFgBusy() && Queued() == 0 && CoXlTestFgBaked() == 1);
+        CoXlTestMover(0, 0, 0, 0, 0, 0);
+        uint32_t three = 2; memcpy(g_level + 0x1E4, &three, 4); /* the level leaves play (state 2) */
+        for (int k = 0; k < 50; k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+        CHECK(Queued() == 0 && CoXlTestFgBaked() == 1 && g_saw.setFalse >= 1 && CoXlTestFgSetting() == 0);
+        three = 3; memcpy(g_level + 0x1E4, &three, 4);
+        CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+        CHECK(CoXlTestFgBusy() && Queued() == 1 && CoXlTestFgBaked() == 2 && CoXlTestFgSetting() == 1);
+        CoXlTestWorldShip();
+    }
+
+    static const char* const kRefusals[] = {"the overlay variants are the game's own (no build-data): their debug tint is still in",
+        "an overlay variant is not loaded", "the overlay variants are the game's own (no build-data): they map 2048 m",
+        "an overlay variant's stage is not where the edit put it"};
+    for (int r = 0; r < 4; r++)
+    {
+        Start("no setting and no bakes unless the edited overlay variants are loaded");
+        Kept();
+        if (r == 0) Libraries(0); /* a DLL copied without build-data: the game's own variants */
+        if (r == 1) g_libLoaded[1] = 0;
+        if (r == 2) memset(g_lib[0] + 0x7DE0 + 0x1894, 0, 8); /* the tint gone, the 2048 m mapping kept */
+        if (r == 3) memset(g_lib[1] + 0x44F8 + 24, 0, 4);
+        CoXlTestFgObserver(1, 100.0f, -300.0f);
+        for (int k = 0; k < 200; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+        CHECK(g_saw.setTrue == 0 && CoXlTestFgSetting() == 0 && g_saw.vps == 0 && CoXlTestFgBaked() == 0);
+        char line[200];
+        snprintf(line, sizeof line, "far grass: off, debug_deformation_prevention stays false: %s", kRefusals[r]);
+        CHECK(fake_host_logged(line));
+        CoXlTestWorldShip();
+        CHECK(g_saw.setFalse == 1);
+    }
+    Start("the edited variants loaded: the setting goes on, each change logged");
+    CoXlTestFgNotesReset();
+    Kept();
+    CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+    CHECK(g_saw.setTrue == 1 && fake_host_logged("the edited overlay variants are loaded") &&
+        fake_host_logged("debug_deformation_prevention true (in play on an extra large level)"));
+    CoXlTestFgTick(0);
+    CHECK(g_saw.setFalse == 1 && fake_host_logged("debug_deformation_prevention false (not in play on an extra large level)"));
+    CoXlTestWorldShip();
+    CHECK(g_saw.setFalse == 2 && fake_host_logged("debug_deformation_prevention false (a level init or the ship)"));
+    Start("a profile save or the renderer's fill never finds debug_deformation_prevention true in the settings document");
+    CHECK(DocKey(0x101u, 1) == (0x101 << 8)); /* a true bool: false, its other bits kept */
+    CHECK(fake_host_logged("debug_deformation_prevention was true before a test save; it is false now"));
+    CHECK(DocKey(0x1u, 0) == (0x1 << 8) && DocKey(0x0u, 0) == (0x1 << 8)); /* false stays; a missing key becomes false */
+    CHECK(fake_host_logged("was missing before a test save"));
+    CHECK(DocKey(0x2u, 7) == (0x2 << 8 | 7) && DocKey(0x6u, 1) == (0x6 << 8 | 1)); /* not a bool: left */
+    Start("a clear that changes nothing is set but not logged: the line cap lasts a long session");
+    CoXlTestWorldShip();
+    CHECK(g_saw.setFalse == 1 && !fake_host_logged("debug_deformation_prevention"));
+    Kept();
+    CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+    CoXlTestWorldShip();
+    CHECK(g_saw.setTrue == 1 && g_saw.setFalse == 2 && fake_host_logged("debug_deformation_prevention false (the level is left)"));
+
     Start("a moving tile's build waits while a batch runs");
     {
         static const char kStart[] = "the level's context did not read; no tile"; /* how far a build start gets on the fake game */
@@ -352,12 +592,15 @@ int main(void)
         Level();
         CoXlTestMover(0, 0, 0, 0, 0, 0);
         CoXlTestFgRing(-2, 2, -2, 2);
-        CoXlTestFgState(1);
+        CoXlTestFgState(2); /* a view's job is out */
+        CoXlTestFgOut(1);
         CoXlTestMoverTick((uintptr_t)g_level, 2048.4f, 0.0f);
         CHECK(!fake_host_logged(kStart));
-        CoXlTestFgState(0);
+        CoXlTestFgState(1); /* between views: the tile builds */
+        CoXlTestFgOut(0);
         CoXlTestMoverTick((uintptr_t)g_level, 2048.4f, 0.0f);
         CHECK(fake_host_logged(kStart));
+        CoXlTestFgState(0);
         CoXlTestFgRing(0, 0, 0, 0);
     }
 
@@ -391,9 +634,68 @@ int main(void)
         CHECK(CoXlTestScatterUpdate(0x22, 500, view) == 1 && CoXlTestScatterBake() == 0);
         int budget = 0; uint64_t most = 0;
         CoXlTestScatLimits(1, &budget, &most);
-        CHECK(budget >= 65536 && most >= 4096);
+        CHECK(budget == 4096 && most == 4096);
         CoXlTestScatLimits(0, &budget, &most);
         CHECK(budget == 256 && most == 1024);
+    }
+
+    g_case = "a layer's scatter update runs under the layer's lock in play, and a wait is counted";
+    {
+        static uint8_t layers[4 * 0x238];
+        uint8_t bake[0x300] = {0}, other[0x300] = {0};
+        float n = 1.0f, f = 1002.0f, aspect = 1.0f, near2 = 0.1f, far2 = 400.0f;
+        memcpy(bake + 0x20, &n, 4); memcpy(bake + 0x24, &f, 4); memcpy(bake + 0x278, &aspect, 4);
+        memcpy(other + 0x20, &near2, 4); memcpy(other + 0x24, &far2, 4);
+        CoXlTestWorldCurrent(8.0f);
+        CoXlTestMission(0, 1);
+        CoXlTestFgWorld(8.0f);
+        LONG64 b0, o0, b1, o1;
+        int locked = 0;
+        CoXlTestScatterCounts(&b0, &o0);
+        CHECK(CoXlTestScatterLayer(bake, layers + 0x238, &locked) == 1 && locked == 1);
+        CHECK(CoXlTestScatterLayer(other, layers + 2 * 0x238, &locked) == 1 && locked == 1);
+        CoXlTestScatterCounts(&b1, &o1);
+        CHECK(b1 - b0 == 1 && o1 == o0); /* free locks: no wait */
+        HANDLE t = CreateThread(NULL, 0, HoldLayer, layers + 0x238, 0, NULL); /* another job holds layer 1 for 100 ms */
+        while (!g_holding) Sleep(1);
+        ULONGLONG t0 = GetTickCount64();
+        CHECK(CoXlTestScatterLayer(other, layers + 0x238, &locked) == 1 && locked == 1);
+        CHECK(GetTickCount64() - t0 >= 50); /* it waited for the holder */
+        WaitForSingleObject(t, INFINITE); CloseHandle(t);
+        CoXlTestScatterCounts(&b0, &o0);
+        CHECK(b0 == b1 && o0 - o1 == 1);
+        CoXlTestFgWorld(1.0f); /* a normal level: no lock */
+        CHECK(CoXlTestScatterLayer(other, layers + 0x238, &locked) == 1 && locked == 0);
+        CoXlTestFgWorld(8.0f);
+    }
+
+    g_case = "a job goes out only after a frame as quick as the recent ones without a job, never by force";
+    {
+        uint32_t deferred = 0;
+        CHECK(CoXlTestFgPaced(10.0, 12.0f, &deferred) == 1 && deferred == 0); /* 12.5 + 1 ms allowed */
+        CHECK(CoXlTestFgPaced(10.0, 13.4f, &deferred) == 1);
+        CHECK(CoXlTestFgPaced(10.0, 14.0f, &deferred) == 0 && deferred == 1); /* past 12.5 + 1 ms: held */
+        CHECK(CoXlTestFgPaced(10.0, 12.0f, &deferred) == 1 && deferred == 0);
+        int out = 0;
+        for (int k = 0; k < 300; k++) out += CoXlTestFgPaced(10.0, 30.0f, &deferred);
+        CHECK(out == 0 && deferred == 300);
+        CHECK(CoXlTestFgPaced(24.0, 30.0f, &deferred) == 1 && deferred == 0); /* the load stayed: the mean follows */
+        CHECK(CoXlTestFgPaced(0.0, 30.0f, &deferred) == 1); /* no frames before: no pacing */
+    }
+
+    g_case = "the frames before a batch: the worst and the mean of the last 128";
+    {
+        float ms[200];
+        double worst = 0, mean = 0;
+        for (int k = 0; k < 200; k++) ms[k] = 10.0f;
+        ms[10] = 90.0f; /* pushed out of the ring by the 128 after it */
+        ms[150] = 40.0f;
+        CoXlTestFgFrames(ms, 200, &worst, &mean);
+        CHECK(fabs(worst - 40.0) < 1e-6 && fabs(mean - (127 * 10.0 + 40.0) / 128.0) < 1e-6);
+        CoXlTestFgFrames(ms, 3, &worst, &mean);
+        CHECK(fabs(worst - 10.0) < 1e-6 && fabs(mean - 10.0) < 1e-6);
+        CoXlTestFgFrames(ms, 0, &worst, &mean);
+        CHECK(worst == 0 && mean == 0);
     }
 
     if (g_failed) { printf("fargrass: %d check(s) failed\n", g_failed); return 1; }
