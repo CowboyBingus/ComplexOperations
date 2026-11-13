@@ -28,7 +28,7 @@ void co_pods_test_reset(void);
 #define BLOCK_SITE 0x568448u        /* lea rax,[block + ship_modules_sync]: disp32 at +3 */
 #define BLOCK_MANAGER 5u
 #define BLOCK_OFFSET 0x4148u
-#define ARRAY_SITE 0xACC65Bu        /* lea r12,[player manager + 0x2C8]: the array is at 0x828 now */
+#define ARRAY_SITE 0xACC65Bu        /* lea r12,[player manager + 0x2C8]: the array is at 0x878 now */
 #define MOVED_BLOCK_SITE 0x5704E5u  /* score's count of the most slots used, from the block; nothing moves inside */
 #define LOOT_SLOT_SITE 0x6308F9u    /* lea r8,[score + 0xC440]: the loot rows by score slot, at 0x37F20 now */
 #define LOOT_INDEX_SITE 0x6312A2u   /* mov [rbp+0xC4A0],rsi: the loot rows by player index, at 0x37FE0 now */
@@ -45,6 +45,16 @@ void co_pods_test_reset(void);
 #define APPLIED_SITE 0x874565u      /* lea r15,[customization + 0x96C]: the applied records (0x44 each), disp32 at +3 */
 /* add rax/rcx,0x24 then imul 0x44: the applied voice of a slot. 0x878329 is the avatar spawn's voice delta. */
 static const uint32_t kVoiceSites[] = {0x878329u, 0x879C6Bu, 0x879F42u, 0xB51CB2u};
+#define PLAYER 0x3326468u
+#define MODULES 0x3326998u
+/* add/lea r,0xD then imul 0x38: (slot + 0xD) * 0x38 is +0x10 of the slot's A2 record (0x38 each, at 0x2C8 in the game). */
+static const uint32_t kPlayerRecordSites[] = {0xACE444u, 0xBA8974u, 0xBB23ABu, 0x609004u, 0x6090C6u, 0x6091D8u, 0xB83464u, 0xB835BCu};
+/* imul by the stride, then the array's offset as an immediate: {rva, offset of the value, manager's global, offset} */
+static const struct { uint32_t rva, at, global, old; } kOffsetSites[] = {
+    {0x60933Bu, 3, PLAYER, 0x108u}, {0x7C739Eu, 2, PLAYER, 0x108u}, {0x6ED25Eu, 2, PLAYER, 0x2C8u}, {0x591C6Eu, 2, PLAYER, 0x2C8u},
+    {0x51BBB4u, 3, MODULES, 0x88u}, {0x7AF805u, 3, MODULES, 0x88u}, {0x17868BEu, 2, 0x33266D0u, 0x90u}, {0xAB0A2Eu, 2, 0x33264F8u, 0x96Cu},
+};
+uint32_t co_managers_offset(uint32_t global, uint32_t offset);
 
 typedef uint64_t (*CtorFn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 typedef void (*ClearFn)(void*, const void*);
@@ -145,6 +155,8 @@ int main(void)
     /* A build for four joins four players and leaves every manager where the game and other mods expect it. */
     CHECK(sites == 0 && co_managers_test_state() == -1 && g_fake.writes == 0);
     for (size_t i = 0; i < sizeof kVoiceSites / sizeof kVoiceSites[0]; i++) CHECK(g_fake.image[kVoiceSites[i] + 3] == 0x24);
+    for (size_t i = 0; i < sizeof kPlayerRecordSites / sizeof kPlayerRecordSites[0]; i++) CHECK(g_fake.image[kPlayerRecordSites[i] + 3] == 0x0D);
+    for (size_t i = 0; i < sizeof kOffsetSites / sizeof kOffsetSites[0]; i++) CHECK(U32(kOffsetSites[i].rva + kOffsetSites[i].at) == kOffsetSites[i].old);
     CHECK(fake_host_logged("players: a build for four keeps the game's player managers"));
     CHECK(!fake_host_logged("component managers") && !fake_host_logged("loot rows"));
     BuildState(SECOND_STATE);
@@ -155,7 +167,7 @@ int main(void)
     CHECK(co_managers_test_state() == 1 && g_fake.writes == writes && co_managers_test_caves() == 6);
     CHECK(fake_host_logged("players: 7 component managers have 8 slots"));
     CHECK(fake_host_logged("players: the score manager's loot rows are cleared and added for eight rows (6 caves)"));
-    CHECK(g_fake.image[CAPACITY_SITE + 2] == 8 && U32(ARRAY_SITE + 3) == 0x828u);
+    CHECK(g_fake.image[CAPACITY_SITE + 2] == 8 && U32(ARRAY_SITE + 3) == 0x878u);
     CHECK(ReachesManager(FIRST_STATE));
     /* Every read of a slot's voice lands on that slot's applied voice at the records' new place; a read left at the old
      * place finds no voice, and the avatar spawns without one. */
@@ -163,6 +175,19 @@ int main(void)
     for (size_t i = 0; i < sizeof kVoiceSites / sizeof kVoiceSites[0]; i++)
         for (uint32_t slot = 0; slot < 8; slot++)
             CHECK((slot + g_fake.image[kVoiceSites[i] + 3]) * 0x44u == U32(APPLIED_SITE + 3) + slot * 0x44u + 0x24u);
+    /* The same for the player's A2 records: every (slot + k) * 0x38 lands on +0x10 of that slot's record at the new
+     * place, which the game's own displacement rows (ARRAY_SITE) say; left at the old place, slots 4 to 7 would write
+     * into A3. */
+    for (size_t i = 0; i < sizeof kPlayerRecordSites / sizeof kPlayerRecordSites[0]; i++)
+        for (uint32_t slot = 0; slot < 8; slot++)
+            CHECK((slot + g_fake.image[kPlayerRecordSites[i] + 3]) * 0x38u == U32(ARRAY_SITE + 3) + slot * 0x38u + 0x10u);
+    CHECK(U32(ARRAY_SITE + 3) + 8 * 0x38u <= 0xA38u);
+    /* An offset carried in an index register moves with its array, as the displacements do. */
+    for (size_t i = 0; i < sizeof kOffsetSites / sizeof kOffsetSites[0]; i++)
+    {
+        const uint32_t now = co_managers_offset(kOffsetSites[i].global, kOffsetSites[i].old);
+        CHECK(now != kOffsetSites[i].old && U32(kOffsetSites[i].rva + kOffsetSites[i].at) == now);
+    }
     /* the loot rows: eight of each behind the manager, loops of eight, and push 4; pop rax for the outcome code */
     {
         static const uint8_t kOutcome[] = {0x6A, 0x04, 0x58, 0x89};

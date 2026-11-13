@@ -26,7 +26,10 @@ Every player in the session needs the mod.
 
 The game keeps one record for each player in seven managers: player, score, customization, kill streak, ship
 inventory, ship customization and ship modules. Each has four slots. A build for eight builds all seven in the mod's
-memory with eight slots and changes the 1,115 code sites that address them, the score manager's loot rows among them.
+memory with eight slots and changes the 1,135 code sites that address them, the score manager's loot rows among them.
+Some code carries an array's offset in an index register, not in a displacement. The generator scans the game for that
+form and refuses an unlisted hit. Where the code counts in whole records, the array moves by whole records: the
+customization manager's applied records by 12 and the player manager's second array by 26.
 6 caves do the loot rows' code that the game wrote out for four rows (see Mission).
 
 A build for eight also moves the avatar manager from eight slots to sixteen. Players' bodies hold a slot too, so
