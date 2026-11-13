@@ -71,6 +71,7 @@
 #include "proto/difficulty_world_destroy.c"
 #include "proto/difficulty_net_patience.c"
 #include "proto/difficulty_world_move.c"
+#include "proto/difficulty_world_fargrass.c"
 #include "proto/xl_free.c"
 #include "proto/living_world.c"
 #include "proto/difficulty_tacmap.c"
@@ -647,8 +648,10 @@ void CoXlTestMission(uintptr_t level, int complex)
 }
 /* The engine's scatter update hook (proto/difficulty_world_diag.c) for `view` while record `record` (op `op`) runs:
  * 1 when it called the engine's update, 0 when it left the view out. */
-static int g_scatterTestCalled;
-static void ScatterTestEngine(void* a, uint8_t* view, uint32_t c, uint8_t* layer, void* e, void* f, void* g, void* h) { g_scatterTestCalled = 1; }
+static int g_scatterTestCalled, g_scatterTestBake;
+static void ScatterTestEngine(void* a, uint8_t* view, uint32_t c, uint8_t* layer, void* e, void* f, void* g, void* h) { g_scatterTestCalled = 1; g_scatterTestBake = t_tdScatBake; }
+int CoXlTestScatterBake(void) { return g_scatterTestBake; } /* the far-grass bake mark the engine's update ran under */
+void CoXlTestScatLimits(int bake, int* budget, uint64_t* most) { NearScatLimits(bake, budget, most); }
 int CoXlTestScatterUpdate(LONG op, LONG record, uint8_t* view)
 {
     g_genOp = op; g_genRecord = record; g_tdScatCameraPinned = 1;
@@ -749,4 +752,22 @@ int CoXlTestTacWaypoint(uint32_t i, float* x, float* y)
     *x = p.wx; *y = p.wy;
     return p.waypoint;
 }
+/* Far grass on extra large maps (proto/difficulty_world_fargrass.c): the planner, a view's square and rectangle, the
+ * kept textures at ops 0x4B / 0x67, the bake's level-update tick with the game's two functions given, the bake view's
+ * mark in the scatter update. A player is the streamer's research observer. */
+int CoXlTestFgBatch(const float (*players)[2], int count, float reach, uint16_t* list, int max) { return FgBatch(&g_fg.map, players, count, reach, list, max); }
+void CoXlTestFgMark(int i, int j) { FgMark(&g_fg.map, i, j); }
+void CoXlTestFgView(int i, int j, float* centre, float* rect) { FgCentre(i, j, centre); FgRect(i, j, rect); }
+void CoXlTestFgInstall(void* aim, void* generate) { g_fg.installed = 1; g_fg.aim = (FgAimFn)aim; g_fg.generate = (FgGenerateFn)generate; }
+void CoXlTestFgKeep(uint64_t record, uint32_t op) { FarGrassKeep(record, op); }
+uint64_t CoXlTestFgTex(int k) { return g_fg.tex[k]; }
+void CoXlTestFgTick(uint64_t level) { FarGrassTick(level); }
+int CoXlTestFgBusy(void) { return FarGrassBusy(); }
+int CoXlTestFgSetting(void) { return g_fg.setting; }
+uint32_t CoXlTestFgBaked(void) { return g_fg.baked; }
+void CoXlTestFgObserver(int on, float x, float y) { g_streamObserverOn = on; g_streamObserverAt[0] = x; g_streamObserverAt[1] = y; }
+int CoXlTestFgBakeView(const uint8_t* view) { return TdScatterBakeView(view); }
+void CoXlTestFgWorld(float live) { g_world.live = live; } /* 8 on an extra large level in play (16384 m) */
+void CoXlTestFgState(int state) { g_fg.state = state; }
+void CoXlTestFgRing(int a0, int a1, int b0, int b1) { g_ring.a0 = a0; g_ring.a1 = a1; g_ring.b0 = b0; g_ring.b1 = b1; } /* the mover's cells */
 #endif

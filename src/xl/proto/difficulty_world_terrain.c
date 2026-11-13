@@ -7249,6 +7249,15 @@ static int NearScatRange(float size, int32_t ix, int32_t iy, float h, float* lo,
     return 1;
 }
 
+/* New cells' ranges a call (the rest come on later frames, cached) and the most nodes a view may have: the player's view
+ * has about 170 (the generator's whole-world sweep at load asks millions). A far-grass bake view renders once, so each of
+ * its nodes gets its range now; its 256 m square holds a vanilla bake tile's nodes. */
+static void NearScatLimits(int bake, int* budget, uint64_t* most)
+{
+    *budget = bake ? 0x7FFFFFFF : 256;
+    *most = bake ? 65536u : 1024u;
+}
+
 static uint64_t NearScatterView(uintptr_t tree, void* frustum, uint32_t stamp, float pad)
 {
     uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
@@ -7258,10 +7267,10 @@ static uint64_t NearScatterView(uintptr_t tree, void* frustum, uint32_t stamp, f
         float size = *(float*)(layer + 0x22C), grow = *(float*)(layer + 0x230);
         uint64_t count = *(uint64_t*)(tree + 0x90);
         uint8_t* nodes = *(uint8_t**)(tree + 0x88);
-        int budget = 256; /* new cells' ranges a call; the rest come on later frames (cached) */
-        /* the player's view only (about 170 nodes; the generator's whole-world sweep at load asks millions) and only
-         * with the tile in (before it, NearVisibleAt has no tile) */
-        if (nodes != NULL && count <= 1024 && NearTilesLive() > 0 && size >= 1.0f && size <= 4096.0f && grow >= 0.0f && grow <= 1024.0f)
+        int budget; uint64_t most;
+        NearScatLimits(t_tdScatBake, &budget, &most);
+        /* only with the tile in (before it, NearVisibleAt has no tile) */
+        if (nodes != NULL && count <= most && NearTilesLive() > 0 && size >= 1.0f && size <= 4096.0f && grow >= 0.0f && grow <= 1024.0f)
         {
             float h = size * 0.5f + grow;
             uint32_t missed = 0;
