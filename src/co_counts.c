@@ -493,8 +493,9 @@ static void (*const kCountCallbacks[])(CoRegs*) = {
     [40] = SeatData, SeatList, SeatValid, Boosters, SeatNode,
 };
 #define CO_CALLBACKS (sizeof kCountCallbacks / sizeof kCountCallbacks[0])
-/* The data the caves read, by the numbers in DATA(n) of the generators: the loadout card's height (loadout_sites.HEIGHTS). */
-static void* const kCountData[] = {&co_card_height};
+/* The data the caves read, by the numbers in DATA(n) of the generators: the loadout card's height (loadout_sites.HEIGHTS)
+ * and the height the slots cave compares (loadout_sites.COLLAPSE). */
+static void* const kCountData[] = {&co_card_height, &co_card_slots_height};
 #define CO_DATA (sizeof kCountData / sizeof kCountData[0])
 
 /* The session init clears the keys 1 to 3 itself; its hook (co_session.c) calls this behind it. */

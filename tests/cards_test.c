@@ -229,7 +229,25 @@ static void CheckCallbacks(void)
     co_cards_layout(&regs);
     CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 498.0f);
     CHECK(co_cards_test_complex_reads() == asked);
+    CHECK(co_card_slots_height == 498.0f);
     co_cards_test_clock(NULL);
+
+    /* The research layout E3: the open own card stays open, the slots cave sees 780, the figure is at 0.8. */
+    co_cards_test_layout(CO_LAYOUT_E3);
+    Put32(g_context + 0x16390, 3);
+    co_cards_open(&regs);
+    CHECK(co_cards_test_get_mode() == CO_CARDS_FOUR && co_card_height == 780.0f && co_card_slots_height == 780.0f);
+    CHECK(fake_host_logged("loadout cards: the game's four (complex operation no, 3 players) in the research layout E3"));
+    Card(1)[0x1EE0C] = 1;
+    Put(Card(1) + 0x1EDE0, 0);
+    Put32(g_context + 0x16390, 5);
+    co_cards_layout(&regs);
+    CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 498.0f && co_card_slots_height == 780.0f);
+    uint64_t again;
+    memcpy(&again, Card(1) + 0x1EDE0, 8);
+    CHECK(Card(1)[0x1EE0C] == 1 && again == 0);
+    CHECK(Field(Card(1) + 0x1FA8, 0x14) == 0.8f && Near(Field(Card(1) + 0x1FA8, 0x8), -9.0f));
+    co_cards_test_layout(CO_LAYOUT_E1);
 
     /* No session context: four. */
     Put(image + 0x347CEF0u, 0);
@@ -285,6 +303,24 @@ int main(void)
         CHECK(Predicted(3440, 1440, kWide, kWideX));
         CHECK(Predicted(1280, 720, kSmall, kSmallX));
         CHECK(Predicted(1920, 1200, kTall, kTallX));
+    }
+
+    g_case = "the research layout E3";
+    {
+        /* E1's rects (the same 498 cards), the figure at 0.8 and 9 down; on 16:10 the figure caps s at 0.692 / 0.8. */
+        static const float kNormal[4] = {187.0f, 561.5f, 594.5f, 969.0f};
+        static const float kNormalX[8] = {278.8f, 594.6f, 627.6f, 943.5f, 976.5f, 1292.3f, 1325.4f, 1641.2f};
+        static const float kWide[4] = {249.3f, 748.6f, 792.7f, 1292.0f};
+        static const float kWideX[8] = {811.7f, 1232.8f, 1276.9f, 1697.9f, 1742.1f, 2163.1f, 2207.2f, 2628.3f};
+        static const float kTall[4] = {189.4f, 620.2f, 658.2f, 1089.0f};
+        static const float kTallX[8] = {176.3f, 539.6f, 577.7f, 941.0f, 979.0f, 1342.3f, 1380.4f, 1743.7f};
+        co_cards_test_layout(CO_LAYOUT_E3);
+        CoCardPlace p;
+        co_cards_place(CO_CARDS_EIGHT, 1080.0f, 0.9f, 5, &p);
+        CHECK(p.figureScale == 0.8f && Near(p.figureY, -9.0f) && Near(p.scale * 1000.0f, 751.92f));
+        CHECK(Near(co_cards_scale(1200.0f, 0.9f) * 1000.0f, 865.0f) && co_cards_place(CO_CARDS_FOUR, 1080.0f, 0.9f, 0, &p) && p.figureScale == 1.0f);
+        CHECK(Predicted(1920, 1080, kNormal, kNormalX) && Predicted(3440, 1440, kWide, kWideX) && Predicted(1920, 1200, kTall, kTallX));
+        co_cards_test_layout(CO_LAYOUT_E1);
     }
 
     g_case = "the hud scale";

@@ -638,11 +638,13 @@ HEIGHTS = [_height_cave(*h) for h in _HEIGHT_STORES]
 
 # 0x189CA20 assigns a card and opens its slots panel only for the own player (`sete r8b` behind the id compare at
 # 0x189CA86); 0x189CB90 and L's resets pass 0. Open adds 113 for the mission stratagems, too tall for the short card,
-# so with the short height in the slot it passes 0 as for any other player. The flags are dead at the call behind.
+# so with a short height in its slot it passes 0 as for any other player. The flags are dead at the call behind. Its
+# slot is the card height, or 780 in the research layout E3 (co_cards.c), where the own card opens as in the game.
+SLOTS_HEIGHT = 1
 COLLAPSE = [
     (0x189CA88, '440fb64c2470' '410f94c0',
      'movzx r9d, byte ptr [rsp+0x70]\n sete r8b\n push rax\n mov rax, DATA(%d)\n cmp dword ptr [rax], 0x44430000\n'
-     ' je 1f\n xor r8d, r8d\n1: pop rax\n jmp game+0x189CA92' % CARD_HEIGHT, '189ca20 card assign: slots collapsed when short'),
+     ' je 1f\n xor r8d, r8d\n1: pop rax\n jmp game+0x189CA92' % SLOTS_HEIGHT, '189ca20 card assign: slots collapsed when short'),
 ]
 
 # The screen-set update hands L its update with a tail jump (0x1497C45, the case for L of 0x1497920; the only reference

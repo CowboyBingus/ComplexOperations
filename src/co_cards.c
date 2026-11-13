@@ -44,6 +44,8 @@
 /* With the slots collapsed (stack top at 184), the figure at 0.528 shows the helmet to the belt, as the game's own
  * card does above its expanded slots: 64.5 % of the image above the stack in both. */
 #define CO_FIGURE 0.528f
+/* Research layout E3 (DESIGN.md 9.7.3): the own card opens its slots as in the game and the figure stays at 0.8. */
+#define CO_FIGURE_E3 0.8f
 /* The figure image is 1.444 s f of its render tile's height; at most 0.692 keeps it from being magnified. */
 #define CO_FIGURE_MOST 0.692f
 #define CO_SCALE_LEAST 0.5f
@@ -55,6 +57,8 @@
 #define CO_COMPLEX_EVERY_MS 250u
 
 float co_card_height = CO_CARD_TALL;
+float co_card_slots_height = CO_CARD_TALL;
+static int g_layout = CO_LAYOUT_E1;
 static uintptr_t g_game, g_screen;
 static int g_mode = CO_CARDS_GAME;
 static int g_complex;
@@ -74,10 +78,34 @@ static int Complex(int fresh)
     return g_complex;
 }
 
+/* The cave at 0x189CA88 collapses the own card's slots while its slot is short: the card height, but the game's 780 in
+ * E3. */
+static void Height(float height)
+{
+    co_card_height = height;
+    co_card_slots_height = g_layout == CO_LAYOUT_E3 ? CO_CARD_TALL : height;
+}
+
+static float Figure(void) { return g_layout == CO_LAYOUT_E3 ? CO_FIGURE_E3 : CO_FIGURE; }
+
 typedef void (*SetFn)(uintptr_t widget, uint64_t pair);
 typedef void (*AssignFn)(uintptr_t card, uintptr_t data, uint8_t expanded, uint8_t flag);
 
-void co_cards_install(uintptr_t game) { g_game = game; }
+/* A research build (no package is made from one) takes HELLFORGE_CO_CARDS_LAYOUT=E3, so the user can compare it with
+ * E1 on screen. */
+void co_cards_install(uintptr_t game)
+{
+    g_game = game;
+#ifdef CO_RESEARCH
+    char text[8];
+    const DWORD n = GetEnvironmentVariableA("HELLFORGE_CO_CARDS_LAYOUT", text, sizeof text);
+    if (n == 2 && text[0] == 'E' && text[1] == '3')
+    {
+        g_layout = CO_LAYOUT_E3;
+        co_log("loadout cards: research switch: layout E3 (the own card's slots open, figure 0.8)");
+    }
+#endif
+}
 
 /* The game's own card centres, from its table at 0x21D8FB8. */
 static const float kGameX[4] = {0.138f, 0.38f, 0.62f, 0.862f};
@@ -95,7 +123,7 @@ float co_cards_scale(float rootHeight, float hudScale)
     const float top = hudScale == hudScale && hudScale * CO_CORNER > CO_TABS ? hudScale * CO_CORNER : CO_TABS;
     float s = (rootHeight - CO_CARD_BOTTOM - top) / (2.0f * CO_CARD_SHORT + CO_CARD_GAP);
     if (s > 1.0f) s = 1.0f;
-    if (s > CO_FIGURE_MOST / CO_FIGURE) s = CO_FIGURE_MOST / CO_FIGURE;
+    if (s > CO_FIGURE_MOST / Figure()) s = CO_FIGURE_MOST / Figure();
     return s < CO_SCALE_LEAST ? CO_SCALE_LEAST : s;
 }
 
@@ -115,9 +143,9 @@ int co_cards_place(int mode, float rootHeight, float hudScale, uint32_t card, Co
     p->x = (960.0f + ((float)(card % 4u) - 1.5f) * CO_CARD_PITCH * s) / 1920.0f;
     p->y = card < 4u ? bottom + (CO_CARD_SHORT + CO_CARD_GAP) * s : bottom;
     p->scale = s;
-    p->figureScale = CO_FIGURE;
+    p->figureScale = Figure();
     /* The figure hangs from the card's top: scaled about it, it moves down so the helmet stays 61 under the plate. */
-    p->figureY = 20.0f - 145.0f * (1.0f - CO_FIGURE);
+    p->figureY = 20.0f - 145.0f * (1.0f - Figure());
     return 1;
 }
 
@@ -174,7 +202,7 @@ void co_cards_to_eight(uintptr_t screen)
     static const uint32_t kParts[4] = {0x0u, 0x1C30u, 0x1D40u, 0x5848u};
     const uintptr_t tweens = *(const uintptr_t*)(g_game + CO_TWEENS);
     const SetFn size = (SetFn)(g_game + CO_SET_SIZE);
-    co_card_height = CO_CARD_SHORT;
+    Height(CO_CARD_SHORT);
     for (uint32_t i = 0; i < 8u; i++)
         for (uint32_t j = 0; j < 4u; j++)
         {
@@ -187,7 +215,7 @@ void co_cards_to_eight(uintptr_t screen)
     /* The own card was assigned open; the cave at 0x189CA88 collapses the later ones. This is the game's own assign
      * call with the same data, so the panel, its box and the hover test (0x1894C92) all see the collapse. */
     const AssignFn assign = (AssignFn)(g_game + CO_CARD_ASSIGN);
-    for (uint32_t i = 0; i < 8u; i++)
+    for (uint32_t i = 0; g_layout != CO_LAYOUT_E3 && i < 8u; i++)
     {
         const uintptr_t card = screen + CO_CARD_BLOCK + i * CO_CARD_STRIDE;
         if (*(const uint8_t*)(card + CO_CARD_EXPANDED) == 0) continue;
@@ -214,9 +242,9 @@ void co_cards_open(CoRegs* regs)
     const uint32_t players = Players();
     g_screen = screen;
     g_mode = co_cards_eight(complex, players, NULL) ? CO_CARDS_EIGHT : CO_CARDS_FOUR;
-    co_card_height = g_mode == CO_CARDS_EIGHT ? CO_CARD_SHORT : CO_CARD_TALL;
-    co_log("loadout cards: %s (complex operation %s, %u players)", g_mode == CO_CARDS_EIGHT ? "eight" : "the game's four",
-        complex ? "yes" : "no", players);
+    Height(g_mode == CO_CARDS_EIGHT ? CO_CARD_SHORT : CO_CARD_TALL);
+    co_log("loadout cards: %s (complex operation %s, %u players)%s", g_mode == CO_CARDS_EIGHT ? "eight" : "the game's four",
+        complex ? "yes" : "no", players, g_layout == CO_LAYOUT_E3 ? " in the research layout E3" : "");
 }
 
 /* Callback 13, behind the init's card loop (rdi = L): placed before anything can raise a card's opacity, including
@@ -253,6 +281,7 @@ void co_cards_layout(CoRegs* regs)
 
 #ifdef CO_TEST
 void co_cards_test_mode(int mode, uintptr_t screen) { g_mode = mode; g_screen = screen; }
+void co_cards_test_layout(int layout) { g_layout = layout; }
 int co_cards_test_get_mode(void) { return g_mode; }
 void co_cards_test_clock(uint64_t (*clock)(void)) { g_clock = clock != NULL ? clock : GetTickCount64; }
 unsigned co_cards_test_complex_reads(void) { return g_complexReads; }
