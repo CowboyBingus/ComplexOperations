@@ -11,6 +11,7 @@ static HfApi g_api;
 static void Log(HfMod* mod, const char* format, ...)
 {
     size_t used = strlen(g_fake.log);
+    if (used + 2 >= sizeof g_fake.log) return; /* full: later lines are dropped, never written past it */
     va_list args;
     va_start(args, format);
     vsnprintf(g_fake.log + used, sizeof g_fake.log - used - 2, format, args);

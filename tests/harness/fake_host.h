@@ -38,7 +38,7 @@ typedef struct FakeHost
     struct { uintptr_t target; void* original; } originals[4]; /* what a hook of this target calls as the original */
     struct { uintptr_t rva; uint8_t bytes[16]; } underHook[2]; /* another's hook here: read_code gives these, read the jump */
     HfEventCallback loaded;
-    char log[8192];
+    char log[65536];
     /* The map generator's room: the request's answer (1 refuses), what `have` reads back (size 0: a HellForge without
      * the regions fills none of them), and the last request. */
     int capacityRefused;
