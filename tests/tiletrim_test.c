@@ -476,6 +476,7 @@ int main(void)
         DrainWorld((uint64_t)(uintptr_t)TestDestroy);
         CHECK(CoXlTestDrainPins() == 0);
         CHECK(fake_host_logged("difficulty: moving tiles: the destroy's render fence is not the reviewed code; releases do not wait for a drained render queue"));
+        CHECK(fake_host_logged("render queue (the destroy's slot; the slot holds 0x"));
         CoXlTestMover(OX, OY, MV_IDLE, 0, 0, 0);
         CoXlTestMoverTile(0, 0, 0, 0);
         for (int k = 1; k < 8; k++) CoXlTestMoverTile(k, 9 + k, 9, now);
@@ -498,6 +499,11 @@ int main(void)
             uint8_t* at = exe + kDrain[i].at + (strlen(kDrain[i].bytes) + 1) / 3 - 1; /* each pin's last byte */
             *at ^= 0x40;
             CHECK(CoXlTestDrainPins() == 0);
+            char named[64];
+            snprintf(named, sizeof named, "(a pin; the slot holds 0x");
+            CHECK(fake_host_logged(named));
+            snprintf(named, sizeof named, "pin exe+0x%X reads ", kDrain[i].at);
+            CHECK(fake_host_logged(named));
             *at ^= 0x40;
         }
         CHECK(CoXlTestDrainPins() == 1);
