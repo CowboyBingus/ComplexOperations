@@ -37,12 +37,14 @@ typedef struct
 {
     const int* list; int count;
     int readyAt[TILES];   /* the frame a list entry is built from; -1 a failed build */
-    int need[TILES];      /* draw calls until the index moves; the last emits nothing (phase 2: the append only) */
+    int need[TILES];      /* calls that draw (0xF499B0 below phase 2); the one that reaches phase 2 moves the index, but
+                           * never the first (the case stays), so a tile drawn in one call moves with an append only */
     int faultAt;          /* list entry whose first call faults, -1 none */
-    int refuseAt;         /* the drop call that finds two different entries, -1 none */
+    int refuseAt;         /* the take that finds an entry not of the 0x3C form, -1 none */
+    int unclippable[TILES];
     int selfBuild, overEvery, limit;
-    int frame, queued, drops, calls[TILES];
-    int frameTiles[CO_COARSE_BATCH_MAX + 1], frameCount;  /* tiles that emitted in this frame */
+    int frame, queued, queuedMax, takes, calls[TILES], aloneBad;
+    int frameTiles[2 * CO_COARSE_BATCH_MAX + 1], frameCount, frameUnclipped; /* tiles that emitted in this frame */
     int gui[TILES * EMITS], guiCount;                      /* emissions not yet rendered, by tile */
     int emits[TILES], renders[TILES], firstFrame[TILES], lastFrame[TILES];
     int done[TILES], how[TILES], buffer[TILES], resets, badReset, touched, twice, overCalls;
@@ -61,32 +63,44 @@ static int Wait(void* self, int k)
     g->readyAt[k] = g->frame;
     return 1;
 }
-static int Call(void* self, int k)
+static int Drawn(void* self, int k) { Game* g = self; return g->calls[k] > 0 && g->calls[k] >= g->need[k]; }
+static int Call(void* self, int k, int shared, int* unclipped)
 {
     Game* g = self;
     int t = g->list[k];
+    if (g->unclippable[k]) { if (shared) return CO_COARSE_UNCLIPPED; *unclipped = 1; }
     if (k == g->faultAt) return -1;
-    g->calls[k]++;
-    g->queued++; /* the append, the call's last act */
-    if (g->calls[k] < g->need[k])
+    int c = ++g->calls[k];
+    if (++g->queued > g->queuedMax) g->queuedMax = g->queued; /* the append, the call's last act */
+    int moved = c >= 2 && c >= g->need[k];
+    if (c <= g->need[k])
     {
+        /* an unclipped tile's triangles share the frame with no other tile's */
+        if ((g->unclippable[k] && g->frameCount > 0) || g->frameUnclipped) g->aloneBad++;
+        if (g->unclippable[k]) g->frameUnclipped = 1;
         for (int i = 0; i < g->frameCount; i++) if (Touch(g->frameTiles[i], t)) g->touched++;
         g->frameTiles[g->frameCount++] = t;
         g->gui[g->guiCount++] = t; g->emits[t]++;
         if (g->firstFrame[t] < 0) g->firstFrame[t] = g->frame;
         g->lastFrame[t] = g->frame;
         g->buffer[k] = 1;
-        return 0;
     }
-    g->buffer[k] = 0;
-    return 1;
+    if (moved) g->buffer[k] = 0;
+    return moved;
 }
 static uint32_t Queued(void* self) { return (uint32_t)((Game*)self)->queued; }
-static int Drop(void* self)
+static int Take(void* self)
 {
     Game* g = self;
-    if (g->drops++ == g->refuseAt || g->queued < 2) return 0;
-    g->queued--;
+    if (g->takes++ == g->refuseAt || g->queued != 1) return 0;
+    g->queued = 0;
+    return 1;
+}
+static int Restore(void* self)
+{
+    Game* g = self;
+    if (g->queued != 0) return 0;
+    g->queued = 1;
     return 1;
 }
 static void Reset(void* self)
@@ -98,14 +112,14 @@ static void Reset(void* self)
 static void Done(void* self, int k, int how) { Game* g = self; g->done[k]++; g->how[k] = how; }
 static int Over(void* self) { Game* g = self; return g->overEvery > 0 && ++g->overCalls % g->overEvery == 0; }
 
-static CoCoarseOps Ops(Game* g) { CoCoarseOps o = {g, Built, Wait, Call, Queued, Drop, Reset, Done, Over}; return o; }
+static CoCoarseOps Ops(Game* g) { CoCoarseOps o = {g, Built, Wait, Drawn, Call, Queued, Take, Restore, Reset, Done, Over}; return o; }
 
 static void Setup(Game* g, const char* name, const int* list, int count, int built)
 {
     g_case = name;
     memset(g, 0, sizeof *g);
     g->list = list; g->count = count; g->faultAt = -1; g->refuseAt = -1; g->limit = 4096;
-    for (int k = 0; k < TILES; k++) { g->readyAt[k] = built ? 0 : k / 7; g->need[k] = 2; g->firstFrame[k] = g->lastFrame[k] = -1; }
+    for (int k = 0; k < TILES; k++) { g->readyAt[k] = built ? 0 : k / 7; g->need[k] = 1; g->firstFrame[k] = g->lastFrame[k] = -1; }
 }
 
 /* The drain at the frame's end (0xAB0590): every entry renders the gui put there since the last render. */
@@ -117,7 +131,7 @@ static void Drain(Game* g)
         for (int i = 0; i < g->guiCount; i++) g->renders[g->gui[i]] += g->queued;
         g->guiCount = 0;
     }
-    g->queued = 0; g->frameCount = 0; g->frame++;
+    g->queued = 0; g->frameCount = 0; g->frameUnclipped = 0; g->frame++;
 }
 
 /* Frames until the batch is done (or `stop` frames), each drained: what co_coarse_frame returned last. */
@@ -190,8 +204,8 @@ int main(void)
         CHECK(most == CO_COARSE_BATCH_MAX);
     }
 
-    /* the frames a batch size takes with every tile built: two a group (the drawing call, then the one that moves on),
-     * each removing the entries of all but one tile */
+    /* the frames a batch size takes with every tile built: one a tile's call alone; batched, a group's drawing frame and
+     * its moving frame, which the next group's drawing calls share */
     {
         int perStep[3 * COLUMNS] = {0};
         for (int k = 0; k < count; k++) perStep[co_coarse_step(list[k], COLUMNS)]++;
@@ -205,21 +219,28 @@ int main(void)
             co_coarse_begin(&b, COLUMNS, batch, 4096);
             CHECK(Run(g, &b, 0) == 0);
             Whole(g, &b);
-            CHECK(b.groups == groups && b.frames == 2 * groups && b.tilesFrameMax == batch && b.dropped == 2 * (count - b.groups) && b.refused == 0);
+            CHECK(b.groups == groups && b.frames == (batch == 1 ? 2 * groups : groups + 1) && b.tilesFrameMax == batch);
+            CHECK(b.refused == 0 && b.unclipped == 0 && b.restored == 0 && g->queuedMax == 1);
             CHECK(g->resets == b.groups);
-            CHECK(batch != 1 || b.frames == 1030);
-            CHECK(batch != CO_COARSE_BATCH || b.frames == 300);
-            printf("batch %2d: %4ld draw frames, %3ld groups, %3ld entries removed\n", batch, b.frames, b.groups, b.dropped);
+            CHECK(batch != 1 || (b.frames == 1030 && b.taken == 0 && b.sharedFrames == 0));
+            CHECK(batch != CO_COARSE_BATCH || b.frames == 151);
+            printf("batch %2d: %4ld draw frames, %3ld groups, %4ld entries taken off\n", batch, b.frames, b.groups, b.taken);
         }
     }
 
     Setup(g, "tiles built as the runners get to them, a frame budget spent", list, count, 0);
     g->overEvery = 3;
-    for (int k = 0; k < count; k += 9) g->need[k] = 3; /* the first call ran out of its clock */
+    for (int k = 0; k < count; k += 9) g->need[k] = 2; /* the first call ran out of its clock */
     co_coarse_begin(&b, COLUMNS, CO_COARSE_BATCH, 4096);
     CHECK(Run(g, &b, 0) == 0);
     Whole(g, &b);
     CHECK(b.tilesFrameMax <= CO_COARSE_BATCH && b.refused == 0);
+
+    Setup(g, "first calls that did not finish, every tile built", list, count, 1);
+    for (int k = 0; k < count; k += 5) g->need[k] = 2;
+    co_coarse_begin(&b, COLUMNS, CO_COARSE_BATCH, 4096);
+    CHECK(Run(g, &b, 0) == 0);
+    Whole(g, &b);
 
     Setup(g, "the dispatcher's thread builds what no runner has", list, count, 0);
     g->selfBuild = 1;
@@ -254,19 +275,42 @@ int main(void)
     {
         int after = 0;
         for (int k = 102; k < count; k++) after += g->done[k] + g->calls[k];
-        CHECK(after == 0 && g->twice == 0);
+        CHECK(after == 0 && g->twice == 0 && b.refused == 0);
+    }
+    {
+        int rendered = 1;
+        for (int t = 0; t < TILES; t++) if (g->renders[t] != g->emits[t]) rendered = 0;
+        CHECK(rendered && g->queuedMax == 1);
+    }
+    /* a fault in a frame's later call: the entry taken off for it is put back for the frame's other tiles */
+    for (int at = 1; at < 12; at++)
+    {
+        Setup(g, "a later call of a frame faults", list, count, 1);
+        g->faultAt = at;
+        co_coarse_begin(&b, COLUMNS, CO_COARSE_BATCH, 4096);
+        CHECK(Run(g, &b, 0) == -1);
+        int rendered = 1;
+        for (int t = 0; t < TILES; t++) if (g->renders[t] != g->emits[t]) rendered = 0;
+        CHECK(rendered && g->twice == 0 && b.refused == 0 && g->done[at] == 1 && g->how[at] == CO_COARSE_FAULTED);
     }
 
-    Setup(g, "two entries that differ", list, count, 1);
-    g->refuseAt = 5;
+    /* a take that finds the queue not holding our one entry, at every later call of the first groups' frames */
+    for (int at = 0; at < 48; at++)
+    {
+        Setup(g, "an entry not of the 0x3C form", list, count, 1);
+        g->refuseAt = at;
+        co_coarse_begin(&b, COLUMNS, CO_COARSE_BATCH, 4096);
+        CHECK(Run(g, &b, 0) == 0);
+        Whole(g, &b);
+        CHECK(b.refused == 1 && b.batch == 1 && g->queuedMax == 1);
+    }
+
+    Setup(g, "tiles that cannot be clipped", list, count, 1);
+    g->unclippable[60] = 1; g->unclippable[61] = 1; g->unclippable[200] = 1;
     co_coarse_begin(&b, COLUMNS, CO_COARSE_BATCH, 4096);
     CHECK(Run(g, &b, 0) == 0);
-    CHECK(b.refused == 1 && b.batch == 1);
-    {
-        int once = 1;
-        for (int k = 0; k < count; k++) if (g->done[k] != 1 || g->how[k] != CO_COARSE_DRAWN) once = 0;
-        CHECK(once && g->touched == 0 && g->badReset == 0);
-    }
+    Whole(g, &b);
+    CHECK(g->aloneBad == 0 && b.batch == 1 && b.unclipped >= 1 && g->queuedMax == 1);
 
     /* TerrainStep's level that ended inside its section: CoarseEnd, then the next level's CoarseStart begins again */
     Setup(g, "a level cut short in a group", list, count, 1);
@@ -299,24 +343,34 @@ int main(void)
             memcpy(e + 0x68, &id, 4);
         }
         CHECK(co_coarse_entries_same(e0, e1));
-        uint32_t two = 2, one = 1;
-        memcpy(q + 0x10, &two, 4);
-        CHECK(co_coarse_queue_drop((uintptr_t)q) == 1);
-        uint32_t n; memcpy(&n, q + 0x10, 4);
-        LONG64 ticket, serving; memcpy(&ticket, q, 8); memcpy(&serving, q + 8, 8);
-        CHECK(n == 1 && ticket == 1 && serving == 1);
-        CHECK(co_coarse_queue_drop((uintptr_t)q) == 0); /* one entry: nothing to remove */
+        uint8_t saved[CO_COARSE_ENTRY];
+        int have = 0;
+        uint32_t n, one = 1, two = 2;
+        LONG64 ticket, serving;
+        memcpy(q + 0x10, &one, 4);
+        CHECK(co_coarse_queue_take((uintptr_t)q, saved, &have) == 1 && have == 1);
+        memcpy(&n, q + 0x10, 4); memcpy(&ticket, q, 8); memcpy(&serving, q + 8, 8);
+        CHECK(n == 0 && ticket == 1 && serving == 1 && memcmp(saved, e0, CO_COARSE_ENTRY) == 0);
+        CHECK(co_coarse_queue_take((uintptr_t)q, saved, &have) == 0); /* nothing on it */
+        memset(e0, 0, CO_COARSE_ENTRY);
+        CHECK(co_coarse_queue_restore((uintptr_t)q, saved) == 1);
+        memcpy(&n, q + 0x10, 4);
+        CHECK(n == 1 && memcmp(saved, e0, CO_COARSE_ENTRY) == 0);
+        CHECK(co_coarse_queue_restore((uintptr_t)q, saved) == 0); /* the call appended its own */
         memcpy(&n, q + 0x10, 4);
         CHECK(n == 1);
         memcpy(q + 0x10, &two, 4);
-        e1[0x08] ^= 1; /* another camera */
-        CHECK(!co_coarse_entries_same(e0, e1) && co_coarse_queue_drop((uintptr_t)q) == 0);
-        e1[0x08] ^= 1; e1[0x5F] ^= 1; /* other settings */
+        CHECK(co_coarse_queue_take((uintptr_t)q, saved, &have) == 0); /* two: not ours alone */
+        memcpy(q + 0x10, &one, 4);
+        e0[0x08] ^= 1; /* another camera */
+        CHECK(!co_coarse_entries_same(e0, e1) && co_coarse_queue_take((uintptr_t)q, saved, &have) == 0);
+        e0[0x08] ^= 1; memcpy(e0 + 0x68, &one, 4); /* an entry with an id of its own */
+        CHECK(co_coarse_queue_take((uintptr_t)q, saved, &have) == 0);
+        { int fresh = 0; CHECK(co_coarse_queue_take((uintptr_t)q, saved, &fresh) == 0); }
+        memcpy(e0 + 0x68, &id, 4); e1[0x5F] ^= 1; /* other settings */
         CHECK(!co_coarse_entries_same(e0, e1));
-        e1[0x5F] ^= 1; memcpy(e1 + 0x68, &one, 4); /* an entry with an id of its own */
-        CHECK(!co_coarse_entries_same(e0, e1));
-        memcpy(&n, q + 0x10, 4);
-        CHECK(n == 2);
+        memcpy(&n, q + 0x10, 4); memcpy(&ticket, q, 8); memcpy(&serving, q + 8, 8);
+        CHECK(n == 1 && ticket == serving);
         free(q);
     }
 

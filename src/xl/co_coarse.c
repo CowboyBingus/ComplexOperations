@@ -31,22 +31,34 @@ int co_coarse_entries_same(const uint8_t* a, const uint8_t* b)
         memcmp(a + 0x58, b + 0x58, 0x14) == 0;
 }
 
-int co_coarse_queue_drop(uintptr_t queue)
+static void QueueLock(uintptr_t queue)
 {
-    volatile LONG64* ticket = (volatile LONG64*)queue;
-    LONG64 mine = InterlockedExchangeAdd64(ticket, 1);
+    LONG64 mine = InterlockedExchangeAdd64((volatile LONG64*)queue, 1);
     while (*(volatile LONG64*)(queue + 8) != mine) YieldProcessor();
+}
+static void QueueUnlock(uintptr_t queue) { InterlockedExchangeAdd64((volatile LONG64*)(queue + 8), 1); }
+
+int co_coarse_queue_take(uintptr_t queue, uint8_t* saved, int* have)
+{
+    QueueLock(queue);
     volatile uint32_t* count = (volatile uint32_t*)(queue + 0x10);
-    uint32_t n = *count;
-    int same = 0;
-    if (n >= 2 && n <= CO_COARSE_ENTRIES)
-    {
-        const uint8_t* a = (const uint8_t*)(queue + 0x18 + (uintptr_t)(n - 2) * CO_COARSE_ENTRY);
-        same = co_coarse_entries_same(a, a + CO_COARSE_ENTRY);
-        if (same) *count = n - 1;
-    }
-    InterlockedExchangeAdd64((volatile LONG64*)(queue + 8), 1);
-    return same;
+    const uint8_t* e = (const uint8_t*)(queue + 0x18);
+    uint32_t id = 0;
+    memcpy(&id, e + 0x68, 4);
+    int ok = *count == 1 && id == 0xFFFFFFFFu && (!*have || co_coarse_entries_same(saved, e));
+    if (ok) { memcpy(saved, e, CO_COARSE_ENTRY); *have = 1; *count = 0; }
+    QueueUnlock(queue);
+    return ok;
+}
+
+int co_coarse_queue_restore(uintptr_t queue, const uint8_t* saved)
+{
+    QueueLock(queue);
+    volatile uint32_t* count = (volatile uint32_t*)(queue + 0x10);
+    int put = *count == 0;
+    if (put) { memcpy((void*)(queue + 0x18), saved, CO_COARSE_ENTRY); *count = 1; }
+    QueueUnlock(queue);
+    return put;
 }
 
 void co_coarse_begin(CoCoarseBatch* b, int columns, int batch, int limit)
@@ -66,8 +78,10 @@ static void GroupDone(CoCoarseBatch* b, const CoCoarseOps* ops)
     b->next += b->n; b->n = 0; b->groups++;
 }
 
-int co_coarse_frame(CoCoarseBatch* b, const int* list, int count, const CoCoarseOps* ops)
+/* `made`: this frame's calls; `drew`: those that could put triangles on the gui. */
+static int Frame(CoCoarseBatch* b, const int* list, int count, const CoCoarseOps* ops, int* made, int* drew)
 {
+    int empty = 1; /* every call of this frame so far only appended */
     for (;;)
     {
         if (b->n == 0)
@@ -82,20 +96,31 @@ int co_coarse_frame(CoCoarseBatch* b, const int* list, int count, const CoCoarse
             b->n = n; b->moved = 0; b->gaveUp = 0;
             memset(b->calls, 0, sizeof b->calls);
         }
-        if (ops->over(ops->self)) return 1;
-        if (ops->queued(ops->self) != 0) { b->queueWaits++; return 1; }
-        int made = 0;
-        for (int i = 0; i < b->n && made < b->batch; i++)
+        if (*made == 0)
+        {
+            if (ops->over(ops->self)) return 1;
+            if (ops->queued(ops->self) != 0) { b->queueWaits++; return 1; }
+        }
+        /* A frame whose calls only appended renders nothing new: the last group's triangles went out with the
+         * previous drain, so the next group's first calls may share it. Only batched: one a frame is the serial path. */
+        else if (!empty || b->batch == 1 || ops->over(ops->self)) return 1;
+        else b->sharedFrames++;
+        for (int i = 0, here = 0; i < b->n && here < b->batch; i++)
         {
             uint32_t bit = 1u << i;
             if ((b->moved | b->gaveUp) & bit) continue;
-            if (made > 0 && ops->queued(ops->self) != 1) break; /* not only this frame's entry: the rest wait */
-            int r = ops->call(ops->self, b->next + i), stop = 0;
-            if (made++ > 0)
+            if (*made > 0)
             {
-                if (ops->drop(ops->self)) b->dropped++;
-                else { b->refused++; b->batch = 1; stop = 1; } /* entries that differ: one tile a frame from here */
+                if (!ops->take(ops->self)) { b->refused++; b->batch = 1; return 1; } /* not ours alone: one a frame */
+                b->taken++;
             }
+            int only = ops->drawn(ops->self, b->next + i), unclipped = 0;
+            int r = ops->call(ops->self, b->next + i, *made > 0, &unclipped);
+            if (*made > 0 && ops->restore(ops->self)) b->restored++;
+            if (unclipped || r == CO_COARSE_UNCLIPPED) { b->unclipped++; b->batch = 1; } /* one tile a frame from here */
+            if (r == CO_COARSE_UNCLIPPED) return 1; /* drawn alone in a later frame */
+            (*made)++; here++;
+            if (!only) { empty = 0; (*drew)++; }
             if (r < 0)
             {
                 for (int j = 0; j < b->n; j++) if ((b->moved >> j) & 1u) ops->done(ops->self, b->next + j, CO_COARSE_DRAWN);
@@ -106,10 +131,17 @@ int co_coarse_frame(CoCoarseBatch* b, const int* list, int count, const CoCoarse
             b->calls[i]++;
             if (r > 0) b->moved |= bit;
             else if (b->calls[i] >= b->limit) b->gaveUp |= bit;
-            if (stop) break;
         }
-        b->frames++;
-        if (made > b->tilesFrameMax) b->tilesFrameMax = made;
-        if ((b->moved | b->gaveUp) == (1u << b->n) - 1u) GroupDone(b, ops);
+        if ((b->moved | b->gaveUp) != (1u << b->n) - 1u) return 1;
+        GroupDone(b, ops);
     }
+}
+
+int co_coarse_frame(CoCoarseBatch* b, const int* list, int count, const CoCoarseOps* ops)
+{
+    int made = 0, drew = 0;
+    int r = Frame(b, list, count, ops, &made, &drew);
+    if (made > 0) b->frames++;
+    if (drew > b->tilesFrameMax) b->tilesFrameMax = drew;
+    return r;
 }

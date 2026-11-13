@@ -719,6 +719,7 @@ static struct
     CoCoarseBatch batch;
     uint64_t frameTris, frameTrisAll; uint32_t trisFrame; /* gui triangles in the dispatcher call g_terrain.frames */
     uint64_t now, nowG, nowH; uintptr_t nowGen; LARGE_INTEGER t0, hz; TileRunner* mine; /* the current dispatcher call's */
+    uint8_t entry[CO_COARSE_ENTRY]; int haveEntry; /* the frame's entry while a later call runs (co_coarse_queue_take) */
 } g_coarse;
 
 /* One coarse tile on a runner (an engine job, CoarseFeed): a free slot and the next tile, built, then the job returns.
@@ -820,6 +821,8 @@ static void TileRunnersStallNote(const char* section, int started)
     Note("difficulty: %s: no tile finished for 10 s; the runners: %s (%ld of %d jobs returned)", section, text, (long)g_tileFinished, started);
 }
 
+static int CoarseBatchNow(void) { return g_coarse.batch.batch; }
+
 /* HELLFORGE_XL_COARSE_BATCH (1 to CO_COARSE_BATCH_MAX): tiles a draw frame; 1 is the serial path's one a frame. */
 static int CoarseBatchSize(void)
 {
@@ -865,9 +868,10 @@ static int CoarseStart(uint64_t records, uint32_t end, uint64_t context, uint64_
     g_tileStop = 0; g_tileFinished = 0; g_tileWork = NULL;
     g_coarse.started = 0; g_coarse.inflight = 0; g_coarse.pending = 0; g_coarse.jobs = 0; g_coarse.selfBuilt = 0;
     g_coarse.tileTrisMax = 0; g_coarse.tileTrisSum = 0; g_coarse.frameTrisMax = 0; g_coarse.tilesCounted = 0; g_coarse.submit = 0;
-    g_coarse.frameTris = 0; g_coarse.frameTrisAll = 0; g_coarse.trisFrame = 0;
-    /* Tiles of a step share a frame only while their additive triangles are clipped to the core +- TERRAIN_BLEND
-     * (640 m apart); unclipped, a cell may reach past the built box, so the tile order and one tile a frame stay. */
+    g_coarse.frameTris = 0; g_coarse.frameTrisAll = 0; g_coarse.trisFrame = 0; g_coarse.haveEntry = 0;
+    /* Tiles of a step share a frame only while their triangles are clipped (adds to the core +- TERRAIN_BLEND, caps to
+     * the core: 640 m apart). Unclipped, how far a tile reaches is not bounded by the code (its route-cell areas are not
+     * checked), so the tile order and one tile a frame stay. */
     int clip = g_coarse.count > 0 && TerrainClipBegin(g_coarse.list[0], gen);
     if (clip) TerrainClipEnd();
     int batch = clip ? CoarseBatchSize() : 1;
@@ -915,8 +919,9 @@ static void CoarseEnd(void)
     Note("difficulty: terrain: gui triangles: a tile's draw at most %llu, mean %llu; one draw call at most %llu; one frame at most %llu", (unsigned long long)g_coarse.tileTrisMax,
         (unsigned long long)(g_coarse.tilesCounted ? g_coarse.tileTrisSum / (uint64_t)g_coarse.tilesCounted : 0), (unsigned long long)g_coarse.frameTrisMax,
         (unsigned long long)g_coarse.frameTrisAll);
-    Note("difficulty: terrain: batched draw: %ld draw frames for %ld groups, at most %d tiles a frame (batch %d); %ld repeated queue entries removed, %ld refused",
-        b->frames, b->groups, b->tilesFrameMax, b->batch, b->dropped, b->refused);
+    Note("difficulty: terrain: batched draw: %ld draw frames for %ld groups (%ld begun in the last one's moving frame), at most %d tiles drawing a frame "
+        "(batch %d); entries taken %ld, put back %ld, refused %ld; %ld unclipped", b->frames, b->groups, b->sharedFrames, b->tilesFrameMax, b->batch, b->taken,
+        b->restored, b->refused, b->unclipped);
     *(volatile uint32_t*)(g_coarse.lg + 0x2D7C) = g_coarse.disk;
     *(volatile float*)g_coarse.spacingAt = g_coarse.spacing;
     g_tileSectionHeld = 0;
@@ -930,13 +935,11 @@ static void CoarseEnd(void)
 
 /* One frame of the parallel section (the dispatcher's thread): the built tiles drawn by step (co_coarse.h), 1 while
  * tiles remain. Each RenderHeightmapVoronoi call (0xF499B0) appends one entry to the generation's queue [ctx+0x50] =
- * G+0xAC570 (0xF4A195..0xF4A254: count +0x10, 16 entries of 0x1D0 from +0x18, no capacity check), and only the render
- * callback drains it, once a frame (0xAB7D54 -> 0xAB0590). A 17th entry lands on G+0xAE288, the current level, with the
- * world ([ctx+0x40]) as its first qword (t77h/t77i/t77j: the objective selection then read [world+0x2D0] = 0 and faulted
- * at game+0x1757304). And each entry is one render_world (0xAB07E1 -> [api+0x10]+0x28) of the generator's world through
- * the camera [R], which draws every gui triangle put there this frame: N entries in a frame drew each frame's additive
- * heights N times (t77k..t77m: an egg-crate up to the u16's 500 m). So a frame draws only with the queue empty, and
- * every call after its first removes the entry it repeats: one render a frame of all the frame's tiles. */
+ * G+0xAC570 (0xF4A195..0xF4A254: count +0x10, 16 entries of 0x1D0 from +0x18, no capacity check); only the render
+ * callback drains it, once a frame (0xAB7D54 -> 0xAB0590). A 17th entry would land on G+0xAE288, the current level.
+ * Each entry is one render_world (0xAB07E1 -> [api+0x10]+0x28) of the generator's world through the camera [R], which
+ * draws every gui triangle put there since the last: N entries in a frame add its heights N times. So a frame draws
+ * only with the queue empty and keeps one entry on it while its later calls run. */
 static uint32_t NearQueued(uint64_t context);
 
 static int CoarseBuilt(void* self, int k)
@@ -963,16 +966,27 @@ static int CoarseWait(void* self, int k)
     return 0;
 }
 
-static int CoarseCall(void* self, int k)
+/* The case's phase byte is set (its first call ran) and the pass's phase is 2: 0xF499B0 then jumps straight to the
+ * append (0xF49B13..0xF49B2A), so the call puts nothing on the gui. */
+static int CoarseDrawn(void* self, int k)
+{
+    const CoarseSlot* s = &g_coarse.slots[g_coarse.slotOf[k]];
+    uint32_t phase = 0;
+    memcpy(&phase, s->record + 8 + 0x108, 4);
+    return s->phase != 0 && phase >= 2;
+}
+
+static int CoarseCall(void* self, int k, int shared, int* unclipped)
 {
     g_coarse.waitSince = 0;
     CoarseSlot* s = &g_coarse.slots[g_coarse.slotOf[k]];
+    int clip = TerrainClipBegin(s->t, g_coarse.nowGen);
+    if (!clip && shared) return CO_COARSE_UNCLIPPED; /* CoarseStart: an unclipped tile never shares a frame */
+    *unclipped = !clip;
     LARGE_INTEGER d0, d1;
     QueryPerformanceCounter(&d0);
     volatile uint32_t index = 0;
     volatile int calls = 0;
-    int clip = TerrainClipBegin(s->t, g_coarse.nowGen);
-    if (!clip) g_coarse.batch.batch = 1; /* CoarseStart: unclipped tiles draw one a frame */
     uint64_t trisBefore = g_clip.tris;
     LONG fault = WorldTileGuarded(s->record, g_coarse.now, &index, &s->phase, g_coarse.nowG, g_coarse.nowH, 1, &calls);
     if (clip) TerrainClipEnd();
@@ -990,10 +1004,17 @@ static int CoarseCall(void* self, int k)
 
 static uint32_t CoarseQueued(void* self) { return NearQueued(g_coarse.now); }
 
-static int CoarseDrop(void* self)
+static int CoarseTake(void* self)
 {
     uint64_t queue = 0;
-    return !SafeRead(g_coarse.now + 0x50, &queue, 8) && queue != 0 && co_coarse_queue_drop((uintptr_t)queue);
+    return !SafeRead(g_coarse.now + 0x50, &queue, 8) && queue != 0 && co_coarse_queue_take((uintptr_t)queue, g_coarse.entry, &g_coarse.haveEntry);
+}
+
+/* Taken only after a read of the same pointer succeeded on this thread, so this one finds the queue too. */
+static int CoarseRestore(void* self)
+{
+    uint64_t queue = 0;
+    return !SafeRead(g_coarse.now + 0x50, &queue, 8) && queue != 0 && co_coarse_queue_restore((uintptr_t)queue, g_coarse.entry);
 }
 
 static void CoarseReset(void* self) { WorldArenaReset(g_coarse.now); }
@@ -1024,7 +1045,8 @@ static int CoarseOver(void* self)
 
 static int CoarseDraw(uint64_t context, uint64_t g, uint64_t h, uintptr_t gen, LARGE_INTEGER t0, LARGE_INTEGER hz)
 {
-    static const CoCoarseOps ops = {NULL, CoarseBuilt, CoarseWait, CoarseCall, CoarseQueued, CoarseDrop, CoarseReset, CoarseDone, CoarseOver};
+    static const CoCoarseOps ops = {NULL, CoarseBuilt, CoarseWait, CoarseDrawn, CoarseCall, CoarseQueued, CoarseTake, CoarseRestore, CoarseReset,
+        CoarseDone, CoarseOver};
     g_coarse.mine = TileRunnerMake(0);
     g_coarse.now = context; g_coarse.nowG = g; g_coarse.nowH = h; g_coarse.nowGen = gen; g_coarse.t0 = t0; g_coarse.hz = hz;
     CoarseFeed();

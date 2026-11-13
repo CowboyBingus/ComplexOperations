@@ -1,8 +1,8 @@
 /* The coarse terrain's tiles drawn several a frame at the level's SmoothHeightmap wait (op 0x40). One draw call of
  * RenderHeightmapVoronoi (0xF499B0) puts the tile's triangles on the merge's gui and appends a render of that gui to
  * the generation's queue; the drain renders every queued entry, so two entries in one frame add a frame's heights
- * twice. Tiles of one step (2 row + column) are two columns apart and never touch: their calls share a frame, and the
- * repeated entries are removed so the drain renders the frame's gui once. Neighbours keep the tile order's sequence. */
+ * twice. Tiles of one step (2 row + column) are two columns apart and never touch: their calls share a frame, and
+ * before each later call the frame's one entry is taken off, so the drain renders the frame's gui once. */
 #ifndef CO_COARSE_H
 #define CO_COARSE_H
 
@@ -20,18 +20,26 @@ void co_coarse_order(int* list, int count, int columns);
 int co_coarse_group(const int* list, int count, int at, int columns, int batch);
 /* Whether two queue entries hold the same render: every field 0xF4A195 writes, with the id -1 it gives its own. */
 int co_coarse_entries_same(const uint8_t* a, const uint8_t* b);
-/* Under the queue's ticket lock (+0 ticket, +8 serving): removes the newest entry when it repeats the one before it. */
-int co_coarse_queue_drop(uintptr_t queue);
+/* Under the queue's ticket lock (+0 ticket, +8 serving). Take: when the queue holds one entry of the 0x3C form (and,
+ * once `*have`, the same as `saved`), it is copied to `saved` and the count set to 0. Restore: an empty queue gets
+ * `saved` back. Between the two the queue never holds two entries, so nothing is rendered twice. */
+int co_coarse_queue_take(uintptr_t queue, uint8_t* saved, int* have);
+int co_coarse_queue_restore(uintptr_t queue, const uint8_t* saved);
 
 enum { CO_COARSE_UNBUILT, CO_COARSE_DRAWN, CO_COARSE_UNFINISHED, CO_COARSE_FAULTED };
+#define CO_COARSE_UNCLIPPED (-2) /* a shared call refused: the tile cannot be clipped, nothing was drawn */
 typedef struct CoCoarseOps
 {
     void* self;
     int (*built)(void* self, int k);           /* list entry k: 1 ready, -1 its build failed, 0 not yet */
     int (*wait)(void* self, int k);            /* k is not built: 1 once it was built now, 0 to wait for a frame */
-    int (*call)(void* self, int k);            /* one draw call: 1 its index moved, 0 not yet, -1 it faulted */
+    int (*drawn)(void* self, int k);           /* k's next call only appends (its pass phase is 2) */
+    /* One draw call: 1 its index moved, 0 not yet, -1 it faulted; with `shared` (not the frame's first call) an
+     * unclippable tile is not drawn (CO_COARSE_UNCLIPPED), alone it is drawn unclipped and `*unclipped` set. */
+    int (*call)(void* self, int k, int shared, int* unclipped);
     uint32_t (*queued)(void* self);            /* the generation queue's count */
-    int (*drop)(void* self);                   /* co_coarse_queue_drop */
+    int (*take)(void* self);                   /* co_coarse_queue_take: 1 when the entry is off */
+    int (*restore)(void* self);                /* co_coarse_queue_restore: 1 when the call appended none */
     void (*reset)(void* self);                 /* the generation arena, once no tile of the group reads its buffer */
     void (*done)(void* self, int k, int how);  /* k is finished (CO_COARSE_*), its slot free */
     int (*over)(void* self);                   /* the dispatcher call's time is spent */
@@ -43,8 +51,8 @@ typedef struct CoCoarseBatch
     int next, n;                /* the group: list entries [next, next + n), none while n is 0 */
     uint32_t moved, gaveUp;     /* the group's tiles whose index moved or that ran out of calls, bit i entry next + i */
     int calls[CO_COARSE_BATCH_MAX];
-    long frames, groups, dropped, refused, queueWaits;
-    int tilesFrameMax;
+    long frames, groups, taken, restored, refused, unclipped, queueWaits, sharedFrames;
+    int tilesFrameMax;          /* tiles that drew triangles in one frame */
 } CoCoarseBatch;
 
 void co_coarse_begin(CoCoarseBatch* b, int columns, int batch, int limit);
