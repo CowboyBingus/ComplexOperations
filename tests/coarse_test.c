@@ -224,6 +224,8 @@ int main(void)
             CHECK(g->resets == b.groups);
             CHECK(batch != 1 || (b.frames == 1030 && b.taken == 0 && b.sharedFrames == 0));
             CHECK(batch != CO_COARSE_BATCH || b.frames == 151);
+            CHECK(b.split == 0 && b.unsharedWait == 0 && b.unsharedDrew == 0 && b.unsharedOver == 0);
+            CHECK(batch == 1 || b.sharedFrames == b.groups - 1);
             printf("batch %2d: %4ld draw frames, %3ld groups, %4ld entries taken off\n", batch, b.frames, b.groups, b.taken);
         }
     }
@@ -235,12 +237,27 @@ int main(void)
     CHECK(Run(g, &b, 0) == 0);
     Whole(g, &b);
     CHECK(b.tilesFrameMax <= CO_COARSE_BATCH && b.refused == 0);
+    /* every group after the first begins in its predecessor's moving frame or is counted under one reason */
+    CHECK(b.sharedFrames + b.unsharedWait + b.unsharedDrew + b.unsharedOver == b.groups - 1);
+    CHECK(b.split == (count + 8) / 9 && b.unsharedDrew > 0 && b.unsharedOver > 0);
+    printf("built as they come: %ld groups, %ld shared, not shared %ld waiting / %ld drew / %ld over, %ld split\n", b.groups, b.sharedFrames,
+        b.unsharedWait, b.unsharedDrew, b.unsharedOver, b.split);
+
+    Setup(g, "tiles built slower than they are drawn", list, count, 1);
+    for (int k = 0; k < count; k++) g->readyAt[k] = k;
+    co_coarse_begin(&b, COLUMNS, CO_COARSE_BATCH, 4096);
+    CHECK(Run(g, &b, 0) == 0);
+    Whole(g, &b);
+    CHECK(b.unsharedWait > 0 && b.unsharedDrew == 0 && b.unsharedOver == 0 && b.split == 0);
+    CHECK(b.sharedFrames + b.unsharedWait == b.groups - 1);
 
     Setup(g, "first calls that did not finish, every tile built", list, count, 1);
     for (int k = 0; k < count; k += 5) g->need[k] = 2;
     co_coarse_begin(&b, COLUMNS, CO_COARSE_BATCH, 4096);
     CHECK(Run(g, &b, 0) == 0);
     Whole(g, &b);
+    CHECK(b.split == (count + 4) / 5 && b.unsharedWait == 0 && b.unsharedOver == 0 && b.unsharedDrew > 0);
+    CHECK(b.sharedFrames + b.unsharedDrew == b.groups - 1);
 
     Setup(g, "the dispatcher's thread builds what no runner has", list, count, 0);
     g->selfBuild = 1;

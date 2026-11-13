@@ -52,6 +52,9 @@ typedef struct CoCoarseBatch
     uint32_t moved, gaveUp;     /* the group's tiles whose index moved or that ran out of calls, bit i entry next + i */
     int calls[CO_COARSE_BATCH_MAX];
     long frames, groups, taken, restored, refused, unclipped, queueWaits, sharedFrames;
+    /* Why a finished group's moving frame was not shared (batched only): the next group not built, a moving call that
+     * drew (its first call ran out of its clock: `split`), the dispatcher's frame budget. */
+    long unsharedWait, unsharedDrew, unsharedOver, split;
     int tilesFrameMax;          /* tiles that drew triangles in one frame */
 } CoCoarseBatch;
 

@@ -920,8 +920,9 @@ static void CoarseEnd(void)
         (unsigned long long)(g_coarse.tilesCounted ? g_coarse.tileTrisSum / (uint64_t)g_coarse.tilesCounted : 0), (unsigned long long)g_coarse.frameTrisMax,
         (unsigned long long)g_coarse.frameTrisAll);
     Note("difficulty: terrain: batched draw: %ld draw frames for %ld groups (%ld begun in the last one's moving frame), at most %d tiles drawing a frame "
-        "(batch %d); entries taken %ld, put back %ld, refused %ld; %ld unclipped", b->frames, b->groups, b->sharedFrames, b->tilesFrameMax, b->batch, b->taken,
-        b->restored, b->refused, b->unclipped);
+        "(batch %d); entries taken %ld, put back %ld, refused %ld; %ld unclipped; not begun there: %ld waiting for a build, %ld after a moving call that drew, "
+        "%ld over the frame budget; %ld first calls ran out of their clock", b->frames, b->groups, b->sharedFrames, b->tilesFrameMax, b->batch, b->taken,
+        b->restored, b->refused, b->unclipped, b->unsharedWait, b->unsharedDrew, b->unsharedOver, b->split);
     *(volatile uint32_t*)(g_coarse.lg + 0x2D7C) = g_coarse.disk;
     *(volatile float*)g_coarse.spacingAt = g_coarse.spacing;
     g_tileSectionHeld = 0;

@@ -881,12 +881,13 @@ static void TdCollect(void)
 
 /* ---- the coarse terrain against another run (research, HELLFORGE_XL_COARSE_COMPARE) -------------------------------
  * `1` writes each image below to the session's logs (coarse-compare-<pipeline>-<label>.bin, .txt) with a hash of all
- * its bytes; a folder (a run's logs) also compares each with that folder's file of the same name. Run once with
- * HELLFORGE_XL_COARSE_BATCH=1 and once batched, the second given the first's logs: 0 samples differ, or where.
+ * its bytes; a folder also compares each with that folder's file of the same name. Run once with
+ * HELLFORGE_XL_COARSE_BATCH=1 and once batched, the second given the first's files: 0 samples differ, or where.
+ * A relative folder is in the mod's own folder: the sandbox shows the game only its own session's logs and the mods.
  *   after-40-<k>  the merge's heights after SmoothHeightmap: CaptureIntermediateHeightmapStart (0x5B) runs right after
  *                 0x40 and its finalize (0x5C, first of the level) leaves the readbacks at lg + 0x18 k
- *   minimap-<id>  after CaptureMinimapTexture (0x56, previews): the ten targets 0x1004DE0 publishes (0x1004F54), read back
- *   final-heights after CleanupTerrainMerge (0x66): the scatter heights lg+0xD8 the level keeps */
+ *   minimap-<id>  after CaptureMinimapTexture (0x56, previews): the ten targets 0x1004DE0 binds (0x1004F54), read back
+ *   final-heights after CleanupTerrainMerge (0x66, missions): the scatter heights lg+0xD8 the level keeps */
 static int CoarseBatchNow(void); /* difficulty_world_terrain.c */
 static struct
 {
@@ -902,8 +903,13 @@ static int CcOn(void)
         char text[MAX_PATH] = "";
         DWORD n = GetEnvironmentVariableA("HELLFORGE_XL_COARSE_COMPARE", text, sizeof text);
         g_cc.on = n > 0 && n < sizeof text && text[0] != '0';
-        if (g_cc.on && strcmp(text, "1") != 0) MultiByteToWideChar(CP_UTF8, 0, text, -1, g_cc.reference, MAX_PATH);
-        if (g_cc.on) Note("coarse compare: on; reference %s", g_cc.reference[0] ? text : "none (this run's files only)");
+        char folder[2 * MAX_PATH] = "";
+        const char* mod = g_coApi != NULL && g_coApi->mod_folder != NULL ? g_coApi->mod_folder(g_coMod) : NULL;
+        if (!g_cc.on || strcmp(text, "1") == 0) folder[0] = 0;
+        else if (text[0] == '\\' || text[0] == '/' || (text[0] && text[1] == ':')) snprintf(folder, sizeof folder, "%s", text);
+        else if (mod != NULL && mod[0]) snprintf(folder, sizeof folder, "%s\\%s", mod, text);
+        if (folder[0] && MultiByteToWideChar(CP_UTF8, 0, folder, -1, g_cc.reference, MAX_PATH) == 0) g_cc.reference[0] = 0;
+        if (g_cc.on) Note("coarse compare: on; reference %s", g_cc.reference[0] ? folder : folder[0] ? "a path too long" : "none (this run's files only)");
     }
     return g_cc.on;
 }
@@ -929,7 +935,7 @@ static void CcImage(const char* label, const uint8_t* data, uint32_t w, uint32_t
         for (size_t at = 0; at < bytes; at += wrote) if (!WriteFile(file, data + at, (DWORD)(bytes - at > 0x40000000u ? 0x40000000u : bytes - at), &wrote, NULL) || !wrote) break;
         CloseHandle(file);
     }
-    char against[200] = "no reference";
+    char against[2 * MAX_PATH + 160] = "no reference";
     if (g_cc.reference[0])
     {
         wchar_t path[MAX_PATH + 128];
@@ -961,12 +967,20 @@ static void CcImage(const char* label, const uint8_t* data, uint32_t w, uint32_t
             }
             else snprintf(against, sizeof against, "the reference did not read");
         }
-        else snprintf(against, sizeof against, ref == INVALID_HANDLE_VALUE ? "no reference file" : "the reference is another size");
+        else if (ref == INVALID_HANDLE_VALUE)
+        {
+            DWORD error = GetLastError();
+            char at[2 * MAX_PATH] = "?";
+            WideCharToMultiByte(CP_UTF8, 0, path, -1, at, sizeof at, NULL, NULL);
+            snprintf(against, sizeof against, "no reference file %s (error %lu)", at, (unsigned long)error);
+        }
+        else snprintf(against, sizeof against, "the reference is another size (%lld B)", (long long)size.QuadPart);
         if (other) VirtualFree(other, 0, MEM_RELEASE);
         if (ref != INVALID_HANDLE_VALUE) CloseHandle(ref);
     }
-    Note("coarse compare: %s %s (batch %d): %u x %u, %u B a sample (format 0x%X), hash %016llX; %s", CcPipeline(), label, CoarseBatchNow(), w, h, bpp, format,
-        (unsigned long long)hash, against);
+    /* 0x1 reads as f32 and 0x16 is the u16 heightmap; the readback's size for other formats is not known */
+    Note("coarse compare: %s %s (batch %d): %u x %u, %u B a sample%s (format 0x%X), hash %016llX; %s", CcPipeline(), label, CoarseBatchNow(), w, h, bpp,
+        format == 0x1 || format == 0x16 ? "" : " assumed", format, (unsigned long long)hash, against);
 }
 
 /* An image the game holds as {w, h, format, ?, data} (TdDescriptor's form). */
@@ -980,6 +994,7 @@ static void CcDescriptor(const char* label, uintptr_t descriptor)
     uint8_t* copy = VirtualAlloc(NULL, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (copy == NULL) return;
     if (!SafeRead((uintptr_t)data, copy, bytes)) CcImage(label, copy, wh[0], wh[1], bpp, wh[2]);
+    else Note("coarse compare: %s %s: %u x %u (format 0x%X) did not read", CcPipeline(), label, wh[0], wh[1], wh[2]);
     VirtualFree(copy, 0, MEM_RELEASE);
 }
 
@@ -1021,19 +1036,29 @@ static void CcPass(uint32_t op)
             CcDescriptor(label, gen + TD_IMAGE_BLOCK + 0x18u * (uintptr_t)k);
         }
     }
-    if (op == 0x66 && gen != 0) CcDescriptor("final-heights", gen + TD_IMAGE_BLOCK + 0xD8);
+    /* a preview's 0x66 returns before its readback (settings+0x28 at 0xC17A27), so lg+0xD8 stays empty there */
+    if (op == 0x66 && gen != 0 && strcmp(CcPipeline(), "preview") != 0) CcDescriptor("final-heights", gen + TD_IMAGE_BLOCK + 0xD8);
+    else if (op == 0x66) Note("coarse compare: preview final-heights: none (a preview's 0x66 reads no heights back)");
     if (op == 0x56)
     {
+        /* The names are bound only to the capture's own render (0x1004F54 -> exe 0x31E070 -> 0x10F4C0, a per-call set),
+         * never in the renderer's name maps that +0x158 searches. The targets themselves are the preview record's (R =
+         * settings+0x48), made once by 0x1003330 through +0x170 (exe 0x31AF50): type 1, so +0x1A8 reads them as they are. */
         static const uint32_t names[10] = {0x581D62D2u, 0xE94F447Cu, 0xCDE78DD2u, 0x3B7981ACu, 0xE6FEBF61u, 0x298B674Cu, 0x8EBBF7D9u, 0x53F40E98u,
             0x60370CF1u, 0x3597C022u};
-        uint64_t table = TdRenderTable(), find = 0, request = 0;
-        if (table == 0 || SafeRead(table + 0x158, &find, 8) || SafeRead(table + 0x1A8, &request, 8) || !find || !request) return;
+        static const uint16_t at[10] = {0x4DA0, 0x4DA8, 0x4D98, 0x4DB0, 0x4DB8, 0x4DC0, 0x4DC8, 0x4DD0, 0x4DD8, 0x4DE0};
+        uint64_t table = TdRenderTable(), request = 0, record = 0;
+        if (table == 0 || SafeRead(table + 0x1A8, &request, 8) || !request) return;
+        if (g_worldLevel == 0 || SafeRead(g_worldLevel + 0x2D68, &record, 8) || record < 0x10000) { Note("coarse compare: no preview record at 0x56"); return; }
         AcquireSRWLockExclusive(&g_cc.lock);
         for (int i = 0; i < 10 && g_cc.pendingCount < 12; i++)
         {
-            uint64_t target = ((TdFindFn)(uintptr_t)find)(names[i]);
-            uint32_t id = target != 0 ? ((TdRequestFn)(uintptr_t)request)(target) : 0xFFFFFFFFu;
-            if (id == 0xFFFFFFFFu) { Note("coarse compare: %s minimap-%08X: no target to read back", CcPipeline(), names[i]); continue; }
+            uint64_t target = 0; uint8_t type = 0; uint32_t size[2] = {0};
+            if (SafeRead(record + at[i], &target, 8) || target < 0x10000 || SafeRead(target + 3, &type, 1) || SafeRead(target + 0x14, size, 8) || type != 1 ||
+                size[0] < 1 || size[1] < 1 || size[0] > 16384 || size[1] > 16384)
+            { Note("coarse compare: %s minimap-%08X: R+0x%X is not a render target (type %u)", CcPipeline(), names[i], at[i], type); continue; }
+            uint32_t id = ((TdRequestFn)(uintptr_t)request)(target);
+            if (id == 0xFFFFFFFFu) { Note("coarse compare: %s minimap-%08X: no readback", CcPipeline(), names[i]); continue; }
             g_cc.pending[g_cc.pendingCount].id = id; g_cc.pending[g_cc.pendingCount].name = names[i];
             g_cc.pending[g_cc.pendingCount].since = GetTickCount64(); g_cc.pendingCount++;
         }

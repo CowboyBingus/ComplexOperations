@@ -92,7 +92,12 @@ static int Frame(CoCoarseBatch* b, const int* list, int count, const CoCoarseOps
             /* a group waits for all its tiles: drawn as they come, a step would take a frame a tile */
             int want = co_coarse_group(list, count, b->next, b->columns, b->batch), n = 0;
             while (n < want && (st = ops->built(ops->self, b->next + n)) > 0) n++;
-            if (n < want && st == 0) { if (!ops->over(ops->self) && ops->wait(ops->self, b->next + n)) continue; return 1; }
+            if (n < want && st == 0)
+            {
+                if (!ops->over(ops->self) && ops->wait(ops->self, b->next + n)) continue;
+                if (*made > 0 && b->batch > 1) b->unsharedWait++;
+                return 1;
+            }
             b->n = n; b->moved = 0; b->gaveUp = 0;
             memset(b->calls, 0, sizeof b->calls);
         }
@@ -103,7 +108,11 @@ static int Frame(CoCoarseBatch* b, const int* list, int count, const CoCoarseOps
         }
         /* A frame whose calls only appended renders nothing new: the last group's triangles went out with the
          * previous drain, so the next group's first calls may share it. Only batched: one a frame is the serial path. */
-        else if (!empty || b->batch == 1 || ops->over(ops->self)) return 1;
+        else if (!empty || b->batch == 1 || ops->over(ops->self))
+        {
+            if (b->batch > 1) { if (!empty) b->unsharedDrew++; else b->unsharedOver++; }
+            return 1;
+        }
         else b->sharedFrames++;
         for (int i = 0, here = 0; i < b->n && here < b->batch; i++)
         {
@@ -128,7 +137,7 @@ static int Frame(CoCoarseBatch* b, const int* list, int count, const CoCoarseOps
                 b->next = count; b->n = 0;
                 return -1;
             }
-            b->calls[i]++;
+            if (++b->calls[i] == 1 && r == 0 && !ops->drawn(ops->self, b->next + i)) b->split++;
             if (r > 0) b->moved |= bit;
             else if (b->calls[i] >= b->limit) b->gaveUp |= bit;
         }
