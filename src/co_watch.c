@@ -14,9 +14,9 @@
 #include "co.h"
 #include "co_watch.h"
 
-/* The link the crash followed (0 and 64.0f), the flags (0.5f), the dirty bits (a pointer into O), the tween slots. */
+/* W's flags (0.5f in the first crash) and link (0 and 64.0f), N4's element (0) and first child (0xC00C1017, the second). */
 const CoWatchSpot co_watch_spots[CO_WATCH_SPOTS] = {
-    {0xE0u, 8u, "W+0xE0"}, {0x00u, 4u, "W+0x0"}, {0xB8u, 8u, "W+0xB8"}, {0xB0u, 8u, "W+0xB0"}};
+    {CO_WATCH_W, 4u, "W+0x0"}, {CO_WATCH_W + 0xE0u, 8u, "W+0xE0"}, {CO_WATCH_N4, 8u, "N4+0x0"}, {CO_WATCH_N4 + 0x10u, 8u, "N4+0x10"}};
 
 /* ---- what runs without a game ------------------------------------------------------------------------------------ */
 
@@ -26,7 +26,7 @@ int co_watch_plan(uintptr_t object, CoWatchPlan* plan)
     plan->object = object;
     for (int k = 0; k < CO_WATCH_SPOTS; k++)
     {
-        plan->at[k] = object + CO_WATCH_W + co_watch_spots[k].offset;
+        plan->at[k] = object + co_watch_spots[k].offset;
         plan->length[k] = co_watch_spots[k].length;
         if ((plan->at[k] & (plan->length[k] - 1u)) != 0) return 0;
     }
@@ -70,40 +70,48 @@ int co_watch_in_library(uintptr_t game, uintptr_t rip)
     return game != 0 && rip >= game + CO_WATCH_LIBRARY_FIRST && rip < game + CO_WATCH_LIBRARY_END;
 }
 
+int co_watch_known(uintptr_t game, uintptr_t rip)
+{
+    if (co_watch_in_library(game, rip)) return CO_WATCH_IN_LIBRARY;
+    if (game != 0 && (rip == game + CO_WATCH_NODE_INIT_CHILD || rip == game + CO_WATCH_NODE_INIT_ELEMENT)) return CO_WATCH_IN_NODE_INIT;
+    return CO_WATCH_ELSEWHERE;
+}
+
+static int NotPointer(uint64_t v) { return (v & 7) != 0 || v < 0x10000 || v > 0x7FFFFFFFFFFFull; }
+
 int co_watch_suspicious(int spot, uint64_t value)
 {
     switch (spot)
     {
-    case CO_WATCH_LINK: /* a widget pointer or 0 */
-        return value != 0 && ((value & 7) != 0 || value < 0x10000 || value > 0x7FFFFFFFFFFFull);
     case CO_WATCH_FLAGS:
     {
         const uint32_t v = (uint32_t)value, exponent = (v >> 23) & 0xFF; /* a float from 1/8 to 255 with a short mantissa */
         return (v & 0xFFFF) == 0 && exponent >= 0x7C && exponent <= 0x86;
     }
-    case CO_WATCH_DIRTY: return value >= 0x10000;
-    case CO_WATCH_TWEEN: return (value >> 32) != 0;
+    case CO_WATCH_LINK: return value != 0 && NotPointer(value); /* a widget pointer or 0 */
+    case CO_WATCH_ELEMENT: return NotPointer(value);            /* C itself, never 0: the walk reads it */
+    case CO_WATCH_CHILD: return value != 0 && NotPointer(value);
     }
     return 0;
 }
 
-int co_watch_filter(CoWatchFilter* f, uintptr_t rip, int inLibrary, int suspicious)
+int co_watch_filter(CoWatchFilter* f, uintptr_t rip, int known, int suspicious)
 {
-    int slot = -1, fresh = 0, reasons = 0;
+    int slot = -1, reasons = 0;
+    long seen = 0;
     for (int i = 0; i < CO_WATCH_PLACES && slot < 0; i++)
     {
         if (f->place[i] == rip) slot = i;
         else if (f->place[i] == 0)
         {
-            if (InterlockedCompareExchange64((volatile LONG64*)&f->place[i], (LONG64)rip, 0) == 0) { slot = i; fresh = 1; }
+            if (InterlockedCompareExchange64((volatile LONG64*)&f->place[i], (LONG64)rip, 0) == 0) slot = i;
             else if (f->place[i] == rip) slot = i;
         }
     }
-    if (slot >= 0) { InterlockedIncrement(&f->count[slot]); if (inLibrary) f->library[slot] = 1; }
+    if (slot >= 0) { seen = InterlockedIncrement(&f->count[slot]); if (f->known[slot] != known) f->known[slot] = known; }
     else InterlockedIncrement(&f->overflow);
-    if (fresh && InterlockedIncrement(&f->logged[0]) <= CO_WATCH_CAP_NEW) reasons |= CO_WATCH_LOG_NEW;
+    if (seen >= 1 && seen <= CO_WATCH_PER_PLACE && InterlockedIncrement(&f->logged[0]) <= CO_WATCH_CAP_NEW) reasons |= CO_WATCH_LOG_NEW;
     if (suspicious && InterlockedIncrement(&f->logged[1]) <= CO_WATCH_CAP_SUSPICIOUS) reasons |= CO_WATCH_LOG_SUSPICIOUS;
-    if (!inLibrary && InterlockedIncrement(&f->logged[2]) <= CO_WATCH_CAP_OUTSIDE) reasons |= CO_WATCH_LOG_OUTSIDE;
     return reasons;
 }
 
@@ -282,14 +290,19 @@ static void SelfTestTrap(CONTEXT* c)
 }
 
 /* The hit's lines: what was written and where, the unwound frames, and the module addresses on its stack. */
-static void HitLines(LONG n, int reasons, int library, const CONTEXT* c, uint64_t dr6, int fired, const uint64_t* now,
+static const char* KnownName(int known)
+{
+    return known == CO_WATCH_IN_LIBRARY ? "in the widget library" : known == CO_WATCH_IN_NODE_INIT ? "in N4's setup by the panel init"
+                                                                                               : "outside the widget library";
+}
+
+static void HitLines(LONG n, int reasons, int known, const CONTEXT* c, uint64_t dr6, int fired, const uint64_t* now,
     const int* have, int changed)
 {
     Text t = {.k = 0};
-    Put(&t, "wartable watch: hit %ld (%s%s%s%s) on thread %lu: the instruction before ", (long)n,
-        reasons & CO_WATCH_LOG_NEW ? "new place, " : "", reasons & CO_WATCH_LOG_SUSPICIOUS ? "suspicious value, " : "",
-        reasons & CO_WATCH_LOG_OUTSIDE ? "outside the widget library, " : "", library ? "in the widget library" : "not in the widget library",
-        GetCurrentThreadId());
+    Put(&t, "wartable watch: hit %ld (%s%s%s) on thread %lu: the instruction before ", (long)n,
+        reasons & CO_WATCH_LOG_NEW ? "one of a place's first, " : "", reasons & CO_WATCH_LOG_SUSPICIOUS ? "suspicious value, " : "",
+        KnownName(known), GetCurrentThreadId());
     PutWhere(&t, (uintptr_t)c->Rip);
     Put(&t, " wrote; Dr6 0x%llx", (unsigned long long)dr6);
     if (fired >= 0) Put(&t, " names %s", co_watch_spots[fired].name);
@@ -333,20 +346,24 @@ static void Hit(const CONTEXT* c, uint64_t dr6, int claim)
     if (!g_live) { InterlockedIncrement(&g_hitsAfter); return; } /* O is going or gone: its memory is not read */
     uint64_t now[CO_WATCH_SPOTS] = {0};
     int have[CO_WATCH_SPOTS] = {0}, changed = 0, fired = -1, suspicious = 0;
+    if (claim == CO_WATCH_CLAIM)
+        for (int s = 0; s < g_current.count && fired < 0; s++) if (dr6 & (1u << s)) fired = s;
+    /* Dr6 names the spot: only its word is read until the hit gets a line. Without it (Wine), every word is read and
+     * the ones that changed are the candidates (a value left as it was is not this write's). */
     for (int s = 0; s < g_current.count; s++)
     {
+        if (fired >= 0 && s != fired) continue;
         have[s] = ReadWord(g_current.at[s], g_current.length[s], &now[s]);
         if (have[s] && (uint64_t)InterlockedExchange64(&g_last[s], (LONG64)now[s]) != now[s]) changed |= 1 << s;
     }
-    if (claim == CO_WATCH_CLAIM)
-        for (int s = 0; s < g_current.count && fired < 0; s++) if (dr6 & (1u << s)) fired = s;
-    /* the spot that fired; unknown, the spots that changed (a value left as it was is not this write's) */
     const int candidates = fired >= 0 ? 1 << fired : changed != 0 ? changed : (1 << g_current.count) - 1;
     for (int s = 0; s < g_current.count; s++)
         if ((candidates & (1 << s)) && have[s] && co_watch_suspicious(s, now[s])) suspicious = 1;
-    const int library = co_watch_in_library(g_game, (uintptr_t)c->Rip);
-    const int reasons = co_watch_filter(&g_filter, (uintptr_t)c->Rip, library, suspicious);
-    if (reasons != 0) HitLines(n, reasons, library, c, dr6, fired, now, have, changed);
+    const int known = co_watch_known(g_game, (uintptr_t)c->Rip);
+    const int reasons = co_watch_filter(&g_filter, (uintptr_t)c->Rip, known, suspicious);
+    if (reasons == 0) return;
+    for (int s = 0; s < g_current.count; s++) if (!have[s]) have[s] = ReadWord(g_current.at[s], g_current.length[s], &now[s]);
+    HitLines(n, reasons, known, c, dr6, fired, now, have, changed);
 }
 
 static LONG CALLBACK WatchHandler(EXCEPTION_POINTERS* info)
@@ -496,7 +513,7 @@ static void SelfTest(void)
 static void ResetForObject(const CoWatchPlan* plan)
 {
     InterlockedExchange(&g_live, 0);
-    long logged[3]; /* the caps hold for the session, not for each opening of the map */
+    long logged[2]; /* the caps hold for the session, not for each opening of the map */
     memcpy(logged, (const void*)g_filter.logged, sizeof logged);
     memset((void*)&g_filter, 0, sizeof g_filter);
     memcpy((void*)g_filter.logged, logged, sizeof logged);
@@ -529,12 +546,13 @@ static void ArmAll(const CoWatchPlan* plan)
         set++; back += b;
         if (!Now(ids[i]) && g_nowCount < THREADS) g_now[g_nowCount++] = ids[i];
     }
-    co_watch_mark("armed on %d of %d threads (%d read back, %d had ended, %d past the list) with Dr7 0x%llx: %s 0x%llx (%u bytes), %s 0x%llx (%u), "
-        "%s 0x%llx (%u), %s 0x%llx (%u); values %016llx %08llx %016llx %016llx", set, found, back, gone, full, (unsigned long long)g_dr7,
-        co_watch_spots[0].name, (unsigned long long)g_current.at[0], g_current.length[0], co_watch_spots[1].name, (unsigned long long)g_current.at[1],
-        g_current.length[1], co_watch_spots[2].name, (unsigned long long)g_current.at[2], g_current.length[2], co_watch_spots[3].name,
-        (unsigned long long)g_current.at[3], g_current.length[3], (unsigned long long)g_last[0], (unsigned long long)g_last[1],
-        (unsigned long long)g_last[2], (unsigned long long)g_last[3]);
+    Text t = {.k = 0};
+    Put(&t, "wartable watch: armed on %d of %d threads (%d read back, %d had ended, %d past the list) with Dr7 0x%llx:", set, found, back, gone,
+        full, (unsigned long long)g_dr7);
+    for (int s = 0; s < g_current.count; s++)
+        Put(&t, "%s %s 0x%llx (%u bytes) holds %0*llx", s ? ";" : "", co_watch_spots[s].name, (unsigned long long)g_current.at[s],
+            g_current.length[s], (int)(2 * g_current.length[s]), (unsigned long long)g_last[s]);
+    LogLine(t.s);
 }
 
 /* Threads started since: armed too, without a line (the status line counts them). */
@@ -562,7 +580,8 @@ static void Places(void)
         if (listed == 0) { t.k = 0; Put(&t, "wartable watch: places:"); }
         Put(&t, " ");
         PutWhere(&t, place);
-        Put(&t, " x%ld%s", (long)g_filter.count[i], g_filter.library[i] ? " (library)" : "");
+        Put(&t, " x%ld%s", (long)g_filter.count[i], g_filter.known[i] == CO_WATCH_IN_LIBRARY ? " (library)"
+                                                    : g_filter.known[i] == CO_WATCH_IN_NODE_INIT ? " (N4 setup)" : "");
         if (++listed == 8) { LogLine(t.s); listed = 0; }
     }
     if (listed != 0) LogLine(t.s);
@@ -645,7 +664,7 @@ static int WaitDone(LONG serial, unsigned ms)
 /* ---- the game side ------------------------------------------------------------------------------------------------ */
 
 /* The factory's case and its table entry, the constructor's start and its return of O, where Z, X and W are built in
- * O, and the free's start, its case and its table entry (build 25480438). */
+ * O, the free's start, its case and its table entry, and where N4 is placed and set up (build 25480438). */
 static const struct { uint32_t rva; const char* bytes; } kPins[] = {
     {0x149958Du, "48 8B 05 24 CE E8 01 BA 30 9C 23 00 48 8B 0D D8 CD E8 01 41 B8 08 00 00 00 4C 8B 48 58 41 FF D1 33 D2 41 B8 30 9C 23 00 "
                  "48 8B C8 48 8B D8 E8 E0 14 BF 00 48 8B CB E8 98 B6 00 00 48 89 86 18 01 00 00"},
@@ -658,6 +677,10 @@ static const struct { uint32_t rva; const char* bytes; } kPins[] = {
     {0x14AC340u, "40 53 48 83 EC 20 FF CA 48 8B D9 83 FA 21 0F 87 38 05 00 00 48 8D 0D A5 3C B5 FE 8B 94 91 94 C8 4A 01 48 03 D1 FF E2"},
     {0x14AC6FEu, "48 8B 05 B3 9C E7 01 48 8B 93 18 01 00 00 48 8B 0D 65 9C E7 01 FF 50 60 48 C7 83 18 01 00 00 00 00 00 00"},
     {0x14AC8F0u, "FE C6 4A 01"},
+    {0x187D7B9u, "49 8D 8E 78 35 00 00 0F 11 44 24 20 E8 86 B6 19 00"}, /* C = Z+0x3578, built by 0x1A18E50 */
+    {0x187D943u, "49 8D 96 78 EE 02 00"},                                /* N4 = Z+0x2EE78, linked under the root */
+    {0x1A18FB0u, "48 89 8F 10 B9 02 00"},                                /* N4's first child = 0 */
+    {0x1A18FE1u, "48 89 BF 00 B9 02 00"},                                /* N4's element = C */
 };
 
 typedef uint64_t (*CtorFn)(uint64_t object);
@@ -674,11 +697,11 @@ static uint64_t CtorDetour(uint64_t object)
     if (made != object || made == 0)
         co_watch_mark("map screen pushed: the constructor returned 0x%llx for 0x%llx; not watched", (unsigned long long)made, (unsigned long long)object);
     else if (!co_watch_plan((uintptr_t)made, &plan))
-        co_watch_mark("map screen pushed: O 0x%llx puts W's words off their alignment; not watched", (unsigned long long)made);
+        co_watch_mark("map screen pushed: O 0x%llx puts the watched words off their alignment; not watched", (unsigned long long)made);
     else
     {
-        co_watch_mark("map screen pushed: O 0x%llx, W 0x%llx (O+0x%X); arming on thread %lu's request", (unsigned long long)made,
-            (unsigned long long)(made + CO_WATCH_W), CO_WATCH_W, GetCurrentThreadId());
+        co_watch_mark("map screen pushed: O 0x%llx, W 0x%llx (O+0x%X), N4 0x%llx (O+0x%X); arming on thread %lu's request", (unsigned long long)made,
+            (unsigned long long)(made + CO_WATCH_W), CO_WATCH_W, (unsigned long long)(made + CO_WATCH_N4), CO_WATCH_N4, GetCurrentThreadId());
         Ask(JOB_ARM, &plan);
     }
     return made;
@@ -710,7 +733,7 @@ const char* co_watch_install(uintptr_t game)
     if (g_ctor != NULL) return NULL;
     if (!co_watch_on()) return "switched off (HELLFORGE_CO_WATCH=0 or wartable-watch.off in the mod's folder)";
     char value[MAX_PATH];
-    if (!Pinned(game)) return "the map screen's factory, constructor or free is not the reviewed code";
+    if (!Pinned(game)) return "the map screen's factory, constructor, free or N4's setup is not the reviewed code";
     if (GetEnvironmentVariableA("HELLFORGE_DIFFICULTY_FIELDWATCH", value, sizeof value) == 1 && value[0] == '1')
         return "HellForge's map preview watchpoints are on (HELLFORGE_DIFFICULTY_FIELDWATCH=1) and hold Dr0-Dr2";
     g_game = game;
@@ -723,7 +746,8 @@ const char* co_watch_install(uintptr_t game)
     CloseHandle(worker);
     InterlockedExchange(&g_ready, 1);
     const DWORD dump = GetEnvironmentVariableA("HELLFORGE_CRASH_DUMP", value, sizeof value);
-    co_watch_mark("on: hardware write watchpoints on W = O+0x%X while the map screen lives; %s", CO_WATCH_W,
+    co_watch_mark("on: hardware write watchpoints on W = O+0x%X (+0x0, +0xE0) and N4 = O+0x%X (+0x0, +0x10) while the map screen lives; %s",
+        CO_WATCH_W, CO_WATCH_N4,
         dump > 0 && dump < sizeof value ? "full crash dump asked (HELLFORGE_CRASH_DUMP): the loader has HellForge.Cli write it at the first crash"
                                         : "no full crash dump: HELLFORGE_CRASH_DUMP is not set (a sandboxed session drops it; run with the sandbox off and Crash dump on)");
     return NULL;

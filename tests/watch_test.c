@@ -1,5 +1,5 @@
-/* The war-table crash's watch: Dr7 for W's words, the claim of a trap, the widget library and the values a field never
- * holds, which hits get a line; then live under Wine: the self-test, the map screen's push arming every thread, a
+/* The war-table crash's watch: Dr7 for W's and N4's words, the claim of a trap, where a write came from and the values
+ * a field never holds, which hits get a line; then live under Wine: the self-test, the map screen's push arming every thread, a
  * write from another thread logged with its value and thread, the free disarming them, and a write after it unseen. */
 #include <stdio.h>
 #include <string.h>
@@ -46,10 +46,11 @@ int main(void)
     g_case = "the plan and Dr7";
     CoWatchPlan plan;
     CHECK(co_watch_plan(0x3C4900080ull, &plan) == 1);
-    CHECK(plan.at[CO_WATCH_LINK] == 0x3C4900080ull + 0xB2A70u && plan.length[CO_WATCH_LINK] == 8);
     CHECK(plan.at[CO_WATCH_FLAGS] == 0x3C4900080ull + 0xB2990u && plan.length[CO_WATCH_FLAGS] == 4);
-    CHECK(plan.at[CO_WATCH_DIRTY] == 0x3C4900080ull + 0xB2A48u && plan.at[CO_WATCH_TWEEN] == 0x3C4900080ull + 0xB2A40u);
-    CHECK(co_watch_dr7(&plan) == 0x99D90055ull); /* L0-L3; write, 8 / 4 / 8 / 8 bytes */
+    CHECK(plan.at[CO_WATCH_LINK] == 0x3C4900080ull + 0xB2A70u && plan.length[CO_WATCH_LINK] == 8);
+    CHECK(plan.at[CO_WATCH_ELEMENT] == 0x3C4900080ull + 0xAF338u && plan.length[CO_WATCH_ELEMENT] == 8);
+    CHECK(plan.at[CO_WATCH_CHILD] == 0x3C4900080ull + 0xAF348u && plan.length[CO_WATCH_CHILD] == 8);
+    CHECK(co_watch_dr7(&plan) == 0x999D0055ull); /* L0-L3; write, 4 / 8 / 8 / 8 bytes */
     CHECK(co_watch_plan(0x3C4900084ull, &plan) == 0);
     plan.count = 1; plan.at[0] = 0x1000; plan.length[0] = 3;
     CHECK(co_watch_dr7(&plan) == 0);
@@ -64,29 +65,38 @@ int main(void)
     CHECK(co_watch_claim(0x80000004u, 1, 0, 0) == CO_WATCH_PASS);      /* a thread the watch never armed */
     CHECK(co_watch_claim(0xC0000005u, 1, 0, 1) == CO_WATCH_PASS);
 
-    g_case = "the widget library and suspicious values";
+    g_case = "where a write came from and suspicious values";
     CHECK(co_watch_in_library(0x10000000u, 0x10000000u + 0x1448B9Du));
     CHECK(!co_watch_in_library(0x10000000u, 0x10000000u + 0x17A4778u));
     CHECK(!co_watch_in_library(0x10000000u, 0x10000000u + 0x1453000u));
+    CHECK(co_watch_known(0x10000000u, 0x10000000u + 0x1448B9Du) == CO_WATCH_IN_LIBRARY);
+    CHECK(co_watch_known(0x10000000u, 0x10000000u + 0x1A18FB7u) == CO_WATCH_IN_NODE_INIT);
+    CHECK(co_watch_known(0x10000000u, 0x10000000u + 0x1A18FE8u) == CO_WATCH_IN_NODE_INIT);
+    CHECK(co_watch_known(0x10000000u, 0x10000000u + 0x1A18FB0u) == CO_WATCH_ELSEWHERE);
     CHECK(co_watch_suspicious(CO_WATCH_LINK, 0x4280000000000000ull));
     CHECK(!co_watch_suspicious(CO_WATCH_LINK, 0) && !co_watch_suspicious(CO_WATCH_LINK, 0x3C49B2588ull));
     CHECK(co_watch_suspicious(CO_WATCH_LINK, 0x3C49B2589ull));
     CHECK(co_watch_suspicious(CO_WATCH_FLAGS, 0x3F000000u) && co_watch_suspicious(CO_WATCH_FLAGS, 0x42800000u));
     CHECK(!co_watch_suspicious(CO_WATCH_FLAGS, 0x08000005u));
-    CHECK(co_watch_suspicious(CO_WATCH_DIRTY, 0x3C49B28C8ull) && !co_watch_suspicious(CO_WATCH_DIRTY, 0x20));
-    CHECK(co_watch_suspicious(CO_WATCH_TWEEN, 0x3F00000000000000ull) && !co_watch_suspicious(CO_WATCH_TWEEN, 0x1800));
+    CHECK(co_watch_suspicious(CO_WATCH_ELEMENT, 0) && co_watch_suspicious(CO_WATCH_ELEMENT, 0xC00C1017u));
+    CHECK(!co_watch_suspicious(CO_WATCH_ELEMENT, 0x3C49B2588ull));
+    CHECK(co_watch_suspicious(CO_WATCH_CHILD, 0xC00C1017u) && co_watch_suspicious(CO_WATCH_CHILD, 0x4280000000000000ull));
+    CHECK(!co_watch_suspicious(CO_WATCH_CHILD, 0) && !co_watch_suspicious(CO_WATCH_CHILD, 0x3C49B2588ull));
 
     g_case = "the hit filter";
     static CoWatchFilter f;
-    CHECK(co_watch_filter(&f, 0x1000, 1, 0) == CO_WATCH_LOG_NEW);
-    CHECK(co_watch_filter(&f, 0x1000, 1, 0) == 0); /* the library's repeat: counted only */
-    CHECK(co_watch_filter(&f, 0x1000, 1, 1) == CO_WATCH_LOG_SUSPICIOUS);
-    CHECK(f.count[0] == 3 && f.library[0] == 1);
-    CHECK(co_watch_filter(&f, 0x2000, 0, 0) == (CO_WATCH_LOG_NEW | CO_WATCH_LOG_OUTSIDE));
-    for (int i = 1; i < CO_WATCH_CAP_OUTSIDE; i++) co_watch_filter(&f, 0x2000, 0, 0);
-    CHECK(co_watch_filter(&f, 0x2000, 0, 0) == 0); /* outside, past its cap */
-    for (int i = 0; i < CO_WATCH_PLACES; i++) co_watch_filter(&f, 0x10000 + 8u * (unsigned)i, 1, 0);
+    for (int i = 0; i < CO_WATCH_PER_PLACE; i++) CHECK(co_watch_filter(&f, 0x1000, CO_WATCH_IN_LIBRARY, 0) == CO_WATCH_LOG_NEW);
+    CHECK(co_watch_filter(&f, 0x1000, CO_WATCH_IN_LIBRARY, 0) == 0); /* a place's repeat: counted only */
+    CHECK(co_watch_filter(&f, 0x1000, CO_WATCH_IN_LIBRARY, 1) == CO_WATCH_LOG_SUSPICIOUS);
+    CHECK(f.count[0] == CO_WATCH_PER_PLACE + 2 && f.known[0] == CO_WATCH_IN_LIBRARY);
+    CHECK(co_watch_filter(&f, 0x2000, CO_WATCH_ELSEWHERE, 0) == CO_WATCH_LOG_NEW);
+    for (int i = 1; i < CO_WATCH_PER_PLACE; i++) co_watch_filter(&f, 0x2000, CO_WATCH_ELSEWHERE, 0);
+    CHECK(co_watch_filter(&f, 0x2000, CO_WATCH_ELSEWHERE, 0) == 0);
+    for (int i = 0; i < CO_WATCH_CAP_SUSPICIOUS; i++) co_watch_filter(&f, 0x2000, CO_WATCH_ELSEWHERE, 1);
+    CHECK(co_watch_filter(&f, 0x2000, CO_WATCH_ELSEWHERE, 1) == 0); /* suspicious, past its cap */
+    for (int i = 0; i < CO_WATCH_PLACES; i++) co_watch_filter(&f, 0x10000 + 8u * (unsigned)i, CO_WATCH_IN_LIBRARY, 0);
     CHECK(f.overflow > 0);
+    CHECK(f.logged[0] <= CO_WATCH_CAP_NEW + CO_WATCH_PLACES); /* lines past the cap are counted, not logged */
 
     g_case = "a changed game refuses";
     g_coApi = fake_host_reset(CO_GAME_BUILD);
@@ -117,12 +127,14 @@ int main(void)
     DWORD writerId = 0;
     HANDLE writer = CreateThread(NULL, 0, Writer, NULL, 0, &writerId);
     uint8_t* block = VirtualAlloc(NULL, CO_WATCH_SCREEN_SIZE + 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    const uintptr_t o = (uintptr_t)block + 0x80, w = o + CO_WATCH_W;
+    const uintptr_t o = (uintptr_t)block + 0x80, w = o + CO_WATCH_W, n4 = o + CO_WATCH_N4;
     memcpy(g_fake.image + MENU + CO_WATCH_SCREEN_SLOT, &o, 8);
+    *(uint64_t*)n4 = o + CO_WATCH_Z + CO_WATCH_C_IN_Z; /* the element C, as the panel init leaves it */
     CHECK(ctor(o) == o);
     CHECK(co_watch_test_settle(10000));
     CHECK(fake_host_logged("map screen pushed: O"));
-    CHECK(fake_host_logged("armed on") && fake_host_logged("with Dr7 0x99d90055"));
+    CHECK(fake_host_logged("armed on") && fake_host_logged("with Dr7 0x999d0055"));
+    CHECK(fake_host_logged("N4+0x10 0x") && fake_host_logged("(8 bytes) holds 0000000000000000"));
     CHECK(co_watch_test_armed(writerId));
 
     g_case = "a write over W is logged";
@@ -130,15 +142,24 @@ int main(void)
     CHECK(co_watch_test_hits() == 1);
     char thread[48];
     snprintf(thread, sizeof thread, "on thread %lu:", writerId);
-    CHECK(fake_host_logged("hit 1 (new place, suspicious value, outside the widget library, not in the widget library)"));
+    CHECK(fake_host_logged("hit 1 (one of a place's first, suspicious value, outside the widget library)"));
     CHECK(fake_host_logged(thread));
     CHECK(fake_host_logged("W+0xE0 4280000000000000"));
     CHECK(fake_host_logged("hit 1 frames: kernel32.dll+0x")); /* the writer is the thread's first function */
     Write(w, 0x3F000000u, 4);
     CHECK(co_watch_test_hits() == 2);
     CHECK(fake_host_logged("W+0x0 3f000000"));
-    Write(w + 0xB8, 0x20, 8);
+
+    g_case = "N4's element cleared and its child overwritten are logged";
+    Write(n4, 0, 8);
     CHECK(co_watch_test_hits() == 3);
+    CHECK(fake_host_logged("hit 3 (one of a place's first, suspicious value,"));
+    CHECK(fake_host_logged("N4+0x0 0000000000000000"));
+    Write(n4 + 0x10, 0xC00C1017u, 8);
+    CHECK(co_watch_test_hits() == 4);
+    CHECK(fake_host_logged("N4+0x10 00000000c00c1017"));
+    Write(w + 0xE0, 0, 8); /* the 8-byte place's fourth write: counted, no line */
+    CHECK(co_watch_test_hits() == 5 && !fake_host_logged("hit 5 "));
 
     g_case = "the free disarms";
     CHECK(freeScreen((uintptr_t)g_fake.image + MENU, CO_WATCH_SCREEN_ID) == 0 && g_freed == CO_WATCH_SCREEN_ID);
@@ -150,7 +171,7 @@ int main(void)
     context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
     CHECK(GetThreadContext(writer, &context) && (context.Dr7 & CO_WATCH_DR7_BITS) == 0 && context.Dr0 == 0);
     Write(w + 0xE0, 0, 8);
-    CHECK(co_watch_test_hits() == 3);
+    CHECK(co_watch_test_hits() == 5);
 
     g_stop = 1;
     SetEvent(g_go);
