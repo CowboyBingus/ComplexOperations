@@ -90,6 +90,8 @@ static struct
     int stashed; float dropCentre[2]; uint64_t dropHandle, dropTex[2], dropBand; uint32_t* dropBandPixels; int dropBandServed, dropBandFramed; uint32_t dropBandFrame;
     uint32_t pixelsFreed; /* band pixels given back once their textures were uploaded (MoveBandPixelsTick) */
     int built, failed, released;
+    uint32_t drainWaits; /* frames a due release has waited for the render queue to drain, the build's step with it */
+    LONGLONG destroyTicks; /* the last release's destroy alone (QPC ticks), -1 none */
     struct { int a, b; ULONGLONG until; } skip[16];
     struct { int used; uint64_t tex[2], band; uint32_t* pixels; uint32_t frames; } freeing[NEAR_TILES_MAX * 2];
     float player[EVT_MAX_PLAYERS + 2][2];
@@ -592,7 +594,14 @@ static void MoveRelease(int slot)
     NearHideUnion(world, "a tile released");
     typedef void (*DestroyFn)(uint64_t world, uint64_t handle);
     DestroyFn destroy = (DestroyFn)NearApi(0x08, 0x1E0);
-    if (destroy != NULL && t.handle != 0) destroy(world, t.handle);
+    g_move.destroyTicks = -1;
+    if (destroy != NULL && t.handle != 0)
+    {
+        LARGE_INTEGER d0, d1; QueryPerformanceCounter(&d0);
+        destroy(world, t.handle);
+        QueryPerformanceCounter(&d1);
+        g_move.destroyTicks = d1.QuadPart - d0.QuadPart;
+    }
     MoveFreeLater(t.tex[0], t.tex[1], t.band, t.bandPixels);
     g_move.released++;
     if (raised) MoveRaiseCheck(t.centre[0], t.centre[1], t.cell[0], t.cell[1]);
@@ -898,29 +907,7 @@ static void MoveKeepSeen(ULONGLONG now)
     }
 }
 
-/* The mover's state in the line lets a run check that no release falls inside the merge's world-sized window. */
-static void MoveReleaseTimed(int k)
-{
-    int building = g_move.state != MV_IDLE;
-    LARGE_INTEGER t0, t1, hz; QueryPerformanceCounter(&t0);
-    MoveRelease(k);
-    QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
-    double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
-    if (building)
-        Note("difficulty: moving tiles: the release took %.1f ms on the game thread, during the build of cell (%d, %d) (mover %s, near state %d)", ms,
-            g_move.cell[0], g_move.cell[1], MoveStateName(g_move.state), g_near.state);
-    else Note("difficulty: moving tiles: the release took %.1f ms on the game thread", ms);
-}
-
-/* Every frame, building or not: an expired tile (not the drop tile) goes, one a frame. 1 when one went. */
-static int MoveReleaseTick(ULONGLONG now)
-{
-    if (g_move.players == 0) return 0;
-    MoveKeepSeen(now);
-    for (int k = 1; k < NEAR_TILES_MAX; k++)
-        if (g_tiles[k].live && g_tiles[k].level == g_world.levels && now - g_tiles[k].seen > MOVE_KEEP_MS && MoveReleaseClear(k)) { MoveReleaseTimed(k); return 1; }
-    return 0;
-}
+static int MoveReleaseTick(ULONGLONG now); /* xl_free.c: an expired tile's release, in a frame where it waits for nothing */
 
 static void MoveTick(uint64_t level)
 {
@@ -932,7 +919,7 @@ static void MoveTick(uint64_t level)
     if (g_move.level != g_world.levels)
     {
         g_move.level = g_world.levels; g_move.levelPtr = level; g_move.state = MV_IDLE; g_move.on = 0;
-        g_move.built = g_move.failed = g_move.released = 0; g_move.pixelsFreed = 0;
+        g_move.built = g_move.failed = g_move.released = 0; g_move.pixelsFreed = 0; g_move.drainWaits = 0;
         memset(g_move.skip, 0, sizeof g_move.skip);
         if (!(g_ring.level == g_world.levels && g_ring.applied)) { Note("difficulty: moving tiles: off for this level (no grid ring at load)"); return; }
         if (!g_tiles[0].live || g_tiles[0].level != g_world.levels) { Note("difficulty: moving tiles: off for this level (no drop tile)"); return; }
@@ -971,7 +958,7 @@ static void MoveTick(uint64_t level)
     MoveGroundKeep(); /* before the frame's ground rays are cast */
     MoveFreeTick(0);
     MovePlayers();
-    if (MoveReleaseTick(now)) return; /* one release a frame, a build's step waits for the next */
+    if (MoveReleaseTick(now)) return; /* a release, or a frame held for one: a build's step waits for the next */
     if (MoveTrimTick()) return;
     if (g_move.state == MV_IDLE)
     {

@@ -26,6 +26,9 @@ void CoXlTestMoverSet(int state);
 void CoXlTestMoverTileIn(int slot, int a, int b);
 void CoXlTestMoverNear(int state);
 uint32_t CoXlTestMoverFrames(void);
+void CoXlTestMoverWorld(uint64_t world);
+void CoXlTestMoverTileHandle(int slot, uint64_t handle);
+int CoXlTestDrainPins(void);
 
 static int g_failed;
 static const char* g_case;
@@ -44,6 +47,41 @@ static LONG64 g_mapped, g_global;
 static int g_trims;
 static void TestTrim(uint64_t unused) { (void)unused; g_trims++; g_mapped -= 300ll << 20; g_global = 0; }
 static void TestStats(void* out) { LONG64 s[7] = {g_mapped, g_mapped, g_global, 0, 0, 0, 0}; memcpy(out, s, sizeof s); }
+
+/* The destroy's render fence as the reviewed exe has it: the bytes pinned, and the world, render world, renderer and
+ * device it reads. The renderer starts busy: its thread a buffer behind the game's, with 3 messages queued there. */
+static const struct { uint32_t at; const char* bytes; } kDrain[] = {
+    {0x1ADF8Bu, "49 8B 8E F8 01 23 00 48 8B D5 E8 E6 B4 F1 FF 49 8B 86 F8 01 23 00 B2 01 48 8B 18 48 8B CB E8 92 7E F5 FF 8B D0 48 8B CB E8 78 80 F5 FF"},
+    {0x105E47u, "80 B9 80 14 00 00 00"},
+    {0x105F62u, "8B B3 98 13 00 00 8B D6 8B 84 B3 80 13 00 00 41 3B C7 74 EC 8D 48 01"},
+    {0x10A850u, "B8 FF FF FF FF F0 45 0F B1 A4 BF 80 13 00 00 41 87 BF 98 13 00 00"},
+    {0x113F4Au, "44 8B 83 9C 13 00 00 B8 AB AA AA AA 41 8D 68 01 F7 E5 C1 EA 02 8D 04 52 03 C0 2B E8"},
+    {0x113EC0u, "8B 83 9C 13 00 00 48 83 C0 62"},
+    {0x113EF3u, "8B 83 9C 13 00 00 48 8D 0C 83 41 8B C7 F0 0F C1 81 80 13 00 00"},
+    {0x1139A4u, "E6 32 11 00"},
+    {0x1132E6u, "49 8B 18 80 7B 48 00 74 08 49 8B CE E8 39 88 FF FF"},
+    {0x10BB44u, "48 8B B9 68 11 00 00 48 8B E9 33 DB 48 8D B7 C8 03 00 00 48 8B CE FF 15 00 AC 2E 01 8B BF D8 03 00 00"},
+};
+static uint8_t g_world[0x230200], g_rw[0x10], g_renderer[0x1C00], g_device[0x400], g_api[0x20], g_table[0x200];
+static uint64_t g_destroyWorld, g_destroyHandle;
+static void TestDestroy(uint64_t world, uint64_t handle) { g_destroyWorld = world; g_destroyHandle = handle; }
+
+static void Put32(uint8_t* at, uint32_t v) { memcpy(at, &v, 4); }
+/* The render thread in buffer `render`, the game's `game`, `queued` messages there, `jobs` device jobs. */
+static void Render(uint32_t render, uint32_t game, uint32_t queued, uint32_t jobs)
+{
+    Put32(g_renderer + 0x139C, render); Put32(g_renderer + 0x1398, game); Put32(g_renderer + 0x1380 + 4 * game, queued); Put32(g_device + 0x3D8, jobs);
+}
+static void DrainWorld(uint64_t destroy)
+{
+    const uint64_t rw = (uint64_t)(uintptr_t)g_rw, r = (uint64_t)(uintptr_t)g_renderer, dev = (uint64_t)(uintptr_t)g_device;
+    const uint64_t api = (uint64_t)(uintptr_t)g_api, table = (uint64_t)(uintptr_t)g_table;
+    memcpy(g_world + 0x2301F8u, &rw, 8); memcpy(g_rw, &r, 8); memcpy(g_renderer + 0x1168, &dev, 8);
+    g_renderer[0x1480] = 1;
+    memcpy(g_fake.image + 0x3326308u, &api, 8); memcpy(g_api + 8, &table, 8); memcpy(g_table + 0x1E0, &destroy, 8);
+    CoXlTestMoverWorld((uint64_t)(uintptr_t)g_world);
+    Render(1, 2, 3, 0);
+}
 
 static void Hex(uint8_t* at, const char* hex)
 {
@@ -339,6 +377,131 @@ int main(void)
         for (int f = 0; f < 20; f++) CHECK(CoXlTestTrimTick() == 0);
         g_fake.strictCode = 0;
         memset(api, 0, sizeof api);
+        memset(g_fake.image + 0x3326308u, 0, 8);
+    }
+
+    const uint64_t fence = (uint64_t)(uintptr_t)exe + 0x1ADEA0u; /* the reviewed destroy: never called here (handle 0) */
+    const float px = OX + 6 * CELL, py = OY + 6 * CELL; /* far from every cell: no build starts */
+
+    g_case = "a due release waits for a drained render queue, and the frame's build step with it";
+    {
+        DrainWorld(fence);
+        CHECK(CoXlTestDrainPins() == 1);
+        CoXlTestTrimUse(TestTrim, TestStats);
+        CoXlTestMover(OX, OY, MV_PACKAGE, 0, 3, 3);
+        CoXlTestMoverTile(0, 0, 0, 0);
+        for (int k = 1; k < 8; k++) CoXlTestMoverTile(k, 9 + k, 9, GetTickCount64());
+        CoXlTestMoverTile(1, 0, -2, GetTickCount64() - KEEP_MS - 1000);
+        const uint32_t frames = CoXlTestMoverFrames();
+        for (int f = 0; f < 3; f++)
+        {
+            CoXlTestMoverTick((uintptr_t)level, px, py);
+            CHECK(CoXlTestMoverLive(1) && CoXlTestMoverFrames() == frames && CoXlTestMoverState() == MV_PACKAGE);
+        }
+        Render(2, 2, 0, 0); /* the render thread caught up with the game's buffer, nothing waiting */
+        CoXlTestMoverTick((uintptr_t)level, px, py);
+        CHECK(!CoXlTestMoverLive(1) && CoXlTestMoverFrames() == frames);
+        CHECK(fake_host_logged("no destroy, the render queue drained after 3 held frame(s) (the render thread in buffer 2, the game's 2; 0 message(s) queued, 0 device job(s))"));
+        CoXlTestMoverSet(MV_IDLE);
+    }
+
+    g_case = "the render thread a buffer behind, queued messages or device jobs hold a release too";
+    {
+        DrainWorld(fence);
+        CoXlTestMover(OX, OY, MV_REPLAY, 1, 2, 1);
+        CoXlTestMoverNear(NEAR_STEP);
+        CoXlTestMoverTile(0, 0, 0, 0);
+        for (int k = 1; k < 8; k++) CoXlTestMoverTile(k, 9 + k, 9, now);
+        CoXlTestMoverTile(1, 0, -2, now - KEEP_MS - 1000);
+        CoXlTestMoverPlayer(OX + 2 * CELL, OY + CELL);
+        Render(3, 4, 0, 0); /* still in the last frame's buffer: the game's own is empty so far */
+        CHECK(CoXlTestMoverRelease(now) == 1 && CoXlTestMoverLive(1));
+        Render(4, 4, 1, 0);
+        CHECK(CoXlTestMoverRelease(now) == 1 && CoXlTestMoverLive(1));
+        Render(4, 4, 0, 2);
+        CHECK(CoXlTestMoverRelease(now) == 1 && CoXlTestMoverLive(1));
+        Render(4, 4, 0, 0);
+        CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(1));
+        CHECK(fake_host_logged("(mover replay, near state 2); no destroy, the render queue drained after 3 held frame(s)"));
+    }
+
+    g_case = "after 8 held frames a release goes anyway; the next one waits again";
+    {
+        DrainWorld(fence);
+        CoXlTestMover(OX, OY, MV_REPLAY, 1, 2, 1);
+        CoXlTestMoverNear(NEAR_STEP);
+        CoXlTestMoverTile(0, 0, 0, 0);
+        for (int k = 1; k < 8; k++) CoXlTestMoverTile(k, 9 + k, 9, now);
+        CoXlTestMoverTile(1, 0, -2, now - KEEP_MS - 1000);
+        CoXlTestMoverTile(2, 1, -2, now - KEEP_MS - 1000);
+        CoXlTestMoverPlayer(OX + 2 * CELL, OY + CELL);
+        for (int f = 0; f < 8; f++) CHECK(CoXlTestMoverRelease(now) == 1 && CoXlTestMoverLive(1));
+        CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(1) && CoXlTestMoverLive(2));
+        CHECK(fake_host_logged("the render queue NOT drained after 8 held frame(s) (the render thread in buffer 1, the game's 2; 3 message(s) queued, 0 device job(s))"));
+        CHECK(CoXlTestMoverRelease(now) == 1 && CoXlTestMoverLive(2));
+        Render(2, 2, 0, 0);
+        CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(2));
+        CHECK(fake_host_logged("the render queue drained after 1 held frame(s)"));
+    }
+
+    g_case = "the world-sized hold outlasts a drained queue; no frame is held for a tile that may not go";
+    {
+        DrainWorld(fence);
+        Render(3, 3, 0, 0);
+        CoXlTestMover(OX, OY, MV_LOOKUP, 1, 2, 1);
+        CoXlTestMoverTile(0, 0, 0, 0);
+        for (int k = 1; k < 8; k++) CoXlTestMoverTile(k, 9 + k, 9, now);
+        CoXlTestMoverTile(1, 0, -2, now - KEEP_MS - 1000);
+        CoXlTestMoverPlayer(OX + 2 * CELL, OY + CELL);
+        CHECK(CoXlTestMoverRelease(now) == 0 && CoXlTestMoverLive(1));
+        Render(1, 2, 3, 0);
+        CHECK(CoXlTestMoverRelease(now) == 0 && CoXlTestMoverLive(1));
+    }
+
+    g_case = "no render thread: the destroy posts no fence, nothing waits";
+    {
+        DrainWorld(fence);
+        g_renderer[0x1480] = 0;
+        CoXlTestMover(OX, OY, MV_IDLE, 0, 0, 0);
+        CoXlTestMoverTile(0, 0, 0, 0);
+        for (int k = 1; k < 8; k++) CoXlTestMoverTile(k, 9 + k, 9, now);
+        CoXlTestMoverTile(1, 0, -2, now - KEEP_MS - 1000);
+        CoXlTestMoverPlayer(px, py);
+        CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(1));
+        CHECK(fake_host_logged("on the game thread; no destroy, no render thread"));
+    }
+
+    g_case = "the destroy alone is timed; another destroy than the reviewed one is not waited for";
+    {
+        DrainWorld((uint64_t)(uintptr_t)TestDestroy);
+        CHECK(CoXlTestDrainPins() == 0);
+        CHECK(fake_host_logged("difficulty: moving tiles: the destroy's render fence is not the reviewed code; releases do not wait for a drained render queue"));
+        CoXlTestMover(OX, OY, MV_IDLE, 0, 0, 0);
+        CoXlTestMoverTile(0, 0, 0, 0);
+        for (int k = 1; k < 8; k++) CoXlTestMoverTile(k, 9 + k, 9, now);
+        CoXlTestMoverTile(1, 0, -2, now - KEEP_MS - 1000);
+        CoXlTestMoverTileHandle(1, 0x1234);
+        CoXlTestMoverPlayer(px, py);
+        CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(1)); /* busy, but not held */
+        CHECK(g_destroyWorld == (uint64_t)(uintptr_t)g_world && g_destroyHandle == 0x1234);
+        CHECK(fake_host_logged("ms on the game thread; the destroy alone ") && fake_host_logged(" ms, the render queue not read"));
+    }
+
+    g_case = "the fence's pins: each pinned byte and the destroy's slot";
+    {
+        DrainWorld(fence);
+        g_fake.strictCode = 1;
+        for (size_t i = 0; i < sizeof kDrain / sizeof kDrain[0]; i++) Hex(exe + kDrain[i].at, kDrain[i].bytes);
+        CHECK(CoXlTestDrainPins() == 1);
+        for (size_t i = 0; i < sizeof kDrain / sizeof kDrain[0]; i++)
+        {
+            uint8_t* at = exe + kDrain[i].at + (strlen(kDrain[i].bytes) + 1) / 3 - 1; /* each pin's last byte */
+            *at ^= 0x40;
+            CHECK(CoXlTestDrainPins() == 0);
+            *at ^= 0x40;
+        }
+        CHECK(CoXlTestDrainPins() == 1);
+        g_fake.strictCode = 0;
         memset(g_fake.image + 0x3326308u, 0, 8);
     }
 

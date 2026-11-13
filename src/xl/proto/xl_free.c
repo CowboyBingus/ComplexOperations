@@ -1,5 +1,6 @@
-/* Memory the extra large world gives back once nothing reads it: op 0x2B's job regions after the op, and a spawned
- * tile's band pixels after the render thread's upload. Included after difficulty_world_move.c. */
+/* Memory the extra large world gives back once nothing reads it: op 0x2B's job regions after the op, a spawned tile's
+ * band pixels after the render thread's upload, an expired tile when its destroy waits for nothing. Included after
+ * difficulty_world_move.c. */
 
 /* ---- Op 0x2B's job regions ----------------------------------------------------------------------------------------- */
 static volatile LONG g_placeJobsIn; /* jobs under way: a job's note reads its region after the job's done flag */
@@ -98,6 +99,111 @@ static void MoveBandPixelsTick(void)
         g_matband.pixels = NULL; g_move.pixelsFreed++;
         Note("difficulty: moving tiles: the drop tile's band pixels given back (64 MiB, %u this level)", g_move.pixelsFreed);
     }
+}
+
+/* ---- The destroy's render fence ------------------------------------------------------------------------------------
+ * The destroy (exe 0x1ADEA0) posts a fence with its flag set on the renderer [[world+0x2301F8]] and blocks until the
+ * render thread reaches it and the device's job list is empty (0x1132E6 -> 0x10BB30). The frame tick waits only for the
+ * frame before last (0x8A7C4), so in the level update the render thread may still be drawing the last frame and a
+ * build's merge renders. A release waits for a frame where it has nothing queued (RELEASE-HITCH.md). */
+static const struct { uint32_t at; const char* bytes; } kDrainPins[] = {
+    {0x1ADF8Bu, "49 8B 8E F8 01 23 00 48 8B D5 E8 E6 B4 F1 FF 49 8B 86 F8 01 23 00 B2 01 48 8B 18 48 8B CB E8 92 7E F5 FF 8B D0 48 8B CB E8 78 80 F5 FF"},
+    {0x105E47u, "80 B9 80 14 00 00 00"}, /* no render thread: no fence */
+    {0x105F62u, "8B B3 98 13 00 00 8B D6 8B 84 B3 80 13 00 00 41 3B C7 74 EC 8D 48 01"}, /* the game's buffer, its count */
+    {0x10A850u, "B8 FF FF FF FF F0 45 0F B1 A4 BF 80 13 00 00 41 87 BF 98 13 00 00"}, /* the kick: the next of 6 */
+    {0x113F4Au, "44 8B 83 9C 13 00 00 B8 AB AA AA AA 41 8D 68 01 F7 E5 C1 EA 02 8D 04 52 03 C0 2B E8"}, /* the render thread's next: alike */
+    {0x113EC0u, "8B 83 9C 13 00 00 48 83 C0 62"}, /* the render thread's buffer */
+    {0x113EF3u, "8B 83 9C 13 00 00 48 8D 0C 83 41 8B C7 F0 0F C1 81 80 13 00 00"}, /* counted down once run */
+    {0x1139A4u, "E6 32 11 00"}, /* message 0x10, the fence */
+    {0x1132E6u, "49 8B 18 80 7B 48 00 74 08 49 8B CE E8 39 88 FF FF"}, /* flagged: the device's jobs first */
+    {0x10BB44u, "48 8B B9 68 11 00 00 48 8B E9 33 DB 48 8D B7 C8 03 00 00 48 8B CE FF 15 00 AC 2E 01 8B BF D8 03 00 00"},
+};
+static int g_drainPinned; /* 1 the reviewed code, -1 not */
+static struct { uint8_t threaded; uint32_t game, render, queued, jobs; } g_drain;
+
+static int MoveDrainPins(uintptr_t exe)
+{
+    if (g_drainPinned) return g_drainPinned > 0;
+    int ok = exe != 0 && NearApi(0x08, 0x1E0) == exe + 0x1ADEA0u;
+    for (size_t i = 0; ok && i < sizeof kDrainPins / sizeof kDrainPins[0]; i++) ok = ApiCodeMatches(exe + kDrainPins[i].at, kDrainPins[i].bytes) == 1;
+    g_drainPinned = ok ? 1 : -1;
+    if (!ok) Note("difficulty: moving tiles: the destroy's render fence is not the reviewed code; releases do not wait for a drained render queue");
+    return ok;
+}
+
+/* 1 when a fence posted now is served at once (no render thread, or it is in the game's buffer with nothing waiting
+ * and no device job), 0 when work is queued before it, -1 when it does not read (the release goes as before). */
+static int MoveRenderDrained(uint64_t world)
+{
+    uintptr_t rw = 0, r = 0, dev = 0;
+    if (!MoveDrainPins(ApiModuleBase("helldivers2.exe", NULL)) || world == 0 || SafeRead(world + 0x2301F8u, &rw, 8) || rw == 0 || SafeRead(rw, &r, 8) || r == 0 ||
+        SafeRead(r + 0x1480, &g_drain.threaded, 1))
+        return -1;
+    if (!g_drain.threaded) return 1;
+    if (SafeRead(r + 0x1398, &g_drain.game, 4) || SafeRead(r + 0x139C, &g_drain.render, 4) || g_drain.game > 5 ||
+        SafeRead(r + 0x1380 + 4 * (uintptr_t)g_drain.game, &g_drain.queued, 4) || SafeRead(r + 0x1168, &dev, 8) || dev == 0 || SafeRead(dev + 0x3D8, &g_drain.jobs, 4))
+        return -1;
+    return g_drain.render == g_drain.game && g_drain.queued == 0 && g_drain.jobs == 0;
+}
+
+/* The release line's account of the render queue as the release found it. */
+static const char* MoveDrainText(int drained, uint32_t held)
+{
+    static char text[192];
+    if (drained < 0) return "the render queue not read";
+    if (!g_drain.threaded) return "no render thread";
+    snprintf(text, sizeof text, "the render queue %s after %u held frame(s) (the render thread in buffer %u, the game's %u; %u message(s) queued, %u device job(s))",
+        drained ? "drained" : "NOT drained", held, g_drain.render, g_drain.game, g_drain.queued, g_drain.jobs);
+    return text;
+}
+
+#define MOVE_DRAIN_FRAMES 8u /* a due release holds the frame's step at most this long for a drained render queue */
+
+static double MoveTicksMs(LONGLONG ticks)
+{
+    LARGE_INTEGER hz; QueryPerformanceFrequency(&hz);
+    return (double)ticks * 1000.0 / (double)hz.QuadPart;
+}
+
+/* The mover's state in the line lets a run check that no release falls inside the merge's world-sized window; the
+ * destroy alone and the render queue it found, that its fence waited for nothing. */
+static void MoveReleaseTimed(int k, int drained)
+{
+    int building = g_move.state != MV_IDLE;
+    LARGE_INTEGER t0, t1; QueryPerformanceCounter(&t0);
+    MoveRelease(k);
+    QueryPerformanceCounter(&t1);
+    char destroyed[48];
+    if (g_move.destroyTicks >= 0) snprintf(destroyed, sizeof destroyed, "the destroy alone %.1f ms", MoveTicksMs(g_move.destroyTicks));
+    else snprintf(destroyed, sizeof destroyed, "no destroy");
+    if (building)
+        Note("difficulty: moving tiles: the release took %.1f ms on the game thread, during the build of cell (%d, %d) (mover %s, near state %d); %s, %s", MoveTicksMs(t1.QuadPart - t0.QuadPart),
+            g_move.cell[0], g_move.cell[1], MoveStateName(g_move.state), g_near.state, destroyed, MoveDrainText(drained, g_move.drainWaits));
+    else Note("difficulty: moving tiles: the release took %.1f ms on the game thread; %s, %s", MoveTicksMs(t1.QuadPart - t0.QuadPart), destroyed, MoveDrainText(drained, g_move.drainWaits));
+}
+
+/* The first expired tile (not the drop tile) clear of the merge cameras, -1 none. */
+static int MoveReleaseDue(ULONGLONG now)
+{
+    for (int k = 1; k < NEAR_TILES_MAX; k++)
+        if (g_tiles[k].live && g_tiles[k].level == g_world.levels && now - g_tiles[k].seen > MOVE_KEEP_MS && MoveReleaseClear(k)) return k;
+    return -1;
+}
+
+/* Every frame, building or not: an expired tile goes, one a frame, in a frame where the destroy's fence waits for
+ * nothing. Until then the frame does nothing else, so the build queues no render work; after MOVE_DRAIN_FRAMES it goes
+ * anyway. 1 when the frame went to a release. */
+static int MoveReleaseTick(ULONGLONG now)
+{
+    if (g_move.players == 0) return 0;
+    MoveKeepSeen(now);
+    int k = MoveReleaseDue(now);
+    if (k < 0) { g_move.drainWaits = 0; return 0; }
+    int drained = MoveRenderDrained(MoveWorld());
+    if (drained == 0 && g_move.drainWaits < MOVE_DRAIN_FRAMES) { g_move.drainWaits++; return 1; }
+    MoveReleaseTimed(k, drained);
+    g_move.drainWaits = 0;
+    return 1;
 }
 
 /* ---- rpmalloc's caches after tile events ---------------------------------------------------------------------------
