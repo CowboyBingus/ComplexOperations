@@ -116,12 +116,21 @@ static void CoXlFrameContext(int* ai, float* nest)
     if (best < 3.0e38f) *nest = sqrtf(best);
 }
 
+/* Frames count only in play: game state 4 ([[game + 0x3326340] + 0xAC21C], as WorldStreamInMission; 6 while the
+ * mission loads). LwLive is on from the loading screen, about 38 s before play. */
+static int CoXlInPlay(void)
+{
+    uintptr_t world = 0; uint32_t state = 0;
+    return LwLive() && g_difficultyGame != 0 && !SafeRead(g_difficultyGame + 0x3326340u, &world, 8) && world != 0 &&
+        !SafeRead(world + 0xAC21Cu, &state, 4) && state == 4;
+}
+
 /* The game thread's part, in the order the loader's tick called it. */
 static void CoXlTick(HfMod* mod, float dt, void* user)
 {
     (void)mod; (void)user;
     co_framecost_context(CoXlFrameContext);
-    co_framecost_begin(LwLive());
+    co_framecost_begin(CoXlInPlay(), (long)g_world.levels);
     StatusWatch(g_difficultyGame); /* the registry's hash, should the game have made the registry only now */
     co_framecost_mark(CO_FC_STATUS);
     WorldStreamTick(dt);
@@ -749,6 +758,8 @@ int CoXlTestCoarseFree(int k) { return g_coarse.slotOf[k] < 0 && g_coarse.slots[
 int CoXlTestCompareOn(void) { g_cc.on = 1; g_cc.reference[0] = 0; return CcTable(); }
 void CoXlTestCompareImage(const char* label, uintptr_t descriptor) { CcDescriptor(label, descriptor); }
 void CoXlTestComparePass(uint32_t op, uintptr_t level) { g_worldLevel = level; CcPass(op); g_worldLevel = 0; }
+/* The frame-time gate (CoXlInPlay) with the game at `game` and the living world's `live`. */
+int CoXlTestInPlay(uintptr_t game, float live) { g_difficultyGame = game; g_world.live = live; return CoXlInPlay(); }
 /* The tactical map (proto/difficulty_tacmap.c): the install's game, the game thread's tick, HellForge's id for the
  * screen, the waypoint the screen queued for the tick, and a session that has not asked for the screen yet. */
 void CoXlTestTacGame(uintptr_t game) { g_difficultyGame = game; }

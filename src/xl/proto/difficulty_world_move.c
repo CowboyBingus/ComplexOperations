@@ -1052,7 +1052,9 @@ static void MoveTick(uint64_t level)
             g_near.at65, g_move.at66);
     }
     if (!g_move.on) return;
+    int64_t fc = co_framecost_now();
     MoveGroundKeep(); /* before the frame's ground rays are cast */
+    co_framecost_nested(CO_FC_GROUNDKEEP, CO_FC_MOVE, fc);
     MoveFreeTick(0);
     MovePlayers();
     if (MoveReleaseTick(now)) return; /* a release, or a frame held for one: a build's step waits for the next */
@@ -1263,18 +1265,24 @@ static void MoveCostNote(void)
 /* Before the level's own update: the scatter cut's close counts this update (difficulty_world_diag.c). */
 static void MoveScatterTick(void) { TdScatterMergeTick((uint64_t)(uintptr_t)g_move.ctx); }
 
+/* The mod's parts are timed for the frame-time lines (co_framecost.h); the game's own update between them is not. */
 static void MoveLevelUpdate(uint64_t level)
 {
+    int64_t fc = co_framecost_now();
     MoveScatterTick();
+    co_framecost_add(CO_FC_SCATTER, fc);
     g_moveUpdate(level);
     int mv = g_move.state, ns = g_near.state, step = g_near.step, conf = g_conform.phase, bld = g_near.building;
     LARGE_INTEGER t0, t1, hz;
     QueryPerformanceCounter(&t0);
     MoveTick(level);
     QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
+    co_framecost_add(CO_FC_MOVE, t0.QuadPart);
     if (mv != MV_IDLE || g_move.state != MV_IDLE) { MoveCostAdd((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart, mv, ns, step, conf, bld); g_moveCost.pending = 1; }
     else if (g_moveCost.pending) MoveCostNote();
+    fc = co_framecost_now();
     FarGrassTick(level);
+    co_framecost_add(CO_FC_FARGRASS, fc);
 }
 
 static void MoveInstall(uintptr_t game)

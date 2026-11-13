@@ -1,48 +1,59 @@
 /* Wall-clock frame times on a complex mission, every build (issue F: stutter near a terminid nest). The mod's
  * game-thread tick (co_xl.c CoXlTick) runs once a frame, so QPC from one tick to the next is the frame; the game's own
- * dt is clamped and cannot show a stutter. Each 10 s window logs the lows, the slow frames, the PC's CPU load against
- * the game's share (a build on the same PC starves the game), the mod's tick, the AI count and the nearest garrison
- * with living spawners (bug holes on a terminid map). A slow frame is logged with the tick part that took the most.
- * Lines are bounded. */
+ * dt is clamped and cannot show a stutter. Each 10 s window of play logs the lows, the slow frames, the PC's CPU load
+ * against the game's share (a build on the same PC starves the game), the timed parts (CoXlTick's and the level update
+ * hook's), the AI count and the nearest garrison with living spawners (bug holes on a terminid map). */
 #ifndef CO_FRAMECOST_H
 #define CO_FRAMECOST_H
 
 #include <stdint.h>
 
-/* The tick's parts, in CoXlTick's order. */
+/* The timed parts: CoXlTick's, in its order, then the level update hook's (difficulty_world_move.c MoveLevelUpdate). */
 enum
 {
     CO_FC_STATUS, CO_FC_STREAM, CO_FC_SPANS, CO_FC_NET, CO_FC_TDIAG, CO_FC_TPROBE, CO_FC_LIVING, CO_FC_DAYLIGHT,
-    CO_FC_TAC, CO_FC_DENSITY, CO_FC_PARTS
+    CO_FC_TAC, CO_FC_DENSITY, CO_FC_SCATTER, CO_FC_MOVE, CO_FC_GROUNDKEEP, CO_FC_FARGRASS, CO_FC_PARTS
 };
 
 #define CO_FC_WINDOW_MS 10000.0
-#define CO_FC_FRAMES 4096          /* frame times kept a window: 400 fps for 10 s */
-#define CO_FC_SLOW_MS 25.0         /* a visible stutter at the 60 fps target */
+#define CO_FC_FRAMES 4096                /* frame times kept a window: 400 fps for 10 s */
+#define CO_FC_SLOW_MS 25.0               /* a visible stutter at the 60 fps target */
 #define CO_FC_HITCH_MS 33.3
-#define CO_FC_SLOW_LINES_WINDOW 2  /* slow-frame lines a window */
-#define CO_FC_LINES_SESSION 800    /* all lines a session: about two hours of play */
-#define CO_FC_LOAD_MS 1000.0       /* longer: a load or a pause, not a frame */
+#define CO_FC_LONG_MS 1000.0             /* a frame of a second or more in play: a build or a stall */
+#define CO_FC_STARVED_IDLE 1.0           /* cores left idle under which the game had to wait for one */
+#define CO_FC_SLOW_LINES_WINDOW 2        /* detailed slow-frame lines a window */
+#define CO_FC_DETAIL_LINES_SESSION 600   /* detailed slow-frame lines a session */
+#define CO_FC_WINDOW_LINES_MISSION 1080  /* window lines a mission: three hours of play */
 
 /* At window close: the AI units now, and the distance from player 1 to the nearest garrison with living spawners
  * (negative when none is known). */
 typedef void (*CoFcContextFn)(int* ai, float* nest);
 void co_framecost_context(CoFcContextFn fn);
 
-/* At the start of the tick: closes the frame since the last tick (when `live` then and now). */
-void co_framecost_begin(int live);
-/* After a part of the tick: the time since the last mark goes to `part`. */
+/* At the start of CoXlTick: closes the frame since the last tick when `play` then and now. `mission` changes with
+ * each mission; a new one gets a new window-line budget. */
+void co_framecost_begin(int play, long mission);
+/* After a part of CoXlTick: the time since the last mark goes to `part`. */
 void co_framecost_mark(int part);
+/* A part timed outside CoXlTick: `t = co_framecost_now(); ...; co_framecost_add(part, t)`. On another thread than
+ * CoXlTick's the time is counted apart, as off the game thread. Returns the part's ticks. */
+int64_t co_framecost_now(void);
+int64_t co_framecost_add(int part, int64_t since);
+/* A part timed inside another: its ticks go to `inner` and come off `outer`. */
+void co_framecost_nested(int inner, int outer, int64_t since);
 
 #ifdef CO_TEST
 /* The same on a given clock (ticks of `freq` a second) and given CPU times (100 ns units). */
 void co_framecost_test_reset(int64_t freq);
 void co_framecost_test_cpu(uint64_t systemBusy, uint64_t systemAll, uint64_t process, int cores);
-void co_framecost_test_begin(int64_t now, int live);
+void co_framecost_test_begin(int64_t now, int play, long mission);
 void co_framecost_test_mark(int part, int64_t now);
-int co_framecost_test_lines(void);
-/* The last closed window: 1% and 0.1% lows (fps), frames over 25 and 33 ms. */
-void co_framecost_test_last(double* low1, double* low01, uint32_t* over25, uint32_t* over33);
+int64_t co_framecost_test_add(int part, int64_t since, int64_t now);
+void co_framecost_test_nested(int inner, int outer, int64_t since, int64_t now);
+int co_framecost_test_window_lines(void);
+int co_framecost_test_detail_lines(void);
+/* The last closed window: 1% and 0.1% lows (fps), frames over 25 ms, 33 ms and 1 s, the CPU verdict. */
+void co_framecost_test_last(double* low1, double* low01, uint32_t* over25, uint32_t* over33, uint32_t* over1s, int* starved);
 #endif
 
 #endif
