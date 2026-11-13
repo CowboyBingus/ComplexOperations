@@ -124,11 +124,23 @@ static struct { uint8_t threaded; uint32_t game, render, queued, jobs; } g_drain
 static int MoveDrainPins(uintptr_t exe)
 {
     if (g_drainPinned) return g_drainPinned > 0;
-    int ok = exe != 0 && NearApi(0x08, 0x1E0) == exe + 0x1ADEA0u;
-    for (size_t i = 0; ok && i < sizeof kDrainPins / sizeof kDrainPins[0]; i++) ok = ApiCodeMatches(exe + kDrainPins[i].at, kDrainPins[i].bytes) == 1;
+    const uintptr_t slot = NearApi(0x08, 0x1E0);
+    int ok = exe != 0 && slot == exe + 0x1ADEA0u;
+    size_t i = 0;
+    for (; ok && i < sizeof kDrainPins / sizeof kDrainPins[0]; i++) ok = ApiCodeMatches(exe + kDrainPins[i].at, kDrainPins[i].bytes) == 1;
     g_drainPinned = ok ? 1 : -1;
-    if (!ok) Note("difficulty: moving tiles: the destroy's render fence is not the reviewed code; releases do not wait for a drained render queue");
-    return ok;
+    if (ok) return 1;
+    /* The slot and the pins match the dump, so the note says which check failed at run time and what it read. */
+    const int pin = exe != 0 && slot == exe + 0x1ADEA0u && i > 0;
+    char where[96] = "?";
+    uint8_t got[8] = {0};
+    if (slot != 0) ModuleAt(slot, where, sizeof where);
+    if (pin) SafeRead(exe + kDrainPins[i - 1].at, got, sizeof got);
+    Note("difficulty: moving tiles: the destroy's render fence is not the reviewed code; releases do not wait for a drained render queue "
+         "(%s; the slot holds 0x%llX in %s, exe 0x%llX; pin exe+0x%X reads %02X %02X %02X %02X %02X %02X %02X %02X)",
+         exe == 0 ? "no exe" : pin ? "a pin" : "the destroy's slot", (unsigned long long)slot, where, (unsigned long long)exe,
+         pin ? kDrainPins[i - 1].at : 0u, got[0], got[1], got[2], got[3], got[4], got[5], got[6], got[7]);
+    return 0;
 }
 
 /* 1 when a fence posted now is served at once (no render thread, or it is in the game's buffer with nothing waiting
