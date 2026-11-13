@@ -411,6 +411,11 @@ On a complex mission the mod's density guards apply:
   is a nearly full ray queue. The AI job gate for new spawns rises from 448 to 1024.
 - Mission locations' pickups, markers and samples spawn when a player comes within 600 m.
 
+On a world larger than 2048 m, the sun's last shadow slice stays dynamic, so shadows are sharp to 80 m from the
+camera. The game's static last slice would cover the whole 16 km map at 16 to 32 m a texel, and shadows would end at
+19 m (shadow quality low) or 56 m (high). A 2048 m mission keeps the game's slice. Log:
+`the sun's last slice stays dynamic`.
+
 The mod also keeps a complex level's destruction records, render version tables, tree extents and navmesh boundary
 requests within what the game holds. On a normal mission and on the ship none of these density and complex-level
 guards acts, and the difficulty rows stay the game's.
