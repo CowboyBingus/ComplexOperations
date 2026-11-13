@@ -4740,6 +4740,22 @@ static void HiveLordNote(uint64_t b)
     Note("difficulty: extra large maps: Hive Lord graph past 255 regions on a normal level: %u nodes with label 0", first);
 }
 
+static uint8_t* g_placeRegions[8];
+static volatile LONG g_placeJobsIn; /* WorldPlaceJob calls under way: their note reads the region after the job's done flag */
+static struct { int pending; DWORD thread; } g_placeFree;
+/* The regions once the op that used them has returned: its merge (0xF35030) copies every record out by value and the
+ * job structs live in the op's arena, so nothing points into them. A later 0x2B (another record, the next level)
+ * makes them again. Called on the thread that ran the op, between dispatcher calls. */
+static void WorldPlaceRegionsFree(void)
+{
+    if (!g_placeFree.pending || g_placeFree.thread != GetCurrentThreadId() || g_placeJobsIn != 0) return;
+    int freed = 0;
+    for (int k = 0; k < 8; k++)
+        if (g_placeRegions[k] != NULL) { VirtualFree(g_placeRegions[k], 0, MEM_RELEASE); g_placeRegions[k] = NULL; freed++; }
+    g_placeFree.pending = 0;
+    if (freed) Note("difficulty: extra large maps: op 0x2B's %d job regions given back after its merge (%d MiB committed)", freed, freed * 128);
+}
+
 static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
 {
     FpsLiftStep(records, index, (uint32_t)d);
@@ -4961,6 +4977,12 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
         uint32_t now = at;
         if (!SafeRead(index, &now, 4) && now != at) TerrainStamps(records, (uint32_t)d, at, b, g, h, block);
     }
+    if (op == 0x2B && g_world.current > 1.0f)
+    {
+        uint32_t now = at;
+        if (!SafeRead(index, &now, 4) && now != at) { g_placeFree.pending = 1; g_placeFree.thread = GetCurrentThreadId(); }
+    }
+    if (op != 0x2B || g_placeFree.pending) WorldPlaceRegionsFree();
     TerrainDiagAfter(records, index, diagAt, diagOp);
     if (mergeSet) *(volatile uint32_t*)(uintptr_t)(mergeSettings + 0x2C) = mergeSize;
     if (mergeTiles != 0) *(volatile uint32_t*)mergeTiles = mergeT;
@@ -5127,7 +5149,16 @@ static const char kPlaceJobPin[] = "48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18
 typedef uint64_t (*WorldJobFn)(uint64_t, uint64_t, uint64_t, uint64_t);
 static WorldJobFn g_placeJob;
 static volatile LONG g_stampTileRun; /* TerrainStamps' tile op 0x2B is running: no per-job line (load time; the planning note has the total) */
+static uint64_t WorldPlaceJobRun(uint64_t a, uint64_t b, uint64_t c, uint64_t job);
 static uint64_t WorldPlaceJob(uint64_t a, uint64_t b, uint64_t c, uint64_t job)
+{
+    InterlockedIncrement(&g_placeJobsIn);
+    uint64_t r = WorldPlaceJobRun(a, b, c, job);
+    InterlockedDecrement(&g_placeJobsIn);
+    return r;
+}
+
+static uint64_t WorldPlaceJobRun(uint64_t a, uint64_t b, uint64_t c, uint64_t job)
 {
     if (job == 0) return g_placeJob(a, b, c, job); /* every level: a vanilla map gives the numbers to compare with */
     const float current = g_world.current; /* before the job runs: level init waits for the old job (co_drain.c) */
@@ -5144,7 +5175,7 @@ static uint64_t WorldPlaceJob(uint64_t a, uint64_t b, uint64_t c, uint64_t job)
      * equal ranges, so the region is picked by the range's start. */
     if (current > 1.0f && items != 0)
     {
-        static uint8_t* regions[8];
+        uint8_t** regions = g_placeRegions;
         uint32_t slot = (uint32_t)((uint64_t)range[0] * 8u / items);
         if (slot > 7) slot = 7;
         if (regions[slot] == NULL)
