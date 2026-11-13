@@ -355,4 +355,5 @@ int CoXlTestCoarseFree(int k) { return g_coarse.slotOf[k] < 0 && g_coarse.slots[
 /* The coarse compare on (no reference), its texel table checked against the exe as CcOn does; then one image. */
 int CoXlTestCompareOn(void) { g_cc.on = 1; g_cc.reference[0] = 0; return CcTable(); }
 void CoXlTestCompareImage(const char* label, uintptr_t descriptor) { CcDescriptor(label, descriptor); }
+void CoXlTestComparePass(uint32_t op, uintptr_t level) { g_worldLevel = level; CcPass(op); g_worldLevel = 0; }
 #endif

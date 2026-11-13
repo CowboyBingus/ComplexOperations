@@ -886,14 +886,13 @@ static void TdCollect(void)
  * A relative folder is in the mod's own folder: the sandbox shows the game only its own session's logs and the mods.
  *   after-40-<k>  the merge's heights after SmoothHeightmap: CaptureIntermediateHeightmapStart (0x5B) runs right after
  *                 0x40 and its finalize (0x5C, first of the level) leaves the readbacks at lg + 0x18 k
- *   minimap-<id>  after CaptureMinimapTexture (0x56, previews): the ten targets 0x1004DE0 binds (0x1004F54), read back
+ *   minimap-heights, minimap-water  after CaptureMinimapTexture (0x56, previews): the preview record's CPU copies
  *   final-heights after CleanupTerrainMerge (0x66, missions): the scatter heights lg+0xD8 the level keeps */
 static int CoarseBatchNow(void); /* difficulty_world_terrain.c */
 static struct
 {
     int on, table; wchar_t reference[MAX_PATH];
-    SRWLOCK lock; LONG level; int captured; DWORD thread;
-    struct { uint32_t id, name; ULONGLONG since; } pending[12]; int pendingCount;
+    LONG level; int captured;
 } g_cc = {-1};
 
 /* The sample sizes are the exe's: with another table every image is refused, not read at a guessed size. */
@@ -998,31 +997,6 @@ static void CcDescriptor(const char* label, uintptr_t descriptor)
     VirtualFree(copy, 0, MEM_RELEASE);
 }
 
-static void CcUse(void* label, const CoReadback* readback) { CcDescriptor(label, (uintptr_t)readback); }
-
-/* Only on the thread that requested (op 0x56 runs on the main thread, flag 2): the readback array grows there. */
-static void CcCollect(void)
-{
-    if (g_cc.on <= 0 || g_cc.pendingCount == 0 || GetCurrentThreadId() != g_cc.thread) return;
-    AcquireSRWLockExclusive(&g_cc.lock);
-    uint64_t table = TdRenderTable(), ready = 0, get = 0, release = 0;
-    if (table != 0 && !SafeRead(table + 0x1D0, &ready, 8) && !SafeRead(table + 0x1D8, &get, 8) && !SafeRead(table + 0x1E0, &release, 8) && ready && get &&
-        release)
-        for (int k = 0; k < g_cc.pendingCount;)
-        {
-            int done = 0;
-            char label[32]; snprintf(label, sizeof label, "minimap-%08X", g_cc.pending[k].name);
-            if (((TdReadyFn)(uintptr_t)ready)(g_cc.pending[k].id))
-            {
-                co_compare_take(g_cc.pending[k].id, (CoReadbackGet)(uintptr_t)get, (CoReadbackFree)(uintptr_t)release, CcUse, label);
-                done = 1;
-            }
-            else if (GetTickCount64() - g_cc.pending[k].since > 20000) { Note("coarse compare: readback %s never came", label); done = 1; }
-            if (done) g_cc.pending[k] = g_cc.pending[--g_cc.pendingCount]; else k++;
-        }
-    ReleaseSRWLockExclusive(&g_cc.lock);
-}
-
 /* A pass whose index moved on. */
 static void CcPass(uint32_t op)
 {
@@ -1043,29 +1017,13 @@ static void CcPass(uint32_t op)
     else if (op == 0x66 && gen != 0) Note("coarse compare: preview final-heights: none (a preview's 0x66 reads no heights back)");
     if (op == 0x56)
     {
-        /* The names are bound only to the capture's own render (0x1004F54 -> exe 0x31E070 -> 0x10F4C0, a per-call set),
-         * never in the renderer's name maps that +0x158 searches. The targets themselves are the preview record's (R =
-         * settings+0x48), made once by 0x1003330 through +0x170 (exe 0x31AF50): type 1, so +0x1A8 reads them as they are. */
-        static const uint32_t names[10] = {0x581D62D2u, 0xE94F447Cu, 0xCDE78DD2u, 0x3B7981ACu, 0xE6FEBF61u, 0x298B674Cu, 0x8EBBF7D9u, 0x53F40E98u,
-            0x60370CF1u, 0x3597C022u};
-        static const uint16_t at[10] = {0x4DA0, 0x4DA8, 0x4D98, 0x4DB0, 0x4DB8, 0x4DC0, 0x4DC8, 0x4DD0, 0x4DD8, 0x4DE0};
-        uint64_t table = TdRenderTable(), request = 0, record = 0;
-        if (table == 0 || SafeRead(table + 0x1A8, &request, 8) || !request) return;
+        /* The CPU copies the preview record R (settings+0x48) keeps, no render request: requesting a readback of the
+         * ten minimap targets stopped the render thread (exe+0x6D0296, the copy's state lookup). R+0x4DE8 is op 0x62's
+         * readback of R+0x4DA0's 64 px mip (0xF5BCEB), R+0x4E08 op 0x0B's of the water (0xF6CCFE); 0x1003C00 frees both. */
+        uint64_t record = 0;
         if (g_worldLevel == 0 || SafeRead(g_worldLevel + 0x2D68, &record, 8) || record < 0x10000) { Note("coarse compare: no preview record at 0x56"); return; }
-        AcquireSRWLockExclusive(&g_cc.lock);
-        g_cc.thread = GetCurrentThreadId();
-        for (int i = 0; i < 10 && g_cc.pendingCount < 12; i++)
-        {
-            uint64_t target = 0; uint8_t type = 0; uint32_t size[2] = {0};
-            if (SafeRead(record + at[i], &target, 8) || target < 0x10000 || SafeRead(target + 3, &type, 1) || SafeRead(target + 0x14, size, 8) || type != 1 ||
-                size[0] < 1 || size[1] < 1 || size[0] > 16384 || size[1] > 16384)
-            { Note("coarse compare: %s minimap-%08X: R+0x%X is not a render target (type %u)", CcPipeline(), names[i], at[i], type); continue; }
-            uint32_t id = ((TdRequestFn)(uintptr_t)request)(target);
-            if (id == 0xFFFFFFFFu) { Note("coarse compare: %s minimap-%08X: no readback", CcPipeline(), names[i]); continue; }
-            g_cc.pending[g_cc.pendingCount].id = id; g_cc.pending[g_cc.pendingCount].name = names[i];
-            g_cc.pending[g_cc.pendingCount].since = GetTickCount64(); g_cc.pendingCount++;
-        }
-        ReleaseSRWLockExclusive(&g_cc.lock);
+        CcDescriptor("minimap-heights", (uintptr_t)record + 0x4DE8);
+        CcDescriptor("minimap-water", (uintptr_t)record + 0x4E08);
     }
 }
 
@@ -1598,7 +1556,6 @@ static void TerrainDiagBefore(uint64_t records, uint64_t index, uint32_t end, ui
     int diag = TerrainDiagOn();
     if ((!diag && !CcOn()) || g_worldLevel == 0) return;
     if (SafeRead(index, at, 4) || SafeRead(records + (uint64_t)*at * 0x19B0u, op, 4)) { *at = 0xFFFFFFFFu; return; }
-    CcCollect();
     if (!diag) return;
     AcquireSRWLockExclusive(&g_td.lock);
     if (g_td.level != g_world.levels) { if (g_td.level >= 0 && !g_td.reported) TdReport(); TdLevelReset(); }
@@ -1738,7 +1695,6 @@ static void TerrainDiagTilePlan(uintptr_t block, double extent)
 /* Every game frame (packages.c): collect readbacks, count frames, write the report once generation is over. */
 static void TerrainDiagTick(void)
 {
-    CcCollect();
     if (g_td.mode <= 0) return;
     if (g_tdScatter != NULL)
     {

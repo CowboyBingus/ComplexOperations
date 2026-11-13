@@ -1,6 +1,6 @@
 /* The coarse terrain compare (research): a readback is read at the exe's size for its format and an unknown format is
- * refused, two images are compared bit for bit, and a readback's data is freed once it was used. The texel table below
- * is the live exe's at 0x1658990, formats 0..0x1A. */
+ * refused, two images are compared bit for bit, and a preview's minimap pass reads the record's own CPU copies. The
+ * texel table below is the live exe's at 0x1658990, formats 0..0x1A. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +12,7 @@
 
 int CoXlTestCompareOn(void);
 void CoXlTestCompareImage(const char* label, uintptr_t descriptor);
+void CoXlTestComparePass(uint32_t op, uintptr_t level);
 
 static int g_failed;
 static const char* g_case;
@@ -19,6 +20,9 @@ static const char* g_case;
 
 static const uint32_t kExeBpt[CO_COMPARE_BPT_COUNT] = {32, 32, 16, 32, 32, 4, 8, 8, 4, 8, 8, 8, 128, 64, 32, 64, 32, 32, 16, 64, 64, 64, 16, 16,
     32, 32, 8};
+
+/* An image as the game holds it: {w, h, format, ?, data} (the render table's +0x1D8 copy, exe 0x31BAB0). */
+typedef struct { uint32_t w, h, format, unused; uint64_t data; } Readback;
 
 static char g_logs[MAX_PATH];
 static HfApi g_api;
@@ -35,13 +39,27 @@ static void Reset(const char* name, const uint32_t* bpt)
     if (bpt != NULL) memcpy(exe + CO_COMPARE_BPT, bpt, CO_COMPARE_BPT_COUNT * 4);
 }
 
-static long long FileBytes(const char* label)
+static long long PipelineBytes(const char* pipeline, const char* label)
 {
     char path[MAX_PATH * 2];
-    snprintf(path, sizeof path, "%s\\coarse-compare-mission-%s.bin", g_logs, label);
+    snprintf(path, sizeof path, "%s\\coarse-compare-%s-%s.bin", g_logs, pipeline, label);
     WIN32_FILE_ATTRIBUTE_DATA data;
     if (!GetFileAttributesExA(path, GetFileExInfoStandard, &data)) return -1;
     return ((long long)data.nFileSizeHigh << 32) | data.nFileSizeLow;
+}
+static long long FileBytes(const char* label) { return PipelineBytes("mission", label); }
+
+/* Every file a case writes, removed before and after: the folder's name repeats from run to run under wine. */
+static void Clean(void)
+{
+    static const char* labels[] = {"mission-f16", "mission-f17", "mission-f1a", "mission-f10", "mission-f00", "mission-f01", "mission-f02", "mission-g16",
+        "preview-minimap-heights", "preview-minimap-water"};
+    for (size_t i = 0; i < sizeof labels / sizeof labels[0]; i++)
+    {
+        char path[MAX_PATH * 2];
+        snprintf(path, sizeof path, "%s\\coarse-compare-%s.bin", g_logs, labels[i]);
+        DeleteFileA(path);
+    }
 }
 
 /* An image of w x h samples of `bytes` each, exactly that large: a read past it would show in the file's size. */
@@ -50,28 +68,10 @@ static void Image(const char* label, uint32_t format, uint32_t w, uint32_t h, ui
     size_t size = (size_t)w * h * (bytes ? bytes : 4);
     uint8_t* data = malloc(size);
     for (size_t i = 0; i < size; i++) data[i] = (uint8_t)(i * 7 + 1);
-    CoReadback r = {w, h, format, 0, (uint64_t)(uintptr_t)data};
+    Readback r = {w, h, format, 0, (uint64_t)(uintptr_t)data};
     CoXlTestCompareImage(label, (uintptr_t)&r);
     free(data);
 }
-
-/* The fake render table's readback: +0x1D8 copies the record out, +0x1E0 frees its data. */
-static struct { CoReadback record; int gets, uses, frees, freedAfterUse; void* freedAt; uint64_t freedData; void* out; } g_rb;
-static void* Get(void* out, uint32_t id)
-{
-    g_rb.gets++;
-    if (id == 0xFFFFu) return NULL;
-    memcpy(out, &g_rb.record, sizeof g_rb.record);
-    g_rb.out = out;
-    return out;
-}
-static void Release(void* readback)
-{
-    CoReadback* r = readback;
-    g_rb.frees++; g_rb.freedAt = readback; g_rb.freedData = r->data; g_rb.freedAfterUse = g_rb.uses > 0;
-    r->data = 0;
-}
-static void Use(void* context, const CoReadback* r) { g_rb.uses++; *(uint32_t*)context = r->format; }
 
 int main(void)
 {
@@ -114,24 +114,10 @@ int main(void)
         CHECK(co_compare_diff(m, n, 2, 2, 0x02, &d) == -1 && d.samples == 0 && d.differ == 0);
     }
 
-    g_case = "a readback is freed after its use";
-    {
-        uint32_t seen = 0;
-        memset(&g_rb, 0, sizeof g_rb);
-        g_rb.record = (CoReadback){4, 4, 0x16, 0, 0x123450000ull};
-        CHECK(co_compare_take(7, Get, Release, Use, &seen) == 1);
-        CHECK(g_rb.gets == 1 && g_rb.uses == 1 && seen == 0x16);
-        CHECK(g_rb.frees == 1 && g_rb.freedAfterUse && g_rb.freedAt == g_rb.out && g_rb.freedData == 0x123450000ull);
-        memset(&g_rb, 0, sizeof g_rb);
-        CHECK(co_compare_take(0xFFFFu, Get, Release, Use, &seen) == 0 && g_rb.uses == 0 && g_rb.frees == 0);
-        memset(&g_rb, 0, sizeof g_rb);
-        g_rb.record = (CoReadback){4, 4, 0x16, 0, 0};
-        CHECK(co_compare_take(8, Get, Release, Use, &seen) == 1 && g_rb.uses == 1 && g_rb.frees == 0); /* no data, nothing to free */
-    }
-
     DWORD n = GetTempPathA(sizeof g_logs - 32, g_logs);
     snprintf(g_logs + n, sizeof g_logs - n, "co-compare-test-%lu", (unsigned long)GetCurrentProcessId());
     CreateDirectoryA(g_logs, NULL);
+    Clean();
 
     Reset("each format read at its size", kExeBpt);
     CHECK(CoXlTestCompareOn() == 1);
@@ -162,13 +148,37 @@ int main(void)
     Image("g16", 0x16, 8, 4, 2);
     CHECK(FileBytes("g16") == -1 && fake_host_logged("g16: 8 x 4, format 0x16: no known sample size, not read"));
 
-    static const char* labels[] = {"f16", "f17", "f1a", "f10", "f00", "f01"};
-    for (size_t i = 0; i < sizeof labels / sizeof labels[0]; i++)
+    Reset("a preview's minimap: the record's CPU copies after 0x56", kExeBpt);
+    CHECK(CoXlTestCompareOn() == 1);
     {
-        char path[MAX_PATH * 2];
-        snprintf(path, sizeof path, "%s\\coarse-compare-mission-%s.bin", g_logs, labels[i]);
-        DeleteFileA(path);
+        uint8_t* level = calloc(1, 0x3000);
+        uint8_t* record = calloc(1, 0x5000);
+        uint16_t* heights = malloc(64 * 64 * 2);
+        uint16_t* water = malloc(128 * 128 * 2);
+        for (int i = 0; i < 64 * 64; i++) heights[i] = (uint16_t)(i * 3);
+        for (int i = 0; i < 128 * 128; i++) water[i] = (uint16_t)(i ^ 0x5A5A);
+        Readback h = {64, 64, 0x16, 0, (uint64_t)(uintptr_t)heights}, w = {128, 128, 0x16, 0, (uint64_t)(uintptr_t)water};
+        memcpy(record + 0x4DE8, &h, sizeof h);
+        memcpy(record + 0x4E08, &w, sizeof w);
+        uint64_t r = (uint64_t)(uintptr_t)record;
+        level[0x2D48] = 1; /* a preview */
+        memcpy(level + 0x2D68, &r, 8);
+        CoXlTestComparePass(0x56, (uintptr_t)level);
+        CHECK(PipelineBytes("preview", "minimap-heights") == 64 * 64 * 2 && PipelineBytes("preview", "minimap-water") == 128 * 128 * 2);
+        CHECK(fake_host_logged("preview minimap-heights (batch") && fake_host_logged(": 64 x 64, 2 B a sample (format 0x16)"));
+        CHECK(fake_host_logged(": 128 x 128, 2 B a sample (format 0x16)"));
+
+        memset(level + 0x2D68, 0, 8);
+        CoXlTestComparePass(0x56, (uintptr_t)level);
+        CHECK(fake_host_logged("coarse compare: no preview record at 0x56"));
+        memcpy(level + 0x2D68, &r, 8);
+        memset(record + 0x4E08, 0, sizeof w);
+        CoXlTestComparePass(0x56, (uintptr_t)level);
+        CHECK(fake_host_logged("coarse compare: preview minimap-water: no image"));
+        free(level); free(record); free(heights); free(water);
     }
+
+    Clean();
     RemoveDirectoryA(g_logs);
 
     if (g_failed) { printf("compare: %d checks failed\n", g_failed); return 1; }

@@ -46,13 +46,3 @@ int co_compare_diff(const uint8_t* a, const uint8_t* b, uint32_t w, uint32_t h, 
     }
     return 0;
 }
-
-int co_compare_take(uint32_t id, CoReadbackGet get, CoReadbackFree release, CoReadbackUse use, void* context)
-{
-    uint8_t out[64] = {0};
-    CoReadback* r = get(out, id);
-    if (r == NULL) return 0;
-    use(context, r);
-    if (r->data != 0) release(r);
-    return 1;
-}
