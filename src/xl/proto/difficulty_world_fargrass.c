@@ -115,6 +115,7 @@ static int FgEye(float* xy)
 
 static int FgBaked(const FgMap* m, int i, int j) { return (m->baked[(j * FG_N + i) >> 3] >> ((j * FG_N + i) & 7)) & 1; }
 static void FgMark(FgMap* m, int i, int j) { m->baked[(j * FG_N + i) >> 3] |= (uint8_t)(1u << ((j * FG_N + i) & 7)); }
+static void FgUnmark(FgMap* m, int i, int j) { m->baked[(j * FG_N + i) >> 3] &= (uint8_t)~(1u << ((j * FG_N + i) & 7)); }
 
 /* View (i, j): i east from the world's west edge, j north from its south edge. */
 static void FgCentre(int i, int j, float* c)
@@ -313,7 +314,8 @@ static void FgFree(void)
     g_fg.state = FG_IDLE; g_fg.vp = g_fg.camera = g_fg.env = 0; g_fg.unit = 0;
     memset(&g_fg.map, 0, sizeof g_fg.map);
     memset(&g_fgLinker.pending, 0, sizeof g_fgLinker.pending); g_fgLinker.builder = 0;
-    if (g_fgLinker.dirty && FgLinkerSend(g_fgLinker.game) == NULL) g_fgLinker.dirty = 0; /* the game's own entries back */
+    /* the game's own entries back, only this level's: a level whose op 0x4A gave none has its own upload already */
+    if (g_fgLinker.dirty && (g_fgLinker.level != g_world.levels || FgLinkerSend(g_fgLinker.game) == NULL)) g_fgLinker.dirty = 0;
     g_fg.level = -1; g_fg.off = 0; g_fg.batches = g_fg.baked = 0; g_fg.edited = 0; g_tdScatWaitUs = g_tdScatWaitMaxUs = 0; g_scatBakeOver = 0;
     g_fgFrames.filled = g_fgFrames.at = 0; g_fgFrames.last = 0;
 }
@@ -619,7 +621,13 @@ static void FarGrassTick(uint64_t level)
     }
     if (++g_fg.empty < FG_EMPTY_UPDATES) return;
     FgPublish(0);
-    if (g_fg.state == FG_VIEW_WAIT && g_scatBakeOver != 0 && !g_fg.off) { g_fg.off = 1; g_fg.next = g_fg.count; } /* its views so far are built */
+    /* a view over the node limit had z-0 boxes: its texels stay as they are, the views before it are built */
+    if (g_fg.state == FG_VIEW_WAIT && g_scatBakeOver != 0 && !g_fg.off)
+    {
+        const int last = g_fg.list[g_fg.next - 1];
+        FgUnmark(&g_fgLinker.pending, last % FG_N, last / FG_N);
+        g_fg.off = 1; g_fg.next = g_fg.count;
+    }
     if (g_fg.state == FG_VIEW_WAIT) { g_fg.state = g_fg.next >= g_fg.count ? FG_BUILD : FG_VIEWS; return; }
     FgEnd(0, NULL);
     FgBatchNote();

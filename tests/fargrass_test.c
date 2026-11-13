@@ -462,6 +462,23 @@ int main(void)
 
     Start("crater cuts: no upload without the level's own linker (not read, or not slot indices)");
     Kept();
+    LinkerRecord(0);
+    CoXlTestFgObserver(1, 100.0f, -300.0f);
+    for (int k = 0; k < 4000 && g_saw.generates < 1; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+    for (int k = 0; k < 20; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+    CHECK(g_saw.generates == 1 && g_linkerSends == 1);
+    /* the next level's op 0x4A gives no slot indices: its own upload stands, the last level's entries are not sent */
+    CoXlTestMission((uintptr_t)g_level, 1);
+    LinkerRecord(1);
+    CoXlTestFgKeep((uint64_t)(uintptr_t)g_rec4B, 0x4B);
+    CoXlTestFgKeep((uint64_t)(uintptr_t)g_rec67, 0x67);
+    CHECK(g_linkerSends == 1);
+    CoXlTestWorldShip();
+    CHECK(g_linkerSends == 1);
+    CoXlTestFgObserver(0, 0.0f, 0.0f);
+
+    Start("crater cuts: a level whose op 0x4A gave no slot indices gets no upload");
+    Kept();
     LinkerRecord(1);
     CoXlTestFgObserver(1, 100.0f, -300.0f);
     for (int k = 0; k < 4000 && g_saw.generates < 1; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
@@ -472,12 +489,18 @@ int main(void)
 
     Start("a bake view's layer over the node limit: the views so far are built, then no more bakes this level");
     Kept();
+    LinkerRecord(0);
     CoXlTestFgObserver(1, 100.0f, -300.0f);
     for (int k = 0; k < 40 && !CoXlTestFgBusy(); k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
     CHECK(CoXlTestFgBusy());
     CoXlTestScatBakeOver(1);
     for (int k = 0; k < 400 && !(g_saw.generates == 1 && !CoXlTestFgBusy()); k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
     CHECK(g_saw.generates == 1 && CoXlTestFgBaked() == 1);
+    {
+        int kept = 0;
+        for (int j = 0; j < 64; j++) for (int i = 0; i < 64; i++) kept += LinkerKeeps(i, j);
+        CHECK(g_linkerSends == 1 && kept == 4096); /* the over-limit view's texels are kept too */
+    }
     CoXlTestFgObserver(1, 4000.0f, 4000.0f);
     for (int k = 0; k < 400; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
     CHECK(g_saw.generates == 1 && g_saw.vps == 1);
