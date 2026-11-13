@@ -313,6 +313,29 @@ static void WorldStreamPlayersLocked(void)
     }
 }
 
+/* 1 with *distance when (x, y) is within `radius` of a player, or of the start area before one has landed. Read without
+ * the lock from spawn threads: a torn position only moves a probe line in or out. */
+static int WorldStreamNearPlayer(float x, float y, float radius, float* distance)
+{
+    int count = g_stream.playerCount;
+    if (count > EVT_MAX_PLAYERS + 1) count = EVT_MAX_PLAYERS + 1;
+    float best = 3.4e38f;
+    for (int p = 0; p < count; p++)
+    {
+        float dx = x - g_streamPlayerAt[p][0], dy = y - g_streamPlayerAt[p][1];
+        if (dx * dx + dy * dy < best) best = dx * dx + dy * dy;
+    }
+    if (count <= 0)
+    {
+        if (!g_stream.captured || g_stream.levels != g_world.levels) return 0;
+        float dx = x - g_streamStart[0], dy = y - g_streamStart[1];
+        best = dx * dx + dy * dy;
+    }
+    if (best > radius * radius) return 0;
+    *distance = sqrtf(best);
+    return 1;
+}
+
 /* The first player's x, y (for the terrain diagnostics); 0 without one. */
 static int WorldStreamFirstPlayer(float* xy)
 {

@@ -489,6 +489,13 @@ uint64_t CoXlTestLayerField(uint64_t unit, uint64_t field) { return NearLayerFie
 int CoXlTestLayerHeight(uint64_t desc, float x, float y, float* h) { return NearLayerHeight(desc, x, y, h); }
 int CoXlTestLayerWhy(uint64_t unit, uint64_t field, int* slot) { int why; NearLayerFieldWhy(unit, field, slot, &why); return why; }
 float CoXlTestTraceGridAt(int slot, float x, float y) { return NearTraceGridAt(slot, x, y); }
+void CoXlTestProbePlayer(int count, float x, float y)
+{
+    g_stream.playerCount = count; g_streamPlayerAt[0][0] = x; g_streamPlayerAt[0][1] = y;
+    g_stream.captured = 1; g_stream.levels = g_world.levels; g_streamStart[0] = x; g_streamStart[1] = y;
+}
+void CoXlTestProbe(char kind, float x, float y, float used, int why) { NearLayerTrace(kind, 0, x, y, 0.0f, why == 0, why, used); }
+void CoXlTestProbeCounts(long* reads, long* off, long* written) { *reads = g_layerProbe.reads; *off = g_layerProbe.off; *written = g_layerProbe.written; }
 void CoXlTestStreamSetup(uintptr_t game, uint8_t* context, uint8_t* array, uint32_t count)
 {
     AcquireSRWLockExclusive(&g_streamLock);

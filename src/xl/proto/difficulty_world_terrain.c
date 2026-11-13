@@ -6275,6 +6275,7 @@ static void NearLayerCompose(NearLayerGrid* g)
     memcpy(g->desc[g->at], mine, sizeof mine);
 }
 
+static void NearLayerProbeNote(const char* when);
 /* A tile came (in = 1, its slot's grid laid out and filled for it) or went (in = 0, its slot's grid out of use): every
  * other live tile's grid is filled again where the tile's span overlaps it. Game thread. */
 static void NearLayerTileChange(int slot, int in, float cx, float cy)
@@ -6306,6 +6307,7 @@ static void NearLayerTileChange(int slot, int in, float cx, float cy)
     Note("difficulty: near terrain: level layers: the tile at (%.0f, %.0f) %s; %s, %d other grid(s) filled again where it %s", (double)cx, (double)cy,
         in ? "is in" : "went", in ? "its 1 m grid of the hidden square and 768 m around it made from the ground as drawn" : "its grid out of use", refilled,
         in ? "lies" : "lay");
+    NearLayerProbeNote(in ? "a tile came in" : "a tile went");
 }
 
 /* The level's layer heightfield: its extent is the world's. */
@@ -6432,11 +6434,69 @@ static float NearTraceGridAt(int k, float x, float y)
     return g->data[(size_t)(NEAR_LAYER_N - 1 - (uint32_t)r) * NEAR_LAYER_N + (uint32_t)c];
 }
 
+/* Every build: the layer height reads within NEAR_PROBE_RADIUS of a player (of the start area before one has landed) in
+ * the mod's log. Each read more than NEAR_PROBE_OFF off the ground as drawn is written (the first 150, then one in 64),
+ * one in NEAR_PROBE_EVERY of the rest, at most NEAR_PROBE_LINES a level; the counts at each tile change. The code shows
+ * no read near the drop point that leaves the drawn ground, yet stamps there floated: a normal session shows the values. */
+#define NEAR_PROBE_RADIUS 300.0f
+#define NEAR_PROBE_OFF 0.5f
+#define NEAR_PROBE_EVERY 512
+#define NEAR_PROBE_LINES 400
+#define NEAR_PROBE_PLAIN_LINES 100
+static struct { volatile LONG level, lines, plainLines, written, reads, off, why[8]; float worst; } g_layerProbe = {.level = -1};
+static const char* const kNearWhy[8] = {"ok", "no descriptor", "another level", "not the level's heightfield", "no stamp place", "no tile's grid",
+    "busy", "off the tiles"};
+static int WorldStreamNearPlayer(float x, float y, float radius, float* distance); /* difficulty_stream.c */
+
+static void NearLayerProbeNote(const char* when)
+{
+    if (g_layerProbe.level != g_world.levels || g_layerProbe.reads == 0) return;
+    char by[256]; int len = 0;
+    for (int k = 0; k < 8; k++)
+        if (g_layerProbe.why[k]) len += snprintf(by + len, sizeof by - len, "%s%s %ld", len ? ", " : "", kNearWhy[k], (long)g_layerProbe.why[k]);
+    Note("difficulty: near terrain: layer probe (%s): %ld reads within %.0f m of a player, %ld of them over %.1f m off the ground as drawn (worst %.2f m); %s; %ld of %d lines written",
+        when, (long)g_layerProbe.reads, (double)NEAR_PROBE_RADIUS, (long)g_layerProbe.off, (double)NEAR_PROBE_OFF, (double)g_layerProbe.worst, by,
+        (long)g_layerProbe.written, NEAR_PROBE_LINES);
+}
+
+static void NearLayerProbe(char kind, uint32_t caller, float x, float y, float z, int result, int why, float used)
+{
+    float distance;
+    if (!WorldStreamNearPlayer(x, y, NEAR_PROBE_RADIUS, &distance)) return;
+    LONG level = g_layerProbe.level, now = g_world.levels;
+    if (level != now && InterlockedCompareExchange(&g_layerProbe.level, now, level) == level)
+    {
+        g_layerProbe.lines = g_layerProbe.plainLines = g_layerProbe.written = g_layerProbe.reads = g_layerProbe.off = 0;
+        memset((void*)g_layerProbe.why, 0, sizeof g_layerProbe.why);
+        g_layerProbe.worst = 0.0f;
+    }
+    float drawn = NearLayerGround(x, y), kept = NearTraceLevelAt(x, y), d = fabsf(used - drawn);
+    LONG n = InterlockedIncrement(&g_layerProbe.reads);
+    InterlockedIncrement(&g_layerProbe.why[why & 7]);
+    int off = d > NEAR_PROBE_OFF, write;
+    if (off)
+    {
+        LONG k = InterlockedIncrement(&g_layerProbe.off);
+        if (d > g_layerProbe.worst) g_layerProbe.worst = d;
+        write = k <= 150 || k % 64 == 0;
+    }
+    else write = n % NEAR_PROBE_EVERY == 1 && InterlockedIncrement(&g_layerProbe.plainLines) <= NEAR_PROBE_PLAIN_LINES;
+    if (write && InterlockedIncrement(&g_layerProbe.lines) <= NEAR_PROBE_LINES)
+    {
+        InterlockedIncrement(&g_layerProbe.written);
+        Note("difficulty: near terrain: layer probe: %s %c 0x%X at (%.1f, %.1f), %.0f m from a player: used %.2f, drawn %.2f, level %.2f, unit z %.2f, source %d (%s), near state %d%s",
+            off ? "OFF" : "ok", kind, caller, (double)x, (double)y, (double)distance, (double)used, (double)drawn, (double)kept, (double)z, result,
+            kNearWhy[why & 7], (int)g_near.state, g_moveBuilding ? ", a tile builds" : "");
+    }
+    if (n == 1000 || n == 100000) NearLayerProbeNote(n == 1000 ? "1000 reads" : "100000 reads");
+}
+
 /* kind 'S': a placed-unit read (0xDFA60), result the grid's slot or -1, z the stamp unit's pose z (+0x58), used the height
  * its units get at the stamp's centre; kind 'H': a sampler read (0xD5B10) from caller (exe RVA), result 1 when the drawn
  * ground answered, used the height returned. why: NEAR_WHY_*. */
 static void NearLayerTrace(char kind, uint32_t caller, float x, float y, float z, int result, int why, float used)
 {
+    NearLayerProbe(kind, caller, x, y, z, result, why, used);
     if (g_layerTrace.on < 0)
     {
         char t[4] = "";
