@@ -324,6 +324,14 @@ int CoXlTestScatterUpdate(LONG op, LONG record, uint8_t* view)
     TdScatterUpdate(NULL, view, 0, NULL, NULL, NULL, NULL, NULL);
     return g_scatterTestCalled;
 }
+/* The moving tile's merge window: 0 open (a build kicks its merge), 1 close (its teardown), 2 closed `agoMs` ago, 3 reset. */
+void CoXlTestScatterMerge(int action, LONG64 agoMs)
+{
+    if (action == 0) TdScatterMergeOpen();
+    else if (action == 1) TdScatterMergeClose();
+    else if (action == 2) { TdScatterMergeClose(); InterlockedExchange64(&g_tdScatMergeClosed, (LONG64)GetTickCount64() - agoMs); }
+    else TdScatterMergeReset();
+}
 /* The same with the op and record as the last dispatch, the ship or a level init left them. */
 int CoXlTestScatterUpdateAsIs(uint8_t* view)
 {

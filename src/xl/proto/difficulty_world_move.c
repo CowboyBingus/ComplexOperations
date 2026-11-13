@@ -452,6 +452,7 @@ static void MoveTeardown(void)
 {
     if (!g_move.merge) return;
     g_move.merge = 0;
+    TdScatterMergeClose(); /* its camera units go below: the scatter cut ends after a grace */
     uintptr_t gen = 0, R = 0, api = 0, t8 = 0, t10 = 0;
     uint64_t world = MoveWorld(), env = 0;
     memcpy(&env, g_move.ctx + 0x98, 8);
@@ -990,6 +991,7 @@ static void MoveTick(uint64_t level)
     if (g_move.state == MV_KICK)
     {
         g_move.merge = 1; /* from here the merge's resources may exist */
+        TdScatterMergeOpen(); /* its world-size views stay out of the scatter update (difficulty_world_diag.c) */
         int r = MoveRunRecord();
         if (r < 0) { MoveFail("0x37 faulted"); return; }
         if (r == 0) { if (++g_move.waits > 60) MoveFail("0x37 did not finish"); return; }
