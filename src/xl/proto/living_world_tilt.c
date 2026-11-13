@@ -1,27 +1,24 @@
 /* Diagnostic, every build (issue G, terminids rolled on flat ground): what the rotation component's ground alignment
  * reads. Rotation 0x620B60 (mgr [game+0x33264A0]: +0x2C count, +0x38 hash, +0x50 instances, +0x58 records 0x298, +0x60
  * records 0xC with +8 enabled) sets each unit's rotation from R+0x54's mode: 2/3 bone rays, 4 four corner rays, 1 the
- * ground record's normal. A ray slot's distance turns negative when the level terrain [G+0x8758A0] alone, cast from
- * z 5000 m down (0x175CBD0 -> exe 0x799FF0), is above the slot's origin (0x620810). Twice a second; at most
- * LW_TILT_LINES unit lines a level, one per unit per 20 s, and a summary with the 30 s notes. */
+ * ground record's normal. A unit is off its ground by the angle between its up and the drawn ground's normal. Twice a
+ * second; at most LW_TILT_LINES unit lines a level, one per unit per 20 s, and a summary with the 30 s notes. */
 #define LW_TILT_ROT 0x33264A0u
 #define LW_TILT_UNITS 0x3326508u     /* unit component: hash +0x40, records +0x68 (0x308: +0x2D0 quaternion, +0x2E0 position) */
 #define LW_TILT_PHYS 0x3326328u      /* physics API: +0x68 ray (world, origin, dir, length, filter, hits 0x2C each, max) */
-#define LW_TILT_COARSE 0x13CA4F0u    /* the level terrain alone, from z + 500 m down 1000 m */
 #define LW_TILT_LINES 48
 #define LW_TILT_SEEN 64
-#define LW_TILT_EXCESS 12.0f         /* degrees of tilt past the ground's under it that make a line */
+#define LW_TILT_EXCESS 12.0f         /* degrees off the ground's normal that make a line */
 
 static struct
 {
     LONG level; ULONGLONG at; int lines;
-    uint32_t scans, units, modes[8], tilted, worstId, worstMode; float worst;
+    uint32_t scans, units, modes[8], tilted, off30, off30Miss, worstId, worstMode; float worst;
     uint32_t longs, longOver, longId; float longWorst; /* corner rays over 3 m apart (chargers' size) on a detailed tile */
     uint32_t seenId[LW_TILT_SEEN]; ULONGLONG seenAt[LW_TILT_SEEN];
 } g_lwTilt = {.level = -1};
 
 typedef uint32_t (*LwTiltRayFn)(uint32_t world, const float* origin, const float* dir, float length, uint32_t filter, void* hits, uint32_t max);
-typedef uint8_t (*LwTiltCoarseFn)(uint64_t unused, const float* p, float* z, uint8_t offset);
 
 /* v rotated by quaternion q (x, y, z, w) */
 static void LwTiltRotate(const float* q, const float* v, float* out)
@@ -34,29 +31,32 @@ static void LwTiltRotate(const float* q, const float* v, float* out)
 
 static float LwTiltDeg(float upZ) { return acosf(upZ > 1.0f ? 1.0f : upZ < -1.0f ? -1.0f : upZ) * 57.29578f; }
 
-/* The ground's own tilt under xy: the drawn ground on a level with moving tiles (1 m either side), else the world
- * ground query's normal. NAN when neither reads. */
-static float LwTiltGround(float x, float y)
+/* The ground's normal under xy: the drawn ground on a level with moving tiles (1 m either side), else the world ground
+ * query's. 0 when neither reads. */
+static int LwTiltGround(float x, float y, float* n)
 {
     int tile;
     if (MoveTilesOn())
     {
-        float e = MoveDrawnGround(x + 1, y, &tile), w = MoveDrawnGround(x - 1, y, &tile), n = MoveDrawnGround(x, y + 1, &tile), s = MoveDrawnGround(x, y - 1, &tile);
-        if (e > -9000.0f && w > -9000.0f && n > -9000.0f && s > -9000.0f)
+        float e = MoveDrawnGround(x + 1, y, &tile), w = MoveDrawnGround(x - 1, y, &tile), no = MoveDrawnGround(x, y + 1, &tile), so = MoveDrawnGround(x, y - 1, &tile);
+        if (e > -9000.0f && w > -9000.0f && no > -9000.0f && so > -9000.0f)
         {
-            float gx = (e - w) / 2.0f, gy = (n - s) / 2.0f;
-            return LwTiltDeg(1.0f / sqrtf(1.0f + gx * gx + gy * gy));
+            float gx = (e - w) / 2.0f, gy = (no - so) / 2.0f, l = sqrtf(1.0f + gx * gx + gy * gy);
+            n[0] = -gx / l; n[1] = -gy / l; n[2] = 1.0f / l;
+            return 1;
         }
     }
     typedef uint8_t (*GroundFn)(uintptr_t world, const float* in, float* outZ, uint8_t reject, float* normal, uint8_t mode);
-    uintptr_t world; float in[3] = {x, y, 0}, z = NAN, nrm[3] = {0, 0, 0};
-    if (!EvpPtr(g_lw.game + 0x346D508u, &world)) return NAN;
-    ((GroundFn)(g_lw.game + 0x13CA380u))(world, in, &z, 0, nrm, 0);
-    return isfinite(z) && nrm[2] > 0.0f ? LwTiltDeg(nrm[2]) : NAN;
+    uintptr_t world; float in[3] = {x, y, 0}, z = NAN;
+    n[0] = n[1] = n[2] = 0;
+    if (!EvpPtr(g_lw.game + 0x346D508u, &world)) return 0;
+    ((GroundFn)(g_lw.game + 0x13CA380u))(world, in, &z, 0, n, 0);
+    return isfinite(z) && n[2] > 0.0f;
 }
 
-/* What lies under one point: the world ray's hits from 4 m over z down 12 m (as the rotation's own rays, filter 0),
- * the drawn ground and the level terrain alone. Written into buf. */
+/* Degrees between two unit vectors. */
+static float LwTiltAngle(const float* a, const float* b) { return LwTiltDeg(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]); }
+
 /* The streamed stamp nearest (x, y) within 32 m that the streamer holds live: its slot, distance and whether the point
  * is inside its footprint (record +0xB0, map metres). -1 when none; a busy lock reads as none. */
 static int LwTiltStamp(float x, float y, float* dist, int* inside)
@@ -81,6 +81,8 @@ static int LwTiltStamp(float x, float y, float* dist, int* inside)
     return best;
 }
 
+/* What lies under one point: the world ray's hits from 4 m over z down 12 m (as the rotation's own rays, filter 0),
+ * and the drawn ground; a hit on the level terrain's body ([mgr+0x18], 0x61FBBA) or near a live stamp says so. */
 static void LwTiltColumn(uintptr_t mgr, float x, float y, float z, char* buf, size_t size)
 {
     uintptr_t phys = 0, fn = 0, settings = 0; uint32_t world = 0, coarseId = 0;
@@ -90,10 +92,8 @@ static void LwTiltColumn(uintptr_t mgr, float x, float y, float z, char* buf, si
     if (EvpPtr(g_lw.game + LW_TILT_PHYS, &phys) && EvpPtr(phys + 0x68, &fn) && fn && EvpPtr(mgr + 8, &settings) && !SafeRead(settings + 0xD4, &world, 4))
         n = ((LwTiltRayFn)fn)(world, origin, down, 12.0f, 0, hits, 8);
     if (n > 8) n = 8;
-    int tile = -1; float drawn = MoveTilesOn() ? MoveDrawnGround(x, y, &tile) : -9999.0f, coarse = NAN;
-    float p[3] = {x, y, z};
-    if (!((LwTiltCoarseFn)(g_lw.game + LW_TILT_COARSE))(0, p, &coarse, 0)) coarse = NAN;
-    int at = snprintf(buf, size, "drawn %.2f (tile %d), level terrain %.2f, %u hits:", (double)drawn, tile, (double)coarse, n);
+    int tile = -1; float drawn = MoveTilesOn() ? MoveDrawnGround(x, y, &tile) : -9999.0f;
+    int at = snprintf(buf, size, "drawn %.2f (tile %d), %u hits:", (double)drawn, tile, n);
     for (uint32_t k = 0; k < n && at > 0 && (size_t)at < size; k++)
     {
         const uint8_t* h = hits + 0x2C * k; float f[7]; uint32_t u[4];
@@ -110,42 +110,55 @@ static void LwTiltColumn(uintptr_t mgr, float x, float y, float z, char* buf, si
     }
 }
 
-/* ---- The fix: a ray that starts under a live tile's ground reads that ground above it --------------------------------
- * The reader 0x620810(mgr, i, rays, request, coarse request) returns a ray slot's distance: R+0x48, the full length,
- * when the ray met nothing; a negative one when the level terrain alone (the coarse request) lies above the ray's start
- * (request + 0x10, 0x40 B each). A heightfield is one-sided, so a corner pushed under the ground misses it and reads a
- * hole, which tilts the unit further: the unit stays rolled (lines with "last 4.00"). Under a live tile the coarse is
- * lowered to -500 m (or raised by a crater), so the game's own check cannot see it; the tile's ground takes its place. */
+/* ---- The fix: a ray that starts under a live tile's ground and misses reads that ground above it ---------------------
+ * The reader 0x620810(mgr, i, rays, request, coarse request) returns R+0x48, the full length, whenever the ray's count
+ * (request + 0x30, records of 0x40 B, start at +0x10) is 0 (0x620933): a hole. A heightfield is one-sided, so a corner
+ * pushed under the ground misses it, reads a hole and tilts the unit further; it stays rolled. On a live tile such a
+ * miss now reads minus its depth, the sign the game gives a hit under its level terrain. Hits stay the game's (craters
+ * are not in the tile's CPU heights). Runs on the rotation's job threads: the tiles are read under g_tilesLock. */
 #define LW_TILT_READ 0x620810u
 typedef float (*LwTiltReadFn)(uintptr_t mgr, uint32_t i, uintptr_t rays, uint32_t request, uint32_t coarse);
 static LwTiltReadFn g_lwTiltRead;
 static volatile LONG g_lwTiltUnder, g_lwTiltReads;
 
-/* The game's rule for a ray that starts under its terrain, with `ground` as the terrain: minus the depth, else d. */
-static float LwTiltUnder(float d, float originZ, float ground) { return ground > originZ ? originZ - ground : d; }
+/* A miss that started under the ground: minus its depth; anything else as the game read it. */
+static float LwTiltUnder(float d, uint32_t count, float originZ, float ground) { return count == 0 && ground > originZ ? originZ - ground : d; }
+
+/* The live tile's ground at (x, y); -9999 outside every live tile or when a writer holds the tiles. */
+static float LwTiltTileGround(float x, float y)
+{
+    float z = -9999.0f;
+    if (!TryAcquireSRWLockShared(&g_tilesLock)) return z;
+    for (int k = 0; k < NEAR_TILES_MAX; k++)
+        if (g_tiles[k].live && g_tiles[k].level == g_world.levels && g_tiles[k].ground.v != NULL &&
+            fabsf(x - g_tiles[k].centre[0]) < NEAR_HIDE / 2 && fabsf(y - g_tiles[k].centre[1]) < NEAR_HIDE / 2)
+        { z = NearGroundAt(&g_tiles[k].ground, x, y); break; }
+    ReleaseSRWLockShared(&g_tilesLock);
+    return z;
+}
 
 static float LwTiltRead(uintptr_t mgr, uint32_t i, uintptr_t rays, uint32_t request, uint32_t coarse)
 {
-    float o[3]; int tile = -1;
-    if (request == 0 || !MoveTilesOn() || SafeRead(rays + 0x40ull * (request - 1) + 0x10, o, sizeof o)) return g_lwTiltRead(mgr, i, rays, request, coarse);
-    float ground = MoveDrawnGround(o[0], o[1], &tile);
-    if (tile < 0 || !(ground > -9000.0f)) return g_lwTiltRead(mgr, i, rays, request, coarse);
-    float d = g_lwTiltRead(mgr, i, rays, request, 0); /* the coarse there is not the ground */
-    g_lwTiltReads++;
-    if (ground > o[2]) g_lwTiltUnder++;
-    return LwTiltUnder(d, o[2], ground);
+    float d = g_lwTiltRead(mgr, i, rays, request, coarse), o[3]; uint32_t count = 1;
+    if (request == 0 || !MoveTilesOn() || SafeRead(rays + 0x40ull * (request - 1) + 0x10, o, sizeof o) ||
+        SafeRead(rays + 0x40ull * (request - 1) + 0x30, &count, 4) || count != 0) return d;
+    float ground = LwTiltTileGround(o[0], o[1]);
+    if (!(ground > -9000.0f)) return d;
+    InterlockedIncrement(&g_lwTiltReads);
+    if (ground > o[2]) InterlockedIncrement(&g_lwTiltUnder);
+    return LwTiltUnder(d, count, o[2], ground);
 }
 
-/* The reader's entry, its request arithmetic, its coarse test (request 0 skips it; coarse z against the start's z at
- * +0x18) and its two callers in the rotation update. */
+/* The reader's entry, its record arithmetic, the count it stores and tests, its full-length default, and its two
+ * callers in the rotation update. */
 static int g_lwTiltDone;
 static void LwInstallTilt(void)
 {
     if (g_lwTiltDone++) return;
     uintptr_t g = g_lw.game;
     if (!ApiCodeMatches(g + LW_TILT_READ, "40 53 55 56 57 48 83 EC 78 0F 29 74 24 60") || !ApiCodeMatches(g + 0x620835u, "41 8D 71 FF 48 C1 E6 06 49 8B D8") ||
-        !ApiCodeMatches(g + 0x6208F7u, "8B 84 24 C0 00 00 00 85 C0 74 31") ||
-        !ApiCodeMatches(g + 0x620914u, "F3 0F 10 4C 1E 18 F3 0F 10 50 08 0F 2F D1 76 0F") ||
+        !ApiCodeMatches(g + 0x6208D4u, "89 44 1E 30") || !ApiCodeMatches(g + 0x6208ECu, "F3 0F 10 45 48") ||
+        !ApiCodeMatches(g + 0x620933u, "83 7C 1E 30 00 76 05 F3 0F 10 47 18") ||
         !ApiCodeMatches(g + 0x6215DDu, "E8 2E F2 FF FF") || !ApiCodeMatches(g + 0x6227A8u, "E8 63 E0 FF FF"))
     { Note("living world: the rotation's ray reader is not the reviewed code; units may stay rolled on detailed tiles"); return; }
     if (LoaderHook("living world: rays under a detailed tile's ground", g + LW_TILT_READ, (void*)LwTiltRead, (void**)&g_lwTiltRead) || g_lwTiltRead == NULL)
@@ -165,15 +178,15 @@ static int LwTiltSeen(uint32_t id, ULONGLONG now)
     return 0;
 }
 
-static void LwTiltLine(uintptr_t mgr, uintptr_t R, uint32_t id, uint32_t mode, const float* q, const float* p, float tilt, float ground)
+static void LwTiltLine(uintptr_t mgr, uintptr_t R, uint32_t id, uint32_t mode, const float* q, const float* p, float tilt, float ground, float off)
 {
     float f[4]; uint32_t hitId = 0;
     SafeRead(R + 0x48, f, 12); SafeRead(R + 0x28C, &hitId, 4);
     float up[3]; const float z1[3] = {0, 0, 1}; LwTiltRotate(q, z1, up);
     char col[512];
     LwTiltColumn(mgr, p[0], p[1], p[2], col, sizeof col);
-    Note("living world: tilt: unit %08X mode %u at (%.1f, %.1f, %.2f): %.0f deg, its ground %.0f deg; up (%.2f, %.2f, %.2f); R+0x48 %.2f, +0x4C %.2f, +0x50 %.2f, +0x28C %08X; under it: %s",
-        id, mode, (double)p[0], (double)p[1], (double)p[2], (double)tilt, (double)ground, (double)up[0], (double)up[1], (double)up[2], (double)f[0], (double)f[1], (double)f[2], hitId, col);
+    Note("living world: tilt: unit %08X mode %u at (%.1f, %.1f, %.2f): %.0f deg, its ground %.0f deg, %.0f deg off its ground; up (%.2f, %.2f, %.2f); R+0x48 %.2f, +0x4C %.2f, +0x50 %.2f, +0x28C %08X; under it: %s",
+        id, mode, (double)p[0], (double)p[1], (double)p[2], (double)tilt, (double)ground, (double)off, (double)up[0], (double)up[1], (double)up[2], (double)f[0], (double)f[1], (double)f[2], hitId, col);
     if (mode == 4)
         for (int k = 0; k < 4; k++)
         {
@@ -201,23 +214,28 @@ static void LwTiltLine(uintptr_t mgr, uintptr_t R, uint32_t id, uint32_t mode, c
     }
 }
 
-/* A four-corner unit whose corners lie over 3 m apart, on a detailed tile: its tilt past the ground's, counted. */
-static void LwTiltLong(uintptr_t R, uint32_t id, const float* p, float tilt)
+/* Whether a four-corner unit holds a corner that read the full length (R+0x48): a miss, read as a hole. */
+static int LwTiltMissed(uintptr_t R)
 {
-    float lo = 0, hi = 0; int tile = -1;
+    float len = 0, last = 0;
+    if (SafeRead(R + 0x48, &len, 4)) return 0;
+    for (int k = 0; k < 4; k++)
+        if (!SafeRead(R + 0x58 + 0x18u * k + 0x10, &last, 4) && fabsf(last - len) < 0.001f) return 1;
+    return 0;
+}
+
+/* Whether a four-corner unit's corners lie over 3 m apart (chargers' size). */
+static int LwTiltLong(uintptr_t R)
+{
+    float lo = 0, hi = 0;
     for (int k = 0; k < 4; k++)
     {
         float o[2];
-        if (SafeRead(R + 0x58 + 0x18u * k + 8, o, sizeof o)) return;
+        if (SafeRead(R + 0x58 + 0x18u * k + 8, o, sizeof o)) return 0;
         if (k == 0 || o[1] < lo) lo = o[1];
         if (k == 0 || o[1] > hi) hi = o[1];
     }
-    if (hi - lo < 3.0f || !MoveTilesOn() || MoveDrawnGround(p[0], p[1], &tile) < -9000.0f || tile < 0) return;
-    float ground = LwTiltGround(p[0], p[1]);
-    if (!isfinite(ground)) return;
-    g_lwTilt.longs++;
-    if (tilt - ground > 15.0f) g_lwTilt.longOver++;
-    if (tilt - ground > g_lwTilt.longWorst) { g_lwTilt.longWorst = tilt - ground; g_lwTilt.longId = id; }
+    return hi - lo >= 3.0f;
 }
 
 static void LwTiltScan(void)
@@ -234,42 +252,48 @@ static void LwTiltScan(void)
     g_lwTilt.scans++;
     for (uint32_t i = 0; i < n; i++)
     {
-        uintptr_t e = 0, R = recs + 0x298ull * i; uint8_t enabled = 0; uint32_t id = 0, mode = 0, ui = 0; float q[4], p[3];
+        uintptr_t e = 0, R = recs + 0x298ull * i; uint8_t enabled = 0; uint32_t id = 0, mode = 0, ui = 0; float q[4], p[3], nrm[3];
         if (!EvpPtr(inst + 8ull * i, &e) || SafeRead(e + 8, &id, 4) || SafeRead(ctl + 0xCull * i + 8, &enabled, 1) || SafeRead(R + 0x54, &mode, 4)) continue;
         if (!enabled || mode > 7 || !EvpHash(units + 0x40, id, 8, 4, &ui) || ui > 0x100000 ||
             SafeRead(urecs + 0x308ull * ui + 0x2D0, q, sizeof q) || SafeRead(urecs + 0x308ull * ui + 0x2E0, p, sizeof p)) continue;
         g_lwTilt.units++; g_lwTilt.modes[mode]++;
         float up[3]; const float z1[3] = {0, 0, 1}; LwTiltRotate(q, z1, up);
-        float tilt = LwTiltDeg(up[2]);
-        if (mode == 4) LwTiltLong(R, id, p, tilt);
-        if (tilt < LW_TILT_EXCESS) continue;
-        float ground = LwTiltGround(p[0], p[1]);
-        if (!isfinite(ground) || tilt < ground + LW_TILT_EXCESS) continue;
+        if (!LwTiltGround(p[0], p[1], nrm)) continue;
+        float tilt = LwTiltDeg(up[2]), ground = LwTiltDeg(nrm[2]), off = LwTiltAngle(up, nrm);
+        int tile = -1;
+        if (mode == 4 && LwTiltLong(R) && MoveTilesOn() && MoveDrawnGround(p[0], p[1], &tile) > -9000.0f && tile >= 0)
+        {
+            g_lwTilt.longs++;
+            if (off > 15.0f) g_lwTilt.longOver++;
+            if (off > g_lwTilt.longWorst) { g_lwTilt.longWorst = off; g_lwTilt.longId = id; }
+        }
+        if (off < LW_TILT_EXCESS) continue;
         g_lwTilt.tilted++;
-        if (tilt > g_lwTilt.worst) { g_lwTilt.worst = tilt; g_lwTilt.worstId = id; g_lwTilt.worstMode = mode; }
-        if (g_lwTilt.lines < LW_TILT_LINES && !LwTiltSeen(id, now)) { g_lwTilt.lines++; LwTiltLine(mgr, R, id, mode, q, p, tilt, ground); }
+        if (off >= 30.0f) { g_lwTilt.off30++; if (mode == 4 && LwTiltMissed(R)) g_lwTilt.off30Miss++; }
+        if (off > g_lwTilt.worst) { g_lwTilt.worst = off; g_lwTilt.worstId = id; g_lwTilt.worstMode = mode; }
+        if (g_lwTilt.lines < LW_TILT_LINES && !LwTiltSeen(id, now)) { g_lwTilt.lines++; LwTiltLine(mgr, R, id, mode, q, p, tilt, ground, off); }
     }
 }
 
-/* With the 30 s notes: the units scanned by mode and those tilted past their ground; the counts start again. */
+/* With the 30 s notes: the units scanned by mode and those off their ground; the counts start again. */
 static void LwTiltNote(void)
 {
     LONG reads = InterlockedExchange(&g_lwTiltReads, 0), under = InterlockedExchange(&g_lwTiltUnder, 0);
-    if (reads) Note("living world: tilt rays (30 s): %ld read on detailed tiles, %ld started under the ground and read it above them", (long)reads, (long)under);
+    if (reads) Note("living world: tilt rays (30 s): %ld missed on detailed tiles, %ld of them started under the ground and read it above them", (long)reads, (long)under);
     if (g_lwTilt.scans == 0) return;
-    Note("living world: tilt (30 s): %u scans, %u unit samples (by rotation mode 0-7: %u %u %u %u %u %u %u %u), %u tilted %.0f deg past their ground, worst %.0f deg (unit %08X, mode %u)",
+    Note("living world: tilt (30 s): %u scans, %u unit samples (by rotation mode 0-7: %u %u %u %u %u %u %u %u), %u %.0f deg or more off their ground, %u 30 deg or more (%u of them with a corner that missed), worst %.0f deg (unit %08X, mode %u)",
         g_lwTilt.scans, g_lwTilt.units, g_lwTilt.modes[0], g_lwTilt.modes[1], g_lwTilt.modes[2], g_lwTilt.modes[3], g_lwTilt.modes[4], g_lwTilt.modes[5], g_lwTilt.modes[6],
-        g_lwTilt.modes[7], g_lwTilt.tilted, (double)LW_TILT_EXCESS, (double)g_lwTilt.worst, g_lwTilt.worstId, g_lwTilt.worstMode);
+        g_lwTilt.modes[7], g_lwTilt.tilted, (double)LW_TILT_EXCESS, g_lwTilt.off30, g_lwTilt.off30Miss, (double)g_lwTilt.worst, g_lwTilt.worstId, g_lwTilt.worstMode);
     if (g_lwTilt.longs)
-        Note("living world: tilt (30 s): units with corners over 3 m apart on detailed tiles: %u samples, %u over 15 deg past their ground, worst %.0f deg past it (unit %08X)",
+        Note("living world: tilt (30 s): units with corners over 3 m apart on detailed tiles: %u samples, %u over 15 deg off their ground, worst %.0f deg off (unit %08X)",
             g_lwTilt.longs, g_lwTilt.longOver, (double)g_lwTilt.longWorst, g_lwTilt.longId);
     g_lwTilt.longs = g_lwTilt.longOver = g_lwTilt.longId = 0; g_lwTilt.longWorst = 0;
-    g_lwTilt.scans = g_lwTilt.units = g_lwTilt.tilted = 0; memset(g_lwTilt.modes, 0, sizeof g_lwTilt.modes); g_lwTilt.worst = 0; g_lwTilt.worstId = g_lwTilt.worstMode = 0;
+    g_lwTilt.scans = g_lwTilt.units = g_lwTilt.tilted = g_lwTilt.off30 = g_lwTilt.off30Miss = 0; memset(g_lwTilt.modes, 0, sizeof g_lwTilt.modes); g_lwTilt.worst = 0; g_lwTilt.worstId = g_lwTilt.worstMode = 0;
 }
 
 #ifdef CO_TEST
 static uint16_t g_lwTiltTestHeights[9];
-/* A live 3 x 3 tile at (cx, cy) over the whole hidden square, flat at z, with moving tiles on; z NAN: tiles off. */
+/* A live 3 x 3 tile at (cx, cy), flat at z, with moving tiles on; z NAN: tiles off. */
 void CoXlTestTiltTile(float cx, float cy, float z)
 {
     memset(g_tiles, 0, sizeof g_tiles);
@@ -279,9 +303,10 @@ void CoXlTestTiltTile(float cx, float cy, float z)
     for (int k = 0; k < 9; k++) g_lwTiltTestHeights[k] = v;
     g_moveInstalled = 1; g_move.on = 1; g_move.level = g_world.levels;
     g_tiles[0].live = 1; g_tiles[0].level = g_world.levels; g_tiles[0].centre[0] = cx; g_tiles[0].centre[1] = cy;
-    g_tiles[0].ground = (NearGround){g_lwTiltTestHeights, 3, NEAR_HIDE, cx, cy};
+    g_tiles[0].ground = (NearGround){g_lwTiltTestHeights, 3, NEAR_SPAN, cx, cy}; /* the terrain reaches past its hidden square */
 }
 int CoXlTestTiltInstall(uintptr_t game) { g_lw.game = game; g_lwTiltDone = 0; g_lwTiltRead = NULL; LwInstallTilt(); return g_lwTiltRead != NULL; }
-float CoXlTestTiltUnder(float d, float originZ, float ground) { return LwTiltUnder(d, originZ, ground); }
+float CoXlTestTiltUnder(float d, uint32_t count, float originZ, float ground) { return LwTiltUnder(d, count, originZ, ground); }
+void CoXlTestTiltHold(int on) { if (on) AcquireSRWLockExclusive(&g_tilesLock); else ReleaseSRWLockExclusive(&g_tilesLock); }
 void CoXlTestTiltCounts(long* reads, long* under) { *reads = InterlockedExchange(&g_lwTiltReads, 0); *under = InterlockedExchange(&g_lwTiltUnder, 0); }
 #endif
