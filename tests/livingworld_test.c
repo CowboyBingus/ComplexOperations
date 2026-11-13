@@ -12,6 +12,8 @@ int CoXlTestLiving(uintptr_t game);
 void CoXlTestLwPins(uint8_t* image);
 LONG CoXlTestNoiseHead(void);
 int CoXlTestLwSettle(uint32_t i, uint64_t peer, const float* at, uint64_t now, float* use);
+int CoXlTestLwSightVerdict(const uint8_t* hits, uint32_t n, uint32_t target, const float* eye, const float* tpos, float nearR, float folR, int* at);
+int CoXlTestLwStaticKind(float z, float drawn, float coarse, int tile);
 
 static int g_failed;
 static const char* g_case;
@@ -33,6 +35,57 @@ static uint8_t* Reset(const char* name)
     memcpy(g_fake.image + CO_PATROL_SKIP, kCoPatrolSkip, sizeof kCoPatrolSkip);
     g_fake.writes = 0;
     return g_fake.image;
+}
+
+/* A ray hit as the game's ray writes it: +0 x, +4 y, +0x18 metres, +0x1C unit (0 static), +0x24 type. */
+static void Hit(uint8_t* hits, int i, float x, float y, float d, uint32_t unit, uint32_t type)
+{
+    uint8_t* h = hits + 0x2C * i;
+    memcpy(h, &x, 4); memcpy(h + 4, &y, 4); memcpy(h + 0x18, &d, 4); memcpy(h + 0x1C, &unit, 4); memcpy(h + 0x24, &type, 4);
+}
+
+/* The sight ray's hits read in order, as 0x64D1D0: the target, foliage near either end, static and other units. */
+static void SightVerdict(void)
+{
+    enum { TARGET = 0x51, OTHER = 0x77 };
+    const uint32_t FOL = 0x4B8DC02Bu, ROCK = 0x1234u;
+    const float eye[3] = {0, 0, 2}, tpos[3] = {20, 0, 1};
+    uint8_t h[8 * 0x2C]; int at = 7;
+    g_case = "a sight ray with no hits sees the target";
+    CHECK(CoXlTestLwSightVerdict(h, 0, TARGET, eye, tpos, 5, 2, &at) == 1 && at == -1);
+    g_case = "the target first: seen, whatever follows";
+    memset(h, 0, sizeof h); Hit(h, 0, 19.6f, 0, 19.6f, TARGET, 0); Hit(h, 1, 10, 0, 10, 0, ROCK);
+    CHECK(CoXlTestLwSightVerdict(h, 2, TARGET, eye, tpos, 5, 2, &at) == 1 && at == 0);
+    g_case = "a static hit before the target blocks it";
+    memset(h, 0, sizeof h); Hit(h, 0, 10, 0, 10, 0, ROCK); Hit(h, 1, 19.6f, 0, 19.6f, TARGET, 0);
+    CHECK(CoXlTestLwSightVerdict(h, 2, TARGET, eye, tpos, 5, 2, &at) == 0 && at == 0);
+    g_case = "another unit blocks";
+    memset(h, 0, sizeof h); Hit(h, 0, 12, 0, 12, OTHER, ROCK);
+    CHECK(CoXlTestLwSightVerdict(h, 1, TARGET, eye, tpos, 5, 2, &at) == 0 && at == 0);
+    g_case = "foliage halfway blocks";
+    memset(h, 0, sizeof h); Hit(h, 0, 10, 0, 10, 0, FOL); Hit(h, 1, 19.6f, 0, 19.6f, TARGET, 0);
+    CHECK(CoXlTestLwSightVerdict(h, 2, TARGET, eye, tpos, 5, 2, &at) == 0 && at == 0);
+    g_case = "foliage within the foliage radius of the target, or exactly on it, is passed";
+    memset(h, 0, sizeof h); Hit(h, 0, 18, 0, 18, 0, FOL); Hit(h, 1, 19.6f, 0, 19.6f, TARGET, 0);
+    CHECK(CoXlTestLwSightVerdict(h, 2, TARGET, eye, tpos, 5, 2, &at) == 1 && at == 1);
+    Hit(h, 0, 17.9f, 0, 17.9f, 0, FOL);
+    CHECK(CoXlTestLwSightVerdict(h, 2, TARGET, eye, tpos, 5, 2, &at) == 0 && at == 0);
+    g_case = "foliage nearer than the foliage radius to the eye is passed, not on it";
+    memset(h, 0, sizeof h); Hit(h, 0, 1.9f, 0, 1.9f, 0, FOL); Hit(h, 1, 10, 0, 10, 0, ROCK);
+    CHECK(CoXlTestLwSightVerdict(h, 2, TARGET, eye, tpos, 5, 2, &at) == 0 && at == 1);
+    Hit(h, 0, 2, 0, 2, 0, FOL);
+    CHECK(CoXlTestLwSightVerdict(h, 2, TARGET, eye, tpos, 5, 2, &at) == 0 && at == 0);
+    g_case = "with the target within the near radius across, all foliage is passed";
+    memset(h, 0, sizeof h); Hit(h, 0, 10, 0, 10, 0, FOL);
+    CHECK(CoXlTestLwSightVerdict(h, 1, TARGET, eye, tpos, 20.5f, 2, &at) == 1 && at == -1);
+    CHECK(CoXlTestLwSightVerdict(h, 1, TARGET, eye, tpos, 20, 2, &at) == 0 && at == 0);
+    g_case = "a static hit against the ground";
+    CHECK(CoXlTestLwStaticKind(5.2f, 5.0f, 9.0f, 0) == 3);     /* the drawn ground */
+    CHECK(CoXlTestLwStaticKind(8.9f, 5.0f, 9.0f, 0) == 4);     /* the coarse collision over a live tile */
+    CHECK(CoXlTestLwStaticKind(8.9f, 5.0f, 9.0f, -1) == 5);    /* off a tile: an object */
+    CHECK(CoXlTestLwStaticKind(4.2f, 5.0f, 4.0f, 0) == 5);     /* under the drawn ground on the coarse rows: not the coarse body over it */
+    CHECK(CoXlTestLwStaticKind(7.0f, 5.0f, 9.0f, 0) == 5);     /* an object */
+    CHECK(CoXlTestLwStaticKind(7.0f, -9999.0f, 9.0f, 0) == 6); /* no drawn ground */
 }
 
 int main(void)
@@ -88,6 +141,7 @@ int main(void)
         CHECK(CoXlTestLwSettle(0, 0xB, b1, 1600, use) == 0 && use[0] == 5001.0f);
         CHECK(CoXlTestLwSettle(1, 0xA, a1, 1600, use) == 0 && use[0] == 900.0f); /* A at index 1: its reading as it is */
     }
+    SightVerdict();
 
     if (g_failed) { printf("livingworld: %d checks failed\n", g_failed); return 1; }
     printf("livingworld: all cases passed\n");

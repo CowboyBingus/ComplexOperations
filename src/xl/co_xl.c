@@ -323,6 +323,10 @@ void CoXlTestLwPins(uint8_t* image)
 int CoXlTestLiving(uintptr_t game) { if (!LwEnabled()) return 0; CoXlLiving(game); return 1; }
 /* The living world's held place for the player at EvpPlayers index `i`, peer `peer`, read at `at` (x, y). */
 int CoXlTestLwSettle(uint32_t i, uint64_t peer, const float* at, uint64_t now, float* use) { return LwSettleAt(i, peer, at, now, use); }
+/* The sight probe's reading of a ray's hits (as 0x64D1D0) and of a static hit against the ground. */
+int CoXlTestLwSightVerdict(const uint8_t* hits, uint32_t n, uint32_t target, const float* eye, const float* tpos, float nearR, float folR, int* at)
+{ return LwSightVerdict(hits, n, target, eye, tpos, nearR, folR, at); }
+int CoXlTestLwStaticKind(float z, float drawn, float coarse, int tile) { return LwStaticKind(z, drawn, coarse, tile); }
 /* The living world's navmesh pins (all in the exe) written into a fake exe, and a complex level's nav tick with no
  * director: 1 when it got past the pins, -1 when they refused. */
 void CoXlTestLwNavPins(uint8_t* exe)
