@@ -41,7 +41,7 @@ static long CoUnwindCopy(const uint8_t* info, uintptr_t gameBase, uint8_t* out, 
         uint16_t* v = (uint16_t*)(c + 2);
         if (op == 4u) v[0] = (uint16_t)(v[0] + delta / 8u);
         else if (op == 8u) v[0] = (uint16_t)(v[0] + delta / 16u);
-        else if (op == 5u || op == 9u) { uint32_t far; memcpy(&far, v, 4); far += delta; memcpy(v, &far, 4); }
+        else if (op == 5u || op == 9u) { uint32_t wide; memcpy(&wide, v, 4); wide += delta; memcpy(v, &wide, 4); }
     }
     if (!chained) return (long)size;
     const RUNTIME_FUNCTION* next = (const RUNTIME_FUNCTION*)(info + 4 + (size_t)slots * 2u);
