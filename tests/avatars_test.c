@@ -115,7 +115,7 @@ int main(void)
     CHECK(avatar == 7 && AvatarMoved(FIRST_STATE, avatar));
     CHECK(fake_host_logged("players: the avatar manager has 16 slots for players and their bodies (2700 code sites changed)"));
     /* the managers' places do not overlap */
-    CHECK(co_managers_test_place((unsigned)avatar) >= co_managers_test_place(6) + 0x9E8u);
+    CHECK(co_managers_test_place((unsigned)avatar) >= co_managers_test_place(6) + 0xA38u);
 #else
     CHECK(avatar == -1 && AvatarAsGame() && !fake_host_logged("avatar manager"));
 #endif

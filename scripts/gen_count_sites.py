@@ -19,7 +19,7 @@
 #   9 only for eight players: the mission summary with eight rows and cards (sites/summary_sites.py); its guards for
 #     four rows are group 6;
 #   10 the stack arrays that four players' avatars and bodies overrun (sites/stack_sites.py, always);
-#   11 only for eight players: the stack and frame arrays with room for eight avatars (sites/stack_sites.py);
+#   11 only for eight players: the stack and frame arrays with room for eight avatars or players (sites/stack_sites.py);
 #   12 the Activity record's further participants and the answers it waits for (ACTIVITY): in every build while the
 #     post's hook is in and every one of them matches, else none of them;
 #   13 only for eight players: the hostability scores of eight peers (HOST_SITES, HOST_CAVES);
@@ -167,7 +167,7 @@ CAVES = [
 # of four or more skips the access, so players 5 to 8 are missing from that table instead of overrunning it; for 0 to
 # 3 nothing changes. Each cave runs the instructions its jump replaced.
 GUARDS = [
-    # Customization, every frame: four pairs on the stack, the stack cookie right behind them.
+    # Customization, every frame: four pairs on the stack, the stack cookie right behind (stack_sites CP2 for eight).
     (0x874E26, '8d 14 00 8b 43 c0', 'cmp eax, 4\n jae game+0x874E3A\n lea edx, [rax+rax*1]\n mov eax, dword ptr [rbx-0x40]\n jmp game+0x874E2C'),
     # Clan tags and names (two copies of each message handler).
     (0xB95BAB, '39 ae 08 6a 00 00', 'cmp r15d, 4\n jae game+0xB95CD5\n cmp dword ptr [rsi+0x6a08], ebp\n jmp game+0xB95BB1'),
@@ -350,8 +350,12 @@ GUARDS += summary_sites.GUARD4 + map_sites.GUARD4 + tag_sites.GUARD4
 # A stack fix gives room where a guard dropped the entry: the guard goes.
 assert set(stack_sites.REPLACES) <= {rva for rva, _, _ in GUARDS}
 GUARDS = [g for g in GUARDS if g[0] not in stack_sites.REPLACES]
+# One whose room is for eight goes in the build for eight only: its guard stays the build for four's.
+assert {c[0] for c in stack_sites.CAVES if c[0] in stack_sites.REPLACES8 and c[4]} == set(stack_sites.REPLACES8)
+assert stack_sites.PASSIVES == 2   # kCountData in co_counts.c
 GUARD_SITES += map_sites.GUARD4_SITES
 OFF = set(loadout_sites.MOD_OFF) | {rva for rva, _, _ in summary_sites.GUARD4 + map_sites.GUARD4 + map_sites.GUARD4_SITES + tag_sites.GUARD4}
+OFF |= set(stack_sites.REPLACES8)
 assert OFF <= {rva for rva, _, _ in GUARD_SITES} | {rva for rva, _, _ in GUARDS}
 rows_by_group = ((G_GUARD, GUARD_SITES), (G_EIGHT, EIGHT_SITES), (G_COUNT, MIRROR_CAPS), (G_COUNT, RECORD_SITES),
                  (G_LOADOUT, [(r, o, n) for r, o, n, _ in LOADOUT_SITES]),

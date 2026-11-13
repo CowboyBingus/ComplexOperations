@@ -64,6 +64,7 @@ void co_registry_test_reset(void);
 #define VO_SITE 0x4C3CC2u
 #define DL_SITE 0x950B66u
 #define LV_SITE 0xAD5466u
+#define CP_SITE 0x874E80u          /* CP7: the customization frame's compare of a passive pair */
 
 static int g_failed;
 static const char* g_case;
@@ -508,7 +509,7 @@ int main(void)
 {
     static uint32_t ec[CASES], hp[CASES], search[SCORE_SETS];
     static EncResult enc[ENC_COUNTS][ENC_CALLS];
-    const unsigned stack = CO_PLAYERS == 8 ? 35u : 19u;
+    const unsigned stack = CO_PLAYERS == 8 ? 43u : 19u;
 
     Start("the reviewed game");
     LoadGame();
@@ -606,10 +607,12 @@ int main(void)
 
     /* A changed byte at a fix refuses the counts with it; a fix of the build for eight is not read in a build for four. */
     {
-        static const uint32_t kChanged[] = {EC_SITE + 1, ENC_SITE + 3, SC_STORE + 4, LV_SITE + 2, 0xACB6A7u + 5, DL_SITE + 1, VO_SITE, DP_SITE + 1, 0xA04D46u + 2};
+        static const uint32_t kChanged[] = {EC_SITE + 1, ENC_SITE + 3, SC_STORE + 4, LV_SITE + 2, 0xACB6A7u + 5, DL_SITE + 1, VO_SITE, DP_SITE + 1, 0xA04D46u + 2,
+                                            CP_SITE + 1};
         for (size_t i = 0; i < sizeof kChanged / sizeof kChanged[0]; i++)
         {
-            const int eightOnly = kChanged[i] == DL_SITE + 1 || kChanged[i] == VO_SITE || kChanged[i] == DP_SITE + 1 || kChanged[i] == 0xA04D46u + 2;
+            const int eightOnly = kChanged[i] == DL_SITE + 1 || kChanged[i] == VO_SITE || kChanged[i] == DP_SITE + 1 || kChanged[i] == 0xA04D46u + 2 ||
+                                  kChanged[i] == CP_SITE + 1;
             Start("one changed stack site");
             g_fake.image[kChanged[i]] ^= 0x01;
             Init();
