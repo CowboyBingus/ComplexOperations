@@ -681,10 +681,11 @@ static int TerrainTileWanted(int tile)
 
 /* ---- The coarse terrain's tiles in parallel (load time) -------------------------------------------------------------
  * As the stamp planning's stage B: runners (engine jobs) build the wanted tiles (TerrainBuild with move, then the draw's
- * record on the slot's block) into slots in tile order, each with its own context (the level's settings as the section
- * holds them: the tile marker and lattice spacing set once for all tiles); the main thread draws them in tile order
- * within its frame budget (RenderHeightmapVoronoi on the level's merge, as the serial code does), so the merge sees the
- * serial order. Off with HELLFORGE_XL_TILE_THREADS=1 or HELLFORGE_XL_TILE_BUILDS=0. */
+ * record on the slot's block) into slots in draw order, each with its own context (the level's settings as the section
+ * holds them: the tile marker and lattice spacing set once for all tiles); the main thread draws them by step within
+ * its frame budget (RenderHeightmapVoronoi on the level's merge, as the serial code does, co_coarse.h), so every pair
+ * of touching tiles reaches the merge in the serial order. Off with HELLFORGE_XL_TILE_THREADS=1 or
+ * HELLFORGE_XL_TILE_BUILDS=0. */
 #define COARSE_SLOTS_MAX (TILE_RUNNERS_MAX + 4)
 typedef struct
 {
@@ -713,8 +714,11 @@ static struct
     uint64_t submit;            /* the engine's job submit ([[game+0x33263E8]+0x88]) */
     uint64_t element[TILE_RUNNERS_MAX]; /* each runner's job element (its TileRunner), fixed while the section runs */
     volatile LONG busy[TILE_RUNNERS_MAX], inflight, pending;
-    long jobs, selfBuilt, queueWaits;
+    long jobs, selfBuilt;
     uint64_t tileTrisMax, tileTrisSum, frameTrisMax; long tilesCounted;
+    CoCoarseBatch batch;
+    uint64_t frameTris, frameTrisAll; uint32_t trisFrame; /* gui triangles in the dispatcher call g_terrain.frames */
+    uint64_t now, nowG, nowH; uintptr_t nowGen; LARGE_INTEGER t0, hz; TileRunner* mine; /* the current dispatcher call's */
 } g_coarse;
 
 /* One coarse tile on a runner (an engine job, CoarseFeed): a free slot and the next tile, built, then the job returns.
@@ -816,6 +820,14 @@ static void TileRunnersStallNote(const char* section, int started)
     Note("difficulty: %s: no tile finished for 10 s; the runners: %s (%ld of %d jobs returned)", section, text, (long)g_tileFinished, started);
 }
 
+/* HELLFORGE_XL_COARSE_BATCH (1 to CO_COARSE_BATCH_MAX): tiles a draw frame; 1 is the serial path's one a frame. */
+static int CoarseBatchSize(void)
+{
+    char t[8] = "";
+    int n = GetEnvironmentVariableA("HELLFORGE_XL_COARSE_BATCH", t, sizeof t) > 0 ? atoi(t) : CO_COARSE_BATCH;
+    return n < 1 ? 1 : n > CO_COARSE_BATCH_MAX ? CO_COARSE_BATCH_MAX : n;
+}
+
 /* Once the template is made (TerrainStep's first call): the parallel section, or 0 for the serial path. */
 static int CoarseStart(uint64_t records, uint32_t end, uint64_t context, uint64_t g, uint64_t h, uintptr_t gen)
 {
@@ -851,8 +863,17 @@ static int CoarseStart(uint64_t records, uint32_t end, uint64_t context, uint64_
     { uint32_t flipped = g_coarse.disk ^ 1u; memcpy(g_coarse.buildS + 0x5C, &flipped, 4); }
     g_coarse.level = g_world.levels;
     g_tileStop = 0; g_tileFinished = 0; g_tileWork = NULL;
-    g_coarse.started = 0; g_coarse.inflight = 0; g_coarse.pending = 0; g_coarse.jobs = 0; g_coarse.selfBuilt = 0; g_coarse.queueWaits = 0;
+    g_coarse.started = 0; g_coarse.inflight = 0; g_coarse.pending = 0; g_coarse.jobs = 0; g_coarse.selfBuilt = 0;
     g_coarse.tileTrisMax = 0; g_coarse.tileTrisSum = 0; g_coarse.frameTrisMax = 0; g_coarse.tilesCounted = 0; g_coarse.submit = 0;
+    g_coarse.frameTris = 0; g_coarse.frameTrisAll = 0; g_coarse.trisFrame = 0;
+    /* Tiles of a step share a frame only while their additive triangles are clipped to the core +- TERRAIN_BLEND
+     * (640 m apart); unclipped, a cell may reach past the built box, so the tile order and one tile a frame stay. */
+    int clip = g_coarse.count > 0 && TerrainClipBegin(g_coarse.list[0], gen);
+    if (clip) TerrainClipEnd();
+    int batch = clip ? CoarseBatchSize() : 1;
+    if (batch > g_coarse.slotCount) batch = g_coarse.slotCount; /* a group's tiles are all built before it draws */
+    if (batch > 1) co_coarse_order(g_coarse.list, g_coarse.count, g_terrain.columns);
+    co_coarse_begin(&g_coarse.batch, g_terrain.columns, batch, TERRAIN_DRAW_CALLS);
     uint64_t api = 0;
     if (!SafeRead(g_world.game + 0x33263E8u, &api, 8) && api != 0 && !SafeRead(api + 0x88, &g_coarse.submit, 8) && g_coarse.submit != 0)
         for (int id = 1; id <= R - 1 && id < TILE_RUNNERS_MAX; id++)
@@ -868,7 +889,10 @@ static int CoarseStart(uint64_t records, uint32_t end, uint64_t context, uint64_
         return 0;
     }
     g_coarse.on = 1; g_coarse.level = g_world.levels; g_coarse.inits = g_levelInits; g_coarse.waitSince = 0; g_coarse.stallNoted = 0;
-    Note("difficulty: terrain: %d tiles on %d runners (%d slots), drawn in tile order", g_coarse.count, g_coarse.started, g_coarse.slotCount);
+    if (g_coarse.batch.batch > 1)
+        Note("difficulty: terrain: %d tiles on %d runners (%d slots), drawn by step (2 rows + column), up to %d tiles a frame", g_coarse.count,
+            g_coarse.started, g_coarse.slotCount, g_coarse.batch.batch);
+    else Note("difficulty: terrain: %d tiles on %d runners (%d slots), drawn in tile order", g_coarse.count, g_coarse.started, g_coarse.slotCount);
     return 1;
 }
 
@@ -886,9 +910,13 @@ static void CoarseEnd(void)
         }
         Sleep(1);
     }
-    Note("difficulty: terrain: the section's %ld tile jobs on %d runners returned; %ld tiles built on the dispatcher's thread; %ld frames ended on a full generation queue", g_coarse.jobs, g_coarse.started, g_coarse.selfBuilt, g_coarse.queueWaits);
-    Note("difficulty: terrain: gui triangles: a tile's draw at most %llu, mean %llu; one draw call at most %llu", (unsigned long long)g_coarse.tileTrisMax,
-        (unsigned long long)(g_coarse.tilesCounted ? g_coarse.tileTrisSum / (uint64_t)g_coarse.tilesCounted : 0), (unsigned long long)g_coarse.frameTrisMax);
+    const CoCoarseBatch* b = &g_coarse.batch;
+    Note("difficulty: terrain: the section's %ld tile jobs on %d runners returned; %ld tiles built on the dispatcher's thread; %ld frames ended on a full generation queue", g_coarse.jobs, g_coarse.started, g_coarse.selfBuilt, b->queueWaits);
+    Note("difficulty: terrain: gui triangles: a tile's draw at most %llu, mean %llu; one draw call at most %llu; one frame at most %llu", (unsigned long long)g_coarse.tileTrisMax,
+        (unsigned long long)(g_coarse.tilesCounted ? g_coarse.tileTrisSum / (uint64_t)g_coarse.tilesCounted : 0), (unsigned long long)g_coarse.frameTrisMax,
+        (unsigned long long)g_coarse.frameTrisAll);
+    Note("difficulty: terrain: batched draw: %ld draw frames for %ld groups, at most %d tiles a frame (batch %d); %ld repeated queue entries removed, %ld refused",
+        b->frames, b->groups, b->tilesFrameMax, b->batch, b->dropped, b->refused);
     *(volatile uint32_t*)(g_coarse.lg + 0x2D7C) = g_coarse.disk;
     *(volatile float*)g_coarse.spacingAt = g_coarse.spacing;
     g_tileSectionHeld = 0;
@@ -900,84 +928,110 @@ static void CoarseEnd(void)
     g_coarse.on = 0;
 }
 
-/* One frame of the parallel section (the dispatcher's thread): the built tiles drawn in tile order, 1 while tiles
- * remain. Each RenderHeightmapVoronoi call (0xF499B0) appends one entry to the generation's queue [ctx+0x50] = G+0xAC570
- * (0xF4A195..0xF4A254: count +0x10, 16 entries of 0x1D0 from +0x18, no capacity check), and only the render callback
- * drains it, once a frame (0xAB7D54 -> 0xAB0590). A 17th entry lands on G+0xAE288, the current level, with the world
- * ([ctx+0x40]) as its first qword (t77h/t77i/t77j: the objective selection then read [world+0x2D0] = 0 and faulted at
- * game+0x1757304). And each entry is one render_world (0xAB07E1 -> [api+0x10]+0x28) of the generator's world through the
- * camera [R], which draws every gui triangle put there this frame: N draw calls in a frame drew each frame's additive
- * heights N times (t77k..t77m: the coarse terrain an egg-crate up to the u16's 500 m, base 265-620 m against 80-125 m
- * serial). So a draw call is made only with the queue empty (one entry, one render a frame, as the serial path: one
- * call a tile a frame), else the level waits for the next frame. Runner jobs build meanwhile; the
- * dispatcher's thread builds a tile itself only when no job is in flight. */
+/* One frame of the parallel section (the dispatcher's thread): the built tiles drawn by step (co_coarse.h), 1 while
+ * tiles remain. Each RenderHeightmapVoronoi call (0xF499B0) appends one entry to the generation's queue [ctx+0x50] =
+ * G+0xAC570 (0xF4A195..0xF4A254: count +0x10, 16 entries of 0x1D0 from +0x18, no capacity check), and only the render
+ * callback drains it, once a frame (0xAB7D54 -> 0xAB0590). A 17th entry lands on G+0xAE288, the current level, with the
+ * world ([ctx+0x40]) as its first qword (t77h/t77i/t77j: the objective selection then read [world+0x2D0] = 0 and faulted
+ * at game+0x1757304). And each entry is one render_world (0xAB07E1 -> [api+0x10]+0x28) of the generator's world through
+ * the camera [R], which draws every gui triangle put there this frame: N entries in a frame drew each frame's additive
+ * heights N times (t77k..t77m: an egg-crate up to the u16's 500 m). So a frame draws only with the queue empty, and
+ * every call after its first removes the entry it repeats: one render a frame of all the frame's tiles. */
 static uint32_t NearQueued(uint64_t context);
+
+static int CoarseBuilt(void* self, int k)
+{
+    LONG at = g_coarse.slotOf[k];
+    if (at < 0 || g_coarse.slots[at].state != STAMP_SLOT_BUILT) return 0;
+    return g_coarse.slots[at].ok ? 1 : -1;
+}
+
+/* Runner jobs build meanwhile; the dispatcher's thread builds a tile itself only when no job is in flight. */
+static int CoarseWait(void* self, int k)
+{
+    CoarseFeed();
+    if (g_coarse.mine != NULL && g_coarse.inflight == 0 && g_coarse.nextTile < g_coarse.count)
+    {
+        TlsSetValue(g_tileRunnerTls, g_coarse.mine);
+        int built = CoarseOne(g_coarse.mine, 0);
+        TlsSetValue(g_tileRunnerTls, NULL);
+        if (built) { g_coarse.selfBuilt++; g_coarse.waitSince = 0; return 1; }
+    }
+    ULONGLONG now = GetTickCount64();
+    if (g_coarse.waitSince == 0) g_coarse.waitSince = now;
+    else if (now - g_coarse.waitSince > 10000 && !g_coarse.stallNoted) { g_coarse.stallNoted = 1; TileRunnersStallNote("terrain", g_coarse.started); }
+    return 0;
+}
+
+static int CoarseCall(void* self, int k)
+{
+    g_coarse.waitSince = 0;
+    CoarseSlot* s = &g_coarse.slots[g_coarse.slotOf[k]];
+    LARGE_INTEGER d0, d1;
+    QueryPerformanceCounter(&d0);
+    volatile uint32_t index = 0;
+    volatile int calls = 0;
+    int clip = TerrainClipBegin(s->t, g_coarse.nowGen);
+    if (!clip) g_coarse.batch.batch = 1; /* CoarseStart: unclipped tiles draw one a frame */
+    uint64_t trisBefore = g_clip.tris;
+    LONG fault = WorldTileGuarded(s->record, g_coarse.now, &index, &s->phase, g_coarse.nowG, g_coarse.nowH, 1, &calls);
+    if (clip) TerrainClipEnd();
+    uint64_t d = g_clip.tris - trisBefore;
+    s->tris += d;
+    if (d > g_coarse.frameTrisMax) g_coarse.frameTrisMax = d;
+    if (g_coarse.trisFrame != g_terrain.frames) { g_coarse.trisFrame = g_terrain.frames; g_coarse.frameTris = 0; }
+    g_coarse.frameTris += d;
+    if (g_coarse.frameTris > g_coarse.frameTrisAll) g_coarse.frameTrisAll = g_coarse.frameTris;
+    QueryPerformanceCounter(&d1);
+    g_terrain.drawMs += (double)(d1.QuadPart - d0.QuadPart) * 1000.0 / (double)g_coarse.hz.QuadPart;
+    s->drawCalls++;
+    return fault ? -1 : index != 0 ? 1 : 0;
+}
+
+static uint32_t CoarseQueued(void* self) { return NearQueued(g_coarse.now); }
+
+static int CoarseDrop(void* self)
+{
+    uint64_t queue = 0;
+    return !SafeRead(g_coarse.now + 0x50, &queue, 8) && queue != 0 && co_coarse_queue_drop((uintptr_t)queue);
+}
+
+static void CoarseReset(void* self) { WorldArenaReset(g_coarse.now); }
+
+static void CoarseDone(void* self, int k, int how)
+{
+    LONG at = g_coarse.slotOf[k];
+    CoarseSlot* s = &g_coarse.slots[at];
+    g_terrain.buildMs += s->buildMs;
+    if (how == CO_COARSE_DRAWN)
+    {
+        g_terrain.drawn++;
+        g_coarse.tileTrisSum += s->tris; g_coarse.tilesCounted++; if (s->tris > g_coarse.tileTrisMax) g_coarse.tileTrisMax = s->tris;
+    }
+    else
+    {
+        if (how != CO_COARSE_UNBUILT) Note("difficulty: terrain: tile %d's draw %s", s->t, how == CO_COARSE_FAULTED ? "faulted" : "did not finish");
+        g_terrain.failed++;
+    }
+    InterlockedExchange(&g_coarse.slotOf[k], -1); InterlockedExchange(&s->state, STAMP_SLOT_FREE);
+}
+
+static int CoarseOver(void* self)
+{
+    LARGE_INTEGER t1; QueryPerformanceCounter(&t1);
+    return (double)(t1.QuadPart - g_coarse.t0.QuadPart) * 1000.0 / (double)g_coarse.hz.QuadPart > TERRAIN_BUDGET_MS;
+}
+
 static int CoarseDraw(uint64_t context, uint64_t g, uint64_t h, uintptr_t gen, LARGE_INTEGER t0, LARGE_INTEGER hz)
 {
-    TileRunner* mine = TileRunnerMake(0);
-    for (;;)
-    {
-        CoarseFeed();
-        if (g_terrain.next >= g_coarse.count) return 0;
-        LARGE_INTEGER t1; QueryPerformanceCounter(&t1);
-        if ((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart > TERRAIN_BUDGET_MS) return 1;
-        LONG at = g_coarse.slotOf[g_terrain.next];
-        if (at < 0 || g_coarse.slots[at].state != STAMP_SLOT_BUILT) /* not built yet */
-        {
-            if (mine != NULL && g_coarse.inflight == 0 && g_coarse.nextTile < g_coarse.count)
-            {
-                TlsSetValue(g_tileRunnerTls, mine);
-                int built = CoarseOne(mine, 0);
-                TlsSetValue(g_tileRunnerTls, NULL);
-                if (built) { g_coarse.selfBuilt++; g_coarse.waitSince = 0; continue; }
-            }
-            ULONGLONG now = GetTickCount64();
-            if (g_coarse.waitSince == 0) g_coarse.waitSince = now;
-            else if (now - g_coarse.waitSince > 10000 && !g_coarse.stallNoted) { g_coarse.stallNoted = 1; TileRunnersStallNote("terrain", g_coarse.started); }
-            return 1;
-        }
-        uint32_t queued = NearQueued(context);
-        if (queued != 0) { g_coarse.queueWaits++; return 1; } /* one draw call a frame: see above */
-        g_coarse.waitSince = 0;
-        CoarseSlot* s = &g_coarse.slots[at];
-        if (!s->ok)
-        {
-            g_terrain.failed++; g_terrain.buildMs += s->buildMs;
-            InterlockedExchange(&g_coarse.slotOf[g_terrain.next], -1); InterlockedExchange(&s->state, STAMP_SLOT_FREE);
-            g_terrain.next++;
-            continue;
-        }
-        LARGE_INTEGER d0, d1;
-        QueryPerformanceCounter(&d0);
-        volatile uint32_t index = 0;
-        volatile int calls = 0;
-        int clip = TerrainClipBegin(s->t, gen);
-        uint64_t trisBefore = g_clip.tris;
-        LONG fault = WorldTileGuarded(s->record, context, &index, &s->phase, g, h, 1, &calls);
-        if (clip) TerrainClipEnd();
-        { uint64_t d = g_clip.tris - trisBefore; s->tris += d; if (d > g_coarse.frameTrisMax) g_coarse.frameTrisMax = d; }
-        QueryPerformanceCounter(&d1);
-        g_terrain.drawMs += (double)(d1.QuadPart - d0.QuadPart) * 1000.0 / (double)hz.QuadPart;
-        s->drawCalls++;
-        int doneTile = 0;
-        if (fault || (index == 0 && s->drawCalls >= TERRAIN_DRAW_CALLS))
-        {
-            Note("difficulty: terrain: tile %d's draw %s", s->t, fault ? "faulted" : "did not finish");
-            g_terrain.failed++; doneTile = 1;
-            if (fault) { g_terrain.buildMs += s->buildMs; InterlockedExchange(&s->state, STAMP_SLOT_FREE); g_terrain.next = g_coarse.count; return -1; }
-        }
-        else if (index != 0)
-        {
-            WorldArenaReset(context); g_terrain.drawn++; doneTile = 1;
-            g_coarse.tileTrisSum += s->tris; g_coarse.tilesCounted++; if (s->tris > g_coarse.tileTrisMax) g_coarse.tileTrisMax = s->tris;
-        }
-        if (doneTile)
-        {
-            g_terrain.buildMs += s->buildMs;
-            InterlockedExchange(&g_coarse.slotOf[g_terrain.next], -1); InterlockedExchange(&s->state, STAMP_SLOT_FREE);
-            g_terrain.next++;
-        }
-    }
+    static const CoCoarseOps ops = {NULL, CoarseBuilt, CoarseWait, CoarseCall, CoarseQueued, CoarseDrop, CoarseReset, CoarseDone, CoarseOver};
+    g_coarse.mine = TileRunnerMake(0);
+    g_coarse.now = context; g_coarse.nowG = g; g_coarse.nowH = h; g_coarse.nowGen = gen; g_coarse.t0 = t0; g_coarse.hz = hz;
+    CoarseFeed();
+    int more = co_coarse_frame(&g_coarse.batch, g_coarse.list, g_coarse.count, &ops);
+    g_terrain.next = g_coarse.batch.next;
+    if (more > 0) CoarseFeed(); /* slots the frame's group freed */
+    return more;
 }
 
 static int MacroStep(uint64_t context); /* difficulty_world_macro.c: the km-scale relief, drawn once the tiles are */

@@ -18,6 +18,7 @@
 #include "co_normal.h"
 #include "co_chain.h"
 #include "co_rows.h"
+#include "co_coarse.h"
 #include "co_objectives.h"
 #include "co_nav.h"
 #include "co_beside.h"
