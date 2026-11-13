@@ -94,6 +94,7 @@ static void SightVerdict(void)
     CHECK(CoXlTestLwSenseRule(0, 15.1f, 1.0f, 0, 1) == 2);  /* too far */
     CHECK(CoXlTestLwSenseRule(1, 10.0f, 1.0f, 0, 1) == 1);  /* already suspicious: the game's own path */
     CHECK(CoXlTestLwSenseRule(0, 10.0f, 1.0f, 2, 1) == 4);  /* in view: the game's sight */
+    CHECK(CoXlTestLwSenseRule(0, 10.0f, 1.0f, 1, 1) == 4);  /* seen close (within 0.3 x the range) */
     CHECK(CoXlTestLwSenseRule(0, 10.0f, 1.0f, 0, 0) == 5);  /* blocked: not through walls or units */
     CHECK(CoXlTestLwSenseRule(0, 10.0f, 1.0f, 0, -1) == 5); /* no ray */
     CHECK(CoXlTestLwSenseRule(0, 7.4f, 0.5f, 0, 1) == 0);   /* a hidden player: half the reach */
