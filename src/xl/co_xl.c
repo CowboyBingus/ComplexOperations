@@ -264,6 +264,15 @@ void CoXlTestRenderFramePins(void) { g_renderFramePinned = -1; }
 void CoXlTestRenderAfter(uintptr_t state, void (*rehash)(uintptr_t, uint32_t), void (*resize)(uintptr_t, uint32_t))
 { g_lwRender.rehash = (uintptr_t)rehash; g_lwRender.resize = (uintptr_t)resize; LwRenderAfterDispatch(state); }
 uintptr_t CoXlTestRenderCopiesPins(uintptr_t exe) { return LwRenderCopiesPins(exe); }
+/* A job's end as the recording's hook sees it (return address `ret`), the gate the last dispatch left, the hook itself
+ * around `original`, and the job pins. */
+void CoXlTestRenderJob(uintptr_t ret, uintptr_t after, uintptr_t job, void (*resize)(uintptr_t, uint32_t))
+{ g_lwRender.jobAfter = after; g_lwRender.resize = (uintptr_t)resize; LwRenderJobDone(ret, job); }
+void CoXlTestRenderJobHooked(void* original) { g_lwRender.recordOrig = original; }
+int CoXlTestRenderJobGate(void) { return g_lwRender.jobGate; }
+uint64_t CoXlTestRenderRecord(uint64_t job) { return LwRenderRecord(1, 2, job, 4, 5, 6, 7); }
+int CoXlTestRenderJobPins(uintptr_t exe) { return LwRenderJobPins(exe); }
+void* CoXlTestRenderJobsInstall(uintptr_t exe, uintptr_t resize) { g_lwRender.recordOrig = NULL; g_lwRender.resize = resize; LwInstallRenderJobs(exe); return g_lwRender.recordOrig; }
 /* A level init's first step for `level`, and a stamp section's hold and cancel test (proto/difficulty_world_terrain.c). */
 void CoXlTestLevelInit(uintptr_t level) { LevelInitBegins(); g_worldLevel = level; }
 void CoXlTestSectionBegin(void) { SectionBegin(); }
