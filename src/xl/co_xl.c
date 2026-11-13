@@ -19,6 +19,7 @@
 #include "co_chain.h"
 #include "co_rows.h"
 #include "co_coarse.h"
+#include "co_compare.h"
 #include "co_objectives.h"
 #include "co_nav.h"
 #include "co_beside.h"
@@ -351,4 +352,7 @@ const CoCoarseBatch* CoXlTestCoarseBatch(int* drawn, int* failed)
 }
 const int* CoXlTestCoarseList(void) { return g_coarse.list; }
 int CoXlTestCoarseFree(int k) { return g_coarse.slotOf[k] < 0 && g_coarse.slots[k].state == STAMP_SLOT_FREE; }
+/* The coarse compare on (no reference), its texel table checked against the exe as CcOn does; then one image. */
+int CoXlTestCompareOn(void) { g_cc.on = 1; g_cc.reference[0] = 0; return CcTable(); }
+void CoXlTestCompareImage(const char* label, uintptr_t descriptor) { CcDescriptor(label, descriptor); }
 #endif

@@ -891,10 +891,20 @@ static void TdCollect(void)
 static int CoarseBatchNow(void); /* difficulty_world_terrain.c */
 static struct
 {
-    int on; wchar_t reference[MAX_PATH];
-    SRWLOCK lock; LONG level; int captured;
+    int on, table; wchar_t reference[MAX_PATH];
+    SRWLOCK lock; LONG level; int captured; DWORD thread;
     struct { uint32_t id, name; ULONGLONG since; } pending[12]; int pendingCount;
 } g_cc = {-1};
+
+/* The sample sizes are the exe's: with another table every image is refused, not read at a guessed size. */
+static int CcTable(void)
+{
+    uint32_t bpt[CO_COMPARE_BPT_COUNT] = {0};
+    uintptr_t exe = ApiModuleBase("helldivers2.exe", NULL);
+    g_cc.table = exe != 0 && !SafeRead(exe + CO_COMPARE_BPT, bpt, sizeof bpt) && co_compare_table_matches(bpt);
+    if (!g_cc.table) Note("coarse compare: the exe's texel sizes (exe+0x%X) are not the ones the compare knows; no image is read", CO_COMPARE_BPT);
+    return g_cc.table;
+}
 
 static int CcOn(void)
 {
@@ -910,6 +920,7 @@ static int CcOn(void)
         else if (mod != NULL && mod[0]) snprintf(folder, sizeof folder, "%s\\%s", mod, text);
         if (folder[0] && MultiByteToWideChar(CP_UTF8, 0, folder, -1, g_cc.reference, MAX_PATH) == 0) g_cc.reference[0] = 0;
         if (g_cc.on) Note("coarse compare: on; reference %s", g_cc.reference[0] ? folder : folder[0] ? "a path too long" : "none (this run's files only)");
+        if (g_cc.on) CcTable();
     }
     return g_cc.on;
 }
@@ -923,6 +934,7 @@ static const char* CcPipeline(void)
 
 static void CcImage(const char* label, const uint8_t* data, uint32_t w, uint32_t h, uint32_t bpp, uint32_t format)
 {
+    /* bpp is co_compare_sample_bytes(format): CcDescriptor refuses any other */
     size_t bytes = (size_t)w * h * bpp;
     uint64_t hash = 0xCBF29CE484222325ull;
     for (size_t i = 0; i < bytes; i++) hash = (hash ^ data[i]) * 0x100000001B3ull;
@@ -935,7 +947,7 @@ static void CcImage(const char* label, const uint8_t* data, uint32_t w, uint32_t
         for (size_t at = 0; at < bytes; at += wrote) if (!WriteFile(file, data + at, (DWORD)(bytes - at > 0x40000000u ? 0x40000000u : bytes - at), &wrote, NULL) || !wrote) break;
         CloseHandle(file);
     }
-    char against[2 * MAX_PATH + 160] = "no reference";
+    char against[4 * MAX_PATH + 160] = "no reference";
     if (g_cc.reference[0])
     {
         wchar_t path[MAX_PATH + 128];
@@ -948,39 +960,25 @@ static void CcImage(const char* label, const uint8_t* data, uint32_t w, uint32_t
         {
             DWORD got = 0; size_t at = 0;
             for (; at < bytes; at += got) if (!ReadFile(ref, other + at, (DWORD)(bytes - at > 0x40000000u ? 0x40000000u : bytes - at), &got, NULL) || !got) break;
-            if (at == bytes)
-            {
-                /* the difference in the sample's own unit: u16, f32 (when the image reads as floats) or bytes */
-                int f32 = bpp == 4 && TdLooksFloat((const uint32_t*)data, (size_t)w * h);
-                uint64_t differ = 0; double most = 0;
-                size_t samples = bpp == 2 || f32 ? (size_t)w * h : bytes;
-                for (size_t i = 0; i < samples; i++)
-                {
-                    double a, b;
-                    if (bpp == 2) { uint16_t x, y; memcpy(&x, data + 2 * i, 2); memcpy(&y, other + 2 * i, 2); a = x; b = y; }
-                    else if (f32) { float x, y; memcpy(&x, data + 4 * i, 4); memcpy(&y, other + 4 * i, 4); a = x; b = y; }
-                    else { a = data[i]; b = other[i]; }
-                    if (a != b) { differ++; if (fabs(a - b) > most) most = fabs(a - b); }
-                }
-                snprintf(against, sizeof against, "against the reference: %llu of %llu samples differ, max |d| %g (%s)", (unsigned long long)differ,
-                    (unsigned long long)samples, most, bpp == 2 ? "u16" : f32 ? "f32" : "bytes");
-            }
+            CoCompareDiff diff;
+            if (at == bytes && co_compare_diff(data, other, w, h, format, &diff) == 0)
+                snprintf(against, sizeof against, "against the reference: %llu of %llu samples differ, max |d| %g (%s)", (unsigned long long)diff.differ,
+                    (unsigned long long)diff.samples, diff.most, diff.unit);
             else snprintf(against, sizeof against, "the reference did not read");
         }
         else if (ref == INVALID_HANDLE_VALUE)
         {
             DWORD error = GetLastError();
-            char at[2 * MAX_PATH] = "?";
-            WideCharToMultiByte(CP_UTF8, 0, path, -1, at, sizeof at, NULL, NULL);
+            char at[4 * MAX_PATH] = "?";
+            if (WideCharToMultiByte(CP_UTF8, 0, path, -1, at, sizeof at, NULL, NULL) == 0) snprintf(at, sizeof at, "?");
             snprintf(against, sizeof against, "no reference file %s (error %lu)", at, (unsigned long)error);
         }
         else snprintf(against, sizeof against, "the reference is another size (%lld B)", (long long)size.QuadPart);
         if (other) VirtualFree(other, 0, MEM_RELEASE);
         if (ref != INVALID_HANDLE_VALUE) CloseHandle(ref);
     }
-    /* 0x1 reads as f32 and 0x16 is the u16 heightmap; the readback's size for other formats is not known */
-    Note("coarse compare: %s %s (batch %d): %u x %u, %u B a sample%s (format 0x%X), hash %016llX; %s", CcPipeline(), label, CoarseBatchNow(), w, h, bpp,
-        format == 0x1 || format == 0x16 ? "" : " assumed", format, (unsigned long long)hash, against);
+    Note("coarse compare: %s %s (batch %d): %u x %u, %u B a sample (format 0x%X), hash %016llX; %s", CcPipeline(), label, CoarseBatchNow(), w, h, bpp,
+        format, (unsigned long long)hash, against);
 }
 
 /* An image the game holds as {w, h, format, ?, data} (TdDescriptor's form). */
@@ -989,7 +987,9 @@ static void CcDescriptor(const char* label, uintptr_t descriptor)
     uint32_t wh[4] = {0}; uint64_t data = 0;
     if (SafeRead(descriptor, wh, 16) || SafeRead(descriptor + 0x10, &data, 8) || data < 0x10000 || wh[0] < 1 || wh[1] < 1 || wh[0] > 16384 || wh[1] > 16384)
     { Note("coarse compare: %s %s: no image", CcPipeline(), label); return; }
-    uint32_t bpp = wh[2] == 0x16 ? 2 : 4;
+    /* a readback is w x h samples of bpt[format] / 8 bytes, packed (exe 0x31DEFF..0x31DF5B) */
+    uint32_t bpp = g_cc.table ? co_compare_sample_bytes(wh[2]) : 0;
+    if (bpp == 0) { Note("coarse compare: %s %s: %u x %u, format 0x%X: no known sample size, not read", CcPipeline(), label, wh[0], wh[1], wh[2]); return; }
     size_t bytes = (size_t)wh[0] * wh[1] * bpp;
     uint8_t* copy = VirtualAlloc(NULL, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (copy == NULL) return;
@@ -998,21 +998,23 @@ static void CcDescriptor(const char* label, uintptr_t descriptor)
     VirtualFree(copy, 0, MEM_RELEASE);
 }
 
+static void CcUse(void* label, const CoReadback* readback) { CcDescriptor(label, (uintptr_t)readback); }
+
+/* Only on the thread that requested (op 0x56 runs on the main thread, flag 2): the readback array grows there. */
 static void CcCollect(void)
 {
-    if (g_cc.on <= 0 || g_cc.pendingCount == 0) return;
+    if (g_cc.on <= 0 || g_cc.pendingCount == 0 || GetCurrentThreadId() != g_cc.thread) return;
     AcquireSRWLockExclusive(&g_cc.lock);
-    uint64_t table = TdRenderTable(), ready = 0, get = 0;
-    if (table != 0 && !SafeRead(table + 0x1D0, &ready, 8) && !SafeRead(table + 0x1D8, &get, 8) && ready && get)
+    uint64_t table = TdRenderTable(), ready = 0, get = 0, release = 0;
+    if (table != 0 && !SafeRead(table + 0x1D0, &ready, 8) && !SafeRead(table + 0x1D8, &get, 8) && !SafeRead(table + 0x1E0, &release, 8) && ready && get &&
+        release)
         for (int k = 0; k < g_cc.pendingCount;)
         {
             int done = 0;
             char label[32]; snprintf(label, sizeof label, "minimap-%08X", g_cc.pending[k].name);
             if (((TdReadyFn)(uintptr_t)ready)(g_cc.pending[k].id))
             {
-                uint8_t out[64] = {0};
-                void* descriptor = ((TdGetFn)(uintptr_t)get)(out, g_cc.pending[k].id);
-                if (descriptor) CcDescriptor(label, (uintptr_t)descriptor);
+                co_compare_take(g_cc.pending[k].id, (CoReadbackGet)(uintptr_t)get, (CoReadbackFree)(uintptr_t)release, CcUse, label);
                 done = 1;
             }
             else if (GetTickCount64() - g_cc.pending[k].since > 20000) { Note("coarse compare: readback %s never came", label); done = 1; }
@@ -1038,7 +1040,7 @@ static void CcPass(uint32_t op)
     }
     /* a preview's 0x66 returns before its readback (settings+0x28 at 0xC17A27), so lg+0xD8 stays empty there */
     if (op == 0x66 && gen != 0 && strcmp(CcPipeline(), "preview") != 0) CcDescriptor("final-heights", gen + TD_IMAGE_BLOCK + 0xD8);
-    else if (op == 0x66) Note("coarse compare: preview final-heights: none (a preview's 0x66 reads no heights back)");
+    else if (op == 0x66 && gen != 0) Note("coarse compare: preview final-heights: none (a preview's 0x66 reads no heights back)");
     if (op == 0x56)
     {
         /* The names are bound only to the capture's own render (0x1004F54 -> exe 0x31E070 -> 0x10F4C0, a per-call set),
@@ -1051,6 +1053,7 @@ static void CcPass(uint32_t op)
         if (table == 0 || SafeRead(table + 0x1A8, &request, 8) || !request) return;
         if (g_worldLevel == 0 || SafeRead(g_worldLevel + 0x2D68, &record, 8) || record < 0x10000) { Note("coarse compare: no preview record at 0x56"); return; }
         AcquireSRWLockExclusive(&g_cc.lock);
+        g_cc.thread = GetCurrentThreadId();
         for (int i = 0; i < 10 && g_cc.pendingCount < 12; i++)
         {
             uint64_t target = 0; uint8_t type = 0; uint32_t size[2] = {0};
