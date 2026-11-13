@@ -530,7 +530,7 @@ static void Locks(void)
     LetGo(&h, reader);
     CHECK(WaitForSingleObject(u, 5000) == WAIT_OBJECT_0); CloseHandle(u);
     CHECK(g_unmaps == 1 && !CoXlTestSrMarked(span));
-    long long c[5]; CoXlTestSrCosts(c);
+    long long c[11]; CoXlTestSrCosts(c);
     CHECK(c[3] > 0); /* the wait was measured */
 
     g_case = "a scan and a rescue wait for an unmap";
@@ -694,12 +694,18 @@ static void Reach(void)
     CHECK(task(7) == 0x66 && g_tasks == 2 && g_taskArg == 7);
     CHECK(Partial(worker) == ws && Q(ws + 0x18) == 0 && Len(Q(ws)) == (int)COUNT - 1);
     CHECK(task(8) == 0x66 && g_tasks == 3); /* taken once */
+    long long c[11]; CoXlTestSrCosts(c);
+    CHECK(c[5] == 0 && c[6] == 0 && c[9] <= c[7] && c[10] <= c[8]); /* timed by the hook that took the list */
     g_fake.log[0] = 0;
     CHECK(CoXlTestSrStep(256, 0, 100002, 1) == 0);
     long long f[F_N]; CoXlTestSrLast(f);
     CHECK(f[F_FOUND] == 2 && f[F_RESCUED] == 2 && f[F_UNTAKEN] == 0 && f[F_THREADS] == 2);
     CHECK(f[F_VIA_RENDER] == 1 && f[F_VIA_TASK] == 1 && f[F_VIA_TRIM] == 0 && f[F_VIA_TICK] == 0);
     CHECK(fake_host_logged("0 in heaps whose thread did not come, 0 over the room; lists taken at trims 0, the tick 0, render messages 1, Havok task steps 1"));
+    CHECK(fake_host_logged("rpmalloc regions registered; taking the lists: at trims 0.000 ms (longest 0.000 ms), at the tick 0.000 ms (longest 0.000 ms), at render messages "));
+    CHECK(fake_host_logged(" ms), at Havok task steps "));
+    CoXlTestSrCosts(c);
+    CHECK(c[7] == 0 && c[8] == 0 && c[9] == 0 && c[10] == 0); /* the note starts the next count */
     void* again = Alloc(renderer);
     CHECK(SpanOf(again) == rs && g_newSpans == 2); /* the renderer's next block comes from the rescued span */
 
@@ -713,9 +719,16 @@ static void Reach(void)
     CoXlTestSrHeap(game);
     CHECK(CoXlTestSrStep(512, 0, 200000, 1) == 1 && CoXlTestSrStep(512, 0, 200001, 1) == 2);
     CoXlTestSrHeap(g_renderHeap);
+    Holder h;
+    HANDLE unmap = Hold(&h, 2); /* an unmap holds the headers: the renderer's take waits, and that wait is its cost */
     HANDLE t = CreateThread(NULL, 0, RenderOne, NULL, 0, NULL);
+    CHECK(WaitForSingleObject(t, 50) == WAIT_TIMEOUT);
+    LetGo(&h, unmap);
     WaitForSingleObject(t, INFINITE); CloseHandle(t);
     CHECK(g_renders == 1 && g_renderArgs[0] == 9 && Partial(g_renderHeap) == rs && Q(rs + 0x18) == 0);
+    LARGE_INTEGER qpf; QueryPerformanceFrequency(&qpf);
+    CoXlTestSrCosts(c);
+    CHECK(c[9] >= qpf.QuadPart / 20 && c[7] == c[9] && c[8] == 0); /* at least the 50 ms it waited, on the render hook alone */
     CHECK(CoXlTestSrStep(512, 0, 200002, 1) == 0);
 
     g_case = "a refused reach hook leaves that thread kind untaken; the rescue stays on";
@@ -728,7 +741,7 @@ static void Reach(void)
     Setup(1);
     g_fake.noHook = (uintptr_t)(g_exe + TASK_STEP) - (uintptr_t)g_fake.image;
     CHECK(CoXlTestSrInstall() == 1 && g_fake.hookCount == 2 && Detour(TASK_STEP) == NULL && Detour(RENDER_STEP) != NULL);
-    CHECK(fake_host_logged("Havok's workers not reached: the hook was refused"));
+    CHECK(fake_host_logged("threads that run Havok tasks not reached: the hook was refused"));
     g_fake.noHook = 0;
 }
 
@@ -764,13 +777,14 @@ static void Skip(void)
     CoXlTestSrHeap(w1);
     CoXlTestSrTrim(0x100); CHECK(g_trims == 6); /* only cl is the argument (0x630310) */
     worker(); CHECK(g_trims == 6);
-    long long c[5]; CoXlTestSrCosts(c);
+    long long c[11]; CoXlTestSrCosts(c);
     CHECK(c[0] == 3 && c[1] == 4 && c[2] == 1);
     g_fake.log[0] = 0;
     CoXlTestSrHeap(NewHeap());
     Pass(256, 100000);
     CHECK(fake_host_logged("pass 1 cost: an unmap waited at most 0.000 ms for the scan; pool worker trims since the last pass: 3 run ("));
-    CHECK(fake_host_logged("4 skipped (only the pass asked); 0 of 9 rpmalloc regions registered"));
+    CHECK(fake_host_logged("4 skipped (only the pass asked); 0 of 9 rpmalloc regions registered; taking the lists: at trims "));
+    CHECK(fake_host_logged("at the tick 0.000 ms (longest 0.000 ms), at render messages 0.000 ms (longest 0.000 ms), at Havok task steps 0.000 ms (longest 0.000 ms)"));
 }
 
 static volatile LONG g_toggleStop;
@@ -853,7 +867,7 @@ static void Install(void)
             if (group == 0 && r != -1 && missed++ == 0) first = kRpmallocBytes[i].rva + k;
             if (group != 0 && (r != 1 || g_fake.hookCount != 2 || Detour(group == 1 ? RENDER_STEP : TASK_STEP) != NULL ||
                 Detour(group == 1 ? TASK_STEP : RENDER_STEP) == NULL || Detour(TRIM) == NULL) && reachMissed++ == 0) first = kRpmallocBytes[i].rva + k;
-            if (group != 0) reachNoted &= fake_host_logged(group == 1 ? "the renderer not reached: the code at 0x" : "Havok's workers not reached: the code at 0x");
+            if (group != 0) reachNoted &= fake_host_logged(group == 1 ? "the renderer not reached: the code at 0x" : "threads that run Havok tasks not reached: the code at 0x");
             g_exe[kRpmallocBytes[i].rva + k] ^= 0x5A;
             SetQ((uintptr_t)(g_exe + MAP_AT), (uint64_t)(uintptr_t)(g_exe + MAP_DEFAULT)); /* as before an install that went in */
             SetQ((uintptr_t)(g_exe + UNMAP_AT), (uint64_t)(uintptr_t)(g_exe + UNMAP_DEFAULT));
