@@ -553,7 +553,7 @@ int main(void)
         static char line[96];
         uint32_t value;
         snprintf(line, sizeof line, "players: the loadout screen has eight records and cards (%u code sites changed)", co_counts_test_loadout());
-        CHECK(co_counts_test_loadout() == 485u && fake_host_logged(line) == (players == 8));
+        CHECK(co_counts_test_loadout() == 488u && fake_host_logged(line) == (players == 8));
         memcpy(&value, image + LOADOUT_SIZE + 1, 4);
         CHECK(image[LOADOUT_SIZE] == 0xBA && value == (players == 8 ? 0x36FA70u : 0x2739D0u));
         CHECK(image[LOADOUT_BOUND] == 0xBF && image[LOADOUT_BOUND + 1] == players);
@@ -632,7 +632,8 @@ int main(void)
          * until the mod sets another height, and the slot is what each store reads. */
         static const struct { uint32_t rva; uint8_t size, rbp; int32_t at; } kHeights[] = {
             {0x146C9CEu, 8, 0, 0x5C}, {0x146C9EFu, 8, 0, 0x64}, {0x146CEDBu, 8, 0, 0x64}, {0x146CEFFu, 8, 0, 0x5C},
-            {0x1471363u, 8, 0, 0x64}, {0x1471384u, 8, 0, 0x54}, {0x189AE82u, 7, 1, -0x2C}, {0x189E149u, 11, 0, 0x94},
+            {0x1471363u, 8, 0, 0x64}, {0x1471384u, 8, 0, 0x54}, {0x189AE82u, 7, 1, -0x2C}, {0x189AEE2u, 7, 1, -0x2C},
+            {0x189AF49u, 7, 1, -0x2C}, {0x189B2F5u, 7, 1, -0x3C}, {0x189E149u, 11, 0, 0x94},
             {0x189E187u, 11, 0, 0x94}, {0x189E23Cu, 11, 0, 0x94}, {0x189E38Du, 7, 1, -0x35}, {0x189E3EAu, 7, 1, -0x45}};
         /* push rbp; sub rsp,0xB0; lea rbp,[rsp+0x80]; jmp rdx */
         static const uint8_t kFrameIn[] = {0x55, 0x48, 0x81, 0xEC, 0xB0, 0x00, 0x00, 0x00, 0x48, 0x8D, 0xAC, 0x24, 0x80, 0x00, 0x00, 0x00,

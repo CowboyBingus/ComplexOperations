@@ -596,9 +596,11 @@ CARD_SCALE = [
 ]
 
 # The card's height, 780 in the game, is a store of an immediate at each place that sizes or tweens the card: the
-# constructor's root, L's and the card's resizes of +0x1C30 and +0x1D40, and the expand and collapse tweens (0x1451BB0,
-# from and to both ways in 0x189E2F0). Each store reads the height from the mod's slot instead (DATA(CARD_HEIGHT),
-# co_cards.c), so one build can draw the game's cards or shorter ones. rax is kept with a push; no flag is written.
+# constructor's root, +0x1C30, +0x1D40 and +0x5848, L's and the card's resizes of +0x1C30 and +0x1D40, and the expand
+# and collapse tweens (0x1451BB0, from and to both ways in 0x189E2F0). That is every 780.0 immediate of L and the card
+# code but the figure's own 780 x 780 (0x18A0DBE..0x18A0F00). Each store reads the height from the mod's slot instead
+# (DATA(CARD_HEIGHT), co_cards.c), so one build can draw the game's cards or shorter ones. rax is kept with a push; no
+# flag is written.
 # (rva, [rsp+d] or [rbp+d] of the store, its length, note)
 CARD_HEIGHT = 0
 _HEIGHT_STORES = [
@@ -609,6 +611,9 @@ _HEIGHT_STORES = [
     (0x1471363, 'rsp', 0x64, 8, '1470d90 +0x1C30 size'),
     (0x1471384, 'rsp', 0x54, 8, '1470d90 +0x1D40 size'),
     (0x189AE82, 'rbp', -0x2C, 7, '189ae00 card root size'),
+    (0x189AEE2, 'rbp', -0x2C, 7, '189ae00 +0x1C30 size (the init end makes it 42)'),
+    (0x189AF49, 'rbp', -0x2C, 7, '189ae00 +0x1D40 size (the init end makes it 42)'),
+    (0x189B2F5, 'rbp', -0x3C, 7, '189ae00 +0x5848 size'),
     (0x189E149, 'rsp', 0x94, 11, '189e080 +0x1C30 tween to'),
     (0x189E187, 'rsp', 0x94, 11, '189e080 +0x1D40 size'),
     (0x189E23C, 'rsp', 0x94, 11, '189e080 +0x1D40 tween to'),

@@ -143,12 +143,12 @@ Limits that remain:
 
 The loadout screen keeps four arrays by player or card: the players' records, a map from player to card, its reverse
 and the cards. A build for eight allocates the screen bigger and moves the four arrays to arrays of eight at its end.
-430 code sites address the new places or count to eight; 56 more go through code beside the game's. Among those are
+430 code sites address the new places or count to eight; 59 more go through code beside the game's. Among those are
 15 guards rebuilt for eight: an index of eight or more, or none, skips the access as before.
 
 The eight cards stand in one row at half the game's size, 232 reference units apart, so they do not overlap.
 
-Each of the 12 places that store a card's height (780 reference units) reads it from the mod's memory instead, through
+Each of the 15 places that store a card's height (780 reference units) reads it from the mod's memory instead, through
 code beside the game's: the card's constructor, the screen's and the card's resizes, and the expand and collapse
 animations. The mod keeps the game's 780 there. A callback runs in front of each update of the screen; it does not
 move the cards yet.
@@ -619,7 +619,7 @@ Pelican), which are not in this folder.
 | `scripts/sites/difficulty_sites.py` | The HiveMind's difficulty sites and their caves for eight. |
 | `scripts/sites/extract_sites.py` | The Pelican's seat caves and seat block, and the booster cave, for eight. |
 | `src/co_extract.c` | The check of the Pelican's seat nodes, and the booster update over eight. |
-| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards and the mission result's slots in both managers' states, the Activity record's participants, answers and post, and the join limit without the managers. The mission summary in each build. The card height's 12 caves, run with the slot at two heights. |
+| `tests/counts_test.c` | The counts and guards: written behind the move, taken back on a failed write, entries 4 to 7. The loadout screen in each build, and the per-peer table's move and its undo. The loot rows' guards and the mission result's slots in both managers' states, the Activity record's participants, answers and post, and the join limit without the managers. The mission summary in each build. The card height's 15 caves, run with the slot at two heights. |
 | `tests/figures_test.c` | The figure records' move and way back, the game's code on the moved records, the caves for records 8 to 11, the refusals. |
 | `tests/cards_test.c` | The loadout cards' layout: eight cards in two rows at nine screen sizes against the predicted pixels, the HUD scale's limit and the game's four. |
 | `tests/extract_test.c` | The difficulty caves for one to eight players, the seat block, the node checks, the attach node caves and the boosters. Refusal by part and rollback of a failed write. |
