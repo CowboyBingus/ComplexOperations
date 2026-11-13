@@ -26,6 +26,7 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
 | 24 `.c` files named in `../co_xl.c` | Included there, in the loader's order. |
 | `living_world_*.c`, `tacmap_*.c`, `tacmap.h`, `world_sites.h`, `living_world_defer_list.h` | Included by the files above. |
 | `safe_read.c` | Included by `../co_shim.c`: the mod's guarded read. |
+| `xl_span_rescue.c`, `xl_span_rescue_pins.h` | The mod's own, not copied. A full rpmalloc span that other threads freed blocks into goes back to its heap's partial list. A pool worker's trim that only the pass asked for is skipped. `../co_xl.c` installs it after the streamer and calls its pass from the tick. `scripts/gen_span_rescue_pins.py` writes the pins. |
 | `important_sites.h`, `route_sites.h` | Not compiled. They are tables of the generation block's move, which is HellForge's. |
 
 ## What is left out

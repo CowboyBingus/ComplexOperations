@@ -70,6 +70,7 @@
 #include "proto/difficulty_tacmap.c"
 #include "proto/test_daylight.c"
 #include "proto/difficulty_world_memprobe.c"
+#include "proto/xl_span_rescue.c"
 #pragma clang diagnostic pop
 
 /* The index query (0xC05360: rcx index, edx key, r8d, r9 buffer, [rsp+0x28] its places) writes at most its places and
@@ -101,6 +102,7 @@ static void CoXlTick(HfMod* mod, float dt, void* user)
     (void)mod; (void)user;
     StatusWatch(g_difficultyGame); /* the registry's hash, should the game have made the registry only now */
     WorldStreamTick(dt);
+    SpanRescueTick();
     NetPatienceTick();
     TerrainDiagTick();
     TerrainProbeTick();
@@ -215,6 +217,7 @@ const char* CoXlInstall(uintptr_t game)
     if ((why = co_text_install(g_coApi->module_base("helldivers2.exe", NULL), CO_HUD_TEXT_FIRST, 16u * HUD_TEXT_IDS)) != NULL)
         Note("difficulty: HUD: %s; no copy counts", why);
     if ((why = InstallWorld(&d)) != NULL || (why = InstallWorldStreamStep(&d)) != NULL || (why = InstallMapHud(&d)) != NULL) return why;
+    if (g_streamInstallState == 1) SpanRescueInstall(); /* its passes follow the streamer's removals */
     if (LoaderHook("the stamp index query's count (at most its places on a complex level)", game + CO_STAMP_QUERY, (void*)IndexQueryClamped, (void**)&g_indexQuery))
         return "the stamp index's query could not be hooked";
     co_nav_ship(WorldShip); /* the ship's navigation step is where play's world goes back to the game's */
