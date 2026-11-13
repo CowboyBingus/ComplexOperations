@@ -11,5 +11,7 @@ static void MoveBandPixelsTick(void);
 static void MoveTileTakeBand(int slot);
 static void MoveBandStash(void);
 static void MoveBandUnstash(void);
+static void MoveTrimEvent(const char* why);
+static int MoveTrimTick(void);
 
 #endif

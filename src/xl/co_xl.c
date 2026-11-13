@@ -302,6 +302,47 @@ void CoXlTestDispatchBegins(uint64_t records, uint64_t index) { WorldDispatchBeg
 void CoXlTestBandBuild(uint64_t tex, uint32_t* pixels, uint32_t made) { MoveBandStash(); g_move.stashed = 1; g_matband.tex = tex; g_matband.pixels = pixels; g_matband.framed = 1; g_matband.frame = made; }
 void CoXlTestBandTileIn(int slot) { g_tiles[slot].live = 1; g_tiles[slot].level = g_world.levels; MoveTileTakeBand(slot); MoveRestoreDrop(); }
 void CoXlTestRenderFramePins(void) { g_renderFramePinned = -1; }
+/* The mover (proto/difficulty_world_move.c) on the current level: grid origin (ox, oy), state `state` with the merge
+ * up or not, building cell (a, b); its tiles; one player; the release step and the whole level-update tick. */
+void CoXlTestMover(float ox, float oy, int state, int merge, int a, int b)
+{
+    g_moveInstalled = 1; g_move.on = 1; g_move.level = g_world.levels; g_move.state = state; g_move.merge = merge;
+    g_move.origin[0] = ox; g_move.origin[1] = oy; g_move.cell[0] = a; g_move.cell[1] = b; MoveCellCentre(a, b, g_move.centre);
+    g_move.players = 0;
+}
+void CoXlTestMoverTile(int slot, int a, int b, ULONGLONG seen)
+{
+    memset(&g_tiles[slot], 0, sizeof g_tiles[slot]);
+    g_tiles[slot].live = 1; g_tiles[slot].level = g_world.levels; g_tiles[slot].cell[0] = a; g_tiles[slot].cell[1] = b;
+    MoveCellCentre(a, b, g_tiles[slot].centre); g_tiles[slot].seen = seen; g_tileHidden[slot].lowered = 0;
+}
+void CoXlTestMoverPlayer(float x, float y) { g_move.player[g_move.players][0] = x; g_move.player[g_move.players][1] = y; g_move.players++; }
+int CoXlTestMoverLive(int slot) { return g_tiles[slot].live && g_tiles[slot].level == g_world.levels; }
+ULONGLONG CoXlTestMoverSeen(int slot) { return g_tiles[slot].seen; }
+int CoXlTestMoverRelease(ULONGLONG now) { return MoveReleaseTick(now); }
+int CoXlTestMoverState(void) { return g_move.state; }
+static float TestNoise(void* noise, float x, float y) { return 0.0f; }
+void CoXlTestMoverTick(uintptr_t level, float observerX, float observerY)
+{
+    g_world.live = 8.0f; g_terrainNoise = (TerrainNoiseFn)TestNoise; g_near.level = g_world.levels; g_near.state = NEAR_IN;
+    g_streamObserverOn = 1; g_streamObserverAt[0] = observerX; g_streamObserverAt[1] = observerY;
+    MoveTick(level);
+    g_streamObserverOn = 0;
+}
+/* rpmalloc's trim after tile events (proto/xl_free.c): its pins asked again, or the reviewed ones taken as passed with
+ * the test's trim and statistics; one tile event; one mover frame. */
+int CoXlTestTrimPins(void) { g_trim.pins = 0; g_trim.call = g_trim.stats = 0; return MoveTrimPins(); }
+uintptr_t CoXlTestTrimCall(void) { return g_trim.call; }
+void CoXlTestTrimUse(void (*trim)(uint64_t), void (*stats)(void*))
+{
+    g_trim.pins = 1; g_trim.call = (uintptr_t)trim; g_trim.stats = (uintptr_t)stats;
+    g_trim.level = g_world.levels; g_trim.pending = 0; g_trim.follow = 0; g_trim.events = 0; g_trim.trims = 0;
+}
+void CoXlTestTrimEvent(const char* why) { MoveTrimEvent(why); }
+int CoXlTestTrimTick(void) { return MoveTrimTick(); }
+void CoXlTestMoverSet(int state) { g_move.state = state; }
+void CoXlTestMoverTileIn(int slot, int a, int b)
+{ g_move.slot = slot; g_move.cell[0] = a; g_move.cell[1] = b; MoveCellCentre(a, b, g_move.centre); g_near.handle = 0; MoveTileIn(0); g_move.state = MV_IDLE; }
 void CoXlTestRenderAfter(uintptr_t state, void (*rehash)(uintptr_t, uint32_t), void (*resize)(uintptr_t, uint32_t))
 { g_lwRender.rehash = (uintptr_t)rehash; g_lwRender.resize = (uintptr_t)resize; LwRenderAfterDispatch(state); }
 uintptr_t CoXlTestRenderCopiesPins(uintptr_t exe) { return LwRenderCopiesPins(exe); }
