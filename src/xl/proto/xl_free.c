@@ -121,17 +121,23 @@ static const struct { uint32_t at; const char* bytes; } kDrainPins[] = {
 static int g_drainPinned; /* 1 the reviewed code, -1 not */
 static struct { uint8_t threaded; uint32_t game, render, queued, jobs; } g_drain;
 
+/* The game's slot holds the thunk 0x336AD0, a lone jmp to the destroy with its arguments as they are (run mp-city5). */
+static int MoveDestroySlot(uintptr_t exe, uintptr_t slot)
+{
+    return exe != 0 && (slot == exe + 0x1ADEA0u || (slot == exe + 0x336AD0u && ApiCodeMatches(slot, "E9 CB 73 E7 FF") == 1));
+}
+
 static int MoveDrainPins(uintptr_t exe)
 {
     if (g_drainPinned) return g_drainPinned > 0;
     const uintptr_t slot = NearApi(0x08, 0x1E0);
-    int ok = exe != 0 && slot == exe + 0x1ADEA0u;
+    int ok = MoveDestroySlot(exe, slot);
     size_t i = 0;
     for (; ok && i < sizeof kDrainPins / sizeof kDrainPins[0]; i++) ok = ApiCodeMatches(exe + kDrainPins[i].at, kDrainPins[i].bytes) == 1;
     g_drainPinned = ok ? 1 : -1;
     if (ok) return 1;
-    /* The slot and the pins match the dump, so the note says which check failed at run time and what it read. */
-    const int pin = exe != 0 && slot == exe + 0x1ADEA0u && i > 0;
+    /* The note says which check failed at run time and what it read. */
+    const int pin = MoveDestroySlot(exe, slot) && i > 0;
     char where[96] = "?";
     uint8_t got[8] = {0};
     if (slot != 0) ModuleAt(slot, where, sizeof where);
