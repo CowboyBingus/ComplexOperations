@@ -405,6 +405,20 @@ void CoXlTestArcUnlockNote(uint64_t lg, uint64_t G, uint32_t o, const uint32_t* 
     memcpy(s.id, id, 4ull * s.o); memcpy(s.block, block, s.o);
     ArcUnlockNote(lg, G, &s, index, rec, blockMission);
 }
+/* The mission arcs on a fake level: the fill's list as WorldObjectiveFill keeps it, and the cluster pass's call with
+ * the first `placed` locations op 0x16's. */
+void CoXlTestArcList(uintptr_t game, uint16_t row, const uint32_t* selected, uint32_t n, const uint32_t* list, uint32_t total)
+{
+    g_difficultyGame = game;
+    ArcListKeep(game + DIF_MISSIONS, row, selected, n, list, total);
+}
+void CoXlTestObjectiveArcs(uintptr_t level, uint64_t a, uint64_t pass, uint64_t clusters, uint32_t n, float centre, uint32_t placed)
+{
+    LevelKindSet(level, 1);
+    memset(g_locationOp, 0, sizeof g_locationOp);
+    memset(g_locationOp, 0x16, placed < CO_LOCATIONS_MAX ? placed : CO_LOCATIONS_MAX);
+    ObjectiveArcs(a, pass, clusters, n, centre);
+}
 /* The frame-time levers on a fake exe: the absent cells' switched site (1 in, -1 refused for good, 0 to try again), its
  * path now, and the nav job and vehicle box hooks with what their leave must undo. */
 int CoXlTestZeroBox(int reset)

@@ -5,7 +5,8 @@
  * from a step to the mains of its own mission by the same note.
  *
  * Only the peer that owns the objectives (the host) runs these passes; the others copy the state it sends, so nothing
- * new goes over the network. A normal level 11, vanilla and the ship run the game's own bytes. */
+ * new goes over the network. The stubs ask on every extra large mission in play; with no note of its generation the
+ * answer is the game's. A map of vanilla size and the ship run the game's own bytes. */
 #ifndef CO_UNLOCK_H
 #define CO_UNLOCK_H
 
@@ -24,7 +25,7 @@ uint8_t co_unlock_noted(uintptr_t lg, uintptr_t gen, uint32_t l, uint32_t id, ui
 /* 1 when the step is to hold the main: the game's map-wide answer unless both missions are known and differ. */
 int co_unlock_rule(uint8_t mainMission, uint8_t stepMission);
 
-/* The mission in play: 1 a complex one. Nothing before the install. */
+/* The world in play: 1 an extra large one (WorldWrite). Nothing before the install. */
 void co_unlock_live(int complex);
 /* Called by the stubs with the objective manager and two instance indexes. */
 uint64_t co_unlock_holds(uintptr_t manager, uint32_t main, uint32_t step);
@@ -70,7 +71,8 @@ size_t co_unlock_stub_d(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t 
  * returns a bit per slot, 0 when the step's own mission is not known. */
 uint32_t co_unlock_hide(const uint8_t* mission, uint32_t slots, uint32_t step);
 
-/* NULL when the two sites hold the game's bytes and the hologram's two functions their pins. Reads only. */
+/* NULL when sites A and B hold the game's bytes and the unit lookup (0x5D2F0C) its pin. Reads only; the install
+ * checks C, D and the hologram on its own, each refused alone. */
 const char* co_unlock_check(uintptr_t game);
 /* Both stubs and both hooks; `list` is the important locations' offset in the generation block (HellForge's). NULL,
  * or why: then nothing was written and every main waits for every step on the map, as in the game. */

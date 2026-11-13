@@ -1,5 +1,5 @@
 /* A main objective waits for the steps of its own mission on a complex operation: the rule, the note it reads and
- * the arcs' note that makes it, the instance's mission found as the game finds an instance's location, the two stubs
+ * the arcs' note that makes it, the instance's mission found as the game finds an instance's location, the four stubs
  * run as the game's passes reach them (whose normal path is the game's bytes), the flag level init and the ship set,
  * the install's refusals and rollback, and the war table's lines from a step to its own mission's mains only. */
 #include <stddef.h>
@@ -154,10 +154,20 @@ struct { uint64_t rsp, rcx, rdx, r8, calls, answer; } g_unlockCall;
 #define LAND_BACK 1u /* 0x5D36BD, after the activation pass's site */
 #define LAND_HOLD 2u /* 0x5D3FAF, the waiting pass's main held */
 #define LAND_NEXT 3u /* 0x5D3F96, the waiting pass's next step */
+#define LAND_C_NEXT 4u /* 0x5D365C, the activation pass's order compare */
+#define LAND_C_SKIP 5u /* 0x5D3686, not counted */
+#define LAND_D_NEXT 6u /* 0x5D3EA7, the waiting pass's jae on the order compare */
+#define LAND_D_SKIP 7u /* 0x5D3EB5, not counted */
+#define LAND_FAULT 8u  /* the run faulted */
 void UnlockRun(void);
 void UnlockBack(void);
 void UnlockHold(void);
 void UnlockNext(void);
+void UnlockCNext(void);
+void UnlockCSkip(void);
+void UnlockDNext(void);
+void UnlockDSkip(void);
+void UnlockFault(void);
 uint64_t UnlockHolds(void);
 /* UnlockRun enters g_unlockEnter with g_unlockIn's registers and flags. Where the site goes on, a landing records every
  * register as the game's next instruction would find it and returns to UnlockRun's caller. UnlockHolds stands in for
@@ -181,6 +191,11 @@ __asm__(".text\n.p2align 4\n.globl UnlockRun\nUnlockRun:\n"
         ".p2align 4\n.globl UnlockBack\nUnlockBack:\n  movq $1, g_unlockOut+0x88(%rip)\n  jmp UnlockLand\n"
         ".p2align 4\n.globl UnlockHold\nUnlockHold:\n  movq $2, g_unlockOut+0x88(%rip)\n  jmp UnlockLand\n"
         ".p2align 4\n.globl UnlockNext\nUnlockNext:\n  movq $3, g_unlockOut+0x88(%rip)\n  jmp UnlockLand\n"
+        ".p2align 4\n.globl UnlockCNext\nUnlockCNext:\n  movq $4, g_unlockOut+0x88(%rip)\n  jmp UnlockLand\n"
+        ".p2align 4\n.globl UnlockCSkip\nUnlockCSkip:\n  movq $5, g_unlockOut+0x88(%rip)\n  jmp UnlockLand\n"
+        ".p2align 4\n.globl UnlockDNext\nUnlockDNext:\n  movq $6, g_unlockOut+0x88(%rip)\n  jmp UnlockLand\n"
+        ".p2align 4\n.globl UnlockDSkip\nUnlockDSkip:\n  movq $7, g_unlockOut+0x88(%rip)\n  jmp UnlockLand\n"
+        ".p2align 4\n.globl UnlockFault\nUnlockFault:\n  movq $8, g_unlockOut+0x88(%rip)\n  jmp UnlockLand\n"
         ".p2align 4\nUnlockLand:\n"
         "  movq %rax, g_unlockOut+0x00(%rip)\n  movq %rcx, g_unlockOut+0x08(%rip)\n  movq %rdx, g_unlockOut+0x10(%rip)\n  movq %rbx, g_unlockOut+0x18(%rip)\n"
         "  movq %rsp, g_unlockOut+0x20(%rip)\n  movq %rbp, g_unlockOut+0x28(%rip)\n  movq %rsi, g_unlockOut+0x30(%rip)\n  movq %rdi, g_unlockOut+0x38(%rip)\n"
@@ -221,24 +236,44 @@ static void Sites(void)
     Pad(CO_UNLOCK_A_BACK, UnlockBack);
     Pad(CO_UNLOCK_B_HOLD, UnlockHold);
     Pad(CO_UNLOCK_B_NEXT, UnlockNext);
+    Pad(CO_UNLOCK_C_NEXT, UnlockCNext);
+    Pad(CO_UNLOCK_C_SKIP, UnlockCSkip);
+    Pad(CO_UNLOCK_D_NEXT, UnlockDNext); /* 14 bytes: up to D_SKIP's pad */
+    Pad(CO_UNLOCK_D_SKIP, UnlockDSkip);
     CHECK(memcmp(g_image + CO_UNLOCK_A_SITE, kCoUnlockA, sizeof kCoUnlockA) == 0 || g_image[CO_UNLOCK_A_SITE] == 0xE9);
     FlushInstructionCache(GetCurrentProcess(), g_image + (CO_UNLOCK_A_SITE & ~0xFFFu), 0x2000u);
 }
 
 /* Runs the code at `enter` with `in`'s registers on a 16-aligned stack whose first 0x100 bytes are `frame` (the pass's
- * own slots); 1 when the run left that frame as it was. g_unlockOut holds what the landing found. */
+ * own slots); 1 when the run left that frame as it was. g_unlockOut holds what the landing found. With g_rbpFrame, rbp
+ * is rsp + 0x100, as 0x5D2DA0's prologue leaves it. */
+static int g_rbpFrame;
+/* A stub that loses a register the game reads faults as the game would: the run lands at UnlockFault (landed 8). */
+static volatile LONG g_running;
+static LONG CALLBACK Fault(EXCEPTION_POINTERS* e)
+{
+    if (!g_running || e->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+    g_running = 0;
+    e->ContextRecord->Rip = (DWORD64)(uintptr_t)UnlockFault;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
 static int Run(const Regs* in, uintptr_t enter, const uint8_t* frame)
 {
-    uint8_t stack[0x1000] __attribute__((aligned(16)));
-    uint8_t* const rsp = stack + 0x800;
+    uint8_t stack[0x8000] __attribute__((aligned(16))); /* room below rsp for the callee and a fault's dispatch */
+    uint8_t* const rsp = stack + 0x7000;
     memset(stack, 0xEE, sizeof stack);
     memcpy(rsp, frame, 0x100);
     g_unlockIn = *in;
     g_unlockIn.rsp = (uint64_t)(uintptr_t)rsp;
+    if (g_rbpFrame) g_unlockIn.rbp = (uint64_t)(uintptr_t)(rsp + 0x100);
     memset(&g_unlockOut, 0, sizeof g_unlockOut);
     g_unlockEnter = enter;
     g_unlockCall.rsp = g_unlockCall.rcx = g_unlockCall.rdx = g_unlockCall.r8 = g_unlockCall.calls = 0;
+    static PVOID handler;
+    if (handler == NULL) handler = AddVectoredExceptionHandler(1, Fault);
+    g_running = 1;
     UnlockRun();
+    g_running = 0;
     return memcmp(rsp, frame, 0x100) == 0;
 }
 
@@ -414,6 +449,86 @@ static void InstalledRun(void)
         CHECK(g_unlockOut.landed == kPairs[p].landB);
         if (g_failed != before) printf("  (pair %u: main %u, step %u, on %d)\n", (unsigned)p, kPairs[p].main, kPairs[p].step, kPairs[p].on);
     }
+    co_unlock_live(0);
+}
+
+/* The activation pass's order test at 0x5D3653: r13d objective k, edi the other j, rbx/r12/r15 j's net, entity and
+ * instance offsets, sil the "held" flag; [rsp+0x30] the manager, [rbp-0x80] k's net offset, [rbp-0x78] the net records. */
+static Regs SiteC(uint32_t k, uint32_t j, uint8_t* frame)
+{
+    Regs r;
+    const uint64_t m = At(MANAGER), kNet = 0x64ull * k, net = At(NET);
+    Distinct(&r);
+    r.rbx = 0x64ull * j; r.rsi = (m & ~0xFFull) | 1u; r.rdi = j; r.r12 = 8ull * j; r.r13 = k; r.r14 = 1; r.r15 = 0x1078ull * j;
+    memset(frame, 0x77, 0x100);
+    memcpy(frame + 0x30, &m, 8); memcpy(frame + 0x80, &kNet, 8); memcpy(frame + 0x88, &net, 8);
+    return r;
+}
+
+/* The waiting pass's order test at 0x5D3E9E: rcx the manager, edi the other j, rbx/rsi j's net and entity offsets,
+ * r14d the objective's order, r12d its group, r15d the instance count; [rsp+0x3c] objective i. */
+static Regs SiteD(uint32_t i, uint32_t j, uint32_t order, uint8_t* frame)
+{
+    Regs r;
+    const uint64_t m = At(MANAGER);
+    Distinct(&r);
+    r.rcx = m; r.rbx = 0x64ull * j; r.rsi = 8ull * j; r.rdi = j; r.r12 = 0x77; r.r13 = 1; r.r14 = order; r.r15 = 8;
+    memset(frame, 0x77, 0x100);
+    memcpy(frame + 0x30, &m, 8); memcpy(frame + 0x3C, &i, 4);
+    return r;
+}
+
+/* Every non-volatile register, rsp and the frame: the pass reads them after either way on. */
+static void KeptOrder(const Regs* in, int frameKept)
+{
+    const Regs* o = &g_unlockOut;
+    CHECK(o->rsp == in->rsp && frameKept);
+    CHECK(o->rbx == in->rbx && o->rbp == in->rbp && o->rsi == in->rsi && o->rdi == in->rdi);
+    CHECK(o->r12 == in->r12 && o->r13 == in->r13 && o->r14 == in->r14 && o->r15 == in->r15);
+    CHECK(memcmp(o->xmm[6], in->xmm[6], 10 * 16) == 0);
+}
+
+/* Both order tests through the installed page and co_unlock_holds, on the note's missions. The volatile registers the
+ * dump's pass reads after them: C, rax and rdx at 0x5D365C, none at 0x5D3686; D, rax and CF at 0x5D3EA7, rcx at both. */
+static void InstalledOrderRun(void)
+{
+    uint8_t frame[0x100];
+    Regs in;
+    g_case = "the installed order tests, run with co_unlock_holds";
+    World(1);
+    Note();
+    Sites();
+    const uintptr_t game = (uintptr_t)g_image;
+    const uint64_t m = At(MANAGER);
+    for (uint32_t j = 0; j < 8; j++) Put32(NET + 0x64u * j + 0x3Cu, 10u + j);
+    /* mission 0: 0, 1, 2; mission 1: 3, 4; 5 a side objective; 7 a unit no location holds. Order 12 for the objective */
+    static const struct { uint32_t objective, other; int on, counted; } kPairs[] = {
+        {0, 1, 1, 1}, {0, 4, 1, 0}, {3, 4, 1, 1}, {3, 1, 1, 0}, {3, 5, 1, 1}, {0, 7, 1, 1},
+        {0, 4, 0, 1}, {3, 1, 0, 1}, /* a normal mission: the game's bytes */
+    };
+    g_rbpFrame = 1;
+    for (size_t p = 0; p < sizeof kPairs / sizeof kPairs[0]; p++)
+    {
+        const int before = g_failed;
+        const uint32_t k = kPairs[p].objective, j = kPairs[p].other;
+        co_unlock_live(kPairs[p].on);
+        in = SiteC(k, j, frame);
+        int kept = Run(&in, game + CO_UNLOCK_C_SITE, frame);
+        in.rsp = g_unlockIn.rsp; in.rbp = g_unlockIn.rbp;
+        KeptOrder(&in, kept);
+        CHECK(g_unlockOut.landed == (kPairs[p].counted ? LAND_C_NEXT : LAND_C_SKIP));
+        if (g_unlockOut.landed == LAND_FAULT) { printf("  (pair %u: the activation pass faulted)\n", (unsigned)p); break; } /* World resets the lock a fault left held */
+        if (g_unlockOut.landed == LAND_C_NEXT) CHECK(g_unlockOut.rax == m && g_unlockOut.rdx == 0x64ull * k);
+        in = SiteD(k, j, 12, frame);
+        kept = Run(&in, game + CO_UNLOCK_D_SITE, frame);
+        in.rsp = g_unlockIn.rsp; in.rbp = g_unlockIn.rbp;
+        KeptOrder(&in, kept);
+        CHECK(g_unlockOut.landed == (kPairs[p].counted ? LAND_D_NEXT : LAND_D_SKIP) && g_unlockOut.rcx == m);
+        if (g_unlockOut.landed == LAND_FAULT) { printf("  (pair %u: the waiting pass faulted)\n", (unsigned)p); break; }
+        if (g_unlockOut.landed == LAND_D_NEXT) CHECK(g_unlockOut.rax == At(NET) && (g_unlockOut.flags & 1u) == (10u + j < 12u));
+        if (g_failed != before) printf("  (pair %u: objective %u, other %u, on %d)\n", (unsigned)p, k, j, kPairs[p].on);
+    }
+    g_rbpFrame = 0;
     co_unlock_live(0);
 }
 
@@ -749,6 +864,7 @@ int main(void)
 
     StubsRun();
     InstalledRun();
+    InstalledOrderRun();
     ArcNote();
     Wiring();
     Refusals();

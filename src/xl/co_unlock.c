@@ -450,6 +450,7 @@ const char* co_unlock_install(uintptr_t game, uint32_t list)
 #ifdef CO_TEST
 void co_unlock_test_reset(void)
 {
+    InitializeSRWLock(&g_lock); /* a test's stub that faulted in co_unlock_holds left it held */
     co_unlock_forget();
     memset(&g_unlock, 0, sizeof g_unlock); memset(g_shown, 0, sizeof g_shown);
 }

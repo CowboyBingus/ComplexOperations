@@ -149,6 +149,7 @@ static int Subscribe(HfMod* mod, uint32_t kind, HfListener listener, void* user,
 
 static uintptr_t DifficultyRow(uint32_t level) { return level == 11 ? g_fake.levelRow : level == 10 ? g_fake.levelTen : 0; }
 static uint32_t LoadPhase(HfMod* mod) { return g_fake.loadPhase; }
+static const char* LogsFolder(HfMod* mod) { return NULL; } /* no folder: the mod writes none of its own log files */
 static int OnGameThread(HfMod* mod, HfTickCallback callback, void* user) { g_fake.tick = callback; return 1; }
 
 /* The registry's first list holds two other systems around the table's entry; the other two lists hold its entry only.
@@ -212,6 +213,7 @@ const HfApi* fake_host_reset(const char* build)
     g_api.generation_capacity = GenerationCapacity;
     g_api.difficulty_row = DifficultyRow;
     g_api.load_phase = LoadPhase;
+    g_api.logs_folder = LogsFolder;
     g_api.on_game_thread = OnGameThread;
     g_api.session = Session;
     g_api.subscribe = Subscribe;
