@@ -43,6 +43,24 @@ extern const uint8_t kCoUnlockA[21], kCoUnlockB[11];
 size_t co_unlock_stub_a(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t flag, uintptr_t holds);
 size_t co_unlock_stub_b(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t flag, uintptr_t holds);
 
+/* The sequential rule (settings +0xA84): an objective waits for the earlier ones (+0x3C order) of its group
+ * (0x1255D60). Group and order span the map and each mission's blocks are copies, so an objective of another known
+ * mission is no earlier one; `co_unlock_holds(manager, objective, other)` answers it as for a step.
+ * C, activation pass, behind its group test: `mov rax,[rsp+0x30]; mov rdx,[rbp-0x80]` (r13d the objective, edi the
+ * other); not counted goes on at 0x5D3686. D, waiting pass: `mov rax,[rcx+0x68]; cmp [rbx+rax+0x3c],r14d`
+ * ([rsp+0x3c] the objective, edi the other, rcx the manager); not counted goes on at 0x5D3EB5. */
+#define CO_UNLOCK_C_SITE 0x5D3653u
+#define CO_UNLOCK_C_NEXT 0x5D365Cu
+#define CO_UNLOCK_C_SKIP 0x5D3686u
+#define CO_UNLOCK_C_STUB 76u
+#define CO_UNLOCK_D_SITE 0x5D3E9Eu
+#define CO_UNLOCK_D_NEXT 0x5D3EA7u
+#define CO_UNLOCK_D_SKIP 0x5D3EB5u
+#define CO_UNLOCK_D_STUB 74u
+extern const uint8_t kCoUnlockC[9], kCoUnlockD[9];
+size_t co_unlock_stub_c(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t flag, uintptr_t holds);
+size_t co_unlock_stub_d(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t flag, uintptr_t holds);
+
 /* The hologram: the marker source (0xF736C0) and a step's line draw (0x14324E0). */
 #define CO_UNLOCK_MARKERS 0xF736C0u
 #define CO_UNLOCK_LINES 0x14324E0u

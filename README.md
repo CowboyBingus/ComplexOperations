@@ -246,7 +246,7 @@ One level-11 operation in four is a complex operation. HellForge owns difficulty
 | Missions | Three missions on the one map. |
 | Objectives | Up to 30: every mission's primaries, then major and optional ones in the room left. |
 | Arcs | The objectives are dealt in arcs: each mission's primaries stand together in their own part of the map. |
-| Unlock | A mission's main objectives open when that mission's own steps are done. The war table draws a step's lines to its own mission's mains only. |
+| Unlock | A mission's main objectives open when that mission's own steps are done; an ordered objective waits only for its own mission's earlier ones. The war table draws a step's lines to its own mission's mains only. |
 | Tactical map | 16 objective markers, as in the game. A marker goes to the next objective when one is done. |
 
 - Which operations are complex comes from the operation's seed and planet, so every player sees the same ones.

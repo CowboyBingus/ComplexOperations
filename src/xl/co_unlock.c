@@ -220,6 +220,68 @@ size_t co_unlock_stub_b(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t 
     return sizeof stub;
 }
 
+const uint8_t kCoUnlockC[9] = {0x48, 0x8B, 0x44, 0x24, 0x30, 0x48, 0x8B, 0x55, 0x80};
+const uint8_t kCoUnlockD[9] = {0x48, 0x8B, 0x41, 0x68, 0x44, 0x39, 0x74, 0x03, 0x3C};
+
+size_t co_unlock_stub_c(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t flag, uintptr_t holds)
+{
+    static const uint8_t stub[CO_UNLOCK_C_STUB] = {
+        0, 0, 0, 0, 0, 0, 0,                              /*  0 cmp byte [flag], 0 */
+        0x75, 0x0E,                                       /*  7 jne 23 */
+        0, 0, 0, 0, 0, 0, 0, 0, 0,                        /*  9 the game's 9 bytes */
+        0xE9, 0, 0, 0, 0,                                 /* 18 jmp 0x5D365C */
+        0x48, 0x83, 0xEC, 0x20,                           /* 23 sub rsp, 0x20 (volatile registers are dead here) */
+        0x48, 0x8B, 0x4C, 0x24, 0x50,                     /* 27 mov rcx, [rsp+0x50] (the manager) */
+        0x44, 0x89, 0xEA,                                 /* 32 mov edx, r13d (the objective) */
+        0x41, 0x89, 0xF8,                                 /* 35 mov r8d, edi (the other) */
+        0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0,               /* 38 mov rax, holds */
+        0xFF, 0xD0,                                       /* 48 call rax */
+        0x48, 0x83, 0xC4, 0x20,                           /* 50 add rsp, 0x20 */
+        0x85, 0xC0,                                       /* 54 test eax, eax */
+        0x0F, 0x84, 0, 0, 0, 0,                           /* 56 je 0x5D3686: another mission's */
+        0, 0, 0, 0, 0, 0, 0, 0, 0,                        /* 62 the game's 9 bytes */
+        0xE9, 0, 0, 0, 0};                                /* 71 jmp 0x5D365C */
+    const uint64_t to = holds;
+    memcpy(out, stub, sizeof stub);
+    Test(out, code, flag);
+    memcpy(out + 9, kCoUnlockC, sizeof kCoUnlockC); memcpy(out + 62, kCoUnlockC, sizeof kCoUnlockC); /* no address in them */
+    Rel(out, 19, code, game + CO_UNLOCK_C_NEXT);
+    memcpy(out + 40, &to, 8);
+    Rel(out, 58, code, game + CO_UNLOCK_C_SKIP);
+    Rel(out, 72, code, game + CO_UNLOCK_C_NEXT);
+    return sizeof stub;
+}
+
+size_t co_unlock_stub_d(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t flag, uintptr_t holds)
+{
+    static const uint8_t stub[CO_UNLOCK_D_STUB] = {
+        0, 0, 0, 0, 0, 0, 0,                              /*  0 cmp byte [flag], 0 */
+        0x75, 0x0E,                                       /*  7 jne 23 */
+        0, 0, 0, 0, 0, 0, 0, 0, 0,                        /*  9 the game's 9 bytes (its cmp's flags go back) */
+        0xE9, 0, 0, 0, 0,                                 /* 18 jmp 0x5D3EA7 */
+        0x51,                                             /* 23 push rcx (the manager, read again at the loop's top) */
+        0x48, 0x83, 0xEC, 0x28,                           /* 24 sub rsp, 0x28 (16-aligned with the push) */
+        0x8B, 0x54, 0x24, 0x6C,                           /* 28 mov edx, [rsp+0x6C] (the objective, [rsp+0x3c] at the site) */
+        0x41, 0x89, 0xF8,                                 /* 32 mov r8d, edi (the other) */
+        0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0,               /* 35 mov rax, holds */
+        0xFF, 0xD0,                                       /* 45 call rax */
+        0x48, 0x83, 0xC4, 0x28,                           /* 47 add rsp, 0x28 */
+        0x59,                                             /* 51 pop rcx */
+        0x85, 0xC0,                                       /* 52 test eax, eax */
+        0x0F, 0x84, 0, 0, 0, 0,                           /* 54 je 0x5D3EB5: another mission's */
+        0, 0, 0, 0, 0, 0, 0, 0, 0,                        /* 60 the game's 9 bytes */
+        0xE9, 0, 0, 0, 0};                                /* 69 jmp 0x5D3EA7 */
+    const uint64_t to = holds;
+    memcpy(out, stub, sizeof stub);
+    Test(out, code, flag);
+    memcpy(out + 9, kCoUnlockD, sizeof kCoUnlockD); memcpy(out + 60, kCoUnlockD, sizeof kCoUnlockD);
+    Rel(out, 19, code, game + CO_UNLOCK_D_NEXT);
+    memcpy(out + 37, &to, 8);
+    Rel(out, 56, code, game + CO_UNLOCK_D_SKIP);
+    Rel(out, 70, code, game + CO_UNLOCK_D_NEXT);
+    return sizeof stub;
+}
+
 uint32_t co_unlock_hide(const uint8_t* mission, uint32_t slots, uint32_t step)
 {
     uint32_t hide = 0;
@@ -313,6 +375,26 @@ const char* co_unlock_check(uintptr_t game)
     return NULL;
 }
 
+/* The sequential rule's two sites (stubs at page+0x100 and +0x180), both or neither. Refused, an objective of the
+ * rule waits for the earlier ones of every mission, as in the game; the steps' rule stands. */
+static const char* SequentialSites(uintptr_t game, const uint8_t* page)
+{
+    uint8_t c[sizeof kCoUnlockC], d[sizeof kCoUnlockD];
+    if (!Same(game + CO_UNLOCK_C_SITE, kCoUnlockC, sizeof c) || !Same(game + CO_UNLOCK_D_SITE, kCoUnlockD, sizeof d))
+        return "the objectives' order test is not the game's code this mod was made for";
+    memset(c, 0x90, sizeof c); memset(d, 0x90, sizeof d);
+    c[0] = d[0] = 0xE9;
+    int32_t rel = (int32_t)((int64_t)(uintptr_t)(page + 0x100) - (int64_t)(game + CO_UNLOCK_C_SITE + 5u)); memcpy(c + 1, &rel, 4);
+    rel = (int32_t)((int64_t)(uintptr_t)(page + 0x180) - (int64_t)(game + CO_UNLOCK_D_SITE + 5u)); memcpy(d + 1, &rel, 4);
+    if (g_coApi->write(game + CO_UNLOCK_C_SITE, c, sizeof c) != 0) return "the activation pass's order test could not be written";
+    if (g_coApi->write(game + CO_UNLOCK_D_SITE, d, sizeof d) != 0)
+    {
+        g_coApi->write(game + CO_UNLOCK_C_SITE, kCoUnlockC, sizeof kCoUnlockC);
+        return "the waiting pass's order test could not be written";
+    }
+    return NULL;
+}
+
 static const char* HologramCheck(uintptr_t game)
 {
     if (!g_coApi->code_matches(game + CO_UNLOCK_MARKERS, kMarkersPin)) return "the war table's marker source is not the game's code this mod was made for";
@@ -335,6 +417,8 @@ const char* co_unlock_install(uintptr_t game, uint32_t list)
     *live = 0;
     co_unlock_stub_a(page, (uintptr_t)page, game, (uintptr_t)live, (uintptr_t)co_unlock_holds);
     co_unlock_stub_b(page + 0x80, (uintptr_t)(page + 0x80), game, (uintptr_t)live, (uintptr_t)co_unlock_holds);
+    co_unlock_stub_c(page + 0x100, (uintptr_t)(page + 0x100), game, (uintptr_t)live, (uintptr_t)co_unlock_holds);
+    co_unlock_stub_d(page + 0x180, (uintptr_t)(page + 0x180), game, (uintptr_t)live, (uintptr_t)co_unlock_holds);
     if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &old)) { VirtualFree(page, 0, MEM_RELEASE); return "the objectives' stubs could not be made to run"; }
     FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
     uint8_t a[sizeof kCoUnlockA], b[sizeof kCoUnlockB];
@@ -350,6 +434,7 @@ const char* co_unlock_install(uintptr_t game, uint32_t list)
         return "the objectives' waiting pass could not be written";
     }
     g_unlock.page = page; g_unlock.live = live;
+    if ((why = SequentialSites(game, page)) != NULL) co_note("complex operations: mission unlock: %s; an ordered objective waits for every mission's earlier ones", why);
     /* the lines are a picture: without them the hologram keeps the game's lines and the unlock stands */
     if ((why = HologramCheck(game)) != NULL) co_note("complex operations: mission unlock: %s; the war table draws every step's lines", why);
     else if (co_loader_hook("the war table's marker source (each marker's mission)", game + CO_UNLOCK_MARKERS, (void*)Markers, (void**)&g_unlock.markers) == 0 &&
