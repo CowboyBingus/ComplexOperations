@@ -393,15 +393,16 @@ void CoXlTestWorldLevel(uintptr_t level, uintptr_t preview)
 void CoXlTestWorldShip(void) { WorldShip(); }
 /* A level's world written as level init writes it (`mission` 0 a war-table preview), without the rest of level init. */
 void CoXlTestWorldWrite(float scale, int mission) { WorldWrite(scale, mission); }
-/* The unlock rule's note of a generation (proto/difficulty_world_arcs.c): objective o at record index[o] with id[o],
- * in block[o] (1-based, 0 none), the block's mission in blockMission. */
-void CoXlTestArcUnlockNote(uint64_t lg, uint64_t G, uint32_t o, const uint32_t* index, const uint32_t* id, const uint8_t* block, const uint8_t* blockMission)
+/* The unlock rule's note of a generation (proto/difficulty_world_arcs.c): objective o at record index[o] (its record at
+ * rec[o]) with id[o], in block[o] (1-based, 0 none), the block's mission in blockMission. */
+void CoXlTestArcUnlockNote(uint64_t lg, uint64_t G, uint32_t o, const uint32_t* index, const uint64_t* rec, const uint32_t* id, const uint8_t* block,
+    const uint8_t* blockMission)
 {
     static ArcSet s;
     memset(&s, 0, sizeof s);
     s.o = o < ARC_MOST ? o : ARC_MOST;
     memcpy(s.id, id, 4ull * s.o); memcpy(s.block, block, s.o);
-    ArcUnlockNote(lg, G, &s, index, blockMission);
+    ArcUnlockNote(lg, G, &s, index, rec, blockMission);
 }
 /* The frame-time levers on a fake exe: the absent cells' switched site (1 in, -1 refused for good, 0 to try again), its
  * path now, and the nav job and vehicle box hooks with what their leave must undo. */

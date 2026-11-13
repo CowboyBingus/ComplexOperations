@@ -17,7 +17,8 @@ void CoXlTestGame(uintptr_t game);
 void CoXlTestWorldLevel(uintptr_t level, uintptr_t preview);
 void CoXlTestWorldShip(void);
 void CoXlTestWorldWrite(float scale, int mission);
-void CoXlTestArcUnlockNote(uint64_t lg, uint64_t G, uint32_t o, const uint32_t* index, const uint32_t* id, const uint8_t* block, const uint8_t* blockMission);
+void CoXlTestArcUnlockNote(uint64_t lg, uint64_t G, uint32_t o, const uint32_t* index, const uint64_t* rec, const uint32_t* id, const uint8_t* block,
+    const uint8_t* blockMission);
 void co_pages_test_reset(void);
 
 static int g_failed;
@@ -35,6 +36,7 @@ static const char* g_case;
 #define INSTANCES (MANAGER + 0x3000u) /* [M+0x60] */
 #define STUBS 0x3100000u            /* the test's own stubs, within a jump of the sites as the install's page is */
 #define FLAG 0x3101800u
+#define RECORDS 0x3970000u          /* the arcs' objective records, their cluster at +0xE0 */
 #define GEN_PAGE 0x3010000u         /* the world's two value pages, in reach of their readers */
 #define LIVE_PAGE 0x3010800u
 #define PREVIEWS 0x3000000u
@@ -109,6 +111,8 @@ static void World(int install)
     Instance(7, 42); /* a unit no location holds */
     memcpy(g_image + CO_UNLOCK_A_SITE, kCoUnlockA, sizeof kCoUnlockA);
     memcpy(g_image + CO_UNLOCK_B_SITE, kCoUnlockB, sizeof kCoUnlockB);
+    memcpy(g_image + CO_UNLOCK_C_SITE, kCoUnlockC, sizeof kCoUnlockC);
+    memcpy(g_image + CO_UNLOCK_D_SITE, kCoUnlockD, sizeof kCoUnlockD);
     /* the hologram's originals, which the hooks call */
     g_fake.originals[0].target = (uintptr_t)(g_image + CO_UNLOCK_MARKERS); g_fake.originals[0].original = (void*)TestMarkers;
     g_fake.originals[1].target = (uintptr_t)(g_image + CO_UNLOCK_LINES); g_fake.originals[1].original = (void*)TestLines;
@@ -415,25 +419,31 @@ static void InstalledRun(void)
 
 /* ---- what writes the note and the flag ----------------------------------------------------------------------------- */
 
-/* The arcs' note: an objective's mission is its block's, none without a block or past the blocks; its record index and
- * id go with it. A level whose block is not the clusters' one gets no note. */
+/* The arcs' note: an objective's mission is its block's, none without a block, past the blocks or with a record whose
+ * cluster cannot be read; its record index, id and cluster (+0xE0) go with it. A level whose block is not the
+ * clusters' one gets no note. */
 static void ArcNote(void)
 {
     g_case = "the arcs' note";
     World(0);
     const uintptr_t lg = (uintptr_t)At(LEVEL), gen = (uintptr_t)At(GEN);
-    static const uint32_t index[7] = {9, 3, 7, 12, 20, 5, 30}, id[7] = {0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17};
-    static const uint8_t block[7] = {1, 2, 3, 0, 16, 17, 2}, expected[7] = {0, 1, CO_UNLOCK_NONE, CO_UNLOCK_NONE, 2, CO_UNLOCK_NONE, 1};
+    static const uint32_t index[8] = {9, 3, 7, 12, 20, 5, 30, 40}, id[8] = {0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18};
+    static const uint8_t block[8] = {1, 2, 3, 0, 16, 17, 2, 1}, expected[8] = {0, 1, CO_UNLOCK_NONE, CO_UNLOCK_NONE, 2, CO_UNLOCK_NONE, 1, CO_UNLOCK_NONE};
+    uint64_t rec[8];
+    for (uint32_t o = 0; o < 8; o++) { rec[o] = At(RECORDS + 0x108u * o); Put64(RECORDS + 0x108u * o + 0xE0u, CLUSTER(index[o])); }
+    rec[7] = 0x10; /* a record that cannot be read: no cluster, no mission */
     uint8_t blockMission[16];
     memset(blockMission, CO_UNLOCK_NONE, sizeof blockMission);
     blockMission[0] = 0; blockMission[1] = 1; blockMission[15] = 2; /* block 3 knows no mission */
-    CoXlTestArcUnlockNote(lg, gen, 7, index, id, block, blockMission);
-    for (uint32_t o = 0; o < 7; o++) CHECK(co_unlock_noted(lg, gen, index[o], id[o]) == expected[o]);
-    CHECK(co_unlock_noted(lg, gen, 0, id[0]) == CO_UNLOCK_NONE && co_unlock_noted(lg, gen, index[0], id[1]) == CO_UNLOCK_NONE);
-    CHECK(fake_host_logged("complex operations: mission unlock: 4 objective locations in 3 missions (7 objectives on the map)"));
+    CoXlTestArcUnlockNote(lg, gen, 8, index, rec, id, block, blockMission);
+    for (uint32_t o = 0; o < 8; o++) CHECK(co_unlock_noted(lg, gen, index[o], id[o], CLUSTER(index[o])) == expected[o]);
+    CHECK(co_unlock_noted(lg, gen, 0, id[0], CLUSTER(index[0])) == CO_UNLOCK_NONE && co_unlock_noted(lg, gen, index[0], id[1], CLUSTER(index[0])) == CO_UNLOCK_NONE);
+    CHECK(co_unlock_noted(lg, gen, index[0], id[0], CLUSTER(index[1])) == CO_UNLOCK_NONE); /* the record holds another cluster's copy now */
+    CHECK(fake_host_logged("complex operations: mission unlock: 4 objective locations in 3 missions (8 objectives on the map)"));
     co_unlock_forget();
-    CoXlTestArcUnlockNote(lg, gen + 0x10000u, 7, index, id, block, blockMission);
-    for (uint32_t o = 0; o < 7; o++) CHECK(co_unlock_noted(lg, gen + 0x10000u, index[o], id[o]) == CO_UNLOCK_NONE && co_unlock_noted(lg, gen, index[o], id[o]) == CO_UNLOCK_NONE);
+    CoXlTestArcUnlockNote(lg, gen + 0x10000u, 8, index, rec, id, block, blockMission);
+    for (uint32_t o = 0; o < 8; o++)
+        CHECK(co_unlock_noted(lg, gen + 0x10000u, index[o], id[o], CLUSTER(index[o])) == CO_UNLOCK_NONE && co_unlock_noted(lg, gen, index[o], id[o], CLUSTER(index[o])) == CO_UNLOCK_NONE);
     CHECK(fake_host_logged("complex operations: mission unlock: the level's block is not the clusters' one; every step holds every main"));
 }
 
@@ -481,12 +491,12 @@ static void Wiring(void)
     CHECK(page[0x1000] == 0);
     CoXlTestWorldWrite(8.0f, 1);
     Note();
-    CHECK(co_unlock_noted(lg, gen, 1, 0xA1) == 0);
+    CHECK(co_unlock_noted(lg, gen, 1, 0xA1, CLUSTER(1)) == 0);
     CoXlTestWorldLevel(lg, 0); /* the next mission's level init: a normal one here */
-    CHECK(page[0x1000] == 0 && co_unlock_noted(lg, gen, 1, 0xA1) == CO_UNLOCK_NONE);
+    CHECK(page[0x1000] == 0 && co_unlock_noted(lg, gen, 1, 0xA1, CLUSTER(1)) == CO_UNLOCK_NONE);
     Note();
     CoXlTestWorldLevel(lg, 0x44); /* a war-table preview's level init forgets it too */
-    CHECK(co_unlock_noted(lg, gen, 1, 0xA1) == CO_UNLOCK_NONE);
+    CHECK(co_unlock_noted(lg, gen, 1, 0xA1, CLUSTER(1)) == CO_UNLOCK_NONE);
     co_pages_test_reset();
 }
 
@@ -505,9 +515,22 @@ static int Freed(const void* at)
     MEMORY_BASIC_INFORMATION m;
     return at != NULL && VirtualQuery(at, &m, sizeof m) != 0 && m.State == MEM_FREE;
 }
+static int OrderAsGame(void)
+{
+    return memcmp(g_image + CO_UNLOCK_C_SITE, kCoUnlockC, sizeof kCoUnlockC) == 0 && memcmp(g_image + CO_UNLOCK_D_SITE, kCoUnlockD, sizeof kCoUnlockD) == 0;
+}
 static int SitesAsGame(void)
 {
-    return memcmp(g_image + CO_UNLOCK_A_SITE, kCoUnlockA, sizeof kCoUnlockA) == 0 && memcmp(g_image + CO_UNLOCK_B_SITE, kCoUnlockB, sizeof kCoUnlockB) == 0;
+    return memcmp(g_image + CO_UNLOCK_A_SITE, kCoUnlockA, sizeof kCoUnlockA) == 0 && memcmp(g_image + CO_UNLOCK_B_SITE, kCoUnlockB, sizeof kCoUnlockB) == 0 && OrderAsGame();
+}
+/* The jump at `site` (the rest of its `size` bytes nops) leads to `to`. */
+static int Jumps(uint32_t site, uint32_t size, const uint8_t* to)
+{
+    int32_t d;
+    for (uint32_t i = 5; i < size; i++)
+        if (g_image[site + i] != 0x90) return 0;
+    memcpy(&d, g_image + site + 1, 4);
+    return g_image[site] == 0xE9 && g_image + site + 5 + d == to;
 }
 
 static void Refusals(void)
@@ -547,7 +570,7 @@ static void Refusals(void)
     g_fake.failWriteAt = 1; g_fake.failWrites = 2;
     CHECK(co_unlock_install(game, LIST) != NULL && co_unlock_test_page() == NULL && g_fake.wroteCount == 3);
     page = JumpedTo(0);
-    CHECK(page != NULL && !Freed(page) && g_image[CO_UNLOCK_A_SITE] == 0xE9); /* the game still jumps to it: kept */
+    CHECK(page != NULL && !Freed(page) && g_image[CO_UNLOCK_A_SITE] == 0xE9 && OrderAsGame()); /* the game still jumps to it: kept */
     CHECK(page != NULL && memcmp(page + 9, kCoUnlockA, sizeof kCoUnlockA) == 0 && page[0x1000] == 0); /* and it runs the game's bytes */
 
     static const struct { uint32_t rva; const char* why; } kPins[] = {
@@ -583,7 +606,31 @@ static void Refusals(void)
     g_case = "the install: every hook in";
     World(0);
     CHECK(co_unlock_install(game, LIST) == NULL && fake_host_detour(CO_UNLOCK_MARKERS) != NULL && fake_host_detour(CO_UNLOCK_LINES) != NULL);
-    CHECK(!fake_host_logged("draws every step's lines") && !fake_host_logged("hook refused"));
+    CHECK(!fake_host_logged("draws every step's lines") && !fake_host_logged("hook refused") && !fake_host_logged("an ordered objective"));
+    page = (uint8_t*)co_unlock_test_page();
+    CHECK(g_fake.wroteCount == 4 && page != NULL);
+    CHECK(page != NULL && Jumps(CO_UNLOCK_A_SITE, sizeof kCoUnlockA, page) && Jumps(CO_UNLOCK_B_SITE, sizeof kCoUnlockB, page + 0x80));
+    CHECK(page != NULL && Jumps(CO_UNLOCK_C_SITE, sizeof kCoUnlockC, page + 0x100) && Jumps(CO_UNLOCK_D_SITE, sizeof kCoUnlockD, page + 0x180));
+
+    /* the order test's sites after the steps' two: refused, the steps' rule stands and the order test is the game's */
+    g_case = "the install: the order test not the game's code";
+    World(0);
+    g_image[CO_UNLOCK_D_SITE + 8] = 0xCC;
+    CHECK(co_unlock_install(game, LIST) == NULL && co_unlock_test_page() != NULL && g_fake.wroteCount == 2);
+    CHECK(memcmp(g_image + CO_UNLOCK_C_SITE, kCoUnlockC, sizeof kCoUnlockC) == 0);
+    CHECK(fake_host_logged("complex operations: mission unlock: the objectives' order test is not the game's code this mod was made for; an ordered objective waits for every mission's earlier ones"));
+    g_case = "the install: the activation pass's order test refused";
+    World(0);
+    g_fake.failWriteAt = 2;
+    CHECK(co_unlock_install(game, LIST) == NULL && co_unlock_test_page() != NULL && g_fake.wroteCount == 3 && OrderAsGame());
+    CHECK(g_image[CO_UNLOCK_A_SITE] == 0xE9 && g_image[CO_UNLOCK_B_SITE] == 0xE9 && fake_host_detour(CO_UNLOCK_LINES) != NULL);
+    CHECK(fake_host_logged("complex operations: mission unlock: the activation pass's order test could not be written; an ordered objective waits for every mission's earlier ones"));
+    g_case = "the install: the waiting pass's order test refused, the activation pass's put back";
+    World(0);
+    g_fake.failWriteAt = 3;
+    CHECK(co_unlock_install(game, LIST) == NULL && co_unlock_test_page() != NULL && g_fake.wroteCount == 5 && g_fake.wrote[4] == game + CO_UNLOCK_C_SITE && OrderAsGame());
+    CHECK(g_image[CO_UNLOCK_A_SITE] == 0xE9 && g_image[CO_UNLOCK_B_SITE] == 0xE9);
+    CHECK(fake_host_logged("complex operations: mission unlock: the waiting pass's order test could not be written; an ordered objective waits for every mission's earlier ones"));
 }
 
 int main(void)
