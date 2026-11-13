@@ -295,22 +295,24 @@ static void ArcTable(const wchar_t* format, const ArcSet* s, const uint32_t* ind
     CloseHandle(file);
 }
 
-/* The unlock rule's note (../co_unlock.c): record, id and mission of each objective in a block whose mission is known. */
-static void ArcUnlockNote(uint64_t lg, uint64_t G, const ArcSet* s, const uint32_t* index, const uint8_t* blockMission)
+/* The unlock rule's note (../co_unlock.c): record, id, cluster (+0xE0, as the moves left it) and mission of each objective
+ * in a block whose mission is known. */
+static void ArcUnlockNote(uint64_t lg, uint64_t G, const ArcSet* s, const uint32_t* index, const uint64_t* rec, const uint8_t* blockMission)
 {
     uint32_t location[ARC_MOST], known = 0, missions = 0;
     uint8_t mission[ARC_MOST];
-    uint64_t gen = 0;
+    uint64_t gen = 0, cluster[ARC_MOST];
     if (SafeRead(lg + 0x2C8, &gen, 8) || gen != G) { Note("complex operations: mission unlock: the level's block is not the clusters' one; every step holds every main"); return; }
     for (uint32_t o = 0; o < s->o; o++)
     {
         location[o] = index[o];
         mission[o] = s->block[o] != 0 && s->block[o] <= ARC_BLOCKS ? blockMission[s->block[o] - 1] : (uint8_t)CO_UNLOCK_NONE;
+        if (SafeRead(rec[o] + 0xE0, &cluster[o], 8)) { cluster[o] = 0; mission[o] = CO_UNLOCK_NONE; }
         if (mission[o] == CO_UNLOCK_NONE) continue;
         known++;
         if (mission[o] < 32) missions |= 1u << mission[o];
     }
-    co_unlock_note(lg, G, location, s->id, mission, s->o);
+    co_unlock_note(lg, G, location, s->id, cluster, mission, s->o);
     uint32_t count = 0;
     for (; missions != 0; missions &= missions - 1) count++;
     Note("complex operations: mission unlock: %u objective locations in %u missions (%u objectives on the map)", known, count, s->o);
@@ -386,8 +388,9 @@ static void ObjectiveArcs(uint64_t a, uint64_t pass, uint64_t clusters, uint32_t
         s->o++;
     }
     s->blocks = blocks;
-    /* each objective's mission, whether the deal goes ahead or not: a main waits for its own mission's steps */
-    if (why == NULL) ArcUnlockNote(lg, G, s, index, blockMission);
+    /* each objective's mission, whether the deal goes ahead or not: a main waits for its own mission's steps. Noted
+     * once no cluster changes any more (loc+0xE0 is the note's guard): below, at either way out */
+    const int unlockNote = why == NULL;
     int planned = 0;
     if (why == NULL) planned = ArcDeal(s, centre);
     if (why == NULL && !planned) why = "fewer than two blocks with a main to deal, or fewer sites than blocks";
@@ -426,6 +429,7 @@ static void ObjectiveArcs(uint64_t a, uint64_t pass, uint64_t clusters, uint32_t
             for (uint32_t b = 0; b < blocks && b < ARC_BLOCKS; b++) mixed |= blockRow[b] != row;
             ArcTable(L"arcs-refused-%ld.tsv", s, index, kind, mixed, centre, planned);
         }
+        if (unlockNote) ArcUnlockNote(lg, G, s, index, rec, blockMission);
         ReleaseSRWLockExclusive(&g_arcDealLock);
         return;
     }
@@ -442,6 +446,7 @@ static void ObjectiveArcs(uint64_t a, uint64_t pass, uint64_t clusters, uint32_t
             ClusterAdd(rec[i], clusters + 0xE0ull * s->cluster[s->take[i]]); moved++;
             for (uint32_t q = 0; q < nk[i]; q++) { ClusterAdd(kids[i][q], clusters + 0xE0ull * s->cluster[s->take[i]]); children++; }
         }
+    ArcUnlockNote(lg, G, s, index, rec, blockMission);
     /* the note and arcs-<level>.tsv: one row an objective */
     int mixes = 0;
     for (uint32_t b = 0; b < blocks; b++) mixes |= blockRow[b] != row;

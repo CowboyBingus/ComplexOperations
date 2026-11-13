@@ -38,6 +38,7 @@ static struct
 {
     uintptr_t lg, gen;
     uint32_t n, location[CO_UNLOCK_NOTED], id[CO_UNLOCK_NOTED];
+    uint64_t cluster[CO_UNLOCK_NOTED];
     uint8_t mission[CO_UNLOCK_NOTED];
 } g_note;
 static struct { uintptr_t entity; uint32_t id, handle; uint8_t mission; } g_cache[256];
@@ -52,15 +53,17 @@ int co_unlock_rule(uint8_t mainMission, uint8_t stepMission)
     return mainMission == CO_UNLOCK_NONE || stepMission == CO_UNLOCK_NONE || mainMission == stepMission;
 }
 
-void co_unlock_note(uintptr_t lg, uintptr_t gen, const uint32_t* location, const uint32_t* id, const uint8_t* mission, uint32_t n)
+void co_unlock_note(uintptr_t lg, uintptr_t gen, const uint32_t* location, const uint32_t* id, const uint64_t* cluster, const uint8_t* mission, uint32_t n)
 {
     AcquireSRWLockExclusive(&g_lock);
     memset(&g_note, 0, sizeof g_note);
     g_note.lg = lg; g_note.gen = gen;
     for (uint32_t i = 0; i < n && g_note.n < CO_UNLOCK_NOTED; i++)
     {
-        if (mission[i] == CO_UNLOCK_NONE) continue;
-        g_note.location[g_note.n] = location[i]; g_note.id[g_note.n] = id[i]; g_note.mission[g_note.n++] = mission[i];
+        uint32_t j = 0; /* another mission's objective of this id in this cluster: a moved record could be either */
+        while (j < n && (j == i || id[j] != id[i] || cluster[j] != cluster[i] || mission[j] == mission[i])) j++;
+        if (mission[i] == CO_UNLOCK_NONE || j < n) continue;
+        g_note.location[g_note.n] = location[i]; g_note.id[g_note.n] = id[i]; g_note.cluster[g_note.n] = cluster[i]; g_note.mission[g_note.n++] = mission[i];
     }
     g_cached = 0;
     ReleaseSRWLockExclusive(&g_lock);
@@ -74,18 +77,18 @@ void co_unlock_forget(void)
     ReleaseSRWLockExclusive(&g_lock);
 }
 
-static uint8_t Noted(uintptr_t lg, uintptr_t gen, uint32_t l, uint32_t id) /* under the lock */
+static uint8_t Noted(uintptr_t lg, uintptr_t gen, uint32_t l, uint32_t id, uint64_t cluster) /* under the lock */
 {
     if (lg == 0 || g_note.lg != lg || g_note.gen != gen) return CO_UNLOCK_NONE;
     for (uint32_t i = 0; i < g_note.n; i++)
-        if (g_note.location[i] == l) return g_note.id[i] == id ? g_note.mission[i] : (uint8_t)CO_UNLOCK_NONE;
+        if (g_note.location[i] == l) return g_note.id[i] == id && g_note.cluster[i] == cluster ? g_note.mission[i] : (uint8_t)CO_UNLOCK_NONE;
     return CO_UNLOCK_NONE;
 }
 
-uint8_t co_unlock_noted(uintptr_t lg, uintptr_t gen, uint32_t l, uint32_t id)
+uint8_t co_unlock_noted(uintptr_t lg, uintptr_t gen, uint32_t l, uint32_t id, uint64_t cluster)
 {
     AcquireSRWLockShared(&g_lock);
-    const uint8_t m = Noted(lg, gen, l, id);
+    const uint8_t m = Noted(lg, gen, l, id, cluster);
     ReleaseSRWLockShared(&g_lock);
     return m;
 }
@@ -102,6 +105,7 @@ static uint8_t MissionOf(uintptr_t manager, uint32_t index) /* under the exclusi
     for (uint32_t i = 0; i < g_cached; i++)
         if (g_cache[i].entity == entity && g_cache[i].id == id && g_cache[i].handle == handle) return g_cache[i].mission;
     uint8_t mission = CO_UNLOCK_NONE;
+    int found = 0; /* no unit or location yet is asked again; a new note empties the cache */
     const uintptr_t lg = Ptr(Ptr(g_unlock.game + WORLD) + 0xAE288), gen = Ptr(lg + 0x2C8);
     const UnitOf unitOf = (UnitOf)Ptr(Ptr(Ptr(g_unlock.game + UNITS) + 0x18) + 0x710);
     if (gen != 0 && unitOf != NULL && handle != 0 && g_note.n != 0 && g_note.lg == lg && g_note.gen == gen)
@@ -112,11 +116,12 @@ static uint8_t MissionOf(uintptr_t manager, uint32_t index) /* under the exclusi
         {
             const uintptr_t loc = gen + g_unlock.list + (uintptr_t)RECORD * l, record = Ptr(loc + 0x98);
             if (record == 0 || *(const uint64_t*)(record + 0xA8) != unit) continue;
-            mission = Noted(lg, gen, l, *(const uint32_t*)(loc + 0xD8));
+            mission = Noted(lg, gen, l, *(const uint32_t*)(loc + 0xD8), *(const uint64_t*)(loc + 0xE0));
+            found = 1;
             break;
         }
     }
-    if (g_cached < sizeof g_cache / sizeof g_cache[0])
+    if (found && g_cached < sizeof g_cache / sizeof g_cache[0])
     {
         g_cache[g_cached].entity = entity; g_cache[g_cached].id = id; g_cache[g_cached].handle = handle; g_cache[g_cached++].mission = mission;
     }
@@ -253,7 +258,7 @@ static uint32_t Markers(uintptr_t lg, uint64_t* pos, const uint32_t* in, uint32_
             {
                 const uintptr_t loc = gen + g_unlock.list + (uintptr_t)RECORD * g_note.location[i];
                 if (memcmp((const void*)(loc + 0xA4), &pos[k], 8) != 0) continue;
-                if (*(const uint32_t*)(loc + 0xD8) == g_note.id[i]) g_shown[at].mission[k] = g_note.mission[i];
+                if (*(const uint32_t*)(loc + 0xD8) == g_note.id[i] && *(const uint64_t*)(loc + 0xE0) == g_note.cluster[i]) g_shown[at].mission[k] = g_note.mission[i];
                 break;
             }
         }
