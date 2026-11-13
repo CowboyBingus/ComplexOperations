@@ -1,7 +1,7 @@
-/* Host only: a bounded log of enemies near a player that stay calm, and what their eyes see of that player.
- * The game's sight pass (0x887270 -> 0x886490) asks per eye whether the target is in view (0x64CF30 -> 0x64C6F0) and,
- * when it is, casts the eye's ray (0x175CA60, run by 0x175C5C0 through [[game+0x3326328]+0x68]); 0x64D1D0 then reads
- * the hits. The probe repeats both for the player's target point, synchronously, so the log names what stops a ray. */
+/* Host only: calm enemies close to a player notice one outside their view (LwSense), and a bounded log of enemies near
+ * a player that stay calm, with what their eyes see of that player. The game's sight pass (0x887270 -> 0x886490) asks
+ * per eye whether the target is in view (0x64CF30 -> 0x64C6F0) and, when it is, casts the eye's ray (0x175CA60, run by
+ * 0x175C5C0 through [[game+0x3326328]+0x68]); 0x64D1D0 then reads the hits. The probe repeats both synchronously. */
 #define LW_AGP_NEAR 25.0f   /* m from a player */
 #define LW_AGP_TIMED 20.0f  /* m: engagement is timed from the first sample this close */
 #define LW_AGP_CALM 3000u   /* ms near and below alert 3 before a unit is logged */
@@ -11,6 +11,10 @@
 #define LW_AGP_EYE_LINES 160 /* eye lines a session, under the unit lines */
 #define LW_AGP_TIME_LINES 40
 #define LW_AGP_LOOKS 6      /* units whose own eye is checked per probe (twice a second) */
+#define LW_SENSE_NEAR 15.0f /* m: a calm enemy this close with a clear line notices a player outside its view (D) */
+#define LW_SENSE_TOLD 4000u /* ms before a told unit is told again; 1000 between checks otherwise */
+#define LW_SENSE_CHECKS 8   /* units checked per probe */
+#define LW_SENSE_LINES 30
 #define LW_FOLIAGE_HIT 0x4B8DC02Bu
 #define LW_HIT 0x2C         /* a ray hit: +0 x, +4 y, +0x18 metres along the ray, +0x1C unit (0 static), +0x24 type */
 
@@ -18,21 +22,21 @@ enum { LW_EYE_NONE, LW_EYE_VIEW, LW_EYE_SEEN, LW_EYE_DRAWN, LW_EYE_COARSE, LW_EY
 static const char* const kLwEyeWhat[LW_EYE_N] = {"no eye", "out of view", "seen", "the drawn ground", "the coarse collision over the tile",
     "a static object", "static (no drawn ground here)", "foliage", "another unit"};
 
-typedef struct { uint32_t unit; ULONGLONG since, seen, closeAt; uint8_t logged, timed; } LwAgpUnit;
+typedef struct { uint32_t unit; ULONGLONG since, seen, closeAt, senseAt; uint8_t logged, timed; } LwAgpUnit;
 static struct
 {
     LwAgpUnit u[LW_AGP_UNITS];
-    int lines, fighting, eyeLines, timeLines, pins, look;
+    int lines, fighting, eyeLines, timeLines, pins, look, senseLines;
     ULONGLONG nextAt, noteAt;
     uint32_t nearSum, calmSum, loaderSum, loaderFighting, scans; /* since the last note */
-    uint32_t eyes[2][LW_EYE_N], timedN[2]; float timedSum[2], timedMax[2]; /* [0] loader members, [1] other units */
+    uint32_t eyes[2][LW_EYE_N], sensed[2], timedN[2]; float timedSum[2], timedMax[2]; /* [0] loader members, [1] other units */
 } g_lwAgp;
 
 /* What an eye made of the target: 0x64C6F0's answer (code 0 out of view, 1 near, 2 far; +4 distance, +8 range) and,
  * when it asked for one, the ray's hits as 0x64D1D0 reads them. */
 typedef struct
 {
-    int what, at; uint32_t code, hits, unit, type, shape; float view[3], base, eye[3], dist, hitDist, hit[3], drawn, coarse, top; int tile;
+    int what, at, clear; uint32_t code, hits, unit, type, shape; float view[3], base, eye[3], dist, hitDist, hit[3], drawn, coarse, top; int tile;
 } LwEyeLook;
 
 /* 0x64D1D0's reading of a sight ray's hits, in the order the ray returned them: 1 seen, 0 blocked; *at the hit that
@@ -75,6 +79,7 @@ static const ActPin kLwSightPins[] = {
     {0, 0x64C6F0u, "488bc44889581855565741544155415641574881ecf0000000"}, /* an eye's view of a target */
     {0, 0x503BC0u, "4883ec284c8bd14885c97507"},                           /* an eye's settings */
     {0, 0x11D9DF0u, "48895c241048896c241856574154415641574883ec2033ff"},   /* a target's stat modifier */
+    {0, 0x888E50u, "40535741574883ec208b3dc1adbf024d"},                   /* the hearing writer (LwSense) */
 };
 typedef const float* (*LwNodePosFn)(uint32_t unit, uint32_t node);
 typedef uint8_t (*LwUnitValidFn)(uint32_t unit);
@@ -108,12 +113,13 @@ static int LwTargetPoint(uint32_t avatar, float* p)
 }
 
 /* One eye (a unit in the eye manager [game+0x3326520]) against `avatar`'s point `tpos`, as a calm unit asks (scale 1.0,
- * flag 0; 0x886635); `ground` adds the ground ray's top under a static hit. */
-static void LwEyeLookAt(uint32_t eyeUnit, uint32_t avatar, const float* tpos, int ground, LwEyeLook* r)
+ * flag 0; 0x886635); `ground` adds the ground ray's top under a static hit; `anyView` casts the ray (r->clear) when the
+ * view test says out of view too. */
+static void LwEyeLookAt(uint32_t eyeUnit, uint32_t avatar, const float* tpos, int ground, int anyView, LwEyeLook* r)
 {
     typedef void (*ViewFn)(uintptr_t mgr, void* out, uint32_t eye, const float* pos, uint32_t target, float scale, uint8_t flag);
     typedef uintptr_t (*SettingsFn)(uintptr_t info);
-    memset(r, 0, sizeof *r); r->at = -1; r->tile = -1; r->drawn = r->coarse = r->top = -9999.0f;
+    memset(r, 0, sizeof *r); r->at = -1; r->clear = -1; r->tile = -1; r->drawn = r->coarse = r->top = -9999.0f;
     uintptr_t mgr = 0, infos = 0, recs = 0, info = 0, templates = 0; uint32_t i = 0;
     if (!EvpPtr(g_lw.game + 0x3326520u, &mgr) || !EvpHash(mgr + 0x30, eyeUnit, 8, 4, &i) || i >= 0x100000 || !EvpPtr(mgr + 0x48, &infos) ||
         !EvpPtr(mgr + 0x58, &recs) || !EvpPtr(infos + 8ull * i, &info) || !info || !EvpPtr(mgr + 8, &templates)) return;
@@ -128,7 +134,7 @@ static void LwEyeLookAt(uint32_t eyeUnit, uint32_t avatar, const float* tpos, in
     float d[3] = {tpos[0] - r->eye[0], tpos[1] - r->eye[1], tpos[2] - r->eye[2]};
     r->dist = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
     r->what = LW_EYE_VIEW;
-    if (r->code == 0 || !(r->dist > 1e-6f) || rayHandle == 0) return; /* no ray: the entry is not visible (0x64D0EA) */
+    if ((r->code == 0 && !anyView) || !(r->dist > 1e-6f) || rayHandle == 0) return; /* no ray: the entry is not visible (0x64D0EA) */
     for (int k = 0; k < 3; k++) d[k] /= r->dist;
     uint8_t hits[8 * LW_HIT] = {0};
     r->hits = g_lwEye.ray(rayHandle, r->eye, d, r->dist, handle, hits, 8);
@@ -136,7 +142,9 @@ static void LwEyeLookAt(uint32_t eyeUnit, uint32_t avatar, const float* tpos, in
     uintptr_t set = ((SettingsFn)(g_lw.game + 0x503BC0u))(info);
     float nearR = 0, folR = 0;
     if (set) { SafeRead(set + 0x24, &nearR, 4); SafeRead(set + 0x28, &folR, 4); }
-    if (LwSightVerdict(hits, r->hits, avatar, r->eye, tpos, nearR, folR, &r->at)) { r->what = LW_EYE_SEEN; return; }
+    r->clear = LwSightVerdict(hits, r->hits, avatar, r->eye, tpos, nearR, folR, &r->at);
+    if (r->code == 0) return;
+    if (r->clear) { r->what = LW_EYE_SEEN; return; }
     const uint8_t* h = hits + LW_HIT * r->at;
     memcpy(&r->hitDist, h + 0x18, 4); memcpy(&r->unit, h + 0x1C, 4); memcpy(&r->type, h + 0x24, 4);
     for (int k = 0; k < 3; k++) r->hit[k] = r->eye[k] + d[k] * r->hitDist;
@@ -222,7 +230,7 @@ static void LwAgpLine(uint32_t unit, float d, int player)
     for (uint32_t k = 0; k < count && k < 16 && g_lwAgp.eyeLines < LW_AGP_EYE_LINES; k++)
     {
         uint32_t eyeUnit = EvpU32(r + 4 + 8ull * k, 0), bit = EvpU32(r + 8 + 8ull * k, 0);
-        LwEyeLook look; LwEyeLookAt(eyeUnit, avatar, tpos, 1, &look);
+        LwEyeLook look; LwEyeLookAt(eyeUnit, avatar, tpos, 1, 0, &look);
         LwEyeLine(unit, eyeUnit, bit, &look, tpos); g_lwAgp.eyeLines++;
     }
 }
@@ -237,6 +245,26 @@ static void LwAgpTimed(LwAgpUnit* a, int loader, float d, ULONGLONG now)
             loader ? "loader member" : "unit", a->unit, (double)s, (double)LW_AGP_TIMED, (double)d);
 }
 
+/* Terminid eyes see 40 m ahead but about 1 m to the side and behind (shape 1: +0x10, +0x14), times the target's
+ * visibility (0x720530; 0.6 on planet 211), and a walking player is heard within 10 m (noise type 5). A vanilla patrol
+ * walks at a player and faces one; a loader squad walks its own route and passed players beside it unseen. A calm
+ * enemy within LW_SENSE_NEAR whose vision ray reaches the player gets the entry a gunshot writes (0x888E50, level 40):
+ * the game's own investigation (alert 2) turns it to the point, where its eye takes over. */
+static void LwSense(LwAgpUnit* a, uint32_t unit, int player, const float* tpos, int loader, float d, ULONGLONG now)
+{
+    typedef void (*HearFn)(void*, uint32_t, uint32_t, const float*, float);
+    uint32_t avatar = g_lwWorld.avatars[player], det = LwAwareDetector(unit);
+    a->senseAt = now + 1000;
+    if (!det) return;
+    LwEyeLook look; LwEyeLookAt(unit, avatar, tpos, 0, 1, &look);
+    if (look.code != 0 || look.clear != 1) return; /* in view: the game's sight handles it; blocked: no notice */
+    ((HearFn)(g_lw.game + 0x888E50u))(NULL, det, avatar, g_lwWorld.players[player], 40.0f);
+    a->senseAt = now + LW_SENSE_TOLD; g_lwAgp.sensed[!loader]++;
+    if (g_lwAgp.senseLines++ < LW_SENSE_LINES)
+        Note("living world: sight: %s %08X noticed player %d at %.1f m outside its view (range %.2f there): told through detector %08X",
+            loader ? "loader member" : "unit", unit, player, (double)d, (double)look.view[1], det);
+}
+
 /* Twice a second: the AI units the host owns ([game+0x33266C8]: owned +0x2324, entity pointers +0x2348) near a player. */
 static void LwAggroProbe(void)
 {
@@ -245,7 +273,7 @@ static void LwAggroProbe(void)
     g_lwAgp.nextAt = now + 500;
     uintptr_t ai = 0, ents = 0;
     if (!EvpPtr(g_lw.game + 0x33266C8u, &ai) || !EvpPtr(ai + 0x2348, &ents)) return;
-    int eyesOn = LwEyeBind(), looks = 0;
+    int eyesOn = LwEyeBind(), looks = 0, checks = 0;
     float tpos[EVT_MAX_PLAYERS][3]; uint8_t tposOk[EVT_MAX_PLAYERS] = {0};
     for (int k = 0; eyesOn && k < g_lwWorld.playersAt && k < EVT_MAX_PLAYERS; k++) tposOk[k] = (uint8_t)LwTargetPoint(g_lwWorld.avatars[k], tpos[k]);
     uint32_t owned = EvpU32(ai + 0x2324, 0), nearN = 0, calmN = 0, loaderN = 0, loaderFightN = 0;
@@ -273,9 +301,11 @@ static void LwAggroProbe(void)
         /* its own eye, a few units a probe in turn: what stops a calm unit seeing the player */
         if (!fighting && eyesOn && tposOk[player] && looks < LW_AGP_LOOKS && (i + (uint32_t)g_lwAgp.look) % 3 == 0)
         {
-            LwEyeLook look; LwEyeLookAt(unit, g_lwWorld.avatars[player], tpos[player], 0, &look);
+            LwEyeLook look; LwEyeLookAt(unit, g_lwWorld.avatars[player], tpos[player], 0, 0, &look);
             g_lwAgp.eyes[!loader][look.what]++; looks++;
         }
+        if (eyesOn && tposOk[player] && LwAlert(unit) == 0 && best <= LW_SENSE_NEAR * LW_SENSE_NEAR && now >= a->senseAt && checks < LW_SENSE_CHECKS)
+        { checks++; LwSense(a, unit, player, tpos[player], loader, sqrtf(best), now); }
         if (fighting && a->logged != 2) a->since = now; /* calm time counts from its last fight */
         a->seen = now;
         if (g_lwAgp.lines >= LW_AGP_LINES || a->logged) continue;
@@ -301,11 +331,11 @@ static void LwAggroProbe(void)
         Note("living world: aggro (30 s): %.1f enemies within %.0f m of a player on average, %.1f of them below alert 3; loader members %.1f, %.1f of them at alert 3+; %d units logged so far; sight cap %s %.1f m",
             g_lwAgp.nearSum / scans, (double)LW_AGP_NEAR, g_lwAgp.calmSum / scans, g_lwAgp.loaderSum / scans, g_lwAgp.loaderFighting / scans, g_lwAgp.lines, capOn ? "on" : "off", (double)cap);
         for (int c = 0; c < 2; c++)
-            Note("living world: sight (30 s): %s, calm, own eye on the player: %s; reached alert 3 from within %.0f m: %u, mean %.1f s, longest %.1f s",
-                c ? "other units" : "loader members", eyes[c], (double)LW_AGP_TIMED, g_lwAgp.timedN[c], g_lwAgp.timedN[c] ? (double)(g_lwAgp.timedSum[c] / (float)g_lwAgp.timedN[c]) : 0.0,
+            Note("living world: sight (30 s): %s, calm, own eye on the player: %s; noticed outside their view within %.0f m: %u; reached alert 3 from within %.0f m: %u, mean %.1f s, longest %.1f s",
+                c ? "other units" : "loader members", eyes[c], (double)LW_SENSE_NEAR, g_lwAgp.sensed[c], (double)LW_AGP_TIMED, g_lwAgp.timedN[c], g_lwAgp.timedN[c] ? (double)(g_lwAgp.timedSum[c] / (float)g_lwAgp.timedN[c]) : 0.0,
                 (double)g_lwAgp.timedMax[c]);
     }
     g_lwAgp.nearSum = g_lwAgp.calmSum = g_lwAgp.loaderSum = g_lwAgp.loaderFighting = g_lwAgp.scans = 0; g_lwAgp.noteAt = now;
-    memset(g_lwAgp.eyes, 0, sizeof g_lwAgp.eyes); memset(g_lwAgp.timedN, 0, sizeof g_lwAgp.timedN);
+    memset(g_lwAgp.eyes, 0, sizeof g_lwAgp.eyes); memset(g_lwAgp.sensed, 0, sizeof g_lwAgp.sensed); memset(g_lwAgp.timedN, 0, sizeof g_lwAgp.timedN);
     memset(g_lwAgp.timedSum, 0, sizeof g_lwAgp.timedSum); memset(g_lwAgp.timedMax, 0, sizeof g_lwAgp.timedMax);
 }
