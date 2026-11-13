@@ -121,7 +121,8 @@ int main(void)
     CHECK(got == out && g_calls == 1 && g_manager == &manager && g_record == &record && g_params == params);
     CHECK(fabsf(Across(out, target) - 1024.0f) < 0.05f && out[2] == 650.0f);
     CHECK(out[0] > target[0] && out[1] > target[1]); /* toward the destroyer */
-    CHECK(fake_host_logged("reinforcement pod 1 started 3552 m from its drop point (-1602, -2388); it starts 1024 m away"));
+    CHECK(fake_host_logged("reinforcement pod 1 started 3552 m from its drop point (-1602, -2388); it starts 1024 m away, 620 m above it"));
+    CHECK(co_podstart_starts() == 1);
 
     g_case = "a complex level, the destroyer within reach";
     g_gameStart[0] = -900.0f; g_gameStart[1] = -1800.0f;
@@ -132,12 +133,14 @@ int main(void)
     g_gameStart[0] = target[0]; g_gameStart[1] = target[1]; g_gameStart[2] = 1030.0f;
     start(&manager, out, &record, params);
     CHECK(out[0] == target[0] && out[1] == target[1] && out[2] == 1030.0f);
+    CHECK(co_podstart_starts() == 3); /* every start on a complex level starts a frame watch, capped or not */
 
     g_case = "the game's map: the start as it is";
     g_liveScale = 1.0f;
     g_gameStart[0] = 1026.0f; g_gameStart[1] = 2.0f; g_gameStart[2] = 650.0f;
     start(&manager, out, &record, params);
     CHECK(out[0] == 1026.0f && out[1] == 2.0f && out[2] == 650.0f);
+    CHECK(co_podstart_starts() == 3);
     g_liveScale = 8.0f;
 
     g_case = "a second install keeps the first";

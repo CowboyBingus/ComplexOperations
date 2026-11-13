@@ -23,6 +23,7 @@ int CoXlTestSunMission(void);
 void CoXlTestSunSnap(uint64_t (*snap)(float*, const float*, uint64_t, uint64_t));
 uint32_t CoXlTestSunLevels(uintptr_t back, uint32_t levels);
 int CoXlTestSunCentre(float* c);
+void CoXlTestSunClock(uint64_t (*clock)(void));
 void CoXlTestSunWrite(int (*write)(uintptr_t, const void*, size_t));
 void co_switch_test_reset(void);
 
@@ -123,9 +124,14 @@ static float* Light(void) { return (float*)(RBP + 0x30); }
 static uint32_t Tiles(void) { uint32_t v; memcpy(&v, RBP + 0x74, 4); return v; }
 static uint64_t Levels(void) { uint64_t v; memcpy(&v, RBP - 0x38, 8); return v; }
 
+/* The render thread's clock: each frame g_step ms after the last (10 s: a camera that is never fast). */
+static uint64_t g_now = 100000, g_step = 10000;
+static uint64_t Clock(void) { return g_now; }
+
 /* The sun straight down: U = x, D = -z, R = y; the game's translation -D x half. */
 static void Frame(float x, float y, float z, uint32_t counter)
 {
+    g_now += g_step;
     memset(g_stack, 0, sizeof g_stack);
     const float light[16] = {1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, 1024, 1};
     const float box[8] = {0, -1024, 1024, -1024, 1024, 0, 0, 1};
@@ -209,6 +215,7 @@ static int FarStart(const char* name)
     if (mod[0] != 0x48 || mod[1] != 0xB8 || mod[10] != 0xFF || mod[11] != 0xD0 || mod[12] != 0xE9 || mod + 17 + Rel32(mod + 13) != site + 5) return 0;
     memcpy(&g_wrap, mod + 2, 8);
     CoXlTestSunSnap(FakeSnap);
+    CoXlTestSunClock(Clock);
     return g_wrap != NULL;
 }
 
@@ -310,6 +317,63 @@ static void FarCases(void)
     Frame(357, -100, 330, 510);
     Snap();
     CHECK(T(357, -100, 1354) && Levels() == 0 && CoXlTestSunFull() == 7);
+
+    g_case = "a pod's start 1 km out and above, inside the box: the camera passes and the box stays";
+    g_step = 16;
+    Frame(357 + 1000, -100, 330 + 600, 520);
+    Snap();
+    CHECK(T(357, -100, 1354) && Levels() == 3 && Tiles() == 8 && CoXlTestSunFull() == 7);
+    g_case = "the pod's sweep back at about 1000 m/s: no slice drawn whole on the way";
+    int whole = 0;
+    for (int k = 1; k <= 60; k++)
+    {
+        Frame(357 + 1000 - 16.5f * (float)k, -100, 330 + 600 - 10.0f * (float)k, 520 + (uint32_t)k);
+        Snap();
+        whole += Levels() == 0;
+    }
+    CHECK(whole == 0 && T(357, -100, 1354) && CoXlTestSunFull() == 7);
+    g_case = "landing near the centre: still in the step, the box stays when the camera is calm";
+    for (int k = 0; k < 100; k++) { Frame(367, -100, 330, 600 + (uint32_t)k); Snap(); whole += Levels() == 0; }
+    CHECK(whole == 0 && CoXlTestSunFull() == 7);
+
+    g_case = "landing 300 m off: the box moves once, a second after the camera stopped";
+    for (int k = 1; k <= 20; k++) { Frame(367 + 15.0f * (float)k, -100, 330, 700 + (uint32_t)k); Snap(); whole += Levels() == 0; } /* 940 m/s */
+    CHECK(whole == 0 && CoXlTestSunFull() == 7);
+    int firstWhole = -1;
+    for (int k = 0; k < 100; k++)
+    {
+        Frame(667, -100, 330, 800 + (uint32_t)k);
+        Snap();
+        if (Levels() == 0) { whole++; if (firstWhole < 0) firstWhole = k; }
+    }
+    CHECK(whole == 1 && CoXlTestSunFull() == 8 && T(667, -100, 1354));
+    CHECK(firstWhole >= 1000 / 16 - 1 && firstWhole <= 1000 / 16 + 1); /* about 1 s at 16 ms a frame */
+
+    g_case = "a passing camera that leaves the box moves it at once";
+    Frame(667 + 1100, -100, 330, 900);
+    Snap();
+    CHECK(Levels() == 0 && CoXlTestSunFull() == 9 && T(1767, -100, 1354));
+    g_case = "a camera that slows to a Helldiver's run stays passing for the calm second only";
+    Frame(1767 + 300, -100, 330, 901); /* inside, past the step: passing, so it stays */
+    Snap();
+    CHECK(Levels() == 3 && CoXlTestSunFull() == 9);
+    g_step = 5000;
+    Frame(1767 + 301, -100, 330, 902); /* 5 s later, calm */
+    Snap();
+    CHECK(Levels() == 0 && CoXlTestSunFull() == 10 && T(2068, -100, 1354));
+    g_case = "a slow camera moves the box at the step as before";
+    g_step = 1000;
+    Frame(2068 + 50, -100, 330, 903); Snap();   /* 50 m/s */
+    CHECK(Levels() == 3 && CoXlTestSunFull() == 10);
+    Frame(2068 + 100, -100, 330, 904); Snap();
+    Frame(2068 + 150, -100, 330, 905); Snap();
+    Frame(2068 + 200, -100, 330, 906); Snap();
+    Frame(2068 + 250, -100, 330, 907); Snap();
+    CHECK(Levels() == 3 && CoXlTestSunFull() == 10);
+    Frame(2068 + 300, -100, 330, 908); Snap();
+    CHECK(Levels() == 0 && CoXlTestSunFull() == 11 && T(2368, -100, 1354));
+    g_step = 10000;
+    Frame(2368, -100, 330, 909); Snap();
 
     g_case = "a 2048 m world keeps the game's half size and the origin";
     Level(2048.0f, 0.998046875f);

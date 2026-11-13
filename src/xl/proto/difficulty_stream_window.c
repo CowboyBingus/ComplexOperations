@@ -306,7 +306,8 @@ static void WindowEvictFarLocked(void)
     float far2[WINDOW_FAR_EVICT];
     for (uint32_t s = g_win.base; s < g_win.high && s < DIF_LOCATIONS; s++)
     {
-        if (g_streamOut2[s] <= 0.0f || !g_streamLive[s] || g_win.handle[s] == 0 || !g_streamPoseGood[s] || g_streamNeedsUnit[s] || g_streamUnit[s] == 0) continue;
+        if (g_streamOut2[s] <= 0.0f || !g_streamLive[s] || g_win.handle[s] == 0 || !g_streamPoseGood[s] || g_streamNeedsUnit[s] || g_streamUnit[s] == 0 ||
+            g_streamDrop[s]) continue;
         float best = 3.4e38f;
         for (int p = 0; p < g_stream.playerCount; p++)
         {
@@ -318,8 +319,7 @@ static void WindowEvictFarLocked(void)
         for (uint32_t k = 1; k < n; k++) if (far2[k] < far2[m]) m = k;
         if (best > far2[m]) { pick[m] = s; far2[m] = best; }
     }
-    for (uint32_t k = 0; k < n; k++)
-        if (WorldStreamRemoveLocked(pick[k])) g_win.evictedFar++;
+    for (uint32_t k = 0; k < n; k++) WorldStreamDropLocked(pick[k], STREAM_DROP_FAR); /* a few a frame (WorldStreamDrainLocked) */
     if (n != 0) g_win.farHoldUntil = GetTickCount64() + 30000; /* no churn: the far ring waits 30 s after it gave way */
 }
 
@@ -413,6 +413,9 @@ static void WindowScanLocked(ULONGLONG now)
     }
     WindowScanFarLocked(bodies, slots, WindowTreesOver(WINDOW_FAR_SHARE));
 }
+
+static void WindowEvictedLocked(void) { g_win.evictedFar++; }
+static uint32_t WindowEntered(void) { return g_win.entered; }
 
 static void WindowNoteLocked(void)
 {

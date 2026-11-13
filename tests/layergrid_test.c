@@ -30,7 +30,11 @@ void CoXlTestStreamObserver(int on, float x, float y);
 int CoXlTestRespawnRoom(uint32_t i, float distance2);
 uint32_t CoXlTestSpawnDue(uint32_t i, float distance2);
 int CoXlTestStreamFlag(uint32_t i);
+void CoXlTestStreamFlagClear(uint32_t i);
+int CoXlTestStreamQueued(uint32_t i);
 void CoXlTestStreamScan(void);
+uint32_t CoXlTestStreamScanFrames(int frames);
+uint32_t CoXlTestStreamDrain(double ms, uint32_t* waiting);
 void CoXlTestStreamSlotState(uint32_t i, int* live, int* due, uint64_t* unit);
 int CoXlTestLayerWhy(uint64_t unit, uint64_t field, int* slot);
 float CoXlTestTraceGridAt(int slot, float x, float y);
@@ -301,6 +305,32 @@ int main(void)
     CHECK(live && unit == 0x2000 && CoXlTestStreamFlag(1));
     CoXlTestStreamScan();
     CHECK(g_destroys == 33);
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+
+    Start("a scan's removals go a few a frame, each asked again");
+    StreamGame();
+    Stream(33);
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTile(b, 1, BX, AY);
+    for (uint32_t k = 0; k < 33; k++) Slot(k, BX, AY + 4.0f * (float)k, 2.0f, 0x1000u * (k + 1), 0);
+    CHECK(CoXlTestStampsReplace(b, BX, AY) == 33);
+    CoXlTestStreamObserver(1, BX - 900.0f, AY);
+    CHECK(CoXlTestStreamScanFrames(1) == 4 && g_destroys == 4); /* the scan decided 32; one frame took 4 */
+    uint32_t waiting = 0;
+    CHECK(CoXlTestStreamDrain(1.0e9, &waiting) == 4 && waiting == 24 && g_destroys == 8);
+    CHECK(CoXlTestStreamDrain(0.0, &waiting) == 1 && waiting == 23 && g_destroys == 9); /* past the frame's time: one at least */
+    uint32_t q = 0;
+    while (q < 33 && !CoXlTestStreamQueued(q)) q++;
+    CHECK(q < 33);
+    CoXlTestStreamFlagClear(q);                           /* its ground is the old one again: it stays */
+    for (int f = 0; f < 8 && waiting > 0; f++) CHECK(CoXlTestStreamDrain(1.0e9, &waiting) <= 4);
+    CHECK(waiting == 0 && g_destroys == 31);
+    CoXlTestStreamSlotState(q, &live, &due, &unit);
+    CHECK(live && unit == 0x1000u * (q + 1));
+    CHECK(CoXlTestStreamScanFrames(-1) == 1 && g_destroys == 32); /* the next scan: the one left over; q is not flagged */
+    CoXlTestStreamSlotState(q, &live, &due, &unit);
+    CHECK(live && unit == 0x1000u * (q + 1));
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
 
     Start("a level location's new unit waits under the window's budgets");

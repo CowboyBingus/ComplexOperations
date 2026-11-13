@@ -87,8 +87,11 @@ enum
     kStreamScanChunk = 64,       /* location records read per SafeRead while deciding */
     kStreamOutTimeout = 5000,    /* ms beyond kStreamOutRadius before a streamed location is removed */
     kStreamRemoveBatch = 8,      /* removals per removal pass (one frame) at most */
-    kStreamReplaceBatch = 32     /* stamps put back on new ground per pass at most (a tile's change flags hundreds) */
+    kStreamReplaceBatch = 32,    /* stamps put back on new ground per pass at most (a tile's change flags hundreds) */
+    kStreamDropsPerFrame = 4,    /* stamp units destroyed per frame at most (WorldStreamDrainLocked) */
+    kStreamDropQueue = 256       /* removals decided and not yet done */
 };
+static const double kStreamDropMs = 1.0; /* a frame's removals stop once they took this long */
 static const float kStreamStartRadius = 600.0f; /* kept at generation: inside this of the start point */
 static const float kStreamInRadius = 500.0f;    /* streamed: a player closer than this makes a location due */
 static const float kStreamOutRadius = 800.0f;   /* removed: every player farther than this for kStreamOutTimeout */
@@ -178,6 +181,11 @@ static uint8_t g_streamMission[kStreamMaxLocations];     /* 1: an important loca
 static float g_streamOut2[kStreamMaxLocations];          /* > 0: this slot's own removal radius, squared (a far window stamp) */
 static uint8_t g_streamReplace[kStreamMaxLocations];     /* 1: the ground under it changed (a tile came or went): out and in again */
 static float g_streamSeen2[kStreamMaxLocations];         /* a flagged one's distance its meshes are drawn to, squared (WindowVisible) */
+/* Removals the scans decide, done a few a frame: a scan after a long move or a tile change asked for 64 DestroyUnit
+ * calls and a far eviction for 64 more, each taking its stamp's layer units down in that one frame. */
+enum { STREAM_DROP_OUT = 1, STREAM_DROP_REPLACE, STREAM_DROP_FAR };
+static uint8_t g_streamDrop[kStreamMaxLocations];        /* the queued removal's kind, 0: none */
+static uint32_t g_streamDropList[kStreamDropQueue], g_streamDropHead, g_streamDropCount;
 
 static SRWLOCK g_streamLock = SRWLOCK_INIT;
 static volatile LONG g_streamOwn;     /* the streamer's own call: the thread id inside it (0: none) */
@@ -239,6 +247,8 @@ static void WorldStreamClearLocked(void)
     memset(g_streamNeedsUnit, 0, sizeof g_streamNeedsUnit);
     memset(g_streamOutSince, 0, sizeof g_streamOutSince);
     memset(g_streamReplace, 0, sizeof g_streamReplace);
+    memset(g_streamDrop, 0, sizeof g_streamDrop);
+    g_streamDropHead = g_streamDropCount = 0;
 }
 
 /* Whether the whole range is committed and writable: the generator's records have their +0xA8 zeroed in place. */
@@ -295,6 +305,7 @@ static void WindowLeaveLocked(uint32_t s);   /* difficulty_stream_window.c */
 static void WindowScanLocked(ULONGLONG now);
 static int WindowRespawnRoomLocked(uint32_t i, int* gates);
 static void WindowNoteLocked(void);
+static uint32_t WindowEntered(void);
 static void DestroyTick(void);                /* difficulty_world_destroy.c */
 static void DestroyNote(void);
 static const char* InstallDestroyQueue(void);
@@ -786,6 +797,44 @@ static uint8_t WorldStreamSpawn(uint8_t* pass, uint8_t* record, uint8_t* context
     return result;
 }
 
+/* A removal for a later frame; 0 when the slot is queued already or the queue is full (a later scan asks again). */
+static int WorldStreamDropLocked(uint32_t i, int kind)
+{
+    if (g_streamDrop[i] || g_streamDropCount >= kStreamDropQueue) return 0;
+    g_streamDrop[i] = (uint8_t)kind;
+    g_streamDropList[(g_streamDropHead + g_streamDropCount++) % kStreamDropQueue] = i;
+    return 1;
+}
+
+static void WindowEvictedLocked(void); /* difficulty_stream_window.c */
+/* Each frame: up to `most` queued removals, until they took `ms`. Each is asked again, as frames went by since its
+ * scan: still live with its own unit, and still out of reach (its timer runs), flagged for new ground, or a far slot.
+ * The removals done. */
+static uint32_t WorldStreamDrainLocked(uint32_t most, double ms)
+{
+    uint32_t done = 0;
+    const double t0 = HitchNow();
+    while (g_streamDropCount > 0 && done < most)
+    {
+        const uint32_t i = g_streamDropList[g_streamDropHead];
+        g_streamDropHead = (g_streamDropHead + 1) % kStreamDropQueue; g_streamDropCount--;
+        const int kind = g_streamDrop[i];
+        g_streamDrop[i] = 0;
+        if (i >= g_stream.count || !g_streamLive[i] || !g_streamPoseGood[i] || g_streamNeedsUnit[i] || g_streamUnit[i] == 0) continue;
+        if (kind == STREAM_DROP_OUT ? g_streamOutSince[i] == 0 : kind == STREAM_DROP_REPLACE ? !g_streamReplace[i] : !(g_streamOut2[i] > 0.0f)) continue;
+        if (!WorldStreamRemoveLocked(i)) continue;
+        done++;
+        if (kind == STREAM_DROP_REPLACE) /* due again: a window slot is free and enters again from the plan */
+        {
+            g_stream.replaced++;
+            if (g_streamDeferred[i]) g_streamDue[i] = 1;
+        }
+        else if (kind == STREAM_DROP_FAR) WindowEvictedLocked();
+        if (HitchNow() - t0 >= ms) break;
+    }
+    return done;
+}
+
 /* A stamp flagged for new ground into the scan's kStreamReplaceBatch picks, which keep the largest keys: its nearest
  * player's distance over the distance its meshes are drawn to, squared. Past 1 no player sees the swap; below it the
  * farthest for its size goes first, where a swap shows least. */
@@ -842,7 +891,7 @@ static void WorldStreamScanLocked(ULONGLONG now)
         }
         if (g_streamLive[i] && g_streamReplace[i]) /* its ground changed: picked below */
         {
-            if (g_streamPoseGood[i] && !g_streamNeedsUnit[i] && g_streamUnit[i] != 0)
+            if (g_streamPoseGood[i] && !g_streamNeedsUnit[i] && g_streamUnit[i] != 0 && !g_streamDrop[i])
                 WorldStreamReplacePick(pick, pickKey, &picks, i, best / g_streamSeen2[i]);
             continue;
         }
@@ -859,7 +908,7 @@ static void WorldStreamScanLocked(ULONGLONG now)
                 removes < co_settle_removals(best, kStreamRemoveBatch, kStreamReplaceBatch) &&
                 g_streamPoseGood[i] && !g_streamNeedsUnit[i] && g_streamUnit[i] != 0)
             {
-                if (WorldStreamRemoveLocked(i)) removes++;
+                if (WorldStreamDropLocked(i, STREAM_DROP_OUT)) removes++;
             }
             continue;
         }
@@ -876,13 +925,7 @@ static void WorldStreamScanLocked(ULONGLONG now)
             g_streamOrder[order++] = i;
         }
     }
-    for (uint32_t k = 0; k < picks; k++) /* out now; due again (a window slot is free and enters again from the plan) */
-    {
-        uint32_t i = pick[k];
-        if (!WorldStreamRemoveLocked(i)) continue;
-        g_stream.replaced++;
-        if (g_streamDeferred[i]) g_streamDue[i] = 1;
-    }
+    for (uint32_t k = 0; k < picks; k++) WorldStreamDropLocked(pick[k], STREAM_DROP_REPLACE);
     g_stream.orderCount = order;
     g_stream.orderCursor = 0;
     WorldStreamSort(order);
@@ -1130,9 +1173,17 @@ static void WorldStreamTick(float dt)
         return;
     }
     ULONGLONG now = GetTickCount64();
+    const uint32_t removed = g_stream.removed, entered = WindowEntered();
+    const double t0 = HitchNow();
     WorldStreamScanLocked(now);
+    WorldStreamDrainLocked(kStreamDropsPerFrame, kStreamDropMs);
+    const double t1 = HitchNow();
     WindowScanLocked(now); /* the planned stamps near the players into the window (difficulty_stream_window.c) */
+    const double t2 = HitchNow();
     WorldStreamSpawnDueLocked();
+    const double t3 = HitchNow();
+    g_hitchCost.stream += (float)(t1 - t0); g_hitchCost.window += (float)(t2 - t1); g_hitchCost.spawn += (float)(t3 - t2);
+    g_hitchCost.removed += (uint16_t)(g_stream.removed - removed); g_hitchCost.entered += (uint16_t)(WindowEntered() - entered);
     WorldStreamNoteLocked(now);
     ReleaseSRWLockExclusive(&g_streamLock);
     /* Removal runs in WorldStreamScanLocked and respawn in WorldStreamSpawnDueLocked, both called above on this thread

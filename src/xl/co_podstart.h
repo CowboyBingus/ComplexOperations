@@ -19,6 +19,8 @@ int co_podstart_cap(float* start, const float* target, float reach);
 /* Hooks the start once. `scale` answers the live map's scale (1 off complex levels): the start is changed only above
  * 1. NULL, or why the game's start stays. */
 const char* co_podstart_install(uintptr_t game, float (*scale)(void));
+/* The pods started on complex levels so far, capped or not: a new one starts the frame watch (co_hitch.h). */
+long co_podstart_starts(void);
 
 #ifdef CO_TEST
 void co_podstart_test_reset(void);

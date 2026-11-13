@@ -11,7 +11,9 @@
  * only when the camera is a quarter of the half size from its centre along a light axis, and that frame draws the
  * whole slice as one tile (subdivisions 0, a setting the game takes): the prepare's locals and the render task's reads
  * of the setting (0x35F140) both give 0 for that frame's counter, so no texel of the old box is restored. Between moves
- * the box stays put in the world and the game's texel snap (0x359930) keeps its grid, so nothing shimmers.
+ * the box stays put in the world and the game's texel snap (0x359930) keeps its grid, so nothing shimmers. A camera
+ * riding a reinforcement hellpod sweeps up to 1 km in about a second, and a 256 m step drew the slice whole four times
+ * in it: while the camera moves faster than any Helldiver, the box stays until the camera leaves it.
  * Without every pin: the last slice stays dynamic on a world over 2048 m (crisp shadows to 80 m). */
 #include <math.h>
 
@@ -22,6 +24,9 @@
 #define SUN_VANILLA_WORLD 2048.0f
 #define SUN_FAR_HALF 1024.0f     /* the render settings' own default, vanilla's 1022 m within a texel */
 #define SUN_FAR_STEP 0.25f       /* of the half size: the box keeps at least 768 m about the camera */
+#define SUN_FAST 60.0f           /* m/s: a camera this fast is passing (co_settle.h's Helldiver limit) */
+#define SUN_SAMPLE_MS 100u       /* the shortest time a speed is read over */
+#define SUN_CALM_MS 1000u        /* and it counts as still after this long under SUN_FAST */
 /* helldivers2.exe */
 #define SUN_SNAP_CALL 0x35FC12u  /* the static branch's call of the texel snap 0x359930(light, box, vp w, vp h) */
 #define SUN_SNAP 0x359930u
@@ -34,8 +39,10 @@ typedef uint64_t (*SunSetFloatFn)(uint64_t settings, const char* name, float val
 typedef uint64_t (*SunSnapFn)(float* light, const float* box, uint64_t width, uint64_t height);
 typedef uint32_t (*SunLevelsFn)(void);
 
-/* The box's centre in the world; only the render thread's prepare keeps it. */
-typedef struct { int live; float c[3], half; } SunFar;
+/* The box's centre in the world, and the camera's last reading for its speed; only the render thread's prepare keeps
+ * them. */
+typedef struct { int live, seen, fast; float c[3], half, last[3]; uint64_t lastMs, fastMs; } SunFar;
+static uint64_t (*g_sunClock)(void); /* a test's clock; NULL: GetTickCount64 */
 
 static struct
 {
@@ -100,19 +107,39 @@ static uint64_t SunSetFloat(uint64_t settings, const char* name, float value)
     return g_sun.setFloat(settings, name, value);
 }
 
+/* 1 while the camera passes: over SUN_FAST since its last reading at least SUN_SAMPLE_MS old (a cut or a jump reads
+ * as a speed far over it), and until SUN_CALM_MS after. */
+static int SunFarPassing(SunFar* s, const float* cam, uint64_t now)
+{
+    if (!s->seen) { s->seen = 1; memcpy(s->last, cam, sizeof s->last); s->lastMs = now; return 0; }
+    const float dx = cam[0] - s->last[0], dy = cam[1] - s->last[1], dz = cam[2] - s->last[2], moved = sqrtf(dx * dx + dy * dy + dz * dz);
+    const uint64_t dt = now > s->lastMs ? now - s->lastMs : 0;
+    if (dt >= SUN_SAMPLE_MS || moved > SUN_FAST * (float)SUN_SAMPLE_MS / 1000.0f)
+    {
+        if (moved * 1000.0f > SUN_FAST * (float)(dt > SUN_SAMPLE_MS ? dt : SUN_SAMPLE_MS)) { s->fast = 1; s->fastMs = now; }
+        memcpy(s->last, cam, sizeof s->last); s->lastMs = now;
+    }
+    if (s->fast && now - s->fastMs >= SUN_CALM_MS) s->fast = 0;
+    return s->fast;
+}
+
 /* 1 when the box moves to `cam`: no box yet, another half size, or the camera over a step from the centre along a
- * light axis. light: the light camera's rows at [rbp+0x30], U at 0, D (the light's direction) at 4, R at 8. */
-static int SunFarCentre(SunFar* s, const float* light, const float* cam, float half)
+ * light axis; while the camera passes, only once it is out of the box. light: the light camera's rows at [rbp+0x30], U
+ * at 0, D (the light's direction) at 4, R at 8. */
+static int SunFarCentre(SunFar* s, const float* light, const float* cam, float half, uint64_t now)
 {
     if (!isfinite(cam[0]) || !isfinite(cam[1]) || !isfinite(cam[2]) || !isfinite(half) || half <= 0.0f) return 0;
+    const int passing = SunFarPassing(s, cam, now);
     const float d[3] = {cam[0] - s->c[0], cam[1] - s->c[1], cam[2] - s->c[2]}, step = half * SUN_FAR_STEP;
-    int kept = s->live && s->half == half;
-    for (int axis = 0; kept && axis < 3; axis++)
+    int kept = s->live && s->half == half, inside = kept;
+    for (int axis = 0; inside && axis < 3; axis++)
     {
         const float* a = light + 4 * axis;
-        if (fabsf(a[0] * d[0] + a[1] * d[1] + a[2] * d[2]) > step) kept = 0;
+        const float along = fabsf(a[0] * d[0] + a[1] * d[1] + a[2] * d[2]);
+        if (along > step) kept = 0;
+        if (along > half) inside = 0;
     }
-    if (kept) return 0;
+    if (kept || (passing && inside)) return 0;
     s->live = 1; s->half = half;
     memcpy(s->c, cam, sizeof s->c);
     return 1;
@@ -132,7 +159,7 @@ static uint64_t SunFarSnap(float* light, const float* box, uint64_t width, uint6
     {
         const LONG gen = g_sun.gen;
         if (g_sun.seen != gen) { g_sun.seen = gen; g_sun.box.live = 0; }
-        const int whole = SunFarCentre(&g_sun.box, light, cam, box[2]);
+        const int whole = SunFarCentre(&g_sun.box, light, cam, box[2], g_sunClock != NULL ? g_sunClock() : GetTickCount64());
         if (g_sun.box.live)
         {
             light[12] += g_sun.box.c[0]; light[13] += g_sun.box.c[1]; light[14] += g_sun.box.c[2];
@@ -293,4 +320,5 @@ int CoXlTestSunMission(void) { return g_sun.mission; }
 void CoXlTestSunSnap(uint64_t (*snap)(float*, const float*, uint64_t, uint64_t)) { g_sun.snap = snap; }
 uint32_t CoXlTestSunLevels(uintptr_t back, uint32_t levels) { return SunLevelsFor(back, levels); }
 int CoXlTestSunCentre(float* c) { memcpy(c, g_sun.box.c, sizeof g_sun.box.c); return g_sun.box.live; }
+void CoXlTestSunClock(uint64_t (*clock)(void)) { g_sunClock = clock; }
 #endif
