@@ -37,6 +37,7 @@
 #include "co_spawners.h"
 #include "co_patrols.h"
 #include "co_density.h"
+#include "co_framecost.h"
 #include "co_switch.h"
 #include "co_steer.h"
 #include "co_cutters.h"
@@ -104,20 +105,43 @@ static uint32_t IndexQueryClamped(uint64_t index, uint32_t key, uint32_t mode, u
     return hits < places ? hits : places;
 }
 
+/* The frame times line's context: the AI units and the nearest garrison with living spawners to player 1. */
+static void CoXlFrameContext(int* ai, float* nest)
+{
+    *ai = (int)LwAiCount(); *nest = -1;
+    if (g_lwWorld.playersAt <= 0) return;
+    float best = 3.0e38f;
+    for (int i = 0; i < g_lwGarrisonCount; i++)
+        if (g_lwGarrisons[i].haveCenter && g_lwGarrisons[i].spawners) { float d = LwDist2(g_lwWorld.players[0], g_lwGarrisons[i].center[0], g_lwGarrisons[i].center[1]); if (d < best) best = d; }
+    if (best < 3.0e38f) *nest = sqrtf(best);
+}
+
 /* The game thread's part, in the order the loader's tick called it. */
 static void CoXlTick(HfMod* mod, float dt, void* user)
 {
     (void)mod; (void)user;
+    co_framecost_context(CoXlFrameContext);
+    co_framecost_begin(LwLive());
     StatusWatch(g_difficultyGame); /* the registry's hash, should the game have made the registry only now */
+    co_framecost_mark(CO_FC_STATUS);
     WorldStreamTick(dt);
+    co_framecost_mark(CO_FC_STREAM);
     SpanRescueTick();
+    co_framecost_mark(CO_FC_SPANS);
     NetPatienceTick();
+    co_framecost_mark(CO_FC_NET);
     TerrainDiagTick();
+    co_framecost_mark(CO_FC_TDIAG);
     TerrainProbeTick();
+    co_framecost_mark(CO_FC_TPROBE);
     LivingTick();
+    co_framecost_mark(CO_FC_LIVING);
     DaylightTick();
+    co_framecost_mark(CO_FC_DAYLIGHT);
     TacTick();
+    co_framecost_mark(CO_FC_TAC);
     co_density_tick(dt);
+    co_framecost_mark(CO_FC_DENSITY);
 }
 
 /* As game.dll is loaded: the records' move must be hooked before the game builds its entity state, and a process moves
@@ -770,4 +794,9 @@ int CoXlTestFgBakeView(const uint8_t* view) { return TdScatterBakeView(view); }
 void CoXlTestFgWorld(float live) { g_world.live = live; } /* 8 on an extra large level in play (16384 m) */
 void CoXlTestFgState(int state) { g_fg.state = state; }
 void CoXlTestFgRing(int a0, int a1, int b0, int b1) { g_ring.a0 = a0; g_ring.a1 = a1; g_ring.b0 = b0; g_ring.b1 = b1; } /* the mover's cells */
+#endif
+
+#ifdef CO_RESEARCH
+/* A research build only: the harness's Lua finds the living world's test commands (teleport, frec) by this name. */
+__declspec(dllexport) int co_research_lw_test(const char* cmd) { return hellforge_lw_test(cmd); }
 #endif
