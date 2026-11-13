@@ -3434,32 +3434,6 @@ static uint32_t NearMatBand(uint32_t* tile, const uint32_t* coarse)
 #define NEAR_MAT_SYNC_SITE 0x1AB157u
 static struct { uint64_t tex; uint32_t* pixels; ULONGLONG made; int holds; uint32_t taken; uint8_t* stub; int served; int framed; uint32_t frame; } g_matband;
 
-/* The render thread reads a created texture's pixels once, in the upload copy (exe 0x6EC1D2), before the end message of
- * the frame it was made in is done (0x10A950 waits for every resource job); the main thread waits for that frame's fence
- * one frame later (0x8A7C4). So 4 frame kicks ([r+0x1A50], +1 a kick at 0x10A81C) after the create, nothing reads them. */
-#define NEAR_PIXELS_FRAMES 4u
-static int NearRenderFrame(uint32_t* frame)
-{
-    static int pinned = -1;
-    uintptr_t exe = ApiModuleBase("helldivers2.exe", NULL), app = 0, r = 0;
-    uint8_t threaded = 0;
-    if (exe == 0) return 0;
-    if (pinned < 0)
-        pinned = ApiCodeMatches(exe + 0x31E870u, "48 8B 05 91 19 6F 01 48 8B 98 38 03 00 00") == 1 && ApiCodeMatches(exe + 0x31E8A8u, "44 38 A3 80 14 00 00") == 1 &&
-            ApiCodeMatches(exe + 0x10A80Au, "41 8B BF 50 1A 00 00 49 8B 8F 48 12 00 00 FF C7") == 1 && ApiCodeMatches(exe + 0x10A81Cu, "41 89 BF 50 1A 00 00") == 1 &&
-            ApiCodeMatches(exe + 0x10A977u, "E8 B4 11 00 00") == 1 && ApiCodeMatches(exe + 0x8A738u, "48 8B 8E 38 03 00 00 E8 7C FE 07 00") == 1 &&
-            ApiCodeMatches(exe + 0x8A7BDu, "48 8B 8E 38 03 00 00 E8 67 B8 07 00") == 1 && ApiCodeMatches(exe + 0x8AAE9u, "48 8B 8E 38 03 00 00 33 D2 E8 49 B3 07 00") == 1;
-    /* [r+0x1480] 0: the create posts nothing to a render thread (0x31E8A8), a path not followed here */
-    return pinned && !SafeRead(exe + 0x1A10208u, &app, 8) && app != 0 && !SafeRead(app + 0x338, &r, 8) && r != 0 && !SafeRead(r + 0x1480, &threaded, 1) &&
-        threaded != 0 && !SafeRead(r + 0x1A50, frame, 4);
-}
-
-/* 1 when the texture made at render frame `made` no longer needs its pixels. */
-static int NearPixelsDone(int framed, uint32_t made)
-{
-    uint32_t now = 0;
-    return framed && NearRenderFrame(&now) && now - made >= NEAR_PIXELS_FRAMES;
-}
 static struct { LONG level; uint32_t* pixels; } g_levelMat = {.level = -1}; /* the level's material map as read at its conform */
 
 static int NearMatBandOn(void)
@@ -3510,8 +3484,7 @@ static void NearMatTexture(ULONGLONG t0)
     uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
     g_matband.tex = (uintptr_t)create == exe + 0x31E740u && ApiCodeMatches(exe + 0x31E740u, "48 89 5C 24 08 48 89 6C 24 10 56 57 41 54 41 56 41 57 48 83 EC 50") &&
         (uintptr_t)NearApi(0x10, 0x6B0) == exe + 0x31E920u ? create(4096, 4096, 1, g_matband.pixels) : 0;
-    g_matband.made = GetTickCount64(); g_matband.holds = 0; g_matband.served = 0;
-    g_matband.framed = g_matband.tex != 0 && NearRenderFrame(&g_matband.frame);
+    g_matband.made = GetTickCount64(); g_matband.holds = 0; g_matband.served = 0; g_matband.framed = g_matband.tex != 0 && NearRenderFrame(&g_matband.frame);
     if (g_matband.tex == 0) { Note("difficulty: near terrain: the material band's texture was not created; the tile keeps its own map to the edge"); return; }
     Note("difficulty: near terrain: material band: %u texels of the tile's map take the coarse terrain's (from %.0f m inside the hidden square's edge, "
         "+-%.0f m), %.2f s; texture 0x%llX", g_matband.taken, (double)(NEAR_MAT_EDGE + NEAR_MAT_BAND), (double)(NEAR_MAT_WOBBLE / 2), (double)(GetTickCount64() - t0) / 1000.0,

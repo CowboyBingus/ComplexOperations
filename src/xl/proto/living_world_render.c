@@ -29,15 +29,20 @@ static void LwRenderShrink(uintptr_t map)
         Note("living world: render version table: %u entries with %u in use, now %u", size, used, *(volatile uint32_t*)map);
 }
 
-/* Each pooled job context X (dev+0x700 count, +0x708 array; 0x6CC700) holds a copy of the versions at X+8 (count +0, cap
- * +4, data +8, allocator +0x10), grown to the table's size for each job (0x6CD17C..0x6CD241) and never shrunk, so the
- * load's long table leaves ~1.35 MB in each of ~900 contexts. Here, after the dispatch has waited for its jobs
- * (0x6CD5F7) and emptied every copy (0x6CD646: used 0, which the find 0x6F51F0 checks first), a copy far over the
- * short table goes (0x6D55E0 to 0); the next job's copy regrows it before its entries are written. */
+/* Each pooled job context X (dev+0x700 count, +0x708 array) copies the versions into X+8 for every job, grown and never
+ * shrunk (0x6CD17C..0x6CD241): ~1.35 MB in each of ~900 contexts after a load. Past the dispatch's wait (0x6CD5F7) every
+ * copy is emptied (0x6CD646: used 0, which the reader 0x6E2230 tests first), so one far over the short table goes
+ * (0x6D55E0 to 0); the next job's copy regrows it. In play only: a load's tables grow back and would re-commit them. */
 typedef void (*LwRenderResizeFn)(uintptr_t array, uint32_t n);
+static int LwRenderInPlay(void)
+{
+    uintptr_t gameObj = 0, level = g_worldLevelLive; uint32_t state = 0, levelState = 0;
+    return g_world.game != 0 && level != 0 && !SafeRead(g_world.game + 0x3326340u, &gameObj, 8) && gameObj != 0 && !SafeRead(gameObj + 0xAC21Cu, &state, 4) &&
+        state == 4 && !SafeRead(level + 0x1E4, &levelState, 4) && levelState == 3;
+}
 static void LwRenderCopiesFree(uintptr_t dev)
 {
-    if (!LwLive() || g_lwRender.resize == 0) return;
+    if (!LwLive() || g_lwRender.resize == 0 || !LwRenderInPlay()) return;
     uint32_t size = *(volatile uint32_t*)(dev + 0x13C8), count = *(volatile uint32_t*)(dev + 0x700);
     uintptr_t contexts = *(volatile uintptr_t*)(dev + 0x708);
     if (contexts == 0 || count > 0x100000u) return;
@@ -57,17 +62,37 @@ static void LwRenderCopiesFree(uintptr_t dev)
         freed, count, (double)bytes / 1048576.0, size, g_lwRender.copiesFreed, (double)g_lwRender.copyBytesFreed / 1048576.0);
 }
 
+/* The shrink, then the copies measured against the short table. */
+static void LwRenderAfterDispatch(uintptr_t state)
+{
+    LwRenderShrink(state + 0x88);
+    LwRenderShrink(state + 0xB0);
+    LwRenderCopiesFree(state - 0x1340);
+}
+
 static void LwDelayRender(void); /* living_world_waits.c, test only */
 static void LwRenderEnd(uintptr_t state)
 {
     ((LwRenderEndFn)g_lwRender.endOrig)(state);
-    if ((uintptr_t)__builtin_return_address(0) != g_lwRender.after) return;   /* a worker's call, or another hook's */
+    /* only the dispatch's call (vt+0xF0 0x6CECB0); it runs on the render thread after its drain (0x109540) or in an
+     * ordered device job (head 0x528170, removal 0x5280F0), so never two at once; not the uploads' call (0x6CEE75) */
+    if ((uintptr_t)__builtin_return_address(0) != g_lwRender.after) return;
 #ifdef CO_RESEARCH
     LwDelayRender(); /* the render thread's test delay */
 #endif
-    LwRenderShrink(state + 0x88);
-    LwRenderShrink(state + 0xB0);
-    LwRenderCopiesFree(state - 0x1340); /* after the shrink: the copies are measured against the short table */
+    LwRenderAfterDispatch(state);
+}
+
+/* The copies' pool, resize, reader and the dispatch's wait as reviewed: the resize to call, or 0 (the copies stay). */
+static uintptr_t LwRenderCopiesPins(uintptr_t exe)
+{
+    return ApiCodeMatches(exe + 0x6D55E0u, "48 89 5C 24 10 57 48 83 EC 30 48 8B D9 8B FA 3B 51 04 74 68") &&
+        ApiCodeMatches(exe + 0x6CD17Cu, "49 8B 9F B0 03 00 00 41 8B B1 C8 13 00 00 3B 73 0C 76 12 8B D6 48") &&
+        ApiCodeMatches(exe + 0x6CD637u, "48 8B 46 70 48 8B 88 B0 03 00 00 48 83 C1 08 E8 15 7F 00 00") &&
+        ApiCodeMatches(exe + 0x6CC700u, "48 8D 8F F8 06 00 00 E8 D4 44 FF FF 48 8B 8F 08 07 00 00") &&
+        ApiCodeMatches(exe + 0x6CC87Bu, "49 8B 83 08 07 00 00 41 0F 10 83 60 07 00 00 48 8B 14 C8") &&
+        ApiCodeMatches(exe + 0x6CC8BEu, "48 89 96 B0 03 00 00") && ApiCodeMatches(exe + 0x6D5560u, "48 83 EC 18 44 8B 01 45 33 D2 41 8B C0 44 89 51 18") &&
+        ApiCodeMatches(exe + 0x6CD5F7u, "E8 64 9B F5 FF") && ApiCodeMatches(exe + 0x6E2230u, "83 79 20 00 44 8B CA 4C 8B C1") ? exe + 0x6D55E0u : 0;
 }
 
 /* The pins: the render thread's call after its dispatch, the batch end reading the changed ids' size (+0xB0) and
@@ -86,16 +111,7 @@ static void LwInstallRender(void)
         !ApiCodeMatches(exe + 0x6F4260u, "8B 43 1C 48 8B CB 8D 14 45 01 00 00 00 3B D6 0F 42 D6 E8"))
     { Note("living world: the render version table is not the reviewed code; not changed"); return; }
     g_lwRender.rehash = exe + LW_RT_REHASH;
-    /* the copies' pool and resize (LwRenderCopiesFree); other code there leaves the copies as the game keeps them */
-    if (ApiCodeMatches(exe + 0x6D55E0u, "48 89 5C 24 10 57 48 83 EC 30 48 8B D9 8B FA 3B 51 04 74 68") &&
-        ApiCodeMatches(exe + 0x6CD17Cu, "49 8B 9F B0 03 00 00 41 8B B1 C8 13 00 00 3B 73 0C 76 12 8B D6 48") &&
-        ApiCodeMatches(exe + 0x6CD637u, "48 8B 46 70 48 8B 88 B0 03 00 00 48 83 C1 08 E8 15 7F 00 00") &&
-        ApiCodeMatches(exe + 0x6CC700u, "48 8D 8F F8 06 00 00 E8 D4 44 FF FF 48 8B 8F 08 07 00 00") &&
-        ApiCodeMatches(exe + 0x6CC87Bu, "49 8B 83 08 07 00 00 41 0F 10 83 60 07 00 00 48 8B 14 C8") &&
-        ApiCodeMatches(exe + 0x6CC8BEu, "48 89 96 B0 03 00 00") && ApiCodeMatches(exe + 0x6D5560u, "48 83 EC 18 44 8B 01 45 33 D2 41 8B C0 44 89 51 18") &&
-        ApiCodeMatches(exe + 0x6CD5F7u, "E8 64 9B F5 FF") && ApiCodeMatches(exe + 0x6F51F0u, "83 79 18 00 74 56"))
-        g_lwRender.resize = exe + 0x6D55E0u;
-    else Note("living world: the render job contexts are not the reviewed code; their version copies stay");
+    if ((g_lwRender.resize = LwRenderCopiesPins(exe)) == 0) Note("living world: the render job contexts are not the reviewed code; their version copies stay");
     g_lwRender.after = exe + LW_RT_AFTER;
     if (LoaderHook("living world: render version table", exe + LW_RT_END, (void*)LwRenderEnd, &g_lwRender.endOrig) || g_lwRender.endOrig == NULL)
     { g_lwRender.endOrig = NULL; Note("living world: the render frame end could not be hooked"); return; }

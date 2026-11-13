@@ -41,6 +41,7 @@
  * ship's level change, the density rules of a later branch); they are unused until their callers are written. */
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-function"
+#include "proto/xl_free.h"
 #include "proto/entity_records.c"
 #include "proto/difficulty_world_profile.c"
 #include "proto/difficulty_world.c"
@@ -62,6 +63,7 @@
 #include "proto/difficulty_world_destroy.c"
 #include "proto/difficulty_net_patience.c"
 #include "proto/difficulty_world_move.c"
+#include "proto/xl_free.c"
 #include "proto/living_world.c"
 #include "proto/difficulty_tacmap.c"
 #include "proto/test_daylight.c"
@@ -253,6 +255,15 @@ uint32_t* CoXlTestBandDropPixels(void) { return g_matband.pixels; }
 void CoXlTestBandTick(void) { MoveBandPixelsTick(); }
 int CoXlTestRenderFrame(uint32_t* frame) { return NearRenderFrame(frame); }
 void CoXlTestBandLevelGone(void) { g_matband.tex = 0; MoveLevelGone(); }
+/* The paths the frees rest on: a dispatcher call's start, the band's stash and take, the pins asked again, the render
+ * hook's order and its pins. */
+void CoXlTestDispatchBegins(uint64_t records, uint64_t index) { WorldDispatchBegins(records, index, 0); }
+void CoXlTestBandBuild(uint64_t tex, uint32_t* pixels, uint32_t made) { MoveBandStash(); g_move.stashed = 1; g_matband.tex = tex; g_matband.pixels = pixels; g_matband.framed = 1; g_matband.frame = made; }
+void CoXlTestBandTileIn(int slot) { g_tiles[slot].live = 1; g_tiles[slot].level = g_world.levels; MoveTileTakeBand(slot); MoveRestoreDrop(); }
+void CoXlTestRenderFramePins(void) { g_renderFramePinned = -1; }
+void CoXlTestRenderAfter(uintptr_t state, void (*rehash)(uintptr_t, uint32_t), void (*resize)(uintptr_t, uint32_t))
+{ g_lwRender.rehash = (uintptr_t)rehash; g_lwRender.resize = (uintptr_t)resize; LwRenderAfterDispatch(state); }
+uintptr_t CoXlTestRenderCopiesPins(uintptr_t exe) { return LwRenderCopiesPins(exe); }
 /* A level init's first step for `level`, and a stamp section's hold and cancel test (proto/difficulty_world_terrain.c). */
 void CoXlTestLevelInit(uintptr_t level) { LevelInitBegins(); g_worldLevel = level; }
 void CoXlTestSectionBegin(void) { SectionBegin(); }

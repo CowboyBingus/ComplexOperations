@@ -1,7 +1,6 @@
-/* Memory given back once nothing reads it: a spawned tile's band pixels after the render thread's upload (4 frame kicks
- * after the texture's create), op 0x2B's job regions after the op returns, and the render job contexts' emptied
- * version copies once the device's table is short. Each goes once, never twice, and not
- * while a reader may still be there. Run on the fake game and exe. */
+/* Memory given back once nothing reads it: a tile's band pixels 4 frame kicks after its texture's create, op 0x2B's job
+ * regions at the op thread's next dispatcher call, and the render job contexts' emptied version copies once the table is
+ * short, in play. Each goes once, never early, never twice; a refused pin keeps it. Run on the fake game and exe. */
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -23,6 +22,14 @@ uint32_t* CoXlTestBandDropPixels(void);
 void CoXlTestBandTick(void);
 int CoXlTestRenderFrame(uint32_t* frame);
 void CoXlTestBandLevelGone(void);
+void CoXlTestGame(uintptr_t game);
+void CoXlTestMission(uintptr_t level, int complex);
+void CoXlTestDispatchBegins(uint64_t records, uint64_t index);
+void CoXlTestBandBuild(uint64_t tex, uint32_t* pixels, uint32_t made);
+void CoXlTestBandTileIn(int slot);
+void CoXlTestRenderFramePins(void);
+void CoXlTestRenderAfter(uintptr_t state, void (*rehash)(uintptr_t, uint32_t), void (*resize)(uintptr_t, uint32_t));
+uintptr_t CoXlTestRenderCopiesPins(uintptr_t exe);
 
 static int g_failed;
 static const char* g_case;
@@ -57,6 +64,20 @@ static void Context(uint8_t* x, uint32_t count, uint32_t cap, uint32_t used)
 static uint32_t Cap(const uint8_t* x) { uint32_t c; memcpy(&c, x + 0xC, 4); return c; }
 
 static uint64_t TestJob(uint64_t a, uint64_t b, uint64_t c, uint64_t job) { (void)a; (void)b; (void)c; (void)job; return 1; }
+/* One job of a 0x2B op over 800 items, its range starting at `first`: the region it is handed. */
+static void PlaceOne(uint32_t first)
+{
+    static uint32_t items = 800;
+    static uint8_t context[0x200], job[0x80];
+    uint64_t list = (uint64_t)(uintptr_t)&items, ctx = (uint64_t)(uintptr_t)context;
+    uint32_t range[2] = {first, first + 100};
+    memcpy(context + 0x170, &list, 8); memcpy(job + 0x10, &ctx, 8); memcpy(job + 0x4C, range, 8);
+    CoXlTestPlaceJob((uint64_t)(uintptr_t)job, TestJob);
+}
+static DWORD WINAPI OtherThreadFree(void* unused) { (void)unused; CoXlTestPlaceFreeTry(); return 0; }
+/* The rehash 0x6F60F0 as the shrink calls it: the table's size becomes about the buckets asked for. */
+static void TestRehash(uintptr_t map, uint32_t buckets) { uint32_t size = buckets + buckets / 3; memcpy((void*)map, &size, 4); memcpy((void*)(map + 0x1C), &buckets, 4); }
+static void Pin(uintptr_t at) { g_fake.noMatch[0] = at - (uintptr_t)g_fake.image; }
 
 int main(void)
 {
@@ -67,6 +88,14 @@ int main(void)
     memcpy(exe + APP, &app, 8); memcpy(g_app + 0x338, &r, 8);
     g_r[0x1480] = 1;
     Frame(100);
+    /* a mission in play: the engine's state 4, the level live (state 3) */
+    uint8_t* gameObj = (uint8_t*)VirtualAlloc(NULL, 0xB0000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    static uint8_t level[0x200];
+    const uint64_t engine = (uint64_t)(uintptr_t)gameObj;
+    const uint32_t four = 4, three = 3;
+    memcpy(g_fake.image + 0x3326340u, &engine, 8); memcpy(gameObj + 0xAC21Cu, &four, 4); memcpy(level + 0x1E4, &three, 4);
+    CoXlTestGame((uintptr_t)g_fake.image);
+    CoXlTestMission((uintptr_t)level, 1);
 
     g_case = "the render frame";
     {
@@ -193,6 +222,97 @@ int main(void)
         CoXlTestRenderCopies(d, TestResize);
         CHECK(g_resized == 3 && Cap(x[1]) == 0 && Cap(x[2]) == 0 && Cap(x[3]) == 4096);
         CoXlTestLive(0);
+    }
+
+    g_case = "a render frame pin refused";
+    {
+        uint32_t f = 0;
+        Pin((uintptr_t)exe + 0x10A81Cu); CoXlTestRenderFramePins();
+        CHECK(!CoXlTestRenderFrame(&f)); /* the kick is not the reviewed code: no frame, the pixels stay */
+        g_fake.noMatch[0] = 0; CoXlTestRenderFramePins();
+        CHECK(CoXlTestRenderFrame(&f));
+    }
+
+    g_case = "a built tile takes the build's frame, the drop tile gets its own back";
+    {
+        uint32_t* drop = Pixels(), *built = Pixels();
+        CoXlTestBandDrop(0x11, drop, 1000, 0);
+        CoXlTestBandBuild(0x22, built, 1200); /* the build's texture, made later */
+        CoXlTestBandTileIn(4);
+        Frame(1203); CoXlTestBandTick();
+        CHECK(CoXlTestBandTilePixels(4) == built && !Gone(built)); /* 3 kicks after its own create */
+        CHECK(CoXlTestBandDropPixels() == NULL && Gone(drop));
+        Frame(1204); CoXlTestBandTick();
+        CHECK(CoXlTestBandTilePixels(4) == NULL && Gone(built));
+        uint32_t* drop2 = Pixels(), *built2 = Pixels();
+        CoXlTestBandDrop(0x33, drop2, 1300, 0);
+        CoXlTestBandBuild(0x44, built2, 1250); /* a build whose texture is older than the drop's */
+        CoXlTestBandTileIn(5);
+        Frame(1303); CoXlTestBandTick();
+        CHECK(CoXlTestBandDropPixels() == drop2 && !Gone(drop2)); /* the drop's own frame came back with it */
+        CHECK(CoXlTestBandTilePixels(5) == NULL && Gone(built2));
+        Frame(1304); CoXlTestBandTick();
+        CHECK(CoXlTestBandDropPixels() == NULL && Gone(drop2));
+    }
+
+    g_case = "op 0x2B's regions: the dispatcher's calls";
+    {
+        static uint8_t records[3 * 0x19B0];
+        const uint32_t ops[3] = {0x2B, 0x2B, 0x10};
+        for (int k = 0; k < 3; k++) memcpy(records + k * 0x19B0, &ops[k], 4);
+        uint32_t at = 0;
+        const uint64_t rec = (uint64_t)(uintptr_t)records, index = (uint64_t)(uintptr_t)&at;
+        CoXlTestWorldCurrent(8.0f);
+        PlaceOne(0); PlaceOne(400);
+        CoXlTestDispatchBegins(rec, index); /* the 0x2B record's call */
+        CHECK(CoXlTestPlaceRegions() == 2);
+        at = 1; CoXlTestDispatchBegins(rec, index); /* another 0x2B record: its op uses them */
+        CHECK(CoXlTestPlaceRegions() == 2);
+        HANDLE t = CreateThread(NULL, 0, OtherThreadFree, NULL, 0, NULL); /* another thread's call: not the op's */
+        if (t != NULL) { WaitForSingleObject(t, INFINITE); CloseHandle(t); }
+        CHECK(CoXlTestPlaceRegions() == 2);
+        at = 2; CoXlTestDispatchBegins(rec, index); /* the next op on the op's thread */
+        CHECK(CoXlTestPlaceRegions() == 0);
+        PlaceOne(0);
+        CoXlTestWorldCurrent(1.0f);
+        at = 0; CoXlTestDispatchBegins(rec, index); /* a 0x2B on a normal level marks nothing */
+        at = 2; CoXlTestDispatchBegins(rec, index);
+        CHECK(CoXlTestPlaceRegions() == 1);
+        CoXlTestWorldCurrent(8.0f);
+        at = 0; CoXlTestDispatchBegins(rec, index);
+        at = 2; CoXlTestDispatchBegins(rec, index);
+        CHECK(CoXlTestPlaceRegions() == 0);
+        CoXlTestWorldCurrent(1.0f);
+    }
+
+    g_case = "the version copies after the shrink, in play only";
+    {
+        static uint8_t dev[0x1500], x[0x1A0];
+        uint64_t array[1] = {(uint64_t)(uintptr_t)x}, at = (uint64_t)(uintptr_t)array;
+        uint32_t count = 1, size = 56114, used = 100, buckets = 40959;
+        memcpy(dev + 0x700, &count, 4); memcpy(dev + 0x708, &at, 8);
+        memcpy(dev + 0x13C8, &size, 4); memcpy(dev + 0x13C8 + 0x18, &used, 4); memcpy(dev + 0x13C8 + 0x1C, &buckets, 4);
+        Context(x, 56114, 56114, 0);
+        g_resized = 0;
+        CoXlTestLive(1);
+        memcpy(level + 0x1E4, &(uint32_t){1}, 4); /* the level still loads */
+        CoXlTestRenderAfter((uintptr_t)dev + 0x1340, TestRehash, TestResize);
+        CHECK(g_resized == 0 && Cap(x) == 56114);
+        memcpy(level + 0x1E4, &three, 4);
+        memcpy(dev + 0x13C8, &size, 4); memcpy(dev + 0x13C8 + 0x1C, &buckets, 4);
+        CoXlTestRenderAfter((uintptr_t)dev + 0x1340, TestRehash, TestResize); /* the shrink first, then the copy against it */
+        CHECK(g_resized == 1 && Cap(x) == 0);
+        CoXlTestLive(0);
+    }
+
+    g_case = "a version copies pin refused";
+    {
+        CHECK(CoXlTestRenderCopiesPins((uintptr_t)exe) == (uintptr_t)exe + 0x6D55E0u);
+        Pin((uintptr_t)exe + 0x6E2230u); /* the reader that tests used first */
+        CHECK(CoXlTestRenderCopiesPins((uintptr_t)exe) == 0);
+        Pin((uintptr_t)exe + 0x6D55E0u);
+        CHECK(CoXlTestRenderCopiesPins((uintptr_t)exe) == 0);
+        g_fake.noMatch[0] = 0;
     }
 
     if (g_failed) { printf("freecuts: %d check(s) failed\n", g_failed); return 1; }
