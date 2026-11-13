@@ -361,6 +361,22 @@ static void Anchor(uint32_t registry, uint32_t kind, uint32_t frame)
     memcpy(g_fake.image + widget + 148, &x, 4); memcpy(g_fake.image + widget + 156, &y, 4);
 }
 
+/* The war table's planet header (PROOFS.md W-5): its title and faction line, plain texts at x 132 units, `title` units
+ * wide; `type` 7 is a plain text. */
+static void Header(double title, uint32_t type, float opacity)
+{
+    const double widths[2] = {title, 250};
+    for (int i = 0; i < 2; i++)
+    {
+        const uint32_t text = OWNER + (i ? 0x36B98u : 0x36630u);
+        const float w = (float)widths[i], s = 2.0f / 3.0f, x = 88.0f, y = 640.0f - 30.0f * i;
+        Put(text, type << 18 | 0x10u, 4);
+        memcpy(g_fake.image + text + 36, &w, 4); memcpy(g_fake.image + text + 84, &opacity, 4);
+        memcpy(g_fake.image + text + 100, &s, 4); memcpy(g_fake.image + text + 140, &s, 4);
+        memcpy(g_fake.image + text + 148, &x, 4); memcpy(g_fake.image + text + 156, &y, 4);
+    }
+}
+
 static uintptr_t Scene(const char* name)
 {
     const uintptr_t game = Start(name);
@@ -369,6 +385,7 @@ static uintptr_t Scene(const char* name)
     Put(0x3772268u, FONT_HASH, 8); Put(0x37C5478u, Ptr(0x3700000u), 8); Put(0x3700000u + 24u, MATERIAL_HASH, 8); Put(0x3772EE8u, ATLAS_HASH, 8);
     Anchor(25224u, 226u, 349072u);
     Anchor(25272u, 229u, 31232u);
+    Header(270, 7, 1); /* AURORA BAY: x 132..402 units */
     g_fake.originals[0].target = (uintptr_t)GetProcAddress(g_lua51, "lua_pcall");
     g_fake.originals[0].original = (void*)GetProcAddress(g_lua51, "lua_pcall");
     g_fake.role = HF_SESSION_HOST;
@@ -428,7 +445,7 @@ static void Banner(void)
     CHECK_LUA(L, "local g = E.created[1] if g.items[7].t ~= 'COMPLEX OPERATION' or g.items[8].t ~= '3 MISSIONS ON ONE 16 KM MAP' then return 'texts' end");
     CHECK_LUA(L, "if E.atlas ~= 'id:9999aaaabbbbcccc' or E.material ~= 'id:5555666677778888' then return 'the native font material' end");
     for (int i = 0; i < CO_TAG_SETTLE; i++) Frame(L);
-    CHECK(fake_host_logged("war-table tag: map, operation 7: complex, banner x 399.3 y 612.0 w 286.7 h 37.3 (beside the panel; panel x 36.0 y 360.4 w 355.3 h 247.6, scale 0.6667)"));
+    CHECK(fake_host_logged("war-table tag: map, operation 7: complex, banner x 399.3 y 612.0 w 286.7 h 37.3 (beside the panel; panel x 36.0 y 360.4 w 355.3 h 247.6, scale 0.6667; planet header to x 272.0)"));
 
     g_case = "W-T3 an unchanged frame makes no Gui call";
     const double calls = Calls(L);
@@ -463,6 +480,28 @@ static void Banner(void)
     Frame(L);
     Drawn(L, CO_TAG_STANDARD, CO_TAG_WHY_NONE, 1);
     g_fake.rowBytes = 0;
+
+    g_case = "W-T3 a long planet name: the second column (A-3)";
+    Header(780, 7, 1); /* EAST IRIDIUM TRADING BAY: to x 912 units, 608 px */
+    Frame(L);
+    const CoTagShown* shown = co_tag_test_shown();
+    CHECK(shown->visible && shown->place == CO_TAG_PLACE_COLUMN && fabs(shown->box.x - (36 + 2 * (355.3333333 + 8))) < 0.01);
+    CHECK(shown->box.x >= 88 + 780 * 2.0 / 3 + 4 - 1e-6);
+    for (int i = 0; i < CO_TAG_SETTLE; i++) Frame(L);
+    CHECK(fake_host_logged("w 286.7 h 37.3 (second column; panel x 36.0 y 360.4 w 355.3 h 247.6, scale 0.6667; planet header to x 612.0)"));
+    g_case = "W-T3 a hidden planet header does not count";
+    Header(780, 7, 0);
+    Frame(L);
+    CHECK(co_tag_test_shown()->visible && co_tag_test_shown()->place == CO_TAG_PLACE_BESIDE);
+    g_case = "W-T3 an unreadable planet header: the second column";
+    Header(270, 0, 1);
+    Frame(L);
+    CHECK(co_tag_test_shown()->visible && co_tag_test_shown()->place == CO_TAG_PLACE_COLUMN);
+    for (int i = 0; i < CO_TAG_SETTLE; i++) Frame(L);
+    CHECK(fake_host_logged("scale 0.6667; planet header unread)"));
+    Header(270, 7, 1);
+    Frame(L);
+    CHECK(co_tag_test_shown()->place == CO_TAG_PLACE_BESIDE);
 
     g_case = "W-T3 another level: nothing shows";
     Put(WAR + 0x17A2A0u, 8, 4);
@@ -618,6 +657,39 @@ static void Places(void)
                 CHECK(Clear(&kNative[n], edge, H, s, 6, &b));
             }
         }
+
+    /* A-3: the war table's planet title starts 132 units from the 16:9 area's left (or the screen's) and shares the
+     * banner's rows. Up to 461 units wide it leaves the banner's place as it is; wider, or unread, the second column. */
+    g_case = "W-5 a long planet title";
+    static const double kTitles[] = {270, 461, 461.5, 780, 1000};
+    for (size_t r = 0; r < sizeof kSizes / sizeof kSizes[0]; r++)
+        for (size_t n = 0; n < sizeof kTitles / sizeof kTitles[0]; n++)
+            for (int edge = 0; edge < 2; edge++)
+            {
+                const double W = kSizes[r][0], H = kSizes[r][1], s = fmin(W / 1920, H / 1080), area = (W - fmin(W, H * 16 / 9)) / 2;
+                const double left = edge ? 0 : area, right = left + (132 + kTitles[n]) * s;
+                CoTagAnchor a = {area + 54 * s, H - 132 * s - 371 * s, 533 * s, 371 * s, s, 1, 1, 1, 0};
+                CoTagBox plain, b;
+                CHECK(co_tag_place(&a, W, H, &plain) == CO_TAG_PLACE_BESIDE);
+                a.reach = right + CO_TAG_CLEAR * s;
+                const int place = co_tag_place(&a, W, H, &b);
+                const int fits = area + 599 * s >= a.reach - 1e-9;
+                CHECK(place == (fits ? CO_TAG_PLACE_BESIDE : CO_TAG_PLACE_COLUMN));
+                CHECK(!fits || memcmp(&plain, &b, sizeof b) == 0);   /* AURORA BAY keeps today's rectangle */
+                CHECK(b.x >= right + 6 * s - 1e-9 && b.y + b.h <= H - CO_TAG_ROOF * s + 1e-9);
+                for (size_t e = 0; e < sizeof kNative / sizeof kNative[0]; e++)
+                    if (kNative[e].screen & 1) CHECK(Clear(&kNative[e], area, H, s, 6, &b));
+                CHECK(Apart(a.x, a.y, a.w, a.h, &b) && Apart(a.x + a.w + 12 * s, 0, a.w, a.y + a.h, &b));
+                CHECK(edge || n != 0 || place == CO_TAG_PLACE_BESIDE);
+                CHECK(n < 2 || edge || place == CO_TAG_PLACE_COLUMN);
+            }
+    for (size_t r = 0; r < sizeof kSizes / sizeof kSizes[0]; r++)
+    {
+        const double W = kSizes[r][0], H = kSizes[r][1], s = fmin(W / 1920, H / 1080), area = (W - fmin(W, H * 16 / 9)) / 2;
+        const CoTagAnchor a = {area + 54 * s, H - 132 * s - 371 * s, 533 * s, 371 * s, s, 1, 1, 1, -1};
+        CoTagBox b;
+        CHECK(co_tag_place(&a, W, H, &b) == CO_TAG_PLACE_COLUMN);
+    }
 
     /* PROOFS.md W-5: the native panel's body text has 8-pixel capitals at 1280x720 and its title 10; this font's capitals
      * are 0.58 of the text size (both measured). Each text fits its line at 0.6 of its size a glyph (0.57 measured). */
