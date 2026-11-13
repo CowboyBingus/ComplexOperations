@@ -39,10 +39,13 @@ static const char* g_case;
 #define CONFIG_REST 0x27B8C70u
 #define REGIONS 0x2360D04u
 #define WORKER_TRIM 0x6253C3u /* the test's entry: sub rsp, 8, then the worker's own `xor ecx, ecx; call trim` */
+#define RENDER_STEP 0x113010u
+#define TASK_STEP 0x99DB30u
 #define CLASS 34u
 #define BLOCK 1040u
 #define COUNT 62u
-enum { F_FOUND, F_RESCUED, F_CHANGED, F_UNTAKEN, F_HEAPS, F_THREADS, F_FOUND_BYTES, F_BYTES, F_CLASS34, F_PASSES, F_SEEN, F_N };
+enum { F_FOUND, F_RESCUED, F_CHANGED, F_UNTAKEN, F_HEAPS, F_THREADS, F_FOUND_BYTES, F_BYTES, F_CLASS34, F_PASSES, F_SEEN, F_VIA_TRIM, F_VIA_TICK,
+    F_VIA_RENDER, F_VIA_TASK, F_N };
 
 static uint8_t* g_exe;
 typedef void* (*AllocFn)(uintptr_t heap, size_t size);
@@ -121,6 +124,10 @@ static uintptr_t TestNewSpan(uintptr_t heap, uintptr_t heapClass, uint32_t spanC
 static void TestRelease(uintptr_t heap, uintptr_t span) { g_released++; g_releasedSpan = span; }
 static void TestFinalised(void) { g_finalised++; }
 static uint64_t TestTrim(uint64_t global) { g_trims++; g_trimArg = global; return 0x77; }
+static int g_renders, g_tasks;
+static uint64_t g_renderArgs[3], g_taskArg;
+static uint64_t TestRender(uint64_t a, uint64_t b, uint64_t c) { g_renders++; g_renderArgs[0] = a; g_renderArgs[1] = b; g_renderArgs[2] = c; return 0x55; }
+static uint64_t TestTask(uint64_t router) { g_tasks++; g_taskArg = router; return 0x66; }
 
 static void Thunk(uint32_t rva, void* to)
 {
@@ -149,7 +156,11 @@ static void Setup(int sync)
     Thunk(0x667C80u, (void*)TestFinalised);
     g_fake.originals[0].target = (uintptr_t)(g_exe + TRIM);
     g_fake.originals[0].original = (void*)TestTrim;
-    g_newSpans = g_released = g_finalised = g_maps = g_unmaps = g_unmapSawBit = g_trims = 0;
+    g_fake.originals[1].target = (uintptr_t)(g_exe + RENDER_STEP);
+    g_fake.originals[1].original = (void*)TestRender;
+    g_fake.originals[2].target = (uintptr_t)(g_exe + TASK_STEP);
+    g_fake.originals[2].original = (void*)TestTask;
+    g_newSpans = g_released = g_finalised = g_maps = g_unmaps = g_unmapSawBit = g_trims = g_renders = g_tasks = 0;
     g_releasedSpan = 0; g_trimArg = 0;
     CoXlTestSrReset(sync);
 }
@@ -519,7 +530,7 @@ static void Locks(void)
     LetGo(&h, reader);
     CHECK(WaitForSingleObject(u, 5000) == WAIT_OBJECT_0); CloseHandle(u);
     CHECK(g_unmaps == 1 && !CoXlTestSrMarked(span));
-    long long c[5]; CoXlTestSrCosts(c);
+    long long c[11]; CoXlTestSrCosts(c);
     CHECK(c[3] > 0); /* the wait was measured */
 
     g_case = "a scan and a rescue wait for an unmap";
@@ -639,6 +650,101 @@ static void Neighbour(void)
     for (int i = 0; i < n; i++) if (SpanOf(rest[i]) != partial) Free(rest[i]);
 }
 
+/* ---- threads that never trim: the renderer and Havok's workers --------------------------------------------------- */
+typedef uint64_t (*RenderFn)(uint64_t, uint64_t, uint64_t);
+typedef uint64_t (*TaskFn)(uint64_t);
+static void* Detour(uint32_t rva) { return fake_host_detour((uintptr_t)(g_exe + rva) - (uintptr_t)g_fake.image); }
+static uintptr_t g_renderHeap;
+static DWORD WINAPI RenderOne(void* unused)
+{
+    (void)unused;
+    SetQ(g_renderHeap, (uint64_t)(uintptr_t)NtCurrentTeb()); /* the heap is this thread's, as the renderer's is */
+    ((RenderFn)Detour(RENDER_STEP))(9, 8, 7);
+    return 0;
+}
+static void Reach(void)
+{
+    g_case = "the renderer and Havok's workers take their lists at a message and at a task step";
+    Setup(1);
+    CHECK(CoXlTestSrInstall() == 1 && g_fake.hookCount == 3);
+    CHECK(fake_host_logged("lists are taken at trims and the tick, the renderer's messages, Havok's task steps"));
+    FakeMapping();
+    RenderFn render = (RenderFn)Detour(RENDER_STEP);
+    TaskFn task = (TaskFn)Detour(TASK_STEP);
+    CHECK(render != NULL && task != NULL);
+    if (render == NULL || task == NULL) return;
+    uintptr_t renderer = NewHeap(), worker = NewHeap(), game = NewHeap();
+    void* r[COUNT]; void* w[COUNT];
+    uintptr_t rs = Fill(renderer, r), ws = Fill(worker, w);
+    FreeElsewhere(r, 1, COUNT - 1);
+    FreeElsewhere(w, 1, COUNT - 1);
+    CoXlTestSrHeap(renderer);
+    CHECK(render(1, 2, 3) == 0x55 && g_renders == 1 && g_renderArgs[0] == 1 && g_renderArgs[1] == 2 && g_renderArgs[2] == 3);
+    CHECK(Q(rs) == 0 && Partial(renderer) == 0); /* between passes: the dispatch alone */
+    CoXlTestSrHeap(game);
+    CHECK(CoXlTestSrStep(256, 0, 100000, 1) == 1);
+    CoXlTestSrHeap(worker);
+    CHECK(task(5) == 0x66 && g_tasks == 1 && g_taskArg == 5 && Partial(worker) == 0); /* scanned, not published */
+    CoXlTestSrHeap(game);
+    CHECK(CoXlTestSrStep(256, 0, 100001, 1) == 2);
+    CoXlTestSrHeap(renderer);
+    CHECK(render(4, 5, 6) == 0x55 && g_renders == 2 && g_renderArgs[2] == 6);
+    CHECK(Partial(renderer) == rs && Q(rs + 0x18) == 0 && Len(Q(rs)) == (int)COUNT - 1 && D(rs + 0x14) == 1 && Q(renderer + 0x718) == 0);
+    CoXlTestSrHeap(worker);
+    CHECK(task(7) == 0x66 && g_tasks == 2 && g_taskArg == 7);
+    CHECK(Partial(worker) == ws && Q(ws + 0x18) == 0 && Len(Q(ws)) == (int)COUNT - 1);
+    CHECK(task(8) == 0x66 && g_tasks == 3); /* taken once */
+    long long c[11]; CoXlTestSrCosts(c);
+    CHECK(c[5] == 0 && c[6] == 0 && c[9] <= c[7] && c[10] <= c[8]); /* timed by the hook that took the list */
+    g_fake.log[0] = 0;
+    CHECK(CoXlTestSrStep(256, 0, 100002, 1) == 0);
+    long long f[F_N]; CoXlTestSrLast(f);
+    CHECK(f[F_FOUND] == 2 && f[F_RESCUED] == 2 && f[F_UNTAKEN] == 0 && f[F_THREADS] == 2);
+    CHECK(f[F_VIA_RENDER] == 1 && f[F_VIA_TASK] == 1 && f[F_VIA_TRIM] == 0 && f[F_VIA_TICK] == 0);
+    CHECK(fake_host_logged("0 in heaps whose thread did not come, 0 over the room; lists taken at trims 0, the tick 0, render messages 1, Havok task steps 1"));
+    CHECK(fake_host_logged("rpmalloc regions registered; taking the lists: at trims 0.000 ms (longest 0.000 ms), at the tick 0.000 ms (longest 0.000 ms), at render messages "));
+    CHECK(fake_host_logged(" ms), at Havok task steps "));
+    CoXlTestSrCosts(c);
+    CHECK(c[7] == 0 && c[8] == 0 && c[9] == 0 && c[10] == 0); /* the note starts the next count */
+    void* again = Alloc(renderer);
+    CHECK(SpanOf(again) == rs && g_newSpans == 2); /* the renderer's next block comes from the rescued span */
+
+    g_case = "the renderer's own thread takes its list";
+    Setup(1);
+    CHECK(CoXlTestSrInstall() == 1);
+    FakeMapping();
+    g_renderHeap = NewHeap();
+    rs = Fill(g_renderHeap, r);
+    FreeElsewhere(r, 1, COUNT - 1);
+    CoXlTestSrHeap(game);
+    CHECK(CoXlTestSrStep(512, 0, 200000, 1) == 1 && CoXlTestSrStep(512, 0, 200001, 1) == 2);
+    CoXlTestSrHeap(g_renderHeap);
+    Holder h;
+    HANDLE unmap = Hold(&h, 2); /* an unmap holds the headers: the renderer's take waits, and that wait is its cost */
+    HANDLE t = CreateThread(NULL, 0, RenderOne, NULL, 0, NULL);
+    CHECK(WaitForSingleObject(t, 50) == WAIT_TIMEOUT);
+    LetGo(&h, unmap);
+    WaitForSingleObject(t, INFINITE); CloseHandle(t);
+    CHECK(g_renders == 1 && g_renderArgs[0] == 9 && Partial(g_renderHeap) == rs && Q(rs + 0x18) == 0);
+    LARGE_INTEGER qpf; QueryPerformanceFrequency(&qpf);
+    CoXlTestSrCosts(c);
+    CHECK(c[9] >= qpf.QuadPart / 20 && c[7] == c[9] && c[8] == 0); /* at least the 50 ms it waited, on the render hook alone */
+    CHECK(CoXlTestSrStep(512, 0, 200002, 1) == 0);
+
+    g_case = "a refused reach hook leaves that thread kind untaken; the rescue stays on";
+    Setup(1);
+    g_fake.noHook = (uintptr_t)(g_exe + RENDER_STEP) - (uintptr_t)g_fake.image;
+    CHECK(CoXlTestSrInstall() == 1 && g_fake.hookCount == 2 && Detour(RENDER_STEP) == NULL && Detour(TASK_STEP) != NULL);
+    CHECK(fake_host_logged("the renderer not reached: the hook was refused"));
+    CHECK(fake_host_logged("lists are taken at trims and the tick, Havok's task steps"));
+    g_fake.noHook = 0;
+    Setup(1);
+    g_fake.noHook = (uintptr_t)(g_exe + TASK_STEP) - (uintptr_t)g_fake.image;
+    CHECK(CoXlTestSrInstall() == 1 && g_fake.hookCount == 2 && Detour(TASK_STEP) == NULL && Detour(RENDER_STEP) != NULL);
+    CHECK(fake_host_logged("threads that run Havok tasks not reached: the hook was refused"));
+    g_fake.noHook = 0;
+}
+
 /* ---- the pool worker's trim -------------------------------------------------------------------------------------- */
 typedef void (*WorkerFn)(void);
 static void WorkerSite(void)
@@ -671,13 +777,14 @@ static void Skip(void)
     CoXlTestSrHeap(w1);
     CoXlTestSrTrim(0x100); CHECK(g_trims == 6); /* only cl is the argument (0x630310) */
     worker(); CHECK(g_trims == 6);
-    long long c[5]; CoXlTestSrCosts(c);
+    long long c[11]; CoXlTestSrCosts(c);
     CHECK(c[0] == 3 && c[1] == 4 && c[2] == 1);
     g_fake.log[0] = 0;
     CoXlTestSrHeap(NewHeap());
     Pass(256, 100000);
     CHECK(fake_host_logged("pass 1 cost: an unmap waited at most 0.000 ms for the scan; pool worker trims since the last pass: 3 run ("));
-    CHECK(fake_host_logged("4 skipped (only the pass asked); 0 of 9 rpmalloc regions registered"));
+    CHECK(fake_host_logged("4 skipped (only the pass asked); 0 of 9 rpmalloc regions registered; taking the lists: at trims "));
+    CHECK(fake_host_logged("at the tick 0.000 ms (longest 0.000 ms), at render messages 0.000 ms (longest 0.000 ms), at Havok task steps 0.000 ms (longest 0.000 ms)"));
 }
 
 static volatile LONG g_toggleStop;
@@ -724,7 +831,7 @@ static void Refusals(void)
         if (r == 1)
         {
             on++;
-            bad |= unmap == g_exe + UNMAP_DEFAULT || map == g_exe + MAP_DEFAULT || g_fake.hookCount != 1;
+            bad |= unmap == g_exe + UNMAP_DEFAULT || map == g_exe + MAP_DEFAULT || g_fake.hookCount != 3;
             SetQ((uintptr_t)(g_exe + UNMAP_AT), (uint64_t)(uintptr_t)(g_exe + UNMAP_DEFAULT));
             InterlockedExchangePointer((void* volatile*)(g_exe + MAP_AT), g_exe + MAP_DEFAULT);
         }
@@ -743,23 +850,39 @@ static void Refusals(void)
 
 static void Install(void)
 {
-    g_case = "every pinned byte is checked";
-    int missed = 0; uint32_t first = 0;
+    g_case = "every pinned byte is checked; a reach's own bytes leave only that reach out";
+    int missed = 0, reachMissed = 0, reachNoted = 1; uint32_t first = 0;
     Setup(1);
     for (size_t i = 0; i < sizeof kRpmallocBytes / sizeof kRpmallocBytes[0]; i++)
     {
-        if (kRpmallocBytes[i].rva == 0x669AB0u) continue; /* run by the test, not pinned */
+        int group = kRpmallocBytes[i].group;
+        if (group == 3) continue; /* run by the test, not pinned */
         for (uint32_t k = 0; k < kRpmallocBytes[i].size; k++)
         {
             CoXlTestSrReset(1);
             g_fake.log[0] = 0; /* the fake log holds 8 KB */
+            g_fake.hookCount = 0;
             g_exe[kRpmallocBytes[i].rva + k] ^= 0x5A;
-            if (CoXlTestSrInstall() != -1 && missed++ == 0) first = kRpmallocBytes[i].rva + k;
+            int r = CoXlTestSrInstall();
+            if (group == 0 && r != -1 && missed++ == 0) first = kRpmallocBytes[i].rva + k;
+            if (group != 0 && (r != 1 || g_fake.hookCount != 2 || Detour(group == 1 ? RENDER_STEP : TASK_STEP) != NULL ||
+                Detour(group == 1 ? TASK_STEP : RENDER_STEP) == NULL || Detour(TRIM) == NULL) && reachMissed++ == 0) first = kRpmallocBytes[i].rva + k;
+            if (group != 0) reachNoted &= fake_host_logged(group == 1 ? "the renderer not reached: the code at 0x" : "threads that run Havok tasks not reached: the code at 0x");
             g_exe[kRpmallocBytes[i].rva + k] ^= 0x5A;
+            SetQ((uintptr_t)(g_exe + MAP_AT), (uint64_t)(uintptr_t)(g_exe + MAP_DEFAULT)); /* as before an install that went in */
+            SetQ((uintptr_t)(g_exe + UNMAP_AT), (uint64_t)(uintptr_t)(g_exe + UNMAP_DEFAULT));
         }
     }
-    CHECK(missed == 0);
-    if (missed) printf("  first unpinned byte at 0x%X\n", first);
+    CHECK(missed == 0 && reachMissed == 0 && reachNoted);
+    if (missed || reachMissed) printf("  first byte not handled at 0x%X\n", first);
+    Setup(1); g_exe[0x113EEEu] ^= 0x5A;
+    CHECK(CoXlTestSrInstall() == 1);
+    CHECK(fake_host_logged("lists are taken at trims and the tick, Havok's task steps"));
+    CHECK(!fake_host_logged("the renderer's messages"));
+    g_exe[0x113EEEu] ^= 0x5A;
+    Setup(1); g_exe[TRIM] ^= 0x5A;
+    CHECK(CoXlTestSrInstall() == -1 && g_fake.hookCount == 0);
+    g_exe[TRIM] ^= 0x5A;
     CHECK(fake_host_logged("is not the reviewed one"));
     CHECK(Q((uintptr_t)(g_exe + MAP_AT)) == (uint64_t)(uintptr_t)(g_exe + MAP_DEFAULT));
 
@@ -774,14 +897,14 @@ static void Install(void)
 
     g_case = "a refused trim hook changes nothing";
     Setup(1); g_fake.noHook = (uintptr_t)(g_exe + TRIM) - (uintptr_t)g_fake.image;
-    CHECK(CoXlTestSrInstall() == -1);
+    CHECK(CoXlTestSrInstall() == -1 && g_fake.hookCount == 0); /* no reach hook either */
     CHECK(Q((uintptr_t)(g_exe + MAP_AT)) == (uint64_t)(uintptr_t)(g_exe + MAP_DEFAULT));
     CHECK(Q((uintptr_t)(g_exe + UNMAP_AT)) == (uint64_t)(uintptr_t)(g_exe + UNMAP_DEFAULT));
     CHECK(CoXlTestSrStep(256, 0, 100000, 1) == 0);
 
     g_case = "installed once";
     Setup(1);
-    CHECK(CoXlTestSrInstall() == 1 && CoXlTestSrInstall() == 1 && g_fake.hookCount == 1);
+    CHECK(CoXlTestSrInstall() == 1 && CoXlTestSrInstall() == 1 && g_fake.hookCount == 3);
 }
 
 #ifdef CO_RESEARCH
@@ -850,6 +973,7 @@ int main(void)
     Churning();
     Neighbour();
     Skip();
+    Reach();
     Refusals();
     Install();
 #ifdef CO_RESEARCH
