@@ -1183,8 +1183,8 @@ static int TerrainStep(uint64_t records, uint32_t end, uint32_t at, uint64_t con
  * 5. The level's merge records run again on copies, as the level ran them: 0x39 clear, 0x3C its Voronoi cells (+0x108
  *    progress zeroed), the vanilla-density tiles that touch the near square (TerrainBuild, drawn as at 0x40), 0x40
  *    smoothing (not 0x94, 0x3E or 0x3F: they squeeze the level into the tile, NearPlan; the conform holds the level's
- *    pads and flatten zones instead), 0x3D zone heights (at the level's texture scale, NearStepPatch), 0x0D route
- *    segments, 0x63 stamp heights, 0x42, 0x41 materials, 0x64 finalize.
+ *    pads and flatten zones instead), 0x3D without its zone fans (NearRecordEdit: the level has no zone relief), 0x0D
+ *    route segments, 0x63 stamp heights, 0x42, 0x41 materials, 0x64 finalize.
  * 6. Once the queue is empty, the tile's heightmap is read back (+0x1A8/+0x1D0/+0x1D8: the GPU work before it is done, and
  *    the heights are logged), the cameras and gui go back as the level had them and both names are unpublished (0x66
  *    then reads the level's own).
@@ -1326,7 +1326,7 @@ static const uint32_t kNearNames[2] = {0x2A9E3232u, 0x95E7E3ACu}; /* generated_h
  * collision were made from, its mips 1-4 = the level's real terrain, mean |d| 57 m). Name = murmur64(name) >> 32. */
 static const uint32_t kNearRoadAlias = 0xBF45B677u;
 enum { NEAR_IDLE, NEAR_START, NEAR_STEP, NEAR_DRAIN, NEAR_READBACK, NEAR_SPAWN, NEAR_READY, NEAR_IN, NEAR_FAILED, NEAR_CAL, NEAR_CONFORM };
-enum { NEAR_RECORD, NEAR_TILE, NEAR_LEVEL }; /* NEAR_LEVEL: a record drawn in the level's pixels (NearPlan's route distance) */
+enum { NEAR_RECORD, NEAR_TILE };
 
 static NearSpawnFn g_nearSpawnOriginal;
 static volatile DWORD g_nearSpawnThread; /* the thread spawning the tile (InitSpawnTerrain called by TerrainNearStep) */
@@ -1354,7 +1354,6 @@ static struct {
     int stampLeave; /* the replayed 0x63 drew at the stamp offset: the cameras go back once its job is drained */
     uint32_t stampWaits;
     int matLeave; /* the replayed 0x41 finished: its cameras go back once its jobs are drained */
-    uint64_t routeGen; volatile LONG routeLevel; /* the NEAR_LEVEL step's route-distance job ([R+0x58]) is still to come */
     uint32_t readId; float* heights; uint32_t hw, hh;
     uint8_t one69[0x19B0], one6B[0x19B0]; uint32_t at69, at6B;
     uint8_t keep69[0x19B0], keep6B[0x19B0]; /* the two records as the level had them, for the tiles built later (difficulty_world_move.c) */
@@ -1544,12 +1543,7 @@ static uint64_t NearRunAt(int consumer, uint64_t a, uint64_t camera, uint64_t c,
         if (!(hasOffset || hasScale)) gui = g_near.gui;
         if (offset != NULL && scale != NULL && gui != 0)
         {
-            uint64_t generator = 0;
-            memcpy(&generator, job + 0x10, 8);
-            if ((camera == g_near.cam[0] || camera == g_near.cam[1]) && g_near.routeLevel && generator == g_near.routeGen &&
-                InterlockedExchange(&g_near.routeLevel, 0))
-            { offset(gui, o0[0], o0[1]); scale(gui, s0[0], s0[1]); } /* the NEAR_LEVEL step's route distance: the level's pixels */
-            else if (camera == g_near.cam[0] || camera == g_near.cam[1])
+            if (camera == g_near.cam[0] || camera == g_near.cam[1])
             {
                 offset(gui, g_near.offset[0] * s0[0] + o0[0], g_near.offset[1] * s0[1] + o0[1]);
                 scale(gui, g_near.scale * s0[0], g_near.scale * s0[1]);
@@ -1606,11 +1600,8 @@ static int NearCapSkip(int on)
     return 1;
 }
 
-/* The game's code a replayed step runs under: 0x3C without the replayed level's caps (NearCapSkip). 0x3D keeps the
- * level's own zone texture scale (1.0 at 0xF4A39C, coordinates position / world size), so the tile draws the zone
- * heights the coarse terrain has, at its own resolution. At 8.0 a jungle zone material's 512 m pattern repeated every
- * 64 m: run spk1's drop tile got 8045 cones 1.5-4.5 m tall and 1-4 m wide on that lattice; vanilla planet 211 has none.
- * 1 when patched. */
+/* The game's code a replayed step runs under: 0x3C without the replayed level's caps (NearCapSkip). 0x3D runs as the
+ * game has it, on a record copy without cells (NearRecordEdit). 1 when patched. */
 static int NearStepPatch(uint8_t op, int on)
 {
     return op == 0x3C && NearCapSkip(on);
@@ -1771,15 +1762,12 @@ static void TerrainNearDrop(void)
 static int NearPlan(uint64_t records, uint32_t at)
 {
     static const uint8_t ops[] = {0x39, 0x3C, 0x40, 0x3D, 0x0D, 0x63, 0x42, 0x41, 0x64};
-    uint32_t start = 0, op = 0, routes = 0;
+    uint32_t start = 0, op = 0;
     for (uint32_t i = at; i > 0; i--)
         if (!SafeRead(records + (uint64_t)(i - 1) * 0x19B0u, &op, 4) && op == 0x38) { start = i; break; }
     if (start == 0) return 0;
-    for (uint32_t i = start; i < at && routes == 0; i++)
-        if (!SafeRead(records + (uint64_t)i * 0x19B0u, &op, 4) && op == 0x0D) routes = i;
     uint32_t seen = 0;
     g_near.steps = 0;
-    InterlockedExchange(&g_near.routeLevel, 0);
     for (uint32_t i = start; i < at && g_near.steps < NEAR_STEPS; i++)
     {
         if (SafeRead(records + (uint64_t)i * 0x19B0u, &op, 4)) return 0;
@@ -1787,12 +1775,6 @@ static int NearPlan(uint64_t records, uint32_t at)
         while (k < sizeof ops && ops[k] != op) k++;
         if (k == sizeof ops || (seen & (1u << k))) continue;
         seen |= 1u << k;
-        /* 0x3D's zone painters scale their height by generated_route_distance ([R+0xC0], written only by 0x0D's job
-         * [R+0x58]) at the level's uv, position / world size (0xF4A39C..0xF4A593). A merge made again for a moving tile
-         * has a new, unwritten [R+0xC0] (0x37 after 0xFCF2F0), so its zones drew nothing. The level's 0x0D goes first,
-         * its job in the level's pixels (NearRunAt), as the drop tile finds it; the tile's own 0x0D stays after 0x3D. */
-        if (op == 0x3D && routes != 0 && g_near.steps + 1 < NEAR_STEPS)
-        { g_near.stepKind[g_near.steps] = NEAR_LEVEL; g_near.stepRecord[g_near.steps] = routes; g_near.stepOp[g_near.steps] = 0x0D; g_near.steps++; }
         g_near.stepKind[g_near.steps] = NEAR_RECORD; g_near.stepRecord[g_near.steps] = i; g_near.stepOp[g_near.steps] = (uint8_t)op; g_near.steps++;
         if (op != 0x3C || g_terrain.level != g_world.levels || g_terrain.columns == 0) continue;
         /* the tiles whose drawn core meets the near square (generator coordinates: world + 8192) */
@@ -1828,7 +1810,6 @@ static void NearCameras(float half0, float half1, float cx, float cy)
 static void NearReplayEnd(int ok)
 {
     InterlockedExchange(&g_nearActive, 0);
-    InterlockedExchange(&g_near.routeLevel, 0);
     LONG views = InterlockedExchange(&g_nearViewCalls, 0);
     Note("difficulty: near terrain: the view drew %ld times with the level's maps while the tile replayed", (long)views);
     if (g_mat.on && g_mat.owner == MAT_TILE) InterlockedExchange(&g_mat.on, 0); /* the cameras go back below */
@@ -2037,6 +2018,27 @@ static int TerrainMatDispatch(uint32_t op, uint64_t context)
     return g_mat.owner == MAT_LEVEL ? 2 : 1;
 }
 
+/* The tile's copy of a replayed record, as its step needs it. 0x3D gets no Voronoi cells: its zone fans add noise x
+ * saturate(route distance / 7), and the level draws them (record 108) before its only route writer 0x0D (109), so the level
+ * has no zone relief. A tile replays with the filled texture: 7EDB's noise (0xEAE9E1102D6797D4, every 45 m) as 1.5-3 m
+ * cones (run sp2r1: 1430 narrow peaks, none without them). With no cells 0xF4A280 goes straight to its jobs (0xF4AAB3). */
+static const uint32_t kNearNoCells = 0;
+static void NearRecordEdit(uint8_t op, uint8_t* one)
+{
+    switch (op)
+    {
+    case 0x3C: memset(one + 8 + 0x108, 0, 8); break;
+    case 0x94: memset(one + 0xB0, 0, 4); break;
+    case 0x3E: memset(one + 0x80, 0, 0x40); break;
+    case 0x3F: memset(one + 0x128, 0, 0x40); break;
+    case 0x3D: /* [record + 8 + 0xF8]: the cell count's address, read at 0xF4A395 and tested at 0xF4A3B7 */
+        if (ApiCodeMatches(g_world.game + 0xF4A395u, "49 8B 86 F8 00 00 00") &&
+            ApiCodeMatches(g_world.game + 0xF4A3B1u, "8B 08 F3 0F 5E F8 85 C9 0F 84 F4 06 00 00"))
+        { uint64_t none = (uint64_t)(uintptr_t)&kNearNoCells; memcpy(one + 0x100, &none, 8); }
+        break;
+    }
+}
+
 /* One replayed record (or tile) step: 1 when it finished, 0 while it runs, -1 when it failed. */
 static int NearBaseOn(void);
 static int NearBaseStep(uint64_t context);
@@ -2054,8 +2056,7 @@ static int NearRunStep(uint64_t records, uint32_t end, uint64_t context, uint64_
     {
         g_near.loggedStep = s + 1;
         if (g_near.stepKind[s] == NEAR_TILE) Note("difficulty: moving tiles: step %d: composite tile %d", s, g_near.stepTile[s]);
-        else Note("difficulty: moving tiles: step %d: op 0x%02X (record %u%s)", s, g_near.stepOp[s], g_near.stepRecord[s],
-            g_near.stepKind[s] == NEAR_LEVEL ? ", the level's route distance" : "");
+        else Note("difficulty: moving tiles: step %d: op 0x%02X (record %u)", s, g_near.stepOp[s], g_near.stepRecord[s]);
     }
     if (g_near.stepKind[s] == NEAR_TILE)
     {
@@ -2108,24 +2109,13 @@ static int NearRunStep(uint64_t records, uint32_t end, uint64_t context, uint64_
     if (g_near.calls == 0)
     {
         if (SafeRead(records + (uint64_t)g_near.stepRecord[s] * 0x19B0u, g_near.one, sizeof g_near.one)) return -1;
-        switch (g_near.stepOp[s])
-        {
-        case 0x3C: memset(g_near.one + 8 + 0x108, 0, 8); break;
-        case 0x94: memset(g_near.one + 0xB0, 0, 4); break;
-        case 0x3E: memset(g_near.one + 0x80, 0, 0x40); break;
-        case 0x3F: memset(g_near.one + 0x128, 0, 0x40); break;
-        }
+        NearRecordEdit(g_near.stepOp[s], g_near.one);
         g_near.phase = 0;
         /* a tile built in mission: 0x63 renders the world through the merge camera, and mid-mission the world holds the
          * live terrains, which it draws as heights too (run s72k: the step's delta was the level's surface, corr 0.978);
          * the tile's stamp terrains stand at the offset, where no terrain is, and the cameras look there for this step */
         if (g_near.stepOp[s] == 0x63 && (g_nearStampOffset[0] != 0 || g_nearStampOffset[1] != 0))
             NearCameras(NEAR_SIDE / 2, NEAR_SIDE / 2, g_near.centre[0] + g_nearStampOffset[0], g_near.centre[1] + g_nearStampOffset[1]);
-    }
-    if (g_near.stepKind[s] == NEAR_LEVEL && g_near.calls == 0)
-    {
-        if (SafeRead(g_near.R + 0x58, &g_near.routeGen, 8) || g_near.routeGen == 0) return 1; /* the zones then draw as before */
-        InterlockedExchange(&g_near.routeLevel, 1); /* before the record: the consumer may take its job at once */
     }
     uint8_t live[0xC0];
     /* 0x3E and 0x3F sample the intermediate captures lg+0..+0xBF on the CPU (0xF4AE30 via [api+0x10]+0x1F0; no other
@@ -2353,7 +2343,8 @@ static int NearCalStep(uint64_t records, uint32_t end, uint64_t context, uint64_
  *    so the edge texels are covered once), in batches of up to NEAR_BATCH triangles, one job each, each batch after
  *    the queue has emptied; then 0x64 again and a readback, which becomes the tile (and is compared with H).
  *    The cells within NEAR_FINE of the hidden square's edge are drawn a texel a cell (g_conform.ring: H - T at every
- *    texel there), so the tile is the coarse surface to the centimetre where the coarse terrain's free edge lies. */
+ *    texel), so the tile is the coarse surface to the centimetre where the coarse terrain's free edge lies; so are the
+ *    cells the triangles miss H - T in by over NEAR_TEXEL_MISS. */
 #define NEAR_BATCH 16384
 #define NEAR_SHIFT_RADIUS 128 /* the shift's box passes: 257 texels (~129 m), three of them */
 #define NEAR_GRID 1025 /* grid lines: texel -0.5, 4, 8, ..., 4092, 4095.5 */
@@ -2675,14 +2666,43 @@ static float NearPadWeight(float wx, float wy)
 /* The target at a tile texel (t its height, low the lowpass of C - T there, coarse C there): inside the hidden square
  * the coarse surface at its edge and the tile's own shape from 160 m in; past it the coarse surface for NEAR_BAND_FLAT,
  * then NearBand under it. */
+static float NearTileShare(float wx, float wy, float e)
+{
+    if (e > 0) return 0.0f;
+    float u = (-e - 16.0f) / 144.0f; u = u < 0 ? 0 : u > 1 ? 1 : u;
+    return (1.0f - NearPadWeight(wx, wy)) * u * u * (3 - 2 * u); /* under the level's pads: the level's surface */
+}
+
 static float NearTarget(float wx, float wy, float t, float low, float coarse)
 {
     float e = NearOutside(wx, wy);
     if (e > 0) return NearCoarseTri(wx, wy) - NearBand(e); /* the drawn triangles (equal to the bilinear on the edge line) */
-    float u = (-e - 16.0f) / 144.0f; u = u < 0 ? 0 : u > 1 ? 1 : u;
-    float target = coarse + u * u * (3 - 2 * u) * (t + low - coarse);
-    float w = NearPadWeight(wx, wy); /* under the level's pads: the level's surface */
-    return target + w * (coarse - target);
+    return coarse + NearTileShare(wx, wy, e) * (t + low - coarse);
+}
+
+/* A cell's change as the draw's two triangles give it at texel (c, r): (i, j), (i + 1, j), (i + 1, j + 1) where
+ * x >= y, else (i, j), (i + 1, j + 1), (i, j + 1); x, y the texel's place across the cell. */
+static float NearCellLerp(const float* delta, int i, int j, float c, float r)
+{
+    float x = (c - NearGridTexel(i)) / (NearGridTexel(i + 1) - NearGridTexel(i)), y = (r - NearGridTexel(j)) / (NearGridTexel(j + 1) - NearGridTexel(j));
+    const float* d = delta + (size_t)j * NEAR_GRID + i;
+    return x >= y ? d[0] + x * (d[1] - d[0]) + y * (d[NEAR_GRID + 1] - d[1]) : d[0] + x * (d[NEAR_GRID + 1] - d[NEAR_GRID]) + y * (d[NEAR_GRID] - d[0]);
+}
+
+/* How far the triangles miss the per-texel change (ring: H - T at every texel) over the texels the cell can cover. */
+static float NearCellMiss(const float* ring, const float* delta, int i, int j)
+{
+    int c0 = (int)ceilf(NearGridTexel(i)), c1 = (int)floorf(NearGridTexel(i + 1)), r0 = (int)ceilf(NearGridTexel(j)), r1 = (int)floorf(NearGridTexel(j + 1));
+    c0 = c0 < 0 ? 0 : c0; r0 = r0 < 0 ? 0 : r0; c1 = c1 > 4095 ? 4095 : c1; r1 = r1 > 4095 ? 4095 : r1;
+    float worst = 0;
+    for (int r = r0; r <= r1; r++)
+        for (int c = c0; c <= c1; c++)
+        {
+            float want = ring[(size_t)r * 4096 + c]; want = want > 480.0f ? 480.0f : want < -480.0f ? -480.0f : want;
+            float miss = fabsf(NearCellLerp(delta, i, j, (float)c, (float)r) - want);
+            if (miss > worst) worst = miss;
+        }
+    return worst;
 }
 
 /* The target and the grid's values (H - T at each grid vertex). */
@@ -2703,7 +2723,58 @@ static void NearDumpPre(void)
     VirtualFree(u, 0, MEM_RELEASE);
 }
 
+/* Cells drawn a texel a cell (NearConformDraw, while g_conform.ring is set). NEAR_TEXEL_MISS: where the tile has a
+ * share of the target (the band, the pads) a node's change carries its height, and a feature wider than a cell (a
+ * crater, 10 texels) still put a 7.4 m spike on a rim (run sp2r1 r890 c294). Within 0.25 m of H - T at every texel the
+ * result cannot rise above both surfaces by more; sp2r1's tile needs 9.7k such cells besides the strip's 29k. */
+#define NEAR_TEXEL_MISS 0.25f
+static uint8_t* g_texelCells;
+static uint32_t g_texelCellsMore;
+
+/* A grid node's tile height for its delta (target - height): the mean of the texels the draw's triangles give the node a
+ * share of, weighted by that share (the adjoint of the draw's interpolation; cells split from (i, j) to (i + 1, j + 1)).
+ * One texel let a crater's rim or floor set a node where the target is the coarse surface (the band, the pads), and the
+ * triangles spread it into a 2-3 m spike (run sp2r1, row 896 col 296). Nodes of the strip's cells keep their texel: the
+ * strip's per-texel values meet them there. */
+static int NearNodeSpan(int k, int* first, float* w)
+{
+    float g = NearGridTexel(k), lo = k > 0 ? NearGridTexel(k - 1) : g, hi = k < NEAR_GRID - 1 ? NearGridTexel(k + 1) : g;
+    int a = (int)ceilf(lo), b = (int)floorf(hi), n = 0;
+    a = a < 0 ? 0 : a; b = b > 4095 ? 4095 : b;
+    *first = a;
+    for (int x = a; x <= b; x++) w[n++] = x <= g ? (g > lo ? ((float)x - lo) / (g - lo) - 1.0f : 0.0f) : (hi > g ? ((float)x - g) / (hi - g) : 1.0f);
+    return n;
+}
+
+static float NearNodeHeight(const float* h, int i, int j)
+{
+    float ti = NearGridTexel(i), tj = NearGridTexel(j);
+    int c = ti < 0 ? 0 : ti > 4095 ? 4095 : (int)ti, r = tj < 0 ? 0 : tj > 4095 ? 4095 : (int)tj;
+    for (int dj = -1; dj <= 0; dj++)
+        for (int di = -1; di <= 0; di++)
+            if (i + di >= 0 && j + dj >= 0 && i + di < NEAR_GRID - 1 && j + dj < NEAR_GRID - 1 && NearFineCell(i + di, j + dj))
+                return h[(size_t)r * 4096 + c] * 1000.0f - 500.0f;
+    /* u, v: signed offsets in cells (-1..1); the hat is 1 - max(|u|, |v|) where they share a sign, else 1 - |u| - |v| */
+    float wu[10], wv[10]; int c0, r0;
+    int nu = NearNodeSpan(i, &c0, wu), nv = NearNodeSpan(j, &r0, wv);
+    double sum = 0, weight = 0;
+    for (int b = 0; b < nv; b++)
+        for (int a = 0; a < nu; a++)
+        {
+            float u = wu[a], v = wv[b];
+            float hat = (u >= 0) == (v >= 0) ? 1.0f - fmaxf(fabsf(u), fabsf(v)) : 1.0f - fabsf(u) - fabsf(v);
+            if (hat <= 0) continue;
+            sum += (double)hat * (h[(size_t)(r0 + b) * 4096 + c0 + a] * 1000.0f - 500.0f);
+            weight += hat;
+        }
+    return weight > 0 ? (float)(sum / weight) : h[(size_t)r * 4096 + c] * 1000.0f - 500.0f;
+}
+
 static double g_conformPlanMean, g_conformPlanWorst;
+/* Narrow cones in a tile's heights (NearPeaksCount): as replayed (the plan's thread) and after the conform. */
+typedef struct { int narrow, wide; float top, topX, topY; } NearPeaks;
+static NearPeaks g_peaksReplayed;
+static void NearPeaksCount(const float* h, NearPeaks* out);
 static int NearConformPlan(void)
 {
     LARGE_INTEGER t0, t1, hz; QueryPerformanceCounter(&t0); QueryPerformanceFrequency(&hz);
@@ -2723,16 +2794,16 @@ static int NearConformPlan(void)
         }
     for (int pass = 0; pass < 3; pass++) { NearBox(a, b, NEAR_SHIFT_RADIUS, 0); NearBox(b, a, NEAR_SHIFT_RADIUS, 1); }
     NearDumpPre();
-    /* the strip around the hidden square's edge (NearFineCell's cells and a texel more): H - T at every texel, in b
-     * (the box passes' scratch, free now) */
+    NearPeaksCount(g_near.heights, &g_peaksReplayed);
+    /* H - T at every texel, in b (the box passes' scratch, free now); where the tile's share is 1 it is the lowpass */
     for (int r = 0; r < 4096; r++)
         for (int c = 0; c < 4096; c++)
         {
-            float wx = x0 + NEAR_TEXEL * (float)c, wy = y0 - NEAR_TEXEL * (float)r;
-            if (fabsf(NearOutside(wx, wy)) > NEAR_FINE + 3.0f) continue;
+            float wx = x0 + NEAR_TEXEL * (float)c, wy = y0 - NEAR_TEXEL * (float)r, e = NearOutside(wx, wy);
             size_t at = (size_t)r * 4096 + c;
+            if (e <= 0 && NearTileShare(wx, wy, e) >= 1.0f) { b[at] = a[at]; continue; }
             float t = g_near.heights[at] * 1000.0f - 500.0f;
-            b[at] = NearTarget(wx, wy, t, a[at], NearCoarseAt(wx, wy)) - t;
+            b[at] = NearTarget(wx, wy, t, a[at], e > 0 ? 0.0f : NearCoarseAt(wx, wy)) - t;
         }
     g_conform.ring = b;
     double worst = 0, sum = 0;
@@ -2742,8 +2813,9 @@ static int NearConformPlan(void)
             float tc = NearGridTexel(i), tr = NearGridTexel(j);
             int c = tc < 0 ? 0 : tc > 4095 ? 4095 : (int)tc, r = tr < 0 ? 0 : tr > 4095 ? 4095 : (int)tr;
             size_t at = (size_t)r * 4096 + c;
-            float t = g_near.heights[at] * 1000.0f - 500.0f;
-            float wx = x0 + NEAR_TEXEL * (float)c, wy = y0 - NEAR_TEXEL * (float)r;
+            float wx = x0 + NEAR_TEXEL * (float)c, wy = y0 - NEAR_TEXEL * (float)r, e = NearOutside(wx, wy);
+            /* with a share of 1 the change is the lowpass whatever the height */
+            float t = e <= 0 && NearTileShare(wx, wy, e) >= 1.0f ? g_near.heights[at] * 1000.0f - 500.0f : NearNodeHeight(g_near.heights, i, j);
             /* inside: metres in from the tile's edge */
             float coarse = NearCoarseAt(wx, wy), target = NearTarget(wx, wy, t, a[at], coarse);
             float d = target - t;
@@ -2751,6 +2823,17 @@ static int NearConformPlan(void)
             g_conform.delta[(size_t)j * NEAR_GRID + i] = d;
             if (fabs(d) > worst) worst = fabs(d);
             sum += fabs(d);
+        }
+    /* cells drawn a texel a cell: the strip's, and every cell the triangles miss H - T in by over NEAR_TEXEL_MISS */
+    if (g_texelCells == NULL) g_texelCells = (uint8_t*)VirtualAlloc(NULL, (size_t)(NEAR_GRID - 1) * (NEAR_GRID - 1), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (g_texelCells == NULL) return 0;
+    g_texelCellsMore = 0;
+    for (int j = 0; j < NEAR_GRID - 1; j++)
+        for (int i = 0; i < NEAR_GRID - 1; i++)
+        {
+            uint8_t* cell = g_texelCells + (size_t)j * (NEAR_GRID - 1) + i;
+            *cell = (uint8_t)NearFineCell(i, j);
+            if (!*cell && NearCellMiss(b, g_conform.delta, i, j) > NEAR_TEXEL_MISS) { *cell = 1; g_texelCellsMore++; }
         }
     /* blocks where the target is the lowpass alone: every texel of the block 160 m or more inside the hidden square's
      * edge (NearTarget's u = 1, with a texel's margin) and no pad weight on any pad cell the block's bilinear W reads */
@@ -2773,6 +2856,7 @@ static int NearConformPlan(void)
                         for (int c = c0 < 0 ? 0 : c0; c <= c1 && c < NEAR_PAD_N; c++)
                             if (g_pads.w[(size_t)r * NEAR_PAD_N + c] != 0.0f) { ok = 0; break; }
                 }
+                for (int q = 0; q < 4; q++) ok = ok && !g_texelCells[(size_t)(2 * bj + (q >> 1)) * (NEAR_GRID - 1) + 2 * bi + (q & 1)];
                 g_conform.block[(size_t)bj * NEAR_BLOCKS + bi] = (uint8_t)ok;
                 g_conform.blocksCoarse += (uint32_t)ok;
             }
@@ -2958,7 +3042,8 @@ static void NearStoreF32(void* p, int c, int r, float m) { ((float*)p)[(size_t)r
  * Elsewhere each of its four cells is drawn as before (2 triangles, or a texel a cell in the ring). Loading-screen
  * frames pace the batches (one a frame), so fewer triangles is fewer frames (hellforge-1a, NEAR_TILE.md levers 1/2:
  * base 128 -> 32 batches, conform ~205 -> ~139). */
-static uint32_t NearCellCost(int i, int j) { return g_conform.ring != NULL && NearFineCell(i, j) ? 50 : 2; }
+static int NearTexelCell(int i, int j) { return g_conform.ring != NULL && g_texelCells != NULL && g_texelCells[(size_t)j * (NEAR_GRID - 1) + i]; }
+static uint32_t NearCellCost(int i, int j) { return NearTexelCell(i, j) ? 50 : 2; }
 static int NearConformDraw(uint64_t context)
 {
     typedef uint64_t (*MatFn)(uint64_t gui, uint64_t hash);
@@ -3004,7 +3089,7 @@ static int NearConformDraw(uint64_t context)
         for (int cell = 0; cell < 4; cell++)
         {
         int i = 2 * bi + (cell & 1), j = 2 * bj + (cell >> 1);
-        if (g_conform.ring != NULL && NearFineCell(i, j))
+        if (NearTexelCell(i, j))
         {
             /* a texel a cell: lines at the cell's own edges and every texel centre between them */
             float us[6], vs[6]; int nu = 0, nv = 0;
@@ -3294,6 +3379,82 @@ static void NearRows(NearRowsFn fn, void* ctx, int rows)
     NearRowsWorker(&job);
     if (made > 0) WaitForMultipleObjects((DWORD)made, t, TRUE, INFINITE);
     for (int k = 0; k < made; k++) CloseHandle(t[k]);
+}
+
+/* A cone is a texel more than NEAR_PEAK_RISE above the mean of the 8 texels NEAR_PEAK_RING out (2.8 m), the top of its
+ * (2 NEAR_PEAK_RING + 1)^2 square, with half that rise reached within NEAR_PEAK_HALF on the mean of the 4 axes: the zone
+ * fans' cones had about 1 m (run sp2r1), stamp mounds 4-11 m. Counted on every tile so a session's log shows if any come
+ * back; about 17M texels on one thread (27-40 ms, off the game thread), most rejected by the ring test. */
+#define NEAR_PEAK_RISE 1.5f
+#define NEAR_PEAK_RING 5
+#define NEAR_PEAK_HALF 2.0f
+typedef struct { const float* h; volatile LONG narrow, wide; SRWLOCK lock; float top; int topR, topC; } NearPeaksJob;
+
+static void NearPeaksRows(void* ctx, int r0, int r1)
+{
+    NearPeaksJob* job = (NearPeaksJob*)ctx;
+    const float* h = job->h;
+    const int R = NEAR_PEAK_RING;
+    LONG narrow = 0, wide = 0; float top = 0; int topR = -1, topC = -1;
+    for (int r = r0 < R ? R : r0; r < r1 && r < 4096 - R; r++)
+        for (int c = R; c < 4096 - R; c++)
+        {
+            const float* p = h + (size_t)r * 4096 + c;
+            float v = *p * 1000.0f; /* metres, less the encoding's 500 */
+            float ring = (p[R] + p[-R] + p[R * 4096] + p[-R * 4096] + p[R * 4097] + p[R * 4095] + p[-R * 4095] + p[-R * 4097]) * 125.0f;
+            float rise = v - ring;
+            if (!(rise > NEAR_PEAK_RISE)) continue;
+            int isTop = 1;
+            for (int j = -R; j <= R && isTop; j++)
+                for (int i = -R; i <= R; i++)
+                {
+                    float w = p[j * 4096 + i] * 1000.0f;
+                    if (w > v || (w == v && (j < 0 || (j == 0 && i < 0)))) { isTop = 0; break; }
+                }
+            if (!isTop) continue;
+            float half = ring + rise / 2; int sum = 0;
+            static const int axis[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+            for (int k = 0; k < 4; k++)
+            {
+                int s = 1;
+                while (s < 4 * R && r + axis[k][0] * s > 0 && r + axis[k][0] * s < 4095 && c + axis[k][1] * s > 0 && c + axis[k][1] * s < 4095 &&
+                    p[axis[k][0] * s * 4096 + axis[k][1] * s] * 1000.0f > half) s++;
+                sum += s;
+            }
+            if ((float)sum / 4.0f * NEAR_TEXEL >= NEAR_PEAK_HALF) { wide++; continue; }
+            narrow++;
+            if (rise > top) { top = rise; topR = r; topC = c; }
+        }
+    InterlockedAdd(&job->narrow, narrow); InterlockedAdd(&job->wide, wide);
+    AcquireSRWLockExclusive(&job->lock);
+    if (topR >= 0 && (top > job->top || (top == job->top && (topR < job->topR || (topR == job->topR && topC < job->topC)))))
+    { job->top = top; job->topR = topR; job->topC = topC; }
+    ReleaseSRWLockExclusive(&job->lock);
+}
+
+/* h: 4096^2 heights normalized as the u16 texture (g_near.heights); positions from g_near's centre. */
+static void NearPeaksCount(const float* h, NearPeaks* out)
+{
+    memset(out, 0, sizeof *out);
+    if (h == NULL) return;
+    NearPeaksJob job = {.h = h, .lock = SRWLOCK_INIT, .topR = -1};
+    NearPeaksRows(&job, 0, 4096); /* one thread: an all-core burst would take frames from the game */
+    out->narrow = (int)job.narrow; out->wide = (int)job.wide; out->top = job.top;
+    if (job.topR >= 0)
+    {
+        out->topX = g_near.centre[0] - NEAR_SIDE / 2 + NEAR_TEXEL / 2 + NEAR_TEXEL * (float)job.topC;
+        out->topY = g_near.centre[1] + NEAR_SIDE / 2 - NEAR_TEXEL / 2 - NEAR_TEXEL * (float)job.topR;
+    }
+}
+
+/* The count after the conform, off the game thread; g_near's heights and centre stay as they are while the conform waits
+ * for it (phase 8). */
+static struct { volatile LONG running; int started; NearPeaks out; } g_peaksAfter;
+static DWORD WINAPI NearPeaksAfterThread(LPVOID unused)
+{
+    NearPeaksCount(g_near.heights, &g_peaksAfter.out);
+    InterlockedExchange(&g_peaksAfter.running, 0);
+    return 0;
 }
 
 /* The coarse terrain's map: made at the conform (the level's map read back), bound in its spawn's material slot
@@ -3889,8 +4050,10 @@ static int NearConformStep(uint64_t records, uint32_t end, uint64_t context, uin
     if (g_conform.phase == 9) /* the plan's thread */
     {
         if (!g_conform.planDone) return 1; /* bounded work on the loader's own buffers: it finishes */
-        Note("difficulty: near terrain: conform: planned in %.0f ms (on its own thread, %.1f s to the game's frame); the change to draw is mean |d| %.2f m, max %.2f m; %u of %u blocks as two triangles",
-            g_conform.ms, (double)(GetTickCount64() - g_conform.planSince) / 1000.0, g_conformPlanMean, g_conformPlanWorst, g_conform.blocksCoarse, (unsigned)(NEAR_BLOCKS * NEAR_BLOCKS));
+        Note("difficulty: near terrain: conform: planned in %.0f ms (on its own thread, %.1f s to the game's frame); the change to draw is mean |d| %.2f m, max %.2f m; %u of %u blocks as two triangles; "
+            "%u cells a texel a cell besides the edge's strip (the triangles missed by over %.2f m)",
+            g_conform.ms, (double)(GetTickCount64() - g_conform.planSince) / 1000.0, g_conformPlanMean, g_conformPlanWorst, g_conform.blocksCoarse, (unsigned)(NEAR_BLOCKS * NEAR_BLOCKS),
+            g_texelCellsMore, (double)NEAR_TEXEL_MISS);
         if (!g_conform.planOk) return 0;
         g_conform.next = 0; g_conform.waits = 0; g_conform.phase = 2;
         return 1;
@@ -3921,7 +4084,7 @@ static int NearConformStep(uint64_t records, uint32_t end, uint64_t context, uin
             g_conform.phase = 9;
             return 1;
         }
-        /* phase 5: the result; compare with the target at the grid's vertices (exact there) */
+        /* phase 5: the result; compare with the target (H at each texel) at the grid's vertices */
         const uint16_t* u = (const uint16_t*)(uintptr_t)data;
         static uint16_t* got;
         if (got == NULL) got = (uint16_t*)VirtualAlloc(NULL, (size_t)4096 * 4096 * 2, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -3931,7 +4094,9 @@ static int NearConformStep(uint64_t records, uint32_t end, uint64_t context, uin
             for (int i = 1; i < NEAR_GRID - 1; i += 3)
             {
                 size_t at = (size_t)(4 * j) * 4096 + (size_t)(4 * i);
-                float want = g_near.heights[at] * 1000.0f - 500.0f + g_conform.delta[(size_t)j * NEAR_GRID + i];
+                float d = g_conform.ring != NULL ? g_conform.ring[at] : g_conform.delta[(size_t)j * NEAR_GRID + i];
+                d = d > 480.0f ? 480.0f : d < -480.0f ? -480.0f : d;
+                float want = g_near.heights[at] * 1000.0f - 500.0f + d;
                 float have = got[at] / 65535.0f * 1000.0f - 500.0f;
                 miss += fabs(have - want); n++; if (fabs(have - want) > worst) worst = fabs(have - want);
             }
@@ -3954,6 +4119,24 @@ static int NearConformStep(uint64_t records, uint32_t end, uint64_t context, uin
         for (size_t i = 0; i < (size_t)4096 * 4096; i++) g_near.heights[i] = got[i] / 65535.0f;
         Note("difficulty: near terrain: conform: the tile now follows the coarse terrain: at the grid's vertices |result - target| mean %.3f m, max %.3f m; "
             "at the hidden square's edge |tile - coarse| mean %.3f m, max %.3f m", n ? miss / n : 0.0, worst, ne ? edge / ne : 0.0, (double)edgeMax);
+        g_conform.phase = 8; g_peaksAfter.started = 0;
+    }
+    if (g_conform.phase == 8) /* the cones after the conform, on a thread of their own (27-40 ms of work) */
+    {
+        if (g_peaksAfter.running) return 1; /* this tile's count, or a count of a build that failed: it finishes */
+        if (!g_peaksAfter.started)
+        {
+            g_peaksAfter.started = 1;
+            InterlockedExchange(&g_peaksAfter.running, 1);
+            HANDLE th = CreateThread(NULL, 0, NearPeaksAfterThread, NULL, 0, NULL);
+            if (th == NULL) NearPeaksAfterThread(NULL);
+            else CloseHandle(th);
+            return 1;
+        }
+        const NearPeaks* after = &g_peaksAfter.out;
+        Note("difficulty: near terrain: cones (over %.1f m within %.1f m, under %.0f m half width): %d as replayed, %d after the conform "
+            "(%d wider mounds); the tallest %.2f m at (%.0f, %.0f)", (double)NEAR_PEAK_RISE, (double)(NEAR_PEAK_RING * NEAR_TEXEL), (double)NEAR_PEAK_HALF,
+            g_peaksReplayed.narrow, after->narrow, after->wide, (double)after->top, (double)after->topX, (double)after->topY);
         char t[4] = "";
         int dump = GetEnvironmentVariableA("HELLFORGE_XL_NEAR_DUMP", t, sizeof t) > 0 && t[0] == '1';
         if (!dump && !NearMatBandOn() && !NearCoarseMatOn()) return 0;
@@ -4082,7 +4265,6 @@ static int NearStepDumpAfter(int s)
 {
     if (!NearStepDumpOn()) return 0;
     if (g_near.stepKind[s] == NEAR_TILE) return s + 1 >= g_near.steps || g_near.stepKind[s + 1] != NEAR_TILE;
-    if (g_near.stepKind[s] == NEAR_LEVEL) return 0; /* no heights */
     switch (g_near.stepOp[s]) { case 0x3C: case 0x40: case 0x3E: case 0x3F: case 0x3D: case 0x0D: case 0x63: return 1; }
     return 0;
 }

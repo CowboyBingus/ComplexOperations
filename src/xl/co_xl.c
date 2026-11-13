@@ -481,31 +481,26 @@ void CoXlTestTileAdd(float cx, float cy, const uint16_t* heights, uint32_t n, fl
 int CoXlTestTilesLive(void) { return NearTilesLive(); }
 /* The game code a replayed tile step runs under (proto/difficulty_world_terrain.c NearStepPatch): 1 when patched. */
 int CoXlTestNearStepPatch(uint8_t op, int on) { return NearStepPatch(op, on); }
-/* The level's route distance before a tile's zone heights (proto/difficulty_world_terrain.c NearPlan, NearRunStep,
- * NearRunAt): the plan made from `records` up to `at` (no composite tiles), its steps; the merge as a replay has it; one
- * step through the test's dispatcher; one job through the consumer's render_world wrapper. */
-int CoXlTestNearPlan(uint64_t records, uint32_t at, uint8_t* kinds, uint8_t* ops, uint32_t* recs, int max)
+/* A replayed step's record copy, and the cone count over a tile's heights centred on (cx, cy) (NearRecordEdit,
+ * NearPeaksCount). */
+void CoXlTestNearRecordEdit(uint8_t op, uint8_t* one) { NearRecordEdit(op, one); }
+uintptr_t CoXlTestNearNoCells(void) { return (uintptr_t)&kNearNoCells; }
+void CoXlTestNearPeaks(const float* heights, float cx, float cy, int* narrow, int* wide, float* top, float* x, float* y)
 {
-    g_terrain.columns = 0;
-    if (!NearPlan(records, at)) return -1;
-    for (int s = 0; s < g_near.steps && s < max; s++) { kinds[s] = g_near.stepKind[s]; ops[s] = g_near.stepOp[s]; recs[s] = g_near.stepRecord[s]; }
-    return g_near.steps;
+    g_near.centre[0] = cx; g_near.centre[1] = cy;
+    NearPeaks p; NearPeaksCount(heights, &p);
+    *narrow = p.narrow; *wide = p.wide; *top = p.top; *x = p.topX; *y = p.topY;
 }
-void CoXlTestNearMerge(uint64_t R, uint64_t cam0, uint64_t cam1, uint64_t gui, float scale, float ox, float oy, void* original)
+/* A conform cell's change from its triangles at texel (c, r), and how far they miss H - T (NearCellLerp, NearCellMiss). */
+float CoXlTestNearCellLerp(const float* delta, int i, int j, float c, float r) { return NearCellLerp(delta, i, j, c, r); }
+float CoXlTestNearCellMiss(const float* ring, const float* delta, int i, int j) { return NearCellMiss(ring, delta, i, j); }
+float CoXlTestNearTexelMiss(void) { return NEAR_TEXEL_MISS; }
+/* A conform grid node's tile height (NearNodeHeight) on a tile centred on (cx, cy). */
+float CoXlTestNearNodeHeight(const float* heights, float cx, float cy, int i, int j)
 {
-    g_near.R = R; g_near.cam[0] = cam0; g_near.cam[1] = cam1; g_near.gui = gui;
-    g_near.scale = scale; g_near.offset[0] = ox; g_near.offset[1] = oy;
-    g_nearRunOriginal = (NearRunFn)original;
-    InterlockedExchange(&g_nearActive, 1);
+    g_near.centre[0] = cx; g_near.centre[1] = cy;
+    return NearNodeHeight(heights, i, j);
 }
-int CoXlTestNearRunStep(uintptr_t level, uint64_t records, int step, void* dispatch)
-{
-    g_worldLevel = level; g_worldDispatch = (WorldDispatchFn)dispatch;
-    g_near.step = step; g_near.calls = 0; g_near.building = 0; g_near.matLeave = 0; g_near.stampLeave = 0;
-    return NearRunStep(records, 0, 0, 0, 0);
-}
-LONG CoXlTestNearRouteArmed(void) { return g_near.routeLevel; }
-void CoXlTestNearJob(const uint8_t* job, uint64_t camera) { NearRunAt(1, 1, camera, 3, (uint64_t)(uintptr_t)(job + 0x58), 5, 6, 7, 8); }
 /* The layer grids and the stamps put back on new ground (proto/difficulty_world_terrain.c, difficulty_world_move.c,
  * difficulty_stream.c): a tile in a given slot, the coarse ground, a moving tile's build under way, a tile's change, the
  * descriptor and the sample a stamp's layers get, and the streamer's slots around a change. */
