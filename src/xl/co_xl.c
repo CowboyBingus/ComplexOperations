@@ -350,6 +350,9 @@ uint32_t CoXlTestMoverFrames(void) { return g_move.frames; }
 void CoXlTestMoverWorld(uint64_t world) { memcpy(g_move.ctx + 0x40, &world, 8); }
 void CoXlTestMoverTileHandle(int slot, uint64_t handle) { g_tiles[slot].handle = handle; }
 int CoXlTestDrainPins(void) { g_drainPinned = 0; return MoveDrainPins(ApiModuleBase("helldivers2.exe", NULL)); }
+/* The map HUD's next zoom level and scale (proto/difficulty_map_hud.c) on a fake game image and map object. */
+uint32_t CoXlTestHudZoom(uintptr_t game, uintptr_t map, uint32_t level, float input, float* scale)
+{ g_hudGame = game; return (uint32_t)HudZoomTarget(map, level, input, scale); }
 void CoXlTestMoverTileIn(int slot, int a, int b)
 { g_move.slot = slot; g_move.cell[0] = a; g_move.cell[1] = b; MoveCellCentre(a, b, g_move.centre); g_near.handle = 0; MoveTileIn(0); g_move.state = MV_IDLE; }
 void CoXlTestRenderAfter(uintptr_t state, void (*rehash)(uintptr_t, uint32_t), void (*resize)(uintptr_t, uint32_t))
