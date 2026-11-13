@@ -29,7 +29,11 @@ void fake_stock_rows(uint8_t* image);
 void fake_stock_nav(uint8_t* image);
 
 /* A game.dll just loaded under HellForge: its nine pool sizes written, the tenth, the broadphase, the navigation grid's
- * extents and cell size the game's, the plugin setup not begun; and the engine's tile size read. */
+ * extents and cell size the game's, the plugin setup not begun; and the engine's tile size read and its main-world
+ * creation at the render capacity's sites (FAKE_RENDER_*). */
+#define FAKE_RENDER_CAP 0x10CDFDu
+#define FAKE_RENDER_POOL0 0x10CE29u
+#define FAKE_RENDER_SCENE 0x10CEB6u
 void fake_stock_early(uint8_t* image);
 
 /* HellForge's jumps and stubs at the stamps' merge, the mine list and the records' store, built as its InstallTowns and

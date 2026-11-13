@@ -6120,11 +6120,10 @@ static const char kRenderPool0Pin[] = "89 44 24 60 89 44 24 64 8B C7 C1 E8 04";
 #define RENDER_SCENE_BACK 0x10CEBEu
 static const char kRenderScenePin[] = "49 89 07 48 8D 54 24 50 48 8B 03";
 
-static void RenderCapacityInstall(void)
+static void RenderCapacityInstall(uintptr_t exe)
 {
     if (g_renderCap.on) return;
     g_renderCap.on = -1;
-    uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
     if (!ApiCodeMatches(exe + RENDER_CAP_SITE, kRenderCapPin))
     { Note("difficulty: render capacity: the world creation is not the reviewed code; the main world keeps its pools"); return; }
     uint8_t* page = AllocateNearGame(exe, 0x1000);
@@ -6395,7 +6394,8 @@ static const char* InstallWorld(DifficultyInstall* d)
     MemProfInstall();
     TerrainDiagInstall(game);
     TerrainInstall(game);
-    if (scale > 1) RenderCapacityInstall();
+    /* No render capacity here: the one main world is made before any level, so CoXlRenderEarly put it in as the game
+     * loaded, and without it the complex part is off. */
     uintptr_t exe = ApiModuleBase("helldivers2.exe", NULL);
     if (ApiCodeMatches(exe + DIF_OBJECT_CALL, kObjectCallPin) && ApiCodeMatches(exe + DIF_OBJECT_LOOKUP, kObjectLookupPin))
     {

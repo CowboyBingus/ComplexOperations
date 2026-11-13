@@ -119,7 +119,10 @@ void co_capacity_early(void)
         return;
     }
     if ((g_capacity.early = OwnSites(game)) != NULL || (g_capacity.early = co_stamps_room_check(game)) != NULL) return;
-    if ((g_capacity.early = co_early_install(game, g_coApi->module_base("helldivers2.exe", NULL))) != NULL) return;
+    const uintptr_t exe = g_coApi->module_base("helldivers2.exe", NULL);
+    if ((g_capacity.early = co_early_install(game, exe)) != NULL) return;
+    /* the same window as the physics room: the setup makes the one main world after it has read the pools */
+    if ((g_capacity.early = CoXlRenderEarly(game, exe)) != NULL) return;
     CoXlEarly(game);
     co_stamps_room(game); /* refused: the engine's room stays, and the poll finds the stamp index too small for the part */
     n->early = 1;

@@ -15,6 +15,7 @@
 void co_capacity_test_commit(uint32_t mb);
 void co_early_test_reset(void);
 void CoXlTestRecords(int state);
+void CoXlTestRenderReset(void);
 
 static int g_failed;
 static const char* g_case;
@@ -31,6 +32,10 @@ static const uint8_t kStock[116] = {
     0x31, 0xC0, 0x49, 0x89, 0x85, 0x94, 0x2D, 0x00, 0x00, 0x48, 0xB8, 0x00, 0x00, 0x80, 0x3F, 0x00, 0x00, 0x80, 0x3F,
     0x49, 0x89, 0x85, 0x9C, 0x2D, 0x00, 0x00, 0xE9, 0, 0, 0, 0};
 #define STOCK 0x3100C40u
+#define RENDER_ENGINE_AT 0x3700000u /* a free place in the image for the engine object, when a case has one */
+
+static int g_worldMade;       /* the next Start's main world is made before the game-loaded event */
+static char g_loadLog[8192];  /* what Start's game-loaded event logged */
 
 static int Lines(const char* text)
 {
@@ -75,8 +80,15 @@ static void Start(const char* name)
     co_capacity_init();
     co_capacity_game((uintptr_t)image);
     /* the engine's room goes in as the game loads, whatever is decided later: not what the cases below count */
-    co_early_test_reset(); CoXlTestRecords(0);
+    co_early_test_reset(); CoXlTestRecords(0); CoXlTestRenderReset();
+    if (g_worldMade)
+    {
+        const uint64_t engine = (uint64_t)(uintptr_t)(image + RENDER_ENGINE_AT), world = 0x123456780ull;
+        memcpy(image + 0x3326340u, &engine, 8); memcpy(image + RENDER_ENGINE_AT + 0x10E8u, &world, 8);
+        g_worldMade = 0;
+    }
     co_capacity_early();
+    strcpy(g_loadLog, g_fake.log);
     g_fake.writes = 0; g_fake.hookCount = 0; g_fake.log[0] = 0;
 }
 
@@ -91,6 +103,15 @@ int main(void)
     /* the part is on, with no line, and nothing has gone in before its start (the last case below) */
     CHECK(CO_COMPLEX_COMPLETE == 1 && co_complex_on() && Untouched());
     CHECK(Lines("complex operations are off") == 0 && co_complex_rolls(1, co_complex_on(), CO_HOST_ROW_NONE));
+    /* the main world's pools went in with the engine's room, before the setup that makes the world */
+    CHECK(co_capacity_needs()->early && strstr(g_loadLog, "render capacity: the main world (capacity 0x200000) is made at 2x") != NULL);
+    CHECK(g_fake.exe[FAKE_RENDER_CAP] == 0xE9 && g_fake.exe[FAKE_RENDER_POOL0] == 0xE9 && g_fake.exe[FAKE_RENDER_SCENE] == 0xE9);
+
+    g_worldMade = 1;
+    Start("the main world was made before the game-loaded event");
+    CHECK(strstr(g_loadLog, "the main world was made before the mod could size it") != NULL && strstr(g_loadLog, "is made at 2x") == NULL);
+    CHECK(co_capacity_poll(1) == 1 && !co_capacity_needs()->early && !co_complex_on() && co_complex_start() == 0 && Untouched());
+    CHECK(Lines("complex operations are off") == 1 && fake_host_logged("the main world was made before its culling pools could be enlarged"));
 
     Start("HellForge's radii step is another");
     g_fake.image[STOCK + 21] = 10;

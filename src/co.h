@@ -147,6 +147,9 @@ int co_early_in(void);
  * 0 not asked, 1 hooked, 2 moved, -1 the game's 2048 stay. */
 void CoXlEarly(uintptr_t game);
 int CoXlRecords(void);
+/* From co_capacity_early, after the engine's room: the main world's culling pools at 2x (4x for pools 0 and 1). NULL,
+ * or why not; the world is made once, so a refusal keeps the complex part off. */
+const char* CoXlRenderEarly(uintptr_t game, uintptr_t exe);
 /* From the game-loaded event, after co_capacity_game: decides the engine's room on what is known then (HellForge's
  * capacity granted at boot, the mod's own sites, the memory) and puts it in. */
 void co_capacity_early(void);

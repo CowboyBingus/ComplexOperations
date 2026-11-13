@@ -114,8 +114,41 @@ void CoXlEarly(uintptr_t game)
     EntityRecordsInstall(game);
 }
 int CoXlRecords(void) { return g_entityRecordsState; }
+/* The main world is made once per process, in game.dll's plugin setup (0x4EE160 -> 0xAB0EE0, the only store of
+ * [engine+0x10E8] at 0xAB18B7), and the ship and every mission are spawned into it: its pools are sized only if the
+ * stubs are in before that. A world already there keeps vanilla pools, which a complex map fills (0x58E14B). */
+#define RENDER_ENGINE 0x3326340u     /* game.dll: the setup's engine object, zeroed (0x4EE535) before it is stored (0x4EE564) */
+#define RENDER_ENGINE_WORLD 0x10E8u  /* its main world */
+static int RenderWorldMade(uintptr_t game)
+{
+    uint64_t engine = 0, world = 0;
+    return g_coApi->read(game + RENDER_ENGINE, &engine, 8) == 0 && engine != 0 &&
+        g_coApi->read((uintptr_t)engine + RENDER_ENGINE_WORLD, &world, 8) == 0 && world != 0;
+}
+const char* CoXlRenderEarly(uintptr_t game, uintptr_t exe)
+{
+    if (RenderWorldMade(game))
+    {
+        Note("difficulty: render capacity: the main world was made before the mod could size it; it keeps vanilla pools (262144)");
+        return "the main world was made before its culling pools could be enlarged";
+    }
+    RenderCapacityInstall(exe);
+    if (g_renderCap.on != 1) return "the main world's culling pools could not be enlarged";
+    /* the setup runs on the game's thread: it may have made the world while the stubs were being written */
+    if (RenderWorldMade(game) && *g_renderCap.made == 0)
+    {
+        Note("difficulty: render capacity: the main world was made while the stubs went in; it keeps vanilla pools (262144)");
+        return "the main world was made before its culling pools could be enlarged";
+    }
+    return NULL;
+}
 #ifdef CO_TEST
 void CoXlTestRecords(int state) { g_entityRecordsState = state; }
+/* The render capacity's state, a fresh process's; its stub page (NULL before the install) and the tile-in note after
+ * `made` main worlds. */
+void CoXlTestRenderReset(void) { memset(&g_renderCap, 0, sizeof g_renderCap); }
+const uint8_t* CoXlTestRenderPage(void) { return g_renderCap.on == 1 ? (const uint8_t*)g_renderCap.made - 0x40 : NULL; }
+void CoXlTestRenderNote(LONG made) { if (g_renderCap.on == 1) *g_renderCap.made = made; RenderCapacityNote(); }
 #endif
 
 /* The living world: on with the complex part when the game is the reviewed build. Each of its parts acts only while
