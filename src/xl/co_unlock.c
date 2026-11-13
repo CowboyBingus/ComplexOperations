@@ -15,6 +15,8 @@
 #define HOLO_SLOT 0x180u
 #define HOLO_COUNT 0x8B730u
 #define HOLO_SKIP 0x17Cu         /* a slot's "no line" byte, read only by the line draw (0x14325A8) */
+#define PREVIEW_IDS (0xAE2A0u + 0x2234u) /* [game+WORLD]+.. preview record 0's marker ids, 0x24FF0 a record */
+#define PREVIEW_RECORDS 1u       /* the pool's records: its next index is only ever set to 0 (0x1004494, 0x12D8073) */
 
 const uint8_t kCoUnlockA[21] = {0x48, 0x8B, 0x42, 0x68, 0x40, 0x0F, 0xB6, 0xF6, 0x83, 0x7C, 0x18, 0x20, 0x02, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x0F, 0x45, 0xF0};
 const uint8_t kCoUnlockB[11] = {0x48, 0x8B, 0x40, 0x68, 0x83, 0x7C, 0x02, 0x20, 0x02, 0x75, 0x19};
@@ -42,9 +44,9 @@ static struct
 } g_note;
 static struct { uintptr_t entity; uint32_t id, handle; uint8_t mission; } g_cache[256];
 static uint32_t g_cached;
-/* a preview record's markers (keyed by its ids, R+0x2234): each slot's id and mission */
-static struct { uintptr_t key; uint32_t count, id[CO_UNLOCK_SLOTS]; uint8_t mission[CO_UNLOCK_SLOTS]; } g_shown[8];
-static uint32_t g_shownNext;
+/* each preview record's markers (keyed by its ids, R+0x2234), one entry per record so none is evicted or shared: each
+ * slot's id and mission */
+static struct { uintptr_t key; uint32_t count, id[CO_UNLOCK_SLOTS]; uint8_t mission[CO_UNLOCK_SLOTS]; } g_shown[PREVIEW_RECORDS];
 static struct { uintptr_t game; uint32_t list; uint8_t* page; volatile uint8_t* live; MarkersFn markers; LinesFn lines; } g_unlock;
 
 int co_unlock_rule(uint8_t mainMission, uint8_t stepMission)
@@ -234,11 +236,10 @@ uint32_t co_unlock_hide(const uint8_t* mission, uint32_t slots, uint32_t step)
 static uint32_t Markers(uintptr_t lg, uint64_t* pos, const uint32_t* in, uint32_t* out)
 {
     const uint32_t n = g_unlock.markers(lg, pos, in, out);
-    const uintptr_t key = (uintptr_t)out;
+    const uintptr_t key = (uintptr_t)out, world = Ptr(g_unlock.game + WORLD), ids = world != 0 ? world + PREVIEW_IDS : 0;
+    if (ids == 0 || key < ids || (key - ids) % 0x24FF0u != 0 || (key - ids) / 0x24FF0u >= PREVIEW_RECORDS) return n; /* not a record's */
+    const uint32_t at = (uint32_t)((key - ids) / 0x24FF0u);
     AcquireSRWLockExclusive(&g_lock);
-    uint32_t at = 0;
-    while (at < 8 && g_shown[at].key != key) at++;
-    if (at == 8) at = g_shownNext++ % 8;
     memset(&g_shown[at], 0, sizeof g_shown[at]);
     const uintptr_t gen = lg != 0 ? *(const uintptr_t*)(lg + 0x2C8) : 0;
     if (n > 0 && g_note.n != 0 && g_note.lg == lg && g_note.gen == gen)
@@ -274,16 +275,14 @@ static uint64_t Lines(uintptr_t holo, uintptr_t b, uintptr_t step, uintptr_t d, 
     const uint32_t shown = previews != 0 ? *(const uint32_t*)(previews + 0x4168CC) : 0xFFFFFFFFu;
     const uintptr_t record = shown != 0xFFFFFFFFu && world != 0 ? world + 0xAE2A0 + 0x24FF0ull * shown : 0;
     const uintptr_t first = holo + HOLO_SLOTS;
-    if (record != 0 && *(const uint32_t*)record == 3 && slots <= CO_UNLOCK_SLOTS && step >= first && (step - first) % HOLO_SLOT == 0)
+    if (record != 0 && shown < PREVIEW_RECORDS && *(const uint32_t*)record == 3 && slots <= CO_UNLOCK_SLOTS && step >= first && (step - first) % HOLO_SLOT == 0)
     {
         AcquireSRWLockShared(&g_lock);
-        for (uint32_t at = 0; at < 8; at++)
+        if (g_shown[shown].key == record + 0x2234)
         {
-            if (g_shown[at].key != record + 0x2234 || g_shown[at].key == 0) continue;
             for (uint32_t s = 0; s < slots; s++)
-                mission[s] = s < g_shown[at].count && *(const uint32_t*)(record + 0x2234 + 4ull * s) == g_shown[at].id[s] ? g_shown[at].mission[s] : (uint8_t)CO_UNLOCK_NONE;
+                mission[s] = s < g_shown[shown].count && *(const uint32_t*)(record + 0x2234 + 4ull * s) == g_shown[shown].id[s] ? g_shown[shown].mission[s] : (uint8_t)CO_UNLOCK_NONE;
             hide = co_unlock_hide(mission, slots, (uint32_t)((step - first) / HOLO_SLOT));
-            break;
         }
         ReleaseSRWLockShared(&g_lock);
     }
@@ -362,7 +361,7 @@ const char* co_unlock_install(uintptr_t game, uint32_t list)
 void co_unlock_test_reset(void)
 {
     co_unlock_forget();
-    memset(&g_unlock, 0, sizeof g_unlock); memset(g_shown, 0, sizeof g_shown); g_shownNext = 0;
+    memset(&g_unlock, 0, sizeof g_unlock); memset(g_shown, 0, sizeof g_shown);
 }
 const uint8_t* co_unlock_test_page(void) { return g_unlock.page; }
 uint32_t co_unlock_test_markers(uintptr_t lg, uint64_t* pos, const uint32_t* in, uint32_t* out) { return Markers(lg, pos, in, out); }
