@@ -295,6 +295,27 @@ static void ArcTable(const wchar_t* format, const ArcSet* s, const uint32_t* ind
     CloseHandle(file);
 }
 
+/* The unlock rule's note (../co_unlock.c): record, id and mission of each objective in a block whose mission is known. */
+static void ArcUnlockNote(uint64_t lg, uint64_t G, const ArcSet* s, const uint32_t* index, const uint8_t* blockMission)
+{
+    uint32_t location[ARC_MOST], known = 0, missions = 0;
+    uint8_t mission[ARC_MOST];
+    uint64_t gen = 0;
+    if (SafeRead(lg + 0x2C8, &gen, 8) || gen != G) { Note("complex operations: mission unlock: the level's block is not the clusters' one; every step holds every main"); return; }
+    for (uint32_t o = 0; o < s->o; o++)
+    {
+        location[o] = index[o];
+        mission[o] = s->block[o] != 0 && s->block[o] <= ARC_BLOCKS ? blockMission[s->block[o] - 1] : (uint8_t)CO_UNLOCK_NONE;
+        if (mission[o] == CO_UNLOCK_NONE) continue;
+        known++;
+        if (mission[o] < 32) missions |= 1u << mission[o];
+    }
+    co_unlock_note(lg, G, location, s->id, mission, s->o);
+    uint32_t count = 0;
+    for (; missions != 0; missions &= missions - 1) count++;
+    Note("complex operations: mission unlock: %u objective locations in %u missions (%u objectives on the map)", known, count, s->o);
+}
+
 static void ObjectiveArcs(uint64_t a, uint64_t pass, uint64_t clusters, uint32_t n, float centre)
 {
     uint64_t lg = 0, records = 0, countAt = 0; uint8_t level = 0;
@@ -307,7 +328,7 @@ static void ObjectiveArcs(uint64_t a, uint64_t pass, uint64_t clusters, uint32_t
     static uint8_t nk[ARC_MOST], kind[ARC_MOST];
     uint32_t count = 0, listed = 0, ids[ARC_MOST], blocks = 0, P = 0, moved = 0, children = 0, stayed = 0, members = 0, unlisted = 0;
     int listClass[ARC_MOST];
-    uint8_t entryBlock[ARC_MOST], entryMain[ARC_MOST], blockRow[ARC_BLOCKS];
+    uint8_t entryBlock[ARC_MOST], entryMain[ARC_MOST], blockRow[ARC_BLOCKS], blockMission[ARC_BLOCKS];
     uint16_t row = 0;
     const uintptr_t rows = g_difficultyGame + DIF_MISSIONS;
     /* the list's place is the one HellForge moved the game's code to */
@@ -326,7 +347,9 @@ static void ObjectiveArcs(uint64_t a, uint64_t pass, uint64_t clusters, uint32_t
     {
         for (uint32_t i = 0; i < listed; i++) listClass[i] = ArcListClass(rows, row, ids[i]);
         /* a list the fill made carries its blocks (../co_objectives.c); any other is read by the same rule */
-        if (!co_list_kept(row, ids, listed, entryBlock, entryMain, blockRow, &blocks) && !ArcBlocks(rows, row, ids, listClass, listed, P, entryBlock, entryMain, blockRow, &blocks))
+        memset(blockMission, CO_UNLOCK_NONE, sizeof blockMission); /* a list read by the rule below knows no missions */
+        if (!co_list_kept(row, ids, listed, entryBlock, entryMain, blockRow, blockMission, &blocks) &&
+            !ArcBlocks(rows, row, ids, listClass, listed, P, entryBlock, entryMain, blockRow, &blocks))
             why = "a primary on the list is no mission row's";
         else if (blocks < 2) why = "one block only";
     }
@@ -363,6 +386,8 @@ static void ObjectiveArcs(uint64_t a, uint64_t pass, uint64_t clusters, uint32_t
         s->o++;
     }
     s->blocks = blocks;
+    /* each objective's mission, whether the deal goes ahead or not: a main waits for its own mission's steps */
+    if (why == NULL) ArcUnlockNote(lg, G, s, index, blockMission);
     int planned = 0;
     if (why == NULL) planned = ArcDeal(s, centre);
     if (why == NULL && !planned) why = "fewer than two blocks with a main to deal, or fewer sites than blocks";

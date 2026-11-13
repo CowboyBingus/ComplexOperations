@@ -33,6 +33,7 @@
 #include "co_clusters.h"
 #include "co_city.h"
 #include "co_locate.h"
+#include "co_unlock.h"
 #include "co_spawners.h"
 #include "co_patrols.h"
 #include "co_density.h"
@@ -217,6 +218,8 @@ const char* CoXlInstall(uintptr_t game)
     if ((why = co_text_install(g_coApi->module_base("helldivers2.exe", NULL), CO_HUD_TEXT_FIRST, 16u * HUD_TEXT_IDS)) != NULL)
         Note("difficulty: HUD: %s; no copy counts", why);
     if ((why = InstallWorld(&d)) != NULL || (why = InstallWorldStreamStep(&d)) != NULL || (why = InstallMapHud(&d)) != NULL) return why;
+    /* refused, the game's rule stays: every step on the map holds every main objective */
+    if ((why = co_unlock_install(game, g_importantList)) != NULL) Note("complex operations: mission unlock: %s; every step holds every main", why);
     if (g_streamInstallState == 1) SpanRescueInstall(); /* its passes follow the streamer's removals */
     if (LoaderHook("the stamp index query's count (at most its places on a complex level)", game + CO_STAMP_QUERY, (void*)IndexQueryClamped, (void**)&g_indexQuery))
         return "the stamp index's query could not be hooked";

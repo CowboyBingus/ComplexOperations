@@ -25,7 +25,7 @@ static SRWLOCK g_lock = SRWLOCK_INIT; /* the tables above and the kept lists */
 static struct
 {
     uint32_t row, count, blocks, ids[CO_LIST_MOST];
-    uint8_t block[CO_LIST_MOST], main[CO_LIST_MOST], blockRow[CO_LIST_BLOCKS];
+    uint8_t block[CO_LIST_MOST], main[CO_LIST_MOST], blockRow[CO_LIST_BLOCKS], blockMission[CO_LIST_BLOCKS];
 } g_kept[8];
 static uint32_t g_keptNext;
 
@@ -106,9 +106,11 @@ static void Keep(uint32_t row, const CoList* f)
     g_kept[at].row = row; g_kept[at].count = f->count; g_kept[at].blocks = f->blocks;
     memcpy(g_kept[at].ids, f->ids, sizeof f->ids); memcpy(g_kept[at].block, f->block, sizeof f->block);
     memcpy(g_kept[at].main, f->main, sizeof f->main); memcpy(g_kept[at].blockRow, f->blockRow, sizeof f->blockRow);
+    memcpy(g_kept[at].blockMission, f->blockMission, sizeof f->blockMission);
 }
 
-int co_list_kept(uint32_t row, const uint32_t* ids, uint32_t count, uint8_t* block, uint8_t* isMain, uint8_t* blockRow, uint32_t* blocks)
+int co_list_kept(uint32_t row, const uint32_t* ids, uint32_t count, uint8_t* block, uint8_t* isMain, uint8_t* blockRow, uint8_t* blockMission,
+    uint32_t* blocks)
 {
     int found = 0;
     if (count == 0 || count > CO_LIST_MOST) return 0;
@@ -118,6 +120,7 @@ int co_list_kept(uint32_t row, const uint32_t* ids, uint32_t count, uint8_t* blo
         if (g_kept[i].blocks == 0 || g_kept[i].row != row || g_kept[i].count != count || memcmp(g_kept[i].ids, ids, 4ull * count) != 0) continue;
         memcpy(block, g_kept[i].block, count); memcpy(isMain, g_kept[i].main, count);
         memcpy(blockRow, g_kept[i].blockRow, sizeof g_kept[i].blockRow);
+        if (blockMission != NULL) memcpy(blockMission, g_kept[i].blockMission, sizeof g_kept[i].blockMission);
         *blocks = g_kept[i].blocks;
         found = 1;
     }
@@ -125,9 +128,11 @@ int co_list_kept(uint32_t row, const uint32_t* ids, uint32_t count, uint8_t* blo
     return found;
 }
 
-/* One block of the selection again, as the list's next block. */
-static void Again(CoList* out, const uint32_t* selected, uint32_t n, const uint8_t* block, const uint8_t* isMain, const uint8_t* blockRow, uint32_t k)
+/* One block of the selection again, as the list's next block: mission q's. */
+static void Again(CoList* out, const uint32_t* selected, uint32_t n, const uint8_t* block, const uint8_t* isMain, const uint8_t* blockRow, uint32_t k,
+    uint32_t q)
 {
+    out->blockMission[out->blocks] = (uint8_t)q;
     out->blockRow[out->blocks++] = blockRow[k];
     for (uint32_t i = 0; i < n; i++)
     {
@@ -246,11 +251,11 @@ const char* co_list(uintptr_t game, uint32_t row, const uint32_t* selected, uint
         out->count++;
     }
     memcpy(out->blockRow, blockRow, unit);
-    out->blocks = unit;
+    out->blocks = unit; /* the selection's own blocks: the first mission's (blockMission 0) */
     for (uint32_t q = 1; q <= firsts; q++)
     {
-        Again(out, selected, n, block, isMain, blockRow, 0);
-        for (uint32_t k = 1; k < unit; k++) if (other[q][k]) Again(out, selected, n, block, isMain, blockRow, k);
+        Again(out, selected, n, block, isMain, blockRow, 0, q);
+        for (uint32_t k = 1; k < unit; k++) if (other[q][k]) Again(out, selected, n, block, isMain, blockRow, k, q);
     }
     out->unit = unit; out->own = own; out->held = unit > 0 ? 1 + firsts : 0;
     out->major[1] = out->major[0] - out->dropped[0]; out->optional[1] = out->optional[0] - out->dropped[1];

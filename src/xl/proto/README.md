@@ -68,6 +68,7 @@ copy: it passes the include on to the SDK's header, or to the fallback when the 
 | `difficulty_world.c`, `difficulty_world_arcs.c` | The objective fill's list is made by `../co_objectives.c` from the selection: within the reported places, a mission's primaries as whole blocks. The arcs take such a list's blocks from it. `ObjectiveIdCap` moved there. |
 | `difficulty_status.c` | The registry's stubs, list and hash are `../co_status.c`'s (seven sites, all or none, installed by `co_complex_start`); `StatusWatch` is called from the game thread's tick, moves the hash and notes skipped units. |
 | `difficulty_world.c` | The mission in play sets where a loot container's location is looked up (`../co_locate.c`): the moved array on a complex mission. |
+| `difficulty_world.c`, `difficulty_world_arcs.c` | The arcs note each objective's mission from the fill's list (`co_list_kept`'s `blockMission`) for `../co_unlock.c`; a level init forgets it, and the mission in play sets the unlock stubs' flag. |
 | `difficulty_world.c` | The HUD rows' text ids start at `CO_HUD_TEXT_FIRST` (`../co_xl_standin.h`); `../co_text.c` answers them behind the engine's lookup. |
 | `living_world.c` | The tick's cost by section is logged by a research build only (`CO_RESEARCH`). |
 | `living_world*.c`, `difficulty_world.c` | The living world is on without a switch and acts only while the mission in play is complex (`LwLive`; `LwLiveSet` follows the live page). The patrol rows are read, never written: `../co_patrols.c` switches the patrols off. |

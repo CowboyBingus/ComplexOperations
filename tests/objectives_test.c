@@ -130,12 +130,15 @@ int main(void)
     CHECK(g_list.block[0] == 1 && g_list.main[0] == 1 && g_list.block[3] == 1 && g_list.main[3] == 0 && g_list.block[6] == 0 && g_list.block[18] == 2 &&
         g_list.block[23] == 2 && g_list.block[24] == 3 && g_list.main[26] == 1 && g_list.main[27] == 0 && g_list.blockRow[2] == PLAIN && Whole());
     {
-        uint8_t block[CO_LIST_MOST], isMain[CO_LIST_MOST], rows[CO_LIST_BLOCKS];
+        uint8_t block[CO_LIST_MOST], isMain[CO_LIST_MOST], rows[CO_LIST_BLOCKS], mission[CO_LIST_BLOCKS] = {0};
         uint32_t blocks = 0;
-        CHECK(co_list_kept(PLAIN, g_list.ids, g_list.count, block, isMain, rows, &blocks) == 1 && blocks == 3 && memcmp(block, g_list.block, 30) == 0 &&
+        CHECK(co_list_kept(PLAIN, g_list.ids, g_list.count, block, isMain, rows, NULL, &blocks) == 1 && blocks == 3 && memcmp(block, g_list.block, 30) == 0 &&
             memcmp(isMain, g_list.main, 30) == 0 && rows[1] == PLAIN);
-        CHECK(co_list_kept(PLAIN, g_list.ids, g_list.count - 1, block, isMain, rows, &blocks) == 0); /* another list */
-        CHECK(co_list_kept(BASE, g_list.ids, g_list.count, block, isMain, rows, &blocks) == 0);      /* another row */
+        /* each mission's block is its own: a step unlocks the mains of its mission only (../src/xl/co_unlock.c) */
+        CHECK(g_list.blockMission[0] == 0 && g_list.blockMission[1] == 1 && g_list.blockMission[2] == 2);
+        CHECK(co_list_kept(PLAIN, g_list.ids, g_list.count, block, isMain, rows, mission, &blocks) == 1 && memcmp(mission, g_list.blockMission, 3) == 0);
+        CHECK(co_list_kept(PLAIN, g_list.ids, g_list.count - 1, block, isMain, rows, NULL, &blocks) == 0); /* another list */
+        CHECK(co_list_kept(BASE, g_list.ids, g_list.count, block, isMain, rows, NULL, &blocks) == 0);      /* another row */
     }
 
     Reset("a block that begins with a step keeps it; a main with no place is on the list as often as its block");
@@ -157,6 +160,8 @@ int main(void)
     CHECK(g_list.count == 30 && g_list.unit == 2 && g_list.own == 4 && g_list.blocks == 5 && g_list.held == 3 && g_list.short_ == 1);
     CHECK(Is(0, s, 6) && Is(6, s + 10, 11) && Is(17, base, 4) && Is(21, partner, 5) && Is(26, base, 4));
     CHECK(g_list.blockRow[0] == BASE && g_list.blockRow[1] == PARTNER && g_list.blockRow[2] == BASE && g_list.blockRow[3] == PARTNER && g_list.blockRow[4] == BASE);
+    /* a base block and its partner's are one mission; the third mission had no room for its partner */
+    CHECK(g_list.blockMission[0] == 0 && g_list.blockMission[1] == 0 && g_list.blockMission[2] == 1 && g_list.blockMission[3] == 1 && g_list.blockMission[4] == 2);
     CHECK(g_list.dropped[0] == 0 && g_list.dropped[1] == 4 && g_list.major[1] == 6 && g_list.optional[1] == 2 && g_list.mains == 20 && g_list.steps == 2 && Whole());
     CHECK(g_list.block[12] == 2 && g_list.main[12] == 1 && g_list.block[16] == 2 && g_list.main[16] == 0);
 
@@ -219,7 +224,7 @@ int main(void)
         uint32_t blocks = 0;
         static const uint32_t sel[4] = {MAIN_A, MAIN_B, M1, STRAY};
         CHECK(Fill(BASE, sel, 4, 30, 1) == NULL && g_list.unit == 0 && g_list.blocks == 0 && g_list.held == 0 && Is(0, sel, 4) && g_list.mains == 0);
-        CHECK(co_list_kept(BASE, g_list.ids, g_list.count, block, isMain, rows, &blocks) == 0);
+        CHECK(co_list_kept(BASE, g_list.ids, g_list.count, block, isMain, rows, NULL, &blocks) == 0);
     }
 
     Reset("the rows cannot be read");
