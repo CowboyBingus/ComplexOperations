@@ -10,6 +10,9 @@
 #include "co.h"
 #include "harness/fake_host.h"
 
+static uint64_t g_now = 1000;
+static uint64_t Clock(void) { return g_now; }
+
 static int g_failed;
 static const char* g_case;
 
@@ -132,10 +135,18 @@ static void CheckCallbacks(void)
     co_cards_layout(&other);
     CHECK(co_cards_test_get_mode() == CO_CARDS_FOUR);
 
-    /* Four or fewer present and no player past card 4: four stays. */
+    /* Four or fewer present and no player past card 4: four stays. The complex term is asked at most every 250 ms;
+     * the opening asked it already. */
+    co_cards_test_clock(Clock);
+    const unsigned reads = co_cards_test_complex_reads();
     Put32(g_screen + PLAYERS, 0);
     co_cards_layout(&regs);
     CHECK(co_cards_test_get_mode() == CO_CARDS_FOUR && co_card_height == 780.0f);
+    for (int i = 0; i < 20; i++) { g_now += 10; co_cards_layout(&regs); }
+    CHECK(co_cards_test_complex_reads() == reads + 1);
+    g_now += 250;
+    co_cards_layout(&regs);
+    CHECK(co_cards_test_complex_reads() == reads + 2 && co_cards_test_get_mode() == CO_CARDS_FOUR);
 
     /* Card parts as the game leaves them: roots at 780, one collapsed +0x1C30 at 42, card 1's +0x1D40 animating to 780
      * and its +0x5848 to 128; card 4's +0x1D40 has an entry that drives another widget. */
@@ -185,13 +196,16 @@ static void CheckCallbacks(void)
     CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 532.0f);
     CHECK(fake_host_logged("loadout cards: eight (complex operation no, 5 players)"));
 
-    /* A fifth player joining a four-card screen. */
+    /* A fifth player joining a four-card screen: switched in the first update after, with the complex term not due. */
     Put32(g_context + 0x16390, 3);
     co_cards_open(&regs);
     CHECK(co_cards_test_get_mode() == CO_CARDS_FOUR && co_card_height == 780.0f);
+    const unsigned asked = co_cards_test_complex_reads();
     Put32(g_context + 0x16390, 5);
     co_cards_layout(&regs);
     CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 532.0f);
+    CHECK(co_cards_test_complex_reads() == asked);
+    co_cards_test_clock(NULL);
 
     /* No session context: four. */
     Put(image + 0x347CEF0u, 0);

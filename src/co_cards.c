@@ -4,6 +4,7 @@
  * bar. An operation for four with at most four players keeps the game's four-card screen. Addresses are game build
  * 25480438's (DESIGN.md of the cards study, layout D and section 9.5). */
 #include <string.h>
+#include <windows.h>
 
 #include "co.h"
 #include "co_tag.h"
@@ -38,9 +39,29 @@
 /* A parked card's top is this far below the window's bottom edge, whatever the window's shape. */
 #define CO_PARK_BELOW 1000.0f
 
+/* How often an open four-card screen asks whether the pick is complex: the answer reads the mission table through
+ * HellForge's guarded reads, each a system call. The player terms are read in place every update. */
+#define CO_COMPLEX_EVERY_MS 250u
+
 float co_card_height = CO_CARD_TALL;
 static uintptr_t g_game, g_screen;
 static int g_mode = CO_CARDS_GAME;
+static int g_complex;
+static uint64_t g_complexAt;
+static unsigned g_complexReads;
+static uint64_t (*g_clock)(void) = GetTickCount64;
+
+static int Complex(int fresh)
+{
+    const uint64_t now = g_clock();
+    if (fresh || now - g_complexAt >= CO_COMPLEX_EVERY_MS)
+    {
+        g_complex = co_tag_picked_complex();
+        g_complexAt = now;
+        g_complexReads++;
+    }
+    return g_complex;
+}
 
 typedef void (*SetFn)(uintptr_t widget, uint64_t pair);
 
@@ -160,7 +181,7 @@ void co_cards_open(CoRegs* regs)
 {
     const uintptr_t screen = (uintptr_t)regs->rdi;
     if (screen == 0 || g_game == 0) return;
-    const int complex = co_tag_picked_complex();
+    const int complex = Complex(1);
     const uint32_t players = Players();
     g_screen = screen;
     g_mode = co_cards_eight(complex, players, NULL) ? CO_CARDS_EIGHT : CO_CARDS_FOUR;
@@ -189,7 +210,7 @@ void co_cards_layout(CoRegs* regs)
     {
         int32_t cards[8];
         memcpy(cards, (const void*)(screen + CO_CARD_PLAYERS), sizeof cards);
-        const int complex = co_tag_picked_complex();
+        const int complex = Complex(0);
         const uint32_t players = Players();
         if (co_cards_eight(complex, players, cards))
         {
@@ -204,4 +225,6 @@ void co_cards_layout(CoRegs* regs)
 #ifdef CO_TEST
 void co_cards_test_mode(int mode, uintptr_t screen) { g_mode = mode; g_screen = screen; }
 int co_cards_test_get_mode(void) { return g_mode; }
+void co_cards_test_clock(uint64_t (*clock)(void)) { g_clock = clock != NULL ? clock : GetTickCount64; }
+unsigned co_cards_test_complex_reads(void) { return g_complexReads; }
 #endif

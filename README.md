@@ -148,7 +148,8 @@ and the cards. A build for eight allocates the screen bigger and moves the four 
 
 The screen shows eight cards for a complex operation, with more than four players, or when a card past the fourth has
 a player. Otherwise it keeps the game's four cards, and cards 5 to 8 wait below the window. The mode is chosen when the
-screen opens. While it is open, four cards turn into eight when the rule turns true, never back.
+screen opens. While it is open, four cards turn into eight when the rule turns true, never back. The players are checked
+every update; the complex pick is checked four times a second, because that check reads the mission table.
 
 Eight cards stand in two rows of four. Each is 532 reference units tall instead of 780, which cuts the figure below
 the chest, and both rows scale together to fit between the screen's top bar and its bottom line.

@@ -101,6 +101,8 @@ void co_cards_to_eight(uintptr_t screen);
 #ifdef CO_TEST
 void co_cards_test_mode(int mode, uintptr_t screen);
 int co_cards_test_get_mode(void);
+void co_cards_test_clock(uint64_t (*clock)(void));
+unsigned co_cards_test_complex_reads(void);
 #endif
 
 /* The stack fixes' callbacks for avatars (co_avatars.c), in the counts' caves. `install` once with game.dll's base. */
