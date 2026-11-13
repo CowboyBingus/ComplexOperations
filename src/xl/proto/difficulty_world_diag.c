@@ -1228,22 +1228,36 @@ static int g_tdScatHooked;
  * 256 lattice candidates (~0.33 s a tile, ~21 s for the bake) and kept their records all mission (~3.5 GB). What changes:
  * the SpeedTree grass no longer draws into scatter_density (17 vegetation templates have a scatter_density_bake pass),
  * so the far-scatter overlay, shown only within +-1024 m of the centre and there the 16 km bake squeezed 8x, loses its
- * grass density. Placed vegetation and the player's own scatter cells are unchanged; no gameplay effect. Other views
- * with the same near/far (op 0x0A's water camera) are untouched: the gate is op 0x4A. */
-static int TdScatterBakeView(const uint8_t* view)
+ * grass density. Placed vegetation and the player's own scatter cells are unchanged; no gameplay effect.
+ * Ops 0x0A/0x0B's water camera has the same near/far/aspect (0xF487B0, square water_height target). Its +-8192 m box
+ * grows every layer's node vector to ~224 MiB, never shrunk (~4.5 GB); no SpeedTree material draws in water_height.
+ * Returns the op whose view is left out, or 0. */
+static LONG TdScatterSkipOp(const uint8_t* view)
 {
-    if (!(g_world.current > 1.0f) || g_genOp != 0x4A) return 0;
+    const LONG op = g_genOp;
+    if (!(g_world.current > 1.0f) || (op != 0x4A && op != 0x0A && op != 0x0B)) return 0;
     float v[2] = {0}, aspect = 0;
-    return !SafeRead((uintptr_t)view + 0x20, v, 8) && !SafeRead((uintptr_t)view + 0x278, &aspect, 4) && v[0] == 1.0f && v[1] == 1001.0f && aspect == 1.0f;
+    return !SafeRead((uintptr_t)view + 0x20, v, 8) && !SafeRead((uintptr_t)view + 0x278, &aspect, 4) && v[0] == 1.0f && v[1] == 1001.0f && aspect == 1.0f ? op : 0;
 }
 static void TdScatterUpdate(void* a, uint8_t* view, uint32_t c, uint8_t* layer, void* e, void* f, void* g, void* h)
 {
-    if (TdScatterBakeView(view))
+    const LONG skipOp = TdScatterSkipOp(view);
+    if (skipOp == 0x4A)
     {
         static volatile LONG notedLevel = -1;
         LONG levels = g_world.levels;
         if (notedLevel != levels && InterlockedExchange(&notedLevel, levels) != levels)
             Note("difficulty: extra large maps: the far-scatter bake's tile views are left out of the scatter update (op 0x4A, record %ld)", (long)g_genRecord);
+        InterlockedIncrement64(&g_tdScatSkipped);
+        return;
+    }
+    if (skipOp != 0)
+    {
+        /* a level has two 0x0A records (about 104 and 159) and one 0x0B: a line for each, so a run shows which skipped */
+        static volatile LONG64 noted = -1;
+        const LONG64 key = (LONG64)g_world.levels << 32 | (uint32_t)g_genRecord;
+        if (noted != key && InterlockedExchange64(&noted, key) != key)
+            Note("difficulty: extra large maps: the water camera's view is left out of the scatter update (op 0x%02lX, record %ld)", (long)skipOp, (long)g_genRecord);
         InterlockedIncrement64(&g_tdScatSkipped);
         return;
     }
@@ -1362,7 +1376,7 @@ static void ScatterBakeInstall(void)
     uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
     if (!ApiCodeMatches(exe + 0x212F10u, "48 89 5C 24 18 55 56 57 41 55 41 56 48 8D AC 24 E0 CB FF"))
     {
-        Note("difficulty: extra large maps: the engine's scatter update is not the reviewed one; the far-scatter bake keeps its grass (and no scatter cache figures)");
+        Note("difficulty: extra large maps: the engine's scatter update is not the reviewed one; the far-scatter bake keeps its grass, the water view its scatter (and no scatter cache figures)");
         g_tdScatHooked = -1;
         return;
     }

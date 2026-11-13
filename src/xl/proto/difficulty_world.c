@@ -6417,7 +6417,7 @@ static const char* InstallWorld(DifficultyInstall* d)
     if (overlap != NULL) Note("difficulty: extra large maps: the stamp overlap grid is not used: %s", overlap);
     const char* poisson = InstallWorldPoisson(game);
     if (poisson != NULL) Note("difficulty: extra large maps: the tiled Poisson-disk sampler is not used: %s", poisson);
-    ScatterBakeInstall(); /* difficulty_world_diag.c: the far-scatter bake's views without grass (op 0x4A) */
+    ScatterBakeInstall(); /* difficulty_world_diag.c: the bake's (op 0x4A) and water camera's (0x0A/0x0B) views without scatter */
     const char* spread = InstallSpreadSort(game);
     if (spread != NULL) Note("difficulty: extra large maps: %s", spread);
     const char* convoy = InstallConvoyGuard(game);
