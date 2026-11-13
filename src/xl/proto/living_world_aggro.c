@@ -11,9 +11,10 @@
 #define LW_AGP_EYE_LINES 160 /* eye lines a session, under the unit lines */
 #define LW_AGP_TIME_LINES 40
 #define LW_AGP_LOOKS 6      /* units whose own eye is checked per probe (twice a second) */
-#define LW_SENSE_NEAR 15.0f /* m: a calm enemy this close with a clear line notices a player outside its view (D) */
-#define LW_SENSE_TOLD 4000u /* ms before a told unit is told again; 1000 between checks otherwise */
-#define LW_SENSE_CHECKS 8   /* units checked per probe */
+#define LW_SENSE_NEAR 15.0f /* m at the player's visibility 1.0, which scales it (D) */
+#define LW_SENSE_TOLD 4000u /* ms before a noticing unit is checked again; 1000 between checks otherwise */
+#define LW_SENSE_CHECKS 4   /* units checked per player per probe */
+#define LW_SENSE_FAST 5000u /* ms: a notice followed this soon by alert 3 */
 #define LW_SENSE_LINES 30
 #define LW_FOLIAGE_HIT 0x4B8DC02Bu
 #define LW_HIT 0x2C         /* a ray hit: +0 x, +4 y, +0x18 metres along the ray, +0x1C unit (0 static), +0x24 type */
@@ -22,12 +23,13 @@ enum { LW_EYE_NONE, LW_EYE_VIEW, LW_EYE_SEEN, LW_EYE_DRAWN, LW_EYE_COARSE, LW_EY
 static const char* const kLwEyeWhat[LW_EYE_N] = {"no eye", "out of view", "seen", "the drawn ground", "the coarse collision over the tile",
     "a static object", "static (no drawn ground here)", "foliage", "another unit", "a squad mate", "another enemy"};
 
-typedef struct { uint32_t unit; ULONGLONG since, seen, closeAt, senseAt; uint8_t logged, timed; } LwAgpUnit;
+typedef struct { uint32_t unit; ULONGLONG since, seen, closeAt, senseAt, noticedAt; uint8_t logged, timed; } LwAgpUnit;
 static struct
 {
     LwAgpUnit u[LW_AGP_UNITS];
     int lines, fighting, eyeLines, timeLines, pins, look, senseLines;
-    ULONGLONG nextAt, noteAt;
+    ULONGLONG nextAt, noteAt, minuteAt;
+    uint32_t mNoticed[2], mFast, mHostile, mStealth, mBlocked, mLevel; /* the notices since the last minute line */
     uint32_t nearSum, calmSum, loaderSum, loaderFighting, scans; /* since the last note */
     uint32_t eyes[2][LW_EYE_N], sensed[2], timedN[2]; float timedSum[2], timedMax[2]; /* [0] loader members, [1] other units */
 } g_lwAgp;
@@ -80,6 +82,7 @@ static const ActPin kLwSightPins[] = {
     {0, 0x503BC0u, "4883ec284c8bd14885c97507"},                           /* an eye's settings */
     {0, 0x11D9DF0u, "48895c241048896c241856574154415641574883ec2033ff"},   /* a target's stat modifier */
     {0, 0x888E50u, "40535741574883ec208b3dc1adbf024d"},                   /* the hearing writer (LwSense) */
+    {0, 0x510170u, "4885c9750333c0c3488b094885c97507"},                   /* a detector's settings */
 };
 typedef const float* (*LwNodePosFn)(uint32_t unit, uint32_t node);
 typedef uint8_t (*LwUnitValidFn)(uint32_t unit);
@@ -257,15 +260,36 @@ static void LwAgpTimed(LwAgpUnit* a, int loader, float d, ULONGLONG now)
             loader ? "loader member" : "unit", a->unit, (double)s, (double)LW_AGP_TIMED, (double)d);
 }
 
-/* Terminid eyes see 40 m ahead but about 1 m to the side and behind (shape 1: +0x10, +0x14), times the target's
- * visibility (0x720530; 0.6 on planet 211), and a walking player is heard within 10 m (noise type 5). A vanilla patrol
- * walks at a player and faces one; a loader squad walks its own route and passed players beside it unseen. A calm
- * enemy within LW_SENSE_NEAR whose vision ray reaches the player gets the entry a gunshot writes (0x888E50, level 40):
- * the game's own investigation (alert 2) turns it to the point, where its eye takes over. */
-/* A unit is told only at alert 0, within LW_SENSE_NEAR, with the player outside its view (code 0) and its ray clear. */
-static int LwSenseWanted(uint32_t alert, float d2, uint32_t code, int clear)
+/* Terminid eyes see 40 m ahead but about 1 m to the side and behind (shape 1: +0x10, +0x14), times the player's
+ * visibility (0x720530), and a walking player is heard within 10 m (noise type 5). So a calm unit passes a player
+ * beside or behind it unseen. A calm unit within LW_SENSE_NEAR x that visibility whose vision ray reaches the player
+ * gets a hearing entry just over its own threshold (0x888E50; settings +0x2BC, compared at 0x7EB694): the game's
+ * investigation (alert 2) turns it to the point, where its eye takes over. */
+enum { LW_SENSE_YES, LW_SENSE_ALERT, LW_SENSE_FAR, LW_SENSE_STEALTH, LW_SENSE_VIEW, LW_SENSE_BLOCKED };
+static int LwSenseRule(uint32_t alert, float d, float visibility, uint32_t code, int clear)
 {
-    return alert == 0 && d2 <= LW_SENSE_NEAR * LW_SENSE_NEAR && code == 0 && clear == 1;
+    if (alert != 0) return LW_SENSE_ALERT;
+    if (d > LW_SENSE_NEAR) return LW_SENSE_FAR;
+    if (code != 0) return LW_SENSE_VIEW; /* in view: the game's own sight */
+    if (d > LW_SENSE_NEAR * visibility) return LW_SENSE_STEALTH;
+    return clear == 1 ? LW_SENSE_YES : LW_SENSE_BLOCKED;
+}
+/* The game's hostility test (0x887977..0x887A1C): hostile when the detector's settings +0x14 make every avatar an
+ * enemy and the target is one ([game+0x3326D20] +0xF8), or its lists +0x13EC bit 0 is set and its faction +0x13E8
+ * shares no bit with the target's mask (registry [game+0x3326CB8] +0x12078) and that mask is not 0. */
+static int LwHostileRule(uint8_t always, int avatar, uint32_t lists, uint32_t faction, uint32_t mask)
+{
+    return (always && avatar) || ((lists & 1u) && (faction & mask) == 0 && mask != 0);
+}
+static int LwHostileTo(uint32_t detector, uint32_t avatar)
+{
+    uintptr_t game = g_lw.game, det = 0, recs = 0, ents = 0, ent = 0, reg = 0, masks = 0, avs = 0; uint32_t di = 0, t = 0, slot = 0;
+    if (!EvpPtr(game + 0x3326548u, &det) || !EvpHash(det + 0x30, detector, 8, 4, &di) || !EvpPtr(det + 0x50, &recs) || !EvpPtr(det + 0x48, &ents) ||
+        !EvpPtr(ents + 8ull * di, &ent) || !ent || !EvpPtr(game + 0x3326CB8u, &reg) || !EvpHash(reg + 0x12050, avatar, 8, 4, &t) || !EvpPtr(reg + 0x12078, &masks)) return 0;
+    uintptr_t r = recs + 0x13F8ull * di, set = ((uintptr_t (*)(uintptr_t))(game + 0x510170u))(ent);
+    uint8_t always = 0; if (set) SafeRead(set + 0x14, &always, 1);
+    int isAvatar = EvpPtr(game + 0x3326D20u, &avs) && EvpHash(avs + 0xF8, avatar, 8, 4, &slot);
+    return LwHostileRule(always, isAvatar, EvpU32(r + 0x13EC, 0), EvpU32(r + 0x13E8, 0), EvpU32(masks + 4ull * t, 0));
 }
 static void LwSense(LwAgpUnit* a, uint32_t unit, int player, const float* tpos, int loader, float d, ULONGLONG now)
 {
@@ -273,13 +297,19 @@ static void LwSense(LwAgpUnit* a, uint32_t unit, int player, const float* tpos, 
     uint32_t avatar = g_lwWorld.avatars[player], det = LwAwareDetector(unit);
     a->senseAt = now + 1000;
     if (!det) return;
+    if (!LwHostileTo(det, avatar)) { g_lwAgp.mHostile++; a->senseAt = now + LW_SENSE_TOLD; return; }
     LwEyeLook look; LwEyeLookAt(unit, avatar, tpos, 0, 1, &look);
-    if (!LwSenseWanted(LwAlert(unit), d * d, look.code, look.clear)) return; /* in view: the game's sight handles it; blocked: none */
-    ((HearFn)(g_lw.game + 0x888E50u))(NULL, det, avatar, g_lwWorld.players[player], 40.0f);
-    a->senseAt = now + LW_SENSE_TOLD; g_lwAgp.sensed[!loader]++;
+    int why = LwSenseRule(LwAlert(unit), d, look.view[2], look.code, look.clear); /* view[2]: the visibility 0x64C6F0 used (0x64CEA1); 0 when fog ended it early (0x64C919) */
+    if (why == LW_SENSE_STEALTH) g_lwAgp.mStealth++;
+    if (why == LW_SENSE_BLOCKED) g_lwAgp.mBlocked++;
+    float threshold = 0, investigate = 0;
+    if (why != LW_SENSE_YES) return;
+    if (!LwHearSettings(unit, &threshold, &investigate) || !(threshold >= 0.0f && threshold + 1.0f < 40.0f)) { g_lwAgp.mLevel++; return; } /* 40: the cap */
+    ((HearFn)(g_lw.game + 0x888E50u))(NULL, det, avatar, g_lwWorld.players[player], threshold + 1.0f);
+    a->senseAt = now + LW_SENSE_TOLD; a->noticedAt = now; g_lwAgp.sensed[!loader]++; g_lwAgp.mNoticed[!loader]++;
     if (g_lwAgp.senseLines++ < LW_SENSE_LINES)
-        Note("living world: sight: %s %08X noticed player %d at %.1f m outside its view (range %.2f there): told through detector %08X",
-            loader ? "loader member" : "unit", unit, player, (double)d, (double)look.view[1], det);
+        Note("living world: sight: %s %08X noticed player %d at %.1f m outside its view (range %.2f there, visibility %.2f): hearing %.1f over its threshold %.1f, detector %08X",
+            loader ? "loader member" : "unit", unit, player, (double)d, (double)look.view[1], (double)look.view[2], (double)(threshold + 1.0f), (double)threshold, det);
 }
 
 /* Twice a second: the AI units the host owns ([game+0x33266C8]: owned +0x2324, entity pointers +0x2348) near a player. */
@@ -290,7 +320,7 @@ static void LwAggroProbe(void)
     g_lwAgp.nextAt = now + 500;
     uintptr_t ai = 0, ents = 0;
     if (!EvpPtr(g_lw.game + 0x33266C8u, &ai) || !EvpPtr(ai + 0x2348, &ents)) return;
-    int eyesOn = LwEyeBind(), looks = 0, checks = 0;
+    int eyesOn = LwEyeBind(), looks = 0; uint8_t checks[EVT_MAX_PLAYERS] = {0};
     float tpos[EVT_MAX_PLAYERS][3]; uint8_t tposOk[EVT_MAX_PLAYERS] = {0};
     for (int k = 0; eyesOn && k < g_lwWorld.playersAt && k < EVT_MAX_PLAYERS; k++) tposOk[k] = (uint8_t)LwTargetPoint(g_lwWorld.avatars[k], tpos[k]);
     uint32_t owned = EvpU32(ai + 0x2324, 0), nearN = 0, calmN = 0, loaderN = 0, loaderFightN = 0;
@@ -322,8 +352,9 @@ static void LwAggroProbe(void)
             if (look.what == LW_EYE_UNIT) look.what = LwBlocker(look.unit, sq);
             g_lwAgp.eyes[!loader][look.what]++; looks++;
         }
-        if (eyesOn && tposOk[player] && LwAlert(unit) == 0 && best <= LW_SENSE_NEAR * LW_SENSE_NEAR && now >= a->senseAt && checks < LW_SENSE_CHECKS)
-        { checks++; LwSense(a, unit, player, tpos[player], loader, sqrtf(best), now); }
+        if (a->noticedAt && (fighting || now - a->noticedAt > LW_SENSE_FAST)) { g_lwAgp.mFast += (uint32_t)(fighting && now - a->noticedAt <= LW_SENSE_FAST); a->noticedAt = 0; }
+        if (eyesOn && tposOk[player] && LwAlert(unit) == 0 && best <= LW_SENSE_NEAR * LW_SENSE_NEAR && now >= a->senseAt && checks[player] < LW_SENSE_CHECKS)
+        { checks[player]++; LwSense(a, unit, player, tpos[player], loader, sqrtf(best), now); }
         if (fighting && a->logged != 2) a->since = now; /* calm time counts from its last fight */
         a->seen = now;
         if (g_lwAgp.lines >= LW_AGP_LINES || a->logged) continue;
@@ -332,6 +363,14 @@ static void LwAggroProbe(void)
         LwAgpLine(unit, sqrtf(best), player);
     }
     g_lwAgp.look++;
+    if (now - g_lwAgp.minuteAt >= 60000)
+    {
+        uint32_t* m = g_lwAgp.mNoticed;
+        if (m[0] || m[1] || g_lwAgp.mHostile || g_lwAgp.mStealth || g_lwAgp.mBlocked || g_lwAgp.mLevel)
+            Note("living world: sight (60 s): %u calm units noticed a player outside their view (loader members %u, other units %u), %u of them at alert 3 within %.0f s; not noticed: not hostile to the player %u, the player's visibility %u, line blocked %u, threshold at the cap %u",
+                m[0] + m[1], m[0], m[1], g_lwAgp.mFast, LW_SENSE_FAST / 1000.0, g_lwAgp.mHostile, g_lwAgp.mStealth, g_lwAgp.mBlocked, g_lwAgp.mLevel);
+        m[0] = m[1] = g_lwAgp.mFast = g_lwAgp.mHostile = g_lwAgp.mStealth = g_lwAgp.mBlocked = g_lwAgp.mLevel = 0; g_lwAgp.minuteAt = now;
+    }
     g_lwAgp.nearSum += nearN; g_lwAgp.calmSum += calmN; g_lwAgp.loaderSum += loaderN; g_lwAgp.loaderFighting += loaderFightN; g_lwAgp.scans++;
     if (now - g_lwAgp.noteAt < 30000) return;
     double scans = g_lwAgp.scans ? (double)g_lwAgp.scans : 1.0;

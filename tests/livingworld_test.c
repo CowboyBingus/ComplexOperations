@@ -14,7 +14,8 @@ LONG CoXlTestNoiseHead(void);
 int CoXlTestLwSettle(uint32_t i, uint64_t peer, const float* at, uint64_t now, float* use);
 int CoXlTestLwSightVerdict(const uint8_t* hits, uint32_t n, uint32_t target, const float* eye, const float* tpos, float nearR, float folR, int* at);
 int CoXlTestLwStaticKind(float z, float drawn, float coarse, int tile);
-int CoXlTestLwSenseWanted(uint32_t alert, float d2, uint32_t code, int clear);
+int CoXlTestLwSenseRule(uint32_t alert, float d, float visibility, uint32_t code, int clear);
+int CoXlTestLwHostileRule(uint8_t always, int avatar, uint32_t lists, uint32_t faction, uint32_t mask);
 
 static int g_failed;
 static const char* g_case;
@@ -87,14 +88,24 @@ static void SightVerdict(void)
     CHECK(CoXlTestLwStaticKind(4.2f, 5.0f, 4.0f, 0) == 5);     /* under the drawn ground on the coarse rows: not the coarse body over it */
     CHECK(CoXlTestLwStaticKind(7.0f, 5.0f, 9.0f, 0) == 5);     /* an object */
     CHECK(CoXlTestLwStaticKind(7.0f, -9999.0f, 9.0f, 0) == 6); /* no drawn ground */
-    g_case = "a calm enemy close beside a player notices them only with a clear line";
-    CHECK(CoXlTestLwSenseWanted(0, 14.9f * 14.9f, 0, 1) == 1);
-    CHECK(CoXlTestLwSenseWanted(0, 15.0f * 15.0f, 0, 1) == 1);  /* the edge counts */
-    CHECK(CoXlTestLwSenseWanted(0, 15.1f * 15.1f, 0, 1) == 0);  /* too far */
-    CHECK(CoXlTestLwSenseWanted(1, 10.0f * 10.0f, 0, 1) == 0);  /* already suspicious: the game's own path */
-    CHECK(CoXlTestLwSenseWanted(0, 10.0f * 10.0f, 2, 1) == 0);  /* in view: the game's sight */
-    CHECK(CoXlTestLwSenseWanted(0, 10.0f * 10.0f, 0, 0) == 0);  /* blocked: not through walls or units */
-    CHECK(CoXlTestLwSenseWanted(0, 10.0f * 10.0f, 0, -1) == 0); /* no ray */
+    g_case = "a calm enemy close beside a player notices them only with a clear line"; /* 0 yes, 1 alert, 2 far, 3 stealth, 4 in view, 5 blocked */
+    CHECK(CoXlTestLwSenseRule(0, 14.9f, 1.0f, 0, 1) == 0);
+    CHECK(CoXlTestLwSenseRule(0, 15.0f, 1.0f, 0, 1) == 0);  /* the edge counts */
+    CHECK(CoXlTestLwSenseRule(0, 15.1f, 1.0f, 0, 1) == 2);  /* too far */
+    CHECK(CoXlTestLwSenseRule(1, 10.0f, 1.0f, 0, 1) == 1);  /* already suspicious: the game's own path */
+    CHECK(CoXlTestLwSenseRule(0, 10.0f, 1.0f, 2, 1) == 4);  /* in view: the game's sight */
+    CHECK(CoXlTestLwSenseRule(0, 10.0f, 1.0f, 0, 0) == 5);  /* blocked: not through walls or units */
+    CHECK(CoXlTestLwSenseRule(0, 10.0f, 1.0f, 0, -1) == 5); /* no ray */
+    CHECK(CoXlTestLwSenseRule(0, 7.4f, 0.5f, 0, 1) == 0);   /* a hidden player: half the reach */
+    CHECK(CoXlTestLwSenseRule(0, 7.6f, 0.5f, 0, 1) == 3);
+    CHECK(CoXlTestLwSenseRule(0, 1.0f, 0.0f, 0, 1) == 3);   /* invisible */
+    g_case = "the game's hostility test";
+    CHECK(CoXlTestLwHostileRule(0, 1, 1, 0x2, 0x4) == 1);   /* no shared faction bit */
+    CHECK(CoXlTestLwHostileRule(0, 1, 1, 0x6, 0x4) == 0);   /* a shared faction bit: an ally */
+    CHECK(CoXlTestLwHostileRule(0, 1, 0, 0x2, 0x4) == 0);   /* the list off */
+    CHECK(CoXlTestLwHostileRule(0, 1, 1, 0x2, 0x0) == 0);   /* no mask */
+    CHECK(CoXlTestLwHostileRule(1, 1, 0, 0x6, 0x4) == 1);   /* every avatar an enemy */
+    CHECK(CoXlTestLwHostileRule(1, 0, 0, 0x6, 0x4) == 0);   /* ... but the target is not an avatar */
 }
 
 int main(void)
