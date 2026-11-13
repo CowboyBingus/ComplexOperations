@@ -361,6 +361,22 @@ static void Anchor(uint32_t registry, uint32_t kind, uint32_t frame)
     memcpy(g_fake.image + widget + 148, &x, 4); memcpy(g_fake.image + widget + 156, &y, 4);
 }
 
+/* The war table's planet header (PROOFS.md W-5): its title and faction line, plain texts at x 132 units, `title` units
+ * wide; `type` 7 is a plain text. */
+static void Header(double title, uint32_t type, float opacity)
+{
+    const double widths[2] = {title, 250};
+    for (int i = 0; i < 2; i++)
+    {
+        const uint32_t text = OWNER + (i ? 0x36B98u : 0x36630u);
+        const float w = (float)widths[i], s = 2.0f / 3.0f, x = 88.0f, y = 640.0f - 30.0f * i;
+        Put(text, type << 18 | 0x10u, 4);
+        memcpy(g_fake.image + text + 36, &w, 4); memcpy(g_fake.image + text + 84, &opacity, 4);
+        memcpy(g_fake.image + text + 100, &s, 4); memcpy(g_fake.image + text + 140, &s, 4);
+        memcpy(g_fake.image + text + 148, &x, 4); memcpy(g_fake.image + text + 156, &y, 4);
+    }
+}
+
 static uintptr_t Scene(const char* name)
 {
     const uintptr_t game = Start(name);
@@ -369,6 +385,7 @@ static uintptr_t Scene(const char* name)
     Put(0x3772268u, FONT_HASH, 8); Put(0x37C5478u, Ptr(0x3700000u), 8); Put(0x3700000u + 24u, MATERIAL_HASH, 8); Put(0x3772EE8u, ATLAS_HASH, 8);
     Anchor(25224u, 226u, 349072u);
     Anchor(25272u, 229u, 31232u);
+    Header(270, 7, 1); /* AURORA BAY: x 132..402 units */
     g_fake.originals[0].target = (uintptr_t)GetProcAddress(g_lua51, "lua_pcall");
     g_fake.originals[0].original = (void*)GetProcAddress(g_lua51, "lua_pcall");
     g_fake.role = HF_SESSION_HOST;
@@ -428,7 +445,7 @@ static void Banner(void)
     CHECK_LUA(L, "local g = E.created[1] if g.items[7].t ~= 'COMPLEX OPERATION' or g.items[8].t ~= '3 MISSIONS ON ONE 16 KM MAP' then return 'texts' end");
     CHECK_LUA(L, "if E.atlas ~= 'id:9999aaaabbbbcccc' or E.material ~= 'id:5555666677778888' then return 'the native font material' end");
     for (int i = 0; i < CO_TAG_SETTLE; i++) Frame(L);
-    CHECK(fake_host_logged("war-table tag: map, operation 7: complex, banner x 399.3 y 612.0 w 355.3 h 47.9 (beside the panel; panel x 36.0 y 360.4 w 355.3 h 247.6, scale 0.6667)"));
+    CHECK(fake_host_logged("war-table tag: map, operation 7: complex, banner x 399.3 y 612.0 w 286.7 h 37.3 (beside the panel; panel x 36.0 y 360.4 w 355.3 h 247.6, scale 0.6667; planet header to x 272.0)"));
 
     g_case = "W-T3 an unchanged frame makes no Gui call";
     const double calls = Calls(L);
@@ -463,6 +480,28 @@ static void Banner(void)
     Frame(L);
     Drawn(L, CO_TAG_STANDARD, CO_TAG_WHY_NONE, 1);
     g_fake.rowBytes = 0;
+
+    g_case = "W-T3 a long planet name: the second column (A-3)";
+    Header(780, 7, 1); /* EAST IRIDIUM TRADING BAY: to x 912 units, 608 px */
+    Frame(L);
+    const CoTagShown* shown = co_tag_test_shown();
+    CHECK(shown->visible && shown->place == CO_TAG_PLACE_COLUMN && fabs(shown->box.x - (36 + 2 * (355.3333333 + 8))) < 0.01);
+    CHECK(shown->box.x >= 88 + 780 * 2.0 / 3 + 4 - 1e-6);
+    for (int i = 0; i < CO_TAG_SETTLE; i++) Frame(L);
+    CHECK(fake_host_logged("w 286.7 h 37.3 (second column; panel x 36.0 y 360.4 w 355.3 h 247.6, scale 0.6667; planet header to x 612.0)"));
+    g_case = "W-T3 a hidden planet header does not count";
+    Header(780, 7, 0);
+    Frame(L);
+    CHECK(co_tag_test_shown()->visible && co_tag_test_shown()->place == CO_TAG_PLACE_BESIDE);
+    g_case = "W-T3 an unreadable planet header: the second column";
+    Header(270, 0, 1);
+    Frame(L);
+    CHECK(co_tag_test_shown()->visible && co_tag_test_shown()->place == CO_TAG_PLACE_COLUMN);
+    for (int i = 0; i < CO_TAG_SETTLE; i++) Frame(L);
+    CHECK(fake_host_logged("scale 0.6667; planet header unread)"));
+    Header(270, 7, 1);
+    Frame(L);
+    CHECK(co_tag_test_shown()->place == CO_TAG_PLACE_BESIDE);
 
     g_case = "W-T3 another level: nothing shows";
     Put(WAR + 0x17A2A0u, 8, 4);
@@ -549,9 +588,27 @@ static int Apart(double ax, double ay, double aw, double ah, const CoTagBox* b)
     return b->x >= ax + aw || b->x + b->w <= ax || b->y >= ay + ah || b->y + b->h <= ay;
 }
 
+/* A native element measured on the 1280x720 shots (PROOFS.md W-5), in units: x from the 16:9 area's left, y down from
+ * the screen's top. */
+typedef struct Native { const char* name; double x0, y0, x1, y1; int screen; } Native;
+static const Native kNative[] = {
+    {"the chat field", 780, 0, 1136, 54, 3},
+    {"the top bar's buttons", 1152, 0, 1920, 61.5, 3},
+    {"the planet title", 54, 0, 402, 97.5, 1},
+    {"the planet title", 54, 0, 402, 67.5, 2},
+    {"the briefing tab", 126, 93, 313.5, 154.5, 2},
+};
+
+/* At least `gap` between the box and the element, with the element anchored at `left` pixels. */
+static int Clear(const Native* n, double left, double H, double s, double gap, const CoTagBox* b)
+{
+    const double x = left + n->x0 * s, y = H - n->y1 * s;
+    return Apart(x - gap * s, y - gap * s, (n->x1 - n->x0 + 2 * gap) * s, (n->y1 - n->y0 + 2 * gap) * s, b);
+}
+
 static void Places(void)
 {
-    static const double kSizes[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {2560, 1080}, {3440, 1440}};
+    static const double kSizes[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3840, 2160}, {2560, 1080}, {3440, 1440}};
     g_case = "W-5 the place";
     int beside = 0, column = 0;
     for (size_t r = 0; r < sizeof kSizes / sizeof kSizes[0]; r++)
@@ -567,37 +624,95 @@ static void Places(void)
                 if (place == CO_TAG_PLACE_NONE) continue;
                 beside += place == CO_TAG_PLACE_BESIDE;
                 column += place == CO_TAG_PLACE_COLUMN;
-                CHECK(place != CO_TAG_PLACE_BESIDE || below >= CO_TAG_HEIGHT + CO_TAG_RAISE + CO_TAG_SIDE - 1e-9);
+                CHECK(place != CO_TAG_PLACE_BESIDE || below >= CO_TAG_HEIGHT + CO_TAG_RAISE + CO_TAG_ROOF - 1e-9);
                 CHECK(b.x >= 0 && b.y >= 0 && b.x + b.w <= W && b.y + b.h <= H);
+                CHECK(b.y + b.h <= H - CO_TAG_ROOF * s + 1e-9);                                 /* under the top bar */
                 CHECK(Apart(a.x, a.y, a.w, a.h, &b));                                           /* the native panel */
                 CHECK(Apart(a.x, 0, a.w, a.y + 3 * s, &b));                                     /* KYC below it, any height */
                 const double side = a.x + a.w + 12 * s + a.w <= W - 12 * s ? a.x + a.w + 12 * s : a.x - a.w - 12 * s;
                 const double top = fmin(H - 12 * s, a.y + a.h);
                 CHECK(Apart(side, 0, a.w, top, &b));                                            /* KYC beside it, any height */
-                CHECK(fabs(b.w - a.w) < 1e-9 && fabs(b.h - CO_TAG_HEIGHT * s) < 1e-9);
+                CHECK(fabs(b.w - CO_TAG_WIDTH * s) < 1e-9 && fabs(b.h - CO_TAG_HEIGHT * s) < 1e-9);
             }
     CHECK(beside > 0 && column > 0);
-    /* the measured panels: the briefing 168 units below the top, the war table's operation panel 132 */
+
+    /* The measured panels: the war table's operation panel 132 units below the top and 371 tall, the briefing's 168 and
+     * 193. The banner sits against the panel, 6 units clear of every native element whichever way the 21:9 screens
+     * anchor them: inside the 16:9 area, or at the screen's own edge on their side. */
+    g_case = "W-5 clear of the native elements";
     for (size_t r = 0; r < sizeof kSizes / sizeof kSizes[0]; r++)
-        for (int k = 0; k < 2; k++)
+        for (int screen = 1; screen <= 2; screen++)
         {
-            const double W = kSizes[r][0], H = kSizes[r][1], s = fmin(W / 1920, H / 1080), below = k ? 132 : 168;
-            const CoTagAnchor a = {(W - fmin(W, H * 16 / 9)) / 2 + 54 * s, H - below * s - 300 * s, 533 * s, 300 * s, s, 1, 1, 1};
+            const double W = kSizes[r][0], H = kSizes[r][1], s = fmin(W / 1920, H / 1080), area = (W - fmin(W, H * 16 / 9)) / 2;
+            const double below = screen == 1 ? 132 : 168, tall = screen == 1 ? 371 : 193;
+            const CoTagAnchor a = {area + 54 * s, H - below * s - tall * s, 533 * s, tall * s, s, 1, 1, 1};
             CoTagBox b;
             CHECK(co_tag_place(&a, W, H, &b) == CO_TAG_PLACE_BESIDE);
+            CHECK(fabs(b.x - (a.x + a.w + CO_TAG_SIDE * s)) < 1e-9 && fabs(b.y - (a.y + a.h + CO_TAG_RAISE * s)) < 1e-9);
+            for (size_t n = 0; n < sizeof kNative / sizeof kNative[0]; n++)
+            {
+                if (!(kNative[n].screen & screen)) continue;
+                const double edge = kNative[n].x0 < 960 ? 0 : W - 1920 * s; /* the screen's edge on the element's side */
+                CHECK(Clear(&kNative[n], area, H, s, 6, &b));
+                CHECK(Clear(&kNative[n], edge, H, s, 6, &b));
+            }
         }
+
+    /* A-3: the war table's planet title starts 132 units from the 16:9 area's left (or the screen's) and shares the
+     * banner's rows. Up to 461 units wide it leaves the banner's place as it is; wider, or unread, the second column. */
+    g_case = "W-5 a long planet title";
+    static const double kTitles[] = {270, 461, 461.5, 780, 1000};
+    for (size_t r = 0; r < sizeof kSizes / sizeof kSizes[0]; r++)
+        for (size_t n = 0; n < sizeof kTitles / sizeof kTitles[0]; n++)
+            for (int edge = 0; edge < 2; edge++)
+            {
+                const double W = kSizes[r][0], H = kSizes[r][1], s = fmin(W / 1920, H / 1080), area = (W - fmin(W, H * 16 / 9)) / 2;
+                const double left = edge ? 0 : area, right = left + (132 + kTitles[n]) * s;
+                CoTagAnchor a = {area + 54 * s, H - 132 * s - 371 * s, 533 * s, 371 * s, s, 1, 1, 1, 0};
+                CoTagBox plain, b;
+                CHECK(co_tag_place(&a, W, H, &plain) == CO_TAG_PLACE_BESIDE);
+                a.reach = right + CO_TAG_CLEAR * s;
+                const int place = co_tag_place(&a, W, H, &b);
+                const int fits = area + 599 * s >= a.reach - 1e-9;
+                CHECK(place == (fits ? CO_TAG_PLACE_BESIDE : CO_TAG_PLACE_COLUMN));
+                CHECK(!fits || memcmp(&plain, &b, sizeof b) == 0);   /* AURORA BAY keeps today's rectangle */
+                CHECK(b.x >= right + 6 * s - 1e-9 && b.y + b.h <= H - CO_TAG_ROOF * s + 1e-9);
+                for (size_t e = 0; e < sizeof kNative / sizeof kNative[0]; e++)
+                    if (kNative[e].screen & 1) CHECK(Clear(&kNative[e], area, H, s, 6, &b));
+                CHECK(Apart(a.x, a.y, a.w, a.h, &b) && Apart(a.x + a.w + 12 * s, 0, a.w, a.y + a.h, &b));
+                CHECK(edge || n != 0 || place == CO_TAG_PLACE_BESIDE);
+                CHECK(n < 2 || edge || place == CO_TAG_PLACE_COLUMN);
+            }
+    for (size_t r = 0; r < sizeof kSizes / sizeof kSizes[0]; r++)
+    {
+        const double W = kSizes[r][0], H = kSizes[r][1], s = fmin(W / 1920, H / 1080), area = (W - fmin(W, H * 16 / 9)) / 2;
+        const CoTagAnchor a = {area + 54 * s, H - 132 * s - 371 * s, 533 * s, 371 * s, s, 1, 1, 1, -1};
+        CoTagBox b;
+        CHECK(co_tag_place(&a, W, H, &b) == CO_TAG_PLACE_COLUMN);
+    }
+
+    /* PROOFS.md W-5: the native panel's body text has 8-pixel capitals at 1280x720 and its title 10; this font's capitals
+     * are 0.58 of the text size (both measured). Each text fits its line at 0.6 of its size a glyph (0.57 measured). */
     g_case = "W-5 the texts";
+    CHECK(0.58 * CO_TAG_CAPTION * 720 / 1080 >= 8 && 0.58 * CO_TAG_TITLE * 720 / 1080 >= 10);
     CHECK(strcmp(co_tag_caption(CO_TAG_COMPLEX, 0), "3 MISSIONS ON ONE 16 KM MAP") == 0);
     static const int kStates[] = {CO_TAG_COMPLEX, CO_TAG_STANDARD, CO_TAG_OFF, CO_TAG_WAITING, CO_TAG_CLEARED};
     for (size_t i = 0; i < sizeof kStates / sizeof kStates[0]; i++)
         for (int why = 0; why < 4; why++)
         {
             const char* texts[2] = {co_tag_title(kStates[i]), co_tag_caption(kStates[i], why)};
-            /* a glyph at most one text size wide still leaves the side padding free */
-            CHECK(strlen(texts[0]) * CO_TAG_TITLE <= 533 - 2 * CO_TAG_PAD && strlen(texts[1]) * CO_TAG_CAPTION <= 533 - 2 * CO_TAG_PAD);
+            const double room = CO_TAG_WIDTH - 2 * CO_TAG_PAD;
+            CHECK(strlen(texts[0]) * 0.6 * CO_TAG_TITLE <= room && strlen(texts[1]) * 0.6 * CO_TAG_CAPTION <= room);
             for (int t = 0; t < 2; t++)
                 for (const char* c = texts[t]; *c; c++) CHECK((*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == ' ');
         }
+    /* the line's ink inside the body: the title's capitals under its top inset, the caption's baseline over its bottom */
+    CoTagPlan plan;
+    const CoTagBox box = {0, 0, CO_TAG_WIDTH, CO_TAG_HEIGHT};
+    co_tag_plan(CO_TAG_COMPLEX, 0, &box, 1, &plan);
+    CHECK(plan.text[0].y + 0.58 * CO_TAG_TITLE <= CO_TAG_HEIGHT - CO_TAG_BORDER - CO_TAG_INSET + 1e-9);
+    CHECK(plan.text[1].y + 0.58 * CO_TAG_CAPTION <= plan.text[0].y - CO_TAG_GAP + 1e-9);
+    CHECK(plan.text[1].y >= CO_TAG_BORDER + CO_TAG_INSET - 1e-9);
 }
 
 int main(void)

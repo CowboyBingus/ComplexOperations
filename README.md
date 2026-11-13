@@ -316,7 +316,8 @@ the game's body font and its panel inks.
   host's briefing shows `STARTS AS STANDARD`.
 - Until this PC's check of the part settles, no banner shows.
 - Other levels and other screens get no banner.
-- The banner goes right of the panel, above its top line, or one column further right when that does not fit.
+- The banner goes right of the panel, above its top line and under the top bar. It goes one column further right when
+  that does not fit, or when the war table's planet name is long enough to come within 6 units of it.
   Know Your Constellation's box never reaches either place.
 
 ### On every level
@@ -727,6 +728,7 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `navigation: ...; normal levels build the whole 32 x 32 grid` | The engine's bytes are not the reviewed ones: the two tile stubs are off. |
 | `difficulty: extra large maps: destroy of a live unit held until the world's destroy list had room (N so far)` | On a complex mission the game's destroy list was full; the destroy waits a frame. Logged at counts 1, 2, 4 and so on. |
 | `war-table tag: map, operation N: complex, banner x ...` | The banner for that state; also `briefing, operation N`. |
+| `...; planet header to x X)` | On the war table: how far right the planet name reaches, plus 6 units; `unread` takes the second column. |
 | `war-table tag: map, operation N: not level 11, no banner` | That operation is another level. |
 | `war-table tag: no banner until this PC's check of the complex part has settled` | Once, while the part's check runs. |
 | `war-table tag: removed (the screen changed; N unbalanced frames)` | The banner's GUI is gone. N above 0 means the Lua stack was not left as found. |

@@ -25,6 +25,8 @@
 #define BRIEFING_KIND 229u
 #define MAP_FRAME 349072u       /* the owner's operation frame; the briefing owner's description frame */
 #define BRIEFING_FRAME 31232u
+#define MAP_TITLE 0x36630u      /* the owner's planet header 0x36520 (0x17A9820): its title +0x110, its faction line */
+#define MAP_LINE 0x36B98u       /* +0x678, both plain texts that size to their text (0x17ABC70, PROOFS.md W-5) */
 #define FONT 0x3772268u         /* the active locale's body face; its normal material's hash at [0x37C5478] + 24; its atlas */
 #define MATERIAL 0x37C5478u
 #define ATLAS 0x3772EE8u
@@ -38,7 +40,9 @@
 #define SELECTED_PLACEMENT 0x17A2A4u
 #define SELECTED_DIFFICULTY 0x17A2A8u
 
-/* The game's own readers of what the tag reads, as build 25480438 has them (PROOFS.md W-1). */
+/* The game's own readers of what the tag reads, as build 25480438 has them (PROOFS.md W-1), and the planet header's
+ * build (W-5): the map's fill of owner+0x36520, its title and faction line labels and plain-text inits, and the
+ * plain text's size-to-text branch. */
 static const struct { uint32_t rva; uint8_t size; uint8_t bytes[48]; } kPins[] = {
     {0x12D0CD0u, 34, {0x8B, 0x81, 0xA0, 0xA2, 0x17, 0x00, 0x83, 0xF8, 0x6E, 0x73, 0x14, 0x48, 0x6B, 0xD0, 0x5C, 0x48, 0x8D, 0x81,
         0x80, 0x72, 0x0F, 0x00, 0x48, 0x03, 0xC2, 0x80, 0x78, 0x34, 0x00, 0x75, 0x02, 0x33, 0xC0, 0xC3}},
@@ -50,6 +54,15 @@ static const struct { uint32_t rva; uint8_t size; uint8_t bytes[48]; } kPins[] =
     {0xADF3A0u, 48, {0x48, 0x8B, 0x0D, 0x81, 0xDA, 0x99, 0x02, 0x48, 0x81, 0xC1, 0x88, 0x42, 0x00, 0x00, 0x8B, 0x41, 0x28, 0x83,
         0xE8, 0x01, 0x48, 0x98, 0x78, 0x17, 0x48, 0x8D, 0x0C, 0x81, 0x48, 0x83, 0xC1, 0x14, 0x83, 0x39, 0x0E, 0x74, 0x0A, 0x48,
         0x83, 0xE9, 0x04, 0x48, 0x83, 0xE8, 0x01, 0x79, 0xF1, 0xC3}},
+    {0x14834DEu, 18, {0x48, 0x8D, 0x8F, 0x20, 0x65, 0x03, 0x00, 0x66, 0x0F, 0x7F, 0x4C, 0x24, 0x50, 0xE8, 0x80, 0x87, 0x32, 0x00}},
+    {0x17ABD62u, 17, {0x49, 0x8D, 0xB6, 0x10, 0x01, 0x00, 0x00, 0x8B, 0xD3, 0x48, 0x8B, 0xCE, 0xE8, 0x1D, 0x02, 0xC9, 0xFF}},
+    {0x17ABE1Eu, 17, {0x49, 0x8D, 0x9E, 0x78, 0x06, 0x00, 0x00, 0x8B, 0xD7, 0x48, 0x8B, 0xCB, 0xE8, 0x61, 0x01, 0xC9, 0xFF}},
+    {0x17A9941u, 22, {0x48, 0x8D, 0x9F, 0x10, 0x01, 0x00, 0x00, 0x48, 0x89, 0x87, 0x08, 0x01, 0x00, 0x00, 0x48, 0x8B, 0xCB, 0xE8,
+        0x49, 0x16, 0xC9, 0xFF}},
+    {0x17A9B80u, 15, {0x48, 0x8D, 0x9F, 0x78, 0x06, 0x00, 0x00, 0x48, 0x8B, 0xCB, 0xE8, 0x11, 0x14, 0xC9, 0xFF}},
+    {0x143AFA6u, 5, {0xBA, 0x07, 0x00, 0x00, 0x00}},
+    {0x143BB66u, 37, {0x0F, 0xB6, 0xB9, 0xA0, 0x02, 0x00, 0x00, 0x48, 0x89, 0x84, 0x24, 0xB0, 0x00, 0x00, 0x00, 0x8B, 0x81, 0x7C,
+        0x02, 0x00, 0x00, 0x89, 0x81, 0x80, 0x02, 0x00, 0x00, 0x40, 0x80, 0xE7, 0x18, 0x0F, 0x85, 0xB1, 0x00, 0x00, 0x00}},
 };
 
 /* ---- the state ---------------------------------------------------------------------------------------------------- */
@@ -148,14 +161,16 @@ int co_tag_board_mark(uintptr_t war, uint32_t index, int* marked)
 
 int co_tag_place(const CoTagAnchor* a, double width, double height, CoTagBox* out)
 {
-    const double s = a->scale, h = CO_TAG_HEIGHT * s, side = CO_TAG_SIDE * s;
-    /* right of the panel, above its top line: no place Know Your Constellation's box can take reaches up there */
-    *out = (CoTagBox){a->x + a->w + side, a->y + a->h + CO_TAG_RAISE * s, a->w, h};
-    if (out->x + out->w <= width - side && out->y + out->h <= height - side) return CO_TAG_PLACE_BESIDE;
+    const double s = a->scale, w = CO_TAG_WIDTH * s, h = CO_TAG_HEIGHT * s, side = CO_TAG_SIDE * s;
+    const double roof = height - CO_TAG_ROOF * s; /* below the whole top bar, wherever its parts sit across the screen */
+    /* right of the panel, above its top line: no place Know Your Constellation's box can take reaches up there; past
+     * the planet header, which shares these rows on the war table */
+    *out = (CoTagBox){a->x + a->w + side, a->y + a->h + CO_TAG_RAISE * s, w, h};
+    if (a->reach >= 0 && out->x >= a->reach && out->x + out->w <= width - side && out->y + out->h <= roof) return CO_TAG_PLACE_BESIDE;
     /* else past the column Know Your Constellation's box takes beside the panel, level with the panel's top */
-    const double top = height - side < a->y + a->h ? height - side : a->y + a->h;
-    *out = (CoTagBox){a->x + 2 * (a->w + side), top - h > side ? top - h : side, a->w, h};
-    if (out->x + out->w <= width - side && out->y + out->h <= height - side) return CO_TAG_PLACE_COLUMN;
+    const double top = roof < a->y + a->h ? roof : a->y + a->h;
+    *out = (CoTagBox){a->x + 2 * (a->w + side), top - h > side ? top - h : side, w, h};
+    if (out->x >= a->reach && out->x + out->w <= width - side && out->y + out->h <= roof) return CO_TAG_PLACE_COLUMN;
     return CO_TAG_PLACE_NONE;
 }
 
@@ -198,7 +213,9 @@ const char* co_tag_caption(int state, int why)
 void co_tag_plan(int state, int why, const CoTagBox* b, double s, CoTagPlan* p)
 {
     const double i = CO_TAG_INSET * s, k = CO_TAG_BORDER * s, top = b->y + b->h, x = b->x + CO_TAG_PAD * s;
-    const double content = top - (CO_TAG_BORDER + CO_TAG_INSET + CO_TAG_EDGE) * s;
+    /* a text's y is its baseline; the texts are capitals only, so each line takes its cap height and no descent */
+    const double title = top - (CO_TAG_BORDER + CO_TAG_INSET + CO_TAG_CAP * CO_TAG_TITLE) * s;
+    const double caption = title - (CO_TAG_GAP + CO_TAG_CAP * CO_TAG_CAPTION) * s;
     const int loud = state == CO_TAG_COMPLEX;
     const CoTagColour edge = loud ? kYellow : kSlate;
     p->rect[0] = (CoTagRect){b->x, b->y, b->w, b->h, CO_TAG_LAYER_SHADE, kShade};
@@ -207,9 +224,8 @@ void co_tag_plan(int state, int why, const CoTagBox* b, double s, CoTagPlan* p)
     p->rect[3] = (CoTagRect){b->x, top - k, b->w, k, CO_TAG_LAYER_BORDER, edge};
     p->rect[4] = (CoTagRect){b->x, b->y, k, b->h, CO_TAG_LAYER_BORDER, edge};
     p->rect[5] = (CoTagRect){b->x + b->w - k, b->y, k, b->h, CO_TAG_LAYER_BORDER, edge};
-    /* baselines as Know Your Constellation's heading: the title one size below the content top, the caption 1.3 below */
-    p->text[0] = (CoTagText){co_tag_title(state), CO_TAG_TITLE * s, x, content - CO_TAG_TITLE * s, CO_TAG_LAYER_TEXT, loud ? kYellow : kLabel};
-    p->text[1] = (CoTagText){co_tag_caption(state, why), CO_TAG_CAPTION * s, x, content - (CO_TAG_TITLE * 1.3 + CO_TAG_CAPTION) * s,
+    p->text[0] = (CoTagText){co_tag_title(state), CO_TAG_TITLE * s, x, title, CO_TAG_LAYER_TEXT, loud ? kYellow : kLabel};
+    p->text[1] = (CoTagText){co_tag_caption(state, why), CO_TAG_CAPTION * s, x, caption,
         CO_TAG_LAYER_TEXT, loud ? kWhite : kGrey};
 }
 
@@ -259,6 +275,24 @@ static int Screen(void)
 static float F32(const uint8_t* b) { float v; memcpy(&v, b, 4); return v; }
 static int Out(double v) { return v != v || v < 0 || v > 32768; }
 
+/* How far right the war table's planet header reaches, plus the gap (CoTagAnchor.reach). Its title and faction line
+ * share the banner's rows and grow with the planet's name; a hidden one does not count. */
+static double Reach(uint64_t owner, double scale)
+{
+    static const uint32_t kTexts[] = {MAP_TITLE, MAP_LINE};
+    double reach = 0;
+    for (size_t i = 0; i < sizeof kTexts / sizeof kTexts[0]; i++)
+    {
+        uint8_t text[164];
+        if (g_coApi->read((uintptr_t)owner + kTexts[i], text, sizeof text) != 0 || ((U32(text) >> 18) & 0xFu) != 7) return -1;
+        const double opacity = F32(text + 84), sx = F32(text + 100), x = F32(text + 148), w = F32(text + 36);
+        if ((U32(text) & 0x10u) == 0 || !(opacity > 0.01)) continue;
+        if (Out(x) || Out(w) || !(sx - scale < 0.01 && scale - sx < 0.01)) return -1;
+        if (x + w * sx + CO_TAG_CLEAR * scale > reach) reach = x + w * sx + CO_TAG_CLEAR * scale;
+    }
+    return reach;
+}
+
 /* The native panel's solved rectangle (y up) while it is fully shown, and the body font: 1, or 0 not now. */
 static int Anchor(int screen, CoTagAnchor* a)
 {
@@ -274,9 +308,10 @@ static int Anchor(int screen, CoTagAnchor* a)
     if (g_coApi->read((uintptr_t)owner + (screen == CO_TAG_SCREEN_MAP ? MAP_FRAME : BRIEFING_FRAME), widget, sizeof widget) != 0) return 0;
     const double opacity = F32(widget + 84), sx = F32(widget + 100), sy = F32(widget + 140);
     if ((U32(widget) & 0x10u) == 0 || !(opacity >= 0.995 && opacity <= 1.01)) return 0;
-    *a = (CoTagAnchor){F32(widget + 148), F32(widget + 156), F32(widget + 36) * sx, F32(widget + 40) * sy, sx, 0, 0, 0};
+    *a = (CoTagAnchor){F32(widget + 148), F32(widget + 156), F32(widget + 36) * sx, F32(widget + 40) * sy, sx, 0, 0, 0, 0};
     if (Out(a->x) || Out(a->y) || Out(a->w) || Out(a->h) || Out(sx) || sx < 0.3 || sx > 4 || (sx - sy > 0.01 || sy - sx > 0.01) || a->w < 200 || a->h < 40)
         return 0;
+    if (screen == CO_TAG_SCREEN_MAP) a->reach = Reach(owner, sx);
     const uint64_t material = Pointer(t.game + MATERIAL);
     a->font = Pointer(t.game + FONT);
     a->atlas = Pointer(t.game + ATLAS);
@@ -376,9 +411,12 @@ static void Log(const Key* k, int drawn)
     const char* screen = k->screen == CO_TAG_SCREEN_MAP ? "map, operation" : "briefing, operation";
     if (k->state == CO_TAG_NONE) { co_log("war-table tag: %s %d: not level 11, no banner", screen, (int)k->index); return; }
     if (!drawn) { co_log("war-table tag: %s %d: %s%s, no place for the banner", screen, (int)k->index, kStates[k->state], kWhy[k->why]); return; }
-    co_log("war-table tag: %s %d: %s%s, banner x %.1f y %.1f w %.1f h %.1f (%s; panel x %.1f y %.1f w %.1f h %.1f, scale %.4f)",
+    char title[48] = "";
+    if (k->a.reach < 0) snprintf(title, sizeof title, "; planet header unread");
+    else if (k->a.reach > 0) snprintf(title, sizeof title, "; planet header to x %.1f", k->a.reach);
+    co_log("war-table tag: %s %d: %s%s, banner x %.1f y %.1f w %.1f h %.1f (%s; panel x %.1f y %.1f w %.1f h %.1f, scale %.4f%s)",
         screen, (int)k->index, kStates[k->state], kWhy[k->why], t.box.x, t.box.y, t.box.w, t.box.h,
-        t.place == CO_TAG_PLACE_BESIDE ? "beside the panel" : "second column", k->a.x, k->a.y, k->a.w, k->a.h, k->a.scale);
+        t.place == CO_TAG_PLACE_BESIDE ? "beside the panel" : "second column", k->a.x, k->a.y, k->a.w, k->a.h, k->a.scale, title);
 }
 
 /* The state of the highlighted operation or the picked mission into k: 1, or 0 when there is none to tell. */

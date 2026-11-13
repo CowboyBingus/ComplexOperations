@@ -31,22 +31,29 @@ int co_tag_board_mark(uintptr_t war, uint32_t index, int* marked);
  * 0 for anything else or when it cannot be read. The loadout cards' mode (co_cards.c) asks it. */
 int co_tag_picked_complex(void);
 
-/* Layout, in the native panel's UI units times its scale (y up, as the Gui draws). */
+/* Layout, in the native panel's UI units times its scale (y up, as the Gui draws). PROOFS.md W-5 measures the top bar
+ * and the native text sizes this keeps to. */
 #define CO_TAG_BORDER 3.0
-#define CO_TAG_INSET 7.0
-#define CO_TAG_EDGE 5.0
+#define CO_TAG_INSET 7.0   /* the dark body's inset; the ink keeps border + inset from the top and bottom edges */
 #define CO_TAG_PAD 22.0
 #define CO_TAG_SIDE 12.0   /* from the panel, and from the screen's edges: Know Your Constellation's side gap */
 #define CO_TAG_RAISE 6.0   /* above the panel's top line */
-#define CO_TAG_TITLE 18.0
-#define CO_TAG_CAPTION 13.0
-#define CO_TAG_HEIGHT (2 * (CO_TAG_BORDER + CO_TAG_INSET + CO_TAG_EDGE) + CO_TAG_TITLE * 1.3 + CO_TAG_CAPTION + CO_TAG_TITLE * 0.3)
+#define CO_TAG_CLEAR 6.0   /* from any native element beside the banner */
+#define CO_TAG_ROOF 67.5   /* from the screen's top: the top bar's chat field and buttons end 61.5 below it, plus 6 */
+#define CO_TAG_TITLE 28.0  /* capitals 10.8 px at 1280x720: the panel title's are 10 */
+#define CO_TAG_CAPTION 22.0 /* capitals 8.5 px at 1280x720: the panel body text's are 8 */
+#define CO_TAG_CAP 0.6     /* a capital's height over the text size: 0.58 measured, so the ink stays inside its share */
+#define CO_TAG_GAP 6.0
+#define CO_TAG_WIDTH 430.0 /* the longest caption at 0.6 of its size a glyph, plus the side padding */
+#define CO_TAG_HEIGHT (2 * (CO_TAG_BORDER + CO_TAG_INSET) + CO_TAG_CAP * (CO_TAG_TITLE + CO_TAG_CAPTION) + CO_TAG_GAP)
 #define CO_TAG_LAYER_SHADE 1011.0
 #define CO_TAG_LAYER_BODY 1012.0
 #define CO_TAG_LAYER_BORDER 1013.0
 #define CO_TAG_LAYER_TEXT 1014.0
 enum { CO_TAG_PLACE_NONE, CO_TAG_PLACE_BESIDE, CO_TAG_PLACE_COLUMN };
-typedef struct CoTagAnchor { double x, y, w, h, scale; uint64_t font, material, atlas; } CoTagAnchor;
+/* `reach`: on the war table, the x the planet header's texts reach plus the 6-unit gap, which the banner must start at
+ * or past; 0 nothing to keep clear of, below 0 the header could not be read (the second column then). */
+typedef struct CoTagAnchor { double x, y, w, h, scale; uint64_t font, material, atlas; double reach; } CoTagAnchor;
 typedef struct CoTagBox { double x, y, w, h; } CoTagBox;
 int co_tag_place(const CoTagAnchor* a, double width, double height, CoTagBox* out);
 
