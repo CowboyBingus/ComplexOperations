@@ -2566,6 +2566,7 @@ enum { LW_J_TEST, LW_J_FRAMES, LW_J_NOISE, LW_J_FIGHT, LW_J_TERRITORY, LW_J_RETA
 static uint64_t g_lwJobTicks[LW_J_COUNT];
 #define LW_TIMED(j, call) do { uint64_t t0_ = __builtin_ia32_rdtsc(); call; g_lwJobTicks[j] += __builtin_ia32_rdtsc() - t0_; } while (0)
 
+static void LwAggroProbe(void); /* living_world_aggro.c */
 static void LwTickScans(void)
 {
     LW_TIMED(LW_J_TEST, {
@@ -2582,7 +2583,7 @@ static void LwTickScans(void)
     LW_TIMED(LW_J_FIGHT, LwFightScan()); /* Phase 2b: fights and calls for help draw squads in (once a second) */
     LW_TIMED(LW_J_TERRITORY, LwTerritoryTick()); /* Phase 2d: regions, their strength, and the squads' homes */
     LW_TIMED(LW_J_RETAKE, LwRetakeScan()); /* Phase 2c: squads retake cleared plain garrisons (every 10 s) */
-    LW_TIMED(LW_J_TRACE, { LwIntentTrace(); if (LwTestTraceOn()) LwAggroTrace(); }); /* test runs only */
+    LW_TIMED(LW_J_TRACE, { LwIntentTrace(); if (LwTestTraceOn()) LwAggroTrace(); LwAggroProbe(); }); /* the probe: every build, bounded */
 }
 
 /* The budget: living members of online squads, the request of pending ones; the far ones' share is returned. */
@@ -4298,6 +4299,7 @@ static void LwLiveSet(int complex)
 }
 
 #include "living_world_intent.c" /* Phase 2: squad intents (investigate noise) */
+#include "living_world_aggro.c" /* calm enemies near a player, and what their eyes see of them, logged */
 #include "living_world_density.c" /* enemy density: a budget per player bubble (KB living-world-density-design) */
 #include "living_world_lod.c" /* data-only AI LOD for hidden, calm loader squads (KB living-world-density-design, C3) */
 #include "living_world_flat.c" /* test instrument: whole-frame sampling profile (KB xl-destruction-record-map-full) */

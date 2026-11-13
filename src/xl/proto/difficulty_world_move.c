@@ -653,6 +653,7 @@ static uint32_t MoveStampsReplace(int slot, const NearTile* gone, float cx, floa
 }
 
 static float MoveCoarseHere(uintptr_t data, float wx, float wy);
+static float MoveCoarseGround(float x, float y);
 /* After a raise: the ground query (0x13CA380, from z + 500 m down 1000 m) at a 4 x 4 grid inside the square against the
  * level's coarse rows: how many hit within 0.5 m (audit 1g, 9: lw87a / lw92a found no collision in a released square). */
 static void MoveRaiseCheck(float cx, float cy, int cellX, int cellY)
@@ -886,6 +887,12 @@ static float MoveDrawnGround(float x, float y, int* tile)
         if (g_tiles[k].live && g_tiles[k].level == g_world.levels && g_tiles[k].ground.v != NULL &&
             fabsf(x - g_tiles[k].centre[0]) < NEAR_HIDE / 2 && fabsf(y - g_tiles[k].centre[1]) < NEAR_HIDE / 2)
         { *tile = k; return NearGroundAt(&g_tiles[k].ground, x, y); }
+    return MoveCoarseGround(x, y);
+}
+/* The level's coarse rows (lg+0xD8) at a point, under a live tile too: the coarse collision's height where it is not
+ * lowered; -9999 when it does not read. */
+static float MoveCoarseGround(float x, float y)
+{
     uintptr_t gen = 0, coarse = 0; uint32_t dims[3] = {0};
     if (g_worldLevel == 0 || SafeRead(g_worldLevel + 0x2C8, &gen, 8) || gen == 0 || SafeRead(gen + 0x8758A8u + 0xD8, dims, 12) || dims[0] != 4096 ||
         dims[1] != 4096 || NearTexelBytes(dims[2]) != 2 || SafeRead(gen + 0x8758A8u + 0xD8 + 0x10, &coarse, 8) || coarse == 0) return -9999.0f;
