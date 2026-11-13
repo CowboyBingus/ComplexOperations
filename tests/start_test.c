@@ -102,7 +102,7 @@ static void Start(const char* name)
 static int Untouched(void) { return g_fake.writes == 0 && g_fake.hookCount == 0; }
 static int InGame(uintptr_t at) { return at >= (uintptr_t)g_fake.image && at < (uintptr_t)g_fake.image + FAKE_IMAGE_SIZE; }
 static void SceneNotReviewed(void) { g_fake.noMatchExe[0] = FAKE_RENDER_SCENE; }
-static void FirstJumpRefused(void) { g_fake.failWriteAt = 16; } /* after the room's 16 writes: the scene jump */
+static void FirstJumpRefused(void) { g_fake.failWriteAt = 18; } /* after the room's 18 writes: the scene jump */
 
 int main(void)
 {
@@ -113,13 +113,15 @@ int main(void)
     /* the part is on, with no line, and nothing has gone in before its start (the last case below) */
     CHECK(CO_COMPLEX_COMPLETE == 1 && co_complex_on() && Untouched());
     CHECK(Lines("complex operations are off") == 0 && co_complex_rolls(1, co_complex_on(), CO_HOST_ROW_NONE));
-    /* the main world's pools went in after the engine's room (its 16 writes, all in game.dll) and before the setup */
+    /* the main world's pools went in after the engine's room (its 18 writes: the forest's 2 in the exe, the rest in
+     * game.dll) and before the setup */
     CHECK(co_capacity_needs()->early && co_capacity_needs()->render && strstr(g_loadLog, "render capacity: the main world (capacity 0x200000) is made at 2x") != NULL);
     CHECK(strstr(g_loadLog, "is made at 2x") < strstr(g_loadLog, "the engine has room for a world"));
     CHECK(g_fake.exe[FAKE_RENDER_CAP] == 0xE9 && g_fake.exe[FAKE_RENDER_POOL0] == 0xE9 && g_fake.exe[FAKE_RENDER_SCENE] == 0xE9);
-    CHECK(g_loadWroteCount >= 19 && g_loadWrote[16] == (uintptr_t)g_fake.exe + FAKE_RENDER_SCENE &&
-        g_loadWrote[17] == (uintptr_t)g_fake.exe + FAKE_RENDER_POOL0 && g_loadWrote[18] == (uintptr_t)g_fake.exe + FAKE_RENDER_CAP);
-    for (int i = 0; i < 16; i++) CHECK(InGame(g_loadWrote[i]));
+    CHECK(g_loadWroteCount >= 21 && g_loadWrote[18] == (uintptr_t)g_fake.exe + FAKE_RENDER_SCENE &&
+        g_loadWrote[19] == (uintptr_t)g_fake.exe + FAKE_RENDER_POOL0 && g_loadWrote[20] == (uintptr_t)g_fake.exe + FAKE_RENDER_CAP);
+    for (int i = 0; i < 18; i++) CHECK(InGame(g_loadWrote[i]) == (i != 10 && i != 11));
+    CHECK(g_loadWrote[10] == (uintptr_t)g_fake.exe + 0x20ADA4u && g_loadWrote[11] == (uintptr_t)g_fake.exe + 0x20AE22u);
 
     /* A check that refuses comes before any write: the engine's room, the navigation and the exe stay the game's. */
     g_worldMade = 1;

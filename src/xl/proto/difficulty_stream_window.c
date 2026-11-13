@@ -340,8 +340,9 @@ static void WindowScanFarLocked(uint32_t bodies, uint32_t slots, int treesOver)
         }
 }
 
-/* Every tree takes a slot of the forest's grid (98304, fixed in the exe; co_forest.h). It fills long before the bodies'
- * or the cutters' shares when a player moves far at once (a respawn) while the old stamps are still in. */
+/* Every tree takes a slot of the forest's grid (co_forest.h). With the early room (524288) the bodies' shares should
+ * hold first (8-15 trees a stamp to about 24 bodies); at the game's 98304 a respawn's long move, with the old stamps
+ * still in, reaches these first. */
 static int WindowTreesOver(float share)
 {
     uint32_t trees = 0, room = 0;

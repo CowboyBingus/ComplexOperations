@@ -11,6 +11,7 @@
 #include "co_early_sites.h"
 #include "xl/co_nav.h"
 #include "xl/co_nav_sites.h"
+#include "xl/co_forest.h"
 
 void co_capacity_test_commit(uint32_t mb);
 void co_early_test_reset(void);
@@ -92,6 +93,31 @@ static void CutFree(uint32_t h)
     g_cut.head = ((g_cut.head + g_cut.live) & ~g_cut.mask) | index;
 }
 
+/* The forest grid (exe 0x7ACE50 sizes the block, 0x7AD1D0 lays it out; KB xl-forest-grid-full-crash): `sized` and
+ * `laid` are the rooms the two sites hand them. The block: 8 B a bit word (ceil(room/64)) for each of 256 + 256 rows and
+ * columns of 8 m over 2048 m, 4 B a slot, 7 to align, all in u32 (0x7ACF3E..0x7ACF83). The layout: 4 B a slot, then
+ * the words for 128 + 128 rows and columns of 16 m over -1024..1024. Its free list chains slots 1..laid-1 (0x7AD3D0;
+ * the head starts at 1), so laid - 1 trees fit. Its key is the cell box, four 7-bit fields, over the slot (0x7AD778). */
+static uint64_t ForestBlock(uint32_t sized) { return 8ull * ((sized + 63ull) / 64u) * 512u + 4ull * sized + 7u; }
+static uint32_t ForestBlock32(uint32_t sized) { const uint32_t w = (uint32_t)((sized + 63ull) / 64u); return w * 512u * 8u + 4u * sized + 7u; }
+static uint64_t ForestLaid(uint32_t laid) { return 4ull * laid + 8ull * ((laid + 63ull) / 64u) * 256u; }
+static uint32_t ForestFits(uint32_t laid)
+{
+    uint32_t* next = malloc((size_t)laid * 4u), head = 1, n = 0;
+    if (next == NULL) return 0;
+    for (uint32_t i = 0; i + 1u < laid; i++) next[i] = i + 1u;
+    next[laid - 1u] = 0xFFFFFFFFu;
+    while (head != 0xFFFFFFFFu) { head = next[head]; n++; }
+    free(next);
+    return n;
+}
+static int ForestKeyFits(uint32_t laid) { uint32_t bits = 0; while (bits < 32 && (laid - 1u) >> bits) bits++; return bits + 4u * 7u <= 64u; }
+/* The trees an XL map wants at once (KB xl-forest-grid-full-crash; inferred from the crash's 98304 trees at no more
+ * than 11262 live stamps and 8-11 cutters a stamp): about 110000 with the window full, about 160000 while a respawn's
+ * new stamps come in before the old ones leave. The window's near (80 %) and far (70 %) shares must hold neither. */
+#define XL_TREES_WINDOW 110000u
+#define XL_TREES_RESPAWN 160000u
+
 /* A HellForge that granted the capacity at boot, and a machine with the memory. */
 static void Machine(void)
 {
@@ -144,6 +170,22 @@ int main(void)
     int32_t rel; memcpy(&rel, image + CO_EARLY_CELL_READ + 4, 4);
     CHECK(cell != NULL && *cell == 32.0f && game + CO_EARLY_CELL_READ + 8u + (intptr_t)rel == (uintptr_t)cell);
     CHECK(memcmp(image + CO_EARLY_CELL_READ, kCoEarlyCellRead, 4) == 0);
+    /* The forest grid: both of its room's sites in the exe, the size's first, and the block holds what the layout lays */
+    {
+        const uint8_t* x = g_fake.exe;
+        const uint32_t sized = U32(x + kCoEarlyForest[0].rva + kCoEarlyForest[0].at), laid = U32(x + kCoEarlyForest[1].rva + kCoEarlyForest[1].at);
+        CHECK(sized == CO_EARLY_FOREST_ROOM && laid == CO_EARLY_FOREST_ROOM && U32(kCoEarlyForest[1].stock + 4) == 0x18000u);
+        for (size_t i = 0; i < 2; i++)
+            CHECK(memcmp(x + kCoEarlyForest[i].rva, kCoEarlyForest[i].stock, kCoEarlyForest[i].at) == 0 &&
+                memcmp(x + kCoEarlyForestCalls[i].rva, kCoEarlyForestCalls[i].bytes, 5) == 0);
+        CHECK(g_fake.wroteCount > 11 && g_fake.wrote[10] == exe + 0x20ADA4u && g_fake.wrote[11] == exe + 0x20AE22u);
+        CHECK(ForestLaid(laid) <= ForestBlock(sized) && ForestBlock(sized) == ForestBlock32(sized) && ForestKeyFits(laid));
+        CHECK(laid & (laid - 1u) ? 0 : 1);
+        CHECK(ForestFits(laid) == laid - 1u && ForestFits(0x18000u) == 98303u);
+        CHECK(!co_forest_over(XL_TREES_RESPAWN, laid, 0.80f) && !co_forest_over(XL_TREES_WINDOW, laid, 0.70f));
+        CHECK(co_forest_over(XL_TREES_RESPAWN, 0x18000u, 0.80f)); /* the game's room: the crash's case */
+        CHECK(ForestBlock(laid) <= 40u * 1024u * 1024u); /* about 34 MiB a forest, against 6.4 */
+    }
     const int writes = g_fake.writes;
     CHECK(co_early_install(game, exe) == NULL && g_fake.writes == writes); /* once */
 
@@ -165,19 +207,39 @@ int main(void)
         memcpy(g_before, image + 0x400000u, sizeof g_before);
         CHECK(co_early_install((uintptr_t)image, (uintptr_t)g_fake.exe) != NULL && !co_early_in() && Unchanged() && g_fake.writes == 0);
     }
+    /* the forest's room sites and the calls they feed (exe) */
+    const uint32_t forestSites[] = {0x20ADA2u, 0x20ADA4u + 2u, 0x20AE1Eu + 1u, 0x20AE22u + 1u, 0x20ADC5u + 1u, 0x20AE39u + 2u};
+    for (size_t i = 0; i < sizeof forestSites / sizeof forestSites[0]; i++)
+    {
+        image = Reset("a forest site is not the one this was made for");
+        g_fake.exe[forestSites[i]] ^= 0x10;
+        uint8_t x[0x100];
+        memcpy(x, g_fake.exe + 0x20AD80u, sizeof x);
+        CHECK(co_early_install((uintptr_t)image, (uintptr_t)g_fake.exe) != NULL && !co_early_in() && Unchanged() && g_fake.writes == 0 &&
+            memcmp(x, g_fake.exe + 0x20AD80u, sizeof x) == 0);
+    }
     image = Reset("the engine's terrain build is another");
     g_fake.exe[CO_EARLY_TILE_READ + 5] ^= 1;
     CHECK(co_early_install((uintptr_t)image, (uintptr_t)g_fake.exe) != NULL && Unchanged());
     image = Reset("no engine");
     CHECK(co_early_install((uintptr_t)image, 0) != NULL && Unchanged());
 
-    /* 10 pools, the broadphase, 4 extents, the read: a write refused at any of them leaves every site as it was */
-    for (int fail = 0; fail < 16; fail++)
+    /* 10 pools, the forest's 2, the broadphase, 4 extents, the read: a write refused at any of them leaves every site as
+     * it was, and the forest's layout goes back before its size */
+    for (int fail = 0; fail < 18; fail++)
     {
         image = Reset("a write is refused");
+        uint8_t x[0x100];
+        memcpy(x, g_fake.exe + 0x20AD80u, sizeof x);
         g_fake.failWriteAt = fail;
-        CHECK(co_early_install((uintptr_t)image, (uintptr_t)g_fake.exe) != NULL && !co_early_in() && Unchanged());
+        CHECK(co_early_install((uintptr_t)image, (uintptr_t)g_fake.exe) != NULL && !co_early_in() && Unchanged() &&
+            memcmp(x, g_fake.exe + 0x20AD80u, sizeof x) == 0);
+        if (fail >= 12 && g_fake.wroteCount > fail + 2)
+            CHECK(g_fake.wrote[fail + 1] == (uintptr_t)g_fake.exe + 0x20AE22u && g_fake.wrote[fail + 2] == (uintptr_t)g_fake.exe + 0x20ADA4u);
     }
+    image = Reset("the eighteenth write is the last");
+    g_fake.failWriteAt = 18;
+    CHECK(co_early_install((uintptr_t)image, (uintptr_t)g_fake.exe) == NULL && co_early_in());
 
     /* What decides it as the game loads. */
     image = Reset("a machine that can");
