@@ -41,6 +41,8 @@
 #include "co_steer.h"
 #include "co_cutters.h"
 #include "co_forest.h"
+#include "co_podstart.h"
+#include "co_settle.h"
 #include "../co_watch.h"
 
 /* Six of the copied files' functions were called from loader code that did not come along (the watch thread, the
@@ -201,6 +203,8 @@ static const char* CoXlGuards(uintptr_t game)
     return NULL;
 }
 
+static float PodStartScale(void) { return co_pages_scale(CO_PAGES_LIVE); }
+
 /* Every install of the prototype, in the loader's order: what it did when game.dll was loaded, then the level
  * install's check and steps, then the tick. NULL, or why a step refused. The loader ran these at three different
  * moments; the mod runs them once level 11 is installed and the complex part is on. The world, the objective fill and
@@ -225,6 +229,8 @@ const char* CoXlInstall(uintptr_t game)
     /* refused, a forest instance made while the cutter pool was full still crashes the destroy (co_cutters.h) */
     if ((why = co_cutters_install(g_coApi->module_base("helldivers2.exe", NULL))) != NULL) Note("navmesh cutters: %s; a handle of 0 is not left out", why);
     else Note("navmesh cutters: the engine's destroy leaves out handles of 0 (a cutter not made while its pool was full)");
+    /* refused, a reinforcement pod still starts at the destroyer and crosses the map to its drop point */
+    if ((why = co_podstart_install(game, PodStartScale)) != NULL) Note("complex operations: hellpod start: %s", why);
     if ((why = InstallWorld(&d)) != NULL || (why = InstallWorldStreamStep(&d)) != NULL || (why = InstallMapHud(&d)) != NULL) return why;
     /* refused, the game's rule stays: every step on the map holds every main objective */
     if ((why = co_unlock_install(game, g_importantList)) != NULL) Note("complex operations: mission unlock: %s; every step holds every main", why);
