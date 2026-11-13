@@ -441,7 +441,7 @@ const char* co_unlock_install(uintptr_t game, uint32_t list)
     if ((why = SequentialSites(game, page)) != NULL) co_note("complex operations: mission unlock: %s; an ordered objective waits for every mission's earlier ones", why);
     /* the lines are a picture: without them the hologram keeps the game's lines and the unlock stands */
     if ((why = HologramCheck(game)) != NULL) co_note("complex operations: mission unlock: %s; the war table draws every step's lines", why);
-    else if (co_loader_hook("the war table's marker source (each marker's mission)", game + CO_UNLOCK_MARKERS, (void*)Markers, (void**)&g_unlock.markers) == 0 &&
+    else if (co_loader_hook("the war table's marker source (each marker's mission)", game + CO_UNLOCK_MARKERS, (void*)Markers, (void**)&g_unlock.markers) != 0 ||
         co_loader_hook("the war table's step lines (its own mission's mains)", game + CO_UNLOCK_LINES, (void*)Lines, (void**)&g_unlock.lines) != 0)
         co_note("complex operations: mission unlock: the war table draws every step's lines");
     return NULL;
