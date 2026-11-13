@@ -351,4 +351,22 @@ void CoXlTestMission(uintptr_t level, int complex)
     g_worldLevelLive = level; g_world.liveLevels = level != 0 ? g_world.levels : 0;
     CoXlTestLive(complex);
 }
+/* The engine's scatter update hook (proto/difficulty_world_diag.c) for `view` while record `record` (op `op`) runs:
+ * 1 when it called the engine's update, 0 when it left the view out. */
+static int g_scatterTestCalled;
+static void ScatterTestEngine(void* a, uint8_t* view, uint32_t c, uint8_t* layer, void* e, void* f, void* g, void* h) { g_scatterTestCalled = 1; }
+int CoXlTestScatterUpdate(LONG op, LONG record, uint8_t* view)
+{
+    g_genOp = op; g_genRecord = record; g_tdScatCameraPinned = 1;
+    g_tdScatterUpdate = ScatterTestEngine; g_scatterTestCalled = 0;
+    TdScatterUpdate(NULL, view, 0, NULL, NULL, NULL, NULL, NULL);
+    return g_scatterTestCalled;
+}
+/* The same with the op and record as the last dispatch, the ship or a level init left them. */
+int CoXlTestScatterUpdateAsIs(uint8_t* view)
+{
+    g_tdScatterUpdate = ScatterTestEngine; g_scatterTestCalled = 0;
+    TdScatterUpdate(NULL, view, 0, NULL, NULL, NULL, NULL, NULL);
+    return g_scatterTestCalled;
+}
 #endif

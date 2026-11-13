@@ -2658,6 +2658,10 @@ static void WorldSubregionNote(void)
 static void TerrainDiagBefore(uint64_t records, uint64_t index, uint32_t end, uint32_t* at, uint32_t* op);
 static void TerrainDiagInstall(uintptr_t game);
 static void ScatterBakeInstall(void); /* difficulty_world_diag.c */
+#ifdef CO_RESEARCH
+static void ScatterResearchNote(void); /* difficulty_world_diag.c: SpeedTree memory at each memory note */
+static void ScatterResearchLevel(void);
+#endif
 /* difficulty_world_terrain.c: the map at vanilla density, as tiles drawn into the level's merge */
 static void TerrainInstall(uintptr_t game);
 static int TerrainStep(uint64_t records, uint32_t end, uint32_t at, uint64_t context, uint64_t g, uint64_t h);
@@ -4202,6 +4206,9 @@ static void WorldMemoryNote(const char* where, uint32_t op, uint32_t record, int
             (unsigned long long)(m.ullAvailPhys >> 20));
     MemProfReport();
     WorldAllocNote(where);
+#ifdef CO_RESEARCH
+    ScatterResearchNote();
+#endif
 }
 
 static void WorldMemoryTick(void)
@@ -4940,7 +4947,12 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
     if (g_kfOn) { g_kfOn = 0; if (g_kfMismatch) Note("difficulty: objectives research: the KindFilter replay disagreed with the game %ld times of %ld", (long)g_kfMismatch, (long)g_kfCount); }
     {
         uint32_t now = 0xFFFFFFFFu, done = watch ? at : vanillaAt, doneOp = watch ? op : vanillaOp;
-        if ((watch || vanilla2B) && !SafeRead(index, &now, 4) && now != done) WorldMemoryNote("after", doneOp, done, 0);
+#ifdef CO_RESEARCH
+        const int force = doneOp == 0x0A || doneOp == 0x0B || doneOp == 0x4A || (doneOp >= 0x43 && doneOp <= 0x45); /* the scatter cut's ops, a note even when commit barely moves */
+#else
+        const int force = 0;
+#endif
+        if ((watch || vanilla2B) && !SafeRead(index, &now, 4) && now != done) WorldMemoryNote("after", doneOp, done, force);
     }
     if (matPatch) TerrainMatPatch(0);
     if (watch && op == 0x2B) TownsAfter(records, at, index, b, g, h, block); /* before TerrainStamps: it saves below[] */
@@ -5319,6 +5331,10 @@ static void WorldLevel(uintptr_t level, uintptr_t preview)
     LevelKindSet(level, complex);
     co_rows_level(complex); /* the distance row its passes read */
     WorldLevelForget();
+    g_genOp = -1; g_genRecord = -1; /* the last level's op, also when its generation was cut short: no scatter cut before this level's first op */
+#ifdef CO_RESEARCH
+    ScatterResearchLevel();
+#endif
     g_world.values->size = scale > 1.0f ? 2048.0f * scale : 0.0f;
     WorldWrite(scale, preview == 0);
     g_worldLevel = level;
@@ -5344,6 +5360,7 @@ static void WorldLevel(uintptr_t level, uintptr_t preview)
 static void WorldShip(void)
 {
     FpsLiftEnd("the ship");
+    g_genOp = -1; g_genRecord = -1; /* a generation cut short leaves its op: the scatter cut (difficulty_world_diag.c) ends with it */
     NearOneMipDrop();
     NearLevelLeft(1);
     if (co_pages_ship() & CO_PAGES_LIVE) { NetPositionRange(1.0f); InterlockedIncrement(&g_world.switches); }
@@ -6452,7 +6469,7 @@ static const char* InstallWorld(DifficultyInstall* d)
     if (overlap != NULL) Note("difficulty: extra large maps: the stamp overlap grid is not used: %s", overlap);
     const char* poisson = InstallWorldPoisson(game);
     if (poisson != NULL) Note("difficulty: extra large maps: the tiled Poisson-disk sampler is not used: %s", poisson);
-    ScatterBakeInstall(); /* difficulty_world_diag.c: the far-scatter bake's views without grass (op 0x4A) */
+    ScatterBakeInstall(); /* difficulty_world_diag.c: the bake's (op 0x4A) and water camera's (0x0A/0x0B) views without scatter */
     const char* spread = InstallSpreadSort(game);
     if (spread != NULL) Note("difficulty: extra large maps: %s", spread);
     const char* convoy = InstallConvoyGuard(game);
