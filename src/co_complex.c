@@ -57,11 +57,10 @@ int co_generation_decision(CoGeneration* g, uintptr_t level, uint32_t first_seed
 
 int co_complex_rolls(int is_host, int own_on, int host_row) { return is_host ? own_on != 0 : host_row == CO_HOST_ROW_ON; }
 
-/* The seed a mission entry keeps: other levels' as the game made it; level 11's with the decision. Only a host whose
- * complex part is on rolls; a client marks its own board the same way for its war table when the host's row says on. */
-/* The roll's chance. A research build (no package is made from one) takes HELLFORGE_CO_CHANCE, in 1/65536, so a test
- * can have every operation complex (65536) or none (0); only the host's roll counts, so one machine's switch suffices. */
-static uint32_t Chance(void)
+/* The others' chance beside each planet's guaranteed complex operation. A research build (no package is made from one)
+ * takes HELLFORGE_CO_CHANCE, in 1/65536: 65536 makes every level-11 operation complex, 0 only each planet's
+ * guaranteed one. Only the host's answer counts, so one machine's switch suffices. */
+uint32_t co_complex_chance(void)
 {
 #ifdef CO_RESEARCH
     static int read;
@@ -71,7 +70,7 @@ static uint32_t Chance(void)
     {
         const unsigned long v = strtoul(text, NULL, 10);
         chance = v > 65536ul ? 65536u : (uint32_t)v;
-        co_log("complex operations: research switch: the roll's chance is %u in 65536", chance);
+        co_log("complex operations: research switch: the roll's chance is %u in 65536 beside each planet's guaranteed one", chance);
     }
     return chance;
 #else
@@ -79,10 +78,11 @@ static uint32_t Chance(void)
 #endif
 }
 
-uint32_t co_complex_entry_seed(uint32_t mission_seed, uint32_t difficulty, uint32_t operation_seed, uint32_t planet, int rolls)
+/* The seed a mission entry keeps: other levels' as the game made it; level 11's with the decision. Only a host whose
+ * complex part is on rolls; a client marks its own board the same way for its war table when the host's row says on. */
+uint32_t co_complex_entry_seed(uint32_t mission_seed, uint32_t difficulty, int complex)
 {
-    if (difficulty != CO_COMPLEX_LEVEL) return mission_seed;
-    return co_seed_marked(mission_seed, rolls && co_complex_roll(operation_seed, planet, Chance()));
+    return difficulty != CO_COMPLEX_LEVEL ? mission_seed : co_seed_marked(mission_seed, complex);
 }
 
 int co_capability_read(const void* data, uint32_t bytes, uint64_t* peer)

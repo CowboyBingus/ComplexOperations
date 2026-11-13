@@ -133,13 +133,19 @@ const char* CoXlInstall(uintptr_t game);
 /* Whether an operation is a complex operation (co_roll.c): the same answer on every peer, from the operation record's
  * seed and planet. `chance_65536` is the chance in 1/65536; 65536 and above is always. */
 int co_complex_roll(uint32_t operation_seed, uint32_t planet, uint32_t chance_65536);
+/* A planet's level-11 operations (co_roll.c): the one that is complex for certain, and every operation's answer. Each
+ * is a board slot and the operation's seed; `complex` takes `count` answers. Returns the guaranteed one's index, or
+ * `count` when there is none. */
+typedef struct CoOperation { uint32_t slot, seed; } CoOperation;
+uint32_t co_pick_key(uint32_t board_seed, uint32_t planet, uint32_t slot);
+uint32_t co_planet_decide(const CoOperation* ops, uint32_t count, uint32_t board_seed, uint32_t planet, uint32_t chance_65536, uint8_t* complex);
 /* A level-11 mission's seed with the decision in it, and the decision read back (co_roll.c). */
 uint32_t co_seed_marked(uint32_t mission_seed, int complex);
 int co_seed_is_complex(uint32_t mission_seed);
 
 /* The complex part of the mod (co_complex.c): what it needs, and what a machine does with a level-11 mission. */
 #define CO_COMPLEX_LEVEL 11u
-#define CO_COMPLEX_CHANCE 16384u     /* in 1/65536: one level-11 operation in four */
+#define CO_COMPLEX_CHANCE 16384u     /* in 1/65536: each level-11 operation but a planet's guaranteed one */
 #define CO_COMPLEX_COMMIT_MB 28672u  /* commit an extra large map was measured to reach */
 #define CO_COMPLEX_MISSIONS 3u      /* an operation's missions, all on the one map */
 typedef struct CoComplexNeeds
@@ -161,7 +167,8 @@ int co_complex_stays(int own_on, int host_row);
  * the level) keeps the first init's answer; `first_seed` is the seed of the descriptor the generation began with. */
 typedef struct CoGeneration { uintptr_t level; uint32_t seed; int decision, held; } CoGeneration;
 int co_generation_decision(CoGeneration* g, uintptr_t level, uint32_t first_seed, int retry, uint32_t difficulty, int is_host, int own_on, int host_row);
-uint32_t co_complex_entry_seed(uint32_t mission_seed, uint32_t difficulty, uint32_t operation_seed, uint32_t planet, int rolls);
+uint32_t co_complex_entry_seed(uint32_t mission_seed, uint32_t difficulty, int complex);
+uint32_t co_complex_chance(void); /* CO_COMPLEX_CHANCE, or a research build's HELLFORGE_CO_CHANCE */
 
 /* Room in the map generator (co_capacity.c). `init` asks HellForge for it, from hellforge_mod_init only. `poll` reads
  * what was given once level 11 is installed, or gives up at `now_ms` past the wait: 1 once settled, with one log line
@@ -288,6 +295,19 @@ int co_peers_host_row(void); /* CO_HOST_ROW_: as this machine holds it now */
 const char* co_mark_check(uintptr_t game); /* NULL when the fill is the game's; reads only */
 const char* co_mark_install(uintptr_t game);
 void co_mark_entry(uintptr_t game, uint32_t slot, uint32_t difficulty, uint32_t operation_seed, uintptr_t entry, int rolls);
+/* The war object's board as the fill and the banner read it: 110 records of 0x5C, the board's planet at +0x2788 and its
+ * rebuild flag at +0x278C (0x12D5576), the board seed in the shown war state (0x12D55A9). */
+#define CO_BOARD 0xF7280u
+#define CO_BOARD_SLOTS 110u
+#define CO_BOARD_BYTES 0x278Du
+#define CO_BOARD_SEED 0x17A2BCu /* W+0x101438+0x78E84 */
+/* The level-11 operations in use on `planet` in a board image, in slot order: their count. */
+uint32_t co_board_level11(const uint8_t* board, uint32_t planet, CoOperation* ops);
+/* Board record `slot`'s answer and its planet's: `seed` is the slot's operation, `guaranteed` the seed of the planet's
+ * guaranteed complex operation. 1 read; 0 when the board is being rebuilt, cannot be read or holds no level-11
+ * operation in use at `slot`. */
+typedef struct CoPlanetDecision { uint32_t planet, board_seed, seed, count, complexes, guaranteed; int complex; } CoPlanetDecision;
+int co_board_decide(uintptr_t war, uint32_t slot, CoPlanetDecision* d);
 
 const CoComplexNeeds* co_capacity_needs(void);
 /* 1 once the poll has settled; before that co_complex_on() is 0 though the part may still come on. */

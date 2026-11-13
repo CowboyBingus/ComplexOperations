@@ -256,7 +256,8 @@ for one to four players and reads it by player count with no bound, so a fifth p
 
 ## Complex operations
 
-One level-11 operation in four is a complex operation. HellForge owns difficulty 11; the mod only adds to it.
+Every planet with level-11 operations has at least one complex operation; each of its other level-11 operations is
+one in four. HellForge owns difficulty 11; the mod only adds to it.
 
 | Part | A complex operation |
 |---|---|
@@ -267,7 +268,14 @@ One level-11 operation in four is a complex operation. HellForge owns difficulty
 | Unlock | A mission's main objectives open when that mission's own steps are done; an ordered objective waits only for its own mission's earlier ones. The war table draws a step's lines to its own mission's mains only. |
 | Tactical map | 16 objective markers, as in the game. A marker goes to the next objective when one is done. |
 
-- Which operations are complex comes from the operation's seed and planet, so every player sees the same ones.
+- Which operations are complex comes from the war table's board, so every player sees the same ones:
+  - One operation per planet is complex for certain: the board slot with the lowest key, a hash of the board seed, the
+    planet and the slot.
+  - Each other operation rolls one in four from a hash of its seed and planet.
+- The guaranteed one stays while its slot holds an operation. Committing an operation keeps it, though the game then
+  draws new seeds for the slots after that one. A new slot with a lower key takes it; a new board seed picks again.
+- A research build (`--research`) takes `HELLFORGE_CO_CHANCE` for the others' chance in 1/65536: `65536` makes every
+  level-11 operation complex, `0` only each planet's guaranteed one.
 - Every player needs the mod. The host launches a complex mission only when every player's PC can make one;
   otherwise that mission is a normal level-11 mission.
 - A PC that cannot make one plays normal missions. An example is a PC with less than 28 GB of memory free to commit
@@ -314,7 +322,7 @@ the game's body font and its panel inks.
 | `STARTS AS STANDARD` | The briefing, as host: a squad member's PC is not known to be able, so the launch drops the mark. |
 
 - The state comes from the functions the launch decides with, on the same inputs. A client whose answer from the host
-  is on takes the operation's roll from the board, so a table filled before that answer still shows the right state.
+  is on takes the operation's answer from the board, so a table filled before that answer still shows the right state.
 - A client's briefing cannot tell whether the host's launch will drop the mark: it shows the operation's roll, and the
   host's briefing shows `STARTS AS STANDARD`.
 - Until this PC's check of the part settles, no banner shows.
@@ -683,8 +691,11 @@ player's game has another shader there, the session says `its data could not be 
 | `tests/registry_test.c` | The list's move in each build, run through the game's loads; refusal on changed code or a card in the list, rollback of a failed write. |
 | `tests/ui_test.c` | The guards for four, the map's move with the state, the HUD's and tags' move at the HUD's init, refusal on changed code and rollback of a failed write. |
 | `tests/engine_test.c` | The engine's sites: written, refused on changed code, taken back on a failed write. |
-| `src/co_roll.c` | Whether an operation is a complex operation: an integer hash of its seed and planet. |
+| `src/co_roll.c` | Whether an operation is a complex operation: each planet's guaranteed one, the others' integer hash of seed and planet. |
+| `src/co_mark.c` | The mark: a level-11 entry's seed gets its planet's decision, read from the board. |
 | `tests/roll_test.c` | The roll's fixed answers and its share of operations at 5, 25 and 50 %. |
+| `tests/pick_test.c` | The guaranteed one: at least one per planet, any record order, kept when other slots go or draw new seeds. |
+| `tests/mark_test.c` | The mark's board reading, its entries' seeds and its one line per planet. |
 | `src/co_tag.c` | The war-table banner: its state, the war table's readers, its place and its plan. |
 | `src/co_lua.c`, `co_gui.c` | The game's Lua and the engine's Gui from C, as Know Your Constellation's; a hook on `lua_pcall`. |
 | `tests/tag_test.c` | The banner's states, readers and launch prediction; its drawing through a real `lua51.dll` (`CO_LUA51_PATH`). |

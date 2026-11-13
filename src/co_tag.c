@@ -149,11 +149,9 @@ int co_tag_briefing_entry(uintptr_t war, uint32_t* index, uint32_t* entry, int* 
 
 int co_tag_board_mark(uintptr_t war, uint32_t index, int* marked)
 {
-    uint8_t record[0x5C];
-    uint16_t planet;
-    if (index >= BOARD_SLOTS || g_coApi->read(war + BOARD + index * 0x5Cu, record, sizeof record) != 0 || record[0x34] == 0) return 0;
-    memcpy(&planet, record + 0x10, 2);
-    *marked = co_seed_is_complex(co_complex_entry_seed(0, CO_COMPLEX_LEVEL, U32(record + 0x0C), planet, 1));
+    CoPlanetDecision d;
+    if (!co_board_decide(war, index, &d)) return 0;
+    *marked = d.complex;
     return 1;
 }
 

@@ -22,9 +22,9 @@ int co_tag_state(const CoTagInputs* in, int* why);
  * (*found 0: no such operation or mission), 0 refused (the table's count is past its entries). */
 int co_tag_map_entries(uintptr_t war, uint32_t* index, uint32_t* entry, int* level11, int* marked, int* found);
 int co_tag_briefing_entry(uintptr_t war, uint32_t* index, uint32_t* entry, int* level11, int* marked, int* found);
-/* The mark the fill gives board record `index`'s level-11 entries while it rolls: its operation seed (+0xC) and planet
- * (+0x10) through co_complex_entry_seed. A client's table filled before the host's answer holds no mark; this does.
- * 1 read, 0 refused (no such record in use). */
+/* The mark the fill gives board record `index`'s level-11 entries while it rolls: its planet's answer from the board
+ * (co_board_decide). A client's table filled before the host's answer holds no mark; this does. 1 read, 0 refused (no
+ * level-11 record in use there, or a board being rebuilt). */
 int co_tag_board_mark(uintptr_t war, uint32_t index, int* marked);
 
 /* The banner's answer for the picked mission, the host's launch-clear prediction included: 1 for a complex operation,
