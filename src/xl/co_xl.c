@@ -39,6 +39,7 @@
 #include "co_density.h"
 #include "co_switch.h"
 #include "co_steer.h"
+#include "co_cutters.h"
 #include "../co_watch.h"
 
 /* Six of the copied files' functions were called from loader code that did not come along (the watch thread, the
@@ -218,6 +219,9 @@ const char* CoXlInstall(uintptr_t game)
     /* the grouped rows' copy counts; refused, a row keeps the objective's name alone */
     if ((why = co_text_install(g_coApi->module_base("helldivers2.exe", NULL), CO_HUD_TEXT_FIRST, 16u * HUD_TEXT_IDS)) != NULL)
         Note("difficulty: HUD: %s; no copy counts", why);
+    /* refused, a forest instance made while the cutter pool was full still crashes the destroy (co_cutters.h) */
+    if ((why = co_cutters_install(g_coApi->module_base("helldivers2.exe", NULL))) != NULL) Note("navmesh cutters: %s; a handle of 0 is not left out", why);
+    else Note("navmesh cutters: the engine's destroy leaves out handles of 0 (a cutter not made while its pool was full)");
     if ((why = InstallWorld(&d)) != NULL || (why = InstallWorldStreamStep(&d)) != NULL || (why = InstallMapHud(&d)) != NULL) return why;
     /* refused, the game's rule stays: every step on the map holds every main objective */
     if ((why = co_unlock_install(game, g_importantList)) != NULL) Note("complex operations: mission unlock: %s; every step holds every main", why);

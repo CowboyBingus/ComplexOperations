@@ -57,6 +57,7 @@ static struct
     uint16_t* reach;                   /* plan entry -> the distance it enters within (m); kept across levels (not reset) */
     uint32_t reachRoom;                /* reach's room */
     uint32_t entered, left, refusedFull, refusedIndex, refusedBodies, poseChecked, poseEqual, enteredFar, farHeld, evictedFar, farLive;
+    uint32_t refusedCutters;           /* scans over the navmesh cutter budget (counted in refusedBodies too) */
     uint32_t reachFar;                 /* the plan entries whose reach is past WINDOW_IN */
     int on, bad, insertOk, removeOk;
     ULONGLONG nextScan, farHoldUntil; /* far entries wait until then after an eviction */
@@ -306,7 +307,8 @@ static void WindowScanFarLocked(uint32_t bodies, uint32_t slots)
     if (g_win.reach == NULL || g_win.reachFar == 0 || g_win.freeCount == 0 || GetTickCount64() < g_win.farHoldUntil) return;
     if (g_win.farLive >= WINDOW_FAR_LIVE) { g_win.farHeld++; return; }
     if ((float)bodies >= WINDOW_FAR_SHARE * (float)slots || !RenderPool0(&used, &capacity) || (float)used >= WINDOW_FAR_SHARE * (float)capacity ||
-        !RenderPool1(&used1, &capacity1) || (float)used1 >= WINDOW_FAR_SHARE * (float)capacity1)
+        !RenderPool1(&used1, &capacity1) || (float)used1 >= WINDOW_FAR_SHARE * (float)capacity1 ||
+        co_cutters_over(ApiModuleBase("helldivers2.exe", NULL), WINDOW_FAR_SHARE))
     { g_win.farHeld++; return; }
     const float cell = g_plan.cell, near2 = WINDOW_IN * WINDOW_IN;
     const int reach = (int)ceilf(WINDOW_FAR / cell);
@@ -343,7 +345,11 @@ static void WindowScanLocked(ULONGLONG now)
     g_win.nextScan = now + 250;
     uint32_t bodies = 0, slots = 0;
     if (!WorldStreamBodyStore(&bodies, &slots)) { g_win.refusedBodies++; return; }
-    if ((float)bodies >= WINDOW_BODY_SHARE * (float)slots) { g_win.refusedBodies++; WindowEvictFarLocked(); return; }
+    /* a forest tree of a type with flag 0x40 takes a navmesh cutter from a pool of 65536 (co_cutters.h); a full pool
+     * leaves the tree without one, so the cutters wait under the bodies' share too */
+    const int cutters = co_cutters_over(ApiModuleBase("helldivers2.exe", NULL), WINDOW_BODY_SHARE);
+    if ((float)bodies >= WINDOW_BODY_SHARE * (float)slots || cutters)
+    { g_win.refusedBodies++; g_win.refusedCutters += cutters; WindowEvictFarLocked(); return; }
     const float cell = g_plan.cell, r2 = WINDOW_IN * WINDOW_IN;
     const int reach = (int)ceilf(WINDOW_IN / cell);
     uint32_t done = 0;
@@ -376,8 +382,14 @@ static void WindowScanLocked(ULONGLONG now)
 static void WindowNoteLocked(void)
 {
     if (!g_win.on) return;
-    uint32_t used = 0, capacity = 0, used1 = 0, capacity1 = 0;
+    uint32_t used = 0, capacity = 0, used1 = 0, capacity1 = 0, cutters = 0, cutterRoom = 0;
     int pool = RenderPool0(&used, &capacity), pool1 = RenderPool1(&used1, &capacity1);
+    int cut = co_cutters_pool(ApiModuleBase("helldivers2.exe", NULL), CO_CUTTERS_WORLD, &cutters, &cutterRoom);
+    CoCuttersSeen seen;
+    co_cutters_seen(&seen);
+    Note("difficulty: extra large maps: navmesh cutters: %u of %u%s; %u scans over their budget; %llu not made (the first at %u of %u), %llu handles of 0 left out of a destroy",
+        cutters, cutterRoom, cut ? "" : ", not read", g_win.refusedCutters, (unsigned long long)seen.failed, seen.usedAtFail, seen.roomAtFail,
+        (unsigned long long)seen.dropped);
     Note("difficulty: extra large maps: stamp window: %u in (slots used %u of %u, highest %u), %u entered (%u of them far, %u far live, %u far ones taken out for the near ones), %u left so far; refused: %u table full, %u index full, %u scans over the body budget, %u far scans held (bodies %u of %u, culling pool 0 %u of %u%s, pool 1 %u of %u%s)",
         (DIF_LOCATIONS - g_win.base) - g_win.freeCount, (DIF_LOCATIONS - g_win.base) - g_win.freeCount, DIF_LOCATIONS - g_win.base, g_win.high, g_win.entered,
         g_win.enteredFar, g_win.farLive, g_win.evictedFar, g_win.left, g_win.refusedFull, g_win.refusedIndex, g_win.refusedBodies, g_win.farHeld, g_stream.bodiesUsed, g_stream.bodySlots,
