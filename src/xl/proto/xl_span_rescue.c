@@ -4,7 +4,9 @@
  * its owner again only once every block in it is free (0x66A37E): one live block keeps the rest from any reuse, and
  * the owner maps new spans instead (mp-city2: about 73 KB a stamp that left, 1.36 GB in 6.7 min). A pass moves each
  * such span back to its owner's partial list, on the owner's thread, as the owner's own free does with a full span
- * (0x66A3C6..0x66A3F9) and as its allocation takes a deferred list (0x6698C0..0x6698E0). Included after the probe. */
+ * (0x66A3C6..0x66A3F9) and as its allocation takes a deferred list (0x6698C0..0x6698E0). A thread takes its list at a game
+ * function rpmalloc never calls: the trim, the game thread's tick, the renderer's message dispatch and Havok's task step
+ * (threads that never trim). Included after the probe. */
 #include "xl_span_rescue_pins.h"
 
 #define SR_MAP_AT 0x27B8C60u        /* rpmalloc's span map and unmap pointers; init stores the defaults (0x66AABF) */
@@ -18,6 +20,8 @@
 #define SR_TRIM 0x6302F0u
 #define SR_WORKER_TRIMS 0x6253CEu   /* return address of the pool worker's trim(0) when its +0x7D is set (0x6253C9) */
 #define SR_APP 0x1A10208u           /* [app+0x318] the pool: workers [+0x90], count [+0x88], trim flag [w+0x7D] */
+#define SR_RENDER_STEP 0x113010u    /* the renderer's message dispatch: only its thread's loop calls it (0x113EEE) */
+#define SR_TASK_STEP 0x99DB30u      /* Havok's router step: only the task queue loops call it, once an iteration */
 #define SR_SPAN 0x10000u
 #define SR_CLASSES 96u
 #define SR_INVALID UINT64_MAX
@@ -34,15 +38,18 @@
 
 enum { SR_IDLE, SR_SCANNING, SR_PUBLISHED };
 enum { SR_SLOT_FREE, SR_SLOT_READY, SR_SLOT_BUSY, SR_SLOT_DONE, SR_SLOT_GONE };
+enum { SR_VIA_TRIM, SR_VIA_TICK, SR_VIA_RENDER, SR_VIA_TASK, SR_VIAS };
 typedef void* (*SrMapFn)(size_t size, size_t* offset);
 typedef void (*SrUnmapFn)(void* address, size_t size, size_t offset, size_t release);
 typedef uint64_t (*SrTrimFn)(uint64_t global);
+typedef uint64_t (*SrRenderFn)(uint64_t renderer, uint64_t message, uint64_t payload);
+typedef uint64_t (*SrTaskFn)(uint64_t router);
 
 typedef struct
 {
     volatile uintptr_t heap;
     volatile LONG state;
-    uint32_t count, rescued, changed;
+    uint32_t count, rescued, changed, via;
     LONG64 found, bytes, cls[3]; /* free block bytes: in the spans found, made reusable, of classes 34-36 */
     uint64_t* spans;
 } SrSlot;
@@ -58,7 +65,7 @@ static struct
 {
     int on;                              /* 1 on, -1 refused */
     uintptr_t exe;
-    SrMapFn map; SrUnmapFn unmap; SrTrimFn trim;
+    SrMapFn map; SrUnmapFn unmap; SrTrimFn trim; SrRenderFn render; SrTaskFn task;
     volatile uint64_t* volatile* top;
     volatile LONG64 registered;
     uint32_t size[SR_CLASSES], count[SR_CLASSES];
@@ -76,7 +83,7 @@ static struct
     volatile LONG gameTrims;             /* trims with `global` set: every game store of a worker's +0x7D follows one */
     struct { volatile uintptr_t heap; volatile LONG seen; } worker[SR_HEAPS];
     volatile LONG64 waitMax, trimTicks, trimMax; volatile LONG trimsRun, trimsSkipped;
-    struct { uint32_t found, rescued, changed, untaken, heaps, threads; LONG64 foundBytes, bytes, cls[3]; } last;
+    struct { uint32_t found, rescued, changed, untaken, heaps, threads, via[SR_VIAS]; LONG64 foundBytes, bytes, cls[3]; } last;
 } g_sr;
 
 /* ---- The registry: every 64 KiB region rpmalloc maps, mapped now ---------------------------------------------------- */
@@ -197,8 +204,8 @@ static uintptr_t SrHeapHere(void)
     return block != 0 ? *(volatile uintptr_t*)(block + 0x4350) : 0;
 }
 
-/* The calling thread's list, if the pass has one for its heap. */
-static void SrRescueHere(void)
+/* The calling thread's list, if the pass has one for its heap. `via` names the hook, for the pass note. */
+static void SrRescueHere(int via)
 {
     if (g_sr.phase != SR_PUBLISHED) return;
     uintptr_t heap = SrHeapHere();
@@ -210,6 +217,7 @@ static void SrRescueHere(void)
         if (InterlockedCompareExchange(&s->state, SR_SLOT_BUSY, SR_SLOT_READY) != SR_SLOT_READY) return;
         if (s->heap != heap) { InterlockedExchange(&s->state, SR_SLOT_READY); return; }
         int mine = *(volatile uint64_t*)heap == (uint64_t)(uintptr_t)NtCurrentTeb() && *(volatile uint32_t*)(heap + 0x73C) == 0;
+        s->via = (uint32_t)via;
         for (uint32_t i = 0; mine && i < s->count; i += 64)
         {
             AcquireSRWLockShared(&g_srLock); /* a span whose bit is set stays mapped until the lock is let go */
@@ -256,7 +264,7 @@ static int SrWorkerSkips(void)
 static uint64_t SrTrimmed(uint64_t global)
 {
     uintptr_t from = (uintptr_t)__builtin_return_address(0);
-    SrRescueHere();
+    SrRescueHere(SR_VIA_TRIM);
     if ((uint8_t)global != 0) InterlockedIncrement(&g_sr.gameTrims);
     if (g_sr.on != 1 || from != g_sr.exe + SR_WORKER_TRIMS) return g_sr.trim(global);
     if (SrWorkerSkips()) { InterlockedIncrement(&g_sr.trimsSkipped); return 0; }
@@ -269,6 +277,19 @@ static uint64_t SrTrimmed(uint64_t global)
     for (LONG64 m = g_sr.trimMax; b.QuadPart - a.QuadPart > m; m = g_sr.trimMax)
         if (InterlockedCompareExchange64(&g_sr.trimMax, b.QuadPart - a.QuadPart, m) == m) break;
     return r;
+}
+
+/* The renderer and Havok's workers never trim (no trim caller is on their loops), so they take their lists here. Both
+ * run only on game threads, between messages and between tasks; arguments and result pass through. */
+static uint64_t SrRendered(uint64_t renderer, uint64_t message, uint64_t payload)
+{
+    SrRescueHere(SR_VIA_RENDER);
+    return g_sr.render(renderer, message, payload);
+}
+static uint64_t SrTasked(uint64_t router)
+{
+    SrRescueHere(SR_VIA_TASK);
+    return g_sr.task(router);
 }
 
 /* ---- The scan: the registry read on a thread of its own, the stranded spans listed by heap ------------------------ */
@@ -377,7 +398,7 @@ static int SrClose(ULONGLONG now)
         if (s->heap == 0) continue;
         g_sr.last.heaps++; g_sr.last.found += s->count; g_sr.last.foundBytes += s->found;
         if (s->state == SR_SLOT_GONE) g_sr.last.untaken += s->count;
-        else { g_sr.last.threads++; g_sr.last.rescued += s->rescued; g_sr.last.changed += s->changed; }
+        else { g_sr.last.threads++; g_sr.last.rescued += s->rescued; g_sr.last.changed += s->changed; g_sr.last.via[s->via < SR_VIAS ? s->via : 0]++; }
         g_sr.last.bytes += s->bytes;
         for (int c = 0; c < 3; c++) g_sr.last.cls[c] += s->cls[c];
     }
@@ -388,10 +409,12 @@ static void SrPassNote(uint32_t removed, ULONGLONG now)
     const double mb = 1.0 / 1048576.0;
     g_sr.passes++;
     Note("difficulty: stranded spans: pass %u after %u stamps removed (+%u, %u left the window): %lld spans of 64 KiB registered, %u read in %.1f ms; "
-        "%u stranded in %u heaps (%.1f MB free in them); %u rescued (%.1f MB: class 34 %.1f, 35 %.1f, 36 %.1f) on %u threads, %u changed first, %u in heaps whose thread did not come, %u over the room",
+        "%u stranded in %u heaps (%.1f MB free in them); %u rescued (%.1f MB: class 34 %.1f, 35 %.1f, 36 %.1f) on %u threads, %u changed first, %u in heaps whose thread did not come, %u over the room; "
+        "lists taken at trims %u, the tick %u, render messages %u, Havok task steps %u",
         g_sr.passes, removed, removed - g_sr.removedAt, g_sr.passLeft, (long long)g_sr.registered, g_sr.seen, g_sr.scanMs, g_sr.last.found, g_sr.last.heaps,
         (double)g_sr.last.foundBytes * mb, g_sr.last.rescued, (double)g_sr.last.bytes * mb, (double)g_sr.last.cls[0] * mb, (double)g_sr.last.cls[1] * mb,
-        (double)g_sr.last.cls[2] * mb, g_sr.last.threads, g_sr.last.changed, g_sr.last.untaken, g_sr.overRoom);
+        (double)g_sr.last.cls[2] * mb, g_sr.last.threads, g_sr.last.changed, g_sr.last.untaken, g_sr.overRoom, g_sr.last.via[SR_VIA_TRIM],
+        g_sr.last.via[SR_VIA_TICK], g_sr.last.via[SR_VIA_RENDER], g_sr.last.via[SR_VIA_TASK]);
     LARGE_INTEGER f;
     QueryPerformanceFrequency(&f);
     const double ms = f.QuadPart > 0 ? 1000.0 / (double)f.QuadPart : 0.0;
@@ -432,7 +455,7 @@ static void SrReset(void)
     {
         SrSlot* s = &g_sr.slot[k];
         InterlockedExchange(&s->state, SR_SLOT_FREE);
-        s->heap = 0; s->count = s->rescued = s->changed = 0; s->found = s->bytes = 0; memset(s->cls, 0, sizeof s->cls);
+        s->heap = 0; s->count = s->rescued = s->changed = s->via = 0; s->found = s->bytes = 0; memset(s->cls, 0, sizeof s->cls);
     }
 }
 
@@ -452,7 +475,7 @@ static void SrStep(uint32_t removed, uint32_t left, ULONGLONG now, int inPlay)
     {
         if (!InterlockedCompareExchange(&g_sr.scanned, 0, 1)) return;
         g_sr.phase = SR_PUBLISHED; g_sr.deadline = now + SR_TAKE_MS;
-        SrRescueHere();  /* the game thread's own heap: the tick is outside any allocator call */
+        SrRescueHere(SR_VIA_TICK);  /* the game thread's own heap: the tick is outside any allocator call */
         SrWakeWorkers();
         return;
     }
@@ -477,6 +500,18 @@ static void SrRefused(const char* why)
     InterlockedExchange(&g_sr.quit, 1);
     if (g_sr.wake != NULL) SetEvent(g_sr.wake);
     Note("difficulty: stranded spans: off: %s", why);
+}
+/* One more thread kind's reach, once the trim hook is in: a refusal leaves that kind untaken, as before, and no hook. */
+static int SrReach(const char* who, const SrPin* pins, size_t n, uint32_t rva, void* detour, void** original)
+{
+    for (size_t i = 0; i < n; i++)
+        if (!ApiCodeMatches(g_sr.exe + pins[i].rva, pins[i].hex))
+        { Note("difficulty: stranded spans: %s not reached: the code at 0x%X is not the reviewed one", who, pins[i].rva); return 0; }
+    char what[96];
+    snprintf(what, sizeof what, "extra large maps: stranded spans (%s)", who);
+    if (LoaderHook(what, g_sr.exe + rva, detour, original) || *original == NULL)
+    { *original = NULL; Note("difficulty: stranded spans: %s not reached: the hook was refused", who); return 0; }
+    return 1;
 }
 static void SpanRescueInstall(void)
 {
@@ -527,9 +562,12 @@ static void SpanRescueInstall(void)
         SrRefused("the trim could not be hooked");
         return;
     }
+    int render = SrReach("the renderer", kSrRenderPins, sizeof kSrRenderPins / sizeof kSrRenderPins[0], SR_RENDER_STEP, (void*)SrRendered, (void**)&g_sr.render);
+    int task = SrReach("Havok's workers", kSrTaskPins, sizeof kSrTaskPins / sizeof kSrTaskPins[0], SR_TASK_STEP, (void*)SrTasked, (void**)&g_sr.task);
     g_sr.on = 1;
     Note("difficulty: stranded spans: on: rpmalloc's 64 KiB spans are registered from now; after %u stamps removed (at most once in %llu s) a full span "
-        "holding deferred blocks goes back to its heap's partial list on that heap's thread; a pool worker's trim only a pass asked for is skipped", SR_EVERY, SR_GAP_MS / 1000);
+        "holding deferred blocks goes back to its heap's partial list on that heap's thread; a pool worker's trim only a pass asked for is skipped; "
+        "lists are taken at trims and the tick%s%s", SR_EVERY, SR_GAP_MS / 1000, render ? ", the renderer's messages" : "", task ? ", Havok's task steps" : "");
 }
 
 #ifdef CO_TEST
@@ -565,7 +603,8 @@ int CoXlTestSrRescue(uintptr_t heap, uintptr_t span) { uint32_t n = 0; int r = S
 void CoXlTestSrLast(long long* out)
 {
     long long v[] = {g_sr.last.found, g_sr.last.rescued, g_sr.last.changed, g_sr.last.untaken, g_sr.last.heaps, g_sr.last.threads, g_sr.last.foundBytes,
-        g_sr.last.bytes, g_sr.last.cls[0], g_sr.passes, g_sr.seen};
+        g_sr.last.bytes, g_sr.last.cls[0], g_sr.passes, g_sr.seen, g_sr.last.via[SR_VIA_TRIM], g_sr.last.via[SR_VIA_TICK], g_sr.last.via[SR_VIA_RENDER],
+        g_sr.last.via[SR_VIA_TASK]};
     memcpy(out, v, sizeof v);
 }
 #endif
