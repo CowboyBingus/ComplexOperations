@@ -1,7 +1,8 @@
-/* A near tile's cones (proto/difficulty_world_terrain.c NearRecordEdit, NearPeaksCount). The tile replays the level's
- * RenderZoneHeightmap (op 0x3D, game 0xF4A280) on a record copy whose cell count reads 0, so its zone fans are not drawn
- * at 7.1 times the level's texels per pixel (cones 1.5-3 m tall, about 1 m half width) and it goes straight to its jobs.
- * The count every tile logs finds such cones and tells them from wider stamp mounds. Run on the fake game. */
+/* A near tile's cones (proto/difficulty_world_terrain.c NearRecordEdit, NearPeaksCount, NearNodeHeight). The tile replays
+ * the level's RenderZoneHeightmap (op 0x3D, game 0xF4A280) on a record copy whose cell count reads 0, so its zone fans
+ * (1.5-3 m cones of a noise texture, about 1 m half width) are not drawn and it goes straight to its jobs. The count every
+ * tile logs finds such cones and tells them from wider stamp mounds. The conform's grid nodes take the tile's height as
+ * the mean under their interpolation's footprint, not one texel. Run on the fake game. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +15,7 @@ void CoXlTestGame(uintptr_t game);
 void CoXlTestNearRecordEdit(uint8_t op, uint8_t* one);
 uintptr_t CoXlTestNearNoCells(void);
 void CoXlTestNearPeaks(const float* heights, float cx, float cy, int* narrow, int* wide, float* top, float* x, float* y);
+float CoXlTestNearNodeHeight(const float* heights, float cx, float cy, int i, int j);
 
 static int g_failed;
 static const char* g_case;
@@ -60,6 +62,8 @@ static float Mesa(float d, int radius) { return d == 0.0f ? 1.004f : d <= (float
 static int g_narrow, g_wide;
 static float g_top, g_x, g_y;
 static void Count(void) { CoXlTestNearPeaks(g_h, 100.0f, -200.0f, &g_narrow, &g_wide, &g_top, &g_x, &g_y); }
+static float Node(int i, int j) { return CoXlTestNearNodeHeight(g_h, 100.0f, -200.0f, i, j); }
+static void Pit(int r, int c) { g_h[(size_t)r * N + c] -= 3.0f / 1000.0f; }
 static float X(int c) { return 100.0f - 1152.0f + T / 2 + T * (float)c; }
 static float Y(int r) { return -200.0f + 1152.0f - T / 2 - T * (float)r; }
 
@@ -151,6 +155,45 @@ int main(void)
     Start("cones near the tile's edge and the field's last rows", 1);
     Flat(0.0f); Add(6, 2000, 1, Cone, 2.0f); Add(4089, 2000, 1, Cone, 2.0f); Add(2000, 6, 1, Cone, 2.0f); Add(2000, 4089, 1, Cone, 2.0f); Count();
     CHECK(g_narrow == 4);
+
+    /* The conform's nodes: grid node k at texel 4k (k = 1..1023), cells split from (i, j) to (i + 1, j + 1); the hat's
+     * weights over a node's 9 x 9 texels sum to 16. Node 57 is on the hidden square's edge (the per-texel strip). */
+    Start("a node's height: flat ground and slopes as they are", 1);
+    Flat(30.0f);
+    CHECK(fabsf(Node(512, 512) - 30.0f) < 1e-3f && fabsf(Node(0, 0) - 30.0f) < 1e-3f && fabsf(Node(1024, 1024) - 30.0f) < 1e-3f && fabsf(Node(0, 1024) - 30.0f) < 1e-3f);
+    for (int r = 0; r < N; r++) for (int c = 0; c < N; c++) g_h[(size_t)r * N + c] = (0.2f * (float)c - 0.1f * (float)r + 500.0f) / 1000.0f;
+    CHECK(fabsf(Node(512, 512) - (0.2f * 2048 - 0.1f * 2048)) < 2e-3f && fabsf(Node(300, 700) - (0.2f * 1200 - 0.1f * 2800)) < 2e-3f);
+
+    Start("a node on a crater's floor texel takes a sixteenth of it, not all of it", 1);
+    Flat(0.0f); Pit(2048, 2048);
+    CHECK(fabsf(Node(512, 512) + 3.0f / 16) < 1e-4f);
+    CHECK(fabsf(Node(513, 512)) < 1e-6f && fabsf(Node(512, 511)) < 1e-6f);
+    Flat(0.0f); Pit(600 * 4, 100 * 4); /* in the band: 98 m inside the hidden square's edge */
+    CHECK(fabsf(Node(100, 600) + 3.0f / 16) < 1e-4f);
+
+    Start("the footprint is the draw's triangles: (i, j) to (i + 1, j + 1)", 1);
+    static const int along[4][2] = {{2, 2}, {-2, -2}, {2, -2}, {-2, 2}};
+    static const float share[4] = {0.5f, 0.5f, 0.0f, 0.0f};
+    for (int k = 0; k < 4; k++) { Flat(0.0f); Pit(2048 + along[k][1], 2048 + along[k][0]); CHECK(fabsf(Node(512, 512) + 3.0f * share[k] / 16) < 1e-4f); }
+    Flat(0.0f); Pit(2048, 2051); CHECK(fabsf(Node(512, 512) + 3.0f * 0.25f / 16) < 1e-4f);
+    Flat(0.0f); Pit(2048, 2052); CHECK(fabsf(Node(512, 512)) < 1e-6f);
+    Flat(0.0f); Pit(2045, 2049); CHECK(fabsf(Node(512, 512) + 3.0f * 0.0f / 16) < 1e-4f); /* u = 1/4, v = -3/4 */
+    Flat(0.0f); Pit(2047, 2046); CHECK(fabsf(Node(512, 512) + 3.0f * 0.5f / 16) < 1e-4f); /* u = -1/2, v = -1/4 */
+
+    Start("the tile's first and last nodes: their texels only", 1);
+    Flat(0.0f); Pit(0, 0); CHECK(fabsf(Node(0, 0) + 0.4f) < 1e-4f); /* texels 0..3, from -0.5 to 4: 8/9 of 20/3 */
+    Flat(0.0f); Pit(4095, 4095); CHECK(fabsf(Node(1024, 1024) + 3.0f * (6.0f / 7) / 4) < 1e-4f); /* 4092..4095, from 4095.5 to 4092 */
+    Flat(0.0f); Pit(0, 4); CHECK(Node(0, 0) == 0.0f);
+    Flat(0.0f); Pit(2048, 0); CHECK(fabsf(Node(1, 512) + 3.0f / 154) < 1e-5f); /* from -0.5 to 4: 1/9 of 154/9 */
+
+    Start("a node of the per-texel strip keeps its texel", 1);
+    Flat(0.0f); Pit(2048, 228);
+    CHECK(fabsf(Node(57, 512) + 3.0f) < 1e-4f);
+    Flat(0.0f); Pit(2048, 229);
+    CHECK(Node(57, 512) == 0.0f);
+    Flat(0.0f); Pit(2048, 244); CHECK(fabsf(Node(61, 512) + 3.0f) < 1e-4f); /* the strip's last cells: 53-60 */
+    Flat(0.0f); Pit(244, 2048); CHECK(fabsf(Node(512, 61) + 3.0f) < 1e-4f);
+    Flat(0.0f); Pit(2048, 248); CHECK(fabsf(Node(62, 512) + 3.0f / 16) < 1e-4f);
 
     free(g_h);
     if (g_failed) { printf("nearcones: %d check(s) failed\n", g_failed); return 1; }

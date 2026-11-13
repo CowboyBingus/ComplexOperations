@@ -491,6 +491,12 @@ void CoXlTestNearPeaks(const float* heights, float cx, float cy, int* narrow, in
     NearPeaks p; NearPeaksCount(heights, &p);
     *narrow = p.narrow; *wide = p.wide; *top = p.top; *x = p.topX; *y = p.topY;
 }
+/* A conform grid node's tile height (NearNodeHeight) on a tile centred on (cx, cy). */
+float CoXlTestNearNodeHeight(const float* heights, float cx, float cy, int i, int j)
+{
+    g_near.centre[0] = cx; g_near.centre[1] = cy;
+    return NearNodeHeight(heights, i, j);
+}
 /* The layer grids and the stamps put back on new ground (proto/difficulty_world_terrain.c, difficulty_world_move.c,
  * difficulty_stream.c): a tile in a given slot, the coarse ground, a moving tile's build under way, a tile's change, the
  * descriptor and the sample a stamp's layers get, and the streamer's slots around a change. */
