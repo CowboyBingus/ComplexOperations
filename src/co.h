@@ -81,9 +81,6 @@ typedef struct CoRegs { uint64_t r15, r14, r13, r12, r11, r10, r9, r8, rdi, rsi,
  * it read (780, the game's, or 498). The callbacks: `open` before the init's card loop and `ready` behind it (rdi = the
  * screen), `layout` in front of each of its updates (rcx = the screen). */
 extern float co_card_height;
-/* The height the slots cave compares with 780 (co_card_height, or 780 in the research layout E3). */
-extern float co_card_slots_height;
-enum { CO_LAYOUT_E1, CO_LAYOUT_E3 };
 void co_cards_open(CoRegs* regs);
 void co_cards_ready(CoRegs* regs);
 void co_cards_layout(CoRegs* regs);
@@ -97,6 +94,10 @@ enum { CO_CARDS_GAME, CO_CARDS_FOUR, CO_CARDS_EIGHT };
 typedef struct CoCardPlace { float x, y, scale, figureScale, figureY; } CoCardPlace;
 float co_cards_scale(float rootHeight, float hudScale);
 int co_cards_place(int mode, float rootHeight, float hudScale, uint32_t card, CoCardPlace* p);
+/* An eight-card figure's camera (distance and height in metres) and its frame's clip, as a share of the frame's height
+ * from its bottom: from the slots' top to the plate. Heights in card units: the card, +0x1C30 and the slots' top. */
+typedef struct CoCardFigure { float distance, height, clipY, clipHeight; } CoCardFigure;
+void co_cards_figure(float rootHeight, float cardHeight, float partHeight, float slotsTop, CoCardFigure* out);
 /* The size a widget is at, or a running size animation's target in the table `tweens`: 1 when animating. */
 int co_cards_size_target(uintptr_t widget, uintptr_t tweens, float out[2]);
 /* An open screen's cards from four to eight: the slot to 498, each card part sized by 780 to its end at once and an
@@ -104,7 +105,6 @@ int co_cards_size_target(uintptr_t widget, uintptr_t tweens, float out[2]);
 void co_cards_to_eight(uintptr_t screen);
 #ifdef CO_TEST
 void co_cards_test_mode(int mode, uintptr_t screen);
-void co_cards_test_layout(int layout);
 int co_cards_test_get_mode(void);
 void co_cards_test_clock(uint64_t (*clock)(void));
 unsigned co_cards_test_complex_reads(void);

@@ -1,8 +1,8 @@
 /* The loadout cards' layout: eight cards in two rows at nine screen sizes, against the pixel places the design predicts
  * and the rules it keeps (31 under the mode tabs, on the game's bottom line, inside the 1920-wide container, the figure
- * never magnified); the hud scale's corner widgets; the game's four cards with cards 5 to 8 parked below the window; the
- * mode's rule; and the callbacks on a stand-in screen: the mode at opening, the switch from four to eight with the own
- * card's slots collapsed. */
+ * never magnified); the figure's camera and cut; the hud scale's corner widgets; the game's four cards with cards 5 to 8
+ * parked below the window; the mode's rule; and the callbacks on a stand-in screen: the mode at opening, the switch
+ * from four to eight with the own card's slots left open, and each figure's camera and clip. */
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -69,20 +69,11 @@ static uint8_t* g_engine;
 
 static void Setter(uint32_t rva, uint8_t field)
 {
-    /* mov [rcx+field],rdx; ret */
-    const uint8_t code[] = {0x48, 0x89, 0x51, field, 0xC3};
+    /* mov [rcx+field],rdx; ret: the field as a 32-bit displacement, so 0x80 and up are not negative */
+    const uint8_t code[] = {0x48, 0x89, 0x91, field, 0x00, 0x00, 0x00, 0xC3};
     DWORD before;
     memcpy(g_fake.image + rva, code, sizeof code);
     CHECK(VirtualProtect(g_fake.image + rva, sizeof code, PAGE_EXECUTE_READWRITE, &before));
-}
-
-/* The card assign 0x189C780 as far as the switch needs it: the open flag from r8b, the data from rdx at +0x1EDE0. */
-static void Assign(void)
-{
-    const uint8_t code[] = {0x44, 0x88, 0x81, 0x0C, 0xEE, 0x01, 0x00, 0x48, 0x89, 0x91, 0xE0, 0xED, 0x01, 0x00, 0xC3};
-    DWORD before;
-    memcpy(g_fake.image + 0x189C780u, code, sizeof code);
-    CHECK(VirtualProtect(g_fake.image + 0x189C780u, sizeof code, PAGE_EXECUTE_READWRITE, &before));
 }
 
 static void Put(void* at, uint64_t value) { memcpy(at, &value, 8); }
@@ -117,7 +108,8 @@ static void CheckCallbacks(void)
     Setter(0x14476A0u, 0x04);      /* position */
     Setter(0x1447ED0u, 0x14);      /* scale */
     Setter(0x144F160u, 0x2C);      /* anchor */
-    Assign();
+    Setter(0x144F210u, 0xC0);      /* clip from */
+    Setter(0x144F2F0u, 0xC8);      /* clip size */
     Put(image + 0x3326340u, (uint64_t)(uintptr_t)g_engine);
     Put(image + 0x347CEF0u, (uint64_t)(uintptr_t)g_context);
     Put(image + 0x347CD88u, (uint64_t)(uintptr_t)g_tweens);
@@ -138,6 +130,8 @@ static void CheckCallbacks(void)
     co_cards_ready(&regs);
     CHECK(Field(Card(1), 0x2C) == 0.38f && Field(Card(1), 0x8) == 111.0f && Field(Card(1), 0x14) == 1.0f);
     CHECK(Field(Card(5), 0x2C) == 0.5f && Field(Card(5), 0x8) == -2080.0f && Field(Card(5) + 0x1FA8, 0x8) == 20.0f);
+    /* Four cards: the figure's camera and clip are the game's. */
+    CHECK(Field(Card(1) + 0x1FA8, 0x8EC) == 0.0f && Field(Card(1) + 0x1FA8 + 0x110, 0xC8) == 0.0f);
     CHECK(fake_host_logged("loadout cards: the game's four (complex operation no, 3 players)"));
 
     /* Another screen's update changes nothing. */
@@ -175,33 +169,39 @@ static void CheckCallbacks(void)
     Size(Card(3) + 0x1D40, 480.0f, 206.0f);
     Animate(Card(3) + 0x1D40, 3, 480.0f, 780.0f);
     Put(g_tweens + 2 * 0x70 + 0x78, 0x1234);
-    /* The own player on card 2, assigned with the slots open. */
+    /* The own player on card 2, assigned with the slots open: the box at the open panel's 253 - 40, the others at
+     * 140 - 40, all at y 42. */
     Card(1)[0x1EE0C] = 1;
-    Card(1)[0x1EE0E] = 1;
-    Put(Card(1) + 0x1EDF0, 0x55);
-    /* Its picker open: the box busy, at the open panel's 253 - 40. */
-    Card(1)[0x1EE11] = 2;
-    Card(1)[0x5958 + 0x15EC4] = 1;
-    Size(Card(1) + 0x5958, 480.0f, 213.0f);
+    for (uint32_t i = 0; i < 8; i++)
+    {
+        Size(Card(i) + 0x5958, 480.0f, i == 1 ? 213.0f : 100.0f);
+        const float y = 42.0f;
+        memcpy(Card(i) + 0x5958 + 0x8, &y, 4);
+    }
 
     /* A player on card 6 with three present (a card freed late): eight before that card is next placed. */
     Put32(g_screen + PLAYERS + 5 * 4, 2);
     co_cards_layout(&regs);
     CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 498.0f);
     CHECK(fake_host_logged("loadout cards: four to eight on the open screen (complex operation no, 3 players, cards 5 to 8: -1 2 -1 -1)"));
-    CHECK(fake_host_logged("loadout cards: card 2's slots collapsed (picker 2, box busy 1, animating 0, box height 213.0, then 213.0)"));
+    CHECK(!fake_host_logged("slots collapsed"));
     for (uint32_t i = 0; i < 8; i++)
     {
         CoCardPlace p;
         co_cards_place(CO_CARDS_EIGHT, rootH, hud, i, &p);
         CHECK(Field(Card(i), 0x10) == 498.0f && Field(Card(i) + 0x1C30, 0x10) == (i == 2 ? 42.0f : 498.0f));
         CHECK(Field(Card(i), 0x2C) == p.x && Field(Card(i), 0x8) == p.y && Field(Card(i), 0x14) == p.scale);
-        CHECK(Field(Card(i) + 0x1FA8, 0x14) == 0.528f && Field(Card(i) + 0x1FA8, 0x8) == p.figureY);
-        /* Only the open card is assigned again, with its own data, closed. */
-        uint64_t data;
-        memcpy(&data, Card(i) + 0x1EDE0, 8);
-        CHECK(Card(i)[0x1EE0C] == 0 && data == (i == 1 ? 0x55u : 0u));
+        CHECK(Field(Card(i) + 0x1FA8, 0x14) == 0.8f && Field(Card(i) + 0x1FA8, 0x8) == 102.0f);
+        /* The camera at 3.52 m and 1.567 m; the clip from the slots' top (255 open, 142 collapsed) to the plate (434),
+         * in the frame from card y -8 to 584. Card 3 is closed (+0x1C30 at 42): its frame is 456 lower. Card 4's
+         * +0x1D40 stays at 206, so its slots' top is at the plate. */
+        const uint8_t* frame = Card(i) + 0x1FA8 + 0x110;
+        const float bottom = i == 2 ? -464.0f : -8.0f, from = i == 1 ? 255.0f : i == 3 ? 434.0f : 142.0f;
+        CHECK(Near(Field(Card(i) + 0x1FA8, 0x8EC), 3.52f) && Field(Card(i) + 0x1FA8, 0x8F0) == 1.567f);
+        CHECK(Field(frame, 0xC0) == 0.0f && Field(frame, 0xC8) == 1.0f);
+        if (i != 2) CHECK(Near(Field(frame, 0xC4) * 592.0f, from - bottom) && Near(Field(frame, 0xCC) * 592.0f, 434.0f - from));
     }
+    CHECK(Card(1)[0x1EE0C] == 1);
     CHECK(Field(Card(0) + 0x1D40, 0x10) == 498.0f && Field(Card(0) + 0x5848, 0x10) == 128.0f);
     CHECK(Field(Card(3) + 0x1D40, 0x10) == 206.0f && Field(Card(1) + 0x5848, 0x10) == 498.0f);
     float to[2];
@@ -229,25 +229,12 @@ static void CheckCallbacks(void)
     co_cards_layout(&regs);
     CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 498.0f);
     CHECK(co_cards_test_complex_reads() == asked);
-    CHECK(co_card_slots_height == 498.0f);
     co_cards_test_clock(NULL);
 
-    /* The research layout E3: the open own card stays open, the slots cave sees 780, the figure is at 0.8. */
-    co_cards_test_layout(CO_LAYOUT_E3);
-    Put32(g_context + 0x16390, 3);
-    co_cards_open(&regs);
-    CHECK(co_cards_test_get_mode() == CO_CARDS_FOUR && co_card_height == 780.0f && co_card_slots_height == 780.0f);
-    CHECK(fake_host_logged("loadout cards: the game's four (complex operation no, 3 players) in the research layout E3"));
-    Card(1)[0x1EE0C] = 1;
-    Put(Card(1) + 0x1EDE0, 0);
-    Put32(g_context + 0x16390, 5);
+    /* The slot list open on card 2: +0x1D40 at 206 hangs from the top, so the box and the cut move up 292. */
+    Size(Card(1) + 0x1D40, 480.0f, 206.0f);
     co_cards_layout(&regs);
-    CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 498.0f && co_card_slots_height == 780.0f);
-    uint64_t again;
-    memcpy(&again, Card(1) + 0x1EDE0, 8);
-    CHECK(Card(1)[0x1EE0C] == 1 && again == 0);
-    CHECK(Field(Card(1) + 0x1FA8, 0x14) == 0.8f && Near(Field(Card(1) + 0x1FA8, 0x8), -9.0f));
-    co_cards_test_layout(CO_LAYOUT_E1);
+    CHECK(Near(Field(Card(1) + 0x1FA8 + 0x110, 0xC4) * 592.0f, 255.0f + 292.0f + 8.0f) && Field(Card(1) + 0x1FA8 + 0x110, 0xCC) == 0.0f);
 
     /* No session context: four. */
     Put(image + 0x347CEF0u, 0);
@@ -273,16 +260,16 @@ int main(void)
         CoCardPlace p[8];
         Rect r[8];
         for (uint32_t i = 0; i < 8; i++) r[i] = Drawn(w, h, 0.9f, i, &p[i]);
-        /* 0.752 wherever the height is 1080, 0.867 on 16:10: 0.75 of the game's size or more everywhere. */
-        CHECK(Near(p[0].scale * 1000.0f, tall ? 867.31f : 751.92f) && p[0].scale >= 0.75f);
+        /* 0.752 wherever the height is 1080, 0.865 on 16:10 (the figure's limit): 0.75 of the game's size or more. */
+        CHECK(Near(p[0].scale * 1000.0f, tall ? 865.0f : 751.92f) && p[0].scale >= 0.75f);
         for (uint32_t i = 0; i < 8; i++)
         {
-            CHECK(p[i].scale == p[0].scale && p[i].figureScale == 0.528f && Near(p[i].figureY, -48.44f));
+            CHECK(p[i].scale == p[0].scale && p[i].figureScale == 0.8f && p[i].figureY == 102.0f);
             CHECK(1.444f * p[i].scale * p[i].figureScale <= 1.0f);
             /* Inside the container and the screen; the top row 31 under the tabs' 156, the bottom row on the game's line. */
             CHECK(r[i].left >= ((rootW - 1920.0f) / 2.0f) * k && r[i].right <= ((rootW + 1920.0f) / 2.0f) * k);
             CHECK(r[i].top >= 187.0f * k - 0.01f && r[i].bottom <= h);
-            if (i < 4) CHECK(Near(r[i].top, 187.0f * k));
+            if (i < 4) CHECK(Near(r[i].top, (tall ? 189.4f : 187.0f) * k));
             if (i >= 4) CHECK(Near(r[i].bottom, h - 111.0f * k));
             /* Rows and columns 44 s apart, the same pitch everywhere. */
             if (i % 4) CHECK(Near((r[i].left - r[i - 1].right) / k, 44.0f * p[i].scale));
@@ -298,29 +285,37 @@ int main(void)
         static const float kWideX[8] = {811.7f, 1232.8f, 1276.9f, 1697.9f, 1742.1f, 2163.1f, 2207.2f, 2628.3f};
         static const float kSmall[4] = {124.7f, 374.3f, 396.4f, 646.0f};
         static const float kSmallX[8] = {185.8f, 396.4f, 418.4f, 629.0f, 651.0f, 861.6f, 883.6f, 1094.2f};
-        static const float kTall[4] = {187.0f, 618.9f, 657.1f, 1089.0f};
-        static const float kTallX[8] = {174.2f, 538.5f, 576.6f, 940.9f, 979.1f, 1343.4f, 1381.5f, 1745.8f};
+        static const float kNormal[4] = {187.0f, 561.5f, 594.5f, 969.0f};
+        static const float kNormalX[8] = {278.8f, 594.6f, 627.6f, 943.5f, 976.5f, 1292.3f, 1325.4f, 1641.2f};
+        static const float kTall[4] = {189.4f, 620.2f, 658.2f, 1089.0f};
+        static const float kTallX[8] = {176.3f, 539.6f, 577.7f, 941.0f, 979.0f, 1342.3f, 1380.4f, 1743.7f};
         CHECK(Predicted(3440, 1440, kWide, kWideX));
         CHECK(Predicted(1280, 720, kSmall, kSmallX));
+        CHECK(Predicted(1920, 1080, kNormal, kNormalX));
         CHECK(Predicted(1920, 1200, kTall, kTallX));
     }
 
-    g_case = "the research layout E3";
+    g_case = "the figure";
     {
-        /* E1's rects (the same 498 cards), the figure at 0.8 and 9 down; on 16:10 the figure caps s at 0.692 / 0.8. */
-        static const float kNormal[4] = {187.0f, 561.5f, 594.5f, 969.0f};
-        static const float kNormalX[8] = {278.8f, 594.6f, 627.6f, 943.5f, 976.5f, 1292.3f, 1325.4f, 1641.2f};
-        static const float kWide[4] = {249.3f, 748.6f, 792.7f, 1292.0f};
-        static const float kWideX[8] = {811.7f, 1232.8f, 1276.9f, 1697.9f, 1742.1f, 2163.1f, 2207.2f, 2628.3f};
-        static const float kTall[4] = {189.4f, 620.2f, 658.2f, 1089.0f};
-        static const float kTallX[8] = {176.3f, 539.6f, 577.7f, 941.0f, 979.0f, 1342.3f, 1380.4f, 1743.7f};
-        co_cards_test_layout(CO_LAYOUT_E3);
-        CoCardPlace p;
-        co_cards_place(CO_CARDS_EIGHT, 1080.0f, 0.9f, 5, &p);
-        CHECK(p.figureScale == 0.8f && Near(p.figureY, -9.0f) && Near(p.scale * 1000.0f, 751.92f));
-        CHECK(Near(co_cards_scale(1200.0f, 0.9f) * 1000.0f, 865.0f) && co_cards_place(CO_CARDS_FOUR, 1080.0f, 0.9f, 0, &p) && p.figureScale == 1.0f);
-        CHECK(Predicted(1920, 1080, kNormal, kNormalX) && Predicted(3440, 1440, kWide, kWideX) && Predicted(1920, 1200, kTall, kTallX));
-        co_cards_test_layout(CO_LAYOUT_E1);
+        /* The image (624 units at 0.8) has the game's 445.7 units a metre at every height of the root; its centre is at
+         * card y 288, so the helmet top (1.877 m) is 8 under the plate. The cut: the slots' top to the plate. */
+        CoCardFigure f;
+        co_cards_figure(1080.0f, 498.0f, 498.0f, 255.0f, &f);
+        const float perMetre = 624.0f / (2.0f * f.distance * tanf(0.3927f / 2.0f));
+        CHECK(Near(f.distance * 100.0f, 352.0f) && f.height == 1.567f && Near(perMetre, 445.6f));
+        CHECK(fabsf(498.0f + 102.0f - 312.0f + (1.877f - f.height) * perMetre - 426.0f) < 0.5f);
+        CHECK(Near(f.clipY * 592.0f, 263.0f) && Near(f.clipHeight * 592.0f, 179.0f));
+        co_cards_figure(1080.0f, 498.0f, 498.0f, 142.0f, &f);
+        CHECK(Near(f.clipY * 592.0f, 150.0f) && Near(f.clipHeight * 592.0f, 292.0f));
+        co_cards_figure(1200.0f, 498.0f, 498.0f, 142.0f, &f);
+        CHECK(Near(624.0f * 1200.0f / 1080.0f / (2.0f * f.distance * tanf(0.3927f / 2.0f)), 445.6f));
+        /* Slots above the plate leave nothing; slots under the frame cut from its bottom. */
+        co_cards_figure(1080.0f, 498.0f, 498.0f, 450.0f, &f);
+        CHECK(f.clipHeight == 0.0f);
+        co_cards_figure(1080.0f, 498.0f, 498.0f, -50.0f, &f);
+        CHECK(f.clipY == 0.0f && Near(f.clipHeight * 592.0f, 442.0f));
+        /* Never magnified: 1.444 s f at most 1 on every shape. */
+        CHECK(1.444f * co_cards_scale(1200.0f, 0.9f) * 0.8f <= 1.0f && 1.444f * co_cards_scale(1080.0f, 0.9f) * 0.8f <= 1.0f);
     }
 
     g_case = "the hud scale";
@@ -377,6 +372,6 @@ int main(void)
     CheckCallbacks();
 
     if (g_failed) { printf("cards: %d failures\n", g_failed); return 1; }
-    printf("cards: layout at nine screens, the hud scale, the game's four, the rule and the switch checked\n");
+    printf("cards: layout at nine screens, the figure, the hud scale, the game's four, the rule and the switch checked\n");
     return 0;
 }
