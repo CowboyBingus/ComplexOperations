@@ -303,6 +303,17 @@ uint32_t* CoXlTestBandDropPixels(void) { return g_matband.pixels; }
 void CoXlTestBandTick(void) { MoveBandPixelsTick(); }
 int CoXlTestRenderFrame(uint32_t* frame) { return NearRenderFrame(frame); }
 void CoXlTestBandLevelGone(void) { g_matband.tex = 0; MoveLevelGone(); }
+/* render_world as the near terrain's wrapper sees it (proto/difficulty_world_terrain.c NearRunAt): a tile replaying
+ * (`active`) with its two textures, the level's one-mip heightmap, the call from the job consumer or not. */
+uint64_t CoXlTestNearRun(int consumer, int active, uint64_t tile0, uint64_t tile1, uint64_t oneMip, void* original)
+{
+    g_nearRunOriginal = (NearRunFn)original;
+    g_near.tex[0] = tile0; g_near.tex[1] = tile1;
+    g_oneMip.tex = oneMip; g_oneMip.level = g_world.levels;
+    InterlockedExchange(&g_nearActive, active);
+    return NearRunAt(consumer, 1, 2, 3, 0, 5, 6, 7, 8);
+}
+void CoXlTestNearReplaying(int active) { InterlockedExchange(&g_nearActive, active); }
 /* The paths the frees rest on: a dispatcher call's start, the band's stash and take, the pins asked again, the render
  * hook's order and its pins. */
 void CoXlTestDispatchBegins(uint64_t records, uint64_t index) { WorldDispatchBegins(records, index, 0); }
