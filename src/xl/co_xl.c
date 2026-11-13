@@ -40,6 +40,7 @@
 #include "co_switch.h"
 #include "co_steer.h"
 #include "co_cutters.h"
+#include "co_forest.h"
 #include "../co_watch.h"
 
 /* Six of the copied files' functions were called from loader code that did not come along (the watch thread, the
@@ -511,6 +512,31 @@ void CoXlTestStreamScan(void)
     ReleaseSRWLockExclusive(&g_streamLock);
 }
 void CoXlTestStreamSlotState(uint32_t i, int* live, int* due, uint64_t* unit) { *live = g_streamLive[i]; *due = g_streamDue[i]; *unit = g_streamUnit[i]; }
+/* The streamer's own SpawnLevelLayers calls (WorldStreamSpawnDueLocked): `spawn` stands in for the original and `pass`
+ * for the captured pass; a due slot waits with its unit; the due slots go in index order. */
+void CoXlTestStreamSpawnSetup(void* spawn, uint8_t* pass)
+{
+    static float height;
+    g_streamSpawn = (WorldStreamSpawnFn)spawn; g_stream.pass = pass; g_heightCopy = &height; g_heightSource = 1;
+}
+void CoXlTestStreamDue(uint32_t i, uint64_t unit)
+{
+    g_streamUnit[i] = unit; g_streamDeferred[i] = 1; g_streamDue[i] = 1; g_streamLive[i] = 0; g_streamSpawned[i] = 0;
+    g_streamNeedsUnit[i] = 0; g_streamDetached[i] = 0;
+    uint32_t n = 0;
+    for (uint32_t k = 0; k < g_stream.count; k++)
+        if (g_streamDeferred[k] && g_streamDue[k] && !g_streamSpawned[k]) g_streamOrder[n++] = k;
+    g_stream.orderCount = n; g_stream.orderCursor = 0; g_stream.deferred = n;
+}
+void CoXlTestStreamSpawnDue(void)
+{
+    AcquireSRWLockExclusive(&g_streamLock);
+    WorldStreamSpawnDueLocked();
+    ReleaseSRWLockExclusive(&g_streamLock);
+}
+void CoXlTestStreamSpawned(uint32_t i, int* spawned, int* due) { *spawned = g_streamSpawned[i]; *due = g_streamDue[i]; }
+void CoXlTestStreamTrees(uint32_t* holds, uint32_t* most, uint32_t* cursor) { *holds = g_stream.treeHolds; *most = g_stream.treesMost; *cursor = g_stream.orderCursor; }
+int CoXlTestWindowTreesOver(float share) { return WindowTreesOver(share); }
 float CoXlTestVisibleAt(float x, float y) { return NearVisibleAt(x, y); }
 void CoXlTestHide(uint64_t handle) { g_hide.handle = handle; g_hide.level = g_world.levels; }
 uint64_t CoXlTestHideHandle(void) { return g_hide.handle; }

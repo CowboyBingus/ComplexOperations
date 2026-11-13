@@ -147,6 +147,10 @@ typedef struct WorldStreamState
     int bodyBeforeSeen, bodyPending, bodyNoted; /* before count read; after count due; the 20-removal line is done */
     ULONGLONG nextScan, nextNote;
     double spentMs;          /* time in the streamer's own SpawnLevelLayers calls */
+    uintptr_t forest;        /* the SpeedTree forest the stamps' trees go to (co_forest.h), from a stamp unit's world */
+    uint32_t treesMost;      /* the most trees one of the streamer's calls added */
+    uint32_t treeHolds;      /* the streamer's calls held back: the forest's grid had no room for one more (cumulative) */
+    int forestBad;           /* one note when the forest does not read */
 } WorldStreamState;
 static WorldStreamState g_stream;
 
@@ -217,6 +221,10 @@ static void WorldStreamClearLocked(void)
     g_stream.nextScan = 0;
     g_stream.nextNote = 0;
     g_stream.spentMs = 0.0;
+    g_stream.forest = 0;
+    g_stream.treesMost = 0;
+    g_stream.treeHolds = 0;
+    g_stream.forestBad = 0;
     memset(g_streamDeferred, 0, sizeof g_streamDeferred);
     memset(g_streamFormation, 0, sizeof g_streamFormation);
     memset(g_streamOut2, 0, sizeof g_streamOut2);
@@ -347,6 +355,23 @@ static int WorldStreamBodyStore(uint32_t* used, uint32_t* slots)
         SafeRead((uintptr_t)physics + 0x4C, used, 4) || SafeRead((uintptr_t)physics + 0x40, slots, 4)) return 0;
     *slots &= 0x3FFFFFFFu;
     return *slots >= 1024 && *slots <= (1u << 24) && *used <= *slots;
+}
+
+/* The SpeedTree forest's trees and its grid's room (co_forest.h). The forest comes from a stamp unit's world, the one
+ * op 0x6C spawns the stamps' trees into, and is kept for the level. 0 when it does not read. */
+static int WorldStreamTrees(uint32_t* trees, uint32_t* room)
+{
+    const int pins = g_stream.forest != 0 || co_forest_pins(ApiModuleBase("helldivers2.exe", NULL));
+    for (uint32_t i = 0; pins && g_stream.forest == 0 && i < g_stream.count && i < kStreamMaxLocations; i++)
+        if (g_streamUnit[i] != 0) { co_forest_of_unit(g_streamUnit[i], &g_stream.forest); break; }
+    if (g_stream.forest != 0 && co_forest_trees(g_stream.forest, trees, room)) return 1;
+    if (!g_stream.forestBad)
+    {
+        g_stream.forestBad = 1;
+        Note("difficulty: extra large maps: content streaming: the SpeedTree forest %s; its trees are not counted",
+            pins ? "does not read" : "code is not the code this mod was made for");
+    }
+    return 0;
 }
 
 /* Remove one streamed location: DestroyUnit (the table's +0x388) takes its stamp unit and the layer units go; the real
@@ -896,6 +921,18 @@ static void WorldStreamSpawnDueLocked(void)
             }
             break;
         }
+        /* Every tree of a call takes a slot of the forest's grid, and a full grid crashes the spawn (exe 0x20CF57):
+         * the call waits, its records stay due, until removals give room back. */
+        uint32_t trees = 0, treeRoom = 0, treesAfter = 0;
+        const int counted = WorldStreamTrees(&trees, &treeRoom);
+        if (counted && !co_forest_call_fits(trees, treeRoom, g_stream.treesMost))
+        {
+            if (g_stream.treeHolds++ == 0)
+                Note("difficulty: extra large maps: content streaming waits: the SpeedTree forest holds %u trees of %u (the most one call added: %u)",
+                    trees, treeRoom, g_stream.treesMost);
+            g_stream.orderCursor = pickedAt[0];
+            break;
+        }
         uint64_t countHere = (uint64_t)(uintptr_t)&countAt;
         uint32_t zero = 0;
         memcpy((void*)((uintptr_t)g_stream.pass + 8), &stage, 8);
@@ -904,6 +941,8 @@ static void WorldStreamSpawnDueLocked(void)
         g_streamOwn = (LONG)GetCurrentThreadId();
         g_streamSpawn(g_stream.pass, g_stream.record, g_stream.context);
         g_streamOwn = 0;
+        if (counted && co_forest_trees(g_stream.forest, &treesAfter, &treeRoom) && treesAfter > trees && treesAfter - trees > g_stream.treesMost)
+            g_stream.treesMost = treesAfter - trees;
         if (g_stream.context == g_streamContextCopy) WorldStreamArenaReset();
         if (SafeRead((uintptr_t)g_stream.pass + 0xD8, &resume, 4))
         {

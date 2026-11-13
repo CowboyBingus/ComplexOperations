@@ -58,6 +58,7 @@ static struct
     uint32_t reachRoom;                /* reach's room */
     uint32_t entered, left, refusedFull, refusedIndex, refusedBodies, poseChecked, poseEqual, enteredFar, farHeld, evictedFar, farLive;
     uint32_t refusedCutters;           /* scans over the navmesh cutter budget (counted in refusedBodies too) */
+    uint32_t refusedTrees;             /* scans over the SpeedTree forest's budget (counted in refusedBodies too) */
     uint32_t reachFar;                 /* the plan entries whose reach is past WINDOW_IN */
     int on, bad, insertOk, removeOk;
     ULONGLONG nextScan, farHoldUntil; /* far entries wait until then after an eviction */
@@ -301,12 +302,12 @@ static void WindowEvictFarLocked(void)
 
 /* The far ring: the planned stamps between WINDOW_IN and their own reach of a player, the ones visible past
  * WINDOW_FAR_BIG first, under the far budgets. */
-static void WindowScanFarLocked(uint32_t bodies, uint32_t slots)
+static void WindowScanFarLocked(uint32_t bodies, uint32_t slots, int treesOver)
 {
     uint32_t used = 0, capacity = 0, used1 = 0, capacity1 = 0;
     if (g_win.reach == NULL || g_win.reachFar == 0 || g_win.freeCount == 0 || GetTickCount64() < g_win.farHoldUntil) return;
     if (g_win.farLive >= WINDOW_FAR_LIVE) { g_win.farHeld++; return; }
-    if ((float)bodies >= WINDOW_FAR_SHARE * (float)slots || !RenderPool0(&used, &capacity) || (float)used >= WINDOW_FAR_SHARE * (float)capacity ||
+    if ((float)bodies >= WINDOW_FAR_SHARE * (float)slots || treesOver || !RenderPool0(&used, &capacity) || (float)used >= WINDOW_FAR_SHARE * (float)capacity ||
         !RenderPool1(&used1, &capacity1) || (float)used1 >= WINDOW_FAR_SHARE * (float)capacity1 ||
         co_cutters_over(ApiModuleBase("helldivers2.exe", NULL), WINDOW_FAR_SHARE))
     { g_win.farHeld++; return; }
@@ -339,6 +340,14 @@ static void WindowScanFarLocked(uint32_t bodies, uint32_t slots)
         }
 }
 
+/* Every tree takes a slot of the forest's grid (98304, fixed in the exe; co_forest.h). It fills long before the bodies'
+ * or the cutters' shares when a player moves far at once (a respawn) while the old stamps are still in. */
+static int WindowTreesOver(float share)
+{
+    uint32_t trees = 0, room = 0;
+    return WorldStreamTrees(&trees, &room) && co_forest_over(trees, room, share);
+}
+
 static void WindowScanLocked(ULONGLONG now)
 {
     if (now < g_win.nextScan || !WindowReadyLocked()) return;
@@ -349,8 +358,9 @@ static void WindowScanLocked(ULONGLONG now)
      * the tree without one. The early room makes the pool as large as the bodies' store, so the bodies' share holds
      * first; the cutters' own share stays as a net for cutters made without a tree */
     const int cutters = co_cutters_over(ApiModuleBase("helldivers2.exe", NULL), WINDOW_BODY_SHARE);
-    if ((float)bodies >= WINDOW_BODY_SHARE * (float)slots || cutters)
-    { g_win.refusedBodies++; g_win.refusedCutters += cutters; WindowEvictFarLocked(); return; }
+    const int treesOver = WindowTreesOver(WINDOW_BODY_SHARE);
+    if ((float)bodies >= WINDOW_BODY_SHARE * (float)slots || cutters || treesOver)
+    { g_win.refusedBodies++; g_win.refusedCutters += cutters; g_win.refusedTrees += treesOver; WindowEvictFarLocked(); return; }
     const float cell = g_plan.cell, r2 = WINDOW_IN * WINDOW_IN;
     const int reach = (int)ceilf(WINDOW_IN / cell);
     uint32_t done = 0;
@@ -377,7 +387,7 @@ static void WindowScanLocked(ULONGLONG now)
                     }
                 }
     }
-    WindowScanFarLocked(bodies, slots);
+    WindowScanFarLocked(bodies, slots, WindowTreesOver(WINDOW_FAR_SHARE));
 }
 
 static void WindowNoteLocked(void)
@@ -391,6 +401,10 @@ static void WindowNoteLocked(void)
     Note("difficulty: extra large maps: navmesh cutters: %u of %u%s; %u scans over their budget; %llu not made (the first at %u of %u), %llu handles of 0 left out of a destroy",
         cutters, cutterRoom, cut ? "" : ", not read", g_win.refusedCutters, (unsigned long long)seen.failed, seen.usedAtFail, seen.roomAtFail,
         (unsigned long long)seen.dropped);
+    uint32_t trees = 0, treeRoom = 0;
+    const int counted = WorldStreamTrees(&trees, &treeRoom);
+    Note("difficulty: extra large maps: SpeedTree forest: %u trees of %u%s; %u scans over its budget; %u streamer calls held, the most one call added %u",
+        trees, treeRoom, counted ? "" : ", not read", g_win.refusedTrees, g_stream.treeHolds, g_stream.treesMost);
     Note("difficulty: extra large maps: stamp window: %u in (slots used %u of %u, highest %u), %u entered (%u of them far, %u far live, %u far ones taken out for the near ones), %u left so far; refused: %u table full, %u index full, %u scans over the body budget, %u far scans held (bodies %u of %u, culling pool 0 %u of %u%s, pool 1 %u of %u%s)",
         (DIF_LOCATIONS - g_win.base) - g_win.freeCount, (DIF_LOCATIONS - g_win.base) - g_win.freeCount, DIF_LOCATIONS - g_win.base, g_win.high, g_win.entered,
         g_win.enteredFar, g_win.farLive, g_win.evictedFar, g_win.left, g_win.refusedFull, g_win.refusedIndex, g_win.refusedBodies, g_win.farHeld, g_stream.bodiesUsed, g_stream.bodySlots,
