@@ -61,6 +61,7 @@ static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
     co_capacity_game(game);
     co_capacity_early(); /* this event is the first moment with game.dll's code there, and HellForge's pool sizes are in */
     co_peers_start(game);
+    co_voice_install(game); /* reads only; on in every build */
     const char* tag = co_tag_install(game);
     if (tag != NULL) co_log("war-table tag: off: %s", tag);
     const char* watch = co_watch_install(game);
