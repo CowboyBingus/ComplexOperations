@@ -18,6 +18,7 @@ void CoXlTestRecords(int state);
 void CoXlTestRenderReset(void);
 const uint8_t* CoXlTestRenderPage(void);
 void CoXlTestRenderNote(LONG made);
+void CoXlTestRenderMade(LONG made);
 
 static int g_failed;
 static const char* g_case;
@@ -40,7 +41,8 @@ static uint8_t* Reset(const char* name)
 static int Unchanged(void) { return memcmp(g_before, g_fake.image + 0x400000u, sizeof g_before) == 0; }
 static uint32_t U32(const uint8_t* at) { uint32_t v; memcpy(&v, at, 4); return v; }
 static float F32(const uint8_t* at) { float v; memcpy(&v, at, 4); return v; }
-static uintptr_t JumpTarget(const uint8_t* at) { int32_t rel; memcpy(&rel, at + 1, 4); return (uintptr_t)at + 5u + (intptr_t)rel; }
+/* The rel32 at buffer+at for an instruction that ends at `end` and goes to `to`, both as addresses in the process. */
+static void Rel32(uint8_t* buffer, size_t at, uintptr_t end, uintptr_t to) { const int32_t rel = (int32_t)((intptr_t)to - (intptr_t)end); memcpy(buffer + at, &rel, 4); }
 #define RENDER_ENGINE_AT 0x3700000u /* a free place in the image for the engine object, when a case has one */
 
 /* The engine object the setup stores at game+0x3326340, with its main world at +0x10E8 (0: not made yet). */
@@ -195,20 +197,41 @@ int main(void)
     Engine(image, 0);
     {
         uint8_t* exe = g_fake.exe;
-        CHECK(CoXlRenderEarly((uintptr_t)image, (uintptr_t)exe) == NULL);
+        CHECK(CoXlRenderCheck((uintptr_t)image, (uintptr_t)exe) == NULL && g_fake.writes == 0 && !fake_host_logged("is made at 2x"));
+        CHECK(CoXlRenderWrite((uintptr_t)image) == NULL);
         CHECK(fake_host_logged("render capacity: the main world (capacity 0x200000) is made at 2x: culling pools of 524288, not 262144; pools 0 and 1 of 1048576"));
+        /* scene, pool, then N: a creation that read N before its jump runs neither of the other two */
+        CHECK(g_fake.wroteCount == 3 && g_fake.wrote[0] == (uintptr_t)exe + FAKE_RENDER_SCENE && g_fake.wrote[1] == (uintptr_t)exe + FAKE_RENDER_POOL0 &&
+            g_fake.wrote[2] == (uintptr_t)exe + FAKE_RENDER_CAP);
         const uint8_t* page = CoXlTestRenderPage();
-        CHECK(page != NULL && exe[FAKE_RENDER_CAP] == 0xE9 && exe[FAKE_RENDER_POOL0] == 0xE9 && exe[FAKE_RENDER_SCENE] == 0xE9);
+        CHECK(page != NULL);
         if (page != NULL)
         {
-            CHECK(JumpTarget(exe + FAKE_RENDER_CAP) == (uintptr_t)page && JumpTarget(exe + FAKE_RENDER_SCENE) == (uintptr_t)page + 0x60u &&
-                JumpTarget(exe + FAKE_RENDER_POOL0) == (uintptr_t)page + 0x80u);
-            CHECK(exe[FAKE_RENDER_CAP + 5] == 0x90 && exe[FAKE_RENDER_CAP + 6] == 0x90 && exe[FAKE_RENDER_CAP + 7] == 0x48); /* the next instruction kept */
-            CHECK(U32(page + 0x40) == 0 && U32(page + 0x44) == 2u && JumpTarget(page + 29) == (uintptr_t)exe + 0x10CE04u &&
-                JumpTarget(page + 0x60 + 23) == (uintptr_t)exe + 0x10CEBEu && JumpTarget(page + 0x80 + 18) == (uintptr_t)exe + 0x10CE31u);
+            const uintptr_t p = (uintptr_t)page, x = (uintptr_t)exe;
+            uint8_t want[34], scene[28], pool[23], jump[8];
+            static const uint8_t kStub[34] = {0x8B, 0xBC, 0x24, 0xC8, 0x00, 0x00, 0x00, 0x81, 0xFF, 0x00, 0x00, 0x20, 0x00, 0x75, 0x0E,
+                0xF0, 0xFF, 0x05, 0, 0, 0, 0, 0x0F, 0xAF, 0x3D, 0, 0, 0, 0, 0xE9, 0, 0, 0, 0};
+            static const uint8_t kScene[28] = {0x49, 0x89, 0x07, 0x81, 0xFF, 0x00, 0x00, 0x40, 0x00, 0x75, 0x07, 0x48, 0x89, 0x05, 0, 0, 0, 0,
+                0x48, 0x8D, 0x54, 0x24, 0x50, 0xE9, 0, 0, 0, 0};
+            static const uint8_t kPool[23] = {0x81, 0xFF, 0x00, 0x00, 0x40, 0x00, 0x75, 0x02, 0x01, 0xC0, 0x89, 0x44, 0x24, 0x60, 0x89, 0x44, 0x24, 0x64,
+                0xE9, 0, 0, 0, 0};
+            memcpy(want, kStub, sizeof want); Rel32(want, 18, p + 22, p + 0x40); Rel32(want, 25, p + 29, p + 0x44); Rel32(want, 30, p + 34, x + 0x10CE04u);
+            memcpy(scene, kScene, sizeof scene); Rel32(scene, 14, p + 0x60 + 18, p + 0x48); Rel32(scene, 24, p + 0x60 + 28, x + 0x10CEBEu);
+            memcpy(pool, kPool, sizeof pool); Rel32(pool, 19, p + 0x80 + 23, x + 0x10CE31u);
+            CHECK(memcmp(page, want, sizeof want) == 0);
+            CHECK(memcmp(page + 0x60, scene, sizeof scene) == 0);
+            CHECK(memcmp(page + 0x80, pool, sizeof pool) == 0);
+            CHECK(U32(page + 0x40) == 0 && U32(page + 0x44) == 2u && U32(page + 0x48) == 0 && U32(page + 0x4C) == 0);
+            static const uint8_t kJump[8] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90};
+            memcpy(jump, kJump, 8); Rel32(jump, 1, x + FAKE_RENDER_CAP + 5u, p);
+            CHECK(memcmp(exe + FAKE_RENDER_CAP, jump, 7) == 0 && exe[FAKE_RENDER_CAP + 7] == 0x48); /* the next instruction kept */
+            memcpy(jump, kJump, 8); Rel32(jump, 1, x + FAKE_RENDER_SCENE + 5u, p + 0x60);
+            CHECK(memcmp(exe + FAKE_RENDER_SCENE, jump, 8) == 0);
+            memcpy(jump, kJump, 8); Rel32(jump, 1, x + FAKE_RENDER_POOL0 + 5u, p + 0x80);
+            CHECK(memcmp(exe + FAKE_RENDER_POOL0, jump, 8) == 0);
         }
         const int writes = g_fake.writes;
-        CHECK(CoXlRenderEarly((uintptr_t)image, (uintptr_t)exe) == NULL && g_fake.writes == writes); /* once */
+        CHECK(CoXlRenderCheck((uintptr_t)image, (uintptr_t)exe) == NULL && CoXlRenderWrite((uintptr_t)image) == NULL && g_fake.writes == writes); /* once */
         CoXlTestRenderNote(0);
         CHECK(fake_host_logged("render capacity: no main world was made since the install"));
         CoXlTestRenderNote(1);
@@ -219,17 +242,50 @@ int main(void)
     Engine(image, 0x123456780ull);
     memcpy(g_before, image + 0x400000u, sizeof g_before);
     {
-        uint8_t exeBefore[26];
+        uint8_t exeBefore[0x100];
         memcpy(exeBefore, g_fake.exe + FAKE_RENDER_CAP, sizeof exeBefore);
-        CHECK(CoXlRenderEarly((uintptr_t)image, (uintptr_t)g_fake.exe) != NULL && g_fake.writes == 0 && CoXlTestRenderPage() == NULL);
+        CHECK(CoXlRenderCheck((uintptr_t)image, (uintptr_t)g_fake.exe) != NULL && g_fake.writes == 0 && g_fake.wroteCount == 0 && CoXlTestRenderPage() == NULL);
         CHECK(fake_host_logged("render capacity: the main world was made before the mod could size it; it keeps vanilla pools (262144)"));
         CHECK(!fake_host_logged("is made at 2x") && memcmp(exeBefore, g_fake.exe + FAKE_RENDER_CAP, sizeof exeBefore) == 0 && Unchanged());
+        CHECK(CoXlRenderWrite((uintptr_t)image) != NULL && g_fake.wroteCount == 0); /* nothing prepared, nothing written */
     }
 
-    image = Reset("the render capacity's site is another");
+    const uint32_t pins[2] = {FAKE_RENDER_CAP, FAKE_RENDER_SCENE};
+    for (int i = 0; i < 2; i++)
+    {
+        image = Reset("a render capacity site is not the reviewed code");
+        Engine(image, 0);
+        g_fake.noMatchExe[0] = pins[i];
+        CHECK(CoXlRenderCheck((uintptr_t)image, (uintptr_t)g_fake.exe) != NULL && g_fake.wroteCount == 0 && fake_host_logged("is not the reviewed code"));
+        CHECK(CoXlRenderWrite((uintptr_t)image) != NULL && g_fake.wroteCount == 0);
+    }
+
+    /* A refused jump puts back the ones before it: the world creation is the game's, byte for byte. */
+    for (int fail = 0; fail < 3; fail++)
+    {
+        image = Reset("a render capacity jump is refused");
+        Engine(image, 0);
+        uint8_t before[0x100];
+        memcpy(before, g_fake.exe + FAKE_RENDER_CAP, sizeof before); /* 0x10CDFD..0x10CEFD: all three sites */
+        CHECK(CoXlRenderCheck((uintptr_t)image, (uintptr_t)g_fake.exe) == NULL);
+        g_fake.failWriteAt = fail;
+        CHECK(CoXlRenderWrite((uintptr_t)image) != NULL && CoXlTestRenderPage() == NULL);
+        CHECK(memcmp(before, g_fake.exe + FAKE_RENDER_CAP, sizeof before) == 0 && fake_host_logged("the sites written are the game's again"));
+        CHECK(g_fake.wroteCount == 2 * fail + 1 && !fake_host_logged("is made at 2x"));
+    }
+
+    /* After the jumps: the setup not begun, every later world runs them; begun, only a world they counted proves it. */
+    image = Reset("the setup began while the jumps went in, no world counted");
     Engine(image, 0);
-    g_fake.failWriteAt = 0; /* the first jump is refused: the part must not go on with vanilla pools */
-    CHECK(CoXlRenderEarly((uintptr_t)image, (uintptr_t)g_fake.exe) != NULL && fake_host_logged("render capacity: the world creation could not be patched"));
+    CHECK(CoXlRenderCheck((uintptr_t)image, (uintptr_t)g_fake.exe) == NULL);
+    image[CO_EARLY_SETUP + 2] = 1;
+    CHECK(CoXlRenderWrite((uintptr_t)image) != NULL && fake_host_logged("the game's setup began while the stubs went in"));
+    image = Reset("the setup began while the jumps went in, a world counted");
+    Engine(image, 0);
+    CHECK(CoXlRenderCheck((uintptr_t)image, (uintptr_t)g_fake.exe) == NULL);
+    image[CO_EARLY_SETUP + 2] = 1;
+    CoXlTestRenderMade(1);
+    CHECK(CoXlRenderWrite((uintptr_t)image) == NULL && !fake_host_logged("setup began"));
 
     g_case = "the pages near the exe come from the space taken at the start";
     {

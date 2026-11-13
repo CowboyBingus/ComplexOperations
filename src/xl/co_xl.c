@@ -125,29 +125,34 @@ static int RenderWorldMade(uintptr_t game)
     return g_coApi->read(game + RENDER_ENGINE, &engine, 8) == 0 && engine != 0 &&
         g_coApi->read((uintptr_t)engine + RENDER_ENGINE_WORLD, &world, 8) == 0 && world != 0;
 }
-const char* CoXlRenderEarly(uintptr_t game, uintptr_t exe)
+const char* CoXlRenderCheck(uintptr_t game, uintptr_t exe)
 {
     if (RenderWorldMade(game))
     {
         Note("difficulty: render capacity: the main world was made before the mod could size it; it keeps vanilla pools (262144)");
         return "the main world was made before its culling pools could be enlarged";
     }
-    RenderCapacityInstall(exe);
-    if (g_renderCap.on != 1) return "the main world's culling pools could not be enlarged";
-    /* the setup runs on the game's thread: it may have made the world while the stubs were being written */
-    if (RenderWorldMade(game) && *g_renderCap.made == 0)
-    {
-        Note("difficulty: render capacity: the main world was made while the stubs went in; it keeps vanilla pools (262144)");
-        return "the main world was made before its culling pools could be enlarged";
-    }
-    return NULL;
+    return RenderCapacityPrepare(exe);
+}
+const char* CoXlRenderWrite(uintptr_t game)
+{
+    const char* why = RenderCapacityWrite();
+    if (why != NULL) return why;
+    /* While the setup has not begun, every main world is made through the stubs. Once it has, a world may have read N
+     * before the jumps (made stays 0 and +0x10E8 is not set until it returns): only a world the stubs counted proves
+     * otherwise. The stubs stay in: putting code back under a thread that may be running it is not safe. */
+    if (!co_early_setup_begun(game) || *g_renderCap.made >= 1) return NULL;
+    Note("difficulty: render capacity: the game's setup began while the stubs went in and no main world has run them; it may keep vanilla pools (262144)");
+    return "the game's setup began while the main world's stubs went in";
 }
 #ifdef CO_TEST
 void CoXlTestRecords(int state) { g_entityRecordsState = state; }
 /* The render capacity's state, a fresh process's; its stub page (NULL before the install) and the tile-in note after
  * `made` main worlds. */
 void CoXlTestRenderReset(void) { memset(&g_renderCap, 0, sizeof g_renderCap); }
-const uint8_t* CoXlTestRenderPage(void) { return g_renderCap.on == 1 ? (const uint8_t*)g_renderCap.made - 0x40 : NULL; }
+const uint8_t* CoXlTestRenderPage(void) { return g_renderCap.on == 1 ? g_renderCap.page : NULL; }
+/* The stubs' counter, as a main world made through them leaves it. */
+void CoXlTestRenderMade(LONG made) { if (g_renderCap.page != NULL) *g_renderCap.made = made; }
 void CoXlTestRenderNote(LONG made) { if (g_renderCap.on == 1) *g_renderCap.made = made; RenderCapacityNote(); }
 #endif
 

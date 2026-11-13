@@ -6,6 +6,7 @@
 #include "harness/fake_host.h"
 #include "harness/fake_stock.h"
 #include "xl/co_nav_sites.h"
+#include "xl/co_nav.h"
 #include "xl/co_navtrim.h"
 #include "xl/co_normal.h"
 #include "xl/co_rows.h"
@@ -35,7 +36,10 @@ static const uint8_t kStock[116] = {
 #define RENDER_ENGINE_AT 0x3700000u /* a free place in the image for the engine object, when a case has one */
 
 static int g_worldMade;       /* the next Start's main world is made before the game-loaded event */
-static char g_loadLog[8192];  /* what Start's game-loaded event logged */
+static void (*g_beforeLoad)(void); /* and this runs just before that event, once */
+static char g_loadLog[8192];  /* what Start's game-loaded event logged, the writes it asked for and their addresses */
+static int g_loadWrites, g_loadWroteCount;
+static uintptr_t g_loadWrote[64];
 
 static int Lines(const char* text)
 {
@@ -87,12 +91,18 @@ static void Start(const char* name)
         memcpy(image + 0x3326340u, &engine, 8); memcpy(image + RENDER_ENGINE_AT + 0x10E8u, &world, 8);
         g_worldMade = 0;
     }
+    if (g_beforeLoad != NULL) { g_beforeLoad(); g_beforeLoad = NULL; }
     co_capacity_early();
     strcpy(g_loadLog, g_fake.log);
+    g_loadWrites = g_fake.writes; g_loadWroteCount = g_fake.wroteCount; memcpy(g_loadWrote, g_fake.wrote, sizeof g_loadWrote);
+    g_fake.failWriteAt = -1;
     g_fake.writes = 0; g_fake.hookCount = 0; g_fake.log[0] = 0;
 }
 
 static int Untouched(void) { return g_fake.writes == 0 && g_fake.hookCount == 0; }
+static int InGame(uintptr_t at) { return at >= (uintptr_t)g_fake.image && at < (uintptr_t)g_fake.image + FAKE_IMAGE_SIZE; }
+static void SceneNotReviewed(void) { g_fake.noMatchExe[0] = FAKE_RENDER_SCENE; }
+static void FirstJumpRefused(void) { g_fake.failWriteAt = 16; } /* after the room's 16 writes: the scene jump */
 
 int main(void)
 {
@@ -103,15 +113,38 @@ int main(void)
     /* the part is on, with no line, and nothing has gone in before its start (the last case below) */
     CHECK(CO_COMPLEX_COMPLETE == 1 && co_complex_on() && Untouched());
     CHECK(Lines("complex operations are off") == 0 && co_complex_rolls(1, co_complex_on(), CO_HOST_ROW_NONE));
-    /* the main world's pools went in with the engine's room, before the setup that makes the world */
-    CHECK(co_capacity_needs()->early && strstr(g_loadLog, "render capacity: the main world (capacity 0x200000) is made at 2x") != NULL);
+    /* the main world's pools went in after the engine's room (its 16 writes, all in game.dll) and before the setup */
+    CHECK(co_capacity_needs()->early && co_capacity_needs()->render && strstr(g_loadLog, "render capacity: the main world (capacity 0x200000) is made at 2x") != NULL);
+    CHECK(strstr(g_loadLog, "is made at 2x") < strstr(g_loadLog, "the engine has room for a world"));
     CHECK(g_fake.exe[FAKE_RENDER_CAP] == 0xE9 && g_fake.exe[FAKE_RENDER_POOL0] == 0xE9 && g_fake.exe[FAKE_RENDER_SCENE] == 0xE9);
+    CHECK(g_loadWroteCount >= 19 && g_loadWrote[16] == (uintptr_t)g_fake.exe + FAKE_RENDER_SCENE &&
+        g_loadWrote[17] == (uintptr_t)g_fake.exe + FAKE_RENDER_POOL0 && g_loadWrote[18] == (uintptr_t)g_fake.exe + FAKE_RENDER_CAP);
+    for (int i = 0; i < 16; i++) CHECK(InGame(g_loadWrote[i]));
 
+    /* A check that refuses comes before any write: the engine's room, the navigation and the exe stay the game's. */
     g_worldMade = 1;
     Start("the main world was made before the game-loaded event");
     CHECK(strstr(g_loadLog, "the main world was made before the mod could size it") != NULL && strstr(g_loadLog, "is made at 2x") == NULL);
+    CHECK(g_loadWrites == 0 && g_loadWroteCount == 0 && !co_early_in());
     CHECK(co_capacity_poll(1) == 1 && !co_capacity_needs()->early && !co_complex_on() && co_complex_start() == 0 && Untouched());
     CHECK(Lines("complex operations are off") == 1 && fake_host_logged("the main world was made before its culling pools could be enlarged"));
+    CHECK(co_capacity_normal() == 1 && Untouched()); /* no room: the grid is HellForge's */
+
+    g_beforeLoad = SceneNotReviewed;
+    Start("the main world's scene store is not the reviewed code");
+    CHECK(g_loadWrites == 0 && g_loadWroteCount == 0 && !co_early_in() && strstr(g_loadLog, "is not the reviewed code") != NULL);
+    CHECK(co_capacity_poll(1) == 1 && !co_complex_on() && fake_host_logged("the main world's scene store is not the reviewed code"));
+
+    /* A jump refused after the room: the exe is the game's again, the room and its navigation plan stay, the part is off. */
+    g_beforeLoad = FirstJumpRefused;
+    Start("the main world's first jump is refused");
+    CHECK(co_early_in() && co_capacity_needs()->early && !co_capacity_needs()->render && strstr(g_loadLog, "the sites written are the game's again") != NULL);
+    CHECK(g_fake.exe[FAKE_RENDER_CAP] == 0x8B && g_fake.exe[FAKE_RENDER_SCENE] == 0x49 && g_fake.exe[FAKE_RENDER_POOL0] == 0x89);
+    CHECK(co_capacity_poll(1) == 1 && !co_complex_on() && co_complex_start() == 0 && Untouched());
+    CHECK(Lines("complex operations are off") == 1 &&
+        fake_host_logged("the main world's culling pools were not enlarged as the game started (the main world's creation could not be patched)"));
+    CHECK(co_capacity_normal() == 1 && g_fake.writes == 4 && g_fake.hookCount == 1 && g_fake.hooks[0].target == CO_NAV_PREPARE);
+    co_nav_test_reset(); /* a process installs the navigation once: the cases below make their own */
 
     Start("HellForge's radii step is another");
     g_fake.image[STOCK + 21] = 10;

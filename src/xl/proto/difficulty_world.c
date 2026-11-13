@@ -6084,14 +6084,24 @@ static const char* OptionalDrawSite(uintptr_t game, uint8_t* code)
  * 131072, 174762, 32768: read from the live s78b process). Measured: the open XL map holds 100-110 thousand objects in
  * pool 0 at its spots (the count falls as well as rises: no leak); the city map, with its three cities' buildings
  * loaded map-wide, filled all 262144 at an open-land spot while a moving tile replayed (3 tiles live). The stub
- * doubles N for that world only (N == 0x200000), so every pool and array keeps the engine's ratio (about 93 MB more:
- * about 35 B a pool slot and 27.5 B per unit of N); other worlds keep theirs. It counts the main worlds it made, so
- * the log shows the world in play was made after the install (the note at the tile-in). */
+ * doubles N for that world only (N == 0x200000), so every pool and array keeps the engine's ratio; other worlds keep
+ * theirs. With pools 0 and 1 doubled again (below) that is 2,042,539 more pool slots at about 143 B each (0x567130's
+ * 108, 4 of handles, 16 at +0x1C0, about 15 of hash) and about 27.5 B per unit of N: about 350 MB a process, paid
+ * in every session the stubs go in, since the one main world serves the ship and every mission. It counts the main
+ * worlds it made, so the log shows the world in play was made after the install (the note at the tile-in). */
 #define RENDER_CAP_SITE 0x10CDFDu
 #define RENDER_CAP_BACK 0x10CE04u
 #define RENDER_CAP_MAIN 0x200000u
 #define RENDER_CAP_MUL 2u
-static struct { volatile LONG* made; uint32_t* mul; volatile uint64_t* scenePtr; int on; LONG noted; } g_renderCap;
+/* on: 0 not asked, 1 the jumps are in, -1 refused. The page is assembled by RenderCapacityPrepare and the three jumps
+ * (scene, pool, N: N last, so a creation that read N first stays wholly vanilla) are written by RenderCapacityWrite. */
+#define RENDER_SITES 3
+static struct
+{
+    volatile LONG* made; uint32_t* mul; volatile uint64_t* scenePtr; int on; LONG noted;
+    uint8_t* page; uintptr_t exe; int pool0;
+    uint32_t site[RENDER_SITES]; uint8_t length[RENDER_SITES], jump[RENDER_SITES][8], game[RENDER_SITES][8];
+} g_renderCap;
 /* The main world's culling pool 0 (the one that filled, 0x58E14B): the second stub (RENDER_SCENE_SITE) keeps the main
  * world's scene; pool 0 is [scene+0x268] (0x1E41F5; the add at 0x1E6BE2 takes it), its used count +0x30 and capacity
  * +0x34 (0x751A0). */
@@ -6111,8 +6121,8 @@ static const char kRenderCapPin[] = "8B BC 24 C8 00 00 00 48 8B F1 B9 00 02 00 0
  * criterion 9): at 0x10CE29 the pool capacities max(N/8, 512) go to [rsp+0x60] (pool 0: 0x1E41ED reads the block's first
  * dword for 0x58DDB0, stored at [scene+0x268]) and [rsp+0x64] (pool 1). The stub doubles [rsp+0x60] for the main world
  * (edi = N x mul there, from the first stub) and keeps N, so the render handles (0x1D83F0, a 24-bit field) keep their
- * generation bit; the pools are self-contained (about 108 B a slot: 0x567130 allocates cap x 0x6C, plus the free list:
- * ~75 MB). eax and the flags are dead at 0x10CE31 (mov eax,edi; shr; cmp). Static, subagent farroom. */
+ * generation bit; the pools are self-contained (about 143 B a slot, the same as every pool: see above). eax and the
+ * flags are dead at 0x10CE31 (mov eax,edi; shr; cmp). Static, subagent farroom. */
 #define RENDER_POOL0_SITE 0x10CE29u /* mov [rsp+0x60],eax; mov [rsp+0x64],eax (8 bytes) */
 #define RENDER_POOL0_BACK 0x10CE31u
 static const char kRenderPool0Pin[] = "89 44 24 60 89 44 24 64 8B C7 C1 E8 04";
@@ -6120,14 +6130,16 @@ static const char kRenderPool0Pin[] = "89 44 24 60 89 44 24 64 8B C7 C1 E8 04";
 #define RENDER_SCENE_BACK 0x10CEBEu
 static const char kRenderScenePin[] = "49 89 07 48 8D 54 24 50 48 8B 03";
 
-static void RenderCapacityInstall(uintptr_t exe)
+/* Everything but the game's bytes: the pins, the page, the stubs and their reach. NULL, or why the main world keeps its
+ * pools; nothing of the game's is changed either way. */
+static const char* RenderCapacityPrepare(uintptr_t exe)
 {
-    if (g_renderCap.on) return;
-    g_renderCap.on = -1;
+    if (g_renderCap.on < 0) return "the main world's culling pools were refused before";
+    if (g_renderCap.on == 1 || g_renderCap.page != NULL) return NULL;
+    const char* why = NULL;
+    uint8_t* page = NULL;
     if (!ApiCodeMatches(exe + RENDER_CAP_SITE, kRenderCapPin))
-    { Note("difficulty: render capacity: the world creation is not the reviewed code; the main world keeps its pools"); return; }
-    uint8_t* page = AllocateNearGame(exe, 0x1000);
-    if (page == NULL) { Note("difficulty: render capacity: no room near the exe for the stub"); return; }
+    { Note("difficulty: render capacity: the world creation is not the reviewed code; the main world keeps its pools"); why = "the main world's creation is not the reviewed code"; goto refused; }
     /* the stub at +0, the counter at +0x40, the multiplier at +0x44, the main world's scene at +0x48 (the second stub at
      * +0x60): mov edi,[rsp+0xC8]; cmp edi,0x200000; jne done; lock inc dword [count]; imul edi,[mul]; done: jmp back */
     static const uint8_t code[] = {
@@ -6151,7 +6163,7 @@ static void RenderCapacityInstall(uintptr_t exe)
         0xE9, 0, 0, 0, 0};                              /* +23 jmp 0x10CEBE (ends +28) */
     _Static_assert(sizeof keep == 28, "render capacity scene stub size");
     if (!ApiCodeMatches(exe + RENDER_SCENE_SITE, kRenderScenePin))
-    { Note("difficulty: render capacity: the world creation's scene store is not the reviewed code; the main world keeps its pools"); return; }
+    { Note("difficulty: render capacity: the world creation's scene store is not the reviewed code; the main world keeps its pools"); why = "the main world's scene store is not the reviewed code"; goto refused; }
     /* cmp edi,N x mul; jne +2; add eax,eax; mov [rsp+0x60],eax; mov [rsp+0x64],eax; jmp 0x10CE31: pools 0 and 1 (s89a,
      * city, far ring on: pool 1 reached 437k of 524288 while pool 0 stayed at 54 % of its doubled size) */
     static const uint8_t pool0[] = {
@@ -6164,50 +6176,73 @@ static void RenderCapacityInstall(uintptr_t exe)
     _Static_assert(sizeof pool0 == 23, "render pool 0 stub size");
     const int pool0Ok = ApiCodeMatches(exe + RENDER_POOL0_SITE, kRenderPool0Pin) == 1;
     if (!pool0Ok) Note("difficulty: render capacity: the pool sizes are not the reviewed code; pool 0 keeps the world's ratio");
+    page = AllocateNearGame(exe, 0x1000);
+    if (page == NULL) { Note("difficulty: render capacity: no room near the exe for the stub"); why = "no room near the exe for the main world's stubs"; goto refused; }
     memcpy(page, code, sizeof code);
     memcpy(page + 0x60, keep, sizeof keep);
     memcpy(page + 0x80, pool0, sizeof pool0);
+    int32_t rel = (int32_t)((intptr_t)(page + 0x40) - (intptr_t)(page + 22)); memcpy(page + 18, &rel, 4);
+    rel = (int32_t)((intptr_t)(page + 0x44) - (intptr_t)(page + 29)); memcpy(page + 25, &rel, 4);
+    uint32_t mainN = RENDER_CAP_MAIN * RENDER_CAP_MUL; memcpy(page + 0x60 + 5, &mainN, 4); memcpy(page + 0x80 + 2, &mainN, 4);
+    rel = (int32_t)((intptr_t)(page + 0x48) - (intptr_t)(page + 0x60 + 18)); memcpy(page + 0x60 + 14, &rel, 4);
+    const intptr_t back[RENDER_SITES] = {(intptr_t)(exe + RENDER_SCENE_BACK) - (intptr_t)(page + 0x60 + 28),
+        (intptr_t)(exe + RENDER_POOL0_BACK) - (intptr_t)(page + 0x80 + 23), (intptr_t)(exe + RENDER_CAP_BACK) - (intptr_t)(page + 34)};
+    const uint32_t site[RENDER_SITES] = {RENDER_SCENE_SITE, RENDER_POOL0_SITE, RENDER_CAP_SITE}, stub[RENDER_SITES] = {0x60, 0x80, 0};
+    const uint8_t length[RENDER_SITES] = {8, 8, 7}, backAt[RENDER_SITES] = {0x60 + 24, 0x80 + 19, 30};
+    for (int i = 0; i < RENDER_SITES; i++)
+    {
+        const intptr_t reach = (intptr_t)(page + stub[i]) - (intptr_t)(exe + site[i] + 5);
+        if (back[i] != (intptr_t)(int32_t)back[i] || reach != (intptr_t)(int32_t)reach)
+        { Note("difficulty: render capacity: the stub is out of reach"); why = "the main world's stubs are out of reach"; goto refused; }
+        rel = (int32_t)back[i]; memcpy(page + backAt[i], &rel, 4);
+        g_renderCap.site[i] = site[i]; g_renderCap.length[i] = length[i];
+        memset(g_renderCap.jump[i], 0x90, sizeof g_renderCap.jump[i]);
+        g_renderCap.jump[i][0] = 0xE9; rel = (int32_t)reach; memcpy(g_renderCap.jump[i] + 1, &rel, 4);
+        /* the bytes to put back should a later jump be refused */
+        if (g_coApi->read(exe + site[i], g_renderCap.game[i], length[i]) != 0)
+        { Note("difficulty: render capacity: the world creation could not be read"); why = "the main world's creation could not be read"; goto refused; }
+    }
+    if (page[13] != 0x75 || page[14] != 29 - 15 || page[15] != 0xF0 || page[22] != 0x0F || page[29] != 0xE9 ||
+        page[0x60 + 9] != 0x75 || page[0x60 + 11] != 0x48 || page[0x60 + 23] != 0xE9)
+    { Note("difficulty: render capacity: the stub did not assemble"); why = "the main world's stubs did not assemble"; goto refused; }
+    DWORD old = 0;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READWRITE, &old))
+    { Note("difficulty: render capacity: the stub is not executable"); why = "the main world's stubs are not executable"; goto refused; }
+    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
     g_renderCap.made = (volatile LONG*)(page + 0x40);
     g_renderCap.mul = (uint32_t*)(page + 0x44);
     g_renderCap.scenePtr = (volatile uint64_t*)(page + 0x48);
     *g_renderCap.made = 0;
     *g_renderCap.mul = RENDER_CAP_MUL;
     *g_renderCap.scenePtr = 0;
-    int32_t rel = (int32_t)((intptr_t)(page + 0x40) - (intptr_t)(page + 22)); memcpy(page + 18, &rel, 4);
-    rel = (int32_t)((intptr_t)(page + 0x44) - (intptr_t)(page + 29)); memcpy(page + 25, &rel, 4);
-    uint32_t mainN = RENDER_CAP_MAIN * RENDER_CAP_MUL; memcpy(page + 0x60 + 5, &mainN, 4); memcpy(page + 0x80 + 2, &mainN, 4);
-    intptr_t pool0Back = (intptr_t)(exe + RENDER_POOL0_BACK) - (intptr_t)(page + 0x80 + 23);
-    intptr_t pool0Reach = (intptr_t)(page + 0x80) - (intptr_t)(exe + RENDER_POOL0_SITE + 5);
-    if (pool0Back != (intptr_t)(int32_t)pool0Back || pool0Reach != (intptr_t)(int32_t)pool0Reach) { Note("difficulty: render capacity: the stub is out of reach"); return; }
-    { int32_t r = (int32_t)pool0Back; memcpy(page + 0x80 + 19, &r, 4); }
-    rel = (int32_t)((intptr_t)(page + 0x48) - (intptr_t)(page + 0x60 + 18)); memcpy(page + 0x60 + 14, &rel, 4);
-    intptr_t sceneBack = (intptr_t)(exe + RENDER_SCENE_BACK) - (intptr_t)(page + 0x60 + 28);
-    intptr_t sceneReach = (intptr_t)(page + 0x60) - (intptr_t)(exe + RENDER_SCENE_SITE + 5);
-    intptr_t back = (intptr_t)(exe + RENDER_CAP_BACK) - (intptr_t)(page + 34);
-    intptr_t reach = (intptr_t)page - (intptr_t)(exe + RENDER_CAP_SITE + 5);
-    if (back != (intptr_t)(int32_t)back || reach != (intptr_t)(int32_t)reach || sceneBack != (intptr_t)(int32_t)sceneBack ||
-        sceneReach != (intptr_t)(int32_t)sceneReach)
-    { Note("difficulty: render capacity: the stub is out of reach"); return; }
-    rel = (int32_t)back; memcpy(page + 30, &rel, 4);
-    rel = (int32_t)sceneBack; memcpy(page + 0x60 + 24, &rel, 4);
-    if (page[13] != 0x75 || page[14] != 29 - 15 || page[15] != 0xF0 || page[22] != 0x0F || page[29] != 0xE9 ||
-        page[0x60 + 9] != 0x75 || page[0x60 + 11] != 0x48 || page[0x60 + 23] != 0xE9)
-    { Note("difficulty: render capacity: the stub did not assemble"); return; }
-    DWORD old = 0;
-    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READWRITE, &old)) { Note("difficulty: render capacity: the stub is not executable"); return; }
-    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
-    uint8_t jump[7] = {0xE9, 0, 0, 0, 0, 0x90, 0x90};
-    rel = (int32_t)reach; memcpy(jump + 1, &rel, 4);
-    uint8_t sceneJump[8] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90};
-    rel = (int32_t)sceneReach; memcpy(sceneJump + 1, &rel, 4);
-    uint8_t pool0Jump[8] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90};
-    rel = (int32_t)pool0Reach; memcpy(pool0Jump + 1, &rel, 4);
-    if (ApiWrite(exe + RENDER_SCENE_SITE, sceneJump, sizeof sceneJump) || (pool0Ok && ApiWrite(exe + RENDER_POOL0_SITE, pool0Jump, sizeof pool0Jump)) ||
-        ApiWrite(exe + RENDER_CAP_SITE, jump, sizeof jump))
-    { Note("difficulty: render capacity: the world creation could not be patched"); return; }
+    g_renderCap.page = page; g_renderCap.exe = exe; g_renderCap.pool0 = pool0Ok;
+    return NULL;
+refused: /* a page taken stays: it may be the exe arena's, which is never handed back */
+    g_renderCap.on = -1;
+    return why;
+}
+
+/* The three jumps, in RENDER_SITES' order. A refused write puts the game's bytes back where a jump already went, so the
+ * world creation is the game's again. NULL, or why. */
+static const char* RenderCapacityWrite(void)
+{
+    if (g_renderCap.on == 1) return NULL;
+    if (g_renderCap.on < 0 || g_renderCap.page == NULL) return "the main world's stubs were not prepared";
+    for (int i = 0; i < RENDER_SITES; i++)
+    {
+        if (i == 1 && !g_renderCap.pool0) continue;
+        if (ApiWrite(g_renderCap.exe + g_renderCap.site[i], g_renderCap.jump[i], g_renderCap.length[i]) == 0) continue;
+        int back = 1;
+        for (int k = 0; k < i; k++)
+            if ((k != 1 || g_renderCap.pool0) && ApiWrite(g_renderCap.exe + g_renderCap.site[k], g_renderCap.game[k], g_renderCap.length[k])) back = 0;
+        g_renderCap.on = -1;
+        Note("difficulty: render capacity: the world creation could not be patched; %s", back ? "the sites written are the game's again" : "a site could not be put back");
+        return "the main world's creation could not be patched";
+    }
     g_renderCap.on = 1;
     Note("difficulty: render capacity: the main world (capacity 0x%X) is made at %ux: culling pools of %u, not %u; pools 0 and 1 of %u", RENDER_CAP_MAIN, RENDER_CAP_MUL,
-        RENDER_CAP_MAIN / 8u * RENDER_CAP_MUL, RENDER_CAP_MAIN / 8u, RENDER_CAP_MAIN / 8u * RENDER_CAP_MUL * (pool0Ok ? 2u : 1u));
+        RENDER_CAP_MAIN / 8u * RENDER_CAP_MUL, RENDER_CAP_MAIN / 8u, RENDER_CAP_MAIN / 8u * RENDER_CAP_MUL * (g_renderCap.pool0 ? 2u : 1u));
+    return NULL;
 }
 
 /* At the tile-in: how many main worlds the stub made (0 = the world in play was made before the install, at vanilla size). */
@@ -6394,7 +6429,7 @@ static const char* InstallWorld(DifficultyInstall* d)
     MemProfInstall();
     TerrainDiagInstall(game);
     TerrainInstall(game);
-    /* No render capacity here: the one main world is made before any level, so CoXlRenderEarly put it in as the game
+    /* No render capacity here: the one main world is made before any level, so CoXlRenderWrite put it in as the game
      * loaded, and without it the complex part is off. */
     uintptr_t exe = ApiModuleBase("helldivers2.exe", NULL);
     if (ApiCodeMatches(exe + DIF_OBJECT_CALL, kObjectCallPin) && ApiCodeMatches(exe + DIF_OBJECT_LOOKUP, kObjectLookupPin))

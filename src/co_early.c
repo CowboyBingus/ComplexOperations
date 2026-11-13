@@ -20,9 +20,8 @@ static int Same(uintptr_t at, const uint8_t* bytes, size_t size)
  * game's own everywhere else. Reads only. */
 const char* co_early_check(uintptr_t game, uintptr_t exe)
 {
-    uint64_t setup = 1;
     float size = 0.0f;
-    if (g_coApi->read(game + CO_EARLY_SETUP, &setup, 8) != 0 || setup != 0) return "the game's set-up had begun";
+    if (co_early_setup_begun(game)) return "the game's set-up had begun";
     for (size_t i = 0; i < sizeof kCoEarlyPools / sizeof kCoEarlyPools[0]; i++)
         if (!Same(game + kCoEarlyPools[i].rva, kCoEarlyPools[i].stock, kCoEarlyPools[i].length))
             return "the physics pools are not the sizes HellForge gives them";
@@ -73,6 +72,11 @@ const char* co_early_install(uintptr_t game, uintptr_t exe)
 }
 
 int co_early_in(void) { return g_early.in; }
+int co_early_setup_begun(uintptr_t game)
+{
+    uint64_t setup = 1;
+    return g_coApi->read(game + CO_EARLY_SETUP, &setup, 8) != 0 || setup != 0;
+}
 
 #ifdef CO_TEST
 void co_early_test_reset(void) { memset(&g_early, 0, sizeof g_early); }
