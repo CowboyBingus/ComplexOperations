@@ -1230,23 +1230,36 @@ static int g_tdScatHooked;
  * terrain_fog_volumes_generated have no SpeedTree pass. Returns the op whose view is left out, or 0. */
 static int g_tdScatCameraPinned; /* the render camera's near/far/projection writer (0x4D0F6A) is the reviewed one */
 static int TdScatterCutOp(LONG op) { return op == 0x4A || op == 0x0A || op == 0x0B || op == 0x43 || op == 0x44 || op == 0x45; }
-/* A moving tile's build in play replays the level's merge (0x37 kick, 0x38 aim, then 0x39, 0x3C, 0x63 ...) through the
- * dispatcher's trampoline, so g_genOp stays at the last op. Its passes render the level's world through the merge
- * object's camera [R] (0x38: 0xF487B0 at the world's size) into R's terrain_generator_* viewports (0x37 kicks them),
- * none of which has a SpeedTree pass. The mover opens this window when it kicks the merge and closes it at the
- * teardown; a render queued late may run a frame after, so the window stays TD_SCAT_MERGE_GRACE_MS longer. */
+/* A moving tile's build in play runs the level's merge records through the dispatcher's trampoline, so g_genOp stays at
+ * the last op. 0x38 aims the merge object's cameras [R] and [R+0x10] at the world's size (0xF487B0, 0xF48990 with T 1),
+ * and 0x4C RenderZoneLookup (0xF4F4F0, MV_LOOKUP) renders the level's world through [R] into [R+0x30]
+ * terrain_generator_zones before the replay narrows the cameras to the tile; a failed replay puts them back with
+ * renders still queued. R's viewports have no SpeedTree pass. The window opens when the mover kicks the merge, closes
+ * to "closing" at its teardown, and shuts once the merge's render queue ([ctx+0x50]+0x10) has read empty at the start
+ * of TD_SCAT_MERGE_EMPTY_UPDATES level updates in a row: a render taken off the queue runs within the next frame
+ * (frame fence exe 0x8AAF2 / 0x8A7C4). No time bound: an open window only cuts views that match the test below. */
 #define TD_SCAT_MERGE 0x138 /* not an op: the moving tile's merge views */
-#define TD_SCAT_MERGE_GRACE_MS 2000
-static volatile LONG g_tdScatMergeOpen, g_tdScatMergeBuilds;
-static volatile LONG64 g_tdScatMergeClosed = -1; /* GetTickCount64 at the last close, -1 none yet */
-static void TdScatterMergeOpen(void) { if (InterlockedExchange(&g_tdScatMergeOpen, 1) == 0) InterlockedIncrement(&g_tdScatMergeBuilds); }
-static void TdScatterMergeClose(void) { if (InterlockedExchange(&g_tdScatMergeOpen, 0) != 0) InterlockedExchange64(&g_tdScatMergeClosed, (LONG64)GetTickCount64()); }
-static void TdScatterMergeReset(void) { InterlockedExchange(&g_tdScatMergeOpen, 0); InterlockedExchange64(&g_tdScatMergeClosed, -1); }
-static int TdScatterMergeWindow(void)
+#define TD_SCAT_MERGE_EMPTY_UPDATES 2
+static volatile LONG g_tdScatMerge; /* 0 shut, 1 open (the build's merge exists), 2 closing (torn down; renders may be queued) */
+static volatile LONG g_tdScatMergeBuilds, g_tdScatMergeEmpty;
+static uint32_t NearQueued(uint64_t context); /* difficulty_world_terrain.c */
+static void TdScatterMergeOpen(void)
 {
-    if (g_tdScatMergeOpen) return 1;
-    const LONG64 closed = g_tdScatMergeClosed;
-    return closed >= 0 && (LONG64)GetTickCount64() - closed < TD_SCAT_MERGE_GRACE_MS;
+    if (InterlockedExchange(&g_tdScatMerge, 1) != 1) InterlockedIncrement(&g_tdScatMergeBuilds);
+    g_tdScatMergeEmpty = 0;
+}
+static void TdScatterMergeClose(void) { if (InterlockedCompareExchange(&g_tdScatMerge, 2, 1) == 1) g_tdScatMergeEmpty = 0; }
+static void TdScatterMergeReset(void) { InterlockedExchange(&g_tdScatMerge, 0); g_tdScatMergeEmpty = 0; }
+static int TdScatterMergeWindow(void) { return g_tdScatMerge != 0; }
+/* At the start of each level update (main thread), with the mover's context: an unreadable queue counts as not empty. */
+static void TdScatterMergeTick(uint64_t context)
+{
+    if (g_tdScatMerge != 2) return;
+    if (NearQueued(context) != 0) { g_tdScatMergeEmpty = 0; return; }
+    if (++g_tdScatMergeEmpty < TD_SCAT_MERGE_EMPTY_UPDATES) return;
+    if (InterlockedCompareExchange(&g_tdScatMerge, 0, 2) == 2)
+        Note("difficulty: extra large maps: the moving tile's scatter cut ends (build %ld; the merge's render queue read empty for %d level updates)",
+            (long)g_tdScatMergeBuilds, TD_SCAT_MERGE_EMPTY_UPDATES);
 }
 static LONG TdScatterSkipOp(const uint8_t* view)
 {

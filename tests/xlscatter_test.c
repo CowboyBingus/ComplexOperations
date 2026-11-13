@@ -2,8 +2,9 @@
  * (ops 0x0A and 0x0B) and the fog volumes camera's view (ops 0x43..0x45), all orthographic with near 1 and far 1001 at
  * any aspect, are left out; any other view or op (the in-game map's 0x4F among them), and any vanilla-size level, runs
  * the engine's update. The bake's cut notes once per level, the others once per record; all end at the ship. In play
- * (op 0x22), the same views are left out while a moving tile's merge window is open and for 2 s after it closes, noted
- * once per build. Run on the fake game. */
+ * (op 0x22), the same views are left out while a moving tile's merge window is open, and after its teardown until the
+ * merge's render queue reads empty on two level updates in a row, noted once per build; the ship and a mission's level
+ * init end it, a preview's does not. Run on the fake game. */
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -14,7 +15,9 @@ void CoXlTestGenLevel(float current);
 int CoXlTestScatterUpdate(LONG op, LONG record, uint8_t* view);
 int CoXlTestScatterUpdateAsIs(uint8_t* view);
 void CoXlTestWorldShip(void);
-void CoXlTestScatterMerge(int action, LONG64 agoMs);
+void CoXlTestScatterMerge(int action, LONG64 queued);
+void CoXlTestGame(uintptr_t game);
+void CoXlTestWorldLevel(uintptr_t level, uintptr_t preview);
 
 static int g_failed;
 static const char* g_case;
@@ -138,6 +141,10 @@ int main(void)
     CHECK(CoXlTestScatterUpdateAsIs(Ortho()) == 0);
     CHECK(Count(kMerge) == 1);
     CHECK(fake_host_logged("merge camera view is left out of the scatter update (build 1 of this run)"));
+    CoXlTestScatterMerge(2, 0); /* an open build's empty queue does not end it */
+    CoXlTestScatterMerge(2, 0);
+    CoXlTestScatterMerge(2, 0);
+    CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 0);
 
     g_case = "the player's and other views during a build";
     CHECK(CoXlTestScatterUpdate(0x22, 183, View(0.1f, 3000.0f, 1, 16.0f / 9.0f)) == 1);
@@ -145,21 +152,47 @@ int main(void)
     CHECK(CoXlTestScatterUpdate(0x22, 183, View(1.0f, 2000.0f, 0, 1.0f)) == 1);
     CHECK(CoXlTestScatterUpdate(0x22, 183, View(0.5f, 1001.0f, 0, 1.0f)) == 1);
 
-    g_case = "the grace after the teardown";
+    g_case = "the close waits for an empty queue on two level updates";
     CoXlTestScatterMerge(1, 0);
     CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 0);
-    CoXlTestScatterMerge(2, 1500);
+    CoXlTestScatterMerge(2, 3); /* renders still queued */
+    CoXlTestScatterMerge(2, 0);
     CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 0);
-    CoXlTestScatterMerge(2, 2500);
+    CoXlTestScatterMerge(2, 1); /* one more queued: the count starts again */
+    CoXlTestScatterMerge(2, 0);
+    CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 0);
+    CoXlTestScatterMerge(2, -1); /* no queue to read: not empty */
+    CoXlTestScatterMerge(2, 0);
+    CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 0);
+    CHECK(!fake_host_logged("scatter cut ends"));
+    CoXlTestScatterMerge(2, 0);
     CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 1);
+    CHECK(fake_host_logged("the moving tile's scatter cut ends (build 1; the merge's render queue read empty for 2 level updates)"));
     CHECK(Count(kMerge) == 1);
 
-    g_case = "the next build notes again";
-    CoXlTestScatterMerge(0, 0);
-    CoXlTestScatterMerge(0, 0);
+    g_case = "a build that fails with renders queued";
+    g_fake.log[0] = 0;
+    CoXlTestScatterMerge(4, 0);
+    CHECK(fake_host_logged("is not built: a test's failure"));
     CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 0);
     CHECK(fake_host_logged("(build 2 of this run)"));
-    CHECK(Count(kMerge) == 2);
+    CoXlTestScatterMerge(2, 2);
+    CoXlTestScatterMerge(2, 2);
+    CoXlTestScatterMerge(2, 0);
+    CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 0);
+    CoXlTestScatterMerge(2, 0);
+    CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 1);
+    CHECK(fake_host_logged("scatter cut ends (build 2;"));
+
+    g_case = "the next build reopens a closing window";
+    CoXlTestScatterMerge(0, 0);
+    CoXlTestScatterMerge(1, 0);
+    CoXlTestScatterMerge(2, 0);
+    CoXlTestScatterMerge(0, 0);
+    CoXlTestScatterMerge(2, 0);
+    CoXlTestScatterMerge(2, 0);
+    CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 0);
+    CHECK(fake_host_logged("(build 4 of this run)"));
 
     g_case = "a build's window on a vanilla-size level";
     CoXlTestGenLevel(1.0f);
@@ -171,6 +204,20 @@ int main(void)
     CoXlTestWorldShip();
     CHECK(CoXlTestScatterUpdateAsIs(Ortho()) == 1);
     CHECK(CoXlTestScatterUpdate(0x4F, 165, Ortho()) == 1);
+
+    g_case = "a preview's level init keeps a build's window, a mission's ends it";
+    {
+        static uint8_t level[0x20000];
+        CoXlTestGame((uintptr_t)g_fake.image);
+        CoXlTestScatterMerge(0, 0);
+        CoXlTestWorldLevel((uintptr_t)level, 0x44);
+        CoXlTestGenLevel(8.0f);
+        CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 0);
+        CoXlTestWorldLevel((uintptr_t)level, 0);
+        CoXlTestGenLevel(8.0f);
+        CHECK(CoXlTestScatterUpdate(0x4F, 165, Ortho()) == 1);
+        CHECK(CoXlTestScatterUpdate(0x22, 183, Ortho()) == 1);
+    }
 
     if (g_failed) { printf("xlscatter: %d check(s) failed\n", g_failed); return 1; }
     printf("xlscatter: all checks passed\n");
