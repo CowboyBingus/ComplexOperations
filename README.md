@@ -246,6 +246,7 @@ One level-11 operation in four is a complex operation. HellForge owns difficulty
 | Missions | Three missions on the one map. |
 | Objectives | Up to 30: every mission's primaries, then major and optional ones in the room left. |
 | Arcs | The objectives are dealt in arcs: each mission's primaries stand together in their own part of the map. |
+| Unlock | A mission's main objectives open when that mission's own steps are done. The war table draws a step's lines to its own mission's mains only. |
 | Tactical map | 16 objective markers, as in the game. A marker goes to the next objective when one is done. |
 
 - Which operations are complex comes from the operation's seed and planet, so every player sees the same ones.
@@ -610,6 +611,7 @@ Pelican), which are not in this folder.
 | `src/xl/` | The extra large world of a complex operation. `co_complex_start` (`src/co_capacity.c`) installs it once the part is on. |
 | `src/xl/co_spawners.c`, `co_clusters.c`, `co_city.c`, `co_pocket.c`, `co_status.c`, `co_locate.c` | A complex level's lists and searches, each beside HellForge's own step: the game's or HellForge's value on any other level. |
 | `src/xl/co_objectives.c`, `co_markers.c`, `co_text.c` | The objective list within 30 places, the check of the map's 16 markers, the grouped HUD rows' texts. |
+| `src/xl/co_unlock.c`, `tests/unlock_test.c` | Each mission's main objectives wait for that mission's steps only, on the host that owns them; the war table's step lines per mission. |
 | `src/xl/proto/` | Its files as copied from a HellForge loader; `README.md` there says from where. Parts of `co_xl.c`. |
 | `src/xl/co_shim.h`, `co_shim.c` | The loader's helpers those files call, over the SDK and the mod's own parts. |
 | `src/xl/co_xl_standin.h` | The names of the loader's level 11 install those files read, over the mod's own parts. |

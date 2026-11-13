@@ -23,8 +23,9 @@ typedef struct CoListRules
 typedef struct CoList
 {
     uint32_t ids[CO_LIST_MOST], count;
-    /* each entry's block (1.., 0 for a side objective), whether it is its block's main, and each block's mission row */
-    uint8_t block[CO_LIST_MOST], main[CO_LIST_MOST], blockRow[CO_LIST_BLOCKS];
+    /* each entry's block (1.., 0 for a side objective), whether it is its block's main, each block's mission row, and
+     * which of the operation's missions (0..) each block is part of */
+    uint8_t block[CO_LIST_MOST], main[CO_LIST_MOST], blockRow[CO_LIST_BLOCKS], blockMission[CO_LIST_BLOCKS];
     uint32_t blocks;       /* on the list; 0 when the selection's primaries are no mission rows' blocks */
     uint32_t unit;         /* the selection's blocks: one mission's */
     uint32_t own;          /* the selection's leading primaries that are the base row's own */
@@ -47,8 +48,9 @@ typedef struct CoList
 const char* co_list(uintptr_t game, uint32_t row, const uint32_t* selected, uint32_t n, const CoListRules* rules, CoList* out);
 
 /* The blocks of a list co_list made, found again by its whole content (a level's blocks never come from another
- * level's list). 0 when the list is none of the last eight made with blocks. */
-int co_list_kept(uint32_t row, const uint32_t* ids, uint32_t count, uint8_t* block, uint8_t* main, uint8_t* blockRow, uint32_t* blocks);
+ * level's list). 0 when the list is none of the last eight made with blocks. `blockMission` may be NULL. */
+int co_list_kept(uint32_t row, const uint32_t* ids, uint32_t count, uint8_t* block, uint8_t* main, uint8_t* blockRow, uint8_t* blockMission,
+    uint32_t* blocks);
 
 #ifdef CO_TEST
 void co_list_test_reset(void);

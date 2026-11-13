@@ -215,6 +215,7 @@ static void WorldWrite(float scale, int mission)
     g_world.live = co_pages_scale(CO_PAGES_LIVE);
     if (g_hudLive != NULL) *g_hudLive = g_world.live > 1.0f;
     co_locate_live(g_world.live > 1.0f); /* where a loot container's location is looked up */
+    co_unlock_live(g_world.live > 1.0f);  /* a main objective waits for its own mission's steps */
     LwLiveSet(g_world.live > 1.0f);
     if (changed) InterlockedIncrement(&g_world.switches);
 }
@@ -5387,6 +5388,7 @@ static void WorldLevelForget(void)
 {
     g_rec25 = g_tileContext = g_pass74 = g_ctx74 = g_pass76 = g_pass15 = 0;
     g_cityShifted = 0;
+    co_unlock_forget(); /* the objectives' missions are the generation's */
     NatureForget();
     TownsLevel();
 }
@@ -5460,6 +5462,7 @@ static void WorldShip(void)
     g_world.live = co_pages_scale(CO_PAGES_LIVE);
     if (g_hudLive != NULL) *g_hudLive = 0;
     co_locate_live(0);
+    co_unlock_live(0);
     LwLiveSet(0);
     g_worldLevelLive = 0; g_world.liveLevels = 0;
     co_spawners_mission(0);
