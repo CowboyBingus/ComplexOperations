@@ -1326,7 +1326,7 @@ static const uint32_t kNearNames[2] = {0x2A9E3232u, 0x95E7E3ACu}; /* generated_h
  * collision were made from, its mips 1-4 = the level's real terrain, mean |d| 57 m). Name = murmur64(name) >> 32. */
 static const uint32_t kNearRoadAlias = 0xBF45B677u;
 enum { NEAR_IDLE, NEAR_START, NEAR_STEP, NEAR_DRAIN, NEAR_READBACK, NEAR_SPAWN, NEAR_READY, NEAR_IN, NEAR_FAILED, NEAR_CAL, NEAR_CONFORM };
-enum { NEAR_RECORD, NEAR_TILE };
+enum { NEAR_RECORD, NEAR_TILE, NEAR_LEVEL }; /* NEAR_LEVEL: a record drawn in the level's pixels (NearPlan's route distance) */
 
 static NearSpawnFn g_nearSpawnOriginal;
 static volatile DWORD g_nearSpawnThread; /* the thread spawning the tile (InitSpawnTerrain called by TerrainNearStep) */
@@ -1354,6 +1354,7 @@ static struct {
     int stampLeave; /* the replayed 0x63 drew at the stamp offset: the cameras go back once its job is drained */
     uint32_t stampWaits;
     int matLeave; /* the replayed 0x41 finished: its cameras go back once its jobs are drained */
+    uint64_t routeGen; volatile LONG routeLevel; /* the NEAR_LEVEL step's route-distance job ([R+0x58]) is still to come */
     uint32_t readId; float* heights; uint32_t hw, hh;
     uint8_t one69[0x19B0], one6B[0x19B0]; uint32_t at69, at6B;
     uint8_t keep69[0x19B0], keep6B[0x19B0]; /* the two records as the level had them, for the tiles built later (difficulty_world_move.c) */
@@ -1543,7 +1544,12 @@ static uint64_t NearRunAt(int consumer, uint64_t a, uint64_t camera, uint64_t c,
         if (!(hasOffset || hasScale)) gui = g_near.gui;
         if (offset != NULL && scale != NULL && gui != 0)
         {
-            if (camera == g_near.cam[0] || camera == g_near.cam[1])
+            uint64_t generator = 0;
+            memcpy(&generator, job + 0x10, 8);
+            if ((camera == g_near.cam[0] || camera == g_near.cam[1]) && g_near.routeLevel && generator == g_near.routeGen &&
+                InterlockedExchange(&g_near.routeLevel, 0))
+            { offset(gui, o0[0], o0[1]); scale(gui, s0[0], s0[1]); } /* the NEAR_LEVEL step's route distance: the level's pixels */
+            else if (camera == g_near.cam[0] || camera == g_near.cam[1])
             {
                 offset(gui, g_near.offset[0] * s0[0] + o0[0], g_near.offset[1] * s0[1] + o0[1]);
                 scale(gui, g_near.scale * s0[0], g_near.scale * s0[1]);
@@ -1765,12 +1771,15 @@ static void TerrainNearDrop(void)
 static int NearPlan(uint64_t records, uint32_t at)
 {
     static const uint8_t ops[] = {0x39, 0x3C, 0x40, 0x3D, 0x0D, 0x63, 0x42, 0x41, 0x64};
-    uint32_t start = 0, op = 0;
+    uint32_t start = 0, op = 0, routes = 0;
     for (uint32_t i = at; i > 0; i--)
         if (!SafeRead(records + (uint64_t)(i - 1) * 0x19B0u, &op, 4) && op == 0x38) { start = i; break; }
     if (start == 0) return 0;
+    for (uint32_t i = start; i < at && routes == 0; i++)
+        if (!SafeRead(records + (uint64_t)i * 0x19B0u, &op, 4) && op == 0x0D) routes = i;
     uint32_t seen = 0;
     g_near.steps = 0;
+    InterlockedExchange(&g_near.routeLevel, 0);
     for (uint32_t i = start; i < at && g_near.steps < NEAR_STEPS; i++)
     {
         if (SafeRead(records + (uint64_t)i * 0x19B0u, &op, 4)) return 0;
@@ -1778,6 +1787,12 @@ static int NearPlan(uint64_t records, uint32_t at)
         while (k < sizeof ops && ops[k] != op) k++;
         if (k == sizeof ops || (seen & (1u << k))) continue;
         seen |= 1u << k;
+        /* 0x3D's zone painters scale their height by generated_route_distance ([R+0xC0], written only by 0x0D's job
+         * [R+0x58]) at the level's uv, position / world size (0xF4A39C..0xF4A593). A merge made again for a moving tile
+         * has a new, unwritten [R+0xC0] (0x37 after 0xFCF2F0), so its zones drew nothing. The level's 0x0D goes first,
+         * its job in the level's pixels (NearRunAt), as the drop tile finds it; the tile's own 0x0D stays after 0x3D. */
+        if (op == 0x3D && routes != 0 && g_near.steps + 1 < NEAR_STEPS)
+        { g_near.stepKind[g_near.steps] = NEAR_LEVEL; g_near.stepRecord[g_near.steps] = routes; g_near.stepOp[g_near.steps] = 0x0D; g_near.steps++; }
         g_near.stepKind[g_near.steps] = NEAR_RECORD; g_near.stepRecord[g_near.steps] = i; g_near.stepOp[g_near.steps] = (uint8_t)op; g_near.steps++;
         if (op != 0x3C || g_terrain.level != g_world.levels || g_terrain.columns == 0) continue;
         /* the tiles whose drawn core meets the near square (generator coordinates: world + 8192) */
@@ -1813,6 +1828,7 @@ static void NearCameras(float half0, float half1, float cx, float cy)
 static void NearReplayEnd(int ok)
 {
     InterlockedExchange(&g_nearActive, 0);
+    InterlockedExchange(&g_near.routeLevel, 0);
     LONG views = InterlockedExchange(&g_nearViewCalls, 0);
     Note("difficulty: near terrain: the view drew %ld times with the level's maps while the tile replayed", (long)views);
     if (g_mat.on && g_mat.owner == MAT_TILE) InterlockedExchange(&g_mat.on, 0); /* the cameras go back below */
@@ -2038,7 +2054,8 @@ static int NearRunStep(uint64_t records, uint32_t end, uint64_t context, uint64_
     {
         g_near.loggedStep = s + 1;
         if (g_near.stepKind[s] == NEAR_TILE) Note("difficulty: moving tiles: step %d: composite tile %d", s, g_near.stepTile[s]);
-        else Note("difficulty: moving tiles: step %d: op 0x%02X (record %u)", s, g_near.stepOp[s], g_near.stepRecord[s]);
+        else Note("difficulty: moving tiles: step %d: op 0x%02X (record %u%s)", s, g_near.stepOp[s], g_near.stepRecord[s],
+            g_near.stepKind[s] == NEAR_LEVEL ? ", the level's route distance" : "");
     }
     if (g_near.stepKind[s] == NEAR_TILE)
     {
@@ -2104,6 +2121,11 @@ static int NearRunStep(uint64_t records, uint32_t end, uint64_t context, uint64_
          * the tile's stamp terrains stand at the offset, where no terrain is, and the cameras look there for this step */
         if (g_near.stepOp[s] == 0x63 && (g_nearStampOffset[0] != 0 || g_nearStampOffset[1] != 0))
             NearCameras(NEAR_SIDE / 2, NEAR_SIDE / 2, g_near.centre[0] + g_nearStampOffset[0], g_near.centre[1] + g_nearStampOffset[1]);
+    }
+    if (g_near.stepKind[s] == NEAR_LEVEL && g_near.calls == 0)
+    {
+        if (SafeRead(g_near.R + 0x58, &g_near.routeGen, 8) || g_near.routeGen == 0) return 1; /* the zones then draw as before */
+        InterlockedExchange(&g_near.routeLevel, 1); /* before the record: the consumer may take its job at once */
     }
     uint8_t live[0xC0];
     /* 0x3E and 0x3F sample the intermediate captures lg+0..+0xBF on the CPU (0xF4AE30 via [api+0x10]+0x1F0; no other
@@ -4060,6 +4082,7 @@ static int NearStepDumpAfter(int s)
 {
     if (!NearStepDumpOn()) return 0;
     if (g_near.stepKind[s] == NEAR_TILE) return s + 1 >= g_near.steps || g_near.stepKind[s + 1] != NEAR_TILE;
+    if (g_near.stepKind[s] == NEAR_LEVEL) return 0; /* no heights */
     switch (g_near.stepOp[s]) { case 0x3C: case 0x40: case 0x3E: case 0x3F: case 0x3D: case 0x0D: case 0x63: return 1; }
     return 0;
 }
