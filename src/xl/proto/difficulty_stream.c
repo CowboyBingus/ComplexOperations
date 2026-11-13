@@ -1182,6 +1182,10 @@ static int WorldStreamInMission(void)
     return !SafeRead(g_stream.game + 0x3326340u, &gameObj, 8) && gameObj != 0 && !SafeRead(gameObj + 0xAC21Cu, &state, 4) && state == 4;
 }
 
+/* A tile's layer change still filling; polled here too (it finishes the change), so the spawns never wait on another
+ * caller's poll. Outside the stream lock: the change's end writes notes and descriptors. */
+static int WorldStreamLayerBusy(void) { return NearLayerBusy(); }
+
 /* Called from TickDetour (packages.c) every frame: nothing until a level is captured and the generator's op is done,
  * nothing once g_worldLevel is another level (all state is dropped), nothing while the world is back to vanilla. */
 static void WorldStreamTick(float dt)
@@ -1191,6 +1195,7 @@ static void WorldStreamTick(float dt)
     DestroyTick(); /* destroys that waited for their unit (difficulty_world_destroy.c) */
     if (dt > 0 && dt < 10.0f) { g_streamFrames++; g_streamFrameSum += dt; if (dt > g_streamFrameMax) g_streamFrameMax = dt; }
     if (g_streamInside) return; /* a generator call is inside: it owns the pass */
+    const int layerBusy = WorldStreamLayerBusy();
     AcquireSRWLockExclusive(&g_streamLock);
     if (!g_stream.captured)
     {
@@ -1218,7 +1223,7 @@ static void WorldStreamTick(float dt)
     const double t2 = HitchNow();
     /* a tile's layer fill takes grids out of use while it writes them (NearLayerChangeFill): a stamp spawned then would
      * miss its grid and stand on the coarse heights, so the spawns wait the few frames until it is done */
-    if (!g_layerJob.running) WorldStreamSpawnDueLocked();
+    if (!layerBusy) WorldStreamSpawnDueLocked();
     const double t3 = HitchNow();
     g_hitchCost.stream += (float)(t1 - t0); g_hitchCost.window += (float)(t2 - t1); g_hitchCost.spawn += (float)(t3 - t2);
     g_hitchCost.removed += (uint16_t)(g_stream.removed - removed); g_hitchCost.entered += (uint16_t)(WindowEntered() - entered);

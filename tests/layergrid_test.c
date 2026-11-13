@@ -20,6 +20,19 @@ void CoXlTestLayerTile(int slot, int in, float cx, float cy);
 void CoXlTestLayerTileLater(int slot, int in, float cx, float cy);
 int CoXlTestLayerBusy(void);
 void CoXlTestNearLevelLeft(int ship);
+int CoXlTestStreamLayerBusy(void);
+int CoXlTestLayerThreadDone(void);
+uint32_t CoXlTestLayerFills(void);
+
+/* Two pollers of one finished change, started together. */
+static volatile LONG g_go;
+static DWORD WINAPI Poller(LPVOID unused)
+{
+    (void)unused;
+    while (!g_go) YieldProcessor();
+    CoXlTestLayerBusy();
+    return 0;
+}
 uint64_t CoXlTestLayerField(uint64_t unit, uint64_t field);
 int CoXlTestLayerHeight(uint64_t desc, float x, float y, float* h);
 void CoXlTestStreamSetup(uintptr_t game, uint8_t* context, uint8_t* array, uint32_t count);
@@ -278,6 +291,44 @@ int main(void)
     CHECK(CoXlTestLayerBusy());
     CoXlTestNearLevelLeft(0);
     CHECK(!CoXlTestLayerBusy());
+
+    Start("the stream's spawns wait on their own poll: a change nothing else polls is finished by it");
+    a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);
+    CoXlTestLayerTile(a, 1, AX, AY);
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTileLater(b, 1, BX, AY);
+    {
+        int polls = 0;
+        while (CoXlTestStreamLayerBusy() && polls < 20000) { Sleep(1); polls++; }
+        CHECK(polls < 20000);
+    }
+    fb = Field(1900.0f, AY);
+    CHECK(fb != 0 && fb != Field(2100.0f, AY) && Near(Read(fb, 1900.0f, AY), 30.0f)); /* the new grid in use */
+
+    Start("two pollers of one finished change: it is finished once (one flip of the grid's descriptor)");
+    a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);
+    CoXlTestLayerTile(a, 1, AX, AY);
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    {
+        int once = 1;
+        for (int round = 0; round < 12; round++)
+        {
+            uint32_t before = CoXlTestLayerFills();
+            CoXlTestLayerTileLater(b, 1, BX, AY);
+            int polls = 0;
+            while (!CoXlTestLayerThreadDone() && polls < 20000) { Sleep(1); polls++; }
+            g_go = 0;
+            HANDLE t[2] = {CreateThread(NULL, 0, Poller, NULL, 0, NULL), CreateThread(NULL, 0, Poller, NULL, 0, NULL)};
+            Sleep(2);
+            InterlockedExchange(&g_go, 1);
+            WaitForMultipleObjects(2, t, TRUE, INFINITE);
+            CloseHandle(t[0]); CloseHandle(t[1]);
+            once &= CoXlTestLayerFills() == before + 1 && !CoXlTestLayerBusy();
+        }
+        CHECK(once);
+        fb = Field(1900.0f, AY);
+        CHECK(fb != 0 && Near(Read(fb, 1900.0f, AY), 30.0f));
+    }
 
     Start("a tile goes: the other grids hold the coarse ground there again, and its own grid is out of use");
     a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);

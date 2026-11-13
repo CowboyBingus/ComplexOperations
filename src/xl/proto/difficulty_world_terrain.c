@@ -6874,10 +6874,12 @@ static void NearLayerTileChange(int slot, int in, float cx, float cy)
 static int NearLayerBusy(void)
 {
     if (!g_layerJob.running) return 0;
-    if (WaitForSingleObject(g_layerJob.thread, 0) != WAIT_OBJECT_0) return 1;
-    CloseHandle(g_layerJob.thread);
+    HANDLE t = g_layerJob.thread;
+    if (t == NULL || WaitForSingleObject(t, 0) != WAIT_OBJECT_0) return g_layerJob.running != 0;
+    /* one poller finishes the change: a second End would flip the grid's descriptor back */
+    if (InterlockedCompareExchange(&g_layerJob.running, 0, 1) != 1) return 0;
     g_layerJob.thread = NULL;
-    InterlockedExchange(&g_layerJob.running, 0);
+    CloseHandle(t);
     NearLayerChangeEnd();
     return 0;
 }

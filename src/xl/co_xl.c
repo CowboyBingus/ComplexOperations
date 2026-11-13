@@ -678,6 +678,11 @@ void CoXlTestLayerTile(int slot, int in, float cx, float cy) { NearLayerTileChan
 void CoXlTestLayerTileLater(int slot, int in, float cx, float cy) { NearLayerTileChangeLater(slot, in, cx, cy); }
 int CoXlTestLayerBusy(void) { return NearLayerBusy(); }
 void CoXlTestNearLevelLeft(int ship) { NearLevelLeft(ship); }
+/* The stream's own poll of a layer change (proto/difficulty_stream.c), whether the change's thread has ended, the
+ * changes finished so far. */
+int CoXlTestStreamLayerBusy(void) { return WorldStreamLayerBusy(); }
+int CoXlTestLayerThreadDone(void) { HANDLE t = g_layerJob.thread; return t != NULL && WaitForSingleObject(t, 0) == WAIT_OBJECT_0; }
+uint32_t CoXlTestLayerFills(void) { return (uint32_t)g_nearLayer.fills; }
 uint64_t CoXlTestLayerField(uint64_t unit, uint64_t field) { return NearLayerField(unit, field); }
 int CoXlTestLayerHeight(uint64_t desc, float x, float y, float* h) { return NearLayerHeight(desc, x, y, h); }
 int CoXlTestLayerWhy(uint64_t unit, uint64_t field, int* slot) { int why; NearLayerFieldWhy(unit, field, slot, &why); return why; }
