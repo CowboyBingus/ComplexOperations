@@ -23,6 +23,9 @@ void CoXlTestFarGrassNames(int on);
 LONG CoXlTestNearResetState(void);
 void CoXlTestNearReset(LONG state, int pins);
 void CoXlTestNearResetTick(void);
+void CoXlTestNearCraterMaps(uint64_t source, uint64_t offset, uint64_t scorch);
+int CoXlTestNearCraterMapsMake(int newLevel);
+void CoXlTestNearCraterMapsEarlier(void);
 
 static int g_failed;
 static const char* g_case;
@@ -36,6 +39,12 @@ static const char* g_case;
 #define TILE0 0x1000ull
 #define TILE1 0x2000ull
 #define ONEMIP 0x3000ull
+#define SOURCE 0xFDF5405Bu /* the craters' maps: generated_heightmap_source, _offset, generated_materials_scorch */
+#define OFFSET 0x4758A80Au
+#define SCORCH 0xB1AA630Du
+#define STAND0 0x5000ull
+#define STAND1 0x6000ull
+#define STAND2 0x7000ull
 #define FRAMES 0x10C4u      /* G+: frames of frame_history_invalidation */
 #define PROBE_ALL 0x7938494u /* G+: a six-face probe capture asked for */
 #define PROBE_WEIGHT 0x7938498u
@@ -57,7 +66,35 @@ static uint64_t* Slot(uint32_t name)
 }
 static void Publish(uint32_t name, uint64_t resource) { *Slot(name) = resource; g_publishes++; }
 static void Unpublish(uint32_t name) { *Slot(name) = 0; g_unpublishes++; }
-static void See(void) { g_seen[0] = *Slot(HEIGHT); g_seen[1] = *Slot(MATERIALS); g_seen[2] = *Slot(ROADS); g_runs++; }
+static uint64_t g_craterSeen[3]; /* what the last render call saw under SOURCE, OFFSET, SCORCH */
+static void See(void)
+{
+    g_seen[0] = *Slot(HEIGHT); g_seen[1] = *Slot(MATERIALS); g_seen[2] = *Slot(ROADS); g_runs++;
+    g_craterSeen[0] = *Slot(SOURCE); g_craterSeen[1] = *Slot(OFFSET); g_craterSeen[2] = *Slot(SCORCH);
+}
+/* The render config's textures as find returns them ({+8 format, +0x14 width, +0x18 height}) and what create made. */
+static uint8_t g_configs[3][0x70];
+static int g_creates;
+static uint32_t g_made[8][4]; /* w, h, mips, format */
+static uint64_t Find(uint32_t name)
+{
+    const uint32_t names[3] = {SOURCE, OFFSET, SCORCH};
+    for (int k = 0; k < 3; k++) if (name == names[k]) return (uint64_t)(uintptr_t)g_configs[k];
+    return 0;
+}
+static uint64_t Create(uint32_t w, uint32_t h, uint32_t mips, uint32_t format, uint32_t id, uint32_t flags)
+{
+    (void)id; (void)flags;
+    if (g_creates < 8) { g_made[g_creates][0] = w; g_made[g_creates][1] = h; g_made[g_creates][2] = mips; g_made[g_creates][3] = format; }
+    return 0x9000ull + (uint64_t)(g_creates++);
+}
+static int g_releases;
+static void Release(uint64_t resource) { (void)resource; g_releases++; }
+static void Configs(uint32_t side)
+{
+    const uint32_t formats[3] = {22, 31, 51};
+    for (int k = 0; k < 3; k++) { memset(g_configs[k], 0, sizeof g_configs[k]); memcpy(g_configs[k] + 8, &formats[k], 4); memcpy(g_configs[k] + 0x14, &side, 4); memcpy(g_configs[k] + 0x18, &side, 4); }
+}
 static int SawLevel(void) { return g_seen[0] == ONEMIP && g_seen[2] == ONEMIP && g_seen[1] == 0; }
 static int SawTile(void) { return g_seen[0] == TILE0 && g_seen[2] == TILE0 && g_seen[1] == TILE1; }
 static int LevelNow(void) { return *Slot(HEIGHT) == ONEMIP && *Slot(ROADS) == ONEMIP && *Slot(MATERIALS) == 0; }
@@ -99,6 +136,9 @@ static void Setup(const char* name, int replaying)
         memcpy(image + API + 0x10, &table, 8);
         void (*publish)(uint32_t, uint64_t) = Publish; memcpy(image + TABLE + 0x210, &publish, 8);
         void (*unpublish)(uint32_t) = Unpublish; memcpy(image + TABLE + 0x218, &unpublish, 8);
+        uint64_t (*find)(uint32_t) = Find; memcpy(image + TABLE + 0x158, &find, 8);
+        uint64_t (*create)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) = Create; memcpy(image + TABLE + 0x170, &create, 8);
+        void (*release)(uint64_t) = Release; memcpy(image + TABLE + 0x198, &release, 8);
         g_G = VirtualAlloc(NULL, PROBE_FACES + 0x1000, MEM_RESERVE, PAGE_NOACCESS);
         VirtualAlloc(g_G, 0x2000, MEM_COMMIT, PAGE_READWRITE);
         VirtualAlloc(g_G + (PROBE_ALL & ~0xFFFu), 0x1000, MEM_COMMIT, PAGE_READWRITE);
@@ -114,6 +154,8 @@ static void Setup(const char* name, int replaying)
     CoXlTestFarGrassNames(0);
     CoXlTestNearProbeClear();
     CoXlTestNearReset(0, 1);
+    CoXlTestNearCraterMaps(0, 0, 0);
+    memset(g_craterSeen, 0xFF, sizeof g_craterSeen);
 }
 
 int main(void)
@@ -131,6 +173,40 @@ int main(void)
     CHECK(g_runs == 1 && SawTile());
     CHECK(LevelNow());
     CHECK(g_publishes == 3 + 2 && g_unpublishes == 3); /* the tile's three, then the one-mip copy's two */
+
+    Setup("the craters' maps: stand-ins inside the consumer, the render config's own after", 1);
+    CoXlTestNearCraterMaps(STAND0, STAND1, STAND2);
+    CoXlTestNearConsume(queue, 1, (void*)Consumer);
+    CHECK(SawTile() && g_craterSeen[0] == STAND0 && g_craterSeen[1] == STAND1 && g_craterSeen[2] == STAND2);
+    CHECK(LevelNow() && *Slot(SOURCE) == 0 && *Slot(OFFSET) == 0 && *Slot(SCORCH) == 0);
+    CHECK(g_publishes == 6 + 2 && g_unpublishes == 6);
+
+    Setup("no stand-ins made: the craters' names are not touched", 1);
+    CoXlTestNearConsume(queue, 1, (void*)Consumer);
+    CHECK(g_craterSeen[0] == 0 && g_craterSeen[1] == 0 && g_craterSeen[2] == 0);
+    CHECK(g_publishes == 3 + 2 && g_unpublishes == 3);
+
+    Setup("an earlier level's stand-ins are not published", 1);
+    CoXlTestNearCraterMaps(STAND0, STAND1, STAND2);
+    CoXlTestNearCraterMapsEarlier();
+    CoXlTestNearConsume(queue, 1, (void*)Consumer);
+    CHECK(SawTile() && g_craterSeen[0] == 0 && g_craterSeen[1] == 0 && g_craterSeen[2] == 0);
+
+    Setup("the stand-ins are made once a level, as the render config's maps", 1);
+    Configs(2560); g_creates = 0; g_releases = 0;
+    CHECK(CoXlTestNearCraterMapsMake(1) == 1);
+    CHECK(g_creates == 3);
+    CHECK(g_made[0][0] == 2560 && g_made[0][1] == 2560 && g_made[0][2] == 1 && g_made[0][3] == 22);
+    CHECK(g_made[1][3] == 31 && g_made[2][3] == 51);
+    CHECK(CoXlTestNearCraterMapsMake(0) == 1 && g_creates == 3); /* the same level: kept */
+    CHECK(CoXlTestNearCraterMapsMake(1) == 1 && g_creates == 6 && g_releases == 3); /* a new level: the old ones go */
+
+    Setup("a crater map of another size: no stand-ins, no tile", 1);
+    Configs(2048); g_creates = 0;
+    CHECK(CoXlTestNearCraterMapsMake(1) == 0);
+    CHECK(g_creates == 0);
+    CoXlTestNearConsume(queue, 1, (void*)Consumer);
+    CHECK(g_craterSeen[0] == 0);
 
     Setup("the consumer on another queue: no name touched", 1);
     CoXlTestNearConsume(queue, 0, (void*)Consumer);

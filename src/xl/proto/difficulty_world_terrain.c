@@ -1502,6 +1502,13 @@ static int TerrainNearCamShift(uint64_t camera, uintptr_t at, const float* v, fl
     return 1;
 }
 
+/* The craters' global maps (2560 x 2560, keep_after_renderer_reboot): the finalize (0x64) clears the offset and scorch
+ * and its terrain_generator_convert_output copies generated_heightmap's texels 768..3327 into the source (CS d9243536).
+ * The crater pass (CS 7083c2aa) writes source + offset into the level's heightmap in its scissor, so a replayed finalize
+ * wiped every crater and left the tile's heights as the base of the next one. Same-size stand-ins take those writes. */
+static const uint32_t kNearCraterNames[3] = {0xFDF5405Bu, 0x4758A80Au, 0xB1AA630Du}; /* source, offset, scorch */
+static struct { LONG level; uint64_t tex[3]; } g_nearCraterMaps = {.level = -1};
+
 /* The names a replay publishes, as the replay's jobs need them (tile) or as play has them (level: NearReplayEnd's state). */
 static void NearNamesTile(void)
 {
@@ -1509,6 +1516,8 @@ static void NearNamesTile(void)
     if (publish == NULL) return;
     for (int k = 0; k < 2; k++) publish(kNearNames[k], g_near.tex[k]);
     publish(kNearRoadAlias, g_near.tex[0]);
+    if (g_nearCraterMaps.level == g_world.levels)
+        for (int k = 0; k < 3; k++) if (g_nearCraterMaps.tex[k] != 0) publish(kNearCraterNames[k], g_nearCraterMaps.tex[k]);
 }
 
 static void NearNamesLevel(void)
@@ -1517,7 +1526,34 @@ static void NearNamesLevel(void)
     if (unpublish == NULL) return;
     for (int k = 0; k < 2; k++) unpublish(kNearNames[k]);
     unpublish(kNearRoadAlias);
+    for (int k = 0; k < 3; k++) if (g_nearCraterMaps.tex[k] != 0) unpublish(kNearCraterNames[k]);
     NearOneMipPublish();
+}
+
+/* The stand-ins for this level, made from the render config's own (find before any publish); 0 when one is missing:
+ * then no tile is replayed, as its finalize would overwrite the level's crater maps. */
+static int NearCraterMapsMake(void)
+{
+    if (g_nearCraterMaps.level == g_world.levels) return 1;
+    NearFindFn find = (NearFindFn)NearApi(0x10, 0x158);
+    NearCreateFn create = (NearCreateFn)NearApi(0x10, 0x170);
+    NearReleaseFn release = (NearReleaseFn)NearApi(0x10, 0x198);
+    for (int k = 0; k < 3; k++) { if (g_nearCraterMaps.tex[k] != 0 && release != NULL) release(g_nearCraterMaps.tex[k]); g_nearCraterMaps.tex[k] = 0; }
+    g_nearCraterMaps.level = -1;
+    if (find == NULL || create == NULL) return 0;
+    for (int k = 0; k < 3; k++)
+    {
+        uint64_t config = find(kNearCraterNames[k]);
+        uint32_t format = 0, w = 0, h = 0; uint8_t f60 = 0, f63 = 0, f64 = 0;
+        if (config == 0 || SafeRead(config + 0x8, &format, 4) || SafeRead(config + 0x14, &w, 4) || SafeRead(config + 0x18, &h, 4) ||
+            SafeRead(config + 0x60, &f60, 1) || SafeRead(config + 0x63, &f63, 1) || SafeRead(config + 0x64, &f64, 1) || w != 2560 || h != 2560)
+        { Note("difficulty: near terrain: the crater map 0x%08X is not the reviewed one (%u x %u); no tile", kNearCraterNames[k], w, h); return 0; }
+        uint32_t flags = (f63 == 1 ? 1u : 0u) | (f60 == 1 ? 2u : 0u) | (f60 == 8 ? 4u : 0u) | (f64 == 0x20 ? 8u : 0u);
+        g_nearCraterMaps.tex[k] = create(w, h, 1, format, 0x48460020u + (uint32_t)k, flags);
+        if (g_nearCraterMaps.tex[k] == 0) { Note("difficulty: near terrain: the crater map stand-in %d was not created; no tile", k); return 0; }
+    }
+    g_nearCraterMaps.level = g_world.levels;
+    return 1;
 }
 
 /* The tile's names are published only around the replay's own work: each step's dispatch (game thread) and the merge's
@@ -5583,6 +5619,7 @@ static int TerrainNearReplay(uint64_t records, uint32_t end, uint32_t at, uint64
         NearCreateFn create = (NearCreateFn)NearApi(0x10, 0x170);
         NearPublishFn publish = (NearPublishFn)NearApi(0x10, 0x210);
         if (find == NULL || create == NULL || publish == NULL) { g_near.state = NEAR_FAILED; return 0; }
+        if (!NearCraterMapsMake()) { NearReplayEnd(0); return 0; }
         for (int k = 0; k < 2; k++)
         {
             uint64_t config = find(kNearNames[k]);

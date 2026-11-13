@@ -338,6 +338,12 @@ void CoXlTestNearConsume(uint64_t queue, int replays, void* original)
 }
 int CoXlTestNearNamesOpen(void) { return NearNamesOpen(); }
 void CoXlTestNearTextures(uint64_t tile0, uint64_t tile1) { g_near.tex[0] = tile0; g_near.tex[1] = tile1; }
+void CoXlTestNearCraterMaps(uint64_t source, uint64_t offset, uint64_t scorch)
+{
+    g_nearCraterMaps.tex[0] = source; g_nearCraterMaps.tex[1] = offset; g_nearCraterMaps.tex[2] = scorch; g_nearCraterMaps.level = g_world.levels;
+}
+void CoXlTestNearCraterMapsEarlier(void) { g_nearCraterMaps.level = g_world.levels - 1; }
+int CoXlTestNearCraterMapsMake(int newLevel) { if (newLevel) g_nearCraterMaps.level = -1; return NearCraterMapsMake(); }
 void CoXlTestNearNamesClose(int opened) { NearNamesClose(opened); }
 uint64_t CoXlTestNearProbe(void* original) { g_nearProbe = (NearProbeFn)original; return NearProbe(1, 2, 3, 4, 5, 6, 7, 8, 9); }
 void CoXlTestNearProbeCounts(uint32_t* replay, uint32_t* tile, uint32_t* other) { *replay = g_probeRun.replay; *tile = g_probeRun.tile; *other = g_probeRun.other; }
