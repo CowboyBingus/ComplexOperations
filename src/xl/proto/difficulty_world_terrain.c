@@ -1963,9 +1963,11 @@ static void NearCameras(float half0, float half1, float cx, float cy)
     }
 }
 
+static void NearPreStop(const char* why);
 /* Puts the level's merge state back after the replay (or a failed one) and lets the level go on. */
 static void NearReplayEnd(int ok)
 {
+    NearPreStop("the replay ended");
     InterlockedExchange(&g_nearActive, 0);
     InterlockedExchange(&g_near.routeLevel, 0);
     Note("difficulty: near terrain: the light probe captured %u times while the tile replayed, %u with the tile's maps published (consumer brackets "
@@ -2194,6 +2196,154 @@ static int NearRunStep(uint64_t records, uint32_t end, uint64_t context, uint64_
     return r;
 }
 
+/* ---- A build's composite tiles off the game thread ---------------------------------------------------------------
+ * TerrainBuild (record 25's Voronoi through op 0x2D) held the game thread 35-130 ms a composite tile. In play a thread
+ * of its own builds the replay's composite steps in order into NEAR_PRE_SLOTS blocks, with a tile runner's context as
+ * the load's coarse section does (CoarseOne); each step waits for its block, then draws it on the game thread. Like
+ * CoarseStart it holds the marker lg+0x2D7C (a float, one ulp; read in play at 0xAC6703) and the spacing for the run. */
+#define NEAR_PRE_SLOTS 2
+enum { NEAR_PRE_FREE, NEAR_PRE_BUILDING, NEAR_PRE_BUILT };
+typedef struct { volatile LONG state; int step, ok; uint8_t phase; double ms; uint8_t record[0x19B0]; } NearPreSlot;
+typedef int (*NearPreBuildFn)(int tile, uint64_t context, uint8_t* block, uint8_t* record);
+static struct
+{
+    volatile LONG stop; int on, refused; HANDLE thread; TileRunner* r; LONG level;
+    int first, last;
+    uint8_t* blocks[NEAR_PRE_SLOTS];
+    NearPreSlot slot[NEAR_PRE_SLOTS];
+    uint64_t records, g, h; uint32_t end; uintptr_t gen, P, lg, spacingAt; uint32_t disk; float spacing;
+    uint8_t ctx[0xE8], buildS[0x120];
+    double longest, sum, waitMs; int built, failed; LARGE_INTEGER waitFrom;
+} g_nearPre;
+static NearPreBuildFn g_nearPreBuild;
+
+/* The tile built on `block` with the runner's context, then the draw's record on it (CoarseOne's). Runner thread. */
+static int NearPreBuildTile(int tile, uint64_t context, uint8_t* block, uint8_t* record)
+{
+    (void)block;
+    if (!TerrainBuild(tile, g_nearPre.records, g_nearPre.end, context, g_nearPre.g, g_nearPre.h, g_nearPre.gen, 1) ||
+        SafeRead(g_nearPre.records + (uint64_t)g_terrain.draw * 0x19B0u, record, 0x19B0)) return 0;
+    uint64_t keep[2];
+    memcpy(keep, record + 8, 16);
+    WorldTileRelocate(record, g_nearPre.gen, (uintptr_t)block);
+    memcpy(record + 8, keep, 16);
+    memset(record + 8 + 0x108, 0, 8);
+    return 1;
+}
+
+static DWORD WINAPI NearPreThread(LPVOID unused)
+{
+    (void)unused;
+    TileRunner* r = g_nearPre.r;
+    if (r != NULL) TlsSetValue(g_tileRunnerTls, r);
+    for (int s = g_nearPre.first; s <= g_nearPre.last && !g_nearPre.stop; s++)
+    {
+        const int i = (s - g_nearPre.first) % NEAR_PRE_SLOTS;
+        NearPreSlot* p = &g_nearPre.slot[i];
+        while (p->state != NEAR_PRE_FREE && !g_nearPre.stop) Sleep(1);
+        if (g_nearPre.stop) break;
+        p->step = s; InterlockedExchange(&p->state, NEAR_PRE_BUILDING);
+        LARGE_INTEGER hz, b0, b1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&b0);
+        uint64_t context = 0;
+        if (r != NULL)
+        {
+            r->block = g_nearPre.blocks[i];
+            TileRunnerContext(r, g_nearPre.ctx, g_nearPre.buildS, g_nearPre.P);
+            context = (uint64_t)(uintptr_t)r->ctx;
+        }
+        p->ok = g_nearPreBuild(g_near.stepTile[s], context, g_nearPre.blocks[i], p->record);
+        if (r != NULL) r->block = NULL;
+        p->phase = 0;
+        QueryPerformanceCounter(&b1); p->ms = (double)(b1.QuadPart - b0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+        MemoryBarrier();
+        InterlockedExchange(&p->state, NEAR_PRE_BUILT);
+    }
+    if (r != NULL) TlsSetValue(g_tileRunnerTls, NULL);
+    return 0;
+}
+
+/* Game thread: the thread stopped and joined, the marker and spacing put back. */
+static void NearPreStop(const char* why)
+{
+    if (!g_nearPre.on) return;
+    InterlockedExchange(&g_nearPre.stop, 1);
+    if (g_nearPre.thread != NULL) { WaitForSingleObject(g_nearPre.thread, INFINITE); CloseHandle(g_nearPre.thread); g_nearPre.thread = NULL; }
+    if (g_nearPre.lg != 0 && g_nearPre.level == g_world.levels)
+    {
+        *(volatile uint32_t*)(g_nearPre.lg + 0x2D7C) = g_nearPre.disk;
+        *(volatile float*)g_nearPre.spacingAt = g_nearPre.spacing;
+    }
+    g_tileSectionHeld = 0;
+    g_nearPre.on = 0;
+    Note("difficulty: moving tiles: composite tiles built off the game thread (%s): %d built, %d failed; the longest %.0f ms, %.0f ms in all; "
+        "the steps waited %.0f ms for them", why, g_nearPre.built, g_nearPre.failed, g_nearPre.longest, g_nearPre.sum, g_nearPre.waitMs);
+}
+
+/* Game thread, at a build's first composite step: the run of composite steps from `s` on the thread. 0: built here. */
+static int NearPreStart(int s, uint64_t records, uint32_t end, uint64_t context, uint64_t g, uint64_t h, uintptr_t gen)
+{
+    if (g_nearPre.refused || !g_moveBuilding || g_coarse.on || g_tileSectionHeld || s < 0 || s >= g_near.steps || g_near.stepKind[s] != NEAR_TILE) return 0;
+    if (g_nearPreBuild == NULL)
+    {
+        if (!TileBuildsOn() || !TileDispatchInstall() || g_tileRunnerTls == TLS_OUT_OF_INDEXES) { g_nearPre.refused = 1; return 0; }
+        g_nearPreBuild = NearPreBuildTile;
+    }
+    int last = s;
+    while (last + 1 < g_near.steps && g_near.stepKind[last + 1] == NEAR_TILE) last++;
+    uintptr_t settings = 0, lg = 0, p = 0, spacingAt = 0;
+    if (g_nearPreBuild == NearPreBuildTile &&
+        (SafeRead(context + 8, &settings, 8) || settings == 0 || SafeRead(context + 0x18, &lg, 8) || lg == 0 || SafeRead(lg + 0x2D0, &p, 8) || p == 0 ||
+         SafeRead(p + 0x68, &spacingAt, 8) || spacingAt == 0 || SafeRead(lg + 0x2D7C, &g_nearPre.disk, 4) || SafeRead(spacingAt, &g_nearPre.spacing, 4) ||
+         SafeRead(settings, g_nearPre.buildS, sizeof g_nearPre.buildS) || SafeRead(context, g_nearPre.ctx, sizeof g_nearPre.ctx) ||
+         SafeRead(context + 0x20, &g_nearPre.P, 8)))
+        return 0;
+    if (g_nearPreBuild == NearPreBuildTile)
+    {
+        g_nearPre.r = TileRunnerMake(1);
+        if (g_nearPre.r == NULL) return 0;
+        for (int i = 0; i < NEAR_PRE_SLOTS; i++)
+        {
+            if (g_nearPre.blocks[i] == NULL) g_nearPre.blocks[i] = (uint8_t*)VirtualAlloc(NULL, GEN_BLOCK_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            if (g_nearPre.blocks[i] == NULL) { g_nearPre.refused = 1; Note("difficulty: moving tiles: no memory for the composite tiles' blocks; they are built on the game thread"); return 0; }
+        }
+    }
+    else g_nearPre.r = NULL;
+    g_nearPre.records = records; g_nearPre.end = end; g_nearPre.g = g; g_nearPre.h = h; g_nearPre.gen = gen; g_nearPre.lg = lg; g_nearPre.spacingAt = spacingAt;
+    g_nearPre.first = s; g_nearPre.last = last; g_nearPre.level = g_world.levels;
+    g_nearPre.longest = g_nearPre.sum = g_nearPre.waitMs = 0; g_nearPre.built = g_nearPre.failed = 0; g_nearPre.waitFrom.QuadPart = 0;
+    for (int i = 0; i < NEAR_PRE_SLOTS; i++) { g_nearPre.slot[i].state = NEAR_PRE_FREE; g_nearPre.slot[i].step = -1; }
+    if (lg != 0)
+    {
+        uint32_t flipped = g_nearPre.disk ^ 1u;
+        memcpy(g_nearPre.buildS + 0x5C, &flipped, 4);
+        *(volatile uint32_t*)(lg + 0x2D7C) = flipped;
+        *(volatile float*)spacingAt = 16.0f;
+    }
+    g_tileSectionHeld = 1;
+    g_nearPre.stop = 0; g_nearPre.on = 1;
+    g_nearPre.thread = CreateThread(NULL, 1024 * 1024, NearPreThread, NULL, 0, NULL);
+    if (g_nearPre.thread == NULL) { NearPreStop("its thread did not start"); return 0; }
+    return 1;
+}
+
+/* The slot holding step `s`'s tile, or NULL when this step builds it here. Game thread. */
+static NearPreSlot* NearPreFor(int s, uint64_t records, uint32_t end, uint64_t context, uint64_t g, uint64_t h, uintptr_t gen)
+{
+    if (!g_nearPre.on && !NearPreStart(s, records, end, context, g, h, gen)) return NULL;
+    if (s < g_nearPre.first || s > g_nearPre.last) return NULL;
+    return &g_nearPre.slot[(s - g_nearPre.first) % NEAR_PRE_SLOTS];
+}
+
+/* After step `s`'s draw: its slot free for the thread, the run ended after its last step. */
+static void NearPreDone(NearPreSlot* p, int s)
+{
+    if (p->ms > g_nearPre.longest) g_nearPre.longest = p->ms;
+    g_nearPre.sum += p->ms;
+    if (p->ok) g_nearPre.built++; else g_nearPre.failed++;
+    InterlockedExchange(&p->state, NEAR_PRE_FREE);
+    if (s >= g_nearPre.last) NearPreStop("the run is drawn");
+}
+
 static int NearRunStepIn(uint64_t records, uint32_t end, uint64_t context, uint64_t g, uint64_t h)
 {
     int s = g_near.step;
@@ -2212,9 +2362,22 @@ static int NearRunStepIn(uint64_t records, uint32_t end, uint64_t context, uint6
     }
     if (g_near.stepKind[s] == NEAR_TILE)
     {
+        NearPreSlot* pre = NearPreFor(s, records, end, context, g, h, gen);
         if (!g_near.building)
         {
-            if (!(TerrainBuild(g_near.stepTile[s], records, end, context, g, h, gen, 1) && TerrainDrawPrepare(records, gen)))
+            if (pre != NULL)
+            {
+                LARGE_INTEGER t, hz; QueryPerformanceCounter(&t); QueryPerformanceFrequency(&hz);
+                if (pre->state != NEAR_PRE_BUILT || pre->step != s) /* the level waits for it, the game's frames do not */
+                {
+                    if (g_nearPre.waitFrom.QuadPart == 0) g_nearPre.waitFrom = t;
+                    return 0;
+                }
+                if (g_nearPre.waitFrom.QuadPart != 0) g_nearPre.waitMs += (double)(t.QuadPart - g_nearPre.waitFrom.QuadPart) * 1000.0 / (double)hz.QuadPart;
+                g_nearPre.waitFrom.QuadPart = 0;
+                if (!pre->ok) { g_near.tilesFailed++; NearPreDone(pre, s); return 1; }
+            }
+            else if (!(TerrainBuild(g_near.stepTile[s], records, end, context, g, h, gen, 1) && TerrainDrawPrepare(records, gen)))
             {
                 g_near.tilesFailed++; g_near.calls = 0;
                 return 1; /* the level's own cells stay there */
@@ -2222,12 +2385,13 @@ static int NearRunStepIn(uint64_t records, uint32_t end, uint64_t context, uint6
             g_near.building = 1; g_near.calls = 0;
         }
         int clip = TerrainClipBegin(g_near.stepTile[s], gen);
-        fault = WorldTileGuarded(g_terrain.record, context, &index, &g_terrain.phase, g, h, 1, &calls);
+        fault = WorldTileGuarded(pre != NULL ? pre->record : g_terrain.record, context, &index, pre != NULL ? &pre->phase : &g_terrain.phase, g, h, 1, &calls);
         if (clip) TerrainClipEnd();
-        if (fault) return -1; /* the merge's state is unknown after a fault */
+        if (fault) { if (pre != NULL) NearPreStop("a draw faulted"); return -1; } /* the merge's state is unknown after a fault */
         if (index == 0 && ++g_near.calls < TERRAIN_DRAW_CALLS) return 0;
         g_near.building = 0; g_near.calls = 0;
         if (index != 0) { WorldArenaReset(context); g_near.tilesDrawn++; } else g_near.tilesFailed++;
+        if (pre != NULL) NearPreDone(pre, s);
         return 1;
     }
     if (g_near.matLeave)

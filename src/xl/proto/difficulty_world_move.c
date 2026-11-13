@@ -1366,6 +1366,7 @@ static void MoveInstall(uintptr_t game)
  * all of them up after its own level init (0x69, the replay, a build in play), so this clears only an older level's. */
 static void NearLevelLeft(int ship)
 {
+    NearPreStop("the level went");
     NearOneMipDisarm();
     InterlockedExchange(&g_nearActive, 0);
     MoveHold(0);

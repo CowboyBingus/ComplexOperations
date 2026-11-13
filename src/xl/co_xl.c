@@ -555,6 +555,19 @@ void CoXlTestCoarse(const uint16_t* heights, uint32_t n, float size) { const Nea
 void CoXlTestNearBuilding(int building) { g_near.level = g_world.levels; g_near.state = building ? NEAR_START : NEAR_IN; }
 void CoXlTestLayerTile(int slot, int in, float cx, float cy) { NearLayerTileChange(slot, in, cx, cy); }
 void CoXlTestLayerTileLater(int slot, int in, float cx, float cy) { NearLayerTileChangeLater(slot, in, cx, cy); }
+/* A build's composite tiles off the game thread (proto/difficulty_world_terrain.c NearPreFor): the test's build in place
+ * of TerrainBuild, `steps` steps with composite tiles at first..last (tile = 100 + step), a step's slot and its end. */
+void CoXlTestNearPreUse(int (*build)(int, uint64_t, uint8_t*, uint8_t*)) { g_nearPreBuild = build; g_nearPre.refused = 0; InterlockedExchange(&g_moveBuilding, 1); }
+void CoXlTestNearPreSteps(int steps, int first, int last)
+{
+    g_near.steps = steps;
+    for (int s = 0; s < steps; s++) { g_near.stepKind[s] = s >= first && s <= last ? NEAR_TILE : NEAR_RECORD; g_near.stepTile[s] = 100 + s; }
+}
+void* CoXlTestNearPreFor(int s) { return NearPreFor(s, 0, 0, 0, 0, 0, 0); }
+int CoXlTestNearPreSlot(void* p, int* step, int* ok) { NearPreSlot* q = (NearPreSlot*)p; *step = q->step; *ok = q->ok; return (int)q->state; }
+void CoXlTestNearPreDone(void* p, int s) { NearPreDone((NearPreSlot*)p, s); }
+int CoXlTestNearPreOn(void) { return g_nearPre.on; }
+void CoXlTestNearPreStop(void) { NearPreStop("a test"); }
 int CoXlTestLayerBusy(void) { return NearLayerBusy(); }
 uint64_t CoXlTestLayerField(uint64_t unit, uint64_t field) { return NearLayerField(unit, field); }
 int CoXlTestLayerHeight(uint64_t desc, float x, float y, float* h) { return NearLayerHeight(desc, x, y, h); }
