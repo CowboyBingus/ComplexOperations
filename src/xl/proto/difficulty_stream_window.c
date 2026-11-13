@@ -304,6 +304,9 @@ static void WindowEvictFarLocked(void)
 {
     uint32_t pick[WINDOW_FAR_EVICT], n = 0;
     float far2[WINDOW_FAR_EVICT];
+    /* the bodies count falls only as the queue drains: at a low frame rate a scan finds them over budget again, and
+     * evicting more then would take far more than the budget needs */
+    if (g_streamDropFar != 0) return;
     for (uint32_t s = g_win.base; s < g_win.high && s < DIF_LOCATIONS; s++)
     {
         if (g_streamOut2[s] <= 0.0f || !g_streamLive[s] || g_win.handle[s] == 0 || !g_streamPoseGood[s] || g_streamNeedsUnit[s] || g_streamUnit[s] == 0 ||

@@ -671,6 +671,23 @@ uint32_t CoXlTestStreamDrain(double ms, uint32_t* waiting)
     return done;
 }
 void CoXlTestStreamOutSince(uint32_t i, ULONGLONG since) { g_streamOutSince[i] = since; }
+void co_capacity_test_places(int region, uint32_t places);
+/* Slots [base, high) as live far window stamps, then one eviction over the bodies' budget: the far removals queued. */
+uint32_t CoXlTestWindowEvictFar(uint32_t base, uint32_t high)
+{
+    AcquireSRWLockExclusive(&g_streamLock);
+    const uint32_t oldBase = g_win.base, oldHigh = g_win.high, before = g_streamDropFar, places = co_gen_places(HF_GEN_LOCATIONS_A);
+    co_capacity_test_places(HF_GEN_LOCATIONS_A, high);
+    g_win.base = base; g_win.high = high;
+    for (uint32_t s = base; s < high; s++) { g_win.handle[s] = 1; g_streamOut2[s] = 1.0e6f; }
+    WindowEvictFarLocked();
+    const uint32_t queued = g_streamDropFar - before;
+    for (uint32_t s = base; s < high; s++) g_win.handle[s] = 0; /* the far slots stay (their removal radius) */
+    g_win.base = oldBase; g_win.high = oldHigh; g_win.farHoldUntil = 0;
+    co_capacity_test_places(HF_GEN_LOCATIONS_A, places);
+    ReleaseSRWLockExclusive(&g_streamLock);
+    return queued;
+}
 void CoXlTestStreamSlotState(uint32_t i, int* live, int* due, uint64_t* unit) { *live = g_streamLive[i]; *due = g_streamDue[i]; *unit = g_streamUnit[i]; }
 /* The streamer's own SpawnLevelLayers calls (WorldStreamSpawnDueLocked): `spawn` stands in for the original and `pass`
  * for the captured pass; a due slot waits with its unit; the due slots go in index order. */

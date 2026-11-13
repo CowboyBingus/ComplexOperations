@@ -185,7 +185,7 @@ static float g_streamSeen2[kStreamMaxLocations];         /* a flagged one's dist
  * calls and a far eviction for 64 more, each taking its stamp's layer units down in that one frame. */
 enum { STREAM_DROP_OUT = 1, STREAM_DROP_REPLACE, STREAM_DROP_FAR };
 static uint8_t g_streamDrop[kStreamMaxLocations];        /* the queued removal's kind, 0: none */
-static uint32_t g_streamDropList[kStreamDropQueue], g_streamDropHead, g_streamDropCount;
+static uint32_t g_streamDropList[kStreamDropQueue], g_streamDropHead, g_streamDropCount, g_streamDropFar;
 
 static SRWLOCK g_streamLock = SRWLOCK_INIT;
 static volatile LONG g_streamOwn;     /* the streamer's own call: the thread id inside it (0: none) */
@@ -248,7 +248,7 @@ static void WorldStreamClearLocked(void)
     memset(g_streamOutSince, 0, sizeof g_streamOutSince);
     memset(g_streamReplace, 0, sizeof g_streamReplace);
     memset(g_streamDrop, 0, sizeof g_streamDrop);
-    g_streamDropHead = g_streamDropCount = 0;
+    g_streamDropHead = g_streamDropCount = g_streamDropFar = 0;
 }
 
 /* Whether the whole range is committed and writable: the generator's records have their +0xA8 zeroed in place. */
@@ -802,6 +802,7 @@ static int WorldStreamDropLocked(uint32_t i, int kind)
 {
     if (g_streamDrop[i] || g_streamDropCount >= kStreamDropQueue) return 0;
     g_streamDrop[i] = (uint8_t)kind;
+    if (kind == STREAM_DROP_FAR) g_streamDropFar++;
     g_streamDropList[(g_streamDropHead + g_streamDropCount++) % kStreamDropQueue] = i;
     return 1;
 }
@@ -820,6 +821,7 @@ static uint32_t WorldStreamDrainLocked(uint32_t most, double ms)
         g_streamDropHead = (g_streamDropHead + 1) % kStreamDropQueue; g_streamDropCount--;
         const int kind = g_streamDrop[i];
         g_streamDrop[i] = 0;
+        if (kind == STREAM_DROP_FAR) g_streamDropFar--;
         if (i >= g_stream.count || !g_streamLive[i] || !g_streamPoseGood[i] || g_streamNeedsUnit[i] || g_streamUnit[i] == 0) continue;
         if (kind == STREAM_DROP_OUT ? g_streamOutSince[i] == 0 : kind == STREAM_DROP_REPLACE ? !g_streamReplace[i] : !(g_streamOut2[i] > 0.0f)) continue;
         if (!WorldStreamRemoveLocked(i)) continue;

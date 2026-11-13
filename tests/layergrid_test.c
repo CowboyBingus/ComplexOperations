@@ -36,6 +36,7 @@ void CoXlTestStreamScan(void);
 uint32_t CoXlTestStreamScanFrames(int frames);
 uint32_t CoXlTestStreamDrain(double ms, uint32_t* waiting);
 void CoXlTestStreamOutSince(uint32_t i, unsigned long long since);
+uint32_t CoXlTestWindowEvictFar(uint32_t base, uint32_t high);
 void CoXlTestStreamSlotState(uint32_t i, int* live, int* due, uint64_t* unit);
 int CoXlTestLayerWhy(uint64_t unit, uint64_t field, int* slot);
 float CoXlTestTraceGridAt(int slot, float x, float y);
@@ -130,7 +131,7 @@ static void StreamGame(void)
 }
 
 /* The streamer on the fake game with `count` slots, the level's heightfield kept (40 m but where a case sets it). */
-static uint8_t g_context[0x100], g_array[64 * 0xE0];
+static uint8_t g_context[0x100], g_array[128 * 0xE0];
 static void Stream(uint32_t count)
 {
     uint64_t world = 0xABC0;
@@ -344,6 +345,19 @@ int main(void)
     CHECK(CoXlTestStreamScanFrames(0) == 0);                            /* the 2 not asked for yet, and none twice */
     CHECK(CoXlTestStreamDrain(1.0e9, &waiting) == 4 && waiting == 2 && g_destroys == 8);
     CHECK(CoXlTestStreamDrain(1.0e9, &waiting) == 2 && waiting == 0 && g_destroys == 10);
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
+
+    Start("far stamps evicted over the budget: no more while the last eviction still drains");
+    StreamGame();
+    Stream(100);
+    for (uint32_t k = 0; k < 100; k++) Slot(k, AX + 3000.0f, AY + 4.0f * (float)k, 2.0f, 0x1000u * (k + 1), 0);
+    CoXlTestStreamObserver(1, AX, AY);
+    CHECK(CoXlTestWindowEvictFar(0, 100) == 64);
+    CHECK(CoXlTestStreamDrain(1.0e9, &waiting) == 4 && waiting == 60 && g_destroys == 4);
+    CHECK(CoXlTestWindowEvictFar(0, 100) == 0); /* a slow frame rate: the next scan finds the bodies over budget again */
+    for (int f = 0; f < 20 && waiting > 0; f++) CoXlTestStreamDrain(1.0e9, &waiting);
+    CHECK(waiting == 0 && g_destroys == 64);
+    CHECK(CoXlTestWindowEvictFar(0, 100) == 36); /* drained: the budget is read again and the rest may go */
     CoXlTestStreamObserver(0, 0.0f, 0.0f);
 
     Start("a level location's new unit waits under the window's budgets");

@@ -420,9 +420,10 @@ camera. Far shadows look as on a vanilla map, blurred, at 2 m (shadow quality hi
 would stretch the slice over the whole 16 km map at 16 to 32 m a texel, so shadows would end at 19 m (low) or 56 m
 (high). The slice moves after the camera has gone 256 m from its centre, and that frame draws the whole slice at once,
 so no shadow from the old place is shown. While the camera moves faster than 60 m/s, as in a reinforcement hellpod,
-the slice stays until the camera leaves it or has been calm for 1 s. Log: `far shadows on this 16384 m world`. If the game's code is not the
-reviewed build's, the last slice stays dynamic instead: sharp shadows to 80 m, none past that. Log:
-`the sun's last slice stays dynamic`. A 2048 m mission keeps the game's slice.
+the slice stays until the camera has been calm for 1 s, or out of the slice for 8 s. Log:
+`far shadows on this 16384 m world`. If the game's code is not the reviewed build's, the last slice stays dynamic
+instead: sharp shadows to 80 m, none past that. Log: `the sun's last slice stays dynamic`. A 2048 m mission keeps
+the game's slice.
 
 The mod also keeps a complex level's destruction records, render version tables, tree extents and navmesh boundary
 requests within what the game holds. On a normal mission and on the ship none of these density and complex-level

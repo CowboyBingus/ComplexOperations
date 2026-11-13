@@ -13,7 +13,9 @@
  * of the setting (0x35F140) both give 0 for that frame's counter, so no texel of the old box is restored. Between moves
  * the box stays put in the world and the game's texel snap (0x359930) keeps its grid, so nothing shimmers. A camera
  * riding a reinforcement hellpod sweeps up to 1 km in about a second, and a 256 m step drew the slice whole four times
- * in it: while the camera moves faster than any Helldiver, the box stays until the camera leaves it.
+ * in it: while the camera moves faster than any Helldiver, the box stays, and moves once the camera is calm. A pod's
+ * start can be outside the box (1 km out and 850 m up, along a low sun's axis), so leaving the box moves it only after
+ * SUN_OUT_MS out.
  * Without every pin: the last slice stays dynamic on a world over 2048 m (crisp shadows to 80 m). */
 #include <math.h>
 
@@ -27,6 +29,7 @@
 #define SUN_FAST 60.0f           /* m/s: a camera this fast is passing (co_settle.h's Helldiver limit) */
 #define SUN_SAMPLE_MS 100u       /* the shortest time a speed is read over */
 #define SUN_CALM_MS 1000u        /* and it counts as still after this long under SUN_FAST */
+#define SUN_OUT_MS 8000u         /* over a pod's ride (one from 796 m was down within 4.6 s): longer out of the box moves it */
 /* helldivers2.exe */
 #define SUN_SNAP_CALL 0x35FC12u  /* the static branch's call of the texel snap 0x359930(light, box, vp w, vp h) */
 #define SUN_SNAP 0x359930u
@@ -41,7 +44,7 @@ typedef uint32_t (*SunLevelsFn)(void);
 
 /* The box's centre in the world, and the camera's last reading for its speed; only the render thread's prepare keeps
  * them. */
-typedef struct { int live, seen, fast; float c[3], half, last[3]; uint64_t lastMs, fastMs; } SunFar;
+typedef struct { int live, seen, fast, out; float c[3], half, last[3]; uint64_t lastMs, fastMs, outMs; } SunFar;
 static uint64_t (*g_sunClock)(void); /* a test's clock; NULL: GetTickCount64 */
 
 static struct
@@ -124,8 +127,8 @@ static int SunFarPassing(SunFar* s, const float* cam, uint64_t now)
 }
 
 /* 1 when the box moves to `cam`: no box yet, another half size, or the camera over a step from the centre along a
- * light axis; while the camera passes, only once it is out of the box. light: the light camera's rows at [rbp+0x30], U
- * at 0, D (the light's direction) at 4, R at 8. */
+ * light axis; while the camera passes, only once it has been out of the box for SUN_OUT_MS. light: the light camera's
+ * rows at [rbp+0x30], U at 0, D (the light's direction) at 4, R at 8. */
 static int SunFarCentre(SunFar* s, const float* light, const float* cam, float half, uint64_t now)
 {
     if (!isfinite(cam[0]) || !isfinite(cam[1]) || !isfinite(cam[2]) || !isfinite(half) || half <= 0.0f) return 0;
@@ -139,7 +142,13 @@ static int SunFarCentre(SunFar* s, const float* light, const float* cam, float h
         if (along > step) kept = 0;
         if (along > half) inside = 0;
     }
-    if (kept || (passing && inside)) return 0;
+    if (kept || (passing && inside)) { s->out = 0; return 0; }
+    if (passing && s->live && s->half == half)
+    {
+        if (!s->out) { s->out = 1; s->outMs = now; }
+        if (now - s->outMs < SUN_OUT_MS) return 0;
+    }
+    s->out = 0;
     s->live = 1; s->half = half;
     memcpy(s->c, cam, sizeof s->c);
     return 1;
