@@ -491,6 +491,15 @@ void CoXlTestNearPeaks(const float* heights, float cx, float cy, int* narrow, in
     NearPeaks p; NearPeaksCount(heights, &p);
     *narrow = p.narrow; *wide = p.wide; *top = p.top; *x = p.topX; *y = p.topY;
 }
+/* The conform's reset for a new tile (NearConformReset): what it keeps of a tile's state, which it is given. */
+void CoXlTestNearConformReset(void* coarse, void* low, void* delta, void* block, long running, int phase, void** kept, long* keptRunning, int* keptPhase)
+{
+    g_conform.coarse = (uint16_t*)coarse; g_conform.low = (float*)low; g_conform.delta = (float*)delta; g_conform.block = (uint8_t*)block;
+    g_conform.planRunning = running; g_conform.phase = phase; g_conform.next = 7; g_conform.blocksCoarse = 9;
+    NearConformReset();
+    kept[0] = g_conform.coarse; kept[1] = g_conform.low; kept[2] = g_conform.delta; kept[3] = g_conform.block;
+    *keptRunning = g_conform.planRunning; *keptPhase = g_conform.phase + (int)g_conform.next + (int)g_conform.blocksCoarse;
+}
 /* A conform cell's change from its triangles at texel (c, r), and how far they miss H - T (NearCellLerp, NearCellMiss). */
 float CoXlTestNearCellLerp(const float* delta, int i, int j, float c, float r) { return NearCellLerp(delta, i, j, c, r); }
 float CoXlTestNearCellMiss(const float* ring, const float* delta, int i, int j) { return NearCellMiss(ring, delta, i, j); }

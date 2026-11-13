@@ -19,6 +19,7 @@ float CoXlTestNearNodeHeight(const float* heights, float cx, float cy, int i, in
 float CoXlTestNearCellLerp(const float* delta, int i, int j, float c, float r);
 float CoXlTestNearCellMiss(const float* ring, const float* delta, int i, int j);
 float CoXlTestNearTexelMiss(void);
+void CoXlTestNearConformReset(void* coarse, void* low, void* delta, void* block, long running, int phase, void** kept, long* keptRunning, int* keptPhase);
 
 static int g_failed;
 static const char* g_case;
@@ -255,6 +256,18 @@ int main(void)
     CHECK(texels <= CoXlTestNearTexelMiss() + 1e-4f);   /* a texel a cell where they miss: the coarse surface */
     CHECK(per > 0 && per < 30);
     free(ring); free(delta);
+
+    Start("a new tile's conform keeps its buffers, the block map among them, and a running plan's flag", 1);
+    {
+        static uint8_t bufs[4];
+        void* kept[4] = {0};
+        long running = -1; int rest = -1;
+        CoXlTestNearConformReset(&bufs[0], &bufs[1], &bufs[2], &bufs[3], 1, 5, kept, &running, &rest);
+        CHECK(kept[0] == &bufs[0] && kept[1] == &bufs[1] && kept[2] == &bufs[2] && kept[3] == &bufs[3]);
+        CHECK(running == 1 && rest == 0);
+        CoXlTestNearConformReset(&bufs[0], &bufs[1], &bufs[2], NULL, 0, 9, kept, &running, &rest);
+        CHECK(kept[3] == NULL && running == 0 && rest == 0);
+    }
 
     free(g_h);
     if (g_failed) { printf("nearcones: %d check(s) failed\n", g_failed); return 1; }

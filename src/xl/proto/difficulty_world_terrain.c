@@ -4036,6 +4036,16 @@ static int NearMatRedirect(int on)
     return 1;
 }
 
+/* A new tile's conform from its first phase. The buffers are kept for it (the block map was dropped, 256 KB a tile), and
+ * so is a running plan's flag: phase 1 waits on it while a failed build's plan still uses the buffers. */
+static void NearConformReset(void)
+{
+    uint16_t* c = g_conform.coarse; float* l = g_conform.low; float* d = g_conform.delta; uint8_t* b = g_conform.block;
+    LONG running = g_conform.planRunning;
+    memset(&g_conform, 0, sizeof g_conform);
+    g_conform.coarse = c; g_conform.low = l; g_conform.delta = d; g_conform.block = b; g_conform.planRunning = running;
+}
+
 static int NearConformStep(uint64_t records, uint32_t end, uint64_t context, uint64_t g, uint64_t h)
 {
     NearReadbackFn readback = (NearReadbackFn)NearApi(0x10, 0x1A8);
@@ -5767,8 +5777,7 @@ static int TerrainNearReplay(uint64_t records, uint32_t end, uint32_t at, uint64
         {
             Note("difficulty: near terrain: the tile is rendered (%.1f s): heights %.1f..%.1f m; mean |tile - level capture| %.2f m; conforming it to the coarse terrain",
                 (double)(GetTickCount64() - g_near.started) / 1000.0, (double)lo, (double)hi, n ? diff / n : 0.0);
-            { uint16_t* c = g_conform.coarse; float* l = g_conform.low; float* d = g_conform.delta; memset(&g_conform, 0, sizeof g_conform);
-              g_conform.coarse = c; g_conform.low = l; g_conform.delta = d; }
+            NearConformReset();
             g_near.state = NEAR_CONFORM;
             return 1;
         }
