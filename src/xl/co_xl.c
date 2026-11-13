@@ -454,6 +454,44 @@ void CoXlTestTileAdd(float cx, float cy, const uint16_t* heights, uint32_t n, fl
     NearTileAdd(NearTileFree(), cx, cy, 0x1234, &ground);
 }
 int CoXlTestTilesLive(void) { return NearTilesLive(); }
+/* The layer grids and the stamps put back on new ground (proto/difficulty_world_terrain.c, difficulty_world_move.c,
+ * difficulty_stream.c): a tile in a given slot, the coarse ground, a moving tile's build under way, a tile's change, the
+ * descriptor and the sample a stamp's layers get, and the streamer's slots around a change. */
+int CoXlTestTileAddAt(float cx, float cy, const uint16_t* heights, uint32_t n, float size)
+{
+    const NearGround ground = {heights, n, size, cx, cy};
+    return NearTileAdd(NearTileFree(), cx, cy, 0x1234, &ground);
+}
+void CoXlTestTileRemove(int slot) { NearTileRemove(slot); }
+void CoXlTestCoarse(const uint16_t* heights, uint32_t n, float size) { const NearGround g = {heights, n, size, 0.0f, 0.0f}; g_nearCoarseGround = g; }
+void CoXlTestNearBuilding(int building) { g_near.level = g_world.levels; g_near.state = building ? NEAR_START : NEAR_IN; }
+void CoXlTestLayerTile(int slot, int in, float cx, float cy) { NearLayerTileChange(slot, in, cx, cy); }
+uint64_t CoXlTestLayerField(uint64_t unit, uint64_t field) { return NearLayerField(unit, field); }
+int CoXlTestLayerHeight(uint64_t desc, float x, float y, float* h) { return NearLayerHeight(desc, x, y, h); }
+void CoXlTestStreamSetup(uintptr_t game, uint8_t* context, uint8_t* array, uint32_t count)
+{
+    AcquireSRWLockExclusive(&g_streamLock);
+    WorldStreamClearLocked();
+    g_streamInstallState = 1; g_stream.captured = 1; g_stream.generatorDone = 1; g_stream.level = g_worldLevel; g_stream.levels = g_world.levels;
+    g_stream.game = game; g_stream.context = context; g_stream.array = array; g_stream.count = count;
+    memset(g_streamMission, 0, sizeof g_streamMission); memset(g_streamUnit, 0, sizeof g_streamUnit); memset(g_streamReplace, 0, sizeof g_streamReplace);
+    ReleaseSRWLockExclusive(&g_streamLock);
+}
+void CoXlTestStreamSlot(uint32_t i, float x, float y, uint64_t unit, int mission)
+{
+    g_streamAt[i][0] = x; g_streamAt[i][1] = y; g_streamUnit[i] = unit; g_streamMission[i] = (uint8_t)mission;
+    g_streamDeferred[i] = 1; g_streamLive[i] = 1; g_streamPoseGood[i] = 1; g_streamNeedsUnit[i] = 0; g_streamSpawned[i] = 1; g_streamResource[i] = 0x51;
+}
+uint32_t CoXlTestStampsReplace(float cx, float cy) { return MoveStampsReplace(cx, cy, "a test tile"); }
+int CoXlTestStreamFlag(uint32_t i) { return g_streamReplace[i]; }
+void CoXlTestStreamScan(void)
+{
+    AcquireSRWLockExclusive(&g_streamLock);
+    g_stream.nextScan = 0;
+    WorldStreamScanLocked(GetTickCount64());
+    ReleaseSRWLockExclusive(&g_streamLock);
+}
+void CoXlTestStreamSlotState(uint32_t i, int* live, int* due, uint64_t* unit) { *live = g_streamLive[i]; *due = g_streamDue[i]; *unit = g_streamUnit[i]; }
 float CoXlTestVisibleAt(float x, float y) { return NearVisibleAt(x, y); }
 void CoXlTestHide(uint64_t handle) { g_hide.handle = handle; g_hide.level = g_world.levels; }
 uint64_t CoXlTestHideHandle(void) { return g_hide.handle; }

@@ -1647,6 +1647,7 @@ static float NearTileAt(float wx, float wy)
     return g_near.heights[(size_t)r * g_near.hw + c] * 1000.0f - 500.0f;
 }
 
+static float NearVisibleAt(float x, float y);
 /* The first player's position against both heightmaps, every 1.5 s for a minute once the tile is in. */
 static void NearReportPlayer(const float* at)
 {
@@ -1657,8 +1658,8 @@ static void NearReportPlayer(const float* at)
     ULONGLONG now = GetTickCount64();
     if (reports >= 40 || now - last < 1500) return;
     last = now; reports++;
-    Note("difficulty: near terrain: player at (%.1f, %.1f, %.2f); the level's heightmap there %.2f, the tile's %.2f", (double)at[0], (double)at[1],
-        (double)at[2], (double)NearGlobalAt(at[0], at[1]), (double)NearTileAt(at[0], at[1]));
+    Note("difficulty: near terrain: player at (%.1f, %.1f, %.2f); the level's heightmap there %.2f, the ground as drawn %.2f", (double)at[0], (double)at[1],
+        (double)at[2], (double)NearGlobalAt(at[0], at[1]), (double)NearVisibleAt(at[0], at[1]));
 }
 
 /* ---- The drop point (the harness reads xl-drop.txt) --------------------------------------------------------------------
@@ -6085,16 +6086,29 @@ static void NearHideUnion(uint64_t world, const char* why)
  *    the tile it returns the tile's height there (bilinear). */
 #define NEAR_LAYER_MARGIN 768.0f
 #define NEAR_LAYER_REACH 384.0f
+#define NEAR_LAYER_N 3584u /* (NEAR_HIDE + 2 NEAR_LAYER_MARGIN) at 1 m */
+/* Every live tile has its own grid (its slot's), filled with the ground as drawn (NearVisibleAt over every live tile,
+ * the coarse terrain elsewhere) and filled again where a tile comes or goes. One grid made once at the drop tile left
+ * the stamps that entered over a later tile, or while one was building, on the coarse heights: they floated or sank
+ * there by the tile's own relief. A slot's memory is kept once made, so a spawn still reading it never faults. */
+typedef struct
+{
+    volatile LONG ready;      /* 1: filled for its tile (level, centre) */
+    LONG level;
+    float cx, cy;
+    float* data;
+    uint8_t desc[2][0x28];    /* alternated per layout, so a spawn in flight keeps a whole one */
+    volatile LONG descMade;   /* 0 not made for this layout, 1 being made, 2 made */
+    int at;                   /* desc[at] belongs to this layout */
+} NearLayerGrid;
+static NearLayerGrid g_layerGrid[NEAR_TILES_MAX];
 static struct
 {
+    uint8_t desc[0x28];         /* the level's descriptor, the template of every grid's */
     LONG level;
-    float* data;
-    uint32_t n;
-    float side, cx, cy;
-    uint8_t desc[0x28];
-    volatile LONG descState;    /* 0 not made, 1 being made, 2 ready (layer spawns run on worker threads) */
+    volatile LONG descState;    /* 0 not taken, 1 being taken, 2 taken (layer spawns run on worker threads) */
     volatile LONG64 units, samples;
-    volatile LONG notes;
+    uint32_t fills;
 } g_nearLayer = {.level = -1};
 
 
@@ -6189,33 +6203,83 @@ static int NearTileNear(float x, float y, float reach)
     return at;
 }
 
-static void NearLayerBuild(void)
+/* The drawn ground at a point for the layer grids: the live tiles, else the coarse terrain, else 0 (off the map). */
+static float NearLayerGround(float x, float y)
 {
-    const float side = NEAR_HIDE + 2.0f * NEAR_LAYER_MARGIN;
-    const uint32_t n = (uint32_t)side; /* 1 m samples */
-    if (g_nearLayer.data == NULL) g_nearLayer.data = (float*)VirtualAlloc(NULL, (size_t)n * n * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (g_nearLayer.data == NULL || g_nearTileGround.v == NULL || g_nearCoarseGround.v == NULL) { g_nearLayer.level = -1; return; }
-    const float cx = g_near.centre[0], cy = g_near.centre[1], step = side / (float)n;
-    uint32_t coarse = 0;
-    for (uint32_t r = 0; r < n; r++)
+    float h = NearVisibleAt(x, y);
+    if (h < -9000.0f) h = NearGroundAt(&g_nearCoarseGround, x, y);
+    return h < -9000.0f ? 0.0f : h;
+}
+
+/* Rows r0..r1 of a grid, columns c0..c1 (NearRows' job). */
+typedef struct { NearLayerGrid* g; int r0, c0, c1; } NearLayerFillJob;
+static void NearLayerFillRows(void* ctx, int a, int b)
+{
+    const NearLayerFillJob* j = (const NearLayerFillJob*)ctx;
+    const float side = (float)NEAR_LAYER_N;
+    for (int r = j->r0 + a; r < j->r0 + b; r++)
     {
-        float y = cy + side / 2 - ((float)r + 0.5f) * step;
-        float* row = g_nearLayer.data + (size_t)r * n;
-        for (uint32_t c = 0; c < n; c++)
-        {
-            float x = cx - side / 2 + ((float)c + 0.5f) * step;
-            float h = NearVisibleAt(x, y);
-            if (h < -9000.0f) { h = NearGroundAt(&g_nearCoarseGround, x, y); coarse++; }
-            row[c] = h < -9000.0f ? 0.0f : h;
-        }
+        float y = j->g->cy + side / 2 - ((float)r + 0.5f);
+        float* row = j->g->data + (size_t)r * NEAR_LAYER_N;
+        for (int c = j->c0; c <= j->c1; c++) row[c] = NearLayerGround(j->g->cx - side / 2 + ((float)c + 0.5f), y);
     }
-    g_nearLayer.n = n; g_nearLayer.side = side; g_nearLayer.cx = cx; g_nearLayer.cy = cy;
-    g_nearLayer.units = g_nearLayer.samples = 0; g_nearLayer.notes = 0;
-    memset(g_nearLayer.desc, 0, sizeof g_nearLayer.desc);
-    InterlockedExchange(&g_nearLayer.descState, 0);
-    g_nearLayer.level = g_world.levels;
-    Note("difficulty: near terrain: level layers get a %u m grid of the tile and %.0f m around it at 1 m (%u samples of the coarse terrain)", n,
-        (double)NEAR_LAYER_MARGIN, coarse);
+}
+
+/* The grid's samples whose points lie in the world rectangle [x0, x1] x [y0, y1]; 0 when none does. */
+static int NearLayerFill(NearLayerGrid* g, float x0, float y0, float x1, float y1)
+{
+    const float side = (float)NEAR_LAYER_N, w = g->cx - side / 2, n = g->cy + side / 2;
+    int c0 = (int)ceilf(x0 - w - 0.5f), c1 = (int)floorf(x1 - w - 0.5f), r0 = (int)ceilf(n - y1 - 0.5f), r1 = (int)floorf(n - y0 - 0.5f);
+    if (c0 < 0) c0 = 0; if (r0 < 0) r0 = 0; if (c1 > (int)NEAR_LAYER_N - 1) c1 = (int)NEAR_LAYER_N - 1; if (r1 > (int)NEAR_LAYER_N - 1) r1 = (int)NEAR_LAYER_N - 1;
+    if (c0 > c1 || r0 > r1) return 0;
+    NearLayerFillJob job = {g, r0, c0, c1};
+    NearRows(NearLayerFillRows, &job, r1 - r0 + 1);
+    return 1;
+}
+
+/* desc[at] from the level's descriptor with the grid's data, origin, extent and size. */
+static void NearLayerCompose(NearLayerGrid* g)
+{
+    uint8_t mine[0x28];
+    memcpy(mine, g_nearLayer.desc, sizeof mine);
+    uint64_t data = (uint64_t)(uintptr_t)g->data;
+    float origin[2] = {g->cx, g->cy}, extent[2] = {(float)NEAR_LAYER_N, (float)NEAR_LAYER_N};
+    uint32_t dims[2] = {NEAR_LAYER_N, NEAR_LAYER_N};
+    memcpy(mine, &data, 8); memcpy(mine + 8, origin, 8); memcpy(mine + 0x14, extent, 8); memcpy(mine + 0x1C, dims, 8);
+    memcpy(g->desc[g->at], mine, sizeof mine);
+}
+
+/* A tile came (in = 1, its slot's grid laid out and filled for it) or went (in = 0, its slot's grid out of use): every
+ * other live tile's grid is filled again where the tile's span overlaps it. Game thread. */
+static void NearLayerTileChange(int slot, int in, float cx, float cy)
+{
+    if (slot < 0 || slot >= NEAR_TILES_MAX) return;
+    if (g_nearLayer.level != g_world.levels) { g_nearLayer.level = g_world.levels; for (int k = 0; k < NEAR_TILES_MAX; k++) g_layerGrid[k].ready = 0; }
+    NearLayerGrid* g = &g_layerGrid[slot];
+    InterlockedExchange(&g->ready, 0);
+    if (in)
+    {
+        if (g->data == NULL) g->data = (float*)VirtualAlloc(NULL, (size_t)NEAR_LAYER_N * NEAR_LAYER_N * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (g->data == NULL) { Note("difficulty: near terrain: no memory for the layer grid of tile slot %d: its stamps keep the coarse heights", slot); return; }
+        g->level = g_world.levels; g->cx = cx; g->cy = cy;
+        NearLayerFill(g, -1e9f, -1e9f, 1e9f, 1e9f);
+        g->at ^= 1;
+        InterlockedExchange(&g->descMade, 0);
+        if (g_nearLayer.descState == 2) { NearLayerCompose(g); InterlockedExchange(&g->descMade, 2); }
+        MemoryBarrier();
+        InterlockedExchange(&g->ready, 1);
+    }
+    int refilled = 0;
+    for (int k = 0; k < NEAR_TILES_MAX; k++)
+    {
+        NearLayerGrid* o = &g_layerGrid[k];
+        if (k == slot || !o->ready || o->level != g_world.levels) continue;
+        refilled += NearLayerFill(o, cx - NEAR_SPAN / 2, cy - NEAR_SPAN / 2, cx + NEAR_SPAN / 2, cy + NEAR_SPAN / 2);
+    }
+    g_nearLayer.fills++;
+    Note("difficulty: near terrain: level layers: the tile at (%.0f, %.0f) %s; %s, %d other grid(s) filled again where it %s", (double)cx, (double)cy,
+        in ? "is in" : "went", in ? "its 1 m grid of the hidden square and 768 m around it made from the ground as drawn" : "its grid out of use", refilled,
+        in ? "lies" : "lay");
 }
 
 /* The level's layer heightfield: its extent is the world's. */
@@ -6226,50 +6290,70 @@ static int NearLayerIsLevel(const uint8_t* desc)
     return fabsf(extent[0] - world) < 1.0f && fabsf(extent[1] - world) < 1.0f;
 }
 
-static int NearLayerOn(void)
+/* One of the grids' descriptors. */
+static int NearLayerIsGrid(uint64_t desc)
 {
-    return g_nearLayer.level == g_world.levels && g_near.level == g_world.levels && g_near.state == NEAR_IN && g_nearLayer.data != NULL;
+    for (int k = 0; k < NEAR_TILES_MAX; k++)
+        if (desc == (uint64_t)(uintptr_t)g_layerGrid[k].desc[0] || desc == (uint64_t)(uintptr_t)g_layerGrid[k].desc[1]) return 1;
+    return 0;
+}
+
+/* The ready grid of this level whose tile is nearest (max norm) to (x, y) within the hidden square and `reach`; -1 none. */
+static int NearLayerGridAt(float x, float y, float reach)
+{
+    int at = -1; float best = 3.4e38f;
+    for (int k = 0; k < NEAR_TILES_MAX; k++)
+    {
+        const NearLayerGrid* g = &g_layerGrid[k];
+        if (!g->ready || g->level != g_world.levels) continue;
+        float d = fmaxf(fabsf(x - g->cx), fabsf(y - g->cy));
+        if (d <= NEAR_HIDE / 2 + reach && d < best) { best = d; at = k; }
+    }
+    return at;
 }
 
 /* WorldLayerSnap (0xDFA60): the descriptor to pass instead of `field`, or 0 to keep it. */
 static uint64_t NearLayerField(uint64_t unit, uint64_t field)
 {
-    if (!NearLayerOn() || unit == 0 || field == 0) return 0;
+    if (unit == 0 || field == 0 || g_nearLayer.level != g_world.levels) return 0;
     uint8_t desc[0x28]; float t[2];
     if (SafeRead(field, desc, sizeof desc) || !NearLayerIsLevel(desc) || SafeRead(unit + 0x50, t, 8) || !isfinite(t[0]) || !isfinite(t[1])) return 0;
-    float reach = NEAR_HIDE / 2 + NEAR_LAYER_REACH;
-    if (fabsf(t[0] - g_near.centre[0]) > reach || fabsf(t[1] - g_near.centre[1]) > reach) return 0;
+    int k = NearLayerGridAt(t[0], t[1], NEAR_LAYER_REACH);
+    if (k < 0) return 0;
     if (g_nearLayer.descState != 2)
     {
-        if (InterlockedCompareExchange(&g_nearLayer.descState, 1, 0) != 0) return 0; /* another thread is making it: keep the level's */
-        uint8_t mine[0x28]; memcpy(mine, desc, sizeof mine);
-        uint64_t data = (uint64_t)(uintptr_t)g_nearLayer.data;
-        float origin[2] = {g_nearLayer.cx, g_nearLayer.cy}, extent[2] = {g_nearLayer.side, g_nearLayer.side};
-        uint32_t dims[2] = {g_nearLayer.n, g_nearLayer.n};
-        memcpy(mine, &data, 8); memcpy(mine + 8, origin, 8); memcpy(mine + 0x14, extent, 8); memcpy(mine + 0x1C, dims, 8);
-        memcpy(g_nearLayer.desc, mine, sizeof mine); /* first use: the level's descriptor with our grid */
+        if (InterlockedCompareExchange(&g_nearLayer.descState, 1, 0) != 0) return 0; /* another thread is taking it: keep the level's */
+        memcpy(g_nearLayer.desc, desc, sizeof desc); /* first use: the level's descriptor, the grids' template */
         MemoryBarrier();
         InterlockedExchange(&g_nearLayer.descState, 2);
     }
-    LONG64 k = InterlockedIncrement64(&g_nearLayer.units);
-    if (k == 1 || k == 100 || k == 1000)
-        Note("difficulty: near terrain: level layers: %lld unit spawns on the tile's grid so far (this stamp at %.1f, %.1f)", (long long)k, (double)t[0], (double)t[1]);
-    return (uint64_t)(uintptr_t)g_nearLayer.desc;
+    NearLayerGrid* g = &g_layerGrid[k];
+    if (g->descMade != 2)
+    {
+        if (InterlockedCompareExchange(&g->descMade, 1, 0) == 0) { NearLayerCompose(g); MemoryBarrier(); InterlockedExchange(&g->descMade, 2); }
+        else
+            for (int spin = 0; g->descMade != 2; spin++) { if (spin > 100000) return 0; YieldProcessor(); }
+    }
+    LONG64 n = InterlockedIncrement64(&g_nearLayer.units);
+    if (n == 1 || n == 100 || n == 1000 || n == 10000)
+        Note("difficulty: near terrain: level layers: %lld unit spawns on a tile's grid so far (this stamp at %.1f, %.1f, the grid of the tile at %.0f, %.0f)",
+            (long long)n, (double)t[0], (double)t[1], (double)g->cx, (double)g->cy);
+    return (uint64_t)(uintptr_t)g->desc[g->at];
 }
 
-/* WorldLayerSample (0xD5B10): 1 with the tile's height at (x, y) when the descriptor is the level's and the point is in
- * the hidden square (or the tile grid's own descriptor: the aligned mode's holder holds ours). */
+/* WorldLayerSample (0xD5B10): 1 with the drawn ground at (x, y) when the descriptor is the level's or a grid's and a live
+ * tile is there (the grid holds the same ground; past the tiles the game's own read stands). */
 static int NearLayerHeight(uint64_t desc, float x, float y, float* height)
 {
-    if (!NearLayerOn() || desc == 0) return 0;
+    if (desc == 0 || g_nearLayer.level != g_world.levels) return 0;
     uint8_t d[0x28];
-    if (desc != (uint64_t)(uintptr_t)g_nearLayer.desc && (SafeRead(desc, d, sizeof d) || !NearLayerIsLevel(d))) return 0;
+    if (!NearLayerIsGrid(desc) && (SafeRead(desc, d, sizeof d) || !NearLayerIsLevel(d))) return 0;
     float h = NearVisibleAt(x, y);
     if (h < -9000.0f) return 0;
     *height = h;
     LONG64 k = InterlockedIncrement64(&g_nearLayer.samples);
     if (k == 1 || k == 10000 || k == 1000000)
-        Note("difficulty: near terrain: level layers: %lld height samples from the tile so far (%.1f m at %.1f, %.1f)", (long long)k, (double)h, (double)x, (double)y);
+        Note("difficulty: near terrain: level layers: %lld height samples from the tiles so far (%.1f m at %.1f, %.1f)", (long long)k, (double)h, (double)x, (double)y);
     return 1;
 }
 
@@ -6729,7 +6813,7 @@ static int TerrainNearStep(uint64_t records, uint32_t end, uint32_t at, uint32_t
             NearSeamReport();
             NearDumpGrounds();
             NearTileBounds(world);
-            NearLayerBuild();
+            if (g_tiles[0].live && g_tiles[0].level == g_world.levels) NearLayerTileChange(0, 1, g_near.centre[0], g_near.centre[1]);
         }
         g_near.state = NEAR_IN;
         return 0;

@@ -238,7 +238,7 @@ static int WindowEnterLocked(uint32_t e, float leave)
     WindowPose(loc, 2.0f * g_stream.half, g_streamPose[s]);
     g_streamUnit[s] = 0;
     g_streamPoseGood[s] = 1; g_streamDeferred[s] = 1; g_streamNeedsUnit[s] = 1; g_streamDetached[s] = 1; g_streamDue[s] = 1;
-    g_streamSpawned[s] = 0; g_streamLive[s] = 0; g_streamOutSince[s] = 0; g_streamFormation[s] = 0; g_streamMission[s] = 0;
+    g_streamSpawned[s] = 0; g_streamLive[s] = 0; g_streamOutSince[s] = 0; g_streamFormation[s] = 0; g_streamMission[s] = 0; g_streamReplace[s] = 0;
     g_streamOut2[s] = leave * leave;
     if (s + 1 > g_win.high)
     {
