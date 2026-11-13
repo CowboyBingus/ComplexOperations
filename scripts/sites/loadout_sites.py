@@ -562,7 +562,9 @@ def _caves():
         (0x1466F26, '48c787d8270000ffffffff', clear + ' jmp game+0x1466F52', '1465840 map/rev clear'),
         # init card loop: r13d is the function's 4 (enum value at 0x1466944, stride at 0x14669EA) and the card loop
         # count from here (sub r13,1 at 0x1466C4D); r12 walks the card x table, which gets eight entries
-        (0x1466AD4, '4c8d25dd24d700', 'mov r13d, 8\n lea r12, [rip+1f]\n jmp game+0x1466ADB\n .balign 4\n1:\n' + table, '1465840 card positions'),
+        # the cards' mode for this opening (co_cards_open) comes first: the constructor in the loop reads its height
+        (0x1466AD4, '4c8d25dd24d700', 'CALL(%d)\n mov r13d, 8\n lea r12, [rip+1f]\n jmp game+0x1466ADB\n .balign 4\n1:\n' % CARDS_OPEN + table,
+         '1465840 card positions'),
         # card loop of 1471740: edi=4 at 0x147176D is also a message value ([rsp+0x54] of event 0xFBC8E61E), so the
         # count is set where the loop starts
         (0x1471848, '488d9e783a0500', 'mov edi, 8\n lea rbx, [rsi+%s]\n jmp game+0x147184F' % C(0x53A78), '1471740 cards'),
@@ -638,8 +640,13 @@ HEIGHTS = [_height_cave(*h) for h in _HEIGHT_STORES]
 # to 0x1468320), after the canvas refit of the same update. The layout callback (co_cards.c) runs there every frame L is
 # updated, with rcx = L. The jump leaves the stack as at a function's entry; CALL aligns it and keeps rcx and xmm0..5.
 CARDS_LAYOUT = 11
+CARDS_OPEN = 12
+CARDS_READY = 13
+# Behind the init's card loop (0x1466C57, rdi = L) the cards are placed once: some raisers of a card's opacity run
+# outside L's update (0x1470D90 from 0xB8FF69 and 0xBA5B09, 0x189D120 from 0xB9023C and 0xBB8B8C).
 LAYOUT = [
     (0x1497C45, 'e9d606fdff', 'CALL(%d)\n jmp game+0x1468320' % CARDS_LAYOUT, '1497920 L update: the cards\' layout first'),
+    (0x1466C57, '488d9fa81f0d00', 'CALL(%d)\n lea rbx, [rdi+0xd1fa8]\n jmp game+0x1466C5E' % CARDS_READY, '1465840 init: the cards placed'),
 ]
 
 # The figure preview has four slots (a z table of four, a viewport switch with cases 0 to 3); slot 4 and up take the

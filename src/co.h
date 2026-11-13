@@ -78,17 +78,30 @@ int co_ui_guarded(void);
 typedef struct CoRegs { uint64_t r15, r14, r13, r12, r11, r10, r9, r8, rdi, rsi, rbp, rbx, rdx, rcx, rax, flags; } CoRegs;
 
 /* The loadout cards for eight (co_cards.c). The card's height in reference units, which the caves of every store of
- * it read (780, the game's); the layout callback, which the cave in front of the screen's update calls with rcx = the
- * screen. */
+ * it read (780, the game's, or 532). The callbacks: `open` before the init's card loop and `ready` behind it (rdi = the
+ * screen), `layout` in front of each of its updates (rcx = the screen). */
 extern float co_card_height;
+void co_cards_open(CoRegs* regs);
+void co_cards_ready(CoRegs* regs);
 void co_cards_layout(CoRegs* regs);
 void co_cards_install(uintptr_t game);
+/* Eight cards for a complex operation, more than four players, or a player on a card past the fourth (NULL: not read). */
+int co_cards_eight(int complex, uint32_t players, const int32_t cardPlayers[8]);
 /* A card's place for a layout: the game's (nothing set), the game's four cards, or eight in two rows. x is the anchor
- * in the 1920-wide container, y the bottom in it; the figure's scale and its y below the card's top. */
+ * in the 1920-wide container, y the bottom in it; the figure's scale and its y below the card's top. With four, cards
+ * 5 to 8 are parked below the window. */
 enum { CO_CARDS_GAME, CO_CARDS_FOUR, CO_CARDS_EIGHT };
-typedef struct CoCardPlace { float x, y, scale, figureScale, figureY; int shown; } CoCardPlace;
+typedef struct CoCardPlace { float x, y, scale, figureScale, figureY; } CoCardPlace;
 float co_cards_scale(float rootHeight, float hudScale);
 int co_cards_place(int mode, float rootHeight, float hudScale, uint32_t card, CoCardPlace* p);
+/* The size a widget is at, or a running size animation's target in the table `tweens`: 1 when animating. */
+int co_cards_size_target(uintptr_t widget, uintptr_t tweens, float out[2]);
+/* An open screen's cards from four to eight: the slot to 532 and each card part sized by 780 to its end at once. */
+void co_cards_to_eight(uintptr_t screen);
+#ifdef CO_TEST
+void co_cards_test_mode(int mode, uintptr_t screen);
+int co_cards_test_get_mode(void);
+#endif
 
 /* The stack fixes' callbacks for avatars (co_avatars.c), in the counts' caves. `install` once with game.dll's base. */
 void co_avatars_install(uintptr_t game);

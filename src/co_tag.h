@@ -27,6 +27,10 @@ int co_tag_briefing_entry(uintptr_t war, uint32_t* index, uint32_t* entry, int* 
  * 1 read, 0 refused (no such record in use). */
 int co_tag_board_mark(uintptr_t war, uint32_t index, int* marked);
 
+/* The banner's answer for the picked mission, the host's launch-clear prediction included: 1 for a complex operation,
+ * 0 for anything else or when it cannot be read. The loadout cards' mode (co_cards.c) asks it. */
+int co_tag_picked_complex(void);
+
 /* Layout, in the native panel's UI units times its scale (y up, as the Gui draws). */
 #define CO_TAG_BORDER 3.0
 #define CO_TAG_INSET 7.0

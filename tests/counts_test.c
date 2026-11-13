@@ -154,6 +154,7 @@ int co_counts_test_host_scores(const void* arguments);
 #define DROP_WORLD 0x13F8657u       /* lea eax,[rcx-1]: the world update's time-out drops a record (rdx) */
 #define DROP_TABLE 0x12E64F7u       /* lea eax,[rcx-1]: the same drop in 0x12E63E0 (rdx) */
 #define CARDS_UPDATE 0x1497C45u     /* jmp to L's update: the cards' layout first */
+#define CARDS_READY 0x1466C57u      /* lea rbx,[rdi+0xd1fa8] behind the init's card loop: the cards placed */
 #define ENTER 0x34C0000u            /* free in the stand-in: the test's ways into the caves */
 #define MANAGER_SIZE 0x380A0u       /* the score manager with its loot rows moved */
 #define CLAN_PAIR 0x12919A0u        /* a function: a clan pair by the player index in r8d */
@@ -553,7 +554,7 @@ int main(void)
         static char line[96];
         uint32_t value;
         snprintf(line, sizeof line, "players: the loadout screen has eight records and cards (%u code sites changed)", co_counts_test_loadout());
-        CHECK(co_counts_test_loadout() == 488u && fake_host_logged(line) == (players == 8));
+        CHECK(co_counts_test_loadout() == 489u && fake_host_logged(line) == (players == 8));
         memcpy(&value, image + LOADOUT_SIZE + 1, 4);
         CHECK(image[LOADOUT_SIZE] == 0xBA && value == (players == 8 ? 0x36FA70u : 0x2739D0u));
         CHECK(image[LOADOUT_BOUND] == 0xBF && image[LOADOUT_BOUND + 1] == players);
@@ -575,9 +576,11 @@ int main(void)
         {
             int32_t to;
             float x[8];
-            CHECK(memcmp(cave, kAnchors, sizeof kAnchors) == 0 && cave[13] == 0xE9 && Leads(cave + 14, 0x1466ADBu));
-            memcpy(&to, cave + 9, 4);
-            memcpy(x, cave + 13 + to, sizeof x);
+            /* the mode's callback first, then the loop's count and table */
+            const uint8_t* loop = cave + 134;
+            CHECK(cave[0] == 0x9C && memcmp(loop, kAnchors, sizeof kAnchors) == 0 && loop[13] == 0xE9 && Leads(loop + 14, 0x1466ADBu));
+            memcpy(&to, loop + 9, 4);
+            memcpy(x, loop + 13 + to, sizeof x);
             for (int i = 0; i < 8; i++) CHECK(x[i] * 1920.0f > 147.99f + 232.0f * (float)i && x[i] * 1920.0f < 148.01f + 232.0f * (float)i);
             CHECK(x[0] * 1920.0f - 105.0f > 40.0f && x[7] * 1920.0f + 105.0f < 1880.0f);
         }
@@ -670,6 +673,13 @@ int main(void)
         CHECK((cave != NULL) == (players == 8));
         if (cave != NULL) CHECK(cave[0] == 0x9C && cave[134] == 0xE9 && Leads(cave + 135, 0x1468320u));
         else CHECK(image[CARDS_UPDATE] == 0xE9 && Leads(image + CARDS_UPDATE + 1, 0x1468320u));
+
+        /* Behind the init's card loop: the callback, then the lea it replaced and back. */
+        static const uint8_t kReady[] = {0x48, 0x8D, 0x9F, 0xA8, 0x1F, 0x0D, 0x00, 0xE9};
+        cave = Cave(CARDS_READY, 7);
+        CHECK((cave != NULL) == (players == 8));
+        if (cave != NULL) CHECK(cave[0] == 0x9C && memcmp(cave + 134, kReady, sizeof kReady) == 0 && Leads(cave + 142, 0x1466C5Eu));
+        else CHECK(memcmp(image + CARDS_READY, kReady, 7) == 0);
     }
     {
         /* A build for eight gives the mission summary eight rows and cards in a bigger allocation and bounds the rows'

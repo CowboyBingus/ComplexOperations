@@ -73,10 +73,10 @@ static uint8_t g_table[TABLE_ENTRIES * 0x4Cu];
 static uint32_t U32(const uint8_t* b) { uint32_t v; memcpy(&v, b, 4); return v; }
 
 /* The table's entries, all `count` of them: 0 when the count is past the table or a read failed. */
-static int Entries(uintptr_t war, uint32_t* count)
+static int Entries(uintptr_t war, uint8_t* table, uint32_t* count)
 {
     if (g_coApi->read(war + TABLE_COUNT, count, 4) != 0 || *count > TABLE_ENTRIES) return 0;
-    return *count == 0 || g_coApi->read(war + TABLE, g_table, (size_t)*count * 0x4Cu) == 0;
+    return *count == 0 || g_coApi->read(war + TABLE, table, (size_t)*count * 0x4Cu) == 0;
 }
 
 int co_tag_map_entries(uintptr_t war, uint32_t* index, uint32_t* entry, int* level11, int* marked, int* found)
@@ -89,7 +89,7 @@ int co_tag_map_entries(uintptr_t war, uint32_t* index, uint32_t* entry, int* lev
     if (*index >= BOARD_SLOTS) return 1; /* 0xFFFFFFFF: none highlighted */
     if (g_coApi->read(war + BOARD + *index * 0x5Cu + 0x34u, &used, 1) != 0) return 0;
     if (used == 0) return 1;
-    if (!Entries(war, &count)) return 0;
+    if (!Entries(war, g_table, &count)) return 0;
     for (uint32_t i = 0; i < count; i++)
     {
         const uint8_t* e = g_table + i * 0x4Cu;
@@ -103,7 +103,8 @@ int co_tag_map_entries(uintptr_t war, uint32_t* index, uint32_t* entry, int* lev
     return 1;
 }
 
-int co_tag_briefing_entry(uintptr_t war, uint32_t* index, uint32_t* entry, int* level11, int* marked, int* found)
+/* The loadout screen asks from its own update, so it reads into a table of its own. */
+static int BriefingEntry(uintptr_t war, uint8_t* table, uint32_t* index, uint32_t* entry, int* level11, int* marked, int* found)
 {
     int32_t kind = -1, placement = -1;
     uint32_t difficulty = 0, count = 0;
@@ -113,10 +114,10 @@ int co_tag_briefing_entry(uintptr_t war, uint32_t* index, uint32_t* entry, int* 
         g_coApi->read(war + SELECTED_DIFFICULTY, &difficulty, 4) != 0)
         return 0;
     if (kind < 0 || placement < 0) return 1;
-    if (!Entries(war, &count)) return 0;
+    if (!Entries(war, table, &count)) return 0;
     for (uint32_t i = 0; i < count; i++)
     {
-        const uint8_t* e = g_table + i * 0x4Cu;
+        const uint8_t* e = table + i * 0x4Cu;
         if (U32(e + 0x2C) != (uint32_t)placement || U32(e + 0x3C) != difficulty) continue;
         *found = 1; /* the first match, as the launch's own search takes it */
         *index = U32(e + 0x28);
@@ -126,6 +127,11 @@ int co_tag_briefing_entry(uintptr_t war, uint32_t* index, uint32_t* entry, int* 
         return 1;
     }
     return 1;
+}
+
+int co_tag_briefing_entry(uintptr_t war, uint32_t* index, uint32_t* entry, int* level11, int* marked, int* found)
+{
+    return BriefingEntry(war, g_table, index, entry, level11, marked, found);
 }
 
 int co_tag_board_mark(uintptr_t war, uint32_t index, int* marked)
@@ -375,19 +381,19 @@ static void Log(const Key* k, int drawn)
         t.place == CO_TAG_PLACE_BESIDE ? "beside the panel" : "second column", k->a.x, k->a.y, k->a.w, k->a.h, k->a.scale);
 }
 
-/* What the screen shows now: 1 with the key, 0 when nothing is to be drawn. */
-static int Look(int screen, Key* k)
+/* The state of the highlighted operation or the picked mission into k: 1, or 0 when there is none to tell. */
+static int Decide(int screen, uint8_t* table, Key* k)
 {
     uint32_t entry = 0;
     int level11 = 0, marked = 0, found = 0;
-    const uint64_t war = Pointer(t.game + CO_WAR_OBJECT);
+    const uint64_t war = t.game != 0 ? Pointer(t.game + CO_WAR_OBJECT) : 0;
     memset(k, 0, sizeof *k);
     k->screen = screen;
     if (war == 0) return 0;
     /* until this PC's check settles, co_complex_on() says off for a part that may still come on */
     if (!co_capacity_settled()) { k->unsettled = 1; return 0; }
     const int read = screen == CO_TAG_SCREEN_MAP ? co_tag_map_entries((uintptr_t)war, &k->index, &entry, &level11, &marked, &found)
-                                                 : co_tag_briefing_entry((uintptr_t)war, &k->index, &entry, &level11, &marked, &found);
+                                                 : BriefingEntry((uintptr_t)war, table, &k->index, &entry, &level11, &marked, &found);
     if (!read) { k->refused = 1; return 0; }
     if (!found) return 0;
     const int host = co_peers_is_host(), row = co_peers_host_row();
@@ -397,7 +403,21 @@ static int Look(int screen, Key* k)
         co_complex_refused_build(co_capacity_needs())};
     if (in.briefing && level11 && host) in.clears = co_launch_would_clear();
     k->state = co_tag_state(&in, &k->why);
+    return 1;
+}
+
+/* What the screen shows now: 1 with the key, 0 when nothing is to be drawn. */
+static int Look(int screen, Key* k)
+{
+    if (!Decide(screen, g_table, k)) return 0;
     return k->state == CO_TAG_NONE || Anchor(screen, &k->a);
+}
+
+int co_tag_picked_complex(void)
+{
+    static uint8_t table[TABLE_ENTRIES * 0x4Cu];
+    Key k;
+    return Decide(CO_TAG_SCREEN_BRIEFING, table, &k) && k.state == CO_TAG_COMPLEX;
 }
 
 /* Once per frame, inside the lua_pcall hook (co_lua.c). A state is logged once it has held for CO_TAG_SETTLE frames, so
