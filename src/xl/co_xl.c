@@ -341,6 +341,8 @@ void CoXlTestTrimUse(void (*trim)(uint64_t), void (*stats)(void*))
 void CoXlTestTrimEvent(const char* why) { MoveTrimEvent(why); }
 int CoXlTestTrimTick(void) { return MoveTrimTick(); }
 void CoXlTestMoverSet(int state) { g_move.state = state; }
+void CoXlTestMoverNear(int state) { g_near.state = state; }
+uint32_t CoXlTestMoverFrames(void) { return g_move.frames; }
 void CoXlTestMoverTileIn(int slot, int a, int b)
 { g_move.slot = slot; g_move.cell[0] = a; g_move.cell[1] = b; MoveCellCentre(a, b, g_move.centre); g_near.handle = 0; MoveTileIn(0); g_move.state = MV_IDLE; }
 void CoXlTestRenderAfter(uintptr_t state, void (*rehash)(uintptr_t, uint32_t), void (*resize)(uintptr_t, uint32_t))

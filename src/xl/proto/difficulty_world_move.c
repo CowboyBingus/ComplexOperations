@@ -873,34 +873,52 @@ static void MoveGroundKeep(void)
 static int MoveReleaseClear(int k)
 {
     if (g_move.state == MV_IDLE || !g_move.merge) return 1;
+    /* 0x38 makes the merge cameras world-sized (+-8,192 m at the origin) and 0x4C's fill draws through cam0; they
+     * narrow only when the replay leaves NEAR_START (NearCameras). Until then no tile goes. */
+    if (g_move.state == MV_KICK || g_move.state == MV_SETUP || g_move.state == MV_LOOKUP || (g_move.state == MV_REPLAY && g_near.state == NEAR_START)) return 0;
     const float* c = g_tiles[k].centre;
     float build = fmaxf(fabsf(c[0] - g_move.centre[0]), fabsf(c[1] - g_move.centre[1])), origin = fmaxf(fabsf(c[0]), fabsf(c[1]));
     return build >= NEAR_SIDE / 2 + NEAR_SPAN / 2 && origin >= MOVE_MAT_HALF + NEAR_SPAN / 2;
 }
 
-/* Every frame, building or not: tiles a player is near are kept; an expired tile (not the drop tile) goes, one a frame.
- * 1 when one went. */
-static int MoveReleaseTick(ULONGLONG now)
+static const char* MoveStateName(int state)
 {
-    if (g_move.players == 0) return 0;
+    static const char* const names[] = {"idle", "package", "stamps", "kick", "setup", "lookup", "replay", "teardown", "unstamp", "spawn", "ready", "failing"};
+    return state >= 0 && state <= MV_FAILING ? names[state] : "?";
+}
+
+/* Tiles a player is near are kept, building or not. */
+static void MoveKeepSeen(ULONGLONG now)
+{
     for (int k = 0; k < NEAR_TILES_MAX; k++)
     {
         if (!g_tiles[k].live || g_tiles[k].level != g_world.levels) continue;
         for (int p = 0; p < g_move.players; p++)
             if (MoveCellDistance(g_tiles[k].cell[0], g_tiles[k].cell[1], g_move.player[p][0], g_move.player[p][1]) <= MOVE_KEEP) { g_tiles[k].seen = now; break; }
     }
+}
+
+/* The mover's state in the line lets a run check that no release falls inside the merge's world-sized window. */
+static void MoveReleaseTimed(int k)
+{
+    int building = g_move.state != MV_IDLE;
+    LARGE_INTEGER t0, t1, hz; QueryPerformanceCounter(&t0);
+    MoveRelease(k);
+    QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
+    double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+    if (building)
+        Note("difficulty: moving tiles: the release took %.1f ms on the game thread, during the build of cell (%d, %d) (mover %s, near state %d)", ms,
+            g_move.cell[0], g_move.cell[1], MoveStateName(g_move.state), g_near.state);
+    else Note("difficulty: moving tiles: the release took %.1f ms on the game thread", ms);
+}
+
+/* Every frame, building or not: an expired tile (not the drop tile) goes, one a frame. 1 when one went. */
+static int MoveReleaseTick(ULONGLONG now)
+{
+    if (g_move.players == 0) return 0;
+    MoveKeepSeen(now);
     for (int k = 1; k < NEAR_TILES_MAX; k++)
-        if (g_tiles[k].live && g_tiles[k].level == g_world.levels && now - g_tiles[k].seen > MOVE_KEEP_MS && MoveReleaseClear(k))
-        {
-            int building = g_move.state != MV_IDLE;
-            LARGE_INTEGER t0, t1, hz; QueryPerformanceCounter(&t0);
-            MoveRelease(k);
-            QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
-            double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
-            if (building) Note("difficulty: moving tiles: the release took %.1f ms on the game thread, during the build of cell (%d, %d)", ms, g_move.cell[0], g_move.cell[1]);
-            else Note("difficulty: moving tiles: the release took %.1f ms on the game thread", ms);
-            return 1;
-        }
+        if (g_tiles[k].live && g_tiles[k].level == g_world.levels && now - g_tiles[k].seen > MOVE_KEEP_MS && MoveReleaseClear(k)) { MoveReleaseTimed(k); return 1; }
     return 0;
 }
 
@@ -1150,11 +1168,10 @@ static void MoveCostAdd(double ms, int mv, int ns, int step, int conf, int bld)
 
 static void MoveCostNote(void)
 {
-    static const char* const mv[] = {"idle", "package", "stamps", "kick", "setup", "lookup", "replay", "teardown", "unstamp", "spawn", "ready", "failing"};
     char line[640]; int n = 0;
     for (int k = 0; k < 6 && g_moveCost.ms[k] > 0 && n < 600; k++)
         n += snprintf(line + n, sizeof line - n, " %.0f ms (%s, near state %d, step %d, building %d, conform phase %d);", g_moveCost.ms[k],
-            g_moveCost.mv[k] >= 0 && g_moveCost.mv[k] <= MV_FAILING ? mv[g_moveCost.mv[k]] : "?", g_moveCost.ns[k], g_moveCost.step[k], g_moveCost.bld[k], g_moveCost.conf[k]);
+            MoveStateName(g_moveCost.mv[k]), g_moveCost.ns[k], g_moveCost.step[k], g_moveCost.bld[k], g_moveCost.conf[k]);
     Note("difficulty: moving tiles: the build's cost on the game thread: %.0f ms over %u frames; the longest:%s", g_moveCost.sum, g_moveCost.frames, line);
     memset(&g_moveCost, 0, sizeof g_moveCost);
 }

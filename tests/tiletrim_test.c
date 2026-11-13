@@ -24,15 +24,18 @@ void CoXlTestTrimEvent(const char* why);
 int CoXlTestTrimTick(void);
 void CoXlTestMoverSet(int state);
 void CoXlTestMoverTileIn(int slot, int a, int b);
+void CoXlTestMoverNear(int state);
+uint32_t CoXlTestMoverFrames(void);
 
 static int g_failed;
 static const char* g_case;
 #define CHECK(what) do { if (!(what)) { printf("FAILED %s: %s\n", g_case, #what); g_failed++; } } while (0)
 
 enum { MV_IDLE, MV_PACKAGE, MV_STAMPS, MV_KICK, MV_SETUP, MV_LOOKUP, MV_REPLAY, MV_TEARDOWN, MV_UNSTAMP, MV_SPAWN, MV_READY, MV_FAILING };
+enum { NEAR_IDLE, NEAR_START, NEAR_STEP, NEAR_DRAIN, NEAR_READBACK, NEAR_SPAWN, NEAR_READY, NEAR_IN };
 #define CELL 2048.44f
 #define KEEP_MS 30000ull
-/* mp-city2's grid: the drop tile's cell (0, 0) at (2, 2) */
+/* mp-city2's grid: the drop tile's cell (0, 0) at (2, 2), next to the world origin; one case moves it */
 #define OX 2.0f
 #define OY 2.0f
 
@@ -69,6 +72,7 @@ int main(void)
     g_case = "a build of a far cell: expired tiles go while it builds";
     {
         CoXlTestMover(OX, OY, MV_REPLAY, 1, 2, 1);
+        CoXlTestMoverNear(NEAR_STEP); /* the replay's cameras placed */
         CoXlTestMoverTile(0, 0, 0, 0);
         CoXlTestMoverTile(1, 0, -2, now - KEEP_MS - 1000);
         CoXlTestMoverTile(2, 1, -2, now - KEEP_MS - 1000);
@@ -77,7 +81,7 @@ int main(void)
         CHECK(CoXlTestMoverRelease(now) == 1);
         CHECK(!CoXlTestMoverLive(1) && CoXlTestMoverLive(2)); /* one a frame */
         CHECK(fake_host_logged("difficulty: moving tiles: the tile of cell (0, -2) released"));
-        CHECK(fake_host_logged("on the game thread, during the build of cell (2, 1)"));
+        CHECK(fake_host_logged("on the game thread, during the build of cell (2, 1) (mover replay, near state 2)"));
         CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(2));
         CHECK(CoXlTestMoverRelease(now) == 0);
         CHECK(CoXlTestMoverLive(0)); /* the drop tile stays */
@@ -110,6 +114,48 @@ int main(void)
         CHECK(CoXlTestMoverRelease(now) == 0 && CoXlTestMoverLive(1));
         CoXlTestMover(OX, OY, MV_IDLE, 1, -2, 1); /* idle: a stale merge flag holds nothing */
         CoXlTestMoverPlayer(OX - 2 * CELL, OY + CELL);
+        CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(1));
+    }
+
+    g_case = "nothing goes while the merge cameras are world-sized (kick, setup, lookup, the replay before its cameras)";
+    {
+        static const struct { int mv, ns; } wide[] = {{MV_KICK, NEAR_IN}, {MV_SETUP, NEAR_IN}, {MV_LOOKUP, NEAR_IN}, {MV_REPLAY, NEAR_START}};
+        for (size_t i = 0; i < sizeof wide / sizeof wide[0]; i++)
+        {
+            CoXlTestMover(OX, OY, wide[i].mv, 1, 2, 1);
+            CoXlTestMoverNear(wide[i].ns);
+            CoXlTestMoverTile(0, 0, 0, 0);
+            for (int k = 1; k < 8; k++) CoXlTestMoverTile(k, 9 + k, 9, now);
+            CoXlTestMoverTile(1, 0, -2, now - KEEP_MS - 1000); /* clear of both squares: it goes once the cameras narrow */
+            CoXlTestMoverPlayer(OX + 2 * CELL, OY + CELL);
+            CHECK(CoXlTestMoverRelease(now) == 0 && CoXlTestMoverLive(1));
+        }
+        CHECK(!fake_host_logged("(mover kick") && !fake_host_logged("(mover setup") && !fake_host_logged("(mover lookup"));
+        CoXlTestMoverNear(NEAR_STEP); /* NearCameras ran */
+        CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(1));
+        /* MV_KICK's first frame, before MoveMergeBegin: no merge, no camera yet */
+        CoXlTestMover(OX, OY, MV_KICK, 0, 2, 1);
+        CoXlTestMoverNear(NEAR_IN);
+        CoXlTestMoverTile(1, 0, -2, now - KEEP_MS - 1000);
+        CoXlTestMoverPlayer(OX + 2 * CELL, OY + CELL);
+        CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(1));
+        CoXlTestMoverNear(NEAR_STEP);
+    }
+
+    g_case = "0x41's square is measured from the world origin, not from the grid's";
+    {
+        /* a grid far from (0, 0): cell (-2, 1) at (903, -952) lies in 0x41's square, cell (1, 0) at (7048, -3000) one cell
+         * from the grid origin but far from the world's */
+        CoXlTestMover(5000.0f, -3000.0f, MV_REPLAY, 1, -1, -2);
+        CoXlTestMoverTile(0, 0, 0, 0);
+        for (int k = 1; k < 8; k++) CoXlTestMoverTile(k, 9 + k, 9, now);
+        CoXlTestMoverTile(1, -2, 1, now - KEEP_MS - 1000);
+        CoXlTestMoverTile(2, 1, 0, now - KEEP_MS - 1000);
+        CoXlTestMoverPlayer(5000.0f - CELL, -3000.0f - 2 * CELL); /* at the build */
+        CHECK(CoXlTestMoverRelease(now) == 1 && CoXlTestMoverLive(1) && !CoXlTestMoverLive(2));
+        CHECK(CoXlTestMoverRelease(now) == 0 && CoXlTestMoverLive(1));
+        CoXlTestMover(5000.0f, -3000.0f, MV_SPAWN, 0, -1, -2);
+        CoXlTestMoverPlayer(5000.0f - CELL, -3000.0f - 2 * CELL);
         CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(1));
     }
 
@@ -158,6 +204,9 @@ int main(void)
         CHECK(CoXlTestTrimTick() == 0 && fake_host_logged("rpmalloc 60 frames after trim 1: mapped 11700 MB (-300 since before it)"));
         for (int f = 0; f < 100; f++) CoXlTestTrimTick();
         CHECK(g_trims == 1); /* once */
+        CoXlTestTrimEvent("a tile in"); /* the next burst counts from the trim */
+        for (int f = 0; f < 8; f++) CoXlTestTrimTick();
+        CHECK(g_trims == 2 && fake_host_logged("rpmalloc trim 2 after 1 tile event(s) (the last: a tile in)"));
     }
 
     g_case = "no trim inside a build's heavy states; the next quiet idle frame takes it";
@@ -182,6 +231,14 @@ int main(void)
         CoXlTestMission((uintptr_t)level, 1);
         for (int f = 0; f < 20; f++) CoXlTestTrimTick();
         CHECK(g_trims == 0);
+        /* nor does a trim's follow-up cross into it */
+        CoXlTestTrimUse(TestTrim, TestStats);
+        CoXlTestTrimEvent("a tile in");
+        for (int f = 0; f < 8; f++) CoXlTestTrimTick();
+        CHECK(g_trims == 1);
+        CoXlTestMission((uintptr_t)level, 1);
+        for (int f = 0; f < 70; f++) CoXlTestTrimTick();
+        CHECK(!fake_host_logged("rpmalloc 60 frames after trim 0"));
     }
 
     g_case = "a release in the level-update tick is a trim's event";
@@ -199,6 +256,40 @@ int main(void)
         CHECK(g_trims == 0);
         CoXlTestMoverTick((uintptr_t)level, px, py);
         CHECK(g_trims == 1);
+    }
+
+    g_case = "the release goes before a trim due on the same frame";
+    {
+        g_trims = 0;
+        CoXlTestTrimUse(TestTrim, TestStats);
+        CoXlTestMover(OX, OY, MV_IDLE, 0, 0, 0);
+        CoXlTestMoverTile(0, 0, 0, 0);
+        for (int k = 1; k < 8; k++) CoXlTestMoverTile(k, 9 + k, 9, GetTickCount64());
+        CoXlTestMoverTile(1, 0, -2, GetTickCount64() - KEEP_MS - 1000);
+        CoXlTestTrimEvent("a tile in");
+        for (int f = 0; f < 7; f++) CHECK(CoXlTestTrimTick() == 0); /* the next tick would trim */
+        const float px = OX + 6 * CELL, py = OY + 6 * CELL;
+        CoXlTestMoverTick((uintptr_t)level, px, py);
+        CHECK(!CoXlTestMoverLive(1) && g_trims == 0); /* the release, and its event starts the quiet again */
+        for (int f = 0; f < 7; f++) CoXlTestMoverTick((uintptr_t)level, px, py);
+        CHECK(g_trims == 0);
+        CoXlTestMoverTick((uintptr_t)level, px, py);
+        CHECK(g_trims == 1 && fake_host_logged("after 2 tile event(s) (the last: a tile released)"));
+    }
+
+    g_case = "a trim frame runs no build step";
+    {
+        g_trims = 0;
+        CoXlTestTrimUse(TestTrim, TestStats);
+        CoXlTestMover(OX, OY, MV_PACKAGE, 0, 3, 3);
+        CoXlTestMoverTile(0, 0, 0, 0);
+        for (int k = 1; k < 8; k++) CoXlTestMoverTile(k, 9 + k, 9, GetTickCount64());
+        CoXlTestTrimEvent("a tile released");
+        for (int f = 0; f < 7; f++) CHECK(CoXlTestTrimTick() == 0);
+        const uint32_t frames = CoXlTestMoverFrames();
+        CoXlTestMoverTick((uintptr_t)level, OX + 6 * CELL, OY + 6 * CELL);
+        CHECK(g_trims == 1 && CoXlTestMoverFrames() == frames && CoXlTestMoverState() == MV_PACKAGE);
+        CoXlTestMoverSet(MV_IDLE);
     }
 
     g_case = "a tile in is a trim's event";
