@@ -398,6 +398,24 @@ int CoXlTestScatterUpdate(LONG op, LONG record, uint8_t* view)
     TdScatterUpdate(NULL, view, 0, NULL, NULL, NULL, NULL, NULL);
     return g_scatterTestCalled;
 }
+/* The moving tile's merge window: 0 open, 1 close, 3 reset, as the gate's own calls; 2 one level update's tick
+ * (MoveScatterTick) with the mover's render queue holding `queued` entries (-1: no queue to read); 4 a build kicked
+ * (MoveMergeBegin) and failed (MoveFail). */
+void CoXlTestScatterMerge(int action, LONG64 queued)
+{
+    static uint8_t queue[0x20];
+    if (action == 0) TdScatterMergeOpen();
+    else if (action == 1) TdScatterMergeClose();
+    else if (action == 2)
+    {
+        uint64_t at = queued < 0 ? 0 : (uint64_t)(uintptr_t)queue;
+        uint32_t n = (uint32_t)queued;
+        memcpy(queue + 0x10, &n, 4); memcpy(g_move.ctx + 0x50, &at, 8);
+        MoveScatterTick();
+    }
+    else if (action == 4) { MoveMergeBegin(); MoveFail("a test's failure"); }
+    else TdScatterMergeReset();
+}
 /* The same with the op and record as the last dispatch, the ship or a level init left them. */
 int CoXlTestScatterUpdateAsIs(uint8_t* view)
 {

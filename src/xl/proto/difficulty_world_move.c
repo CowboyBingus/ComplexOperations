@@ -449,11 +449,19 @@ static uint64_t MoveWorld(void)
     return world;
 }
 
+/* From MV_KICK on the merge's resources may exist, and its world-size views stay out of the scatter update. */
+static void MoveMergeBegin(void)
+{
+    g_move.merge = 1;
+    TdScatterMergeOpen();
+}
+
 /* The merge as the level's 0x66 and 0x67 leave it (the parts this build re-created). */
 static void MoveTeardown(void)
 {
     if (!g_move.merge) return;
     g_move.merge = 0;
+    TdScatterMergeClose(); /* its camera units go below; the scatter cut ends once their queued renders ran */
     uintptr_t gen = 0, R = 0, api = 0, t8 = 0, t10 = 0;
     uint64_t world = MoveWorld(), env = 0;
     memcpy(&env, g_move.ctx + 0x98, 8);
@@ -991,7 +999,7 @@ static void MoveTick(uint64_t level)
     }
     if (g_move.state == MV_KICK)
     {
-        g_move.merge = 1; /* from here the merge's resources may exist */
+        MoveMergeBegin();
         int r = MoveRunRecord();
         if (r < 0) { MoveFail("0x37 faulted"); return; }
         if (r == 0) { if (++g_move.waits > 60) MoveFail("0x37 did not finish"); return; }
@@ -1123,8 +1131,12 @@ static void MoveCostNote(void)
     memset(&g_moveCost, 0, sizeof g_moveCost);
 }
 
+/* Before the level's own update: the scatter cut's close counts this update (difficulty_world_diag.c). */
+static void MoveScatterTick(void) { TdScatterMergeTick((uint64_t)(uintptr_t)g_move.ctx); }
+
 static void MoveLevelUpdate(uint64_t level)
 {
+    MoveScatterTick();
     g_moveUpdate(level);
     int mv = g_move.state, ns = g_near.state, step = g_near.step, conf = g_conform.phase, bld = g_near.building;
     LARGE_INTEGER t0, t1, hz;

@@ -1417,12 +1417,46 @@ static int g_tdScatHooked;
  * terrain_fog_volumes_generated have no SpeedTree pass. Returns the op whose view is left out, or 0. */
 static int g_tdScatCameraPinned; /* the render camera's near/far/projection writer (0x4D0F6A) is the reviewed one */
 static int TdScatterCutOp(LONG op) { return op == 0x4A || op == 0x0A || op == 0x0B || op == 0x43 || op == 0x44 || op == 0x45; }
+/* A moving tile's build in play runs the level's merge records through the dispatcher's trampoline, so g_genOp stays at
+ * the last op. 0x38 aims the merge object's cameras [R] and [R+0x10] at the world's size (0xF487B0, 0xF48990 with T 1),
+ * and 0x4C RenderZoneLookup (0xF4F4F0, MV_LOOKUP) renders the level's world through [R] into [R+0x30]
+ * terrain_generator_zones before the replay narrows the cameras to the tile; a failed replay puts them back with
+ * renders still queued. R's viewports have no SpeedTree pass. The window opens when the mover kicks the merge, closes
+ * to "closing" at its teardown, and shuts once the merge's render queue ([ctx+0x50]+0x10) has read empty at the start
+ * of TD_SCAT_MERGE_EMPTY_UPDATES level updates in a row. A render taken off the queue runs within the next frame
+ * (frame fence exe 0x8AAF2 / 0x8A7C4); 3 keeps a frame's margin whether the frame drains the queue before or after the
+ * level update. No time bound: an open window only cuts views that match the test below. */
+#define TD_SCAT_MERGE 0x138 /* not an op: the moving tile's merge views */
+#define TD_SCAT_MERGE_EMPTY_UPDATES 3
+static volatile LONG g_tdScatMerge; /* 0 shut, 1 open (the build's merge exists), 2 closing (torn down; renders may be queued) */
+static volatile LONG g_tdScatMergeBuilds, g_tdScatMergeEmpty;
+static uint32_t NearQueued(uint64_t context); /* difficulty_world_terrain.c */
+static void TdScatterMergeOpen(void)
+{
+    if (InterlockedExchange(&g_tdScatMerge, 1) != 1) InterlockedIncrement(&g_tdScatMergeBuilds);
+    g_tdScatMergeEmpty = 0;
+}
+static void TdScatterMergeClose(void) { if (InterlockedCompareExchange(&g_tdScatMerge, 2, 1) == 1) g_tdScatMergeEmpty = 0; }
+static void TdScatterMergeReset(void) { InterlockedExchange(&g_tdScatMerge, 0); g_tdScatMergeEmpty = 0; }
+static int TdScatterMergeWindow(void) { return g_tdScatMerge != 0; }
+/* At the start of each level update (main thread), with the mover's context: an unreadable queue counts as not empty. */
+static void TdScatterMergeTick(uint64_t context)
+{
+    if (g_tdScatMerge != 2) return;
+    if (NearQueued(context) != 0) { g_tdScatMergeEmpty = 0; return; }
+    if (++g_tdScatMergeEmpty < TD_SCAT_MERGE_EMPTY_UPDATES) return;
+    if (InterlockedCompareExchange(&g_tdScatMerge, 0, 2) == 2)
+        Note("difficulty: extra large maps: the moving tile's scatter cut ends (build %ld; the merge's render queue read empty for %d level updates)",
+            (long)g_tdScatMergeBuilds, TD_SCAT_MERGE_EMPTY_UPDATES);
+}
 static LONG TdScatterSkipOp(const uint8_t* view)
 {
     const LONG op = g_genOp;
-    if (!g_tdScatCameraPinned || !(g_world.current > 1.0f) || !TdScatterCutOp(op)) return 0;
+    if (!g_tdScatCameraPinned || !(g_world.current > 1.0f)) return 0;
+    const LONG which = TdScatterCutOp(op) ? op : TdScatterMergeWindow() ? TD_SCAT_MERGE : 0;
+    if (which == 0) return 0;
     struct { float nearZ, farZ; uint32_t projection; } v = {0, 0, 1};
-    return !SafeRead((uintptr_t)view + 0x20, &v, sizeof v) && v.nearZ == 1.0f && v.farZ == 1001.0f && v.projection == 0 ? op : 0;
+    return !SafeRead((uintptr_t)view + 0x20, &v, sizeof v) && v.nearZ == 1.0f && v.farZ == 1001.0f && v.projection == 0 ? which : 0;
 }
 #ifdef CO_RESEARCH
 /* Research builds: where a load's SpeedTree memory goes. A scatter system (one a render world, built by 0x2102C0: its
@@ -1447,6 +1481,7 @@ static struct
     float nearFar[3][2];
     uint32_t projection[3];
     int viewCount;
+    LONG64 inMerge; /* growths while the moving tile's merge window was open */
 } g_rsOp;
 typedef uint8_t (*RsGrowFn)(uint8_t* vec, uint64_t n);
 static RsGrowFn g_rsGrow;
@@ -1502,10 +1537,10 @@ static void RsOpLine(void)
         if (at >= sizeof views) at = sizeof views - 1;
     }
     Note("scatter research: node vectors grown during op 0x%02lX record %ld (level %ld): %lld MiB in %lld calls (scatter update %lld MiB in %lld, tree culling %lld MiB "
-        "in %lld, others %lld MiB in %lld), largest %llu nodes, first by x+0x%llX < x+0x%llX < x+0x%llX < x+0x%llX; views (%d): %s",
+        "in %lld, others %lld MiB in %lld; %lld in a tile merge window), largest %llu nodes, first by x+0x%llX < x+0x%llX < x+0x%llX < x+0x%llX; views (%d): %s",
         (long)g_rsOp.op, (long)g_rsOp.record, (long)(g_rsOp.key >> 32), (long long)((g_rsOp.bytes[0] + g_rsOp.bytes[1] + g_rsOp.bytes[2]) >> 20), (long long)calls,
         (long long)(g_rsOp.bytes[0] >> 20), (long long)g_rsOp.calls[0], (long long)(g_rsOp.bytes[1] >> 20), (long long)g_rsOp.calls[1],
-        (long long)(g_rsOp.bytes[2] >> 20), (long long)g_rsOp.calls[2], (unsigned long long)g_rsOp.most, (unsigned long long)g_rsOp.chain[0],
+        (long long)(g_rsOp.bytes[2] >> 20), (long long)g_rsOp.calls[2], (long long)g_rsOp.inMerge, (unsigned long long)g_rsOp.most, (unsigned long long)g_rsOp.chain[0],
         (unsigned long long)g_rsOp.chain[1], (unsigned long long)g_rsOp.chain[2], (unsigned long long)g_rsOp.chain[3], g_rsOp.viewCount,
         g_rsOp.viewCount ? views : "none in a scatter update");
 }
@@ -1536,6 +1571,7 @@ static uint8_t RsGrow(uint8_t* vec, uint64_t n)
             memcpy(g_rsOp.chain, x, sizeof x);
         }
         g_rsOp.bytes[who] += bytes; g_rsOp.calls[who]++;
+        if (TdScatterMergeWindow()) g_rsOp.inMerge++;
         if (n > g_rsOp.most) g_rsOp.most = n;
         int at = 0;
         while (known && at < g_rsOp.viewCount && g_rsOp.views[at] != (uintptr_t)view) at++;
@@ -1637,6 +1673,15 @@ static void TdScatterUpdate(void* a, uint8_t* view, uint32_t c, uint8_t* layer, 
         LONG levels = g_world.levels;
         if (notedLevel != levels && InterlockedExchange(&notedLevel, levels) != levels)
             Note("difficulty: extra large maps: the far-scatter bake's tile views are left out of the scatter update (op 0x4A, record %ld)", (long)g_genRecord);
+        InterlockedIncrement64(&g_tdScatSkipped);
+        return;
+    }
+    if (skipOp == TD_SCAT_MERGE)
+    {
+        static volatile LONG notedBuild = -1;
+        const LONG build = g_tdScatMergeBuilds;
+        if (notedBuild != build && InterlockedExchange(&notedBuild, build) != build)
+            Note("difficulty: extra large maps: the moving tile's merge camera view is left out of the scatter update (build %ld of this run)", (long)build);
         InterlockedIncrement64(&g_tdScatSkipped);
         return;
     }
