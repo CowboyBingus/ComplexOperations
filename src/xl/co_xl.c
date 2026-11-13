@@ -346,9 +346,8 @@ void CoXlTestNearCraterMapsEarlier(void) { g_nearCraterMaps.level = g_world.leve
 int CoXlTestNearCraterMapsMake(int newLevel) { if (newLevel) g_nearCraterMaps.level = -1; return NearCraterMapsMake(); }
 void CoXlTestNearNamesClose(int opened) { NearNamesClose(opened); }
 uint64_t CoXlTestNearProbe(void* original) { g_nearProbe = (NearProbeFn)original; return NearProbe(1, 2, 3, 4, 5, 6, 7, 8, 9); }
-void CoXlTestNearProbeCounts(uint32_t* replay, uint32_t* tile, uint32_t* other) { *replay = g_probeRun.replay; *tile = g_probeRun.tile; *other = g_probeRun.other; }
+void CoXlTestNearProbeCounts(uint32_t* replay, uint32_t* tile) { *replay = g_probeRun.replay; *tile = g_probeRun.tile; }
 void CoXlTestNearProbeClear(void) { memset(&g_probeRun, 0, sizeof g_probeRun); }
-void CoXlTestFarGrassNames(int on) { InterlockedExchange(&g_namesFarGrass, on); }
 LONG CoXlTestNearResetState(void) { return g_nearReset.state; }
 void CoXlTestNearReset(LONG state, int pins) { g_nearReset.state = state; g_nearReset.pins = pins; }
 void CoXlTestNearResetTick(void) { NearResetTick(); }
@@ -375,7 +374,9 @@ void CoXlTestMoverTile(int slot, int a, int b, ULONGLONG seen)
 void CoXlTestMoverPlayer(float x, float y) { g_move.player[g_move.players][0] = x; g_move.player[g_move.players][1] = y; g_move.players++; }
 int CoXlTestMoverLive(int slot) { return g_tiles[slot].live && g_tiles[slot].level == g_world.levels; }
 ULONGLONG CoXlTestMoverSeen(int slot) { return g_tiles[slot].seen; }
-int CoXlTestMoverRelease(ULONGLONG now) { return MoveReleaseTick(now); }
+/* The release and tick hooks let a tile change's grid fills finish in the call, as if they took under a frame. */
+static void TestLayerSettle(void) { while (MoveLayerWait()) Sleep(1); }
+int CoXlTestMoverRelease(ULONGLONG now) { int r = MoveReleaseTick(now); TestLayerSettle(); return r; }
 int CoXlTestMoverState(void) { return g_move.state; }
 static float TestNoise(void* noise, float x, float y) { return 0.0f; }
 void CoXlTestMoverTick(uintptr_t level, float observerX, float observerY)
@@ -383,6 +384,7 @@ void CoXlTestMoverTick(uintptr_t level, float observerX, float observerY)
     g_world.live = 8.0f; g_terrainNoise = (TerrainNoiseFn)TestNoise; g_near.level = g_world.levels; g_near.state = NEAR_IN;
     g_streamObserverOn = 1; g_streamObserverAt[0] = observerX; g_streamObserverAt[1] = observerY;
     MoveTick(level);
+    TestLayerSettle();
     g_streamObserverOn = 0;
 }
 /* rpmalloc's trim after tile events (proto/xl_free.c): its pins asked again, or the reviewed ones taken as passed with
@@ -400,6 +402,11 @@ void CoXlTestMoverSet(int state) { g_move.state = state; }
 /* The build's wall-clock frames (proto/difficulty_world_move.c MoveWallAdd): one frame of `ms` in mover state `mv`; the
  * longest three and the count over 50 ms as the build's note gives them. */
 void CoXlTestMoveWall(double ms, int mv) { MoveWallAdd(ms, mv); }
+/* The tile's stamp units as 0x2F left them (`units`, n of them, in the world at the context's +0x40), then one frame's
+ * destroys within `budget` ms: 1 once all are gone. */
+void CoXlTestStampUnits(uint64_t* units, uint32_t n) { g_move.stUnit = units; g_move.stTemp = g_move.stUnits = n; g_move.stGone = 0; }
+int CoXlTestStampUnitsDestroy(double budget) { return MoveStampUnitsDestroy(budget); }
+uint32_t CoXlTestStampUnitsGone(void) { return g_move.stGone; }
 void CoXlTestMoveWallRead(double* wall, int* mv, uint32_t* slow) { for (int k = 0; k < 3; k++) { wall[k] = g_moveCost.wall[k]; mv[k] = g_moveCost.wallMv[k]; } *slow = g_moveCost.slow; }
 void CoXlTestMoveWallClear(void) { memset(&g_moveCost, 0, sizeof g_moveCost); }
 void CoXlTestMoverNear(int state) { g_near.state = state; }
@@ -412,7 +419,7 @@ int CoXlTestDrainPins(void) { g_drainPinned = 0; return MoveDrainPins(ApiModuleB
 uint32_t CoXlTestHudZoom(uintptr_t game, uintptr_t map, uint32_t level, float input, float* scale)
 { g_hudGame = game; return (uint32_t)HudZoomTarget(map, level, input, scale); }
 void CoXlTestMoverTileIn(int slot, int a, int b)
-{ g_move.slot = slot; g_move.cell[0] = a; g_move.cell[1] = b; MoveCellCentre(a, b, g_move.centre); g_near.handle = 0; MoveTileIn(0); g_move.state = MV_IDLE; }
+{ g_move.slot = slot; g_move.cell[0] = a; g_move.cell[1] = b; MoveCellCentre(a, b, g_move.centre); g_near.handle = 0; MoveTileIn(0); TestLayerSettle(); g_move.state = MV_IDLE; }
 void CoXlTestRenderAfter(uintptr_t state, void (*rehash)(uintptr_t, uint32_t), void (*resize)(uintptr_t, uint32_t))
 { g_lwRender.rehash = (uintptr_t)rehash; g_lwRender.resize = (uintptr_t)resize; LwRenderAfterDispatch(state); }
 uintptr_t CoXlTestRenderCopiesPins(uintptr_t exe) { return LwRenderCopiesPins(exe); }
@@ -547,6 +554,8 @@ void CoXlTestTileRemove(int slot) { NearTileRemove(slot); }
 void CoXlTestCoarse(const uint16_t* heights, uint32_t n, float size) { const NearGround g = {heights, n, size, 0.0f, 0.0f}; g_nearCoarseGround = g; }
 void CoXlTestNearBuilding(int building) { g_near.level = g_world.levels; g_near.state = building ? NEAR_START : NEAR_IN; }
 void CoXlTestLayerTile(int slot, int in, float cx, float cy) { NearLayerTileChange(slot, in, cx, cy); }
+void CoXlTestLayerTileLater(int slot, int in, float cx, float cy) { NearLayerTileChangeLater(slot, in, cx, cy); }
+int CoXlTestLayerBusy(void) { return NearLayerBusy(); }
 uint64_t CoXlTestLayerField(uint64_t unit, uint64_t field) { return NearLayerField(unit, field); }
 int CoXlTestLayerHeight(uint64_t desc, float x, float y, float* h) { return NearLayerHeight(desc, x, y, h); }
 int CoXlTestLayerWhy(uint64_t unit, uint64_t field, int* slot) { int why; NearLayerFieldWhy(unit, field, slot, &why); return why; }

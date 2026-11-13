@@ -17,6 +17,8 @@ void CoXlTestTileRemove(int slot);
 void CoXlTestCoarse(const uint16_t* heights, uint32_t n, float size);
 void CoXlTestNearBuilding(int building);
 void CoXlTestLayerTile(int slot, int in, float cx, float cy);
+void CoXlTestLayerTileLater(int slot, int in, float cx, float cy);
+int CoXlTestLayerBusy(void);
 uint64_t CoXlTestLayerField(uint64_t unit, uint64_t field);
 int CoXlTestLayerHeight(uint64_t desc, float x, float y, float* h);
 void CoXlTestStreamSetup(uintptr_t game, uint8_t* context, uint8_t* array, uint32_t count);
@@ -191,6 +193,23 @@ int main(void)
     h = 0.0f;
     CHECK(CoXlTestLayerHeight((uint64_t)(uintptr_t)g_levelDesc, 2600.0f, AY, &h) && Near(h, 45.0f));
     CoXlTestNearBuilding(0);
+
+    Start("a tile comes in play: its grid fills on a thread, out of use until the game thread finishes it");
+    a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);
+    CoXlTestLayerTile(a, 1, AX, AY);
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTileLater(b, 1, BX, AY);
+    CHECK(Field(1900.0f, AY) == Field(2100.0f, AY)); /* the drop tile's grid serves both until the new one is in use */
+    {
+        int polls = 0;
+        while (CoXlTestLayerBusy() && polls < 20000) { Sleep(1); polls++; }
+        CHECK(polls < 20000);
+    }
+    fa = Field(2100.0f, AY);
+    CHECK(fa != 0 && Near(Read(fa, 1900.0f, AY), 30.0f) && Near(Read(fa, 2600.0f, AY), 45.0f));
+    fb = Field(1900.0f, AY);
+    CHECK(fb != 0 && fb != fa && Near(Read(fb, 1900.0f, AY), 30.0f) && Near(Read(fb, 2300.0f, AY), 45.0f));
+    CHECK(!CoXlTestLayerBusy());
 
     Start("a tile goes: the other grids hold the coarse ground there again, and its own grid is out of use");
     a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);

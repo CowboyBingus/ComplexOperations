@@ -1567,7 +1567,6 @@ static struct
     LONG steps, consumers;         /* brackets this replay */
     DWORD stepThread, consumerThread;
 } g_nearNames;
-static volatile LONG g_namesFarGrass; /* far grass's kept textures are published (difficulty_world_fargrass.c FgPublish) */
 
 static int NearNamesOpen(void)
 {
@@ -1581,11 +1580,10 @@ static void NearNamesClose(int opened)
     if (opened && InterlockedDecrement(&g_nearNames.open) == 0) NearNamesLevel();
 }
 
-/* After a replayed op 0x64 (terrain_generator_finalize clears the global atmospheric_scattering_color, the volumetric
- * fog and far fog histories) the frame keeps an olive ground-bounce ambient until the 5 %-a-frame histories refill. The
- * game's own reset (0x102F329) is copied without its camera cut: G+0x10C4 frames of frame_history_invalidation (read
- * each frame at 0xAB9369) and a full six-face light probe capture blended in at weight 1 (0xAB771E). */
-#define NEAR_RESET_FRAMES 8 /* atmospheric_scattering_calculate renews one cube face a frame */
+/* A replayed op 0x64 (terrain_generator_finalize) clears play's global atmosphere LUTs, fog, cloud and TAA histories.
+ * The game's reset after its own finalize (0x102F329) follows once its jobs ran: G+0x10C4 frames of
+ * frame_history_invalidation (set each frame at 0xAB9369), the camera cut, a six-face light probe capture at weight 1. */
+#define NEAR_RESET_FRAMES 8 /* atmospheric_scattering_calculate (CS f8dae03a) renews one of six faces a frame */
 static struct { volatile LONG state; int pins; LONG done; } g_nearReset; /* state: 1 a 0x64 queued, 2 its jobs ran */
 typedef void (*NearConsumeFn)(uint64_t queue);
 static NearConsumeFn g_nearConsume;
@@ -1609,33 +1607,34 @@ static void NearResetTick(void)
     if (SafeRead(g_world.game + 0x3326340u, &G, 8) || G == 0) return;
     volatile int32_t* frames = (volatile int32_t*)(G + 0x10C4u);
     if (*frames < NEAR_RESET_FRAMES) *frames = NEAR_RESET_FRAMES;
+    *(volatile uint8_t*)(G + 0x78AC014u) = 1; /* the camera cut: the view copies it and clears it (0xAB5B04, 0xAB5B21) */
     *(volatile uint64_t*)(G + 0x7938498u) = 0x3F800000u; /* weight 1.0, and the face counter that picks six faces at 0 */
     *(volatile uint8_t*)(G + 0x7938494u) = 1;
     InterlockedExchange(&g_nearReset.state, 0);
     g_nearReset.done++;
 }
 
-/* Every light probe capture (exe 0x110C40, called from render interface slot 0x268): runs of captures made while names
- * other than the level's were published are logged with their length and publisher, and counted for the replay. */
+/* Every light probe capture (exe 0x110C40, called from render interface slot 0x268): runs made while the tile's names
+ * were published are counted for the replay, and the first few of a replay logged with their length. */
+#define NEAR_PROBE_NOTES 4
 typedef uint64_t (*NearProbeFn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 static NearProbeFn g_nearProbe;
-static struct { LONG mask; uint32_t n; LARGE_INTEGER first; DWORD thread; uint32_t replay, tile, other; } g_probeRun;
+static struct { LONG mask; uint32_t n; LARGE_INTEGER first; DWORD thread; uint32_t replay, tile, notes; } g_probeRun;
 
 static void NearProbeRunEnd(void)
 {
-    if (g_probeRun.mask == 0 || g_probeRun.n == 0) return;
+    if (g_probeRun.mask == 0 || g_probeRun.n == 0 || ++g_probeRun.notes > NEAR_PROBE_NOTES) return;
     LARGE_INTEGER now, hz;
     QueryPerformanceCounter(&now); QueryPerformanceFrequency(&hz);
-    Note("difficulty: light probe: %u captures saw %s%s%s (the first %.3f s before this line, thread %lu)", g_probeRun.n,
-        (g_probeRun.mask & 1) ? "the moving tile's maps" : "", g_probeRun.mask == 3 ? " and " : "", (g_probeRun.mask & 2) ? "far grass's kept textures" : "",
-        (double)(now.QuadPart - g_probeRun.first.QuadPart) / (double)hz.QuadPart, (unsigned long)g_probeRun.thread);
+    Note("difficulty: light probe: %u captures saw the moving tile's maps (the first %.3f s before this line, thread %lu)%s", g_probeRun.n,
+        (double)(now.QuadPart - g_probeRun.first.QuadPart) / (double)hz.QuadPart, (unsigned long)g_probeRun.thread,
+        g_probeRun.notes == NEAR_PROBE_NOTES ? "; later runs of this replay are only counted" : "");
 }
 
 static void NearProbeSeen(void)
 {
-    LONG mask = (g_nearNames.open > 0 ? 1 : 0) | (g_namesFarGrass ? 2 : 0);
-    if (g_nearActive) { g_probeRun.replay++; if (mask & 1) g_probeRun.tile++; }
-    if (mask != 0) g_probeRun.other++;
+    LONG mask = g_nearNames.open > 0 ? 1 : 0;
+    if (g_nearActive) { g_probeRun.replay++; g_probeRun.tile += (uint32_t)mask; }
     if (mask == g_probeRun.mask) { if (mask) g_probeRun.n++; return; }
     NearProbeRunEnd();
     g_probeRun.mask = mask; g_probeRun.n = mask ? 1 : 0; g_probeRun.thread = GetCurrentThreadId();
@@ -1664,6 +1663,7 @@ static void NearNamesInstall(uintptr_t game)
     { g_nearProbe = NULL; Note("difficulty: near terrain: the light probe capture is not the reviewed code; its captures are not counted"); }
     if (g_nearReset.pins == 0)
         g_nearReset.pins = ApiCodeMatches(game + 0x102F329u, kNearResetPin) == 1 && ApiCodeMatches(game + 0xAB9369u, "83 BF C4 10 00 00 00 0F 8E") == 1 &&
+            ApiCodeMatches(game + 0xAB5B1Au, "0F 10 8A 08 C0 8A 07 44 88 BA 14 C0 8A 07") == 1 &&
             ApiCodeMatches(game + 0xAB771Eu, "40 38 B3 94 84 93 07 74 0E 39 B3 9C 84 93 07 B8 06 00 00 00 0F 44 E8") == 1 ? 1 : -1;
     if (g_nearReset.pins < 0) Note("difficulty: near terrain: the game's history reset is not the reviewed code; a tile's finalize leaves the ambient to refill");
 }
@@ -1971,7 +1971,6 @@ static void NearReplayEnd(int ok)
     Note("difficulty: near terrain: the light probe captured %u times while the tile replayed, %u with the tile's maps published (consumer brackets "
         "%ld on thread %lu, step brackets %ld on thread %lu)", g_probeRun.replay, g_probeRun.tile, (long)g_nearNames.consumers,
         (unsigned long)g_nearNames.consumerThread, (long)g_nearNames.steps, (unsigned long)g_nearNames.stepThread);
-    InterlockedExchange(&g_nearReset.state, 2); /* the finalize's clears, and anything the probe took while it ran */
     if (g_mat.on && g_mat.owner == MAT_TILE) InterlockedExchange(&g_mat.on, 0); /* the cameras go back below */
     g_near.matLeave = 0;
     if (g_near.R != 0)
@@ -5640,7 +5639,7 @@ static int TerrainNearReplay(uint64_t records, uint32_t end, uint32_t at, uint64
         }
         /* published around each step and consumer run (NearNamesOpen), the alias too: 0x40 must not write the level's map */
         if (SafeRead(context + 0x50, &g_nearNames.queue, 8) || g_nearNames.queue == 0) { Note("difficulty: near terrain: no job queue; no tile"); NearReplayEnd(0); return 0; }
-        g_nearNames.steps = g_nearNames.consumers = 0; g_probeRun.replay = g_probeRun.tile = 0;
+        g_nearNames.steps = g_nearNames.consumers = 0; g_probeRun.replay = g_probeRun.tile = g_probeRun.notes = 0;
         NearCameras(NEAR_SIDE / 2, NEAR_SIDE / 2, g_near.centre[0], g_near.centre[1]);
         MemoryBarrier();
         InterlockedExchange(&g_nearActive, 1);
@@ -6541,38 +6540,111 @@ static void NearLayerCompose(NearLayerGrid* g)
 }
 
 static void NearLayerProbeNote(const char* when);
-/* A tile came (in = 1, its slot's grid laid out and filled for it) or went (in = 0, its slot's grid out of use): every
- * other live tile's grid is filled again where the tile's span overlaps it. Game thread. */
-static void NearLayerTileChange(int slot, int in, float cx, float cy)
+static int NearLayerBusy(void);
+/* A tile's change of the grids: the tile's own grid filled (in = 1) and every other live grid filled again where the
+ * tile's span overlaps it. On its own thread in play (NearLayerTileChangeLater): 12.8 M samples took 30-45 ms on 16
+ * threads, the game's frame with them. Readers of a grid being filled again get the old or the new sample. */
+static struct { volatile LONG running; HANDLE thread; int slot, in, refilled; float cx, cy; LONG level; LARGE_INTEGER t0; double ms; } g_layerJob;
+
+/* Game thread: the change's grid out of use and laid out for the tile; 0 when there is nothing to fill. */
+static int NearLayerChangeBegin(int slot, int in, float cx, float cy)
 {
-    if (slot < 0 || slot >= NEAR_TILES_MAX) return;
     if (g_nearLayer.level != g_world.levels) { g_nearLayer.level = g_world.levels; for (int k = 0; k < NEAR_TILES_MAX; k++) g_layerGrid[k].ready = 0; }
     NearLayerGrid* g = &g_layerGrid[slot];
     InterlockedExchange(&g->ready, 0);
+    if (!in) return 1;
+    if (g->data == NULL) g->data = (float*)VirtualAlloc(NULL, (size_t)NEAR_LAYER_N * NEAR_LAYER_N * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (g->data == NULL) { Note("difficulty: near terrain: no memory for the layer grid of tile slot %d: its stamps keep the coarse heights", slot); return 0; }
+    g->level = g_world.levels; g->cx = cx; g->cy = cy;
+    return 1;
+}
+
+/* Any thread: the fills. The other grids' ready flags are read once, at the start. */
+static void NearLayerChangeFill(void)
+{
+    const int slot = g_layerJob.slot;
+    const float cx = g_layerJob.cx, cy = g_layerJob.cy;
+    if (g_layerJob.in) NearLayerFill(&g_layerGrid[slot], -1e9f, -1e9f, 1e9f, 1e9f);
+    int refilled = 0;
+    for (int k = 0; k < NEAR_TILES_MAX; k++)
+    {
+        NearLayerGrid* o = &g_layerGrid[k];
+        if (k == slot || !o->ready || o->level != g_layerJob.level) continue;
+        refilled += NearLayerFill(o, cx - NEAR_SPAN / 2, cy - NEAR_SPAN / 2, cx + NEAR_SPAN / 2, cy + NEAR_SPAN / 2);
+    }
+    g_layerJob.refilled = refilled;
+}
+
+static DWORD WINAPI NearLayerChangeThread(LPVOID unused)
+{
+    (void)unused;
+    NearLayerChangeFill();
+    return 0;
+}
+
+/* Game thread: the tile's grid into use, once the fills are done. */
+static void NearLayerChangeEnd(void)
+{
+    const int slot = g_layerJob.slot, in = g_layerJob.in;
+    NearLayerGrid* g = &g_layerGrid[slot];
+    LARGE_INTEGER t1, hz; QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
+    g_layerJob.ms = (double)(t1.QuadPart - g_layerJob.t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+    if (g_layerJob.level != g_world.levels) return; /* a level went meanwhile: its grids are out of use */
     if (in)
     {
-        if (g->data == NULL) g->data = (float*)VirtualAlloc(NULL, (size_t)NEAR_LAYER_N * NEAR_LAYER_N * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        if (g->data == NULL) { Note("difficulty: near terrain: no memory for the layer grid of tile slot %d: its stamps keep the coarse heights", slot); return; }
-        g->level = g_world.levels; g->cx = cx; g->cy = cy;
-        NearLayerFill(g, -1e9f, -1e9f, 1e9f, 1e9f);
         g->at ^= 1;
         InterlockedExchange(&g->descMade, 0);
         if (g_nearLayer.descState == 2) { NearLayerCompose(g); InterlockedExchange(&g->descMade, 2); }
         MemoryBarrier();
         InterlockedExchange(&g->ready, 1);
     }
-    int refilled = 0;
-    for (int k = 0; k < NEAR_TILES_MAX; k++)
-    {
-        NearLayerGrid* o = &g_layerGrid[k];
-        if (k == slot || !o->ready || o->level != g_world.levels) continue;
-        refilled += NearLayerFill(o, cx - NEAR_SPAN / 2, cy - NEAR_SPAN / 2, cx + NEAR_SPAN / 2, cy + NEAR_SPAN / 2);
-    }
     g_nearLayer.fills++;
-    Note("difficulty: near terrain: level layers: the tile at (%.0f, %.0f) %s; %s, %d other grid(s) filled again where it %s", (double)cx, (double)cy,
-        in ? "is in" : "went", in ? "its 1 m grid of the hidden square and 768 m around it made from the ground as drawn" : "its grid out of use", refilled,
-        in ? "lies" : "lay");
+    Note("difficulty: near terrain: level layers: the tile at (%.0f, %.0f) %s; %s, %d other grid(s) filled again where it %s (%.0f ms)", (double)g_layerJob.cx,
+        (double)g_layerJob.cy, in ? "is in" : "went", in ? "its 1 m grid of the hidden square and 768 m around it made from the ground as drawn" : "its grid out of use",
+        g_layerJob.refilled, in ? "lies" : "lay", g_layerJob.ms);
     NearLayerProbeNote(in ? "a tile came in" : "a tile went");
+}
+
+static int NearLayerChangeStart(int slot, int in, float cx, float cy)
+{
+    if (slot < 0 || slot >= NEAR_TILES_MAX || !NearLayerChangeBegin(slot, in, cx, cy)) return 0;
+    g_layerJob.slot = slot; g_layerJob.in = in; g_layerJob.cx = cx; g_layerJob.cy = cy; g_layerJob.level = g_world.levels; g_layerJob.refilled = 0;
+    QueryPerformanceCounter(&g_layerJob.t0);
+    return 1;
+}
+
+/* A tile came (in = 1) or went (in = 0), all in this call: level load and the tests. Game thread. */
+static void NearLayerTileChange(int slot, int in, float cx, float cy)
+{
+    while (NearLayerBusy()) Sleep(1); /* a change from play still filling: it shares g_layerJob and the grids */
+    if (!NearLayerChangeStart(slot, in, cx, cy)) return;
+    NearLayerChangeFill();
+    NearLayerChangeEnd();
+}
+
+/* 1 while a change's fills run; the change is finished here once they are done. Game thread. */
+static int NearLayerBusy(void)
+{
+    if (!g_layerJob.running) return 0;
+    if (WaitForSingleObject(g_layerJob.thread, 0) != WAIT_OBJECT_0) return 1;
+    CloseHandle(g_layerJob.thread);
+    g_layerJob.thread = NULL;
+    InterlockedExchange(&g_layerJob.running, 0);
+    NearLayerChangeEnd();
+    return 0;
+}
+
+/* The change with its fills on a thread of their own (in play); NearLayerBusy finishes it. A change that fills nothing
+ * (no grid of its own, none other ready) or whose thread does not start is done here. */
+static void NearLayerTileChangeLater(int slot, int in, float cx, float cy)
+{
+    while (NearLayerBusy()) Sleep(1); /* callers wait for NearLayerBusy first: not reached in play */
+    if (!NearLayerChangeStart(slot, in, cx, cy)) return;
+    int work = in;
+    for (int k = 0; k < NEAR_TILES_MAX && !work; k++) work = k != slot && g_layerGrid[k].ready && g_layerGrid[k].level == g_world.levels;
+    g_layerJob.thread = work ? CreateThread(NULL, 256 * 1024, NearLayerChangeThread, NULL, 0, NULL) : NULL;
+    if (g_layerJob.thread == NULL) { NearLayerChangeFill(); NearLayerChangeEnd(); return; }
+    InterlockedExchange(&g_layerJob.running, 1);
 }
 
 /* The level's layer heightfield: its extent is the world's. */

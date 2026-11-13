@@ -17,9 +17,8 @@ void CoXlTestNearConsume(uint64_t queue, int replays, void* original);
 int CoXlTestNearNamesOpen(void);
 void CoXlTestNearNamesClose(int opened);
 uint64_t CoXlTestNearProbe(void* original);
-void CoXlTestNearProbeCounts(uint32_t* replay, uint32_t* tile, uint32_t* other);
+void CoXlTestNearProbeCounts(uint32_t* replay, uint32_t* tile);
 void CoXlTestNearProbeClear(void);
-void CoXlTestFarGrassNames(int on);
 LONG CoXlTestNearResetState(void);
 void CoXlTestNearReset(LONG state, int pins);
 void CoXlTestNearResetTick(void);
@@ -47,6 +46,7 @@ static const char* g_case;
 #define STAND2 0x7000ull
 #define FRAMES 0x10C4u      /* G+: frames of frame_history_invalidation */
 #define PROBE_ALL 0x7938494u /* G+: a six-face probe capture asked for */
+#define CUT 0x78AC014u      /* G+: the camera cut */
 #define PROBE_WEIGHT 0x7938498u
 #define PROBE_FACES 0x793849Cu
 
@@ -142,6 +142,7 @@ static void Setup(const char* name, int replaying)
         g_G = VirtualAlloc(NULL, PROBE_FACES + 0x1000, MEM_RESERVE, PAGE_NOACCESS);
         VirtualAlloc(g_G, 0x2000, MEM_COMMIT, PAGE_READWRITE);
         VirtualAlloc(g_G + (PROBE_ALL & ~0xFFFu), 0x1000, MEM_COMMIT, PAGE_READWRITE);
+        VirtualAlloc(g_G + (CUT & ~0xFFFu), 0x1000, MEM_COMMIT, PAGE_READWRITE);
         uint64_t G = (uint64_t)(uintptr_t)g_G;
         memcpy(image + 0x3326340u, &G, 8);
     }
@@ -151,7 +152,6 @@ static void Setup(const char* name, int replaying)
     g_publishes = g_unpublishes = 0; g_runs = 0; g_endInside = 0; g_probeInside = 0;
     memset(g_seen, 0xFF, sizeof g_seen);
     *(uint32_t*)(g_queue + 0x10) = 3;
-    CoXlTestFarGrassNames(0);
     CoXlTestNearProbeClear();
     CoXlTestNearReset(0, 1);
     CoXlTestNearCraterMaps(0, 0, 0);
@@ -161,7 +161,7 @@ static void Setup(const char* name, int replaying)
 int main(void)
 {
     const uint64_t queue = (uint64_t)(uintptr_t)g_queue;
-    uint32_t replay = 0, tile = 0, other = 0;
+    uint32_t replay = 0, tile = 0;
 
     Setup("the player's view while a tile replays: the level's maps, no name touched", 1);
     CHECK(CoXlTestNearRun(0, 1, TILE0, TILE1, ONEMIP, (void*)Original) == 1 + 2 + 3 + 0 + 5 + 6 + 7 + 8);
@@ -246,6 +246,7 @@ int main(void)
     CoXlTestNearConsume(queue, 1, (void*)Consumer);
     CHECK(SawTile());
     CHECK(LevelNow());
+    CHECK(CoXlTestNearResetState() == 0); /* a replay's end asks for no reset of its own: only a finalize's jobs do */
 
     Setup("one frame of a build: probe, view, consumer, probe", 1);
     CoXlTestNearProbe((void*)Probe);
@@ -257,34 +258,43 @@ int main(void)
     *(uint32_t*)(g_queue + 0x10) = 3;
     CHECK(CoXlTestNearProbe((void*)Probe) == 45);
     CHECK(SawLevel() && g_runs == 4);
-    CoXlTestNearProbeCounts(&replay, &tile, &other);
-    CHECK(replay == 2 && tile == 0 && other == 0);
+    CoXlTestNearProbeCounts(&replay, &tile);
+    CHECK(replay == 2 && tile == 0);
 
     Setup("a probe capture inside the bracket is counted as the tile's", 1);
     g_probeInside = 1;
     CoXlTestNearConsume(queue, 1, (void*)Consumer);
-    CoXlTestNearProbeCounts(&replay, &tile, &other);
-    CHECK(replay == 1 && tile == 1 && other == 1);
+    CoXlTestNearProbeCounts(&replay, &tile);
+    CHECK(replay == 1 && tile == 1);
 
-    Setup("far grass's textures published: its captures are counted, not the replay's", 0);
-    CoXlTestFarGrassNames(1);
-    CoXlTestNearProbe((void*)Probe);
-    CoXlTestNearProbe((void*)Probe);
-    CoXlTestFarGrassNames(0);
-    CoXlTestNearProbe((void*)Probe);
-    CoXlTestNearProbeCounts(&replay, &tile, &other);
-    CHECK(replay == 0 && tile == 0 && other == 2);
+    Setup("runs of captures inside the bracket: the first four of a replay noted, every one counted", 1);
+    g_probeInside = 1;
+    const size_t logFrom = strlen(g_fake.log);
+    for (int k = 0; k < 7; k++)
+    {
+        *(uint32_t*)(g_queue + 0x10) = 3;
+        CoXlTestNearConsume(queue, 1, (void*)Consumer);
+        CoXlTestNearProbe((void*)Probe); /* outside: ends the run */
+    }
+    CoXlTestNearProbeCounts(&replay, &tile);
+    CHECK(replay == 14 && tile == 7);
+    {
+        int notes = 0;
+        for (const char* at = g_fake.log + logFrom; (at = strstr(at, "captures saw the moving tile's maps")) != NULL; at++) notes++;
+        CHECK(notes == 4);
+        CHECK(fake_host_logged("later runs of this replay are only counted"));
+    }
 
     Setup("a finalize's jobs run: the reset is asked for, then applied once on the game thread", 1);
     CoXlTestNearReset(1, 1);
     CoXlTestNearConsume(queue, 1, (void*)Consumer);
     CHECK(CoXlTestNearResetState() == 2);
     SetFrames(0);
-    memset(g_G + PROBE_ALL, 0, 12);
+    memset(g_G + PROBE_ALL, 0, 12); g_G[CUT] = 0;
     uint32_t faces = 5; memcpy(g_G + PROBE_FACES, &faces, 4);
     CoXlTestNearResetTick();
     float weight = 0; memcpy(&weight, g_G + PROBE_WEIGHT, 4); memcpy(&faces, g_G + PROBE_FACES, 4);
-    CHECK(Frames() == 8 && g_G[PROBE_ALL] == 1 && weight == 1.0f && faces == 0);
+    CHECK(Frames() == 8 && g_G[PROBE_ALL] == 1 && g_G[CUT] == 1 && weight == 1.0f && faces == 0);
     CHECK(CoXlTestNearResetState() == 0);
     SetFrames(0);
     CoXlTestNearResetTick();
@@ -307,9 +317,9 @@ int main(void)
 
     Setup("the reset's code not the reviewed one: nothing written", 1);
     CoXlTestNearReset(2, -1);
-    SetFrames(0); g_G[PROBE_ALL] = 0;
+    SetFrames(0); g_G[PROBE_ALL] = 0; g_G[CUT] = 0;
     CoXlTestNearResetTick();
-    CHECK(Frames() == 0 && g_G[PROBE_ALL] == 0 && CoXlTestNearResetState() == 2);
+    CHECK(Frames() == 0 && g_G[PROBE_ALL] == 0 && g_G[CUT] == 0 && CoXlTestNearResetState() == 2);
 
     CoXlTestNearReset(0, 1);
     CoXlTestNearReplaying(0);

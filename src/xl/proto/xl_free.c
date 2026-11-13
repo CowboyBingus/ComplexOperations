@@ -213,7 +213,7 @@ static int MoveReleaseDue(ULONGLONG now)
  * anyway. 1 when the frame went to a release. */
 static int MoveReleaseTick(ULONGLONG now)
 {
-    if (g_move.players == 0) return 0;
+    if (g_move.players == 0 || MoveLayerWait()) return 0;
     MoveKeepSeen(now);
     int k = MoveReleaseDue(now);
     if (k < 0) { g_move.drainWaits = 0; return 0; }
