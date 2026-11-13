@@ -17,7 +17,9 @@ HERE = os.path.dirname(os.path.abspath(__file__)) + '/sites/'
 # name: (global, offset in the block, size, new size, [(old start, old end, new start) of each array that moves])
 MANAGERS = {
     'score':              (0x3326AE0, 0x7C7368, 0x37E38, 0x380A0, [(0x37D70, 0x37D90, 0x37EE0), (0xC440, 0xC4A0, 0x37F20), (0xC4A0, 0xC500, 0x37FE0)]),
-    'customization':      (0x33264F8, 0xE9FC98, 0xB80,   0xEA8,   [(0x968, 0x96C, 0xC80), (0x96C, 0xA7C, 0xC88)]),
+    # The applied records (0x44 each) move a whole number of records, so the game's (slot + 0x24) * 0x44 reads of the
+    # voice stay right with a new 0x24 (VOICE).
+    'customization':      (0x33264F8, 0xE9FC98, 0xB80,   0xEBC,   [(0x968, 0x96C, 0xC80), (0x96C, 0xA7C, 0xC9C)]),
     'kill_streak':        (0x3326AF0, 0x2A988,  0x4A8,   0xCE8,   [(0x88, 0x4A8, 0x4A8)]),
     'ship_inventory':     (0x33266D0, 0xEB5178, 0x168,   0x318,   [(0x90, 0x160, 0x170), (0x160, 0x164, 0x310)]),
     'ship_customization': (0x33267B8, 0x3CA0,   0x2B8,   0x620,   [(0x90, 0x98, 0x398), (0x98, 0x1D8, 0x3A0)]),
@@ -37,7 +39,8 @@ EIGHT_ONLY = set(MANAGERS)
 # Sites the lists miss, found later: (manager, rva, offset of the disp32, old value[, what it adds])
 # The avatar's FOLD at 0xA4F4FD: add r9,0xE6; shl r9,5 reaches A1 + 0x1B70 of a slot (0xE6 x 32 = 0x150 + 0x1B70) with
 # no array offset of its own, so it adds A1's distance divided by 32.
-EXTRA = [('player', 0xACC65B, 3, 0x2C8), ('avatar', 0xA4F4FD, 3, 0xE6, (0x5497D0 - 0x150) // 32)]
+# 0xAB0A2E: add rax,0x96C, an immediate, not a displacement (dead code, kept so that every form of the record is moved).
+EXTRA = [('player', 0xACC65B, 3, 0x2C8), ('avatar', 0xA4F4FD, 3, 0xE6, (0x5497D0 - 0x150) // 32), ('customization', 0xAB0A2E, 2, 0x96C)]
 assert (0x5497D0 - 0x150) % 32 == 0
 # More site lists of a manager. Score's loot tables (four rows of 0x18 by score slot at +0xC440, four by player index at
 # +0xC4A0) move behind the manager, so that eight rows of each fit.
@@ -51,6 +54,15 @@ LOOPS = [('score', 0x63090B, '83 f9 04', 2), ('score', 0x63095B, '83 f8 04', 2),
 # r14d of the loop at 0x1380C68 is also the mission end report's outcome code, read at 0x1380F0B: mov eax,r14d becomes
 # push 4; pop rax, the value it had. (manager, rva, four bytes, four new bytes)
 CODE = [('score', 0x1380F0B, '41 8b c6 89', '6a 04 58 89')]
+# The applied voice read as (slot + 0x24) * 0x44 from the manager, an immediate the site lists miss. Left at 0x24, the
+# avatar spawn (0x878260, from 0xAC9A69 and 0xADC494) finds no voice in the empty old place and spawns every Helldiver
+# without the voice delta: no voice lines. 0xB51CB2 is the language change's package release; 0x879C6B and 0x879F42
+# are dead copies.
+APPLIED = [new - lo for lo, _, new in MANAGERS['customization'][4] if lo == 0x96C][0]
+assert APPLIED % 0x44 == 0 and 0x24 + APPLIED // 0x44 < 0x80
+VOICE = 0x24 + APPLIED // 0x44
+for rva, raw in [(0x878329, '48 83 c0 24'), (0x879C6B, '48 83 c1 24'), (0x879F42, '48 83 c0 24'), (0xB51CB2, '48 83 c0 24')]:
+    CODE.append(('customization', rva, raw, raw[:-2] + '%02x' % VOICE))
 # The loot rows' clears and sums, written out for four rows. With the rows moved, a jump replaces the first instruction
 # and the mod's code does the eight rows at their new place: a clear stores the replaced instruction's 16 bytes and rows
 # 4 to 7 (the game's other stores are ARRAY rows and clear the rest; xmm0 is zero there), a sum adds the count at +0xC of

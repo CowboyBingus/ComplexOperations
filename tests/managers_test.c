@@ -42,6 +42,9 @@ void co_pods_test_reset(void);
 #define LOOT_SUM 0x6309B7u          /* mov eax,[rcx+0xC494]: a sum of four rows, then three adds and ret */
 #define LOOT_TEAM 0x126EC60u        /* mov eax,[rdi+0xC494]: the team's sum of four rows */
 #define ENTER 0x34C0000u            /* free in the stand-in: the test's way into the caves */
+#define APPLIED_SITE 0x874565u      /* lea r15,[customization + 0x96C]: the applied records (0x44 each), disp32 at +3 */
+/* add rax/rcx,0x24 then imul 0x44: the applied voice of a slot. 0x878329 is the avatar spawn's voice delta. */
+static const uint32_t kVoiceSites[] = {0x878329u, 0x879C6Bu, 0x879F42u, 0xB51CB2u};
 
 typedef uint64_t (*CtorFn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 typedef void (*ClearFn)(void*, const void*);
@@ -141,6 +144,7 @@ int main(void)
 #if CO_PLAYERS < 8
     /* A build for four joins four players and leaves every manager where the game and other mods expect it. */
     CHECK(sites == 0 && co_managers_test_state() == -1 && g_fake.writes == 0);
+    for (size_t i = 0; i < sizeof kVoiceSites / sizeof kVoiceSites[0]; i++) CHECK(g_fake.image[kVoiceSites[i] + 3] == 0x24);
     CHECK(fake_host_logged("players: a build for four keeps the game's player managers"));
     CHECK(!fake_host_logged("component managers") && !fake_host_logged("loot rows"));
     BuildState(SECOND_STATE);
@@ -153,6 +157,12 @@ int main(void)
     CHECK(fake_host_logged("players: the score manager's loot rows are cleared and added for eight rows (6 caves)"));
     CHECK(g_fake.image[CAPACITY_SITE + 2] == 8 && U32(ARRAY_SITE + 3) == 0x828u);
     CHECK(ReachesManager(FIRST_STATE));
+    /* Every read of a slot's voice lands on that slot's applied voice at the records' new place; a read left at the old
+     * place finds no voice, and the avatar spawns without one. */
+    CHECK(U32(APPLIED_SITE + 3) != 0x96Cu);
+    for (size_t i = 0; i < sizeof kVoiceSites / sizeof kVoiceSites[0]; i++)
+        for (uint32_t slot = 0; slot < 8; slot++)
+            CHECK((slot + g_fake.image[kVoiceSites[i] + 3]) * 0x44u == U32(APPLIED_SITE + 3) + slot * 0x44u + 0x24u);
     /* the loot rows: eight of each behind the manager, loops of eight, and push 4; pop rax for the outcome code */
     {
         static const uint8_t kOutcome[] = {0x6A, 0x04, 0x58, 0x89};
