@@ -58,6 +58,7 @@ enum { MV_IDLE, MV_PACKAGE, MV_STAMPS, MV_KICK, MV_SETUP, MV_LOOKUP, MV_REPLAY, 
 #define MOVE_STAMPS_MAX 32768u /* the plan's stamps in reach too (difficulty_stream_window.c): a tile at vanilla density */
 #define MOVE_STAMP_MARGIN 512.0f /* locations this far past the tile's texels: a stamp's terrain reaches ~256 m from it */
 #define MOVE_STAMP_REACH 256.0f /* a stamp's terrain reaches about this far from it: these go in first */
+#define MOVE_UNSTAMP_MS 2.0 /* game-thread time a frame for the stamp units' destroys */
 
 typedef void (*MoveUpdateFn)(uint64_t level);
 typedef void (*MoveCraterUpdateFn)(void* system, float dt, uint64_t r8, uint64_t r9);
@@ -81,6 +82,7 @@ static struct
     /* the stamp terrains of the tile's locations (0x2F spawns them for 0x63 to draw, 0x65 takes them away): staging
      * copies of their records, the real indices, their units, the counts the two ops read through pointers */
     uint8_t* stLoc; uint32_t* stIndex; uint64_t* stUnit; uint32_t stCount, stUnits, stTemp; int stamped;
+    uint32_t stGone, stFrames; double stMs, stLongest; /* the stamp units' destroys so far, spread over frames */
     ULONGLONG since, started;
     uint8_t ctx[0xE8];
     uint8_t settings[0xD0];
@@ -97,6 +99,8 @@ static struct
     float player[EVT_MAX_PLAYERS + 2][2];
     int players;
 } g_move = {.level = -1};
+/* A tile change's stamp flags, waiting for its grids (MoveReplaceLater). */
+static struct { int on, slot, hasGone; NearTile gone; float cx, cy; const char* why; } g_moveReplace;
 
 static int FarGrassBusy(void); /* difficulty_world_fargrass.c */
 static void FarGrassTick(uint64_t level);
@@ -199,6 +203,7 @@ static void MoveRestoreDrop(void)
 /* A new level starts (TerrainNearReplay's first call): the last level's world is gone with every tile in it. */
 static void MoveLevelGone(void)
 {
+    NearLayerSettle();
     if (g_move.state != MV_IDLE && g_move.stashed)
         MoveFreeNow(g_move.dropTex[0] == g_near.tex[0] ? 0 : g_move.dropTex[0], g_move.dropTex[1] == g_near.tex[1] ? 0 : g_move.dropTex[1],
             g_move.dropBand == g_matband.tex ? 0 : g_move.dropBand, g_move.dropBand == g_matband.tex ? NULL : g_move.dropBandPixels);
@@ -211,7 +216,8 @@ static void MoveLevelGone(void)
             g_tiles[k].tex[0] = g_tiles[k].tex[1] = g_tiles[k].band = 0; g_tiles[k].bandPixels = NULL;
         }
     g_move.state = MV_IDLE; g_move.level = -1; g_move.on = 0;
-    g_move.stTemp = 0; g_move.stamped = 0; /* their levels went with the world */
+    g_move.stTemp = g_move.stGone = 0; g_move.stamped = 0; /* their levels went with the world */
+    g_moveReplace.on = 0;
     InterlockedExchange(&g_moveBuilding, 0);
     MoveHold(0);
 }
@@ -318,27 +324,45 @@ static int MoveStampUnitsReady(void)
     return 1;
 }
 
-static void MoveStampUnitsDestroy(void)
+/* 1 once every stamp unit is gone. Each destroy scans the world's unit list and its second list (exe 0x3389C3,
+ * 0x1B47E0), so a tile's 30000 in one frame held it for about 240 ms; a frame gives them `budget` ms. */
+static int MoveStampUnitsDestroy(double budget)
 {
+    if (g_move.stGone >= g_move.stTemp) { g_move.stTemp = g_move.stGone = 0; g_nearStampOffset[0] = g_nearStampOffset[1] = 0.0f; return 1; }
     uint64_t world = MoveWorld();
     uintptr_t wi = 0, table = 0, destroy = 0;
     if (world == 0 || SafeRead(g_world.game + DIF_STREAM_INTERFACE, &wi, 8) || wi == 0 || SafeRead(wi + DIF_STREAM_TABLE, &table, 8) || table == 0 ||
-        SafeRead(table + DIF_STREAM_DESTROY_ENTRY, &destroy, 8) || destroy == 0) { g_move.stTemp = 0; return; }
+        SafeRead(table + DIF_STREAM_DESTROY_ENTRY, &destroy, 8) || destroy == 0) { g_move.stTemp = g_move.stGone = 0; return 1; }
     /* the animation wait first, as every game destroy (difficulty_stream.c, DIF_STREAM_ANIM_WAIT_ENTRY); this runs before
      * the async kick today (the level-update hook, game 0xAB519E), where the wait returns at once */
     uintptr_t wait = WorldStreamAnimWait(table);
-    if (wait == 0) { Note("difficulty: near terrain: the tile's stamp units kept: the animation wait is not the reviewed one"); g_move.stTemp = 0; return; }
+    if (wait == 0) { Note("difficulty: near terrain: the tile's stamp units kept: the animation wait is not the reviewed one"); g_move.stTemp = g_move.stGone = 0; return 1; }
     ((WorldStreamAnimWaitFn)wait)(world);
-    for (uint32_t k = 0; k < g_move.stTemp; k++) if (g_move.stUnit[k] != 0) ((WorldStreamDestroyUnitFn)destroy)(world, g_move.stUnit[k], 0, 0);
-    g_move.stTemp = 0;
+    LARGE_INTEGER hz, t0, t;
+    QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
+    const LONGLONG limit = budget >= 1e6 ? INT64_MAX : (LONGLONG)(budget * (double)hz.QuadPart / 1000.0); /* 1e30: no limit */
+    uint32_t k = g_move.stGone;
+    do
+    {
+        if (g_move.stUnit[k] != 0) ((WorldStreamDestroyUnitFn)destroy)(world, g_move.stUnit[k], 0, 0);
+        QueryPerformanceCounter(&t);
+    } while (++k < g_move.stTemp && t.QuadPart - t0.QuadPart < limit);
+    const double ms = (double)(t.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+    g_move.stGone = k; g_move.stFrames++; g_move.stMs += ms;
+    if (ms > g_move.stLongest) g_move.stLongest = ms;
+    if (k < g_move.stTemp) return 0;
+    Note("difficulty: moving tiles: the tile's %u stamp units went over %u frames (%.0f ms in all, the longest frame %.1f ms)", g_move.stTemp,
+        g_move.stFrames, g_move.stMs, g_move.stLongest);
+    g_move.stTemp = g_move.stGone = g_move.stFrames = 0; g_move.stMs = g_move.stLongest = 0.0;
     g_nearStampOffset[0] = g_nearStampOffset[1] = 0.0f;
+    return 1;
 }
 
 /* The locations whose stamps reach the cell's tile (their record xy +0 in generator metres, world + half), each with a
  * stamp unit of its own at the offset, copied for 0x2F. */
 static uint32_t MoveStampsSelect(uint64_t locs, uint32_t count, float half)
 {
-    g_move.stCount = 0; g_move.stUnits = 0; g_move.stTemp = 0;
+    g_move.stCount = 0; g_move.stUnits = 0; g_move.stTemp = 0; g_move.stGone = 0;
     if (g_move.stLoc == NULL)
     {
         g_move.stLoc = (uint8_t*)VirtualAlloc(NULL, (size_t)MOVE_STAMPS_MAX * 0xE0, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -533,7 +557,7 @@ static void MoveTeardown(void)
 /* The rest of a failed build, once its stamp terrains are away. */
 static void MoveFailRest(void)
 {
-    MoveStampUnitsDestroy();
+    MoveStampUnitsDestroy(1e30);
     MoveTeardown();
     if (g_move.failState >= MV_SPAWN && g_near.handle != 0 && g_near.handle != g_move.dropHandle)
     {
@@ -625,6 +649,7 @@ static int MoveStampGroundMoved(uint32_t i, int slot, const NearTile* gone, floa
  * window stamp enters its slot again from the plan, a level location is due again. A stamp whose ground stayed within
  * MOVE_STAMP_MOVED stays (taking every one in reach out made 1568 stamps pop over 12 s for one tile). The mission's
  * stamps and the start area's content are never streamed. Game thread. Returns how many were flagged. */
+static int MoveLayerWait(void);
 static uint32_t MoveStampsReplace(int slot, const NearTile* gone, float cx, float cy, const char* why)
 {
     if (g_streamInstallState != 1 || g_streamInside) return 0;
@@ -652,6 +677,28 @@ static uint32_t MoveStampsReplace(int slot, const NearTile* gone, float cx, floa
             why, (double)cx, (double)cy, flagged, inReach, (double)MOVE_STAMP_MOVED, (unsigned)kStreamReplaceBatch,
             (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart);
     return flagged;
+}
+
+/* The stamps on moved ground are flagged once the grids hold the new ground (NearLayerTileChangeLater's fills): a
+ * stamp put back before would read the old. `gone`'s copy is kept: its ground is the tile's slot buffer, which no
+ * build reuses while a change is pending (MoveLayerWait). */
+static void MoveReplaceLater(int slot, const NearTile* gone, float cx, float cy, const char* why)
+{
+    g_moveReplace.slot = slot; g_moveReplace.hasGone = gone != NULL; if (gone) g_moveReplace.gone = *gone;
+    g_moveReplace.cx = cx; g_moveReplace.cy = cy; g_moveReplace.why = why; g_moveReplace.on = 1;
+    MoveLayerWait();
+}
+
+/* 1 while a tile change's grids fill; the stamps' flags follow when they are done. Game thread. */
+static int MoveLayerWait(void)
+{
+    if (NearLayerBusy()) return 1;
+    if (g_moveReplace.on)
+    {
+        g_moveReplace.on = 0;
+        MoveStampsReplace(g_moveReplace.slot, g_moveReplace.hasGone ? &g_moveReplace.gone : NULL, g_moveReplace.cx, g_moveReplace.cy, g_moveReplace.why);
+    }
+    return 0;
 }
 
 static float MoveCoarseHere(uintptr_t data, float wx, float wy);
@@ -688,8 +735,8 @@ static void MoveRelease(int slot)
     int raised = NearRaiseCoarse(world, &g_tileHidden[slot]);
     g_tileHidden[slot].lowered = 0;
     NearHideUnion(world, "a tile released");
-    NearLayerTileChange(slot, 0, t.centre[0], t.centre[1]);
-    MoveStampsReplace(slot, &t, t.centre[0], t.centre[1], "a tile went");
+    NearLayerTileChangeLater(slot, 0, t.centre[0], t.centre[1]);
+    MoveReplaceLater(slot, &t, t.centre[0], t.centre[1], "a tile went");
     typedef void (*DestroyFn)(uint64_t world, uint64_t handle);
     DestroyFn destroy = (DestroyFn)NearApi(0x08, 0x1E0);
     g_move.destroyTicks = -1;
@@ -793,20 +840,38 @@ static int MoveReplayBegin(void)
 }
 
 /* After the finalize: the coarse terrain under the tile, its ground, the tile in the list. */
+/* The "ready" frame's parts (ms), for the build's cost line: the game's ready call and finalize, the coarse square
+ * hidden, the tile's heights copied, its band taken, the hide union, the layer change started, the stamps flagged. */
+static double g_moveReadyMs[7];
+static double MoveMsSince(LARGE_INTEGER* t)
+{
+    LARGE_INTEGER now, hz; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&hz);
+    double ms = (double)(now.QuadPart - t->QuadPart) * 1000.0 / (double)hz.QuadPart;
+    *t = now;
+    return ms;
+}
+
 static void MoveTileIn(uint64_t world)
 {
     int slot = g_move.slot, x0 = 0, y0 = 0;
+    LARGE_INTEGER t; QueryPerformanceCounter(&t);
     NearCellSquare(g_move.cell[0], g_move.cell[1], g_move.centre[0], g_move.centre[1], &x0, &y0);
     NearHideCoarse(world, x0, y0, &g_tileHidden[slot]);
+    g_moveReadyMs[1] = MoveMsSince(&t);
     NearGround ground;
     NearGroundOf(world, g_near.handle, NEAR_SPAN, g_move.centre[0], g_move.centre[1], &ground, &g_groundBuf[slot]);
     NearTileAdd(slot, g_move.centre[0], g_move.centre[1], g_near.handle, &ground);
+    g_moveReadyMs[2] = MoveMsSince(&t);
     g_tiles[slot].cell[0] = g_move.cell[0]; g_tiles[slot].cell[1] = g_move.cell[1];
     g_tiles[slot].tex[0] = g_near.tex[0]; g_tiles[slot].tex[1] = g_near.tex[1];
     MoveTileTakeBand(slot);
+    g_moveReadyMs[3] = MoveMsSince(&t);
     NearHideUnion(world, "a tile built in mission");
-    NearLayerTileChange(slot, 1, g_move.centre[0], g_move.centre[1]);
-    MoveStampsReplace(slot, NULL, g_move.centre[0], g_move.centre[1], "a tile is in");
+    g_moveReadyMs[4] = MoveMsSince(&t);
+    NearLayerTileChangeLater(slot, 1, g_move.centre[0], g_move.centre[1]);
+    g_moveReadyMs[5] = MoveMsSince(&t);
+    MoveReplaceLater(slot, NULL, g_move.centre[0], g_move.centre[1], "a tile is in");
+    g_moveReadyMs[6] = MoveMsSince(&t);
     g_move.built++;
     Note("difficulty: moving tiles: the tile of cell (%d, %d) is in after %.1f s (%u frames): ground %s, centre %.2f m (coarse %.2f m); %d tiles live; craters held %lld updates",
         g_move.cell[0], g_move.cell[1], (double)(GetTickCount64() - g_move.started) / 1000.0, g_move.frames, ground.v != NULL ? "read" : "NOT read",
@@ -1066,6 +1131,7 @@ static void MoveTick(uint64_t level)
     co_framecost_nested(CO_FC_GROUNDKEEP, CO_FC_MOVE, fc);
     MoveFreeTick(0);
     MovePlayers();
+    MoveLayerWait();
     if (MoveReleaseTick(now)) return; /* a release, or a frame held for one: a build's step waits for the next */
     if (MoveTrimTick()) return;
     if (g_move.state == MV_IDLE)
@@ -1207,7 +1273,8 @@ static void MoveTick(uint64_t level)
             if (r != 1) Note("difficulty: moving tiles: the stamp terrains were not all taken away (0x65: %d)", r);
             g_move.stamped = 0; g_move.ringWaits = 0;
         }
-        if (!MoveStampUnitsReady()) return;
+        if (g_move.stGone == 0 && !MoveStampUnitsReady()) return;
+        if (!MoveStampUnitsDestroy(MOVE_UNSTAMP_MS)) return;
         MoveFailRest();
         return;
     }
@@ -1221,8 +1288,8 @@ static void MoveTick(uint64_t level)
             if (r == 0) { if (++g_move.waits > 600) { g_move.stamped = 0; MoveFail("0x65 did not finish"); } return; }
             g_move.stamped = 0; g_move.ringWaits = 0;
         }
-        if (!MoveStampUnitsReady()) return;
-        MoveStampUnitsDestroy();
+        if (g_move.stGone == 0 && !MoveStampUnitsReady()) return;
+        if (!MoveStampUnitsDestroy(MOVE_UNSTAMP_MS)) return;
         MoveTeardown();
         memcpy(g_near.one69, g_near.keep69, sizeof g_near.one69); memcpy(g_near.one6B, g_near.keep6B, sizeof g_near.one6B);
         g_move.state = MV_SPAWN;
@@ -1237,8 +1304,11 @@ static void MoveTick(uint64_t level)
     }
     if (g_move.state == MV_READY)
     {
+        if (MoveLayerWait()) return; /* the last change's grids first: the tile's slot buffers and grids are its */
         uint64_t world = 0;
+        LARGE_INTEGER t; QueryPerformanceCounter(&t);
         if (NearReadyTile((uint64_t)(uintptr_t)g_move.ctx, &world)) return;
+        g_moveReadyMs[0] = MoveMsSince(&t);
         if (g_near.state == NEAR_FAILED) { MoveFail("the tile was not ready"); return; }
         MoveTileIn(world);
         g_move.state = MV_IDLE;
@@ -1248,7 +1318,20 @@ static void MoveTick(uint64_t level)
 /* What a build costs the game thread: MoveTick's time in each frame of a build, the six longest with the build's state,
  * the replay's step and the conform's phase at the frame's start; noted once the build is over (the frame after the tile
  * is in, or after a failure). */
-static struct { double ms[6]; int mv[6], ns[6], step[6], conf[6], bld[6]; double sum; uint32_t frames; int pending; } g_moveCost;
+static struct { double ms[6]; int mv[6], ns[6], step[6], conf[6], bld[6]; double sum; uint32_t frames; int pending;
+    double wall[3]; int wallMv[3]; uint32_t slow; } g_moveCost;
+/* Wall-clock frames, level update to level update (once a frame on the game thread, 0xAB519E): the whole frame's time,
+ * render and other threads' waits included, which the game-thread cost above leaves out. */
+static struct { LARGE_INTEGER last; int mv; } g_moveWall;
+static void MoveWallAdd(double ms, int mv)
+{
+    if (ms > 50.0) g_moveCost.slow++;
+    int at = 3;
+    while (at > 0 && ms > g_moveCost.wall[at - 1]) at--;
+    if (at >= 3) return;
+    for (int k = 2; k > at; k--) { g_moveCost.wall[k] = g_moveCost.wall[k - 1]; g_moveCost.wallMv[k] = g_moveCost.wallMv[k - 1]; }
+    g_moveCost.wall[at] = ms; g_moveCost.wallMv[at] = mv;
+}
 
 static void MoveCostAdd(double ms, int mv, int ns, int step, int conf, int bld)
 {
@@ -1268,6 +1351,13 @@ static void MoveCostNote(void)
         n += snprintf(line + n, sizeof line - n, " %.0f ms (%s, near state %d, step %d, building %d, conform phase %d);", g_moveCost.ms[k],
             MoveStateName(g_moveCost.mv[k]), g_moveCost.ns[k], g_moveCost.step[k], g_moveCost.bld[k], g_moveCost.conf[k]);
     Note("difficulty: moving tiles: the build's cost on the game thread: %.0f ms over %u frames; the longest:%s", g_moveCost.sum, g_moveCost.frames, line);
+    Note("difficulty: moving tiles: the ready frame: ready and finalize %.1f ms, coarse hidden %.1f, heights copied %.1f, band %.1f, hide union %.1f, "
+        "layer change started %.1f, stamps flagged %.1f", g_moveReadyMs[0], g_moveReadyMs[1], g_moveReadyMs[2], g_moveReadyMs[3], g_moveReadyMs[4],
+        g_moveReadyMs[5], g_moveReadyMs[6]);
+    memset(g_moveReadyMs, 0, sizeof g_moveReadyMs);
+    Note("difficulty: moving tiles: the build's wall-clock frames: the longest %.0f ms (%s), %.0f ms (%s), %.0f ms (%s); %u over 50 ms",
+        g_moveCost.wall[0], MoveStateName(g_moveCost.wallMv[0]), g_moveCost.wall[1], MoveStateName(g_moveCost.wallMv[1]), g_moveCost.wall[2],
+        MoveStateName(g_moveCost.wallMv[2]), g_moveCost.slow);
     memset(&g_moveCost, 0, sizeof g_moveCost);
 }
 
@@ -1280,10 +1370,14 @@ static void MoveLevelUpdate(uint64_t level)
     int64_t fc = co_framecost_now();
     MoveScatterTick();
     co_framecost_add(CO_FC_SCATTER, fc);
+    NearResetTick();
     g_moveUpdate(level);
     int mv = g_move.state, ns = g_near.state, step = g_near.step, conf = g_conform.phase, bld = g_near.building;
     LARGE_INTEGER t0, t1, hz;
-    QueryPerformanceCounter(&t0);
+    QueryPerformanceCounter(&t0); QueryPerformanceFrequency(&hz);
+    if (g_moveWall.last.QuadPart != 0 && (g_moveWall.mv != MV_IDLE || g_moveCost.pending))
+        MoveWallAdd((double)(t0.QuadPart - g_moveWall.last.QuadPart) * 1000.0 / (double)hz.QuadPart, g_moveWall.mv);
+    g_moveWall.last = t0; g_moveWall.mv = mv;
     MoveTick(level);
     QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
     g_hitchCost.tiles += (float)((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart);
@@ -1318,6 +1412,7 @@ static void MoveInstall(uintptr_t game)
  * all of them up after its own level init (0x69, the replay, a build in play), so this clears only an older level's. */
 static void NearLevelLeft(int ship)
 {
+    NearLayerSettle();
     NearOneMipDisarm();
     InterlockedExchange(&g_nearActive, 0);
     MoveHold(0);

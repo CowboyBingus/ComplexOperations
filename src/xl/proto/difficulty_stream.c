@@ -1216,7 +1216,9 @@ static void WorldStreamTick(float dt)
     const double t1 = HitchNow();
     WindowScanLocked(now); /* the planned stamps near the players into the window (difficulty_stream_window.c) */
     const double t2 = HitchNow();
-    WorldStreamSpawnDueLocked();
+    /* a tile's layer fill takes grids out of use while it writes them (NearLayerChangeFill): a stamp spawned then would
+     * miss its grid and stand on the coarse heights, so the spawns wait the few frames until it is done */
+    if (!g_layerJob.running) WorldStreamSpawnDueLocked();
     const double t3 = HitchNow();
     g_hitchCost.stream += (float)(t1 - t0); g_hitchCost.window += (float)(t2 - t1); g_hitchCost.spawn += (float)(t3 - t2);
     g_hitchCost.removed += (uint16_t)(g_stream.removed - removed); g_hitchCost.entered += (uint16_t)(WindowEntered() - entered);
