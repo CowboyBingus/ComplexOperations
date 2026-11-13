@@ -6668,6 +6668,7 @@ static void NearLayerPendingAdd(uint64_t unit, float x, float y)
     ReleaseSRWLockExclusive(&g_layerPending.lock);
 }
 
+static void NearLayerMembersNote(const char* when);
 static void NearLayerSpawnNote(const char* when)
 {
     AcquireSRWLockShared(&g_layerSpawnNote.lock);
@@ -6686,6 +6687,7 @@ static void NearLayerSpawnNote(const char* when)
             g_layerPending.count, g_layerPending.expired, g_layerPending.lost);
     }
     ReleaseSRWLockShared(&g_layerSpawnNote.lock);
+    NearLayerMembersNote(when);
 }
 
 /* What an inline reader takes at (x, y) from `desc`: a grid's nearest sample, else the level's kept heightfield. */
@@ -6694,6 +6696,98 @@ static float NearSpawnRead(uint64_t desc, float x, float y)
     for (int k = 0; k < NEAR_TILES_MAX; k++)
         if (desc == (uint64_t)(uintptr_t)g_layerGrid[k].desc[0] || desc == (uint64_t)(uintptr_t)g_layerGrid[k].desc[1]) return NearTraceGridAt(k, x, y);
     return NearTraceLevelAt(x, y);
+}
+
+/* Prefab members' final poses (exe 0x232600 hands 0x12CFD0 one 4x4 matrix per member, rows x, y, z axes then the
+ * translation) near players against the drawn ground. A member within 0.25 m of the ground it was given is set on it,
+ * so its height over the drawn ground is the float a player sees; the z axis gives its tilt against both grounds. */
+#define NEAR_MEMBER_SET 0.25f
+#define NEAR_MEMBER_TILT 5.0f
+#define NEAR_MEMBER_LINES 10
+static struct
+{
+    SRWLOCK lock; LONG level, batches, members, nearby, set, above, below, aligned, tilted, lines;
+    float worst, worstAt[2], worstTilt, tiltAt[2];
+} g_layerMembers = {SRWLOCK_INIT, -1};
+static void NearMemberNormal(uint64_t desc, int drawn, float x, float y, float n[3])
+{
+    float a = drawn ? NearVisibleAt(x - 2.0f, y) : NearSpawnRead(desc, x - 2.0f, y), b = drawn ? NearVisibleAt(x + 2.0f, y) : NearSpawnRead(desc, x + 2.0f, y);
+    float c = drawn ? NearVisibleAt(x, y - 2.0f) : NearSpawnRead(desc, x, y - 2.0f), d = drawn ? NearVisibleAt(x, y + 2.0f) : NearSpawnRead(desc, x, y + 2.0f);
+    n[0] = (a - b) / 4.0f; n[1] = (c - d) / 4.0f; n[2] = 1.0f;
+    float l = sqrtf(n[0] * n[0] + n[1] * n[1] + 1.0f);
+    n[0] /= l; n[1] /= l; n[2] /= l;
+}
+static float NearMemberAngle(const float u[3], const float n[3])
+{
+    float d = u[0] * n[0] + u[1] * n[1] + u[2] * n[2];
+    return acosf(d > 1.0f ? 1.0f : d < -1.0f ? -1.0f : d) * 57.29578f;
+}
+static void NearLayerMembers(uint64_t desc, const float* poses, uint32_t count)
+{
+    LONG nearby = 0, set = 0, above = 0, below = 0, aligned = 0, tilted = 0;
+    float worst = 0, worstAt[2] = {0}, worstTilt = 0, tiltAt[2] = {0};
+    char lines[NEAR_MEMBER_LINES][200]; int n = 0;
+    for (uint32_t i = 0; i < count && i < 512; i++)
+    {
+        float m[16], distance = 0;
+        if (SafeRead((uint64_t)(uintptr_t)(poses + (size_t)i * 16), m, sizeof m)) break;
+        float x = m[12], y = m[13], z = m[14];
+        if (!isfinite(x) || !isfinite(y) || !isfinite(z) || !WorldStreamNearPlayer(x, y, NEAR_PROBE_RADIUS, &distance)) continue;
+        float used = NearSpawnRead(desc, x, y), drawn = NearVisibleAt(x, y);
+        if (used < -9000.0f || drawn < -9000.0f) continue;
+        nearby++;
+        float l = sqrtf(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]);
+        if (l < 1e-6f) continue;
+        float up[3] = {m[8] / l, m[9] / l, m[10] / l}, nu[3], nd[3];
+        NearMemberNormal(desc, 0, x, y, nu); NearMemberNormal(desc, 1, x, y, nd);
+        float tu = NearMemberAngle(up, nu), td = NearMemberAngle(up, nd), vertical = acosf(up[2] > 1.0f ? 1.0f : up[2]) * 57.29578f;
+        int off = 0;
+        if (fabsf(z - used) < NEAR_MEMBER_SET)
+        {
+            set++;
+            float h = z - drawn;
+            if (h > NEAR_SPAWN_OFF) { above++; off = 1; } else if (h < -NEAR_SPAWN_OFF) { below++; off = 1; }
+            if (fabsf(h) > worst) { worst = fabsf(h); worstAt[0] = x; worstAt[1] = y; }
+        }
+        if (tu < 2.0f && vertical > 2.0f) /* turned to the slope it was given */
+        {
+            aligned++;
+            if (td > NEAR_MEMBER_TILT) { tilted++; off = 1; }
+            if (td > worstTilt) { worstTilt = td; tiltAt[0] = x; tiltAt[1] = y; }
+        }
+        if (off && n < NEAR_MEMBER_LINES)
+            snprintf(lines[n++], sizeof lines[0], "at (%.1f, %.1f), %.0f m from a player: z %.2f, given %.2f, drawn %.2f; tilt %.1f deg off the given ground, %.1f off the drawn",
+                (double)x, (double)y, (double)distance, (double)z, (double)used, (double)drawn, (double)tu, (double)td);
+    }
+    int print = 0;
+    AcquireSRWLockExclusive(&g_layerMembers.lock);
+    if (g_layerMembers.level != g_world.levels)
+    {
+        g_layerMembers.level = g_world.levels;
+        g_layerMembers.batches = g_layerMembers.members = g_layerMembers.nearby = g_layerMembers.set = g_layerMembers.above = g_layerMembers.below = 0;
+        g_layerMembers.aligned = g_layerMembers.tilted = g_layerMembers.lines = 0;
+        g_layerMembers.worst = g_layerMembers.worstTilt = 0;
+    }
+    g_layerMembers.batches++; g_layerMembers.members += (LONG)count; g_layerMembers.nearby += nearby; g_layerMembers.set += set;
+    g_layerMembers.above += above; g_layerMembers.below += below; g_layerMembers.aligned += aligned; g_layerMembers.tilted += tilted;
+    if (worst > g_layerMembers.worst) { g_layerMembers.worst = worst; g_layerMembers.worstAt[0] = worstAt[0]; g_layerMembers.worstAt[1] = worstAt[1]; }
+    if (worstTilt > g_layerMembers.worstTilt) { g_layerMembers.worstTilt = worstTilt; g_layerMembers.tiltAt[0] = tiltAt[0]; g_layerMembers.tiltAt[1] = tiltAt[1]; }
+    if (n > 0 && g_layerMembers.lines < NEAR_MEMBER_LINES) { print = NEAR_MEMBER_LINES - g_layerMembers.lines; if (print > n) print = n; g_layerMembers.lines += print; }
+    ReleaseSRWLockExclusive(&g_layerMembers.lock);
+    for (int k = 0; k < print; k++) Note("difficulty: near terrain: layer member off the ground (%s): %s", NearLayerIsGrid(desc) ? "a tile's grid" : "the level's heights", lines[k]);
+}
+static void NearLayerMembersNote(const char* when)
+{
+    AcquireSRWLockShared(&g_layerMembers.lock);
+    if (g_layerMembers.level == g_world.levels && g_layerMembers.batches > 0)
+        Note("difficulty: near terrain: layer members (%s): %ld placed by %ld prefab batches, %ld within %.0f m of a player; %ld set on the ground they were given, "
+            "%ld of them over %.1f m above the drawn ground and %ld under it (worst %.2f m at %.0f, %.0f); %ld turned to their ground's slope, %ld of them over %.0f deg "
+            "off the drawn ground's (worst %.1f deg at %.0f, %.0f)",
+            when, (long)g_layerMembers.members, (long)g_layerMembers.batches, (long)g_layerMembers.nearby, (double)NEAR_PROBE_RADIUS, (long)g_layerMembers.set,
+            (long)g_layerMembers.above, (double)NEAR_SPAWN_OFF, (long)g_layerMembers.below, (double)g_layerMembers.worst, (double)g_layerMembers.worstAt[0],
+            (double)g_layerMembers.worstAt[1], (long)g_layerMembers.aligned, (long)g_layerMembers.tilted, (double)NEAR_MEMBER_TILT, (double)g_layerMembers.worstTilt,
+            (double)g_layerMembers.tiltAt[0], (double)g_layerMembers.tiltAt[1]);
+    ReleaseSRWLockShared(&g_layerMembers.lock);
 }
 
 /* `again`: a second choice after a refill (WorldLayerSpawn), not counted twice. */

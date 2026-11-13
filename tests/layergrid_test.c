@@ -39,6 +39,8 @@ void CoXlTestProbe(char kind, float x, float y, float used, int why);
 void CoXlTestProbeCounts(long* reads, long* off, long* written);
 uint64_t CoXlTestLayerSpawn(uint64_t unit, uint64_t count, uint64_t field);
 uint64_t CoXlTestThunk(int which, float* out, uint64_t* r9, uint64_t* fifth);
+void CoXlTestMembers(uint64_t desc, const float* poses, uint32_t count);
+void CoXlTestMembersNote(void);
 uint64_t CoXlTestLayerSnap(uint64_t unit, uint64_t field);
 void CoXlTestLayerSpawnInstall(uintptr_t exe);
 uintptr_t CoXlTestLayerSpawnDetour(void);
@@ -421,6 +423,22 @@ int main(void)
     CHECK(CoXlTestLayerSpawn(SpawnUnit(2100.0f, AY, 0, 0), 3, given) == given);  /* a grid already: kept */
     CHECK(CoXlTestLayerSpawn(SpawnUnit(2100.0f, AY, 0, 0), 0, level) == level);  /* no members: the engine returns at once */
     CHECK(CoXlTestLayerSpawn(SpawnUnit(2600.0f, AY, 3, 0), 3, level) == given);  /* counted: SpeedTree, no particles */
+    {
+        /* Prefab members' final matrices: set on the level's 52 m beside a tile drawn at about 43 m (floating), set on the
+         * grid, and one 8 m over the ground it was given (a member authored above its stamp's ground). */
+        float poses[3][16] = {{0}};
+        for (int i = 0; i < 3; i++) { poses[i][0] = poses[i][5] = poses[i][10] = poses[i][15] = 1.0f; poses[i][12] = 2100.0f; poses[i][13] = AY; }
+        poses[0][14] = 52.0f;
+        poses[1][13] = AY + 5.0f; poses[1][14] = Read(given, 2100.0f, AY + 5.0f);
+        poses[2][13] = AY - 5.0f; poses[2][14] = 60.0f;
+        CoXlTestMembers(level, poses[0], 1);
+        CoXlTestMembers(given, poses[1], 2);
+        CoXlTestMembersNote();
+        CHECK(fake_host_logged("layer member off the ground (the level's heights): at (2100.0, -4094.9), 20 m from a player: z 52.00, given 52.00, drawn 4"));
+        CHECK(fake_host_logged("layer members (a test): 3 placed by 2 prefab batches, 3 within 300 m of a player; 2 set on the ground they were given, "
+            "1 of them over 0.5 m above the drawn ground and 0 under it (worst "));
+        CHECK(!fake_host_logged("layer member off the ground (a tile's grid)"));
+    }
     CoXlTestLayerTile(a, 1, AX, AY);
     CHECK(fake_host_logged("layer spawns (a tile came in): 3, 2 of them on a tile's grid for every member (2 with SpeedTree, 1 with particle effects)"));
     CHECK(fake_host_logged("layer spawns (a tile came in): 0 ran on the game thread, the rest on 1 other thread(s); 0 spawned on the level's heights by a tile"));

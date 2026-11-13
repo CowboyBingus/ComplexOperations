@@ -562,6 +562,8 @@ uintptr_t CoXlTestLayerSpawnDetour(void) { return (uintptr_t)WorldLayerSpawn; }
 uintptr_t CoXlTestLayerSpawnOriginal(void) { return (uintptr_t)g_layerSpawn; }
 int CoXlTestGridEnter(uint64_t desc) { return NearLayerGridEnter(desc); }
 void CoXlTestGridLeave(int k) { NearLayerGridLeave(k); }
+void CoXlTestMembers(uint64_t desc, const float* poses, uint32_t count) { NearLayerMembers(desc, poses, count); }
+void CoXlTestMembersNote(void) { NearLayerMembersNote("a test"); }
 /* The two leaf thunks against a target that wipes xmm0-xmm5: out gets xmm1-xmm5 after the call, the target's r9 and
  * fifth argument, and the address the runner's call returns to. which 0: the layer sampler's, 1: the index query's. */
 uint64_t g_coTestR9, g_coTestFifth;

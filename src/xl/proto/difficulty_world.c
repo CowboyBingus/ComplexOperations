@@ -5309,6 +5309,7 @@ static int NearLayerHeightWhy(uint64_t desc, float x, float y, float* height, in
 static void NearLayerTrace(char kind, uint32_t caller, float x, float y, float z, int result, int why, float used);
 static void NearLayerTraceSnap(uint64_t unit, int slot, int why);
 static int NearLayerIsGrid(uint64_t desc);
+static void NearLayerMembers(uint64_t desc, const float* poses, uint32_t count);
 static uint64_t NearLayerSpawnField(uint64_t unit, uint64_t field, int again);
 static int NearLayerGridEnter(uint64_t desc);
 static void NearLayerSpawnStale(uint64_t unit);
@@ -5417,6 +5418,43 @@ static void WorldLayerSpawnInstall(uintptr_t exe)
         FlushInstructionCache(GetCurrentProcess(), (void*)site, 5);
     }
     Note("difficulty: extra large maps: a stamp layer by a tile spawns on its grid for every member (placed units, SpeedTree, particles)");
+}
+
+/* The members' final poses: 0x232600 (rdx the heightfield, 0x232632) builds a matrix per member and passes them to
+ * 0x12CFD0 at 0x233379 (r8, the count fifth); the batch detour checks only that call, with the heightfield its thread's
+ * prefab detour saw. Both are full functions with frames and calls, so C detours keep their contracts. */
+typedef uint64_t (*MemberPrefabFn)(uint64_t, uint64_t, uint64_t, uint64_t);
+typedef uint64_t (*MemberBatchFn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+static MemberPrefabFn g_memberPrefab;
+static MemberBatchFn g_memberBatch;
+static uintptr_t g_memberReturn;
+static _Thread_local uint64_t t_memberDesc;
+static uint64_t WorldMemberPrefab(uint64_t a, uint64_t desc, uint64_t c, uint64_t d)
+{
+    uint64_t outer = t_memberDesc;
+    t_memberDesc = desc;
+    uint64_t r = g_memberPrefab(a, desc, c, d);
+    t_memberDesc = outer;
+    return r;
+}
+static uint64_t WorldMemberBatch(uint64_t a, uint64_t b, uint64_t poses, uint64_t d, uint64_t count, uint64_t f, uint64_t g, uint64_t h)
+{
+    if (t_memberDesc != 0 && (uintptr_t)__builtin_return_address(0) == g_memberReturn && poses != 0)
+        NearLayerMembers(t_memberDesc, (const float*)(uintptr_t)poses, (uint32_t)count);
+    return g_memberBatch(a, b, poses, d, count, f, g, h);
+}
+static void WorldMembersInstall(uintptr_t exe)
+{
+    int pinned = ApiCodeMatches(exe + 0x232600u, "48 8B C4 44 89 40 18 48 89 48 08 55 53 57 48 8D A8 58 F6 FF FF") &&
+        ApiCodeMatches(exe + 0x12CFD0u, "48 89 5C 24 18 4C 89 4C 24 20 48 89 54 24 10 55 56 57 41 54") &&
+        ApiCodeMatches(exe + 0x23320Cu, "F3 42 0F 10 04 80 F3 0F 58 E8 F3 0F 11 6D F8") &&
+        ApiCodeMatches(exe + 0x23325Au, "0F 28 4D F0 43 0F 11 4C 27 30") && ApiCodeMatches(exe + 0x233316u, "4D 8B C4") &&
+        ApiCodeMatches(exe + 0x233374u, "44 89 74 24 20 E8 52 9C EF FF");
+    if (!pinned) { Note("difficulty: extra large maps: the prefab spawn is not the reviewed code; its members' poses are not checked"); return; }
+    g_memberReturn = exe + 0x23337Eu;
+    if (LoaderHook("extra large maps' prefab member check", exe + 0x12CFD0u, (void*)WorldMemberBatch, (void**)&g_memberBatch) ||
+        LoaderHook("extra large maps' prefab member check", exe + 0x232600u, (void*)WorldMemberPrefab, (void**)&g_memberPrefab))
+        Note("difficulty: extra large maps: the prefab member check could not be hooked");
 }
 
 /* The engine's other height sampler (exe 0xD5B10: rcx the address of the descriptor pointer, x/y in xmm1/xmm2; it reads
@@ -6567,6 +6605,7 @@ static const char* InstallWorld(DifficultyInstall* d)
     if (ApiCodeMatches(exe + 0xD5B10u, kLayerSamplePin))
         LoaderHook("extra large maps' layer height sampler", exe + 0xD5B10u, (void*)CoWorldLayerSampleThunk, (void**)&g_layerSample);
     WorldLayerSpawnInstall(exe);
+    WorldMembersInstall(exe);
     for (int i = 0; i < 4; i++)
         if (ApiCodeMatches(exe + kSpawners[i].rva, kSpawners[i].pin))
             LoaderHook("extra large maps' spawn diagnostic", exe + kSpawners[i].rva, kSpawnDetours[i], (void**)&g_worldSpawn[i]);
