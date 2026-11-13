@@ -17,7 +17,7 @@ static const char* g_case;
 #define CHECK(what) do { if (!(what)) { printf("FAILED %s: %s\n", g_case, #what); g_failed++; } } while (0)
 
 /* The registers the game's code has at the two sites, and what it left: r13 and which way it went. */
-typedef struct Regs { uint64_t rbx, r13, r14, rdi, r15, r8, r9, r10, r12, rdx, xmm4, outR13, outWay; } Regs;
+typedef struct Regs { uint64_t rbx, r13, r14, rdi, r15, r8, r9, r10, r12, rdx, xmm4, outR13, outWay, r11, rsi, outRbx; } Regs;
 Regs* g_runRegs;
 uint64_t Run(Regs* regs, uintptr_t entry);
 void RunBack(void);
@@ -29,9 +29,10 @@ __asm__(".intel_syntax noprefix\n"
     "mov [rip+g_runRegs], rcx\nmov rax, rdx\n"
     "mov rbx, [rcx]\nmov r13, [rcx+8]\nmov r14, [rcx+16]\nmov rdi, [rcx+24]\nmov r15, [rcx+32]\n"
     "mov r8, [rcx+40]\nmov r9, [rcx+48]\nmov r10, [rcx+56]\nmov r12, [rcx+64]\nmov rdx, [rcx+72]\nmovq xmm4, [rcx+80]\n"
+    "mov r11, [rcx+104]\nmov rsi, [rcx+112]\n"
     "test r14, r14\njz 1f\nmovups xmm0, [r14]\nmov [rsp+0x70], r13\n1:\njmp rax\n"
     ".globl RunBack\nRunBack:\n"
-    "mov rcx, [rip+g_runRegs]\nmov [rcx+88], r13\nmov [rcx+96], rax\n"
+    "mov rcx, [rip+g_runRegs]\nmov [rcx+88], r13\nmov [rcx+96], rax\nmov [rcx+120], rbx\n"
     "add rsp, 0x208\npop r15\npop r14\npop r13\npop r12\npop rsi\npop rdi\npop rbp\npop rbx\nret\n"
     ".att_syntax\n");
 
@@ -39,10 +40,11 @@ __asm__(".intel_syntax noprefix\n"
 #define MANAGER (WORLD + CO_SPAWNER_MANAGER)
 #define MANAGER_SIZE 0x8C810u
 #define COMMON 0x3116000u                      /* the way back out of the image */
-enum { WAY_ADDED = 1, WAY_LOOP_DONE, WAY_EMPTY };
-#define SPANS 4
+enum { WAY_ADDED = 1, WAY_LOOP_DONE, WAY_EMPTY, WAY_BACK, WAY_LOOP, WAY_DONE };
+#define SPANS 8
 static uint8_t g_spans[SPANS][0x40];
-static const uint32_t kSpans[SPANS] = {CO_SPAWNER_SITE - 8u, CO_SPAWNER_FIRST - 8u, CO_SPAWNER_PLACES - 8u, CO_SPAWNER_GROUPS_SITE - 8u};
+static const uint32_t kSpans[SPANS] = {CO_SPAWNER_SITE - 8u, CO_SPAWNER_FIRST - 8u, CO_SPAWNER_PLACES - 8u, CO_SPAWNER_GROUPS_SITE - 8u,
+    CO_SPAWNER_TASKS - 8u, CO_SPAWNER_SITES - 8u, CO_SPAWNER_ALARMS - 8u, CO_SPAWNER_PATROLS - 8u};
 
 static void Land(uint8_t* image, uint32_t at, uint32_t way)
 {
@@ -139,6 +141,109 @@ static void Size(uint8_t* image, uint64_t* alloc, uint64_t* zeroed)
 }
 static int Units(uint32_t n) { for (uint32_t i = 0; i < n; i++) if (g_units[i] != 0xABCD0000u + i) return 0; return 1; }
 
+/* A group's own lists, run as code: the game's bytes copied out (GAME_CODE, then its own way on) beside the mod's stub at
+ * the site, from the same block. With room the stub stores what the game stores; full, or with no group, nothing in the
+ * block changes but the counter, and the loop goes on as the game's would. */
+#define GAME_CODE 0x2A00000u
+static uint8_t g_block[4 * 0x300];
+static uint8_t g_before[sizeof g_block], g_game[sizeof g_block];
+static void Put32(uint8_t* at, uint32_t v) { memcpy(at, &v, 4); }
+/* The game's first `size` bytes of `code`, then a jump to `back`, at GAME_CODE. */
+static uintptr_t GameCopy(uint8_t* image, const uint8_t* code, size_t size, uint32_t back)
+{
+    const int32_t rel = (int32_t)(back - (GAME_CODE + size + 5u));
+    memcpy(image + GAME_CODE, code, size); image[GAME_CODE + size] = 0xE9; memcpy(image + GAME_CODE + size + 1, &rel, 4);
+    return (uintptr_t)image + GAME_CODE;
+}
+/* Both runs from the block as it is: 1 when the game's copy and the site leave the same block, ways and rbx. */
+static int AsGame(uintptr_t gameEntry, uintptr_t site, const Regs* r, Regs* out)
+{
+    Regs a = *r, b = *r;
+    memcpy(g_before, g_block, sizeof g_block);
+    Run(&a, gameEntry);
+    memcpy(g_game, g_block, sizeof g_block);
+    memcpy(g_block, g_before, sizeof g_block);
+    Run(&b, site);
+    *out = b;
+    return memcmp(g_game, g_block, sizeof g_block) == 0 && a.outWay == b.outWay && a.outRbx == b.outRbx && memcmp(g_game, g_before, sizeof g_block) != 0;
+}
+/* One run at the site that must leave the block as it was; the counter and the way it went are the caller's to check. */
+static int Untouched(uintptr_t site, Regs* r)
+{
+    memcpy(g_before, g_block, sizeof g_block);
+    Run(r, site);
+    return memcmp(g_before, g_block, sizeof g_block) == 0;
+}
+static uint8_t g_managerKept[MANAGER_SIZE];
+static void GroupLists(uint8_t* image)
+{
+    const uintptr_t game = (uintptr_t)image;
+    uint8_t* manager = image + MANAGER;
+    uint8_t* group = g_block + 0x300;
+    uint8_t keep[10];
+    Regs r, out;
+    memcpy(keep, image + CO_SPAWNER_TASKS_BACK, sizeof keep);
+    Land(image, CO_SPAWNER_TASKS_BACK, WAY_BACK);
+    Land(image, 0x94AC00u, WAY_LOOP); Land(image, CO_SPAWNER_SITES_NEXT + 13u, WAY_DONE);
+    Land(image, 0x94B1D0u, WAY_LOOP); Land(image, CO_SPAWNER_ALARMS + 55u, WAY_DONE);
+    Land(image, 0x94B2A0u, WAY_LOOP); Land(image, CO_SPAWNER_PATROLS + 52u, WAY_DONE);
+    memcpy(g_managerKept, manager, MANAGER_SIZE);
+    memset(manager, 0, MANAGER_SIZE);
+    const volatile long* tasks = co_spawners_skipped(CO_SPAWNER_CELL_TASKS), *sites = co_spawners_skipped(CO_SPAWNER_CELL_SITES);
+    const volatile long* alarms = co_spawners_skipped(CO_SPAWNER_CELL_ALARMS), *patrols = co_spawners_skipped(CO_SPAWNER_CELL_PATROLS);
+    CHECK(tasks != NULL && sites != NULL && alarms != NULL && patrols != NULL && co_spawners_skipped(CO_SPAWNER_CELL_FULL) == NULL);
+    if (tasks == NULL || sites == NULL || alarms == NULL || patrols == NULL) return;
+
+    g_case = "a group's tasks";
+    memset(g_block, 0xA5, sizeof g_block);
+    Put32(group + CO_SPAWNER_TASK_COUNT, 95);
+    r = (Regs){.rbx = (uint64_t)(uintptr_t)group, .r8 = 0x1234567890ull, .rsi = 0x3F1};
+    CHECK(AsGame(GameCopy(image, kCoSpawnerTasks, 19, CO_SPAWNER_TASKS_BACK), game + CO_SPAWNER_TASKS, &r, &out) && out.outWay == WAY_BACK);
+    CHECK(U32(group + CO_SPAWNER_TASK_COUNT) == 96u && U32(group + 8 + 95 * 4) == 0x3F1u && *(uint64_t*)group == 0x1234567890ull && *tasks == 0);
+    r.rsi = 0x3F2;
+    CHECK(Untouched(game + CO_SPAWNER_TASKS, &r) && r.outWay == WAY_BACK && *tasks == 1); /* the 97th: the key is the group's already */
+    Put32(group + CO_SPAWNER_TASK_COUNT, 0); memset(group, 0, 8);
+    CHECK(AsGame(GameCopy(image, kCoSpawnerTasks, 19, CO_SPAWNER_TASKS_BACK), game + CO_SPAWNER_TASKS, &r, &out) && U32(group + 8) == 0x3F2u && *tasks == 1);
+
+    g_case = "a group's invasion sites";
+    memset(g_block, 0xA5, sizeof g_block);
+    Put32(group + CO_SPAWNER_PLACE_COUNT, 15); Put32(manager + 0x86FA0u, 3);
+    r = (Regs){.r8 = (uint64_t)(uintptr_t)group, .xmm4 = 0x4142434445464748ull, .rdx = 0x51525354u, .r13 = (uint64_t)(uintptr_t)manager, .r10 = 2};
+    CHECK(AsGame(GameCopy(image, kCoSpawnerPlaces, 33, CO_SPAWNER_SITES_NEXT), game + CO_SPAWNER_SITES, &r, &out) && out.outWay == WAY_LOOP && *sites == 0);
+    CHECK(U32(group + CO_SPAWNER_PLACE_COUNT) == 16u && *(uint64_t*)(group + 0x18C + 15 * 12) == 0x4142434445464748ull && U32(group + 0x18C + 15 * 12 + 8) == 0x51525354u);
+    r.r10 = 3;
+    CHECK(Untouched(game + CO_SPAWNER_SITES, &r) && r.outWay == WAY_DONE && *sites == 1); /* the 17th */
+
+    g_case = "a group's alarms";
+    memset(g_block, 0xA5, sizeof g_block);
+    for (uint32_t i = 0; i < 4; i++) Put32(manager + 0x86FA8u + 16u * i, 0xA1A10000u + i);
+    Put32(manager + 0x877A8u, 4);
+    Put32(group + CO_SPAWNER_ALARM_COUNT, 31);
+    r = (Regs){.rdi = (uint64_t)(uintptr_t)g_block, .rdx = 1, .rbx = 2, .r11 = 4, .r13 = (uint64_t)(uintptr_t)manager};
+    CHECK(AsGame(GameCopy(image, kCoSpawnerAlarms, 42, CO_SPAWNER_ALARMS_NEXT), game + CO_SPAWNER_ALARMS, &r, &out) && out.outWay == WAY_LOOP && out.outRbx == 3u);
+    CHECK(U32(group + CO_SPAWNER_ALARM_COUNT) == 32u && U32(group + 0x250 + 31 * 4) == 0xA1A10002u && *alarms == 0);
+    r.rbx = 3; r.r11 = 6;
+    CHECK(Untouched(game + CO_SPAWNER_ALARMS, &r) && r.outWay == WAY_DONE && r.outRbx == 4u && *alarms == 1); /* the 33rd */
+    r = (Regs){.rdi = (uint64_t)(uintptr_t)g_block, .rdx = 0xFFFFFFFFu, .rbx = 0, .r11 = 0, .r13 = (uint64_t)(uintptr_t)manager};
+    CHECK(Untouched(game + CO_SPAWNER_ALARMS, &r) && r.outWay == WAY_LOOP && r.outRbx == 1u && *alarms == 2); /* no group */
+
+    g_case = "a group's patrol spawner";
+    memset(g_block, 0xA5, sizeof g_block);
+    for (uint32_t i = 0; i < 3; i++) Put32(manager + 0x330u + 16u * i, 0xB2B20000u + i);
+    Put32(manager + 0x730u, 3);
+    Put32(group + CO_SPAWNER_PATROL_COUNT, 0);
+    r = (Regs){.rdi = (uint64_t)(uintptr_t)g_block, .rdx = 1, .rbx = 1, .r10 = 2u * (1u + 0x33u), .r13 = (uint64_t)(uintptr_t)manager};
+    CHECK(AsGame(GameCopy(image, kCoSpawnerPatrols, 39, CO_SPAWNER_PATROLS_NEXT), game + CO_SPAWNER_PATROLS, &r, &out) && out.outWay == WAY_LOOP && out.outRbx == 2u);
+    CHECK(U32(group + CO_SPAWNER_PATROL_COUNT) == 1u && U32(group + 0x2D4) == 0xB2B20001u && *patrols == 0);
+    r.rbx = 2; r.r10 = 2u * (2u + 0x33u);
+    CHECK(Untouched(game + CO_SPAWNER_PATROLS, &r) && r.outWay == WAY_DONE && r.outRbx == 3u && *patrols == 1); /* the second */
+    r = (Regs){.rdi = (uint64_t)(uintptr_t)g_block, .rdx = 0xFFFFFFFFu, .rbx = 0, .r10 = 2u * 0x33u, .r13 = (uint64_t)(uintptr_t)manager};
+    CHECK(Untouched(game + CO_SPAWNER_PATROLS, &r) && r.outWay == WAY_LOOP && r.outRbx == 1u && *patrols == 2); /* no group */
+
+    memcpy(image + CO_SPAWNER_TASKS_BACK, keep, sizeof keep);
+    memcpy(manager, g_managerKept, MANAGER_SIZE);
+}
+
 int main(void)
 {
     static uint8_t gameList[0x54], gameGroup[sizeof g_group]; /* an entry less its last four bytes, which are the stack's */
@@ -159,16 +264,17 @@ int main(void)
     g_case = "the mod beside it";
     const char* why = co_spawners_install(game);
     if (why != NULL) printf("install: %s (%d writes)\n", why, g_fake.writes);
-    CHECK(why == NULL && g_fake.writes == 5 && g_fake.hookCount == 0);
+    CHECK(why == NULL && g_fake.writes == 9 && g_fake.hookCount == 0);
     uint8_t* page = co_spawners_test_page();
     CHECK(page != NULL && co_spawners_places_full() != NULL);
     if (page == NULL) { printf("spawners: no page\n"); return 1; }
     const uint8_t* cells = page + CO_SPAWNER_CELLS; const uint8_t* list = page + CO_SPAWNER_LIST;
     const volatile long* placesFull = co_spawners_places_full();
     {
-        const struct { uint32_t rva, size, stub; } sites[4] = {{CO_SPAWNER_SITE, 6, CO_SPAWNER_STUB_APPEND}, {CO_SPAWNER_FIRST, 13, CO_SPAWNER_STUB_FIRST},
-            {CO_SPAWNER_NEXT, 13, CO_SPAWNER_STUB_NEXT}, {CO_SPAWNER_PLACES, 33, CO_SPAWNER_STUB_PLACES}};
-        for (int i = 0; i < 4; i++)
+        const struct { uint32_t rva, size, stub; } sites[8] = {{CO_SPAWNER_SITE, 6, CO_SPAWNER_STUB_APPEND}, {CO_SPAWNER_FIRST, 13, CO_SPAWNER_STUB_FIRST},
+            {CO_SPAWNER_NEXT, 13, CO_SPAWNER_STUB_NEXT}, {CO_SPAWNER_PLACES, 33, CO_SPAWNER_STUB_PLACES}, {CO_SPAWNER_TASKS, 19, CO_SPAWNER_STUB_TASKS},
+            {CO_SPAWNER_SITES, 33, CO_SPAWNER_STUB_SITES}, {CO_SPAWNER_ALARMS, 23, CO_SPAWNER_STUB_ALARMS}, {CO_SPAWNER_PATROLS, 20, CO_SPAWNER_STUB_PATROLS}};
+        for (int i = 0; i < 8; i++)
         {
             CHECK(image[sites[i].rva] == 0xE9 && Leads(image + sites[i].rva + 1) == (uintptr_t)page + sites[i].stub);
             for (uint32_t k = 5; k < sites[i].size; k++) CHECK(image[sites[i].rva + k] == 0x90);
@@ -189,7 +295,12 @@ int main(void)
         Size(image, &alloc, &zeroed);
         CHECK(alloc == (uint64_t)groups * CO_SPAWNER_GROUP_SIZE && zeroed == alloc && alloc == 0x24C000u);
         CHECK(fake_host_logged("complex operations: GuardForce's group block holds 3136 groups on every level (2352 KB of scratch at mission load)"));
+        CHECK(fake_host_logged("a GuardForce group keeps at most 96 tasks, 16 positions, 32 alarms and 1 patrol spawner on every level"));
+        /* what the game's code behind each site reads is the game's, past the bytes replaced */
+        CHECK(memcmp(image + CO_SPAWNER_TASKS + 19, kCoSpawnerTasks + 19, 4) == 0 && memcmp(image + CO_SPAWNER_SITES_NEXT, kCoSpawnerSitesNext, 13) == 0);
+        CHECK(memcmp(image + CO_SPAWNER_ALARMS_ADD, kCoSpawnerAlarms + 23, 32) == 0 && memcmp(image + CO_SPAWNER_PATROLS_ADD, kCoSpawnerPatrols + 20, 32) == 0);
     }
+    GroupLists(image);
     const int writes = g_fake.writes;
     CHECK(co_spawners_install(game) == NULL && g_fake.writes == writes); /* once */
     /* the count of the mission loaded before the install is the manager's list's: the loop is the game's */
@@ -247,7 +358,10 @@ int main(void)
         const uint32_t other[] = {FAKE_STOCK_SPAWNERS + 7u, FAKE_STOCK_SPAWNERS + 12u, FAKE_STOCK_SPAWNERS + 14u, FAKE_STOCK_SPAWNERS + 19u, FAKE_STOCK_SPAWNERS + 26u,
             CO_SPAWNER_SITE, CO_SPAWNER_SITE + 5u, CO_SPAWNER_ADD + 11u, CO_SPAWNER_ADD + 120u, CO_SPAWNER_BASE_LOAD + 3u, CO_SPAWNER_BASE_ADD + 3u,
             CO_SPAWNER_FIRST + 3u, CO_SPAWNER_FIRST + 9u, CO_SPAWNER_NEXT + 1u, CO_SPAWNER_NEXT + 12u, CO_SPAWNER_PLACES + 3u, CO_SPAWNER_PLACES + 32u,
-            CO_SPAWNER_GROUPS_SITE, CO_SPAWNER_GROUPS_SITE + 5u, CO_SPAWNER_GROUPS_SITE + 11u, CO_SPAWNER_GROUPS_SITE + 24u, CO_SPAWNER_GROUPS_SITE + 48u};
+            CO_SPAWNER_GROUPS_SITE, CO_SPAWNER_GROUPS_SITE + 5u, CO_SPAWNER_GROUPS_SITE + 11u, CO_SPAWNER_GROUPS_SITE + 24u, CO_SPAWNER_GROUPS_SITE + 48u,
+            CO_SPAWNER_TASKS + 1u, CO_SPAWNER_TASKS + 18u, CO_SPAWNER_TASKS + 22u, CO_SPAWNER_SITES + 3u, CO_SPAWNER_SITES + 32u, CO_SPAWNER_SITES_NEXT + 3u,
+            CO_SPAWNER_SITES_NEXT + 12u, CO_SPAWNER_ALARMS, CO_SPAWNER_ALARMS + 12u, CO_SPAWNER_ALARMS + 25u, CO_SPAWNER_ALARMS + 54u, CO_SPAWNER_PATROLS,
+            CO_SPAWNER_PATROLS + 12u, CO_SPAWNER_PATROLS + 22u, CO_SPAWNER_PATROLS + 51u};
         for (size_t i = 0; i < sizeof other / sizeof other[0]; i++)
         {
             image = Reset("a site or HellForge's guard is another");
@@ -261,11 +375,12 @@ int main(void)
         CHECK(co_spawners_check((uintptr_t)image) != NULL && strstr(co_spawners_check((uintptr_t)image), "not in place") != NULL);
         CHECK(co_spawners_install((uintptr_t)image) != NULL && Unchanged() && g_fake.writes == 0);
     }
-    for (int fail = 0; fail < 5; fail++)
+    for (int fail = 0; fail < 9; fail++)
     {
         image = Reset("a write is refused");
         g_fake.failWriteAt = fail;
-        CHECK(co_spawners_install((uintptr_t)image) != NULL && Unchanged() && co_spawners_test_page() == NULL && co_spawners_places_full() == NULL);
+        CHECK(co_spawners_install((uintptr_t)image) != NULL && Unchanged() && co_spawners_test_page() == NULL && co_spawners_places_full() == NULL &&
+            co_spawners_skipped(CO_SPAWNER_CELL_ALARMS) == NULL);
         CHECK(!fake_host_logged("group block holds"));
         /* and the game with HellForge's guard runs as before */
         Load(image, 130);
