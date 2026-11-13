@@ -74,6 +74,7 @@
 #include "proto/test_daylight.c"
 #include "proto/difficulty_world_memprobe.c"
 #include "proto/xl_span_rescue.c"
+#include "proto/xl_sun_slice.c"
 #pragma clang diagnostic pop
 
 /* The index query (0xC05360: rcx index, edx key, r8d, r9 buffer, [rsp+0x28] its places) writes at most its places and
@@ -193,6 +194,7 @@ static const char* CoXlGuards(uintptr_t game)
     LwInstallMover();
     LwInstallTrees();
     LwInstallZeroBox(); /* absent SpeedTree cells: a switched site, the empty box on complex levels only */
+    SunSliceInstall(game); /* the sun's last shadow slice: dynamic on a world over 2048 m */
     if (g_lwRec.insertOrig == NULL) return "the destruction records' room on a complex level could not be guarded";
     if (g_lwMover.passOrig == NULL) return "the navmesh boundary requests on a complex level could not be guarded";
     return NULL;
