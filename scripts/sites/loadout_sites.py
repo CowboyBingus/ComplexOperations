@@ -587,7 +587,7 @@ def _caves():
         (0x147061F, '41c6859539270000', ''.join(' cmp byte ptr [rsp+0x%x], 0\n jne %d1f\n mov qword ptr [r13+0x%x], 0\n%d1:\n'
                                                 % (0x38 + k, k, NR + k * 0x9F0 + 0x9E8, k) for k in range(4, 8)) +
          ' mov byte ptr [r13+0x273995], 0\n jmp game+0x1470627', '146fc40 records 4..7 peer id clear'),
-    ] + CARD_SCALE + FIGURE_SLOT + GUARDS8 + HEIGHTS + LAYOUT
+    ] + CARD_SCALE + FIGURE_SLOT + GUARDS8 + HEIGHTS + MISSION + LAYOUT
 
 # Eight cards at the game's size overlap: the init card loop sets each card root's scale to 0.5 before its pivot, so
 # the panel, its text and its figure image draw at half size. rsi is the card for the whole loop and rcx, rdx are
@@ -635,6 +635,18 @@ def _height_cave(rva, base, disp, size, note):
             % (CARD_HEIGHT, base, at, rva + size), 'card height from the slot: ' + note)
 
 HEIGHTS = [_height_cave(*h) for h in _HEIGHT_STORES]
+
+# The slots panel (card+0x5B78) is 140 tall, plus 113 when its MISSION STRATAGEMS block is open (0x1895A20). Only its
+# constructor (0x1893FDC) and the open setter (0x1895AA0) read the 113 (0x23C7824, no other reference); every box
+# layout takes the panel's size. Both read it from the mod's slot (DATA(MISSION_HEIGHT), co_cards.c), so eight cards
+# can drop the heading's 48. rax is kept with a push; no branch lands in the eight bytes.
+MISSION_HEIGHT = 1
+MISSION = [
+    (0x1893FDC, 'f30f100d4038b300', 'push rax\n mov rax, DATA(%d)\n movss xmm1, dword ptr [rax]\n pop rax\n jmp game+0x1893FE4'
+     % MISSION_HEIGHT, '1893f30 slots panel: open height from the slot'),
+    (0x1895AA0, 'f30f100d7c1db300', 'push rax\n mov rax, DATA(%d)\n movss xmm1, dword ptr [rax]\n pop rax\n jmp game+0x1895AA8'
+     % MISSION_HEIGHT, '1895a20 slots panel open: height from the slot'),
+]
 
 # The screen-set update hands L its update with a tail jump (0x1497C45, the case for L of 0x1497920; the only reference
 # to 0x1468320), after the canvas refit of the same update. The layout callback (co_cards.c) runs there every frame L is

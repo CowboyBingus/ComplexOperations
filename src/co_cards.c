@@ -1,6 +1,7 @@
 /* The loadout screen's cards in a build for eight: where each card sits and how large it is drawn, per frame, from the
  * screen's size. Eight cards go in two rows of four, shorter than the game's (498 of 780 reference units, the own
- * card's slots open as in the game) and scaled as one so both rows fit between the bottom line and the mode tabs.
+ * card's slots open as in the game, without their MISSION STRATAGEMS heading) and scaled as one so both rows fit
+ * between the bottom line and the mode tabs.
  * An operation for four with at most four players keeps the game's four-card screen. Addresses are game build
  * 25480438's (DESIGN.md of the cards study, layout D and sections 9.5 and 9.7). */
 #include <string.h>
@@ -30,6 +31,12 @@
 #define CO_FIGURE_FRAME 0x110u    /* in the figure: 420 x 740, centred, clips the image */
 #define CO_FIGURE_DISTANCE 0x8ECu /* in the figure: the camera, read by every render (0x18A139A, 0x18A13A5) */
 #define CO_FIGURE_HEIGHT 0x8F0u
+#define CO_SET_SHOWN 0x14508E0u   /* a widget's shown bit 0x10: off, the draw gives it and its children no colour (0x144BE00) */
+#define CO_CARD_PANEL 0x5B78u     /* the slots panel X in the box: 480 x 140, plus the mission height when open */
+#define CO_PANEL_OPEN 0xD978u     /* its MISSION STRATAGEMS block shown (0x1895A94) */
+#define CO_PANEL_HEADING 0x220u   /* the block's heading, 420 x 40 at 31 under its top: hatch, backing and text */
+#define CO_PANEL_MISSION 0x858u   /* the seven 55 x 55 mission slots, top-left at (30 + 60.8 i, -79) in the block */
+#define CO_PANEL_SLOT 0x12A8u
 
 /* The card in reference units: 498 is the tallest that keeps the cards at 0.75 of the game's size or more between the
  * tabs and the bottom line. The rows are 44 apart, the game's gap between columns, and the columns 464 apart. */
@@ -52,6 +59,13 @@
 #define CO_CAMERA_DISTANCE 4.4f
 #define CO_CAMERA_HEIGHT 1.567f
 #define CO_PLATE 64.0f
+/* The open panel's 113 for its mission stratagems: 31 to the heading, the heading's 40, 8 to the slots, the slots' 55
+ * and 9 to the own slots, less the 30 a closed panel keeps above them (0x1893F30). Eight cards drop the heading and the
+ * 8 under it: the slots go up to the heading's line, 31 under the panel's top, so nothing is left where it was. */
+#define CO_PANEL_CLOSED 140.0f
+#define CO_MISSION_TALL 113.0f
+#define CO_MISSION_SHORT 65.0f
+#define CO_MISSION_Y (-31.0f)
 #define CO_SCALE_LEAST 0.5f
 /* A parked card's top is this far below the window's bottom edge, whatever the window's shape. */
 #define CO_PARK_BELOW 1000.0f
@@ -61,6 +75,7 @@
 #define CO_COMPLEX_EVERY_MS 250u
 
 float co_card_height = CO_CARD_TALL;
+float co_card_mission = CO_MISSION_TALL;
 static uintptr_t g_game, g_screen;
 static int g_mode = CO_CARDS_GAME;
 static int g_complex;
@@ -201,6 +216,26 @@ static uint32_t Players(void)
     return context != 0 ? *(const uint32_t*)(context + CO_SESSION_PLAYERS) : 0u;
 }
 
+/* The heading hidden and the slots on its line. Only the panel's constructor places the slots or shows the heading, so
+ * once per screen holds. An open panel is resized here; the next assign (0x189C780, every update through 0x146C040)
+ * lays its box out from that size. */
+static void Compact(uintptr_t screen)
+{
+    const SetFn position = (SetFn)(g_game + CO_SET_POSITION), size = (SetFn)(g_game + CO_SET_SIZE);
+    const SetFn shown = (SetFn)(g_game + CO_SET_SHOWN);
+    for (uint32_t i = 0; i < 8u; i++)
+    {
+        const uintptr_t panel = screen + CO_CARD_BLOCK + i * CO_CARD_STRIDE + CO_CARD_PANEL;
+        shown(panel + CO_PANEL_HEADING, 0);
+        for (uint32_t j = 0; j < 7u; j++)
+        {
+            const uintptr_t slot = panel + CO_PANEL_MISSION + j * CO_PANEL_SLOT;
+            position(slot, Pair(*(const float*)(slot + 0x4u), CO_MISSION_Y));
+        }
+        if (*(const uint8_t*)(panel + CO_PANEL_OPEN)) size(panel, Pair(*(const float*)(panel + 0xCu), CO_PANEL_CLOSED + co_card_mission));
+    }
+}
+
 /* The slot goes first, so every later store and tween of the game takes the short height. The size setter also ends a running
  * animation (0x14471A9..0x1447215, 0x14472C3..), so each part jumps to its end and none keeps a target of 780. */
 void co_cards_to_eight(uintptr_t screen)
@@ -209,6 +244,7 @@ void co_cards_to_eight(uintptr_t screen)
     const uintptr_t tweens = *(const uintptr_t*)(g_game + CO_TWEENS);
     const SetFn size = (SetFn)(g_game + CO_SET_SIZE);
     co_card_height = CO_CARD_SHORT;
+    co_card_mission = CO_MISSION_SHORT;
     for (uint32_t i = 0; i < 8u; i++)
         for (uint32_t j = 0; j < 4u; j++)
         {
@@ -218,6 +254,7 @@ void co_cards_to_eight(uintptr_t screen)
             if (!running && to[1] != CO_CARD_TALL) continue;
             size(w, Pair(to[0], to[1] == CO_CARD_TALL ? CO_CARD_SHORT : to[1]));
         }
+    Compact(screen);
     g_mode = CO_CARDS_EIGHT;
 }
 
@@ -232,6 +269,7 @@ void co_cards_open(CoRegs* regs)
     g_screen = screen;
     g_mode = co_cards_eight(complex, players, NULL) ? CO_CARDS_EIGHT : CO_CARDS_FOUR;
     co_card_height = g_mode == CO_CARDS_EIGHT ? CO_CARD_SHORT : CO_CARD_TALL;
+    co_card_mission = g_mode == CO_CARDS_EIGHT ? CO_MISSION_SHORT : CO_MISSION_TALL;
     co_log("loadout cards: %s (complex operation %s, %u players)", g_mode == CO_CARDS_EIGHT ? "eight" : "the game's four",
         complex ? "yes" : "no", players);
 }
@@ -242,6 +280,7 @@ void co_cards_ready(CoRegs* regs)
 {
     const uintptr_t screen = (uintptr_t)regs->rdi;
     if (screen == 0 || screen != g_screen || g_mode == CO_CARDS_GAME || g_game == 0) return;
+    if (g_mode == CO_CARDS_EIGHT) Compact(screen);
     Layout(screen);
 }
 

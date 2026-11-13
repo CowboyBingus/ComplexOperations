@@ -143,7 +143,7 @@ Limits that remain:
 
 The loadout screen keeps four arrays by player or card: the players' records, a map from player to card, its reverse
 and the cards. A build for eight allocates the screen bigger and moves the four arrays to arrays of eight at its end.
-430 code sites address the new places or count to eight; 59 more go through code beside the game's. Among those are
+430 code sites address the new places or count to eight; 61 more go through code beside the game's. Among those are
 15 guards rebuilt for eight: an index of eight or more, or none, skips the access as before.
 
 The screen shows eight cards for a complex operation, with more than four players, or when a card past the fourth has
@@ -154,11 +154,13 @@ every update; the complex pick is checked four times a second, because that chec
 Eight cards stand in two rows of four. Each is 498 reference units tall instead of 780, and both rows scale together
 to fit between the screen's BRIEFING and LOADOUT tabs and its bottom line: 0.75 of the game's size at 16:9 and 21:9.
 The own card keeps its slots open with the mission stratagems, as in the game; the other cards keep theirs collapsed.
+The MISSION STRATAGEMS heading is left out, and the mission stratagem slots sit right under EQUIPMENT.
 Each figure's camera comes closer, so the figure keeps the game's size against its card. The helmet sits just under the
 name plate, and the figure is cut at the top of the slots.
 
 Each of the 15 places that store a card's height reads it from the mod's memory instead, through code beside the
-game's: the card's constructor, the screen's and the card's resizes, and the expand and collapse animations. A
+game's: the card's constructor, the screen's and the card's resizes, and the expand and collapse animations. Two
+more read the height the open slots panel adds for the mission stratagems, 48 less without the heading. A
 callback before the screen's card loop picks the mode and that height. Another places the cards behind the loop, and a
 third places them before each update of the screen.
 

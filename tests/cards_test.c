@@ -2,7 +2,8 @@
  * and the rules it keeps (31 under the mode tabs, on the game's bottom line, inside the 1920-wide container, the figure
  * never magnified); the figure's camera and cut; the hud scale's corner widgets; the game's four cards with cards 5 to 8
  * parked below the window; the mode's rule; and the callbacks on a stand-in screen: the mode at opening, the switch
- * from four to eight with the own card's slots left open, and each figure's camera and clip. */
+ * from four to eight with the own card's slots left open, each figure's camera and clip, and the slots panels without
+ * their MISSION STRATAGEMS heading in eight. */
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -81,6 +82,51 @@ static void Put32(void* at, uint32_t value) { memcpy(at, &value, 4); }
 static void Size(uint8_t* w, float x, float y) { memcpy(w + 0xC, &x, 4); memcpy(w + 0x10, &y, 4); }
 static float Field(const uint8_t* w, uint32_t at) { float v; memcpy(&v, w + at, 4); return v; }
 static uint8_t* Card(uint32_t i) { return g_screen + BLOCK + i * STRIDE; }
+static uint8_t* Panel(uint32_t i) { return Card(i) + 0x5B78; }
+static uint8_t* Mission(uint32_t i, uint32_t j) { return Panel(i) + 0x858 + j * 0x12A8; }
+static uint32_t Flags(const uint8_t* w) { uint32_t v; memcpy(&v, w, 4); return v; }
+
+/* The slots panels as the game builds them: the heading shown, the mission slots at (30 + 60.8 j, -79) in their block,
+ * 140 tall, and 253 where the block is open. */
+static void Panels(int ownOpen)
+{
+    for (uint32_t i = 0; i < 8; i++)
+    {
+        Put32(Panel(i) + 0x220, 0x10);
+        Panel(i)[0xD978] = ownOpen && i == 1;
+        Size(Panel(i), 480.0f, Panel(i)[0xD978] ? 253.0f : 140.0f);
+        for (uint32_t j = 0; j < 7; j++)
+        {
+            const float x = 30.0f + 60.8f * (float)j, y = -79.0f;
+            memcpy(Mission(i, j) + 0x4, &x, 4);
+            memcpy(Mission(i, j) + 0x8, &y, 4);
+        }
+    }
+}
+
+/* Every panel in eight: the heading not shown, the slots 48 up with x kept, an open panel 140 + 65. */
+static int Compacted(void)
+{
+    int ok = 1;
+    for (uint32_t i = 0; i < 8; i++)
+    {
+        ok &= (Flags(Panel(i) + 0x220) & 0x10) == 0 && Field(Panel(i), 0x10) == (Panel(i)[0xD978] ? 205.0f : 140.0f);
+        for (uint32_t j = 0; j < 7; j++) ok &= Field(Mission(i, j), 0x4) == 30.0f + 60.8f * (float)j && Field(Mission(i, j), 0x8) == -31.0f;
+    }
+    return ok;
+}
+
+/* The game's, in four: the heading shown, the slots at -79, the open panel at 253. */
+static int AsBuilt(void)
+{
+    int ok = 1;
+    for (uint32_t i = 0; i < 8; i++)
+    {
+        ok &= (Flags(Panel(i) + 0x220) & 0x10) != 0 && Field(Panel(i), 0x10) == (Panel(i)[0xD978] ? 253.0f : 140.0f);
+        for (uint32_t j = 0; j < 7; j++) ok &= Field(Mission(i, j), 0x8) == -79.0f;
+    }
+    return ok;
+}
 
 /* A running size animation of w in entry `slot` (from 1) towards (x, y), as 0x1446DD0 and 0x1439170 leave it. */
 static void Animate(uint8_t* w, uint32_t slot, float x, float y)
@@ -110,6 +156,13 @@ static void CheckCallbacks(void)
     Setter(0x144F160u, 0x2C);      /* anchor */
     Setter(0x144F210u, 0xC0);      /* clip from */
     Setter(0x144F2F0u, 0xC8);      /* clip size */
+    {
+        /* shown: and dword [rcx],~0x10; test dl,dl; je +3; or dword [rcx],0x10; ret */
+        static const uint8_t kShown[] = {0x83, 0x21, 0xEF, 0x84, 0xD2, 0x74, 0x03, 0x83, 0x09, 0x10, 0xC3};
+        DWORD before;
+        memcpy(image + 0x14508E0u, kShown, sizeof kShown);
+        CHECK(VirtualProtect(image + 0x14508E0u, sizeof kShown, PAGE_EXECUTE_READWRITE, &before));
+    }
     Put(image + 0x3326340u, (uint64_t)(uintptr_t)g_engine);
     Put(image + 0x347CEF0u, (uint64_t)(uintptr_t)g_context);
     Put(image + 0x347CD88u, (uint64_t)(uintptr_t)g_tweens);
@@ -124,10 +177,12 @@ static void CheckCallbacks(void)
     CoRegs regs = {0};
     regs.rdi = regs.rcx = (uintptr_t)g_screen;
 
-    /* Four at opening: the game's height and places, cards 5 to 8 parked. */
+    /* Four at opening: the game's height and places, cards 5 to 8 parked, the panels as the game builds them. */
+    Panels(1);
     co_cards_open(&regs);
-    CHECK(co_cards_test_get_mode() == CO_CARDS_FOUR && co_card_height == 780.0f);
+    CHECK(co_cards_test_get_mode() == CO_CARDS_FOUR && co_card_height == 780.0f && co_card_mission == 113.0f);
     co_cards_ready(&regs);
+    CHECK(AsBuilt());
     CHECK(Field(Card(1), 0x2C) == 0.38f && Field(Card(1), 0x8) == 111.0f && Field(Card(1), 0x14) == 1.0f);
     CHECK(Field(Card(5), 0x2C) == 0.5f && Field(Card(5), 0x8) == -2080.0f && Field(Card(5) + 0x1FA8, 0x8) == 20.0f);
     /* Four cards: the figure's camera and clip are the game's. */
@@ -152,6 +207,7 @@ static void CheckCallbacks(void)
     g_now += 250;
     co_cards_layout(&regs);
     CHECK(co_cards_test_complex_reads() == reads + 2 && co_cards_test_get_mode() == CO_CARDS_FOUR);
+    CHECK(AsBuilt() && co_card_mission == 113.0f);
 
     /* Card parts as the game leaves them: roots at 780, one collapsed +0x1C30 at 42, card 1's +0x1D40 animating to 780
      * and its +0x5848 to 128; card 4's +0x1D40 has an entry that drives another widget. */
@@ -182,9 +238,11 @@ static void CheckCallbacks(void)
     /* A player on card 6 with three present (a card freed late): eight before that card is next placed. */
     Put32(g_screen + PLAYERS + 5 * 4, 2);
     co_cards_layout(&regs);
-    CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 498.0f);
+    CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 498.0f && co_card_mission == 65.0f);
     CHECK(fake_host_logged("loadout cards: four to eight on the open screen (complex operation no, 3 players, cards 5 to 8: -1 2 -1 -1)"));
     CHECK(!fake_host_logged("slots collapsed"));
+    /* Every panel without its heading, the own card's open one at 205; its box follows at the game's next assign. */
+    CHECK(Compacted() && Panel(1)[0xD978] == 1);
     for (uint32_t i = 0; i < 8; i++)
     {
         CoCardPlace p;
@@ -208,22 +266,36 @@ static void CheckCallbacks(void)
     CHECK(co_cards_size_target((uintptr_t)(Card(0) + 0x5848), (uintptr_t)g_tweens, to) && to[1] == 128.0f);
     CHECK(!co_cards_size_target((uintptr_t)(Card(3) + 0x1D40), (uintptr_t)g_tweens, to) && to[1] == 206.0f);
 
+    /* The game's next assign lays the own card's box out from the panel: 205 - 40. The cut comes down to 207, the
+     * EQUIPMENT bar's foot. */
+    Size(Card(1) + 0x5958, 480.0f, 165.0f);
+    co_cards_layout(&regs);
+    CHECK(Near(Field(Card(1) + 0x1FA8 + 0x110, 0xC4) * 592.0f, 207.0f + 8.0f) && Near(Field(Card(1) + 0x1FA8 + 0x110, 0xCC) * 592.0f, 434.0f - 207.0f));
+
     /* Never back to four while open: the player leaves, eight stays. */
     memset(g_screen + PLAYERS, 0xFF, 32);
     co_cards_layout(&regs);
     CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 498.0f);
 
-    /* The next opening with five players: eight from the start, so the constructor builds at 498. */
+    /* The next opening with five players: eight from the start, so the constructor builds at 498 and opens the panel
+     * at 140 + 65 (the open comes after the init). The ready callback leaves out the headings before the first draw. */
     Put32(g_context + 0x16390, 5);
     co_card_height = 780.0f;
+    co_card_mission = 113.0f;
+    Panels(0);
     co_cards_open(&regs);
-    CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 498.0f);
+    CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 498.0f && co_card_mission == 65.0f);
     CHECK(fake_host_logged("loadout cards: eight (complex operation no, 5 players)"));
+    co_cards_ready(&regs);
+    CHECK(Compacted());
 
     /* A fifth player joining a four-card screen: switched in the first update after, with the complex term not due. */
     Put32(g_context + 0x16390, 3);
+    Panels(1);
     co_cards_open(&regs);
-    CHECK(co_cards_test_get_mode() == CO_CARDS_FOUR && co_card_height == 780.0f);
+    CHECK(co_cards_test_get_mode() == CO_CARDS_FOUR && co_card_height == 780.0f && co_card_mission == 113.0f);
+    co_cards_ready(&regs);
+    CHECK(AsBuilt());
     const unsigned asked = co_cards_test_complex_reads();
     Put32(g_context + 0x16390, 5);
     co_cards_layout(&regs);
@@ -234,7 +306,8 @@ static void CheckCallbacks(void)
     /* The slot list open on card 2: +0x1D40 at 206 hangs from the top, so the box and the cut move up 292. */
     Size(Card(1) + 0x1D40, 480.0f, 206.0f);
     co_cards_layout(&regs);
-    CHECK(Near(Field(Card(1) + 0x1FA8 + 0x110, 0xC4) * 592.0f, 255.0f + 292.0f + 8.0f) && Field(Card(1) + 0x1FA8 + 0x110, 0xCC) == 0.0f);
+    CHECK(Compacted());
+    CHECK(Near(Field(Card(1) + 0x1FA8 + 0x110, 0xC4) * 592.0f, 207.0f + 292.0f + 8.0f) && Field(Card(1) + 0x1FA8 + 0x110, 0xCC) == 0.0f);
 
     /* No session context: four. */
     Put(image + 0x347CEF0u, 0);
@@ -243,6 +316,7 @@ static void CheckCallbacks(void)
 
     co_cards_test_mode(CO_CARDS_GAME, 0);
     co_card_height = 780.0f;
+    co_card_mission = 113.0f;
 }
 
 int main(void)

@@ -49,6 +49,7 @@ uint32_t co_counts_test_join_index(uint8_t* flags);
 int co_counts_test_write_of(uint32_t rva);
 unsigned co_counts_test_loadout(void);
 extern float co_card_height;
+extern float co_card_mission;
 unsigned co_counts_test_synced(void);
 uintptr_t co_counts_test_synced_table(void);
 int co_counts_test_move_writes(void);
@@ -554,7 +555,7 @@ int main(void)
         static char line[96];
         uint32_t value;
         snprintf(line, sizeof line, "players: the loadout screen has eight records and cards (%u code sites changed)", co_counts_test_loadout());
-        CHECK(co_counts_test_loadout() == 489u && fake_host_logged(line) == (players == 8));
+        CHECK(co_counts_test_loadout() == 491u && fake_host_logged(line) == (players == 8));
         memcpy(&value, image + LOADOUT_SIZE + 1, 4);
         CHECK(image[LOADOUT_SIZE] == 0xBA && value == (players == 8 ? 0x36FA70u : 0x2739D0u));
         CHECK(image[LOADOUT_BOUND] == 0xBF && image[LOADOUT_BOUND + 1] == players);
@@ -666,6 +667,33 @@ int main(void)
                 CHECK(got == want);
             }
             co_card_height = 780.0f;
+        }
+
+        /* Run: the slots panel's open height at its constructor and its open setter. A stub sets eax and clears xmm1
+         * and jumps to the cave; where it goes back the test returns rax's low half over xmm1's bits. The cave loads the
+         * slot and keeps rax. */
+        static const uint32_t kMission[2][2] = {{0x1893FDCu, 0x1893FE4u}, {0x1895AA0u, 0x1895AA8u}};
+        /* mov eax,0x5A5A5A5A; xorps xmm1,xmm1; jmp rdx */
+        static const uint8_t kMissionIn[] = {0xB8, 0x5A, 0x5A, 0x5A, 0x5A, 0x0F, 0x57, 0xC9, 0xFF, 0xE2};
+        /* shl rax,32; movd ecx,xmm1; or rax,rcx; ret */
+        static const uint8_t kMissionBack[] = {0x48, 0xC1, 0xE0, 0x20, 0x66, 0x0F, 0x7E, 0xC9, 0x48, 0x09, 0xC8, 0xC3};
+        typedef uint64_t (*MissionFn)(void*, const void*);
+        Landing(ENTER + 0x240u, kMissionIn, sizeof kMissionIn);
+        for (size_t i = 0; i < 2; i++)
+        {
+            cave = Cave(kMission[i][0], 8);
+            CHECK((cave != NULL) == (players == 8));
+            if (cave == NULL) { CHECK(memcmp(image + kMission[i][0], (const uint8_t[]){0xF3, 0x0F, 0x10, 0x0D}, 4) == 0); continue; }
+            Landing(kMission[i][1], kMissionBack, sizeof kMissionBack);
+            const float heights[2] = {113.0f, 65.0f};
+            for (int h = 0; h < 2; h++)
+            {
+                uint32_t want;
+                co_card_mission = heights[h];
+                memcpy(&want, &heights[h], 4);
+                CHECK(((MissionFn)(uintptr_t)(g_fake.image + ENTER + 0x240u))(NULL, cave) == (0x5A5A5A5Aull << 32 | want));
+            }
+            co_card_mission = 113.0f;
         }
 
         /* The layout's cave in front of L's update: the callback, then the update itself. */
