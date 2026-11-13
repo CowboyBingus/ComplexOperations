@@ -19,6 +19,7 @@ const char* co_complex_refusal(const CoComplexNeeds* n)
     if (!n->level_11) return "difficulty 11 is not installed (the Hell Forge mod is off or failed)";
     if (!n->moved) return "the map generator kept its own arrays";
     if (!n->early) return "the engine's pools and navigation grid were not enlarged as the game started";
+    if (!n->render) return "the main world's culling pools were not enlarged as the game started";
     if (!n->stock_stubs) return "difficulty 11's larger-map steps are not the ones this mod was built for";
     if (!n->own_sites) return "the game's code is not the build this mod was made for";
     if (!n->records) return "the entity records kept the game's 2048 places";

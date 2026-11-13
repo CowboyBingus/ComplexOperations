@@ -114,8 +114,46 @@ void CoXlEarly(uintptr_t game)
     EntityRecordsInstall(game);
 }
 int CoXlRecords(void) { return g_entityRecordsState; }
+/* The main world is made once per process, in game.dll's plugin setup (0x4EE160 -> 0xAB0EE0, the only store of
+ * [engine+0x10E8] at 0xAB18B7), and the ship and every mission are spawned into it: its pools are sized only if the
+ * stubs are in before that. A world already there keeps vanilla pools, which a complex map fills (0x58E14B). */
+#define RENDER_ENGINE 0x3326340u     /* game.dll: the setup's engine object, zeroed (0x4EE535) before it is stored (0x4EE564) */
+#define RENDER_ENGINE_WORLD 0x10E8u  /* its main world */
+static int RenderWorldMade(uintptr_t game)
+{
+    uint64_t engine = 0, world = 0;
+    return g_coApi->read(game + RENDER_ENGINE, &engine, 8) == 0 && engine != 0 &&
+        g_coApi->read((uintptr_t)engine + RENDER_ENGINE_WORLD, &world, 8) == 0 && world != 0;
+}
+const char* CoXlRenderCheck(uintptr_t game, uintptr_t exe)
+{
+    if (RenderWorldMade(game))
+    {
+        Note("difficulty: render capacity: the main world was made before the mod could size it; it keeps vanilla pools (262144)");
+        return "the main world was made before its culling pools could be enlarged";
+    }
+    return RenderCapacityPrepare(exe);
+}
+const char* CoXlRenderWrite(uintptr_t game)
+{
+    const char* why = RenderCapacityWrite();
+    if (why != NULL) return why;
+    /* While the setup has not begun, every main world is made through the stubs. Once it has, a world may have read N
+     * before the jumps (made stays 0 and +0x10E8 is not set until it returns): only a world the stubs counted proves
+     * otherwise. The stubs stay in: putting code back under a thread that may be running it is not safe. */
+    if (!co_early_setup_begun(game) || *g_renderCap.made >= 1) return NULL;
+    Note("difficulty: render capacity: the game's setup began while the stubs went in and no main world has run them; it may keep vanilla pools (262144)");
+    return "the game's setup began while the main world's stubs went in";
+}
 #ifdef CO_TEST
 void CoXlTestRecords(int state) { g_entityRecordsState = state; }
+/* The render capacity's state, a fresh process's; its stub page (NULL before the install) and the tile-in note after
+ * `made` main worlds. */
+void CoXlTestRenderReset(void) { memset(&g_renderCap, 0, sizeof g_renderCap); }
+const uint8_t* CoXlTestRenderPage(void) { return g_renderCap.on == 1 ? g_renderCap.page : NULL; }
+/* The stubs' counter, as a main world made through them leaves it. */
+void CoXlTestRenderMade(LONG made) { if (g_renderCap.page != NULL) *g_renderCap.made = made; }
+void CoXlTestRenderNote(LONG made) { if (g_renderCap.on == 1) *g_renderCap.made = made; RenderCapacityNote(); }
 #endif
 
 /* The living world: on with the complex part when the game is the reviewed build. Each of its parts acts only while

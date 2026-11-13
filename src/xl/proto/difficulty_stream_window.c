@@ -206,7 +206,8 @@ static int WindowReadyLocked(void)
         g_plan.count, g_win.base, DIF_LOCATIONS - 1, g_win.freeCount, (double)WINDOW_IN, WINDOW_PER_SCAN, (double)(WINDOW_BODY_SHARE * 100.0f), freeEntries, slots);
     Note("difficulty: extra large maps: stamp window: %u of the planned stamps can be seen past %.0f m: they enter within that distance (%.0f m at most, %u a scan, the largest first) while the bodies and the culling pool 0 stay under %.0f %%%s",
         g_win.reachFar, (double)WINDOW_IN, (double)WINDOW_FAR, WINDOW_FAR_PER_SCAN, (double)(WINDOW_FAR_SHARE * 100.0f),
-        g_win.reach == NULL ? " (no memory for the distances: off)" : g_renderCap.on != 1 ? " (the culling pool is not read: off)" : "");
+        g_win.reach == NULL ? " (no memory for the distances: off)" : g_renderCap.on != 1 ? " (the culling pool is not read: off)" :
+        *g_renderCap.scenePtr == 0 ? " (the main world's scene is not known, so its pools are not read: every far stamp is held)" : "");
     return 1;
 }
 

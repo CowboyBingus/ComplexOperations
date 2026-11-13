@@ -64,6 +64,8 @@ static int ReadCode(uintptr_t address, void* buffer, size_t size)
 
 static int Write(uintptr_t address, const void* data, size_t size)
 {
+    if (g_fake.wroteCount < (int)(sizeof g_fake.wrote / sizeof g_fake.wrote[0])) g_fake.wrote[g_fake.wroteCount] = address;
+    g_fake.wroteCount++;
     if (!Inside(address, size) || g_fake.writes++ == g_fake.failWriteAt) return 1;
     memcpy((void*)address, data, size);
     return 0;
@@ -73,6 +75,8 @@ static int CodeMatches(uintptr_t address, const char* pattern)
 {
     for (size_t i = 0; i < sizeof g_fake.noMatch / sizeof g_fake.noMatch[0]; i++)
         if (g_fake.noMatch[i] != 0 && (uintptr_t)g_fake.image + g_fake.noMatch[i] == address) return 0;
+    for (size_t i = 0; i < sizeof g_fake.noMatchExe / sizeof g_fake.noMatchExe[0]; i++)
+        if (g_fake.noMatchExe[i] != 0 && g_fake.exe != NULL && (uintptr_t)g_fake.exe + g_fake.noMatchExe[i] == address) return 0;
     return 1;
 }
 

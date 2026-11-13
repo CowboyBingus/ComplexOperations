@@ -158,6 +158,12 @@ void fake_stock_nav(uint8_t* image)
     for (int i = 0; i < 4; i++) memcpy(exe + kCoNavFillConst[i][0], &kCoNavFillConst[i][1], 4);
 }
 
+/* The exe's main-world creation (0x10CDE0) at the render capacity's three sites, as the game has them. */
+static const uint8_t kRenderCap[26] = {0x8B, 0xBC, 0x24, 0xC8, 0x00, 0x00, 0x00, 0x48, 0x8B, 0xF1, 0xB9, 0x00, 0x02, 0x00, 0x00,
+    0x4C, 0x8B, 0xFA, 0x8B, 0xC7, 0x4D, 0x8B, 0xF0, 0xC1, 0xE8, 0x03};
+static const uint8_t kRenderPool0[13] = {0x89, 0x44, 0x24, 0x60, 0x89, 0x44, 0x24, 0x64, 0x8B, 0xC7, 0xC1, 0xE8, 0x04};
+static const uint8_t kRenderScene[11] = {0x49, 0x89, 0x07, 0x48, 0x8D, 0x54, 0x24, 0x50, 0x48, 0x8B, 0x03};
+
 void fake_stock_early(uint8_t* image)
 {
     uint8_t* exe = g_fake.exe != NULL ? g_fake.exe : fake_host_exe(); /* a case's engine image is made once */
@@ -173,6 +179,9 @@ void fake_stock_early(uint8_t* image)
     memset(image + CO_EARLY_SETUP, 0, 8);
     memcpy(image + CO_STAMP_CELL_SITE, kCoStampCellGame, sizeof kCoStampCellGame);
     memcpy(exe + CO_EARLY_TILE_READ, kCoEarlyTileRead, 8);
+    memcpy(exe + FAKE_RENDER_CAP, kRenderCap, sizeof kRenderCap);
+    memcpy(exe + FAKE_RENDER_POOL0, kRenderPool0, sizeof kRenderPool0);
+    memcpy(exe + FAKE_RENDER_SCENE, kRenderScene, sizeof kRenderScene);
 }
 
 static uint32_t Jump(uint8_t* image, uint32_t at, uint32_t target) { image[at] = 0xE9; Rel(image, at + 1u, target); return at + 5u; }

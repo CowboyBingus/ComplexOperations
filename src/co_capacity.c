@@ -35,6 +35,7 @@ static struct
     uint64_t since;            /* the first poll */
     uintptr_t game;
     const char* early;         /* why the engine's room did not go in; NULL when it did or was not asked */
+    const char* render;        /* why the main world's culling pools did not, once the room did */
     int asked, settled, on;
 } g_capacity;
 static uint32_t g_commitTest; /* tests: the commit to report instead of the machine's */
@@ -103,9 +104,11 @@ static const char* OwnSites(uintptr_t game)
     return NULL;
 }
 
-/* The engine lays its pools and its navigation grid out once, seconds after game.dll is loaded, and the mod knows only
- * later whether level 11 is there. So the room goes in on what is known now, and only on a machine that could make a
- * complex operation at all: where one of these fails nothing of the engine's is changed. */
+/* The engine lays its pools, its navigation grid and its one main world out once, seconds after game.dll is loaded,
+ * and the mod knows only later whether level 11 is there. So the room goes in on what is known now, and only on a
+ * machine that could make a complex operation at all. Every check runs before any write, so a refusal there changes
+ * nothing of the engine's. The main world's jumps go in after the room: a refusal then keeps the room, and with it
+ * every level's navigation plan, with the complex part off. */
 void co_capacity_early(void)
 {
     CoComplexNeeds* n = &g_capacity.needs;
@@ -119,7 +122,10 @@ void co_capacity_early(void)
         return;
     }
     if ((g_capacity.early = OwnSites(game)) != NULL || (g_capacity.early = co_stamps_room_check(game)) != NULL) return;
-    if ((g_capacity.early = co_early_install(game, g_coApi->module_base("helldivers2.exe", NULL))) != NULL) return;
+    const uintptr_t exe = g_coApi->module_base("helldivers2.exe", NULL);
+    if ((g_capacity.early = co_early_check(game, exe)) != NULL || (g_capacity.early = CoXlRenderCheck(game, exe)) != NULL) return;
+    if ((g_capacity.early = co_early_install(game, exe)) != NULL) return;
+    n->render = (g_capacity.render = CoXlRenderWrite(game)) == NULL;
     CoXlEarly(game);
     co_stamps_room(game); /* refused: the engine's room stays, and the poll finds the stamp index too small for the part */
     n->early = 1;
@@ -172,6 +178,7 @@ static void Settle(void)
     else if (capacity && g_capacity.game == 0) why = NULL; /* no game to ask: the line below says what this build is */
     g_capacity.on = CO_COMPLEX_COMPLETE && capacity && g_capacity.game != 0 && why == NULL;
     if (why != NULL && capacity && !n->early && g_capacity.early != NULL) co_log("complex operations are off: %s (%s)", why, g_capacity.early);
+    else if (why != NULL && capacity && n->early && !n->render && g_capacity.render != NULL) co_log("complex operations are off: %s (%s)", why, g_capacity.render);
     else if (why != NULL && site != NULL && n->stock_stubs) co_log("complex operations are off: %s (%s)", why, site);
     else if (why != NULL && n->stock_stubs && n->own_sites && n->records && capacity && g_capacity.game != 0)
         co_log("complex operations are off: %s (%u MB can be committed, %u are needed)", why, n->commit_free_mb, CO_COMPLEX_COMMIT_MB);
