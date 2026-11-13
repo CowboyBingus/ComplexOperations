@@ -6322,8 +6322,8 @@ static void NearHideUnion(uint64_t world, const char* why)
  *    at +0x20, as SpawnStamps 0xF44890 builds it; a footprint is at most 256 m, 362 m across) gets a 1 m grid of the
  *    hidden square and NEAR_LAYER_MARGIN around it: the tile's heights inside, the coarse terrain's outside (over the
  *    tile's buried band too).
- *  - the other members (SpeedTree, prefabs, volumes, ...): 0xDBEC0 samples 0xD5B10(holder, x, y) directly; inside
- *    the tile it returns the tile's height there (bilinear). */
+ *  - prefabs and volumes: 0xDBEC0 samples 0xD5B10(holder, x, y), which inside a tile returns its height (bilinear);
+ *    SpeedTree and particle effects read 0xDBEC0's descriptor inline, so WorldLayerSpawn gives the grid there. */
 #define NEAR_LAYER_MARGIN 768.0f
 #define NEAR_LAYER_REACH 384.0f
 #define NEAR_LAYER_N 3584u /* (NEAR_HIDE + 2 NEAR_LAYER_MARGIN) at 1 m */
@@ -6340,6 +6340,7 @@ typedef struct
     uint8_t desc[2][0x28];    /* alternated per layout, so a spawn in flight keeps a whole one */
     volatile LONG descMade;   /* 0 not made for this layout, 1 being made, 2 made */
     int at;                   /* desc[at] belongs to this layout */
+    volatile LONG users;      /* layer spawns reading it now (WorldLayerSpawn): a refill waits for them */
 } NearLayerGrid;
 static NearLayerGrid g_layerGrid[NEAR_TILES_MAX];
 static struct
@@ -6348,7 +6349,7 @@ static struct
     LONG level;
     volatile LONG descState;    /* 0 not taken, 1 being taken, 2 taken (layer spawns run on worker threads) */
     volatile LONG64 units, samples;
-    uint32_t fills;
+    uint32_t fills, quietWaits, quietLate; /* refills; those that waited for spawns; those that went on with one in flight */
 } g_nearLayer = {.level = -1};
 
 
@@ -6559,7 +6560,41 @@ static void NearLayerCompose(NearLayerGrid* g)
     memcpy(g->desc[g->at], mine, sizeof mine);
 }
 
+/* A grid about to be written: out of use for new spawns, then up to 200 ms for the spawns reading it to finish (they
+ * run on the engine's workers; the wait is bounded so a worker that waits on the game thread cannot hang it). */
+static void NearLayerQuiet(NearLayerGrid* g)
+{
+    InterlockedExchange(&g->ready, 0);
+    if (g->users == 0) return;
+    g_nearLayer.quietWaits++;
+    for (int i = 0; i < 200 && g->users != 0; i++) Sleep(1);
+    if (g->users != 0) g_nearLayer.quietLate++;
+}
+
+/* WorldLayerSpawn around the engine's spawn: the slot of the grid `desc` it hands on, counted as in use, or -1 when
+ * `desc` is no longer a ready grid's current descriptor (a refill began after it was chosen). */
+static int NearLayerGridEnter(uint64_t desc)
+{
+    for (int k = 0; k < NEAR_TILES_MAX; k++)
+    {
+        NearLayerGrid* g = &g_layerGrid[k];
+        if (desc != (uint64_t)(uintptr_t)g->desc[0] && desc != (uint64_t)(uintptr_t)g->desc[1]) continue;
+        InterlockedIncrement(&g->users);
+        MemoryBarrier();
+        if (g->ready && g->level == g_world.levels && desc == (uint64_t)(uintptr_t)g->desc[g->at]) return k;
+        InterlockedDecrement(&g->users);
+        return -1;
+    }
+    return -1;
+}
+
+static void NearLayerGridLeave(int k)
+{
+    if (k >= 0 && k < NEAR_TILES_MAX) InterlockedDecrement(&g_layerGrid[k].users);
+}
+
 static void NearLayerProbeNote(const char* when);
+static void NearLayerSpawnNote(const char* when);
 /* A tile came (in = 1, its slot's grid laid out and filled for it) or went (in = 0, its slot's grid out of use): every
  * other live tile's grid is filled again where the tile's span overlaps it. Game thread. */
 static void NearLayerTileChange(int slot, int in, float cx, float cy)
@@ -6567,7 +6602,7 @@ static void NearLayerTileChange(int slot, int in, float cx, float cy)
     if (slot < 0 || slot >= NEAR_TILES_MAX) return;
     if (g_nearLayer.level != g_world.levels) { g_nearLayer.level = g_world.levels; for (int k = 0; k < NEAR_TILES_MAX; k++) g_layerGrid[k].ready = 0; }
     NearLayerGrid* g = &g_layerGrid[slot];
-    InterlockedExchange(&g->ready, 0);
+    NearLayerQuiet(g);
     if (in)
     {
         if (g->data == NULL) g->data = (float*)VirtualAlloc(NULL, (size_t)NEAR_LAYER_N * NEAR_LAYER_N * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -6585,13 +6620,18 @@ static void NearLayerTileChange(int slot, int in, float cx, float cy)
     {
         NearLayerGrid* o = &g_layerGrid[k];
         if (k == slot || !o->ready || o->level != g_world.levels) continue;
+        NearLayerQuiet(o);
         refilled += NearLayerFill(o, cx - NEAR_SPAN / 2, cy - NEAR_SPAN / 2, cx + NEAR_SPAN / 2, cy + NEAR_SPAN / 2);
+        MemoryBarrier();
+        InterlockedExchange(&o->ready, 1);
     }
     g_nearLayer.fills++;
-    Note("difficulty: near terrain: level layers: the tile at (%.0f, %.0f) %s; %s, %d other grid(s) filled again where it %s", (double)cx, (double)cy,
+    Note("difficulty: near terrain: level layers: the tile at (%.0f, %.0f) %s; %s, %d other grid(s) filled again where it %s; "
+        "%u grid writes so far waited for layer spawns reading them, %u went on with one still reading", (double)cx, (double)cy,
         in ? "is in" : "went", in ? "its 1 m grid of the hidden square and 768 m around it made from the ground as drawn" : "its grid out of use", refilled,
-        in ? "lies" : "lay");
+        in ? "lies" : "lay", g_nearLayer.quietWaits, g_nearLayer.quietLate);
     NearLayerProbeNote(in ? "a tile came in" : "a tile went");
+    NearLayerSpawnNote(in ? "a tile came in" : "a tile went");
 }
 
 /* The level's layer heightfield: its extent is the world's. */
@@ -6631,6 +6671,8 @@ static uint64_t NearLayerFieldWhy(uint64_t unit, uint64_t field, int* slot, int*
 {
     *slot = -1;
     if (unit == 0 || field == 0) { *why = NEAR_WHY_ARGS; return 0; }
+    for (int k = 0; k < NEAR_TILES_MAX; k++) /* given at the layer spawn (WorldLayerSpawn): kept */
+        if (field == (uint64_t)(uintptr_t)g_layerGrid[k].desc[0] || field == (uint64_t)(uintptr_t)g_layerGrid[k].desc[1]) { *slot = k; *why = NEAR_WHY_OK; return 0; }
     if (g_nearLayer.level != g_world.levels) { *why = NEAR_WHY_LEVEL; return 0; }
     uint8_t desc[0x28]; float t[2];
     if (SafeRead(field, desc, sizeof desc) || !NearLayerIsLevel(desc)) { *why = NEAR_WHY_DESC; return 0; }
@@ -6773,6 +6815,142 @@ static void NearLayerProbe(char kind, uint32_t caller, float x, float y, float z
             kNearWhy[why & 7], (int)g_near.state, g_moveBuilding ? ", a tile builds" : "");
     }
     if (n == 1000 || n == 100000) NearLayerProbeNote(n == 1000 ? "1000 reads" : "100000 reads");
+}
+
+/* A layer spawn's descriptor for all its members (WorldLayerSpawn, exe 0xDBEC0): the grid of the tile its stamp stands
+ * by, else 0. A location stamp's own unit stands at z 0; its members take their heights from reads of this descriptor
+ * (the hooked ones from the drawn ground), so the note checks what the inline readers (SpeedTree, prefab units,
+ * particles) take at the stamp's centre against the drawn ground, for stamps within NEAR_PROBE_RADIUS of a player. */
+#define NEAR_SPAWN_OFF 0.5f
+#define NEAR_SPAWN_LINES 20
+#define NEAR_SPAWN_RELIEF 16.0f /* m around a stamp's centre for the relief (foot_band_min) */
+static struct
+{
+    SRWLOCK lock; LONG level, spawns, grids, trees, effects, nearby, off, lines, onGame, threads;
+    float worst, worstAt[2], relief; double sum;
+    DWORD seen[16];
+} g_layerSpawnNote = {SRWLOCK_INIT, -1};
+static volatile DWORD g_layerGameThread; /* the streamer's tick thread (the game thread), WorldStreamTick */
+
+/* Stamps whose layers spawned on the level's heights while a live tile was within reach (its grid not ready yet, or
+ * written again meanwhile): their inline readers took the level's heights. The streamer puts each back once a grid
+ * covers it (WorldStreamPendingLocked). Workers add, the game thread takes. */
+#define NEAR_PENDING 1024
+static struct
+{
+    SRWLOCK lock; LONG level; uint32_t count, added, lost, replaced, kept, expired;
+    struct { uint64_t unit; float x, y; ULONGLONG at; } e[NEAR_PENDING];
+} g_layerPending = {SRWLOCK_INIT, -1};
+static void NearLayerPendingAdd(uint64_t unit, float x, float y)
+{
+    AcquireSRWLockExclusive(&g_layerPending.lock);
+    if (g_layerPending.level != g_world.levels)
+    {
+        g_layerPending.level = g_world.levels;
+        g_layerPending.count = g_layerPending.added = g_layerPending.lost = g_layerPending.replaced = g_layerPending.kept = g_layerPending.expired = 0;
+    }
+    if (g_layerPending.count < NEAR_PENDING)
+    {
+        g_layerPending.e[g_layerPending.count].unit = unit; g_layerPending.e[g_layerPending.count].x = x; g_layerPending.e[g_layerPending.count].y = y;
+        g_layerPending.e[g_layerPending.count++].at = GetTickCount64();
+        g_layerPending.added++;
+    }
+    else g_layerPending.lost++;
+    ReleaseSRWLockExclusive(&g_layerPending.lock);
+}
+
+static void NearLayerSpawnNote(const char* when)
+{
+    AcquireSRWLockShared(&g_layerSpawnNote.lock);
+    if (g_layerSpawnNote.level == g_world.levels && g_layerSpawnNote.spawns > 0)
+    {
+        Note("difficulty: near terrain: layer spawns (%s): %ld, %ld of them on a tile's grid for every member (%ld with SpeedTree, %ld with particle effects); "
+            "%ld within %.0f m of a player, their members %.2f m off the drawn ground on average, %.2f m at most (at %.0f, %.0f), %ld over %.1f m; "
+            "the drawn ground within %.0f m of their centres up to %.2f m under the centre's",
+            when, (long)g_layerSpawnNote.spawns, (long)g_layerSpawnNote.grids, (long)g_layerSpawnNote.trees, (long)g_layerSpawnNote.effects,
+            (long)g_layerSpawnNote.nearby, (double)NEAR_PROBE_RADIUS, g_layerSpawnNote.nearby ? g_layerSpawnNote.sum / g_layerSpawnNote.nearby : 0.0,
+            (double)g_layerSpawnNote.worst, (double)g_layerSpawnNote.worstAt[0], (double)g_layerSpawnNote.worstAt[1], (long)g_layerSpawnNote.off,
+            (double)NEAR_SPAWN_OFF, (double)NEAR_SPAWN_RELIEF, (double)g_layerSpawnNote.relief);
+        Note("difficulty: near terrain: layer spawns (%s): %ld ran on the game thread, the rest on %ld other thread(s); %u spawned on the level's heights by a tile, "
+            "%u of them since put back on a grid, %u kept (not the streamer's to put back), %u waiting, %u with no grid within 60 s, %u not listed (list full)",
+            when, (long)g_layerSpawnNote.onGame, (long)g_layerSpawnNote.threads, g_layerPending.added, g_layerPending.replaced, g_layerPending.kept,
+            g_layerPending.count, g_layerPending.expired, g_layerPending.lost);
+    }
+    ReleaseSRWLockShared(&g_layerSpawnNote.lock);
+}
+
+/* What an inline reader takes at (x, y) from `desc`: a grid's nearest sample, else the level's kept heightfield. */
+static float NearSpawnRead(uint64_t desc, float x, float y)
+{
+    for (int k = 0; k < NEAR_TILES_MAX; k++)
+        if (desc == (uint64_t)(uintptr_t)g_layerGrid[k].desc[0] || desc == (uint64_t)(uintptr_t)g_layerGrid[k].desc[1]) return NearTraceGridAt(k, x, y);
+    return NearTraceLevelAt(x, y);
+}
+
+/* `again`: a second choice after a refill (WorldLayerSpawn), not counted twice. */
+static uint64_t NearLayerSpawnField(uint64_t unit, uint64_t field, int again)
+{
+    uint64_t grid = NearLayerField(unit, field);
+    if (again) return grid;
+    uint32_t trees = 0, effects = 0; uint64_t res = 0; float t[3] = {0}, distance = 0, off = -1.0f, read = 0, drawn = 0, relief = 0;
+    SafeRead(unit + 0x3D0, &trees, 4); /* 0xDC390: the unit's SpeedTree groups */
+    if (!SafeRead(unit + 0x10, &res, 8) && res != 0) SafeRead(res + 0x48, &effects, 4); /* 0xE7D1B: its particle effects */
+    int placed = !SafeRead(unit + 0x50, t, 12) && isfinite(t[0]) && isfinite(t[1]);
+    if (placed && grid == 0 && NearTileNear(t[0], t[1], NEAR_LAYER_REACH) >= 0) NearLayerPendingAdd(unit, t[0], t[1]);
+    if (placed && WorldStreamNearPlayer(t[0], t[1], NEAR_PROBE_RADIUS, &distance))
+    {
+        read = NearSpawnRead(grid != 0 ? grid : field, t[0], t[1]);
+        drawn = NearVisibleAt(t[0], t[1]);
+        if (read > -9000.0f && drawn > -9000.0f)
+        {
+            off = fabsf(read - drawn);
+            for (float dy = -NEAR_SPAWN_RELIEF; dy <= NEAR_SPAWN_RELIEF; dy += 4.0f)
+                for (float dx = -NEAR_SPAWN_RELIEF; dx <= NEAR_SPAWN_RELIEF; dx += 4.0f)
+                {
+                    float g = NearVisibleAt(t[0] + dx, t[1] + dy);
+                    if (g > -9000.0f && drawn - g > relief) relief = drawn - g;
+                }
+        }
+    }
+    DWORD tid = GetCurrentThreadId();
+    int line = 0;
+    AcquireSRWLockExclusive(&g_layerSpawnNote.lock);
+    if (g_layerSpawnNote.level != g_world.levels)
+    {
+        g_layerSpawnNote.level = g_world.levels;
+        g_layerSpawnNote.spawns = g_layerSpawnNote.grids = g_layerSpawnNote.trees = g_layerSpawnNote.effects = 0;
+        g_layerSpawnNote.nearby = g_layerSpawnNote.off = g_layerSpawnNote.lines = g_layerSpawnNote.onGame = g_layerSpawnNote.threads = 0;
+        g_layerSpawnNote.worst = g_layerSpawnNote.relief = 0.0f; g_layerSpawnNote.sum = 0.0;
+    }
+    LONG n = ++g_layerSpawnNote.spawns;
+    g_layerSpawnNote.grids += grid != 0; g_layerSpawnNote.trees += grid != 0 && trees != 0; g_layerSpawnNote.effects += grid != 0 && effects != 0;
+    if (tid == g_layerGameThread) g_layerSpawnNote.onGame++;
+    else
+    {
+        int known = 0;
+        for (LONG k = 0; k < g_layerSpawnNote.threads && k < 16; k++) known |= g_layerSpawnNote.seen[k] == tid;
+        if (!known) { if (g_layerSpawnNote.threads < 16) g_layerSpawnNote.seen[g_layerSpawnNote.threads] = tid; g_layerSpawnNote.threads++; }
+    }
+    if (off >= 0.0f)
+    {
+        g_layerSpawnNote.nearby++; g_layerSpawnNote.sum += off;
+        if (off > g_layerSpawnNote.worst) { g_layerSpawnNote.worst = off; g_layerSpawnNote.worstAt[0] = t[0]; g_layerSpawnNote.worstAt[1] = t[1]; }
+        if (relief > g_layerSpawnNote.relief) g_layerSpawnNote.relief = relief;
+        if (off > NEAR_SPAWN_OFF) { g_layerSpawnNote.off++; line = ++g_layerSpawnNote.lines <= NEAR_SPAWN_LINES; }
+    }
+    ReleaseSRWLockExclusive(&g_layerSpawnNote.lock);
+    if (line)
+        Note("difficulty: near terrain: layer spawn off the ground: the stamp at (%.1f, %.1f), %.0f m from a player: its members read %.2f (%s), drawn %.2f, unit z %.2f",
+            (double)t[0], (double)t[1], (double)distance, (double)read, grid != 0 ? "a tile's grid" : "the level's heights", (double)drawn, (double)t[2]);
+    if (n == 1 || n == 100 || n == 1000 || n == 10000) NearLayerSpawnNote(n == 1 ? "the first" : n == 100 ? "100" : n == 1000 ? "1000" : "10000");
+    return grid;
+}
+
+/* WorldLayerSpawn chose a grid twice and both were written meanwhile: the stamp spawns on the level's heights. */
+static void NearLayerSpawnStale(uint64_t unit)
+{
+    float t[2];
+    if (!SafeRead(unit + 0x50, t, 8) && isfinite(t[0]) && isfinite(t[1])) NearLayerPendingAdd(unit, t[0], t[1]);
 }
 
 /* kind 'S': a placed-unit read (0xDFA60), result the grid's slot or -1, z the stamp unit's pose z (+0x58), used the height
