@@ -2207,15 +2207,24 @@ typedef struct { volatile LONG state; int step, ok; uint8_t phase; double ms; ui
 typedef int (*NearPreBuildFn)(int tile, uint64_t context, uint8_t* block, uint8_t* record);
 static struct
 {
-    volatile LONG stop; int on, refused; HANDLE thread; TileRunner* r; LONG level;
+    volatile LONG stop; int on, refused; HANDLE thread; TileRunner* r; LONG level, inits, goneLevel;
     int first, last;
     uint8_t* blocks[NEAR_PRE_SLOTS];
     NearPreSlot slot[NEAR_PRE_SLOTS];
     uint64_t records, g, h; uint32_t end; uintptr_t gen, P, lg, spacingAt; uint32_t disk; float spacing;
     uint8_t ctx[0xE8], buildS[0x120];
-    double longest, sum, waitMs; int built, failed; LARGE_INTEGER waitFrom;
+    double longest, sum, waitMs; int built, failed, sizeNoted; LARGE_INTEGER waitFrom;
 } g_nearPre;
 static NearPreBuildFn g_nearPreBuild;
+
+/* In a mission (game state 4, as WorldStreamInMission): the level's world is freed when the mission ends, before the
+ * next level init, so a run must not outlive it. */
+static int NearPreInMissionGame(void)
+{
+    uintptr_t gameObj = 0; uint32_t state = 0;
+    return !SafeRead(g_world.game + 0x3326340u, &gameObj, 8) && gameObj != 0 && !SafeRead(gameObj + 0xAC21Cu, &state, 4) && state == 4;
+}
+static int (*g_nearPreInMission)(void) = NearPreInMissionGame;
 
 /* The tile built on `block` with the runner's context, then the draw's record on it (CoarseOne's). Runner thread. */
 static int NearPreBuildTile(int tile, uint64_t context, uint8_t* block, uint8_t* record)
@@ -2241,7 +2250,9 @@ static DWORD WINAPI NearPreThread(LPVOID unused)
         const int i = (s - g_nearPre.first) % NEAR_PRE_SLOTS;
         NearPreSlot* p = &g_nearPre.slot[i];
         while (p->state != NEAR_PRE_FREE && !g_nearPre.stop) Sleep(1);
-        if (g_nearPre.stop) break;
+        /* as the coarse runners: a level init waits for the build, and a build of a level being replaced is not begun */
+        AcquireSRWLockShared(&g_sectionLock);
+        if (g_nearPre.stop || g_levelInits != g_nearPre.inits) { ReleaseSRWLockShared(&g_sectionLock); break; }
         p->step = s; InterlockedExchange(&p->state, NEAR_PRE_BUILDING);
         LARGE_INTEGER hz, b0, b1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&b0);
         uint64_t context = 0;
@@ -2252,6 +2263,7 @@ static DWORD WINAPI NearPreThread(LPVOID unused)
             context = (uint64_t)(uintptr_t)r->ctx;
         }
         p->ok = g_nearPreBuild(g_near.stepTile[s], context, g_nearPre.blocks[i], p->record);
+        ReleaseSRWLockShared(&g_sectionLock);
         if (r != NULL) r->block = NULL;
         p->phase = 0;
         QueryPerformanceCounter(&b1); p->ms = (double)(b1.QuadPart - b0.QuadPart) * 1000.0 / (double)hz.QuadPart;
@@ -2267,22 +2279,40 @@ static void NearPreStop(const char* why)
 {
     if (!g_nearPre.on) return;
     InterlockedExchange(&g_nearPre.stop, 1);
+    LARGE_INTEGER hz, j0, j1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&j0);
     if (g_nearPre.thread != NULL) { WaitForSingleObject(g_nearPre.thread, INFINITE); CloseHandle(g_nearPre.thread); g_nearPre.thread = NULL; }
-    if (g_nearPre.lg != 0 && g_nearPre.level == g_world.levels)
+    QueryPerformanceCounter(&j1);
+    /* the marker and spacing are the level's: not written once its world may be gone (a level init came, or the
+     * mission ended; g_world.levels moves only later in the level init) */
+    const int gone = g_levelInits != g_nearPre.inits || g_nearPre.level != g_world.levels || !g_nearPreInMission();
+    if (g_nearPre.lg != 0 && !gone)
     {
         *(volatile uint32_t*)(g_nearPre.lg + 0x2D7C) = g_nearPre.disk;
         *(volatile float*)g_nearPre.spacingAt = g_nearPre.spacing;
     }
+    for (int i = 0; i < NEAR_PRE_SLOTS; i++) if (g_nearPre.blocks[i] != NULL) { VirtualFree(g_nearPre.blocks[i], 0, MEM_RELEASE); g_nearPre.blocks[i] = NULL; }
+    TileRunner* r = g_nearPre.r;
+    if (r != NULL && !g_tileJobsBroken)
+    {
+        /* this runner only (TileRunnersRelease's steps): the 2 blocks and its arena come back for the next build */
+        VirtualFree((void*)(uintptr_t)r->chunk.data, TILE_RUNNER_ARENA, MEM_DECOMMIT);
+        for (int j = 0; j < 8; j++) if (r->regions[j] != NULL) VirtualFree(r->regions[j], TILE_JOB_REGION, MEM_DECOMMIT);
+        if (r->memory != NULL) { VirtualFree(r->memory, 0, MEM_RELEASE); r->memory = NULL; r->memoryBytes = 0; }
+        r->decommitted = 1;
+    }
+    g_nearPre.r = NULL;
     g_tileSectionHeld = 0;
     g_nearPre.on = 0;
     Note("difficulty: moving tiles: composite tiles built off the game thread (%s): %d built, %d failed; the longest %.0f ms, %.0f ms in all; "
-        "the steps waited %.0f ms for them", why, g_nearPre.built, g_nearPre.failed, g_nearPre.longest, g_nearPre.sum, g_nearPre.waitMs);
+        "the steps waited %.0f ms for them; the join %.1f ms; %s", why, g_nearPre.built, g_nearPre.failed, g_nearPre.longest, g_nearPre.sum,
+        g_nearPre.waitMs, (double)(j1.QuadPart - j0.QuadPart) * 1000.0 / (double)hz.QuadPart, gone ? "the level was gone: its marker left" : "the marker put back");
 }
 
 /* Game thread, at a build's first composite step: the run of composite steps from `s` on the thread. 0: built here. */
 static int NearPreStart(int s, uint64_t records, uint32_t end, uint64_t context, uint64_t g, uint64_t h, uintptr_t gen)
 {
-    if (g_nearPre.refused || !g_moveBuilding || g_coarse.on || g_tileSectionHeld || s < 0 || s >= g_near.steps || g_near.stepKind[s] != NEAR_TILE) return 0;
+    if (g_nearPre.refused || !g_moveBuilding || g_coarse.on || g_tileSectionHeld || s < 0 || s >= g_near.steps || g_near.stepKind[s] != NEAR_TILE ||
+        g_nearPre.goneLevel == g_world.levels + 1 || !g_nearPreInMission()) return 0;
     if (g_nearPreBuild == NULL)
     {
         if (!TileBuildsOn() || !TileDispatchInstall() || g_tileRunnerTls == TLS_OUT_OF_INDEXES) { g_nearPre.refused = 1; return 0; }
@@ -2306,10 +2336,13 @@ static int NearPreStart(int s, uint64_t records, uint32_t end, uint64_t context,
             if (g_nearPre.blocks[i] == NULL) g_nearPre.blocks[i] = (uint8_t*)VirtualAlloc(NULL, GEN_BLOCK_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
             if (g_nearPre.blocks[i] == NULL) { g_nearPre.refused = 1; Note("difficulty: moving tiles: no memory for the composite tiles' blocks; they are built on the game thread"); return 0; }
         }
+        if (!g_nearPre.sizeNoted++)
+            Note("difficulty: moving tiles: composite tiles off the game thread: %d blocks of %.1f MB, released after each run", NEAR_PRE_SLOTS,
+                (double)GEN_BLOCK_SIZE / 1048576.0);
     }
     else g_nearPre.r = NULL;
     g_nearPre.records = records; g_nearPre.end = end; g_nearPre.g = g; g_nearPre.h = h; g_nearPre.gen = gen; g_nearPre.lg = lg; g_nearPre.spacingAt = spacingAt;
-    g_nearPre.first = s; g_nearPre.last = last; g_nearPre.level = g_world.levels;
+    g_nearPre.first = s; g_nearPre.last = last; g_nearPre.level = g_world.levels; g_nearPre.inits = g_levelInits;
     g_nearPre.longest = g_nearPre.sum = g_nearPre.waitMs = 0; g_nearPre.built = g_nearPre.failed = 0; g_nearPre.waitFrom.QuadPart = 0;
     for (int i = 0; i < NEAR_PRE_SLOTS; i++) { g_nearPre.slot[i].state = NEAR_PRE_FREE; g_nearPre.slot[i].step = -1; }
     if (lg != 0)
@@ -2324,6 +2357,15 @@ static int NearPreStart(int s, uint64_t records, uint32_t end, uint64_t context,
     g_nearPre.thread = CreateThread(NULL, 1024 * 1024, NearPreThread, NULL, 0, NULL);
     if (g_nearPre.thread == NULL) { NearPreStop("its thread did not start"); return 0; }
     return 1;
+}
+
+/* Every frame (CoXlTick), game thread: a run whose mission ended is stopped before its world is freed; that level
+ * builds no more off the thread. */
+static void NearPreTick(void)
+{
+    if (!g_nearPre.on || g_nearPreInMission()) return;
+    g_nearPre.goneLevel = g_world.levels + 1; /* + 1: 0 is no level */
+    NearPreStop("the mission ended");
 }
 
 /* The slot holding step `s`'s tile, or NULL when this step builds it here. Game thread. */
@@ -3600,18 +3642,28 @@ static DWORD WINAPI NearRowsWorker(LPVOID p)
     return 0;
 }
 
-static void NearRows(NearRowsFn fn, void* ctx, int rows)
+/* `helpers` threads beside the caller's (-1: one a core but the caller's, at most 15), at `priority`. */
+static void NearRowsWith(NearRowsFn fn, void* ctx, int rows, int helpers, int priority)
 {
     NearRowsJob job = {fn, ctx, 0, rows};
-    SYSTEM_INFO si; GetSystemInfo(&si);
-    int want = (int)si.dwNumberOfProcessors - 1;
+    int want = helpers;
+    if (want < 0) { SYSTEM_INFO si; GetSystemInfo(&si); want = (int)si.dwNumberOfProcessors - 1; }
     want = want < 0 ? 0 : want > 15 ? 15 : want;
     HANDLE t[15]; int made = 0;
-    for (int k = 0; k < want; k++) { t[made] = CreateThread(NULL, 256 * 1024, NearRowsWorker, &job, 0, NULL); if (t[made] != NULL) made++; }
+    for (int k = 0; k < want; k++)
+    {
+        t[made] = CreateThread(NULL, 256 * 1024, NearRowsWorker, &job, CREATE_SUSPENDED, NULL);
+        if (t[made] == NULL) continue;
+        SetThreadPriority(t[made], priority);
+        ResumeThread(t[made]);
+        made++;
+    }
     NearRowsWorker(&job);
     if (made > 0) WaitForMultipleObjects((DWORD)made, t, TRUE, INFINITE);
     for (int k = 0; k < made; k++) CloseHandle(t[k]);
 }
+
+static void NearRows(NearRowsFn fn, void* ctx, int rows) { NearRowsWith(fn, ctx, rows, -1, THREAD_PRIORITY_NORMAL); }
 
 /* The coarse terrain's map: made at the conform (the level's map read back), bound in its spawn's material slot
  * (NearOneMipSpawn), served to that spawn's physics readback (NearMatReadAsync) and copied over the scatter's CPU copy
@@ -6680,14 +6732,14 @@ static void NearLayerFillRows(void* ctx, int a, int b)
 }
 
 /* The grid's samples whose points lie in the world rectangle [x0, x1] x [y0, y1]; 0 when none does. */
-static int NearLayerFill(NearLayerGrid* g, float x0, float y0, float x1, float y1)
+static int NearLayerFill(NearLayerGrid* g, float x0, float y0, float x1, float y1, int helpers, int priority)
 {
     const float side = (float)NEAR_LAYER_N, w = g->cx - side / 2, n = g->cy + side / 2;
     int c0 = (int)ceilf(x0 - w - 0.5f), c1 = (int)floorf(x1 - w - 0.5f), r0 = (int)ceilf(n - y1 - 0.5f), r1 = (int)floorf(n - y0 - 0.5f);
     if (c0 < 0) c0 = 0; if (r0 < 0) r0 = 0; if (c1 > (int)NEAR_LAYER_N - 1) c1 = (int)NEAR_LAYER_N - 1; if (r1 > (int)NEAR_LAYER_N - 1) r1 = (int)NEAR_LAYER_N - 1;
     if (c0 > c1 || r0 > r1) return 0;
     NearLayerFillJob job = {g, r0, c0, c1};
-    NearRows(NearLayerFillRows, &job, r1 - r0 + 1);
+    NearRowsWith(NearLayerFillRows, &job, r1 - r0 + 1, helpers, priority);
     return 1;
 }
 
@@ -6706,9 +6758,10 @@ static void NearLayerCompose(NearLayerGrid* g)
 static void NearLayerProbeNote(const char* when);
 static int NearLayerBusy(void);
 /* A tile's change of the grids: the tile's own grid filled (in = 1) and every other live grid filled again where the
- * tile's span overlaps it. On its own thread in play (NearLayerTileChangeLater): 12.8 M samples took 30-45 ms on 16
- * threads, the game's frame with them. Readers of a grid being filled again get the old or the new sample. */
-static struct { volatile LONG running; HANDLE thread; int slot, in, refilled; float cx, cy; LONG level; LARGE_INTEGER t0; double ms; } g_layerJob;
+ * tile's span overlaps it. On its own thread in play (NearLayerTileChangeLater), 4 threads below normal priority: nothing
+ * waits on it, and 16 at normal took the cores from the game's own. Readers of a grid being refilled get either sample. */
+#define NEAR_LAYER_HELPERS 3
+static struct { volatile LONG running; HANDLE thread; int slot, in, refilled, helpers, priority; float cx, cy; LONG level; LARGE_INTEGER t0; double ms; } g_layerJob;
 
 /* Game thread: the change's grid out of use and laid out for the tile; 0 when there is nothing to fill. */
 static int NearLayerChangeBegin(int slot, int in, float cx, float cy)
@@ -6728,13 +6781,13 @@ static void NearLayerChangeFill(void)
 {
     const int slot = g_layerJob.slot;
     const float cx = g_layerJob.cx, cy = g_layerJob.cy;
-    if (g_layerJob.in) NearLayerFill(&g_layerGrid[slot], -1e9f, -1e9f, 1e9f, 1e9f);
+    if (g_layerJob.in) NearLayerFill(&g_layerGrid[slot], -1e9f, -1e9f, 1e9f, 1e9f, g_layerJob.helpers, g_layerJob.priority);
     int refilled = 0;
     for (int k = 0; k < NEAR_TILES_MAX; k++)
     {
         NearLayerGrid* o = &g_layerGrid[k];
         if (k == slot || !o->ready || o->level != g_layerJob.level) continue;
-        refilled += NearLayerFill(o, cx - NEAR_SPAN / 2, cy - NEAR_SPAN / 2, cx + NEAR_SPAN / 2, cy + NEAR_SPAN / 2);
+        refilled += NearLayerFill(o, cx - NEAR_SPAN / 2, cy - NEAR_SPAN / 2, cx + NEAR_SPAN / 2, cy + NEAR_SPAN / 2, g_layerJob.helpers, g_layerJob.priority);
     }
     g_layerJob.refilled = refilled;
 }
@@ -6773,6 +6826,7 @@ static int NearLayerChangeStart(int slot, int in, float cx, float cy)
 {
     if (slot < 0 || slot >= NEAR_TILES_MAX || !NearLayerChangeBegin(slot, in, cx, cy)) return 0;
     g_layerJob.slot = slot; g_layerJob.in = in; g_layerJob.cx = cx; g_layerJob.cy = cy; g_layerJob.level = g_world.levels; g_layerJob.refilled = 0;
+    g_layerJob.helpers = -1; g_layerJob.priority = THREAD_PRIORITY_NORMAL;
     QueryPerformanceCounter(&g_layerJob.t0);
     return 1;
 }
@@ -6798,6 +6852,9 @@ static int NearLayerBusy(void)
     return 0;
 }
 
+/* Level end: a running fill reads the ground buffers the next level's drop tile writes again (NearGroundOf). */
+static void NearLayerSettle(void) { while (NearLayerBusy()) Sleep(1); }
+
 /* The change with its fills on a thread of their own (in play); NearLayerBusy finishes it. A change that fills nothing
  * (no grid of its own, none other ready) or whose thread does not start is done here. */
 static void NearLayerTileChangeLater(int slot, int in, float cx, float cy)
@@ -6806,8 +6863,11 @@ static void NearLayerTileChangeLater(int slot, int in, float cx, float cy)
     if (!NearLayerChangeStart(slot, in, cx, cy)) return;
     int work = in;
     for (int k = 0; k < NEAR_TILES_MAX && !work; k++) work = k != slot && g_layerGrid[k].ready && g_layerGrid[k].level == g_world.levels;
-    g_layerJob.thread = work ? CreateThread(NULL, 256 * 1024, NearLayerChangeThread, NULL, 0, NULL) : NULL;
+    g_layerJob.thread = work ? CreateThread(NULL, 256 * 1024, NearLayerChangeThread, NULL, CREATE_SUSPENDED, NULL) : NULL;
     if (g_layerJob.thread == NULL) { NearLayerChangeFill(); NearLayerChangeEnd(); return; }
+    g_layerJob.helpers = NEAR_LAYER_HELPERS; g_layerJob.priority = THREAD_PRIORITY_BELOW_NORMAL;
+    SetThreadPriority(g_layerJob.thread, THREAD_PRIORITY_BELOW_NORMAL);
+    ResumeThread(g_layerJob.thread);
     InterlockedExchange(&g_layerJob.running, 1);
 }
 

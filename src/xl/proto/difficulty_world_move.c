@@ -201,6 +201,7 @@ static void MoveRestoreDrop(void)
 /* A new level starts (TerrainNearReplay's first call): the last level's world is gone with every tile in it. */
 static void MoveLevelGone(void)
 {
+    NearLayerSettle();
     if (g_move.state != MV_IDLE && g_move.stashed)
         MoveFreeNow(g_move.dropTex[0] == g_near.tex[0] ? 0 : g_move.dropTex[0], g_move.dropTex[1] == g_near.tex[1] ? 0 : g_move.dropTex[1],
             g_move.dropBand == g_matband.tex ? 0 : g_move.dropBand, g_move.dropBand == g_matband.tex ? NULL : g_move.dropBandPixels);
@@ -836,20 +837,38 @@ static int MoveReplayBegin(void)
 }
 
 /* After the finalize: the coarse terrain under the tile, its ground, the tile in the list. */
+/* The "ready" frame's parts (ms), for the build's cost line: the game's ready call and finalize, the coarse square
+ * hidden, the tile's heights copied, its band taken, the hide union, the layer change started, the stamps flagged. */
+static double g_moveReadyMs[7];
+static double MoveMsSince(LARGE_INTEGER* t)
+{
+    LARGE_INTEGER now, hz; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&hz);
+    double ms = (double)(now.QuadPart - t->QuadPart) * 1000.0 / (double)hz.QuadPart;
+    *t = now;
+    return ms;
+}
+
 static void MoveTileIn(uint64_t world)
 {
     int slot = g_move.slot, x0 = 0, y0 = 0;
+    LARGE_INTEGER t; QueryPerformanceCounter(&t);
     NearCellSquare(g_move.cell[0], g_move.cell[1], g_move.centre[0], g_move.centre[1], &x0, &y0);
     NearHideCoarse(world, x0, y0, &g_tileHidden[slot]);
+    g_moveReadyMs[1] = MoveMsSince(&t);
     NearGround ground;
     NearGroundOf(world, g_near.handle, NEAR_SPAN, g_move.centre[0], g_move.centre[1], &ground, &g_groundBuf[slot]);
     NearTileAdd(slot, g_move.centre[0], g_move.centre[1], g_near.handle, &ground);
+    g_moveReadyMs[2] = MoveMsSince(&t);
     g_tiles[slot].cell[0] = g_move.cell[0]; g_tiles[slot].cell[1] = g_move.cell[1];
     g_tiles[slot].tex[0] = g_near.tex[0]; g_tiles[slot].tex[1] = g_near.tex[1];
     MoveTileTakeBand(slot);
+    g_moveReadyMs[3] = MoveMsSince(&t);
     NearHideUnion(world, "a tile built in mission");
+    g_moveReadyMs[4] = MoveMsSince(&t);
     NearLayerTileChangeLater(slot, 1, g_move.centre[0], g_move.centre[1]);
+    g_moveReadyMs[5] = MoveMsSince(&t);
     MoveReplaceLater(slot, NULL, g_move.centre[0], g_move.centre[1], "a tile is in");
+    g_moveReadyMs[6] = MoveMsSince(&t);
     g_move.built++;
     Note("difficulty: moving tiles: the tile of cell (%d, %d) is in after %.1f s (%u frames): ground %s, centre %.2f m (coarse %.2f m); %d tiles live; craters held %lld updates",
         g_move.cell[0], g_move.cell[1], (double)(GetTickCount64() - g_move.started) / 1000.0, g_move.frames, ground.v != NULL ? "read" : "NOT read",
@@ -1276,7 +1295,9 @@ static void MoveTick(uint64_t level)
     {
         if (MoveLayerWait()) return; /* the last change's grids first: the tile's slot buffers and grids are its */
         uint64_t world = 0;
+        LARGE_INTEGER t; QueryPerformanceCounter(&t);
         if (NearReadyTile((uint64_t)(uintptr_t)g_move.ctx, &world)) return;
+        g_moveReadyMs[0] = MoveMsSince(&t);
         if (g_near.state == NEAR_FAILED) { MoveFail("the tile was not ready"); return; }
         MoveTileIn(world);
         g_move.state = MV_IDLE;
@@ -1319,6 +1340,10 @@ static void MoveCostNote(void)
         n += snprintf(line + n, sizeof line - n, " %.0f ms (%s, near state %d, step %d, building %d, conform phase %d);", g_moveCost.ms[k],
             MoveStateName(g_moveCost.mv[k]), g_moveCost.ns[k], g_moveCost.step[k], g_moveCost.bld[k], g_moveCost.conf[k]);
     Note("difficulty: moving tiles: the build's cost on the game thread: %.0f ms over %u frames; the longest:%s", g_moveCost.sum, g_moveCost.frames, line);
+    Note("difficulty: moving tiles: the ready frame: ready and finalize %.1f ms, coarse hidden %.1f, heights copied %.1f, band %.1f, hide union %.1f, "
+        "layer change started %.1f, stamps flagged %.1f", g_moveReadyMs[0], g_moveReadyMs[1], g_moveReadyMs[2], g_moveReadyMs[3], g_moveReadyMs[4],
+        g_moveReadyMs[5], g_moveReadyMs[6]);
+    memset(g_moveReadyMs, 0, sizeof g_moveReadyMs);
     Note("difficulty: moving tiles: the build's wall-clock frames: the longest %.0f ms (%s), %.0f ms (%s), %.0f ms (%s); %u over 50 ms",
         g_moveCost.wall[0], MoveStateName(g_moveCost.wallMv[0]), g_moveCost.wall[1], MoveStateName(g_moveCost.wallMv[1]), g_moveCost.wall[2],
         MoveStateName(g_moveCost.wallMv[2]), g_moveCost.slow);
@@ -1367,6 +1392,7 @@ static void MoveInstall(uintptr_t game)
 static void NearLevelLeft(int ship)
 {
     NearPreStop("the level went");
+    NearLayerSettle();
     NearOneMipDisarm();
     InterlockedExchange(&g_nearActive, 0);
     MoveHold(0);

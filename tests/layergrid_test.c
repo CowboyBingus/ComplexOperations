@@ -19,6 +19,7 @@ void CoXlTestNearBuilding(int building);
 void CoXlTestLayerTile(int slot, int in, float cx, float cy);
 void CoXlTestLayerTileLater(int slot, int in, float cx, float cy);
 int CoXlTestLayerBusy(void);
+void CoXlTestNearLevelLeft(int ship);
 uint64_t CoXlTestLayerField(uint64_t unit, uint64_t field);
 int CoXlTestLayerHeight(uint64_t desc, float x, float y, float* h);
 void CoXlTestStreamSetup(uintptr_t game, uint8_t* context, uint8_t* array, uint32_t count);
@@ -209,6 +210,15 @@ int main(void)
     CHECK(fa != 0 && Near(Read(fa, 1900.0f, AY), 30.0f) && Near(Read(fa, 2600.0f, AY), 45.0f));
     fb = Field(1900.0f, AY);
     CHECK(fb != 0 && fb != fa && Near(Read(fb, 1900.0f, AY), 30.0f) && Near(Read(fb, 2300.0f, AY), 45.0f));
+    CHECK(!CoXlTestLayerBusy());
+
+    Start("the level ends while a tile's fill runs: the level's end waits for it (the next level writes the ground it reads)");
+    a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);
+    CoXlTestLayerTile(a, 1, AX, AY);
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTileLater(b, 1, BX, AY);
+    CHECK(CoXlTestLayerBusy());
+    CoXlTestNearLevelLeft(0);
     CHECK(!CoXlTestLayerBusy());
 
     Start("a tile goes: the other grids hold the coarse ground there again, and its own grid is out of use");

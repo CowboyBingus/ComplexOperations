@@ -110,6 +110,7 @@ static void CoXlTick(HfMod* mod, float dt, void* user)
     (void)mod; (void)user;
     StatusWatch(g_difficultyGame); /* the registry's hash, should the game have made the registry only now */
     WorldStreamTick(dt);
+    NearPreTick();
     SpanRescueTick();
     NetPatienceTick();
     TerrainDiagTick();
@@ -557,7 +558,15 @@ void CoXlTestLayerTile(int slot, int in, float cx, float cy) { NearLayerTileChan
 void CoXlTestLayerTileLater(int slot, int in, float cx, float cy) { NearLayerTileChangeLater(slot, in, cx, cy); }
 /* A build's composite tiles off the game thread (proto/difficulty_world_terrain.c NearPreFor): the test's build in place
  * of TerrainBuild, `steps` steps with composite tiles at first..last (tile = 100 + step), a step's slot and its end. */
-void CoXlTestNearPreUse(int (*build)(int, uint64_t, uint8_t*, uint8_t*)) { g_nearPreBuild = build; g_nearPre.refused = 0; InterlockedExchange(&g_moveBuilding, 1); }
+static int g_testInMission = 1;
+static int TestInMission(void) { return g_testInMission; }
+void CoXlTestNearPreUse(int (*build)(int, uint64_t, uint8_t*, uint8_t*))
+{ g_nearPreBuild = build; g_nearPre.refused = 0; g_nearPreInMission = TestInMission; g_testInMission = 1; InterlockedExchange(&g_moveBuilding, 1); }
+void CoXlTestNearPreMission(int on) { g_testInMission = on; }
+void CoXlTestNearPreTick(void) { NearPreTick(); }
+void CoXlTestLevelInits(void) { LevelInitBegins(); }
+void CoXlTestNextLevel(void) { InterlockedIncrement(&g_world.levels); }
+void CoXlTestNearLevelLeft(int ship) { NearLevelLeft(ship); }
 void CoXlTestNearPreSteps(int steps, int first, int last)
 {
     g_near.steps = steps;

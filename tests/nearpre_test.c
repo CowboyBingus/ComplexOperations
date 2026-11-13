@@ -17,6 +17,10 @@ int CoXlTestNearPreSlot(void* p, int* step, int* ok);
 void CoXlTestNearPreDone(void* p, int s);
 int CoXlTestNearPreOn(void);
 void CoXlTestNearPreStop(void);
+void CoXlTestNearPreMission(int on);
+void CoXlTestNearPreTick(void);
+void CoXlTestLevelInits(void);
+void CoXlTestNextLevel(void);
 
 static int g_failed;
 static const char* g_case;
@@ -87,6 +91,35 @@ int main(void)
     LONG after = g_builds;
     Sleep(30);
     CHECK(g_builds == after && after <= 3);
+
+    g_case = "the mission ends inside a run: the frame's tick stops it, its marker left, no new run on that level";
+    CoXlTestNearPreSteps(12, 2, 9);
+    g_builds = g_done = 0;
+    { int ok = 0; CHECK(Step(2, &ok) && ok); }
+    CoXlTestNearPreTick(); /* still in the mission: nothing */
+    CHECK(CoXlTestNearPreOn());
+    CoXlTestNearPreMission(0);
+    CoXlTestNearPreTick();
+    CHECK(!CoXlTestNearPreOn());
+    CHECK(fake_host_logged("(the mission ended)") && fake_host_logged("the level was gone: its marker left"));
+    after = g_builds;
+    CHECK(CoXlTestNearPreFor(3) == NULL && !CoXlTestNearPreOn());
+    Sleep(30);
+    CHECK(g_builds == after && after <= 3);
+    CoXlTestNearPreMission(1);
+    CHECK(CoXlTestNearPreFor(3) == NULL); /* that level builds on the game thread from now on */
+
+    g_case = "a level init during a run: no build begins after it, and the stop leaves the marker";
+    CoXlTestNextLevel(); /* a later mission's level */
+    CoXlTestNearPreSteps(12, 2, 9);
+    g_builds = g_done = 0;
+    CHECK(CoXlTestNearPreFor(2) != NULL && CoXlTestNearPreOn());
+    CoXlTestLevelInits(); /* waits for a build in flight; none begins after it */
+    after = g_builds;
+    Sleep(40);
+    CHECK(g_builds == after && after <= 1);
+    CoXlTestNearPreStop();
+    CHECK(!CoXlTestNearPreOn() && fake_host_logged("(a test)") && fake_host_logged("the level was gone: its marker left"));
 
     if (g_failed) { printf("nearpre: %d check(s) failed\n", g_failed); return 1; }
     printf("nearpre: all checks passed\n");
