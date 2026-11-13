@@ -26,10 +26,12 @@ typedef struct FakeHost
     uint8_t* image;
     const char* build;
     int failWriteAt;          /* the write with this number (from 0) fails; -1 for none */
+    int failWrites;           /* and this many writes from it (0 or 1: that one) */
     int writes;
     uintptr_t noMatch[4];     /* code_matches answers 0 for these addresses */
     uintptr_t noMatchExe[2];  /* and for these RVAs in the exe */
     uintptr_t wrote[64];      /* every write asked for, refused or not, in order (the first 64) */
+    uint8_t wroteHead[64][8]; /* and the first bytes of each */
     int wroteCount;
     int strictCode;           /* code_matches compares the pattern with the bytes there (?? any) */
     uintptr_t noHook;         /* hook fails for this address */

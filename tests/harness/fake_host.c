@@ -65,9 +65,15 @@ static int ReadCode(uintptr_t address, void* buffer, size_t size)
 
 static int Write(uintptr_t address, const void* data, size_t size)
 {
-    if (g_fake.wroteCount < (int)(sizeof g_fake.wrote / sizeof g_fake.wrote[0])) g_fake.wrote[g_fake.wroteCount] = address;
+    if (g_fake.wroteCount < (int)(sizeof g_fake.wrote / sizeof g_fake.wrote[0]))
+    {
+        g_fake.wrote[g_fake.wroteCount] = address;
+        memcpy(g_fake.wroteHead[g_fake.wroteCount], data, size < 8 ? size : 8);
+    }
     g_fake.wroteCount++;
-    if (!Inside(address, size) || g_fake.writes++ == g_fake.failWriteAt) return 1;
+    if (!Inside(address, size)) return 1;
+    const int n = g_fake.writes++;
+    if (g_fake.failWriteAt >= 0 && n >= g_fake.failWriteAt && n < g_fake.failWriteAt + (g_fake.failWrites > 1 ? g_fake.failWrites : 1)) return 1;
     memcpy((void*)address, data, size);
     return 0;
 }
