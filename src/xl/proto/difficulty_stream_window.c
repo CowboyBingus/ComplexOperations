@@ -270,6 +270,29 @@ static void WindowLeaveLocked(uint32_t s)
     g_win.left++;
 }
 
+/* A level location's new stamp unit (after a removal, or for new ground) under the budgets a window slot enters under:
+ * within WINDOW_IN of a player the near ones (bodies and navmesh cutters under WINDOW_BODY_SHARE), past it the far ones
+ * (bodies, culling pools 0 and 1 and cutters under WINDOW_FAR_SHARE). A window slot passed them as it entered. gates:
+ * the near and far answers of this spawn pass, -1 until read. Over budget the location stays due. */
+static int WindowRespawnRoomLocked(uint32_t i, int* gates)
+{
+    if (g_win.on && g_win.level == g_stream.level && i >= g_win.base && i < DIF_LOCATIONS) return 1;
+    const int away = g_streamDistance[i] > WINDOW_IN * WINDOW_IN;
+    if (gates[away] < 0)
+    {
+        uint32_t bodies = 0, slots = 0, used = 0, capacity = 0;
+        const uintptr_t exe = ApiModuleBase("helldivers2.exe", NULL);
+        int ok = WorldStreamBodyStore(&bodies, &slots);
+        if (!away) ok = ok && (float)bodies < WINDOW_BODY_SHARE * (float)slots && !co_cutters_over(exe, WINDOW_BODY_SHARE);
+        else
+            ok = ok && (float)bodies < WINDOW_FAR_SHARE * (float)slots && RenderPool0(&used, &capacity) && (float)used < WINDOW_FAR_SHARE * (float)capacity &&
+                RenderPool1(&used, &capacity) && (float)used < WINDOW_FAR_SHARE * (float)capacity && !co_cutters_over(exe, WINDOW_FAR_SHARE);
+        gates[away] = ok;
+        if (!ok) g_stream.respawnHeld++;
+    }
+    return gates[away];
+}
+
 /* Every 0.25 s, after the streamer's scan (the players are fresh): the planned stamps within WINDOW_IN of a player, from
  * the player's bucket outward, into the window while it has slots, the index has room and the bodies stay under budget. */
 /* The near stamps come first: while the bodies are over the near budget, live far stamps go, the farthest from every

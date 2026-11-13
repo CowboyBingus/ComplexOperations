@@ -6260,6 +6260,76 @@ static float NearLayerGround(float x, float y)
     return h < -9000.0f ? 0.0f : h;
 }
 
+/* ---- The ground a standing stamp was placed on, before a tile's change (MoveStampsReplace) ----------------------------
+ * A stamp's placed units read the grid NearLayerField hands them (the nearest ready tile grid within reach of its level
+ * unit; every grid holds NearLayerGround) or, with none in reach, the level's layer heightfield. A tile's change moves
+ * both: the drawn ground inside its span, and which stamps have a grid in reach. These answer for the tiles before it. */
+
+/* NearVisibleAt with slot `skip`'s tile left out (-1: none) and `extra` (a released tile's copy, NULL: none) added. */
+static float NearVisibleWith(float x, float y, int skip, const NearTile* extra)
+{
+    float best = -9999.0f;
+    int inside = 0;
+    AcquireSRWLockShared(&g_tilesLock);
+    for (int k = 0; k <= NEAR_TILES_MAX; k++)
+    {
+        const NearTile* t = k < NEAR_TILES_MAX ? &g_tiles[k] : extra;
+        if (t == NULL || (k < NEAR_TILES_MAX && (k == skip || !t->live || t->level != g_world.levels))) continue;
+        float dx = fabsf(x - t->centre[0]), dy = fabsf(y - t->centre[1]);
+        if (dx <= NEAR_HIDE / 2 && dy <= NEAR_HIDE / 2) { best = NearGroundAt(&t->ground, x, y); inside = 1; break; }
+        if (dx > NEAR_SPAN / 2 || dy > NEAR_SPAN / 2) continue;
+        float h = NearGroundAt(&t->ground, x, y);
+        if (h > best) best = h;
+    }
+    ReleaseSRWLockShared(&g_tilesLock);
+    if (inside || best < -9000.0f) return best;
+    float c = NearGroundAt(&g_nearCoarseGround, x, y);
+    return c < -9000.0f || best >= c ? best : c;
+}
+
+/* NearLayerGround over that set of tiles: what the grids held there. */
+static float NearLayerGroundWith(float x, float y, int skip, const NearTile* extra)
+{
+    float h = NearVisibleWith(x, y, skip, extra);
+    if (h < -9000.0f) h = NearGroundAt(&g_nearCoarseGround, x, y);
+    return h < -9000.0f ? 0.0f : h;
+}
+
+/* Whether a stamp whose level unit stands at (x, y) gets a grid (NearLayerGridAt) with slot `skip`'s grid out of use
+ * (-1: none) and a grid at `extra` (a released tile's centre, NULL: none) in use. */
+static int NearLayerGridWith(float x, float y, int skip, const float* extra)
+{
+    const float reach = NEAR_HIDE / 2 + NEAR_LAYER_REACH;
+    if (extra != NULL && fmaxf(fabsf(x - extra[0]), fabsf(y - extra[1])) <= reach) return 1;
+    for (int k = 0; k < NEAR_TILES_MAX; k++)
+    {
+        const NearLayerGrid* g = &g_layerGrid[k];
+        if (k != skip && g->ready && g->level == g_world.levels && fmaxf(fabsf(x - g->cx), fabsf(y - g->cy)) <= reach) return 1;
+    }
+    return 0;
+}
+
+/* The level's layer heightfield (the kept copy, difficulty_world.c) at (x, y) as exe 0xDFA60 reads it inline
+ * (0xE059E..0xE0612): column (int)(((x - origin) / extent + 0.5) x columns), compared unsigned with the last; rows
+ * counted from the far edge. The coarse terrain when no copy is kept for this level. */
+static float NearLevelFieldAt(float x, float y)
+{
+    uint64_t data = 0; float origin[2], extent[2]; uint32_t cols = 0, rows = 0;
+    memcpy(&data, g_heightField, 8); memcpy(origin, g_heightField + 8, 8); memcpy(extent, g_heightField + 0x14, 8);
+    memcpy(&cols, g_heightField + 0x1C, 4); memcpy(&rows, g_heightField + 0x20, 4);
+    if (g_heightCopy == NULL || g_heightLevel != g_world.levels || data != (uint64_t)(uintptr_t)g_heightCopy || cols == 0 || rows == 0 ||
+        (uint64_t)cols * rows * 4u > g_heightBytes || !(extent[0] > 0.0f) || !(extent[1] > 0.0f))
+    {
+        float c = NearGroundAt(&g_nearCoarseGround, x, y);
+        return c < -9000.0f ? 0.0f : c;
+    }
+    float u = ((x - origin[0]) / extent[0] + 0.5f) * (float)cols, v = ((y - origin[1]) / extent[1] + 0.5f) * (float)rows;
+    uint32_t c = (uint32_t)(int64_t)u, r = (uint32_t)(int64_t)v;
+    if (c > cols - 1) c = cols - 1;
+    if (r > rows - 1) r = rows - 1;
+    return g_heightCopy[(size_t)(rows - 1 - r) * cols + c];
+}
+
 /* Rows r0..r1 of a grid, columns c0..c1 (NearRows' job). */
 typedef struct { NearLayerGrid* g; int r0, c0, c1; } NearLayerFillJob;
 static void NearLayerFillRows(void* ctx, int a, int b)

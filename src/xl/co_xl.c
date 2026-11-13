@@ -533,7 +533,47 @@ void CoXlTestStreamSlot(uint32_t i, float x, float y, uint64_t unit, int mission
     g_streamAt[i][0] = x; g_streamAt[i][1] = y; g_streamUnit[i] = unit; g_streamMission[i] = (uint8_t)mission;
     g_streamDeferred[i] = 1; g_streamLive[i] = 1; g_streamPoseGood[i] = 1; g_streamNeedsUnit[i] = 0; g_streamSpawned[i] = 1; g_streamResource[i] = 0x51;
 }
-uint32_t CoXlTestStampsReplace(float cx, float cy) { return MoveStampsReplace(cx, cy, "a test tile"); }
+uint32_t CoXlTestStampsReplace(int slot, float cx, float cy) { return MoveStampsReplace(slot, NULL, cx, cy, "a test tile"); }
+/* A tile goes as MoveRelease takes it out: its copy first, then out of the list and its grid, then the stamps. */
+uint32_t CoXlTestTileGo(int slot)
+{
+    NearTile t = g_tiles[slot];
+    NearTileRemove(slot);
+    NearLayerTileChange(slot, 0, t.centre[0], t.centre[1]);
+    return MoveStampsReplace(slot, &t, t.centre[0], t.centre[1], "a test tile went");
+}
+/* The level's kept layer heightfield (difficulty_world.c WorldLayerSnap): data, columns x rows over the world's extent
+ * around (0, 0); NULL: none. */
+void CoXlTestHeightKept(float* data, uint32_t cols, uint32_t rows, float extent)
+{
+    memset(g_heightField, 0, sizeof g_heightField);
+    g_heightCopy = data; g_heightLevel = data != NULL ? g_world.levels : -1; g_heightBytes = (uint64_t)cols * rows * 4u;
+    uint64_t at = (uint64_t)(uintptr_t)data; float e[2] = {extent, extent}; uint32_t dims[2] = {cols, rows};
+    memcpy(g_heightField, &at, 8); memcpy(g_heightField + 0x14, e, 8); memcpy(g_heightField + 0x1C, dims, 8);
+}
+float CoXlTestVisibleWithNone(float x, float y) { return NearVisibleWith(x, y, -1, NULL); }
+void CoXlTestStreamObserver(int on, float x, float y) { g_streamObserverOn = on; g_streamObserverAt[0] = x; g_streamObserverAt[1] = y; }
+/* WindowRespawnRoomLocked for slot i with its nearest player sqrt(distance2) away, the gates read afresh. */
+int CoXlTestRespawnRoom(uint32_t i, float distance2)
+{
+    int gates[2] = {-1, -1};
+    g_streamDistance[i] = distance2;
+    return WindowRespawnRoomLocked(i, gates);
+}
+static uint8_t TestSpawnNone(uint8_t* pass, uint8_t* record, uint8_t* context) { return 0; }
+/* One spawn pass with slot i due for a new stamp unit, its nearest player sqrt(distance2) away: the passes held over
+ * budget so far (the fake game has no SpawnUnit, so an unheld one goes no further). */
+uint32_t CoXlTestSpawnDue(uint32_t i, float distance2)
+{
+    WorldStreamSpawnFn spawn = g_streamSpawn;
+    uint64_t source = g_heightSource;
+    g_streamSpawn = TestSpawnNone; g_heightSource = 1;
+    g_streamDue[i] = 1; g_streamSpawned[i] = 0; g_streamLive[i] = 0; g_streamNeedsUnit[i] = 1; g_streamDistance[i] = distance2;
+    g_stream.deferred = 1; g_streamOrder[0] = i; g_stream.orderCount = 1; g_stream.orderCursor = 0;
+    WorldStreamSpawnDueLocked();
+    g_streamSpawn = spawn; g_heightSource = source;
+    return g_stream.respawnHeld;
+}
 int CoXlTestStreamFlag(uint32_t i) { return g_streamReplace[i]; }
 void CoXlTestStreamScan(void)
 {

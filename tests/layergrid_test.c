@@ -21,7 +21,14 @@ uint64_t CoXlTestLayerField(uint64_t unit, uint64_t field);
 int CoXlTestLayerHeight(uint64_t desc, float x, float y, float* h);
 void CoXlTestStreamSetup(uintptr_t game, uint8_t* context, uint8_t* array, uint32_t count);
 void CoXlTestStreamSlot(uint32_t i, float x, float y, uint64_t unit, int mission);
-uint32_t CoXlTestStampsReplace(float cx, float cy);
+uint32_t CoXlTestStampsReplace(int slot, float cx, float cy);
+uint32_t CoXlTestTileGo(int slot);
+void CoXlTestHeightKept(float* data, uint32_t cols, uint32_t rows, float extent);
+float CoXlTestVisibleWithNone(float x, float y);
+float CoXlTestVisibleAt(float x, float y);
+void CoXlTestStreamObserver(int on, float x, float y);
+int CoXlTestRespawnRoom(uint32_t i, float distance2);
+uint32_t CoXlTestSpawnDue(uint32_t i, float distance2);
 int CoXlTestStreamFlag(uint32_t i);
 void CoXlTestStreamScan(void);
 void CoXlTestStreamSlotState(uint32_t i, int* live, int* due, uint64_t* unit);
@@ -112,6 +119,39 @@ static void StreamGame(void)
     g_destroys = 0; g_destroyed = 0;
 }
 
+/* The streamer on the fake game with `count` slots, the level's heightfield kept (40 m but where a case sets it). */
+static uint8_t g_context[0x100], g_array[64 * 0xE0];
+static void Stream(uint32_t count)
+{
+    uint64_t world = 0xABC0;
+    memcpy(g_context + 0x40, &world, 8);
+    memset(g_array, 0, sizeof g_array);
+    CoXlTestStreamSetup((uintptr_t)g_fake.image, g_context, g_array, count);
+    for (int k = 0; k < 4; k++) g_levelData[k] = 40.0f;
+    CoXlTestHeightKept(g_levelData, 2, 2, 16384.0f);
+}
+
+/* A streamed stamp at (x, y) with a square footprint of `side` m (record +0xB0, map metres: the setup's half is 0). */
+static void Slot(uint32_t i, float x, float y, float side, uint64_t unit, int mission)
+{
+    float box[4] = {x - side / 2, y - side / 2, x + side / 2, y + side / 2};
+    memcpy(g_array + (size_t)i * 0xE0 + 0xB0, box, sizeof box);
+    CoXlTestStreamSlot(i, x, y, unit, mission);
+}
+
+/* The mission world's physics bodies in use of 1048576 and its navmesh cutters of 1000 (the readers'
+ * [exe+0x27BA890+0x160]+0x4C/+0x40 and [exe+0x27C6330+16]+0x20/+0x24). */
+static void Budgets(uint32_t bodies, uint32_t cutters)
+{
+    uint8_t* exe = g_fake.exe;
+    uint64_t physics = (uint64_t)(uintptr_t)(exe + 0x27E0000u), pool = (uint64_t)(uintptr_t)(exe + 0x27F0000u);
+    uint32_t slots = 1048576u, room = 1000u;
+    memcpy(exe + 0x27BA890u + 0x160u, &physics, 8);
+    memcpy(exe + 0x27E0000u + 0x40, &slots, 4); memcpy(exe + 0x27E0000u + 0x4C, &bodies, 4);
+    memcpy(exe + 0x27C6330u + 16u, &pool, 8);
+    memcpy(exe + 0x27F0000u + 0x20, &cutters, 4); memcpy(exe + 0x27F0000u + 0x24, &room, 4);
+}
+
 int main(void)
 {
     g_lg = (uint8_t*)VirtualAlloc(NULL, 0x20000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -161,29 +201,120 @@ int main(void)
     CHECK(fa != 0 && Near(Read(fa, AX, AY - 1200.0f), 40.0f));
     CHECK(Field(AX, CY2) == 0);
 
-    Start("the streamed stamps on a new tile's ground go out and come back; the rest stay");
+    Start("a tile comes: the stamps whose ground moved go out and come back; the rest stay");
     StreamGame();
-    static uint8_t context[0x100], array[4 * 0xE0];
-    uint64_t world = 0xABC0;
-    memcpy(context + 0x40, &world, 8);
-    CoXlTestStreamSetup((uintptr_t)g_fake.image, context, array, 4);
-    CoXlTestStreamSlot(0, BX + 900.0f, AY, 0x1000, 0);        /* on the new tile's ground (its band) */
-    CoXlTestStreamSlot(1, BX + 1600.0f, AY, 0x2000, 0);       /* the drop tile's interior: past the new tile's span and reach */
-    CoXlTestStreamSlot(2, BX, AY, 0x3000, 1);                 /* a mission's stamp: never streamed out */
-    CoXlTestStreamSlot(3, BX - 1400.0f, AY + 300.0f, 0x4000, 0); /* within the span's reach on the far side */
-    CHECK(CoXlTestStampsReplace(BX, AY) == 2);
-    CHECK(CoXlTestStreamFlag(0) && !CoXlTestStreamFlag(1) && !CoXlTestStreamFlag(2) && CoXlTestStreamFlag(3));
+    Stream(6);
+    a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);
+    CoXlTestLayerTile(a, 1, AX, AY);
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTile(b, 1, BX, AY);
+    Slot(0, BX + 500.0f, AY, 20.0f, 0x1000, 0);         /* on the new tile: the level's 40 m before, its 30 m now */
+    Slot(1, BX + 1600.0f, AY, 20.0f, 0x2000, 0);        /* the drop tile's interior: past the new tile's span and reach */
+    Slot(2, BX, AY, 20.0f, 0x3000, 1);                  /* a mission's stamp: never streamed out */
+    Slot(3, BX - 1400.0f, AY + 300.0f, 20.0f, 0x4000, 0); /* in reach past the span: its grid now holds the coarse 40 m it stood on */
+    Slot(4, BX + 1100.0f, AY, 20.0f, 0x5000, 0);        /* in the drop tile's square and the new tile's span: still the drop tile's 45 m */
+    Slot(5, BX + 1100.0f, AY, 400.0f, 0x6000, 0);       /* the same, its footprint reaching into the new tile's square */
+    CHECK(CoXlTestStampsReplace(b, BX, AY) == 2);
+    CHECK(CoXlTestStreamFlag(0) && !CoXlTestStreamFlag(1) && !CoXlTestStreamFlag(2) && !CoXlTestStreamFlag(3) && !CoXlTestStreamFlag(4) &&
+        CoXlTestStreamFlag(5));
     CoXlTestStreamScan();
     int live = 0, due = 0; uint64_t unit = 0;
     CHECK(g_destroys == 2);
     CoXlTestStreamSlotState(0, &live, &due, &unit);
     CHECK(!live && due && unit == 0 && !CoXlTestStreamFlag(0));
+    for (uint32_t k = 1; k <= 4; k++)
+    {
+        CoXlTestStreamSlotState(k, &live, &due, &unit);
+        CHECK(live && unit == 0x1000u * (k + 1));
+    }
+    CHECK(CoXlTestVisibleWithNone(BX + 900.0f, AY) == CoXlTestVisibleAt(BX + 900.0f, AY) &&
+        CoXlTestVisibleWithNone(BX + 1100.0f, AY) == CoXlTestVisibleAt(BX + 1100.0f, AY) &&
+        CoXlTestVisibleWithNone(BX - 1100.0f, AY) == CoXlTestVisibleAt(BX - 1100.0f, AY));
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+
+    Start("a tile comes whose ground is within 0.5 m of what the stamps stood on: they stay");
+    StreamGame();
+    Stream(2);
+    g_tileB[0] = g_tileB[1] = g_tileB[2] = g_tileB[3] = U16(40.3f);
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTile(b, 1, BX, AY);
+    Slot(0, BX + 500.0f, AY, 20.0f, 0x1000, 0);
+    CHECK(CoXlTestStampsReplace(b, BX, AY) == 0 && !CoXlTestStreamFlag(0));
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+
+    Start("a tile comes 0.7 m off the ground the stamps stood on: they go");
+    StreamGame();
+    Stream(2);
+    g_tileB[0] = g_tileB[1] = g_tileB[2] = g_tileB[3] = U16(40.7f);
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTile(b, 1, BX, AY);
+    Slot(0, BX + 500.0f, AY, 20.0f, 0x1000, 0);
+    CHECK(CoXlTestStampsReplace(b, BX, AY) == 1 && CoXlTestStreamFlag(0));
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+
+    Start("a stamp that stood on the level's heightfield gets a grid: it goes when the two differ there");
+    StreamGame();
+    Stream(2);
+    g_levelData[2] = 39.0f; /* x < 0, y < 0: column 0, row 0, counted from the far edge: index 2 */
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTile(b, 1, BX, AY);
+    Slot(0, BX - 1400.0f, AY + 300.0f, 20.0f, 0x1000, 0);
+    CHECK(CoXlTestStampsReplace(b, BX, AY) == 1 && CoXlTestStreamFlag(0));
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+
+    Start("a tile goes: the stamps on its ground go, the rest stay");
+    StreamGame();
+    Stream(4);
+    a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);
+    CoXlTestLayerTile(a, 1, AX, AY);
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTile(b, 1, BX, AY);
+    Slot(0, BX + 500.0f, AY, 20.0f, 0x1000, 0);         /* on it: its 30 m, then the level's 40 m */
+    Slot(1, BX - 1400.0f, AY, 20.0f, 0x2000, 0);        /* its grid's coarse 40 m, then the level's 40 m */
+    Slot(2, BX + 1100.0f, AY, 20.0f, 0x3000, 0);        /* the drop tile's square */
+    CHECK(CoXlTestTileGo(b) == 1);
+    CHECK(CoXlTestStreamFlag(0) && !CoXlTestStreamFlag(1) && !CoXlTestStreamFlag(2));
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+
+    Start("a scan takes the least seen first: past the distance a stamp is drawn to, then the farthest for its size");
+    StreamGame();
+    Stream(33);
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTile(b, 1, BX, AY);
+    const float ox = BX - 900.0f;
+    Slot(0, BX, AY, 19.0f, 0x1000, 0);                  /* 900 m away, drawn to ~830 m: unseen */
+    Slot(1, BX + 100.0f, AY, 52.0f, 0x2000, 0);         /* 1000 m away, drawn to ~1.2 km: seen */
+    for (uint32_t k = 2; k < 33; k++) Slot(k, BX, AY + 4.0f * (float)k, 2.0f, 0x1000u * (k + 1), 0); /* small and unseen */
+    CHECK(CoXlTestStampsReplace(b, BX, AY) == 33);
+    CoXlTestStreamObserver(1, ox, AY);
+    CoXlTestStreamScan();
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
+    CHECK(g_destroys == 32);
+    CoXlTestStreamSlotState(0, &live, &due, &unit);
+    CHECK(!live && unit == 0);
     CoXlTestStreamSlotState(1, &live, &due, &unit);
-    CHECK(live && unit == 0x2000);
-    CoXlTestStreamSlotState(2, &live, &due, &unit);
-    CHECK(live && unit == 0x3000);
-    CoXlTestStreamSlotState(3, &live, &due, &unit);
-    CHECK(!live && due && unit == 0);
+    CHECK(live && unit == 0x2000 && CoXlTestStreamFlag(1));
+    CoXlTestStreamScan();
+    CHECK(g_destroys == 33);
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+
+    Start("a level location's new unit waits under the window's budgets");
+    StreamGame();
+    Stream(2);
+    Budgets(500000, 100);
+    CHECK(CoXlTestRespawnRoom(0, 100.0f * 100.0f));
+    Budgets(900000, 100);
+    CHECK(!CoXlTestRespawnRoom(0, 100.0f * 100.0f));                  /* bodies over 80 % */
+    Budgets(500000, 900);
+    CHECK(!CoXlTestRespawnRoom(0, 100.0f * 100.0f));                  /* navmesh cutters over 80 % */
+    Budgets(500000, 100);
+    CHECK(!CoXlTestRespawnRoom(0, 1000.0f * 1000.0f));                /* far: the culling pools do not read on the fake game */
+    Budgets(500000, 100);
+    uint32_t held = CoXlTestSpawnDue(0, 100.0f * 100.0f); /* the passes held so far: the refusals above */
+    CHECK(held == 3);
+    Budgets(900000, 100);
+    CHECK(CoXlTestSpawnDue(0, 100.0f * 100.0f) == held + 1 && CoXlTestSpawnDue(0, 100.0f * 100.0f) == held + 2);
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
 
     if (g_failed) { printf("layergrid: %d checks failed\n", g_failed); return 1; }
     printf("layergrid: all cases passed\n");
