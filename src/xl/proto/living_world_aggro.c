@@ -18,9 +18,9 @@
 #define LW_FOLIAGE_HIT 0x4B8DC02Bu
 #define LW_HIT 0x2C         /* a ray hit: +0 x, +4 y, +0x18 metres along the ray, +0x1C unit (0 static), +0x24 type */
 
-enum { LW_EYE_NONE, LW_EYE_VIEW, LW_EYE_SEEN, LW_EYE_DRAWN, LW_EYE_COARSE, LW_EYE_OBJECT, LW_EYE_STATIC, LW_EYE_FOLIAGE, LW_EYE_UNIT, LW_EYE_N };
+enum { LW_EYE_NONE, LW_EYE_VIEW, LW_EYE_SEEN, LW_EYE_DRAWN, LW_EYE_COARSE, LW_EYE_OBJECT, LW_EYE_STATIC, LW_EYE_FOLIAGE, LW_EYE_UNIT, LW_EYE_MATE, LW_EYE_ENEMY, LW_EYE_N };
 static const char* const kLwEyeWhat[LW_EYE_N] = {"no eye", "out of view", "seen", "the drawn ground", "the coarse collision over the tile",
-    "a static object", "static (no drawn ground here)", "foliage", "another unit"};
+    "a static object", "static (no drawn ground here)", "foliage", "another unit", "a squad mate", "another enemy"};
 
 typedef struct { uint32_t unit; ULONGLONG since, seen, closeAt, senseAt; uint8_t logged, timed; } LwAgpUnit;
 static struct
@@ -156,12 +156,24 @@ static void LwEyeLookAt(uint32_t eyeUnit, uint32_t avatar, const float* tpos, in
     r->what = LwStaticKind(r->hit[2], r->drawn, r->coarse, r->tile);
 }
 
+/* What kind of unit stopped a ray: a member of squad `sq` (-1 none), another enemy the host's AI holds
+ * ([game+0x33266C8] hash +0x2330), or anything else (a prop, a pod, a vehicle). */
+static int LwBlocker(uint32_t unit, int sq)
+{
+    uintptr_t ai = 0; uint32_t ii = 0; int other = -1;
+    if (sq >= 0 && LwOnlineMember(unit, &other) && other == sq) return LW_EYE_MATE;
+    return EvpPtr(g_lw.game + 0x33266C8u, &ai) && EvpHash(ai + 0x2330, unit, 8, 4, &ii) ? LW_EYE_ENEMY : LW_EYE_UNIT;
+}
+
 static void LwEyeLine(uint32_t unit, uint32_t eyeUnit, uint32_t bit, const LwEyeLook* r, const float* tpos)
 {
-    char ray[300] = "";
+    char ray[340] = "";
+    uint32_t u = 0; uint64_t res = r->unit ? EvpEntityResource(g_lw.game, r->unit, &u) : 0;
+    int sq = -1; LwOnlineMember(unit, &sq);
     if (r->code && r->what != LW_EYE_SEEN && r->at >= 0)
-        snprintf(ray, sizeof ray, "; ray %u hits, hit %d stops it at %.2f m of %.2f: unit %08X, type %08X, at z %.2f (drawn ground %.2f, tile %d, coarse rows %.2f, ground ray top %.2f)",
-            r->hits, r->at, (double)r->hitDist, (double)r->dist, r->unit, r->type, (double)r->hit[2], (double)r->drawn, r->tile, (double)r->coarse, (double)r->top);
+        snprintf(ray, sizeof ray, "; ray %u hits, hit %d stops it at %.2f m of %.2f: unit %08X (%s, resource %016llX), type %08X, at z %.2f (drawn ground %.2f, tile %d, coarse rows %.2f, ground ray top %.2f)",
+            r->hits, r->at, (double)r->hitDist, (double)r->dist, r->unit, r->unit ? kLwEyeWhat[LwBlocker(r->unit, sq)] : "static", (unsigned long long)res, r->type,
+            (double)r->hit[2], (double)r->drawn, r->tile, (double)r->coarse, (double)r->top);
     else if (r->code) snprintf(ray, sizeof ray, "; ray %u hits", r->hits);
     Note("living world: sight: %08X's detector, eye %08X%s (bit %u, shape %u, base range %.1f): %s; view code %u, %.2f m (eye z %.2f, target z %.2f), range %.2f, factor %.2f%s",
         unit, eyeUnit, eyeUnit == unit ? " (its own)" : "", bit, r->shape, (double)r->base, kLwEyeWhat[r->what], r->code, (double)r->dist, (double)r->eye[2],
@@ -250,6 +262,11 @@ static void LwAgpTimed(LwAgpUnit* a, int loader, float d, ULONGLONG now)
  * walks at a player and faces one; a loader squad walks its own route and passed players beside it unseen. A calm
  * enemy within LW_SENSE_NEAR whose vision ray reaches the player gets the entry a gunshot writes (0x888E50, level 40):
  * the game's own investigation (alert 2) turns it to the point, where its eye takes over. */
+/* A unit is told only at alert 0, within LW_SENSE_NEAR, with the player outside its view (code 0) and its ray clear. */
+static int LwSenseWanted(uint32_t alert, float d2, uint32_t code, int clear)
+{
+    return alert == 0 && d2 <= LW_SENSE_NEAR * LW_SENSE_NEAR && code == 0 && clear == 1;
+}
 static void LwSense(LwAgpUnit* a, uint32_t unit, int player, const float* tpos, int loader, float d, ULONGLONG now)
 {
     typedef void (*HearFn)(void*, uint32_t, uint32_t, const float*, float);
@@ -257,7 +274,7 @@ static void LwSense(LwAgpUnit* a, uint32_t unit, int player, const float* tpos, 
     a->senseAt = now + 1000;
     if (!det) return;
     LwEyeLook look; LwEyeLookAt(unit, avatar, tpos, 0, 1, &look);
-    if (look.code != 0 || look.clear != 1) return; /* in view: the game's sight handles it; blocked: no notice */
+    if (!LwSenseWanted(LwAlert(unit), d * d, look.code, look.clear)) return; /* in view: the game's sight handles it; blocked: none */
     ((HearFn)(g_lw.game + 0x888E50u))(NULL, det, avatar, g_lwWorld.players[player], 40.0f);
     a->senseAt = now + LW_SENSE_TOLD; g_lwAgp.sensed[!loader]++;
     if (g_lwAgp.senseLines++ < LW_SENSE_LINES)
@@ -302,6 +319,7 @@ static void LwAggroProbe(void)
         if (!fighting && eyesOn && tposOk[player] && looks < LW_AGP_LOOKS && (i + (uint32_t)g_lwAgp.look) % 3 == 0)
         {
             LwEyeLook look; LwEyeLookAt(unit, g_lwWorld.avatars[player], tpos[player], 0, 0, &look);
+            if (look.what == LW_EYE_UNIT) look.what = LwBlocker(look.unit, sq);
             g_lwAgp.eyes[!loader][look.what]++; looks++;
         }
         if (eyesOn && tposOk[player] && LwAlert(unit) == 0 && best <= LW_SENSE_NEAR * LW_SENSE_NEAR && now >= a->senseAt && checks < LW_SENSE_CHECKS)
@@ -321,12 +339,13 @@ static void LwAggroProbe(void)
     {
         uintptr_t s = 0; uint8_t capOn = 0; float cap = 0;
         if (EvpPtr(g_lw.game + 0x3326340u, &s) && s) { SafeRead(s + 0x78AF7B0u, &capOn, 1); SafeRead(s + 0x78AF9DCu, &cap, 4); } /* 0x64C8A9 */
-        char eyes[2][300];
+        char eyes[2][400];
         for (int c = 0; c < 2; c++)
         {
             const uint32_t* e = g_lwAgp.eyes[c];
-            snprintf(eyes[c], sizeof eyes[c], "out of view %u, seen %u, blocked by the drawn ground %u, by the coarse collision over the tile %u, by a static object %u, static with no drawn ground %u, by foliage %u, by another unit %u, no eye %u",
-                e[LW_EYE_VIEW], e[LW_EYE_SEEN], e[LW_EYE_DRAWN], e[LW_EYE_COARSE], e[LW_EYE_OBJECT], e[LW_EYE_STATIC], e[LW_EYE_FOLIAGE], e[LW_EYE_UNIT], e[LW_EYE_NONE]);
+            snprintf(eyes[c], sizeof eyes[c], "out of view %u, seen %u, blocked by the drawn ground %u, by the coarse collision over the tile %u, by a static object %u, static with no drawn ground %u, by foliage %u, by a squad mate %u, by another enemy %u, by another unit %u, no eye %u",
+                e[LW_EYE_VIEW], e[LW_EYE_SEEN], e[LW_EYE_DRAWN], e[LW_EYE_COARSE], e[LW_EYE_OBJECT], e[LW_EYE_STATIC], e[LW_EYE_FOLIAGE], e[LW_EYE_MATE], e[LW_EYE_ENEMY],
+                e[LW_EYE_UNIT], e[LW_EYE_NONE]);
         }
         Note("living world: aggro (30 s): %.1f enemies within %.0f m of a player on average, %.1f of them below alert 3; loader members %.1f, %.1f of them at alert 3+; %d units logged so far; sight cap %s %.1f m",
             g_lwAgp.nearSum / scans, (double)LW_AGP_NEAR, g_lwAgp.calmSum / scans, g_lwAgp.loaderSum / scans, g_lwAgp.loaderFighting / scans, g_lwAgp.lines, capOn ? "on" : "off", (double)cap);

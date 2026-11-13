@@ -14,6 +14,7 @@ LONG CoXlTestNoiseHead(void);
 int CoXlTestLwSettle(uint32_t i, uint64_t peer, const float* at, uint64_t now, float* use);
 int CoXlTestLwSightVerdict(const uint8_t* hits, uint32_t n, uint32_t target, const float* eye, const float* tpos, float nearR, float folR, int* at);
 int CoXlTestLwStaticKind(float z, float drawn, float coarse, int tile);
+int CoXlTestLwSenseWanted(uint32_t alert, float d2, uint32_t code, int clear);
 
 static int g_failed;
 static const char* g_case;
@@ -86,6 +87,14 @@ static void SightVerdict(void)
     CHECK(CoXlTestLwStaticKind(4.2f, 5.0f, 4.0f, 0) == 5);     /* under the drawn ground on the coarse rows: not the coarse body over it */
     CHECK(CoXlTestLwStaticKind(7.0f, 5.0f, 9.0f, 0) == 5);     /* an object */
     CHECK(CoXlTestLwStaticKind(7.0f, -9999.0f, 9.0f, 0) == 6); /* no drawn ground */
+    g_case = "a calm enemy close beside a player notices them only with a clear line";
+    CHECK(CoXlTestLwSenseWanted(0, 14.9f * 14.9f, 0, 1) == 1);
+    CHECK(CoXlTestLwSenseWanted(0, 15.0f * 15.0f, 0, 1) == 1);  /* the edge counts */
+    CHECK(CoXlTestLwSenseWanted(0, 15.1f * 15.1f, 0, 1) == 0);  /* too far */
+    CHECK(CoXlTestLwSenseWanted(1, 10.0f * 10.0f, 0, 1) == 0);  /* already suspicious: the game's own path */
+    CHECK(CoXlTestLwSenseWanted(0, 10.0f * 10.0f, 2, 1) == 0);  /* in view: the game's sight */
+    CHECK(CoXlTestLwSenseWanted(0, 10.0f * 10.0f, 0, 0) == 0);  /* blocked: not through walls or units */
+    CHECK(CoXlTestLwSenseWanted(0, 10.0f * 10.0f, 0, -1) == 0); /* no ray */
 }
 
 int main(void)
