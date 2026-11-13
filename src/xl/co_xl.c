@@ -37,6 +37,7 @@
 #include "co_spawners.h"
 #include "co_patrols.h"
 #include "co_density.h"
+#include "co_framecost.h"
 #include "co_switch.h"
 #include "co_steer.h"
 #include "co_cutters.h"
@@ -164,23 +165,55 @@ static void HitchTick(void)
     if (co_hitch_frame(&g_hitch, now, (float)frame, &cost)) HitchNote(&g_hitch, pods);
 }
 
+/* The frame times line's context: the AI units and the nearest garrison with living spawners to player 1. */
+static void CoXlFrameContext(int* ai, float* nest)
+{
+    *ai = (int)LwAiCount(); *nest = -1;
+    if (g_lwWorld.playersAt <= 0) return;
+    float best = 3.0e38f;
+    for (int i = 0; i < g_lwGarrisonCount; i++)
+        if (g_lwGarrisons[i].haveCenter && g_lwGarrisons[i].spawners) { float d = LwDist2(g_lwWorld.players[0], g_lwGarrisons[i].center[0], g_lwGarrisons[i].center[1]); if (d < best) best = d; }
+    if (best < 3.0e38f) *nest = sqrtf(best);
+}
+
+/* Frames count only in play: game state 4 ([[game + 0x3326340] + 0xAC21C], as WorldStreamInMission; 6 while the
+ * mission loads). LwLive is on from the loading screen, about 38 s before play. */
+static int CoXlInPlay(void)
+{
+    uintptr_t world = 0; uint32_t state = 0;
+    return LwLive() && g_difficultyGame != 0 && !SafeRead(g_difficultyGame + 0x3326340u, &world, 8) && world != 0 &&
+        !SafeRead(world + 0xAC21Cu, &state, 4) && state == 4;
+}
+
 /* The game thread's part, in the order the loader's tick called it. */
 static void CoXlTick(HfMod* mod, float dt, void* user)
 {
     (void)mod; (void)user;
     HitchTick();
+    co_framecost_context(CoXlFrameContext);
+    co_framecost_begin(CoXlInPlay(), (long)g_world.levels);
     StatusWatch(g_difficultyGame); /* the registry's hash, should the game have made the registry only now */
+    co_framecost_mark(CO_FC_STATUS);
     WorldStreamTick(dt);
+    co_framecost_mark(CO_FC_STREAM);
     SpanRescueTick();
+    co_framecost_mark(CO_FC_SPANS);
     NetPatienceTick();
+    co_framecost_mark(CO_FC_NET);
     TerrainDiagTick();
+    co_framecost_mark(CO_FC_TDIAG);
     TerrainProbeTick();
+    co_framecost_mark(CO_FC_TPROBE);
     const double living = HitchNow();
     LivingTick();
     g_hitchCost.living += (float)(HitchNow() - living);
+    co_framecost_mark(CO_FC_LIVING);
     DaylightTick();
+    co_framecost_mark(CO_FC_DAYLIGHT);
     TacTick();
+    co_framecost_mark(CO_FC_TAC);
     co_density_tick(dt);
+    co_framecost_mark(CO_FC_DENSITY);
 }
 
 /* As game.dll is loaded: the records' move must be hooked before the game builds its entity state, and a process moves
@@ -878,6 +911,8 @@ int CoXlTestCoarseFree(int k) { return g_coarse.slotOf[k] < 0 && g_coarse.slots[
 int CoXlTestCompareOn(void) { g_cc.on = 1; g_cc.reference[0] = 0; return CcTable(); }
 void CoXlTestCompareImage(const char* label, uintptr_t descriptor) { CcDescriptor(label, descriptor); }
 void CoXlTestComparePass(uint32_t op, uintptr_t level) { g_worldLevel = level; CcPass(op); g_worldLevel = 0; }
+/* The frame-time gate (CoXlInPlay) with the game at `game` and the living world's `live`. */
+int CoXlTestInPlay(uintptr_t game, float live) { g_difficultyGame = game; g_world.live = live; return CoXlInPlay(); }
 /* The tactical map (proto/difficulty_tacmap.c): the install's game, the game thread's tick, HellForge's id for the
  * screen, the waypoint the screen queued for the tick, and a session that has not asked for the screen yet. */
 void CoXlTestTacGame(uintptr_t game) { g_difficultyGame = game; }
@@ -949,4 +984,9 @@ int CoXlTestFgPaced(double mean, float last, uint32_t* deferred)
     return r;
 }
 void CoXlTestFgRing(int a0, int a1, int b0, int b1) { g_ring.a0 = a0; g_ring.a1 = a1; g_ring.b0 = b0; g_ring.b1 = b1; } /* the mover's cells */
+#endif
+
+#ifdef CO_RESEARCH
+/* A research build only: the harness's Lua finds the living world's test commands (teleport, frec) by this name. */
+__declspec(dllexport) int co_research_lw_test(const char* cmd) { return hellforge_lw_test(cmd); }
 #endif

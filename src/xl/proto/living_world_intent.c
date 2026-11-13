@@ -732,6 +732,7 @@ static void LwRetakeGarrison(LwGarrison* g, uintptr_t d, uintptr_t s, uintptr_t 
         for (uint32_t k = 0; k < live && k < 96; k++) { uint32_t local = EvpU32(r + 0x810 + 24u * k + 0x10, 0); if (local >= 1 && local <= n) g->structure[(local - 1) / 32] |= 1u << ((local - 1) % 32); }
         plain = n > 0 && !SafeRead(s + 0x1C, &f[0], 4) && !SafeRead(s + 0x24, &f[1], 4) && !SafeRead(s + 0x2C, &f[2], 4) && !f[1] && !f[2];
         g->plainBase = (uint8_t)plain;
+        { uint32_t sp = EvpU32(l + 0x1EC, 0); g->spawners = (uint16_t)(sp < 0xFFFF ? sp : 0xFFFF); }
         /* structures: only once every one is destroyed. Its death sets point 0x20 (0x910435) and nothing clears it; a
          * despawned one has no 0x20 and comes back. The retake holds their points, so the fill never touches them. */
         if (plain && live) plain = 0;
