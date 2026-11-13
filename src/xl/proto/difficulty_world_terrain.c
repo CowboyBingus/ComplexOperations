@@ -7224,7 +7224,7 @@ static int NearScatRange(float size, int32_t ix, int32_t iy, float h, float* lo,
     if (g_nearCoarseGround.v == NULL || *budget <= 0) return 0;
     (*budget)--;
     float cx = ((float)ix + 0.5f) * size, cy = ((float)iy + 0.5f) * size, a = 1e9f, b = -1e9f;
-    int n = (int)ceilf(2.0f * h / 2.0f); /* samples every 2 m at most */
+    int n = (int)ceilf(2.0f * h / (t_tdScatBake ? 4.0f : 2.0f)); /* every 2 m at most; a far-grass bake view's 4 m, its lookup's texel */
     if (n < 2) n = 2;
     if (n > 64) n = 64;
     for (int j = 0; j <= n; j++)
@@ -7251,11 +7251,11 @@ static int NearScatRange(float size, int32_t ix, int32_t iy, float h, float* lo,
 
 /* New cells' ranges a call (the rest come on later frames, cached) and the most nodes a view may have: the player's view
  * has about 170 (the generator's whole-world sweep at load asks millions). A far-grass bake view renders once, so each of
- * its nodes gets its range now; its 256 m square holds a vanilla bake tile's nodes. */
+ * its nodes gets its range now: its 256 m square is 18 x 18 cells of 16 m with the margin, 4096 covers 4 m cells. */
 static void NearScatLimits(int bake, int* budget, uint64_t* most)
 {
-    *budget = bake ? 0x7FFFFFFF : 256;
-    *most = bake ? 65536u : 1024u;
+    *budget = bake ? 4096 : 256;
+    *most = bake ? 4096u : 1024u;
 }
 
 static uint64_t NearScatterView(uintptr_t tree, void* frustum, uint32_t stamp, float pad)

@@ -502,11 +502,14 @@ world that bake is cut (it would grow every scatter layer to the whole map), and
 - `hellforge-data.json` edits two variants of the overlay's shader (`2fa016b4649b8927`, `ecf7f262f57585a0` in archive
   `ee6b1ba7e22d71ed`): the 16384 m world, no debug tint. The DLL picks them on a 16 km level in play through the render
   setting `debug_deformation_prevention`, which nothing else reads.
-- The DLL keeps the bake's textures from load and bakes the ground as players come near
+- The DLL keeps the bake's textures from load and bakes the ground as this PC's camera comes near
   (`src/xl/proto/difficulty_world_fargrass.c`): views of 256 m, nearest first, up to 1.5 km away, then the lookup
-  again. Baked ground stays baked for the mission.
+  again. Baked ground stays baked for the mission. A moving tile waits for one view at most.
+- The DLL sets `debug_deformation_prevention` only on a 16 km level in play, and clears it at every level start and on
+  the ship. The profile saves the setting, and on a normal map the edited variants would map the wrong square.
 - The lookup holds 4 m a texel on a 16 km world (0.5 m on 2048 m): the far grass is coarser than on a normal map.
-- `HELLFORGE_XL_FARGRASS=0` turns the bakes off.
+- A research build (`--research`) takes `HELLFORGE_XL_FARGRASS=0` to turn the bakes off; a player's build reads no
+  environment variables.
 
 ### M map
 

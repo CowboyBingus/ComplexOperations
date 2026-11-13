@@ -19,7 +19,7 @@
 #define FG_PICK_FRAMES 30u    /* level updates between looks for unbaked ground */
 #define FG_SETTING_FRAMES 60u /* the setting is set again this often: an options apply resets the render settings */
 #define FG_EMPTY_UPDATES 3u   /* the queue read empty this many level updates in a row: the builder's job has run */
-#define FG_VIEW_EVERY 2u      /* a view every this many level updates: each view's scatter is generated afresh */
+#define FG_PACE_DEFER 30u     /* level updates a view waits at most for a frame as quick as the ones before the batch */
 #define FG_WAITS 1200u        /* level updates a step waits for the queue before the level's bakes stop */
 #define FG_AIM 0xF48990u      /* game: the phase-B camera's set-up (op 0x49) */
 #define FG_GENERATE 0xF3B2A0u /* game: a generator's job on the queue (op 0x4A's last call) */
@@ -38,7 +38,9 @@ static const struct { uint32_t name, at, format, flags, id; } kFgTex[FG_TEXTURES
     {0x3AEAC078u, 0x38, 0x1A, 1, 0x3AEAC078u}, {0x6DD81D45u, 0x40, 0x1A, 1, 0x6DD81D45u},
     {0xDF3266D2u, 0x48, 0x16, 0, 0xDF3266D2u}, {0x2FFE957Du, 0xB8, 0x2A, 4, 0x1524FE5Au}};
 
-enum { FG_IDLE, FG_VIEWS, FG_BUILD, FG_SETTLE };
+/* FG_VIEWS and FG_BUILD wait to queue a job, FG_VIEW_WAIT and FG_SETTLE for it to run; only while a job is out are the
+ * names published and the mover held, so a moving tile waits one view at most. */
+enum { FG_IDLE, FG_VIEWS, FG_VIEW_WAIT, FG_BUILD, FG_SETTLE };
 
 typedef struct { uint8_t baked[FG_N * FG_N / 8]; } FgMap;
 typedef void (*FgAimFn)(uint64_t world, uint32_t unit, uint64_t camera, float size, float k);
@@ -55,11 +57,60 @@ static struct
     int state, count, next, published, off;
     uint16_t list[FG_BATCH];
     uint64_t world, queue, settings, vp, camera, env; uint32_t unit;
-    uint32_t frames, empty, waits;
-    int setting; uint32_t settingFrames;
+    uint32_t frames, empty, waits, deferred;
+    int setting, settingNotes, edited; uint32_t settingFrames;
     uint32_t batches, baked;
     ULONGLONG started;
 } g_fg = {.level = -1};
+
+/* Wall-clock frame times (QPC between level updates in play): the last FG_RING before a batch against the batch's own,
+ * so each batch line shows whether its views cost frame time. The game's dt is clamped and would hide a spike. */
+#define FG_RING 128
+static struct { LONGLONG last, hz; float ring[FG_RING], lastMs; uint32_t at, filled; double worst, sum; uint32_t n; double before[2]; LONG64 scat, overlap; } g_fgFrames;
+static void FgFrame(int live)
+{
+    LARGE_INTEGER t;
+    if (!live) { g_fgFrames.last = 0; return; }
+    QueryPerformanceCounter(&t);
+    if (g_fgFrames.hz == 0) { LARGE_INTEGER hz; QueryPerformanceFrequency(&hz); g_fgFrames.hz = hz.QuadPart; }
+    if (g_fgFrames.last != 0 && g_fgFrames.hz > 0)
+    {
+        const float ms = (float)((double)(t.QuadPart - g_fgFrames.last) * 1000.0 / (double)g_fgFrames.hz);
+        g_fgFrames.lastMs = ms;
+        if (g_fg.state != FG_IDLE) { g_fgFrames.n++; g_fgFrames.sum += ms; if (ms > g_fgFrames.worst) g_fgFrames.worst = ms; }
+        else { g_fgFrames.ring[g_fgFrames.at] = ms; g_fgFrames.at = (g_fgFrames.at + 1) % FG_RING; if (g_fgFrames.filled < FG_RING) g_fgFrames.filled++; }
+    }
+    g_fgFrames.last = t.QuadPart;
+}
+/* A batch starts: the frames before it, and the counts start again. */
+static void FgFramesStart(void)
+{
+    double worst = 0, sum = 0;
+    for (uint32_t k = 0; k < g_fgFrames.filled; k++) { sum += g_fgFrames.ring[k]; if (g_fgFrames.ring[k] > worst) worst = g_fgFrames.ring[k]; }
+    g_fgFrames.before[0] = worst; g_fgFrames.before[1] = g_fgFrames.filled ? sum / g_fgFrames.filled : 0;
+    g_fgFrames.worst = g_fgFrames.sum = 0; g_fgFrames.n = 0; g_fgFrames.scat = g_tdScatBakeUpdates; g_fgFrames.overlap = g_tdScatOverlap;
+}
+
+/* A job goes out after a frame no slower than a quarter over the mean before the batch, or after FG_PACE_DEFER updates. */
+static int FgPaced(void)
+{
+    if (g_fgFrames.before[1] <= 0.0 || g_fgFrames.lastMs <= 1.25 * g_fgFrames.before[1] + 1.0 || g_fg.deferred >= FG_PACE_DEFER)
+    { g_fg.deferred = 0; return 1; }
+    g_fg.deferred++;
+    return 0;
+}
+
+/* The ground this PC draws is around its own camera ([game+0x346D560]+0x3C, the pose's translation): the overlay is
+ * per PC, so a client bakes for its own view. The streamer's research observer stands in for it in tests. */
+static int FgEye(float* xy)
+{
+    uintptr_t cm = 0;
+    float at[3];
+    if (g_streamObserverOn) { xy[0] = g_streamObserverAt[0]; xy[1] = g_streamObserverAt[1]; return 1; }
+    if (SafeRead(g_world.game + 0x346D560u, &cm, 8) || cm == 0 || SafeRead(cm + 0x3C, at, sizeof at) || !isfinite(at[0]) || !isfinite(at[1])) return 0;
+    xy[0] = at[0]; xy[1] = at[1];
+    return 1;
+}
 
 static int FgBaked(const FgMap* m, int i, int j) { return (m->baked[(j * FG_N + i) >> 3] >> ((j * FG_N + i) & 7)) & 1; }
 static void FgMark(FgMap* m, int i, int j) { m->baked[(j * FG_N + i) >> 3] |= (uint8_t)(1u << ((j * FG_N + i) & 7)); }
@@ -129,12 +180,21 @@ static void FgPublish(int on)
     g_fg.published = on;
 }
 
-static void FgSetting(int on)
+/* The setter (exe 0x31A200 -> 0x10D880) only queues a message, so the setting is set again every FG_SETTING_FRAMES in
+ * play: an options apply puts the profile's value back. The getter (0x319F30) waits on the render thread (0x105E40,
+ * 0x106030), so the live value is not read. The profile saves the setting (render_settings), so it is cleared at every
+ * ship and level init too. Each is logged (64 lines a session); `why` NULL is a quiet repeat. */
+static void FgSetting(int on, const char* why)
 {
     typedef void (*SettingFn)(const char* name, const char* value);
     SettingFn set = (SettingFn)NearApi(0x10, 0xD8);
     if (set != NULL) set("debug_deformation_prevention", on ? "true" : "false");
-    g_fg.setting = on; g_fg.settingFrames = 0;
+    if (why != NULL && g_fg.settingNotes < 64)
+    {
+        g_fg.settingNotes++;
+        Note("difficulty: far grass: debug_deformation_prevention %s (%s)%s", on ? "true" : "false", why, set == NULL ? "; no setter, not set" : "");
+    }
+    g_fg.setting = on && set != NULL; g_fg.settingFrames = 0;
 }
 
 /* An earlier level's textures, destroyed as op 0x4B destroys them; a batch's own objects went with its world. */
@@ -150,7 +210,8 @@ static void FgFree(void)
     if (g_fg.state != FG_IDLE) Note("difficulty: far grass: the level ended inside a batch; its viewport, camera and environment are left to the world");
     g_fg.state = FG_IDLE; g_fg.vp = g_fg.camera = g_fg.env = 0; g_fg.unit = 0;
     memset(&g_fg.map, 0, sizeof g_fg.map);
-    g_fg.level = -1; g_fg.off = 0; g_fg.batches = g_fg.baked = 0;
+    g_fg.level = -1; g_fg.off = 0; g_fg.batches = g_fg.baked = 0; g_fg.edited = 0;
+    g_fgFrames.filled = g_fgFrames.at = 0; g_fgFrames.last = 0;
 }
 
 /* Ops 0x4B (destroys op 0x49's targets) and 0x67 (the merge's, generated_zones among them) on an extra large level: the
@@ -191,11 +252,11 @@ static void FarGrassKeep(uint64_t record, uint32_t op)
 /* A level init or the ship's set-up: the last level's textures go, and the overlay's variant is the game's again. */
 static void FarGrassLevelLeft(void)
 {
-    if (g_fg.setting) FgSetting(0);
+    FgSetting(0, g_fg.setting ? "the level is left" : "a level init or the ship");
     if (g_fg.level >= 0) FgFree();
 }
 
-static int FarGrassBusy(void) { return g_fg.state != FG_IDLE; }
+static int FarGrassBusy(void) { return g_fg.published; }
 
 /* Op 0x4A's job for one view: an entry of 0x1D0 bytes on the generator's queue (game 0xF6155E..0xF615E5). */
 static void FgQueueView(void)
@@ -213,6 +274,58 @@ static void FgQueueView(void)
     memcpy(e + 0x68, &id, 4);
     InterlockedExchangeAdd64((volatile LONG64*)(uintptr_t)(queue + 8), 1);
 }
+
+/* The overlay variants the setting picks must be the edited ones: the stock debug variant tints the ground blue, which
+ * a DLL copied without HellForge's build-data would show. A shader_library resource's buffer is its GPU part in file
+ * order (loader 0x12A0D0 fixes pointers in place) and stays while the library is online, so the two pixel stages sit
+ * at the offsets hellforge-data.json edits. Found by can_get / get ([api+0x10]+0x388 (type, name), +0x3F8 (name, type)). */
+#define FG_SHADER_LIBRARY 0xE5EE32A477239A93ull
+static const struct { uint64_t name; uint32_t at[2], size, run; int scale; } kFgShaders[2] = {
+    {0x2FA016B4649B8927ull, {0x1FB8, 0x7DE0}, 0x4F14, 0x4B18, 1}, {0xECF7F262F57585A0ull, {0x1CC8, 0x44F8}, 0x1C20, 0x1840, 0}};
+static const char* FgShaderCheck(void)
+{
+    typedef uint8_t (*CanGetFn)(uint64_t type, uint64_t name);
+    typedef uint64_t (*GetFn)(uint64_t name, uint64_t type);
+    static const uint8_t nops[16] = {0x3A, 0, 0, 1, 0x3A, 0, 0, 1, 0x3A, 0, 0, 1, 0x3A, 0, 0, 1};
+    static const uint8_t scale[8] = {0, 0, 0x80, 0x38, 0, 0, 0x80, 0xB8}; /* 1/16384, -1/16384 */
+    CanGetFn canGet = (CanGetFn)NearApi(0x10, 0x388);
+    GetFn get = (GetFn)NearApi(0x10, 0x3F8);
+    if (canGet == NULL || get == NULL) return "the resource lookup is missing";
+    for (int k = 0; k < 2; k++)
+    {
+        if (!canGet(FG_SHADER_LIBRARY, kFgShaders[k].name)) return "an overlay variant is not loaded";
+        const uint64_t lib = get(kFgShaders[k].name, FG_SHADER_LIBRARY);
+        if (lib == 0) return "an overlay variant is not loaded";
+        for (int s = 0; s < 2; s++)
+        {
+            const uint64_t blob = lib + kFgShaders[k].at[s];
+            uint8_t head[28], run[16], c[2][8];
+            uint32_t size = 0;
+            if (SafeRead(blob, head, sizeof head) || memcmp(head, "DXBC", 4) != 0) return "an overlay variant's stage is not where the edit put it";
+            memcpy(&size, head + 24, 4);
+            if (size != kFgShaders[k].size) return "an overlay variant's stage is not where the edit put it";
+            if (SafeRead(blob + kFgShaders[k].run, run, sizeof run) || memcmp(run, nops, sizeof nops) != 0)
+                return "the overlay variants are the game's own (no build-data): their debug tint is still in";
+            if (kFgShaders[k].scale && (SafeRead(blob + 0x1818, c[0], 8) || SafeRead(blob + 0x1894, c[1], 8) || memcmp(c[0], scale, 8) != 0 ||
+                memcmp(c[1], scale, 8) != 0))
+                return "the overlay variants are the game's own (no build-data): they map 2048 m";
+        }
+    }
+    return NULL;
+}
+/* Checked once a level, at its first update in play; a refusal is logged and that level has no far grass. */
+static int FgShadersEdited(void)
+{
+    if (g_fg.edited == 0)
+    {
+        const char* why = FgShaderCheck();
+        g_fg.edited = why == NULL ? 1 : -1;
+        if (why == NULL) Note("difficulty: far grass: the edited overlay variants are loaded (0x2FA016B4649B8927, 0xECF7F262F57585A0)");
+        else Note("difficulty: far grass: off, debug_deformation_prevention stays false: %s", why);
+    }
+    return g_fg.edited > 0;
+}
+
 
 static void FgObjectsDestroy(void)
 {
@@ -257,7 +370,10 @@ static int FgObjects(void)
     return 1;
 }
 
-/* One view: the camera over its square, the viewport's rectangle, op 0x4A's job (game 0xF616B0..0xF61832). */
+/* One view: the camera over its square, the viewport's rectangle, op 0x4A's job (game 0xF616B0..0xF61832). Not op 0x4A's
+ * next call, [api+8]+0x640 (exe 0x339690): its message 0xB rebuilds every scatter layer tree of the world (exe
+ * 0x216FE8), which in play would throw the players' cells away each view. A cell's instances depend on the cell and the
+ * layer only (exe 0x21343B..0x213479), and the view's records are freed for reuse at the next update (0x953A11). */
 static int FgView(int index)
 {
     typedef void (*MoveFn)(uint64_t camera, uint32_t unit, const float* xyz);
@@ -283,13 +399,49 @@ static int FgView(int index)
 static void FgEnd(int stop, const char* why)
 {
     FgObjectsDestroy();
-    FgPublish(0);
+    if (g_fg.published) FgPublish(0);
     g_fg.state = FG_IDLE; g_fg.frames = 0;
     if (stop) { g_fg.off = 1; Note("difficulty: far grass: %s; no more bakes this level", why); }
 }
 
-/* After the level update, on the game thread. A moving tile's build and a batch never overlap: MoveTick waits while
- * FarGrassBusy, and a batch starts only with the mover idle and its merge's renders drained. */
+/* After a batch: SpeedTree's memory (the speedtree_plugin proxy [exe+0x1A100D8]: live bytes +0x30, peak +0x40; every
+ * scatter container allocates through it) and the node vectors of the system the bake updated (its vtable exe+0x1673E48
+ * and type 0x11 at +8; layers [+0x1C0] 0x238 apart, [+0x1B8] of them; tree [layer+0x40], node capacity +0x98, 0xE0 a
+ * node). Both stay flat from batch to batch when the bake grows nothing per baked area. */
+static void FgScatterNote(void)
+{
+    const uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL), sys = g_tdScatBakeSys;
+    uintptr_t proxy = 0, vt = 0, layers = 0;
+    uint64_t live = 0, peak = 0, nodes = 0, most = 0;
+    uint32_t type = 0, count = 0, read = 0;
+    if (!SafeRead(exe + 0x1A100D8u, &proxy, 8) && proxy != 0) { SafeRead(proxy + 0x30, &live, 8); SafeRead(proxy + 0x40, &peak, 8); }
+    if (sys != 0 && !SafeRead(sys, &vt, 8) && vt == exe + 0x1673E48u && !SafeRead(sys + 8, &type, 4) && type == 0x11 && !SafeRead(sys + 0x1B8, &count, 4) &&
+        count <= 64 && !SafeRead(sys + 0x1C0, &layers, 8) && layers != 0)
+        for (uint32_t i = 0; i < count; i++)
+        {
+            uintptr_t tree = 0; uint64_t cap = 0;
+            if (SafeRead(layers + (uint64_t)i * 0x238u + 0x40, &tree, 8) || tree == 0 || SafeRead(tree + 0x98, &cap, 8)) continue;
+            nodes += cap; if (cap > most) most = cap; read++;
+        }
+    Note("difficulty: far grass: SpeedTree memory %llu MiB (peak %llu MiB); node vectors %llu KiB over %u of %u layers, the largest %llu nodes",
+        (unsigned long long)(live >> 20), (unsigned long long)(peak >> 20), (unsigned long long)(nodes * 0xE0u >> 10), read, count, (unsigned long long)most);
+}
+
+static void FgBatchNote(void)
+{
+    g_fg.batches++;
+    if (g_fg.batches > 8 && g_fg.batches % 16 != 0) return;
+    Note("difficulty: far grass: batch %u: %d views of 256 m in %.1f s (%lld scatter updates of its views; %lld updates waited for their layer); %u of %d "
+        "views baked this level; frames (wall clock) %u in the batch, worst %.1f ms, mean %.1f ms; the %u before it worst %.1f ms, mean %.1f ms", g_fg.batches,
+        g_fg.count, (double)(GetTickCount64() - g_fg.started) / 1000.0, (long long)(g_tdScatBakeUpdates - g_fgFrames.scat),
+        (long long)(g_tdScatOverlap - g_fgFrames.overlap), g_fg.baked, FG_N * FG_N, g_fgFrames.n, g_fgFrames.worst,
+        g_fgFrames.n ? g_fgFrames.sum / g_fgFrames.n : 0.0, g_fgFrames.filled, g_fgFrames.before[0], g_fgFrames.before[1]);
+    FgScatterNote();
+    WorldMemoryNote("far grass batch", 0xFFFFFFFFu, 0, 1);
+}
+
+/* After the level update, on the game thread, and only in play (level state 3). A job goes out only with the mover idle,
+ * its merge's renders drained and the queue empty; MoveTick waits while one is out (FarGrassBusy). */
 static void FarGrassTick(uint64_t level)
 {
     if (!g_fg.installed) return;
@@ -297,57 +449,62 @@ static void FarGrassTick(uint64_t level)
     uint64_t block = 0;
     int live = level != 0 && level == g_worldLevelLive && g_world.live == 8.0f && g_fg.level == g_world.levels && FgKept() &&
         !SafeRead(level + 0x1E4, &state, 4) && state == 3 && !SafeRead(level + 0x2A8, &block, 8) && block != 0;
+    FgFrame(live);
     if (!live)
     {
-        if (g_fg.setting) FgSetting(0);
+        if (g_fg.setting) FgSetting(0, "not in play on an extra large level");
         return;
     }
-    if (!g_fg.setting || ++g_fg.settingFrames >= FG_SETTING_FRAMES) FgSetting(1);
+    if (!FgShadersEdited()) return;
+    if (!g_fg.setting) FgSetting(1, "in play on an extra large level");
+    else if (++g_fg.settingFrames >= FG_SETTING_FRAMES) FgSetting(1, NULL);
     const uint64_t context = block + 0x19B008u;
     if (g_fg.state == FG_IDLE)
     {
+        float eye[2];
         if (g_fg.off || ++g_fg.frames < FG_PICK_FRAMES) return;
         if (g_move.state != MV_IDLE || TdScatterMergeWindow() || NearQueued(context) != 0) return;
         g_fg.frames = 0;
-        MovePlayers();
-        if (FgBatch(&g_fg.map, (const float (*)[2])g_move.player, g_move.players, FG_WANT, g_fg.list, 1) == 0) return;
-        g_fg.count = FgBatch(&g_fg.map, (const float (*)[2])g_move.player, g_move.players, FG_REACH, g_fg.list, FG_BATCH);
+        if (!FgEye(eye) || FgBatch(&g_fg.map, (const float (*)[2])eye, 1, FG_WANT, g_fg.list, 1) == 0) return;
+        g_fg.count = FgBatch(&g_fg.map, (const float (*)[2])eye, 1, FG_REACH, g_fg.list, FG_BATCH);
         if (SafeRead(context + 0x40, &g_fg.world, 8) || g_fg.world == 0 || SafeRead(context + 0x50, &g_fg.queue, 8) || g_fg.queue == 0 ||
             SafeRead(context + 8, &g_fg.settings, 8) || g_fg.settings == 0) return;
-        FgPublish(1);
         if (!FgObjects()) { FgEnd(1, "the bake's viewport, camera or environment could not be made"); return; }
-        g_fg.next = 0; g_fg.waits = 0; g_fg.started = GetTickCount64();
+        g_fg.next = 0; g_fg.waits = 0; g_fg.deferred = 0; g_fg.started = GetTickCount64();
+        FgFramesStart();
         g_fg.state = FG_VIEWS;
+        return;
     }
-    if (g_fg.state == FG_VIEWS)
+    if (g_fg.state == FG_VIEWS || g_fg.state == FG_BUILD)
     {
         /* one job on the queue at a time: the rectangle belongs to the viewport, not to the job */
-        if (++g_fg.frames < FG_VIEW_EVERY || NearQueued(context) != 0)
+        if (g_move.state != MV_IDLE || TdScatterMergeWindow() || NearQueued(context) != 0 || !FgPaced()) return;
+        FgPublish(1);
+        if (g_fg.state == FG_VIEWS)
         {
-            if (++g_fg.waits > FG_WAITS) FgEnd(1, "the generator's queue did not empty");
-            return;
+            if (!FgView(g_fg.list[g_fg.next++])) { FgEnd(1, "a view's camera or viewport call is missing"); return; }
+            g_fg.state = FG_VIEW_WAIT;
         }
-        g_fg.frames = 0; g_fg.waits = 0;
-        if (!FgView(g_fg.list[g_fg.next++])) { FgEnd(1, "a view's camera or viewport call is missing"); return; }
-        if (g_fg.next >= g_fg.count) g_fg.state = FG_BUILD;
-        return;
-    }
-    if (g_fg.state == FG_BUILD)
-    {
-        if (NearQueued(context) != 0) { if (++g_fg.waits > FG_WAITS) FgEnd(1, "the generator's queue did not empty"); return; }
-        g_fg.generate(g_fg.queue, g_fg.world, FG_BUILDER, 0, 0, NULL, 0, NULL, NULL, 0);
+        else
+        {
+            g_fg.generate(g_fg.queue, g_fg.world, FG_BUILDER, 0, 0, NULL, 0, NULL, NULL, 0);
+            g_fg.state = FG_SETTLE;
+        }
         g_fg.empty = 0; g_fg.waits = 0;
-        g_fg.state = FG_SETTLE;
         return;
     }
-    /* FG_SETTLE: a job taken off the queue runs within the next frame (TD_SCAT_MERGE_EMPTY_UPDATES) */
-    if (NearQueued(context) != 0) { g_fg.empty = 0; if (++g_fg.waits > FG_WAITS) FgEnd(1, "the builder's job did not leave the queue"); return; }
+    /* FG_VIEW_WAIT, FG_SETTLE: a job taken off the queue runs within the next frame (TD_SCAT_MERGE_EMPTY_UPDATES) */
+    if (NearQueued(context) != 0)
+    {
+        g_fg.empty = 0;
+        if (++g_fg.waits > FG_WAITS) FgEnd(1, g_fg.state == FG_SETTLE ? "the builder's job did not leave the queue" : "the generator's queue did not empty");
+        return;
+    }
     if (++g_fg.empty < FG_EMPTY_UPDATES) return;
+    FgPublish(0);
+    if (g_fg.state == FG_VIEW_WAIT) { g_fg.state = g_fg.next >= g_fg.count ? FG_BUILD : FG_VIEWS; return; }
     FgEnd(0, NULL);
-    g_fg.batches++;
-    if (g_fg.batches <= 4 || g_fg.batches % 16 == 0)
-        Note("difficulty: far grass: batch %u: %d views of 256 m in %.1f s; %u of %d views baked this level", g_fg.batches, g_fg.count,
-            (double)(GetTickCount64() - g_fg.started) / 1000.0, g_fg.baked, FG_N * FG_N);
+    FgBatchNote();
 }
 
 static void FarGrassInstall(uintptr_t game)
