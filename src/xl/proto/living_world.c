@@ -2550,6 +2550,7 @@ static void LwTestCommands(void)
 
 /* With the 30 s notes: the obstacle smashes spared, and where the members stood against the drawn ground; the
  * counts start again. */
+static void LwTiltScan(void); static void LwTiltNote(void); /* living_world_tilt.c */
 static void LwGroundNote(void)
 {
     { LONG spared = InterlockedExchange(&g_lwSpared, 0); if (spared) Note("living world: obstacle smashes (30 s): squad mates kept out of the zones %ld times (a mate is tested again every frame of a zone)", (long)spared); }
@@ -2751,7 +2752,7 @@ static void LwSquadsTick(void)
         g_lwWorld.goals = g_lwWorld.goalNoFace = g_lwWorld.goalReplans = g_lwWorld.goalStuck = 0;
         LwNavTypeDump(); /* test (HELLFORGE_LW_TEST_NAV=1): agent types and obstacle areas, twice a level */
         LwHearNote(); LwRushNote();
-        LwGroundNote();
+        LwGroundNote(); LwTiltNote();
         Note("living world: %d squads, %d online (%d units of %d), %u spawned, %u taken offline, %u destroyed, %u request frames refused; job-1 units %u, AI %u; "
             "player 1 at (%.0f, %.0f); by sightline: %u spawned (%u in sight, off the host's screen), %d units now", g_lwWorld.count, online, g_lwWorld.onlineUnits, g_lwWorld.eff, g_lwWorld.spawned, g_lwWorld.offlined, g_lwWorld.died,
             g_lwWorld.refused, EvpU32(dir + 0x614, 0), LwAiCount(), (double)(g_lwWorld.playersAt ? g_lwWorld.players[0][0] : 0),
@@ -4267,6 +4268,7 @@ static void LivingTickBody(void)
     if (EvpPtr(g_lw.game + LW_DIRECTOR, &dir)) LwNavTick(dir);
     LwGarrisonsTick();
     LwSquadsTick();
+    LwTiltScan();
 }
 
 /* The mission in play has changed kind (difficulty_world.c, as the live page is set): what the stubs read. A normal
@@ -4328,6 +4330,7 @@ static void LwRmCmd(const char* a) { (void)a; } /* the render phase timer and th
 #include "living_world_tasks.c" /* test instrument: the physics task queue's timeline (KB physics-step-task-graph) */
 #include "living_world_records.c" /* test fix: the destruction records' room and hash (KB xl-destruction-record-map-full) */
 #include "living_world_mover.c" /* the 256 navmesh boundary requests a frame (KB living-world-mover-query-overflow) */
+#include "living_world_tilt.c" /* diagnostic: units tilted past the ground under them, and what their rays meet */
 #include "living_world_defer.c" /* mission locations' loose entities spawned near the players (KB living-world-density) */
 #include "living_world_skin.c" /* the skin palette levers' instrument: render worlds, frames, palette-job waits */
 #include "living_world_skincopy.c" /* the skin palette upload copied by helper threads */

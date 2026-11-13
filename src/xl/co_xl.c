@@ -196,6 +196,7 @@ static const char* CoXlGuards(uintptr_t game)
     LwInstallRecords();
     LwInstallRender();
     LwInstallMover();
+    LwInstallTilt(); /* rotation rays under a detailed tile's ground read it above them */
     LwInstallTrees();
     LwInstallZeroBox(); /* absent SpeedTree cells: a switched site, the empty box on complex levels only */
     SunSliceInstall(game); /* the sun's last shadow slice: about the camera on a world over 2048 m, else dynamic */
