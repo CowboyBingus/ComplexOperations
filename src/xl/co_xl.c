@@ -395,6 +395,27 @@ int CoXlTestLwNavTick(uintptr_t game)
     LwNavTick(0);
     return g_lwNav.pins;
 }
+/* The nav section swap on fake game calls, in g_lwSwap's order: unload, load, asyncMode, inFlight, stepDone, wait,
+ * commit, step, runnerMake, runnerFree, queued, permit, join. `jobs` and `inl` stand for the two [W+0x4C8] the AI
+ * update sets; 0 as when their code is not the reviewed one. */
+void CoXlTestLwNavSwapFakes(uintptr_t table, void* const* fn, uintptr_t jobs, uintptr_t inl)
+{
+    memset(&g_lwSwap, 0, sizeof g_lwSwap);
+    g_lwSwap.unload = (LwNavUnloadFn)fn[0]; g_lwSwap.load = (LwNavLoadFn)fn[1];
+    g_lwSwap.asyncMode = (uint8_t (*)(uintptr_t))fn[2]; g_lwSwap.inFlight = (uint8_t (*)(uintptr_t))fn[3]; g_lwSwap.stepDone = (uint8_t (*)(uintptr_t))fn[4];
+    g_lwSwap.wait = (void (*)(uintptr_t))fn[5]; g_lwSwap.commit = (void (*)(uintptr_t, void*, int))fn[6];
+    g_lwSwap.step = (uintptr_t (*)(uintptr_t, void*, void*, int))fn[7];
+    g_lwSwap.runnerMake = (void (*)(void*))fn[8]; g_lwSwap.runnerFree = (void (*)(void*))fn[9];
+    g_lwSwap.queued = (int (*)(uintptr_t))fn[10]; g_lwSwap.permit = (int (*)(int))fn[11]; g_lwSwap.join = (void (*)(int))fn[12];
+    g_lwSwap.table = table; g_lwSwap.tasksJobs = jobs; g_lwSwap.tasksInline = inl;
+}
+uintptr_t CoXlTestLwNavUnload(uintptr_t w, uint32_t* id) { return LwNavUnload(w, id, 0); }
+uintptr_t CoXlTestLwNavLoad(uintptr_t w, uint32_t* out) { return LwNavLoad(w, out, 0, NULL, 0, NULL); }
+void CoXlTestLwNavSwapSummary(ULONGLONG now) { LwNavSwapSummary(now); }
+int CoXlTestLwNavStepThreads(uintptr_t jobs, uintptr_t inl, uintptr_t runner, uintptr_t tasks, int32_t count)
+{ return LwNavStepThreads(jobs, inl, runner, tasks, count); }
+void CoXlTestLwNavSwapCounts(uint32_t* swaps, uint32_t* steps, uint32_t* parallel, uint32_t* refused)
+{ *swaps = g_lwSwap.swaps; *steps = g_lwSwap.steps; *parallel = g_lwSwap.parallel; *refused = g_lwSwap.refused; }
 LONG CoXlTestNoiseHead(void) { return g_lwNoiseHead; }
 const char* CoXlTestGuards(uintptr_t game) { return CoXlGuards(game); }
 void CoXlTestRenderShrink(uintptr_t map, void (*rehash)(uintptr_t, uint32_t)) { g_lwRender.rehash = (uintptr_t)rehash; LwRenderShrink(map); }

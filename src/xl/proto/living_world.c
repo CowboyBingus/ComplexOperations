@@ -3112,8 +3112,14 @@ static void LwInstallNavLeaveFix(void)
  * g_lwSwap.unsafe holds the loader's new rebuild marks until the world is idle. */
 #define LW_AIW_TABLE 0x190D4A0u
 #define LW_NAV_PERMIT_MS 20
+#define LW_NAV_SWAP_LINES 400    /* swap lines a level; the 30 s summary goes on */
+#define LW_NAV_STEP_THREADS 64   /* a sanity cap on the stepper's thread count */
+#define LW_NAV_TASKS_JOBS 0x7D7C20u   /* [W+0x4C8] in the threaded AI update (0x7D863A) */
+#define LW_NAV_TASKS_INLINE 0x814580u /* [W+0x4C8] when the AI update runs on the frame thread (0x7D866A) */
 typedef uintptr_t (*LwNavUnloadFn)(uintptr_t w, uint32_t* id, uint8_t graph);
 typedef uintptr_t (*LwNavLoadFn)(uintptr_t w, uint32_t* out, uintptr_t inst, void* p4, uintptr_t graph, void* p6);
+/* A drain's parts (ms): the AI update's join, the permit, the in-flight step's wait, its commit, the synchronous step. */
+enum { LW_NAV_JOIN, LW_NAV_PERMIT, LW_NAV_WAIT, LW_NAV_COMMIT, LW_NAV_STEP, LW_NAV_PARTS };
 static struct
 {
     LwNavUnloadFn unload; LwNavLoadFn load;
@@ -3124,11 +3130,19 @@ static struct
     int (*queued)(uintptr_t);
     int (*permit)(int);
     void (*join)(int);
-    uintptr_t table;
+    uintptr_t table, exe;
+    uintptr_t tasksJobs, tasksInline; /* the two [W+0x4C8] the AI update sets; 0 when their code is not the reviewed one */
     uint8_t swap[4];
     volatile LONG unsafe;            /* a swap went unsynchronised: hold new marks until the world is idle */
-    uint32_t swaps, steps, refused;
+    uint32_t swaps, steps, refused, parallel, lines, linesLevel;
+    int threads;                     /* the last synchronous step's threads */
     double worstMs;
+    /* the completion being swapped, per world: the drain before its unload, the game's unload, when it returned */
+    double pre[4][LW_NAV_PARTS], unloadMs[4];
+    int64_t unloadEnd[4];
+    /* 30 s summary */
+    uint32_t sumSwaps; double sumMs, sumWorst, sumStep, sumWait;
+    ULONGLONG sumAt;
 } g_lwSwap;
 
 static int LwAiwIndex(uintptr_t w)
@@ -3136,78 +3150,132 @@ static int LwAiwIndex(uintptr_t w)
     for (int i = 0; i < 4; i++) if (*(volatile uintptr_t*)(g_lwSwap.table + 0x80u * i) == w) return i;
     return -1;
 }
-/* The vanilla flush's step (0x7B94F0..0x7B959E). */
-static void LwNavSyncStep(uintptr_t w)
+static double LwNavMs(int64_t from, int64_t to) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return (double)(to - from) * 1000.0 / (double)f.QuadPart; }
+static int64_t LwNavNow(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
+/* The synchronous step's threads: the game's own async step (0xBD1380) runs its task lists through [W+0x4C8] with the AI
+ * table's runner (+0x28, 0x7D861F) and the stepper's count [[W+0x4A8]+0x28] (0xBD13CD); 0xBD0BB0 does the same when
+ * given more than one thread (0xBD0C22 / 0xBD0C76) and runs every task on the caller otherwise. One thread put each
+ * swap's recut on the frame thread: 100-1270 ms frames while flying over new tiles. 1 = serial (no runner, a [W+0x4C8]
+ * the AI update did not set, or no count above one). */
+static int LwNavStepThreads(uintptr_t jobsFn, uintptr_t inlineFn, uintptr_t runner, uintptr_t tasks, int32_t count)
+{
+    if (runner == 0 || tasks == 0 || (tasks != jobsFn && tasks != inlineFn) || count < 2) return 1;
+    return count > LW_NAV_STEP_THREADS ? LW_NAV_STEP_THREADS : count;
+}
+/* The vanilla flush's step (0x7B94F0..0x7B959E), on the AI update's runner when it has one. */
+static void LwNavSyncStep(uintptr_t w, int idx)
 {
     uint8_t runner[0x18] __attribute__((aligned(16)));
     uint8_t block[0x40] __attribute__((aligned(16)));
     memset(block, 0, sizeof block);
-    g_lwSwap.runnerMake(runner);
+    uintptr_t jobs = *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx + 0x28), stepper = *(volatile uintptr_t*)(w + 0x4A8);
+    int32_t count = 0;
+    if (stepper) count = *(volatile int32_t*)(stepper + 0x28);
+    int threads = LwNavStepThreads(g_lwSwap.tasksJobs, g_lwSwap.tasksInline, jobs, *(volatile uintptr_t*)(w + 0x4C8), count);
     block[0] = 1;
     *(uint32_t*)(block + 0x14) = 0x80000000u;
     *(int32_t*)(block + 0x20) = 0x7FFFFFFF; *(int32_t*)(block + 0x28) = 0x7FFFFFFF;
     *(int32_t*)(block + 0x30) = 0x7FFFFFFF; *(int32_t*)(block + 0x34) = 0x7FFFFFFF;
     *(uint32_t*)(block + 0x38) = 0xFFFFFFFFu;
-    g_lwSwap.step(w, block, runner, 1);
+    if (threads > 1) { g_lwSwap.step(w, block, (void*)jobs, threads); g_lwSwap.parallel++; }
+    else { g_lwSwap.runnerMake(runner); g_lwSwap.step(w, block, runner, 1); g_lwSwap.runnerFree(runner); }
+    g_lwSwap.threads = threads;
     *(volatile uint8_t*)(w + 0x478) = 0;
     int32_t cap = *(int32_t*)(block + 0x14); uintptr_t arr = *(uintptr_t*)(block + 8);
     if (cap >= 0 && arr != 0)
     {
-        uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL), heap = *(uintptr_t*)(exe + 0x1899880u);
-        ((void (*)(uintptr_t, uintptr_t, int, uint32_t))(exe + 0x99A920u))(heap, arr, 4, (uint32_t)cap & 0x3FFFFFFFu);
+        uintptr_t heap = *(uintptr_t*)(g_lwSwap.exe + 0x1899880u);
+        ((void (*)(uintptr_t, uintptr_t, int, uint32_t))(g_lwSwap.exe + 0x99A920u))(heap, arr, 4, (uint32_t)cap & 0x3FFFFFFFu);
     }
-    g_lwSwap.runnerFree(runner);
     g_lwSwap.steps++;
 }
-/* Finishes the world's async step and applies what is queued; 0 when the permit never came (nothing done). */
-static int LwNavDrain(uintptr_t w, int idx)
+/* Finishes the world's async step and applies what is queued, timing each part into `ms`; 0 when the permit never came
+ * (nothing done). */
+static int LwNavDrain(uintptr_t w, int idx, double* ms)
 {
+    for (int k = 0; k < LW_NAV_PARTS; k++) ms[k] = 0;
+    int64_t a = LwNavNow(), b;
     if (*(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx + 0x20)) g_lwSwap.join(idx);
-    LARGE_INTEGER a, b, f; QueryPerformanceCounter(&a); QueryPerformanceFrequency(&f);
+    b = LwNavNow(); ms[LW_NAV_JOIN] = LwNavMs(a, b); a = b;
     for (;;)
     {
         g_lwSwap.permit(idx);
         if (*(volatile uint8_t*)(w + 0x478)) break;
-        QueryPerformanceCounter(&b);
-        if ((double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart > LW_NAV_PERMIT_MS) return 0;
+        if (LwNavMs(a, LwNavNow()) > LW_NAV_PERMIT_MS) { ms[LW_NAV_PERMIT] = LwNavMs(a, LwNavNow()); return 0; }
         SwitchToThread();
     }
+    b = LwNavNow(); ms[LW_NAV_PERMIT] = LwNavMs(a, b); a = b;
     if (g_lwSwap.inFlight(w)) g_lwSwap.wait(w);
+    b = LwNavNow(); ms[LW_NAV_WAIT] = LwNavMs(a, b); a = b;
     if (g_lwSwap.inFlight(w) && g_lwSwap.stepDone(w)) g_lwSwap.commit(w, NULL, 0);
+    b = LwNavNow(); ms[LW_NAV_COMMIT] = LwNavMs(a, b); a = b;
     uintptr_t q = *(volatile uintptr_t*)(w + 0x4A0);
-    if (q && g_lwSwap.queued(q) > 0) LwNavSyncStep(w);
+    if (q && g_lwSwap.queued(q) > 0) LwNavSyncStep(w, idx);
+    ms[LW_NAV_STEP] = LwNavMs(a, LwNavNow());
     *(volatile uint8_t*)(w + 0x478) = 0;
     return 1;
 }
+static double LwNavSum(const double* ms) { double s = 0; for (int k = 0; k < LW_NAV_PARTS; k++) s += ms[k]; return s; }
 static uintptr_t LwNavUnload(uintptr_t w, uint32_t* id, uint8_t graph)
 {
     int idx = LwAiwIndex(w);
-    if (idx >= 0 && LwLive() && g_lwSwap.asyncMode(w))
-    {
-        if (LwNavDrain(w, idx)) g_lwSwap.swap[idx] = 1;
-        else { g_lwSwap.swap[idx] = 0; g_lwSwap.refused++; InterlockedExchange(&g_lwSwap.unsafe, 1); }
-    }
-    return g_lwSwap.unload(w, id, graph);
+    if (idx < 0 || !LwLive() || !g_lwSwap.asyncMode(w)) return g_lwSwap.unload(w, id, graph);
+    int64_t t = co_framecost_now();
+    if (LwNavDrain(w, idx, g_lwSwap.pre[idx])) g_lwSwap.swap[idx] = 1;
+    else { g_lwSwap.swap[idx] = 0; g_lwSwap.refused++; InterlockedExchange(&g_lwSwap.unsafe, 1); }
+    int64_t u = LwNavNow();
+    uintptr_t r = g_lwSwap.unload(w, id, graph);
+    g_lwSwap.unloadEnd[idx] = LwNavNow();
+    g_lwSwap.unloadMs[idx] = LwNavMs(u, g_lwSwap.unloadEnd[idx]);
+    co_framecost_add(CO_FC_NAVSWAP, t);
+    return r;
+}
+/* The 30 s summary, from the level tick; `now` GetTickCount64. */
+static void LwNavSwapSummary(ULONGLONG now)
+{
+    if (g_lwSwap.sumAt == 0) { g_lwSwap.sumAt = now; return; }
+    if (now - g_lwSwap.sumAt < 30000) return;
+    g_lwSwap.sumAt = now;
+    if (g_lwSwap.sumSwaps == 0) return;
+    Note("living world: nav swaps (30 s): %u on the frame thread, %.0f ms in all (worst %.1f ms): in-flight steps waited %.0f ms, synchronous steps %.0f ms "
+        "(the last on %d thread(s); %u of %u steps on the AI update's runner this level)", g_lwSwap.sumSwaps, g_lwSwap.sumMs, g_lwSwap.sumWorst, g_lwSwap.sumWait,
+        g_lwSwap.sumStep, g_lwSwap.threads, g_lwSwap.parallel, g_lwSwap.steps);
+    g_lwSwap.sumSwaps = 0; g_lwSwap.sumMs = g_lwSwap.sumWorst = g_lwSwap.sumStep = g_lwSwap.sumWait = 0;
 }
 static uintptr_t LwNavLoad(uintptr_t w, uint32_t* out, uintptr_t inst, void* p4, uintptr_t graph, void* p6)
 {
+    int64_t t = co_framecost_now();
     uintptr_t r = g_lwSwap.load(w, out, inst, p4, graph, p6);
+    double loadMs = LwNavMs(t, LwNavNow());
     int idx = LwAiwIndex(w);
     if (idx >= 0 && !LwLive()) g_lwSwap.swap[idx] = 0; /* a normal mission's swaps stay the game's */
     if (idx < 0 || !g_lwSwap.swap[idx]) return r;
     g_lwSwap.swap[idx] = 0;
-    LARGE_INTEGER a, b, f; QueryPerformanceCounter(&a);
+    /* the game's work between its unload and this load (the connect), when the load follows in the same completion */
+    double between = LwNavMs(g_lwSwap.unloadEnd[idx], t);
+    if (between < 0 || between > 1000.0) between = -1;
     uint32_t steps = g_lwSwap.steps;
-    int ok = LwNavDrain(w, idx);
-    QueryPerformanceCounter(&b); QueryPerformanceFrequency(&f);
-    double ms = (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart;
-    if (!ok) { g_lwSwap.refused++; InterlockedExchange(&g_lwSwap.unsafe, 1); }
-    else
+    double post[LW_NAV_PARTS];
+    int ok = LwNavDrain(w, idx, post);
+    co_framecost_add(CO_FC_NAVSWAP, between >= 0 ? g_lwSwap.unloadEnd[idx] : t);
+    if (!ok) { g_lwSwap.refused++; InterlockedExchange(&g_lwSwap.unsafe, 1); return r; }
+    const double* pre = g_lwSwap.pre[idx];
+    double ms = LwNavSum(pre) + g_lwSwap.unloadMs[idx] + (between > 0 ? between : 0) + loadMs + LwNavSum(post);
+    g_lwSwap.swaps++;
+    if (ms > g_lwSwap.worstMs) g_lwSwap.worstMs = ms;
+    g_lwSwap.sumSwaps++; g_lwSwap.sumMs += ms; if (ms > g_lwSwap.sumWorst) g_lwSwap.sumWorst = ms;
+    g_lwSwap.sumWait += pre[LW_NAV_JOIN] + pre[LW_NAV_WAIT] + post[LW_NAV_JOIN] + post[LW_NAV_WAIT];
+    g_lwSwap.sumStep += pre[LW_NAV_STEP] + post[LW_NAV_STEP];
+    if (g_lwSwap.linesLevel != (uint32_t)g_world.levels) { g_lwSwap.linesLevel = (uint32_t)g_world.levels; g_lwSwap.lines = 0; }
+    if (g_lwSwap.lines < LW_NAV_SWAP_LINES)
     {
-        g_lwSwap.swaps++;
-        if (ms > g_lwSwap.worstMs) g_lwSwap.worstMs = ms;
-        Note("living world: nav: section %u swapped in at once (world %d): %u step(s), %.1f ms; %u swaps, worst %.1f ms",
-            out ? *out : 0u, idx, g_lwSwap.steps - steps, ms, g_lwSwap.swaps, g_lwSwap.worstMs);
+        g_lwSwap.lines++;
+        Note("living world: nav: section %u swapped in at once (world %d): %.1f ms on the frame thread; before the unload %.1f (AI update %.1f, permit %.1f, "
+            "step in flight %.1f, its commit %.1f, queued %.1f), the game's unload %.1f, connect %.1f, load %.1f, after the load %.1f (AI update %.1f, "
+            "step in flight %.1f, the swap's step %.1f); %u step(s) on %d thread(s); %u swaps, worst %.1f ms", out ? *out : 0u, idx, ms, LwNavSum(pre),
+            pre[LW_NAV_JOIN], pre[LW_NAV_PERMIT], pre[LW_NAV_WAIT], pre[LW_NAV_COMMIT], pre[LW_NAV_STEP], g_lwSwap.unloadMs[idx], between, loadMs, LwNavSum(post),
+            post[LW_NAV_JOIN], post[LW_NAV_WAIT], post[LW_NAV_STEP], g_lwSwap.steps - steps, g_lwSwap.threads, g_lwSwap.swaps, g_lwSwap.worstMs);
+        if (g_lwSwap.lines == LW_NAV_SWAP_LINES) Note("living world: nav: %d swap lines this level; the 30 s summaries go on", LW_NAV_SWAP_LINES);
     }
     return r;
 }
@@ -3235,7 +3303,16 @@ static void LwInstallNavSwapSync(void)
     g_lwSwap.commit = (void (*)(uintptr_t, void*, int))(exe + 0xBD05E0u); g_lwSwap.step = (uintptr_t (*)(uintptr_t, void*, void*, int))(exe + 0xBD0BB0u);
     g_lwSwap.runnerMake = (void (*)(void*))(exe + 0xA0F4D0u); g_lwSwap.runnerFree = (void (*)(void*))(exe + 0xA0F4F0u);
     g_lwSwap.queued = (int (*)(uintptr_t))(exe + 0xAD4740u); g_lwSwap.permit = (int (*)(int))(exe + 0x7D7740u);
-    g_lwSwap.join = (void (*)(int))(exe + 0x7D7930u); g_lwSwap.table = exe + LW_AIW_TABLE;
+    g_lwSwap.join = (void (*)(int))(exe + 0x7D7930u); g_lwSwap.table = exe + LW_AIW_TABLE; g_lwSwap.exe = exe;
+    /* the parallel step's pins: 0xBD0BB0's dispatch by thread count, the async step's count, the AI update's runner and
+     * its two task runners; any other code keeps every step on the frame thread */
+    if (ApiCodeMatches(exe + 0xBD0C22u, "41 83 FE 01 7E 0F 4C 8D 05") && ApiCodeMatches(exe + 0xBD0C2Fu, "FF 96 C8 04 00 00 EB 0C 48 8B 07") &&
+        ApiCodeMatches(exe + 0xBD0C76u, "41 83 FE 01 7E 0F") && ApiCodeMatches(exe + 0xBD13BCu, "48 8B 87 A8 04 00 00 48 8D 55 67 4C 8B C6 48 8B CF 44 8B 48 28") &&
+        ApiCodeMatches(exe + 0x7D861Fu, "48 89 7B 28") && ApiCodeMatches(exe + 0x7D862Bu, "48 8D 0D EE F5 FF FF") &&
+        ApiCodeMatches(exe + 0x7D8660u, "48 8D 0D 19 BF 03 00") && ApiCodeMatches(exe + LW_NAV_TASKS_JOBS, "48 89 5C 24 10 48 89 6C 24 18 56 57 41 56 48 83 EC 20 48 8B F2 48 8B D9") &&
+        ApiCodeMatches(exe + LW_NAV_TASKS_INLINE, "48 8B C2 48 85 C9 74 10 48 85 D2 74 0B"))
+    { g_lwSwap.tasksJobs = exe + LW_NAV_TASKS_JOBS; g_lwSwap.tasksInline = exe + LW_NAV_TASKS_INLINE; }
+    else Note("living world: nav: the parallel step's code is not the reviewed one; swap steps run on the frame thread");
     uint8_t code[24] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0,  /* mov rax, LwNavUnload; jmp rax */
                         0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0}; /* mov rax, LwNavLoad; jmp rax */
     uint64_t fn = (uint64_t)(uintptr_t)LwNavUnload; memcpy(code + 2, &fn, 8);
@@ -4284,6 +4361,7 @@ static void LivingTickBody(void)
     LwTraceTick();
     uintptr_t dir;
     if (EvpPtr(g_lw.game + LW_DIRECTOR, &dir)) LwNavTick(dir);
+    LwNavSwapSummary(GetTickCount64());
     LwGarrisonsTick();
     LwSquadsTick();
     LwTiltScan();

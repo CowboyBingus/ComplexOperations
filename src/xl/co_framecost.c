@@ -10,7 +10,7 @@
 
 static const char* const kPartNames[CO_FC_PARTS] = {
     "status", "streamer", "span rescue", "net patience", "terrain diagnostics", "terrain probe", "living world",
-    "daylight", "tactical map", "density", "scatter merge", "moving tiles", "ground keep", "far grass"};
+    "daylight", "tactical map", "density", "scatter merge", "moving tiles", "ground keep", "far grass", "nav swaps"};
 
 static struct
 {
@@ -29,6 +29,8 @@ static struct
     double sum, worst, worstTimed, worstTop, timedSum;
     int worstTopPart;
     int windowLines, detailLines;
+    /* the window's slowest frames over CO_FC_SLOW_MS, slowest first, noted at its close */
+    struct { double ms, timed, top, at; int part; const char* front; } slow[CO_FC_SLOW_LINES_WINDOW];
     /* the last window, for the tests */
     double low1, low01; uint32_t lastOver25, lastOver33, lastOver1s; int lastStarved;
 #ifdef CO_TEST
@@ -84,13 +86,16 @@ static void WindowStart(int64_t now)
     CpuTimes(&g_fc.sysBusy, &g_fc.sysAll, &g_fc.proc);
     InterlockedExchange64(&g_fc.offThread, 0);
     g_fc.frames = g_fc.kept = g_fc.over25 = g_fc.over33 = g_fc.over1s = g_fc.slowNoted = 0;
+    memset(g_fc.slow, 0, sizeof g_fc.slow);
     g_fc.sum = g_fc.worst = g_fc.worstTimed = g_fc.worstTop = g_fc.timedSum = 0; g_fc.worstTopPart = 0;
 }
 
+static void SlowLines(void);
 static void WindowClose(int64_t now)
 {
     double wallMs = Ms(now - g_fc.windowAt), offMs = Ms(InterlockedExchange64(&g_fc.offThread, 0));
     if (g_fc.frames == 0) return;
+    SlowLines();
     if (g_fc.budgetMission != g_fc.mission) { g_fc.budgetMission = g_fc.mission; g_fc.windowLines = 0; }
     if (g_fc.windowLines > CO_FC_WINDOW_LINES_MISSION) return;
     if (++g_fc.windowLines > CO_FC_WINDOW_LINES_MISSION)
@@ -121,14 +126,31 @@ static void WindowClose(int64_t now)
         busyPct, sysCores, g_fc.cores, gameCores, elseCores, starved, ai, nestText);
 }
 
-/* A detailed line for a slow frame, while the session's budget lasts. */
-static void SlowLine(double ms, double timed, int topPart, double top)
+/* A slow frame kept for the window's close if it is among the window's slowest: the first ones were the lines before,
+ * and a window with a 1.3 s stall noted two 25 ms frames instead of it. */
+static void SlowKeep(double ms, double timed, int topPart, double top, double at)
 {
-    if (g_fc.slowNoted >= CO_FC_SLOW_LINES_WINDOW || g_fc.detailLines >= CO_FC_DETAIL_LINES_SESSION) return;
-    g_fc.slowNoted++;
-    co_log("frame times: a %.1f ms frame (QPC; the game's window %s): timed parts (CoXlTick, the level update) %.2f ms (the most: %s %.2f ms), untimed %.1f ms",
-        ms, Front(), timed, kPartNames[topPart], top, ms - timed);
-    if (++g_fc.detailLines == CO_FC_DETAIL_LINES_SESSION) co_log("frame times: %d slow-frame lines this session; the window lines go on", CO_FC_DETAIL_LINES_SESSION);
+    int k = CO_FC_SLOW_LINES_WINDOW;
+    while (k > 0 && ms > g_fc.slow[k - 1].ms) k--;
+    if (k == CO_FC_SLOW_LINES_WINDOW) return;
+    memmove(&g_fc.slow[k + 1], &g_fc.slow[k], (CO_FC_SLOW_LINES_WINDOW - 1 - k) * sizeof g_fc.slow[0]);
+    g_fc.slow[k].ms = ms; g_fc.slow[k].timed = timed; g_fc.slow[k].top = top; g_fc.slow[k].part = topPart; g_fc.slow[k].at = at;
+    g_fc.slow[k].front = Front();
+}
+
+/* The window's slowest frames, one detailed line each while the session's budget lasts. */
+static void SlowLines(void)
+{
+    for (int k = 0; k < CO_FC_SLOW_LINES_WINDOW && g_fc.slow[k].ms > 0; k++)
+    {
+        if (g_fc.detailLines >= CO_FC_DETAIL_LINES_SESSION) break;
+        g_fc.slowNoted++;
+        co_log("frame times: a %.1f ms frame (QPC; the game's window %s): timed parts (CoXlTick, the level update) %.2f ms (the most: %s %.2f ms), untimed %.1f ms; "
+            "%.1f s into the window", g_fc.slow[k].ms, g_fc.slow[k].front, g_fc.slow[k].timed, kPartNames[g_fc.slow[k].part], g_fc.slow[k].top,
+            g_fc.slow[k].ms - g_fc.slow[k].timed, g_fc.slow[k].at);
+        if (++g_fc.detailLines == CO_FC_DETAIL_LINES_SESSION) co_log("frame times: %d slow-frame lines this session; the window lines go on", CO_FC_DETAIL_LINES_SESSION);
+    }
+    memset(g_fc.slow, 0, sizeof g_fc.slow);
 }
 
 /* The frame from the last tick's start to `now`, with its parts. */
@@ -150,12 +172,13 @@ static void FrameClose(int64_t now)
     if (ms > CO_FC_HITCH_MS) g_fc.over33++;
     if (!(ms > CO_FC_SLOW_MS)) return;
     g_fc.over25++;
-    SlowLine(ms, timed, topPart, top);
+    SlowKeep(ms, timed, topPart, top, Ms(g_fc.last - g_fc.windowAt) / 1000.0); /* where it started */
 }
 
 static void Begin(int64_t now, int play, long mission)
 {
     g_fc.thread = GetCurrentThreadId();
+    if (g_fc.lastPlay && (!play || mission != g_fc.mission)) SlowLines(); /* a window cut short still names its stalls */
     if (play && (!g_fc.lastPlay || g_fc.windowAt == 0 || mission != g_fc.mission)) WindowStart(now); /* windows count play only */
     else if (play)
     {

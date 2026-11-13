@@ -8,11 +8,12 @@
 
 #include <stdint.h>
 
-/* The timed parts: CoXlTick's, in its order, then the level update hook's (difficulty_world_move.c MoveLevelUpdate). */
+/* The timed parts: CoXlTick's, in its order, then the level update hook's (difficulty_world_move.c MoveLevelUpdate), then
+ * the nav section swaps the game's cell tick runs through the living world's hooks (living_world.c LwNavUnload / LwNavLoad). */
 enum
 {
     CO_FC_STATUS, CO_FC_STREAM, CO_FC_SPANS, CO_FC_NET, CO_FC_TDIAG, CO_FC_TPROBE, CO_FC_LIVING, CO_FC_DAYLIGHT,
-    CO_FC_TAC, CO_FC_DENSITY, CO_FC_SCATTER, CO_FC_MOVE, CO_FC_GROUNDKEEP, CO_FC_FARGRASS, CO_FC_PARTS
+    CO_FC_TAC, CO_FC_DENSITY, CO_FC_SCATTER, CO_FC_MOVE, CO_FC_GROUNDKEEP, CO_FC_FARGRASS, CO_FC_NAVSWAP, CO_FC_PARTS
 };
 
 #define CO_FC_WINDOW_MS 10000.0
@@ -21,7 +22,7 @@ enum
 #define CO_FC_HITCH_MS 33.3
 #define CO_FC_LONG_MS 1000.0             /* a frame of a second or more in play: a build or a stall */
 #define CO_FC_STARVED_IDLE 1.0           /* cores left idle under which the game had to wait for one */
-#define CO_FC_SLOW_LINES_WINDOW 2        /* detailed slow-frame lines a window */
+#define CO_FC_SLOW_LINES_WINDOW 2        /* detailed slow-frame lines a window: its slowest, at its close */
 #define CO_FC_DETAIL_LINES_SESSION 600   /* detailed slow-frame lines a session */
 #define CO_FC_WINDOW_LINES_MISSION 1080  /* window lines a mission: three hours of play */
 
