@@ -1,6 +1,7 @@
 /* The engine's scatter update on an extra large level: the far-scatter bake's views (op 0x4A) and the water camera's
  * view (ops 0x0A and 0x0B), both near 1, far 1001, aspect 1, are left out; any other view or op, and any vanilla-size
- * level, runs the engine's update. Each cut notes once per level, the water's once per record. Run on the fake game. */
+ * level, runs the engine's update. Each cut notes once per level, the water's once per record, and ends at the ship.
+ * Run on the fake game. */
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -9,6 +10,8 @@
 
 void CoXlTestGenLevel(float current);
 int CoXlTestScatterUpdate(LONG op, LONG record, uint8_t* view);
+int CoXlTestScatterUpdateAsIs(uint8_t* view);
+void CoXlTestWorldShip(void);
 
 static int g_failed;
 static const char* g_case;
@@ -78,6 +81,13 @@ int main(void)
     CHECK(CoXlTestScatterUpdate(0x0B, 160, Ortho()) == 1);
     CHECK(CoXlTestScatterUpdate(0x4A, 157, Ortho()) == 1);
     CHECK(Count(kWater) == 0 && Count(kBake) == 0);
+
+    g_case = "a generation cut short at op 0x0A, then the ship";
+    CoXlTestGenLevel(8.0f);
+    CHECK(CoXlTestScatterUpdate(0x0A, 159, Ortho()) == 0);
+    CHECK(CoXlTestScatterUpdateAsIs(Ortho()) == 0);
+    CoXlTestWorldShip();
+    CHECK(CoXlTestScatterUpdateAsIs(Ortho()) == 1);
 
     if (g_failed) { printf("xlscatter: %d check(s) failed\n", g_failed); return 1; }
     printf("xlscatter: all checks passed\n");

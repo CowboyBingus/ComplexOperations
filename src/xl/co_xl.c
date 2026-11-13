@@ -324,4 +324,11 @@ int CoXlTestScatterUpdate(LONG op, LONG record, uint8_t* view)
     TdScatterUpdate(NULL, view, 0, NULL, NULL, NULL, NULL, NULL);
     return g_scatterTestCalled;
 }
+/* The same with the op and record as the last dispatch, the ship or a level init left them. */
+int CoXlTestScatterUpdateAsIs(uint8_t* view)
+{
+    g_tdScatterUpdate = ScatterTestEngine; g_scatterTestCalled = 0;
+    TdScatterUpdate(NULL, view, 0, NULL, NULL, NULL, NULL, NULL);
+    return g_scatterTestCalled;
+}
 #endif
