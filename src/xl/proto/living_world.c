@@ -40,6 +40,7 @@ static const ActPin kLwPins[] = {
     {0, 0x9513A1u, "4439a014060000"},                                    /* the patrol loop's gate */
     {0, 0xA2DC87u, "8079180075"},                                        /* the removability test reads the keep byte +0x18 */
     {0, 0x954B8Cu, "410fb6442411"},                                      /* keep travels from rec+0x11 (movzx eax, [r12+0x11]) */
+    {0, 0x843FD0u, "48894c240853574155" "4883ec508b053dfcc302"},          /* a unit's detector: its own again (LwOwnDetectors) */
 };
 
 static struct
@@ -498,7 +499,7 @@ typedef struct LwSquad
     uint16_t prevNode; uint8_t prevValid, goalPending, alerted; ULONGLONG calmSince; /* the node it walked from (no route starts back to it); a patrol goal held while members are alert; alert since it came online, calm since */
 } LwSquad;
 static int LwIntentArrived(LwSquad* q); static int LwIntentGoal(LwSquad* q); static void LwIntentOnline(LwSquad* q, const uint32_t* members, int n, const float* at);
-static int LwSteerOk(const LwSquad* q); static uint32_t LwAwareDetector(uint32_t unit); static void LwIntentOffline(LwSquad* q); static int LwIntentHold(LwSquad* q, float nx, float ny); static int LwIntentInside(LwSquad* q); static int LwIntentLeg(LwSquad* q, float dt); static int LwTerritoryGoalOk(const LwSquad* q, int node); static void LwTerritoryTick(void); static void LwIntentTrace(void); static void LwAggroTrace(void); static void LwRetakeScan(void); static void LwTestClear(int seq, uint32_t entity); static void LwRetakeWait(int seq, float s); static void LwRetakeUnfit(int seq); static void LwRetakeTakenCmd(int seq); static int64_t LwFillMasks(uintptr_t desc, float* budget, char* trace, size_t traceLen); static void LwNoiseDrain(void); static void LwHearNote(void); static void LwFightScan(void); static void LwRushNote(void); static void LwTestNoise(int seq, int type, float dx, float dy);
+static int LwSteerOk(const LwSquad* q); static uint32_t LwAwareDetector(uint32_t unit); static int LwOwnDetectors(const uint32_t* members, int n); static void LwIntentOffline(LwSquad* q); static int LwIntentHold(LwSquad* q, float nx, float ny); static int LwIntentInside(LwSquad* q); static int LwIntentLeg(LwSquad* q, float dt); static int LwTerritoryGoalOk(const LwSquad* q, int node); static void LwTerritoryTick(void); static void LwIntentTrace(void); static void LwAggroTrace(void); static void LwRetakeScan(void); static void LwTestClear(int seq, uint32_t entity); static void LwRetakeWait(int seq, float s); static void LwRetakeUnfit(int seq); static void LwRetakeTakenCmd(int seq); static int64_t LwFillMasks(uintptr_t desc, float* budget, char* trace, size_t traceLen); static void LwNoiseDrain(void); static void LwHearNote(void); static void LwFightScan(void); static void LwRushNote(void); static void LwTestNoise(int seq, int type, float dx, float dy);
 static void LwDensityOnline(const float* pos, uint32_t members); static int LwDensityOn(void); static int LwDensityRoom(const float* pos, uint32_t members, uint32_t held, char* why, size_t whyLen); static float LwDensityPopulateUnits(int eff); static float LwFarShareLimit(void); static int LwDensitySameBubble(const LwSquad* a, const LwSquad* b); static void LwDensityTick(float dt); static void LwDensityNote(void); static void LwDensityBudgetCmd(int n); static void LwSyncCensus(int seq); /* living_world_density.c */
 static void LwLodTick(void); static void LwLodNote(void); static void LwLodCmd(int on); static int LwLodFullUnits(void); /* living_world_lod.c */
 static void LwDeferTick(uintptr_t lg, uint32_t seed); static void LwDeferNote(void); static void LwSpawnSourcesNote(int seq); /* living_world_defer.c */
@@ -1236,7 +1237,7 @@ static int LwAimForward(int player, float* f)
 {
     uintptr_t m = 0; uint32_t slot = 0; float qv[4];
     if (player < 0 || player >= g_lwWorld.playersAt || !g_lwWorld.avatars[player] || !EvpPtr(g_lw.game + 0x3326D20u, &m) || m == 0 ||
-        !EvpHash(m + 0xF8, g_lwWorld.avatars[player], 8, 4, &slot) || SafeRead(m + 0x547858u + 0x78u * (uintptr_t)slot, qv, sizeof qv)) return 0;
+        !EvpHash(m + 0xF8, g_lwWorld.avatars[player], 8, 4, &slot) || SafeRead(m + co_managers_offset(0x3326D20u, 0x547858u) + 0x78u * (uintptr_t)slot, qv, sizeof qv)) return 0;
     float x = qv[0], y = qv[1], z = qv[2], w = qv[3], l = x * x + y * y + z * z + w * w;
     if (!(l > 0.9f && l < 1.1f)) return 0;
     float fx = 2.0f * (x * y - w * z), fy = 1.0f - 2.0f * (x * x + z * z), fl = sqrtf(fx * fx + fy * fy);
@@ -1491,6 +1492,7 @@ static void LwOnlineTick(LwSquad* q, int* removals)
         q->state = LW_FREE; g_lwWorld.died++; g_lwWorld.onlineUnits -= q->alive;
         return;
     }
+    LwOwnDetectors(members, n); /* each tick: members join over several frames, and a join points them at the squad's */
     for (int i = 0; i < q->seenCount; i++) /* a member that left the list is lost (killed or destroyed) */
     {
         int still = 0;
@@ -2566,6 +2568,7 @@ enum { LW_J_TEST, LW_J_FRAMES, LW_J_NOISE, LW_J_FIGHT, LW_J_TERRITORY, LW_J_RETA
 static uint64_t g_lwJobTicks[LW_J_COUNT];
 #define LW_TIMED(j, call) do { uint64_t t0_ = __builtin_ia32_rdtsc(); call; g_lwJobTicks[j] += __builtin_ia32_rdtsc() - t0_; } while (0)
 
+static void LwAggroProbe(void); /* living_world_aggro.c */
 static void LwTickScans(void)
 {
     LW_TIMED(LW_J_TEST, {
@@ -2582,7 +2585,7 @@ static void LwTickScans(void)
     LW_TIMED(LW_J_FIGHT, LwFightScan()); /* Phase 2b: fights and calls for help draw squads in (once a second) */
     LW_TIMED(LW_J_TERRITORY, LwTerritoryTick()); /* Phase 2d: regions, their strength, and the squads' homes */
     LW_TIMED(LW_J_RETAKE, LwRetakeScan()); /* Phase 2c: squads retake cleared plain garrisons (every 10 s) */
-    LW_TIMED(LW_J_TRACE, { LwIntentTrace(); if (LwTestTraceOn()) LwAggroTrace(); }); /* test runs only */
+    LW_TIMED(LW_J_TRACE, { LwIntentTrace(); if (LwTestTraceOn()) LwAggroTrace(); LwAggroProbe(); }); /* the probe: every build, bounded */
 }
 
 /* The budget: living members of online squads, the request of pending ones; the far ones' share is returned. */
@@ -4298,6 +4301,7 @@ static void LwLiveSet(int complex)
 }
 
 #include "living_world_intent.c" /* Phase 2: squad intents (investigate noise) */
+#include "living_world_aggro.c" /* loader members see through their own detectors; calm enemies near a player logged */
 #include "living_world_density.c" /* enemy density: a budget per player bubble (KB living-world-density-design) */
 #include "living_world_lod.c" /* data-only AI LOD for hidden, calm loader squads (KB living-world-density-design, C3) */
 #include "living_world_flat.c" /* test instrument: whole-frame sampling profile (KB xl-destruction-record-map-full) */

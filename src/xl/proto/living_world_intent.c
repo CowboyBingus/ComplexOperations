@@ -339,7 +339,7 @@ static void LwReinforceOnline(LwSquad* q, const uint32_t* members, int n, const 
         if (!q->intentSent && q->jobSet) { q->intentSent = 1; if (!LwSquadGoTo(q, q->target)) { LwIntentEnd(q, "no navmesh at the point"); return; } }
         /* members come online over several ticks (lw113f: 2 of 9 listed on the first): the newly listed run too */
         if (q->intentSent && !engaged && (!q->rushed || n > q->rushedN)) LwRushMembers(q, members, n, 1);
-        if (LwFightOf(q) && now >= q->retargetAt && LwDist2(g_lwFights[q->fight].pos, q->target[0], q->target[1]) > 30.0f * 30.0f) /* the fight moved */
+        if (!engaged && LwFightOf(q) && now >= q->retargetAt && LwDist2(g_lwFights[q->fight].pos, q->target[0], q->target[1]) > 30.0f * 30.0f) /* the fight moved; not once a member fights */
         { memcpy(q->target, g_lwFights[q->fight].pos, sizeof q->target); q->retargetAt = now + 10000; if (q->jobSet) LwSquadGoTo(q, q->target); }
         int there = LwDist2(at, q->target[0], q->target[1]) <= LW_FIGHT_JOIN * LW_FIGHT_JOIN;
         if (engaged || there)

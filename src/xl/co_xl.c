@@ -258,6 +258,14 @@ void CoXlTestLwPins(uint8_t* image)
         }
 }
 int CoXlTestLiving(uintptr_t game) { if (!LwEnabled()) return 0; CoXlLiving(game); return 1; }
+/* LwOwnDetectors on a fake game, with `use` standing in for the game's 0x843FD0: how many members moved. */
+int CoXlTestLwOwnDetectors(uintptr_t game, const uint32_t* units, int n, void (*use)(uintptr_t, uint32_t, uint32_t))
+{
+    uintptr_t was = g_lw.game; g_lw.game = game; g_lwUseDetector = use;
+    int moved = LwOwnDetectors(units, n);
+    g_lwUseDetector = NULL; g_lw.game = was;
+    return moved;
+}
 /* The living world's navmesh pins (all in the exe) written into a fake exe, and a complex level's nav tick with no
  * director: 1 when it got past the pins, -1 when they refused. */
 void CoXlTestLwNavPins(uint8_t* exe)
