@@ -1410,6 +1410,15 @@ static void TdScatterMergeTick(uint64_t context)
         Note("difficulty: extra large maps: the moving tile's scatter cut ends (build %ld; the merge's render queue read empty for %d level updates)",
             (long)g_tdScatMergeBuilds, TD_SCAT_MERGE_EMPTY_UPDATES);
 }
+/* Extra large maps' far-grass bake in play (difficulty_world_fargrass.c): its orthographic view has near 1 and far
+ * 1002. While the engine updates the scatter for it, the scatter boxes (NearScatterView) give every node its ground. */
+#define TD_SCAT_BAKE_FAR 1002.0f
+static _Thread_local int t_tdScatBake;
+static int TdScatterBakeView(const uint8_t* view)
+{
+    struct { float nearZ, farZ; uint32_t projection; } v = {0, 0, 1};
+    return g_world.live == 8.0f && !SafeRead((uintptr_t)view + 0x20, &v, sizeof v) && v.nearZ == 1.0f && v.farZ == TD_SCAT_BAKE_FAR && v.projection == 0;
+}
 static LONG TdScatterSkipOp(const uint8_t* view)
 {
     const LONG op = g_genOp;
@@ -1625,6 +1634,7 @@ static void TdScatterResearchDone(void)
 static void TdScatterUpdate(void* a, uint8_t* view, uint32_t c, uint8_t* layer, void* e, void* f, void* g, void* h)
 {
     const LONG skipOp = TdScatterSkipOp(view);
+    t_tdScatBake = TdScatterBakeView(view);
 #ifdef CO_RESEARCH
     RsTakeSystem(a, layer);
 #endif

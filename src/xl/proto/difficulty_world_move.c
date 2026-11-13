@@ -98,6 +98,11 @@ static struct
     int players;
 } g_move = {.level = -1};
 
+static int FarGrassBusy(void); /* difficulty_world_fargrass.c */
+static void FarGrassTick(uint64_t level);
+static void FarGrassLevelLeft(void);
+static void FarGrassInstall(uintptr_t game);
+
 static void MoveCraterUpdate(void* system, float dt, uint64_t r8, uint64_t r9)
 {
     LONG64 since = g_moveHoldSince;
@@ -996,7 +1001,7 @@ static void MoveTick(uint64_t level)
     if (MoveTrimTick()) return;
     if (g_move.state == MV_IDLE)
     {
-        if (g_move.players == 0) return;
+        if (g_move.players == 0 || FarGrassBusy()) return; /* a far-grass batch has the generator's queue and names */
         if (NearTilesLive() >= MOVE_CAP) return;
         float best = 1e9f; int ba = 0, bb = 0, bp = -1;
         for (int p = 0; p < g_move.players; p++)
@@ -1211,6 +1216,7 @@ static void MoveLevelUpdate(uint64_t level)
     QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
     if (mv != MV_IDLE || g_move.state != MV_IDLE) { MoveCostAdd((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart, mv, ns, step, conf, bld); g_moveCost.pending = 1; }
     else if (g_moveCost.pending) MoveCostNote();
+    FarGrassTick(level);
 }
 
 static void MoveInstall(uintptr_t game)
@@ -1224,6 +1230,7 @@ static void MoveInstall(uintptr_t game)
         LoaderHook("extra large maps' moving tiles", game + MOVE_LEVEL_UPDATE, (void*)MoveLevelUpdate, (void**)&g_moveUpdate))
     { Note("difficulty: moving tiles: a hook did not go in; the detailed terrain stays at the drop point"); return; }
     g_moveInstalled = 1;
+    FarGrassInstall(game); /* its bakes run from the level update hook above */
     Note("difficulty: moving tiles: installed (level update 0x%X, crater hold 0x%X / 0x%X)", MOVE_LEVEL_UPDATE, MOVE_CRATER_UPDATE, MOVE_CRATER_RENDER);
 }
 
@@ -1235,6 +1242,7 @@ static void NearLevelLeft(int ship)
     NearOneMipDisarm();
     InterlockedExchange(&g_nearActive, 0);
     MoveHold(0);
+    FarGrassLevelLeft();
     /* only the ship: a level init advances g_world.levels, which every tile and hide gate already compares */
     if (ship) { NearTilesClear(); g_hide.handle = 0; }
 }

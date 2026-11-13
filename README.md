@@ -491,6 +491,20 @@ blank.
   over the 2048 m around the player, and, while Tab is held, level 5 with the whole world full-screen.
 - On a 16 km world the map texture holds 8 m a texel.
 
+### Far grass
+
+Past the near scatter, the game draws grass colour on the ground from a 4096 x 4096 lookup baked at load. On a 16 km
+world that bake is cut (it would grow every scatter layer to the whole map), and the overlay's shader maps 2048 m.
+
+- `hellforge-data.json` edits two variants of the overlay's shader (`2fa016b4649b8927`, `ecf7f262f57585a0` in archive
+  `ee6b1ba7e22d71ed`): the 16384 m world, no debug tint. The DLL picks them on a 16 km level in play through the render
+  setting `debug_deformation_prevention`, which nothing else reads.
+- The DLL keeps the bake's textures from load and bakes the ground as players come near
+  (`src/xl/proto/difficulty_world_fargrass.c`): views of 256 m, nearest first, up to 1.5 km away, then the lookup
+  again. Baked ground stays baked for the mission.
+- The lookup holds 4 m a texel on a 16 km world (0.5 m on 2048 m): the far grass is coarser than on a normal map.
+- `HELLFORGE_XL_FARGRASS=0` turns the bakes off.
+
 ### M map
 
 M opens a full-screen tactical map on a world above 2048 m: terrain, the squad, objectives, enemy territory and
@@ -652,9 +666,10 @@ data the mod leaves four pods.
 The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`, then `gunship_seats.py recipe` for the
 Pelican), which are not in this folder.
 
-HellForge also builds the Tab map's shader from `hellforge-data.json` and the player's game files (see Tab map), into
-its own cache outside the folder. The spec names the game's shader by the digest of each stage it edits. When the
-player's game has another shader there, the session says `its data could not be built` and leaves the whole mod out.
+HellForge also builds the Tab map's and the far grass's shaders from `hellforge-data.json` and the player's game files
+(see Tab map and Far grass), into its own cache outside the folder. The spec names the game's shader by the digest of
+each stage it edits. When the player's game has another shader there, the session says `its data could not be built` and
+leaves the whole mod out.
 
 ## Source
 
