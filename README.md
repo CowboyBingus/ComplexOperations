@@ -294,7 +294,11 @@ the game's body font and its panel inks.
 | `WAITING FOR HOST` | A client that has no answer from the host yet. |
 | `STARTS AS STANDARD` | The briefing, as host: a squad member's PC is not known to be able, so the launch drops the mark. |
 
-- The state comes from the functions the launch decides with, on the same inputs.
+- The state comes from the functions the launch decides with, on the same inputs. A client whose answer from the host
+  is on takes the operation's roll from the board, so a table filled before that answer still shows the right state.
+- A client's briefing cannot tell whether the host's launch will drop the mark: it shows the operation's roll, and the
+  host's briefing shows `STARTS AS STANDARD`.
+- Until this PC's check of the part settles, no banner shows.
 - Other levels and other screens get no banner.
 - The banner goes right of the panel, above its top line, or one column further right when that does not fit.
   Know Your Constellation's box never reaches either place.
@@ -707,6 +711,8 @@ The mod's lines are in the session's `game/mod-cowboybingus.complex-operations.l
 | `difficulty: extra large maps: destroy of a live unit held until the world's destroy list had room (N so far)` | On a complex mission the game's destroy list was full; the destroy waits a frame. Logged at counts 1, 2, 4 and so on. |
 | `war-table tag: map, operation N: complex, banner x ...` | The banner for that state; also `briefing, operation N`. |
 | `war-table tag: map, operation N: not level 11, no banner` | That operation is another level. |
+| `war-table tag: no banner until this PC's check of the complex part has settled` | Once, while the part's check runs. |
+| `war-table tag: removed (the screen changed; N unbalanced frames)` | The banner's GUI is gone. N above 0 means the Lua stack was not left as found. |
 | `war-table tag: off: ...` | The banner is off: the game's Lua or the war table's code is not the reviewed one. |
 | `TEST BUILD, not for play` | Built with `--test-first-slot`. |
 | `the session lists count to four as before` | The count change is off; the reason stands before it. |

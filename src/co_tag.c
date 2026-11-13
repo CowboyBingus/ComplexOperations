@@ -128,6 +128,16 @@ int co_tag_briefing_entry(uintptr_t war, uint32_t* index, uint32_t* entry, int* 
     return 1;
 }
 
+int co_tag_board_mark(uintptr_t war, uint32_t index, int* marked)
+{
+    uint8_t record[0x5C];
+    uint16_t planet;
+    if (index >= BOARD_SLOTS || g_coApi->read(war + BOARD + index * 0x5Cu, record, sizeof record) != 0 || record[0x34] == 0) return 0;
+    memcpy(&planet, record + 0x10, 2);
+    *marked = co_seed_is_complex(co_complex_entry_seed(0, CO_COMPLEX_LEVEL, U32(record + 0x0C), planet, 1));
+    return 1;
+}
+
 /* ---- the layout --------------------------------------------------------------------------------------------------- */
 
 int co_tag_place(const CoTagAnchor* a, double width, double height, CoTagBox* out)
@@ -205,7 +215,7 @@ static const uint64_t kScalarSlots[4] = {0x8035C26600000000ull, 0x5E8455FE000000
 #define SHADOW_SLOT 0x7701209E00000000ull
 #define ATLAS_SLOT 0x88BAC99B00000000ull
 
-typedef struct Key { int screen, state, why, refused; uint32_t index; CoTagAnchor a; } Key;
+typedef struct Key { int screen, state, why, refused, unsettled; uint32_t index; CoTagAnchor a; } Key;
 
 static struct
 {
@@ -219,7 +229,7 @@ static struct
     CoTagBox box;
     int place;
     int drawn, unlogged, stable;
-    int errors;
+    int errors, toldUnsettled;
 } t;
 
 static uint64_t Pointer(uintptr_t at) { uint64_t p = 0; return g_coApi->read(at, &p, 8) == 0 ? p : 0; }
@@ -374,12 +384,16 @@ static int Look(int screen, Key* k)
     memset(k, 0, sizeof *k);
     k->screen = screen;
     if (war == 0) return 0;
+    /* until this PC's check settles, co_complex_on() says off for a part that may still come on */
+    if (!co_capacity_settled()) { k->unsettled = 1; return 0; }
     const int read = screen == CO_TAG_SCREEN_MAP ? co_tag_map_entries((uintptr_t)war, &k->index, &entry, &level11, &marked, &found)
                                                  : co_tag_briefing_entry((uintptr_t)war, &k->index, &entry, &level11, &marked, &found);
     if (!read) { k->refused = 1; return 0; }
     if (!found) return 0;
-    const int host = co_peers_is_host();
-    CoTagInputs in = {level11, marked, host, co_complex_on(), co_peers_host_row(), screen == CO_TAG_SCREEN_BRIEFING, 0,
+    const int host = co_peers_is_host(), row = co_peers_host_row();
+    /* a client fills its table with the mark only once the host's answer is in; the board record gives it either way */
+    if (!host && row == CO_HOST_ROW_ON && level11 && !co_tag_board_mark((uintptr_t)war, k->index, &marked)) { k->refused = 1; return 0; }
+    CoTagInputs in = {level11, marked, host, co_complex_on(), row, screen == CO_TAG_SCREEN_BRIEFING, 0,
         co_complex_refused_build(co_capacity_needs())};
     if (in.briefing && level11 && host) in.clears = co_launch_would_clear();
     k->state = co_tag_state(&in, &k->why);
@@ -395,7 +409,7 @@ static void Frame(lua_State* L)
     Key k;
     if (screen == CO_TAG_SCREEN_NONE)
     {
-        if (t.gui != 0) { Destroy(); co_log("war-table tag: removed (the screen changed)"); }
+        if (t.gui != 0) { Destroy(); co_log("war-table tag: removed (the screen changed; %u unbalanced frames)", co_lua_unbalanced()); }
         t.has = 0;
         return;
     }
@@ -409,7 +423,12 @@ static void Frame(lua_State* L)
     t.has = 1;
     t.stable = t.drawn = 0;
     t.unlogged = shown;
-    if (k.refused) Error("the mission table's count is past its entries, or it could not be read", "");
+    if (k.refused) Error("the mission table's count is past its entries, or a record could not be read", "");
+    if (k.unsettled && !t.toldUnsettled)
+    {
+        t.toldUnsettled = 1;
+        co_log("war-table tag: no banner until this PC's check of the complex part has settled");
+    }
     if (!shown || k.state == CO_TAG_NONE) { Hide(); return; }
     CoGuiCall size = {.op = CO_GUI_RESOLUTION};
     CoTagPlan plan;

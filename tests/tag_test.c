@@ -17,6 +17,7 @@
 void co_peers_test_reset(void);
 void co_peers_test_message(const void* data, uint32_t bytes);
 void co_capacity_test_on(int on);
+void co_capacity_test_unsettled(void);
 
 static int g_failed;
 static const char* g_case;
@@ -39,6 +40,12 @@ static void Entry(uint32_t i, uint32_t slot, uint32_t placement, uint32_t seed, 
 {
     const uint32_t at = WAR + 0xF9A10u + i * 0x4Cu;
     Put(at + 0x28, slot, 4); Put(at + 0x2C, placement, 4); Put(at + 0x34, seed, 4); Put(at + 0x3C, difficulty, 4);
+}
+/* A board record's operation seed and planet, which the fill passes for its entries (0x11E5CCD, 0x11E5762). */
+static void Board(uint32_t index, uint32_t operation, uint16_t planet)
+{
+    Put(WAR + 0xF7280u + index * 0x5Cu + 0x0Cu, operation, 4);
+    Put(WAR + 0xF7280u + index * 0x5Cu + 0x10u, planet, 2);
 }
 static void Count(uint32_t n) { Put(WAR + 0xFFC08u, n, 4); }
 static void Highlight(uint32_t index) { Put(WAR + 0x17A2A0u, index, 4); if (index < 110) Put(WAR + 0xF7280u + index * 0x5Cu + 0x34u, 1, 1); }
@@ -141,6 +148,13 @@ static void Readers(void)
     CHECK(co_tag_map_entries(war, &index, &entry, &level11, &marked, &found) == 1 && level11 && !marked && entry == 2);
     Entry(2, 7, 3, 0x3001, 10);
     CHECK(co_tag_map_entries(war, &index, &entry, &level11, &marked, &found) == 1 && found && !level11);  /* another level */
+
+    g_case = "W-T1 the board's mark: the roll of board BD8D3DA4's operations 102 and 100 on planet 114";
+    Board(7, 0x8EF642A9u, 114);
+    CHECK(co_tag_board_mark(war, 7, &marked) == 1 && marked);
+    Board(7, 0xC2F5784Cu, 114);
+    CHECK(co_tag_board_mark(war, 7, &marked) == 1 && !marked);
+    CHECK(co_tag_board_mark(war, 110, &marked) == 0 && co_tag_board_mark(war, 9, &marked) == 0); /* past the board; not in use */
 
     g_case = "W-T1 the briefing's reader";
     Entry(0, 3, 5, 0x1000, 11); Entry(1, 7, 6, 0x2000, 11); Entry(2, 7, 6, 0x3001, 11); Entry(3, 9, 6, 0x4001, 10);
@@ -399,6 +413,15 @@ static void Banner(void)
     const uintptr_t game = Scene("W-T3 the complex banner");
     CHECK_LUA(L, kStingray);
     CHECK(co_tag_install(game) == NULL && g_fake.hookCount == 1);
+    g_case = "W-T3 nothing before this PC's check settles (T-2)";
+    co_capacity_test_unsettled();
+    Frame(L); Frame(L); Frame(L);
+    CHECK(co_tag_test_shown()->gui == 0 && Lines("war-table tag: no banner until this PC's check of the complex part has settled") == 1);
+    CHECK_LUA(L, "if #E.created ~= 0 then return 'a GUI before the check settled' end");
+    for (int i = 0; i < CO_TAG_SETTLE + 2; i++) Frame(L);
+    CHECK(!fake_host_logged("war-table tag: map, operation 7"));
+    co_capacity_test_on(1);
+    g_case = "W-T3 the complex banner";
     Frame(L);
     CHECK(fake_host_logged("war-table tag: the game's Lua state found"));
     Drawn(L, CO_TAG_COMPLEX, CO_TAG_WHY_NONE, 1);
@@ -426,7 +449,20 @@ static void Banner(void)
     g_fake.role = HF_SESSION_JOINER;
     Frame(L);
     Drawn(L, CO_TAG_WAITING, CO_TAG_WHY_NONE, 1);
-    g_fake.role = HF_SESSION_HOST;
+
+    g_case = "W-T3 a client whose table filled before the host's answer (T-1)";
+    g_fake.row[0] = CO_SHARE_PROTOCOL; g_fake.row[1] = 1; g_fake.rowBytes = 2; /* the answer: on */
+    Board(7, 0x8EF642A9u, 114);                                                /* entries 0 and 1 hold no mark */
+    Frame(L);
+    Drawn(L, CO_TAG_COMPLEX, CO_TAG_WHY_NONE, 1);
+    Board(7, 0xC2F5784Cu, 114);
+    Frame(L);
+    Drawn(L, CO_TAG_STANDARD, CO_TAG_WHY_NONE, 1);
+    Board(7, 0x8EF642A9u, 114);
+    g_fake.role = HF_SESSION_HOST; /* the host's entries are what its launch sends: unmarked, standard */
+    Frame(L);
+    Drawn(L, CO_TAG_STANDARD, CO_TAG_WHY_NONE, 1);
+    g_fake.rowBytes = 0;
 
     g_case = "W-T3 another level: nothing shows";
     Put(WAR + 0x17A2A0u, 8, 4);
@@ -483,7 +519,7 @@ static void Banner(void)
     g_case = "W-T3 a screen change removes the GUI";
     ScreenTop(3);
     Frame(L);
-    CHECK(co_tag_test_shown()->gui == 0 && fake_host_logged("war-table tag: removed (the screen changed)"));
+    CHECK(co_tag_test_shown()->gui == 0 && fake_host_logged("war-table tag: removed (the screen changed; 0 unbalanced frames)"));
     CHECK_LUA(L, "local n = #E.created if #E.destroyed < 1 or E.destroyed[#E.destroyed] ~= E.created[n] then return 'not destroyed' end");
 
     g_case = "W-T3 a GUI an earlier start left is destroyed";

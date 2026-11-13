@@ -247,6 +247,8 @@ const char* co_mark_install(uintptr_t game);
 void co_mark_entry(uintptr_t game, uint32_t slot, uint32_t difficulty, uint32_t operation_seed, uintptr_t entry, int rolls);
 
 const CoComplexNeeds* co_capacity_needs(void);
+/* 1 once the poll has settled; before that co_complex_on() is 0 though the part may still come on. */
+int co_capacity_settled(void);
 int co_complex_on(void);
 /* Where a region of the generator's block lies and how many elements it holds (HF_GEN_ names): 0 until settled and
  * moved, so code that reads the block finds nothing to read before. `block` is the block's size. */

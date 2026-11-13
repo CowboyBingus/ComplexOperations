@@ -22,6 +22,10 @@ int co_tag_state(const CoTagInputs* in, int* why);
  * (*found 0: no such operation or mission), 0 refused (the table's count is past its entries). */
 int co_tag_map_entries(uintptr_t war, uint32_t* index, uint32_t* entry, int* level11, int* marked, int* found);
 int co_tag_briefing_entry(uintptr_t war, uint32_t* index, uint32_t* entry, int* level11, int* marked, int* found);
+/* The mark the fill gives board record `index`'s level-11 entries while it rolls: its operation seed (+0xC) and planet
+ * (+0x10) through co_complex_entry_seed. A client's table filled before the host's answer holds no mark; this does.
+ * 1 read, 0 refused (no such record in use). */
+int co_tag_board_mark(uintptr_t war, uint32_t index, int* marked);
 
 /* Layout, in the native panel's UI units times its scale (y up, as the Gui draws). */
 #define CO_TAG_BORDER 3.0
