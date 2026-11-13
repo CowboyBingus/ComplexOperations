@@ -48,7 +48,7 @@ void CoXlTestProbe(char kind, float x, float y, float used, int why);
 void CoXlTestProbeCounts(long* reads, long* off, long* written);
 uint64_t CoXlTestLayerSpawn(uint64_t unit, uint64_t count, uint64_t field);
 uint64_t CoXlTestThunk(int which, float* out, uint64_t* r9, uint64_t* fifth);
-int CoXlTestUnwind(uintptr_t site, int pre, uint64_t out[4]);
+int CoXlTestUnwind(uintptr_t site, int pre, uint64_t out[10]);
 void CoXlTestLayerChosen(void (*fn)(uint64_t));
 void CoXlTestGridReady(int slot, LONG ready);
 void CoXlTestLayerCounts(long* grids, long* spawns, uint32_t* pending);
@@ -233,15 +233,20 @@ static void RefillBetween(uint64_t grid)
     for (int k = 0; k < 2; k++) if (g_refillSlots[k] >= 0) CoXlTestGridReady(g_refillSlots[k], 0);
 }
 
-/* A function with a frame and saved registers, to stand for the game function a stub is laid over. */
-__attribute__((noinline)) static int UnwindHost(volatile int* v)
-{
-    volatile int local[64];
-    for (int i = 0; i < 64; i++) local[i] = v[i & 3] * i;
-    int sum = 0;
-    for (int i = 0; i < 64; i++) sum += local[i] ^ (int)(i * 7);
-    return sum;
-}
+/* A function with the save codes the game's hosts use (a push, an allocation, a saved register and a saved xmm at
+ * offsets from the frame), standing for the game function a stub is laid over; UnwindHostBody is past its prologue. */
+void UnwindHost(void);
+extern const uint8_t UnwindHostBody[];
+__asm__(".text\n.p2align 4\n.globl UnwindHost\n.globl UnwindHostBody\nUnwindHost:\n"
+        "  .seh_proc UnwindHost\n"
+        "  pushq %rbx\n  .seh_pushreg %rbx\n"
+        "  subq $0x60, %rsp\n  .seh_stackalloc 0x60\n"
+        "  movq %r12, 0x20(%rsp)\n  .seh_savereg %r12, 0x20\n"
+        "  movaps %xmm6, 0x30(%rsp)\n  .seh_savexmm %xmm6, 0x30\n"
+        "  .seh_endprologue\n"
+        "UnwindHostBody:\n  nop\n  nop\n  nop\n  nop\n  nop\n  nop\n  nop\n  nop\n"
+        "  movaps 0x30(%rsp), %xmm6\n  movq 0x20(%rsp), %r12\n  addq $0x60, %rsp\n  popq %rbx\n  retq\n"
+        "  .seh_endproc\n");
 
 int main(void)
 {
@@ -663,16 +668,11 @@ int main(void)
 
     Start("a stub over a game function's body unwinds as that function at the site, and the thunks have unwind data");
     {
-        DWORD64 base = 0;
-        PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry((DWORD64)(uintptr_t)UnwindHost, &base, NULL);
-        CHECK(fe != NULL);
-        if (fe != NULL)
-        {
-            uintptr_t site = (uintptr_t)base + fe->BeginAddress + (fe->EndAddress - fe->BeginAddress) / 2; /* past its prologue */
-            uint64_t u[4] = {0};
-            CHECK(CoXlTestUnwind(site, 0, u) == 0 && u[0] == u[2] && u[1] == u[3] && u[0] >= 0x1000u && u[0] < 0x1400u);
-            CHECK(CoXlTestUnwind(site, 1, u) == 0 && u[0] == u[2] && u[1] == u[3]);
-        }
+        uintptr_t site = (uintptr_t)UnwindHostBody + 4u; /* past its prologue */
+        uint64_t u[10] = {0};
+        CHECK(CoXlTestUnwind(site, 0, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0 && u[0] >= 0x1000u && u[0] < 0x1400u);
+        CHECK(u[3] != 0 && u[4] != 0); /* r12 and xmm6 came off the stack: the save offsets were applied */
+        CHECK(CoXlTestUnwind(site, 1, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0);
         uint64_t t[2] = {0}, top = 0;
         CHECK(CoXlTestThunkUnwind(t, &top) == 0 && t[1] == top + 0x98u + 8u && t[0] == 0x2000u + 0x98u / 8u);
     }

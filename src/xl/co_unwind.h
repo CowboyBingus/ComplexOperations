@@ -15,10 +15,10 @@
 typedef struct CoUnwindRange { uint32_t begin, length; uint8_t prolog, count; uint16_t codes[6]; } CoUnwindRange;
 
 /* One function table based at `block`, so it covers the block's stubs only (Proton's lookup stops at the first table
- * whose range holds the address): the ranges, then the game function at `site`. space: `bytes` writable bytes in the
- * block after its stubs, readable once the block is protected (512 do). 0 when registered. */
-int co_unwind_block(uint8_t* block, const CoUnwindRange* ranges, int count, uintptr_t site, uint8_t* space, size_t bytes);
-/* Every table co_unwind_block registered goes (the mod is taken out). */
-void co_unwind_remove_all(void);
+ * whose range holds the address): the ranges, then the game function at `site`. handler: the one exception handler the
+ * game's data may name (dropped: its stack-cookie check). space: `bytes` writable bytes in the block after its stubs,
+ * readable once it is protected (1024 do). 0 when registered, -2 for another handler, -1 when it does not fit. The
+ * tables stay for the session, as the stubs do (the mod has no unload). */
+int co_unwind_block(uint8_t* block, const CoUnwindRange* ranges, int count, uintptr_t site, uintptr_t handler, uint8_t* space, size_t bytes);
 
 #endif
