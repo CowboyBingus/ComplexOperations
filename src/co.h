@@ -22,6 +22,9 @@ void co_log(const char* format, ...);
 /* Eight ship hellpods (co_pods.c). Called once, on the loader's thread, when game.dll is loaded. */
 void co_pods_install(uintptr_t game);
 
+/* The voice lines' log (co_voice.c): hooks the spawn's voice delta and the line name, on the loader's thread. */
+void co_voice_install(uintptr_t game);
+
 /* Free address space within reach of a 32-bit offset from `target`; 0 when there is none. */
 uintptr_t co_alloc_near(uintptr_t target, size_t size);
 /* The same with the allocation type given: MEM_RESERVE alone takes the address space only. */
