@@ -32,6 +32,11 @@ uint32_t CoXlTestSpawnDue(uint32_t i, float distance2);
 int CoXlTestStreamFlag(uint32_t i);
 void CoXlTestStreamScan(void);
 void CoXlTestStreamSlotState(uint32_t i, int* live, int* due, uint64_t* unit);
+int CoXlTestLayerWhy(uint64_t unit, uint64_t field, int* slot);
+float CoXlTestTraceGridAt(int slot, float x, float y);
+void CoXlTestProbePlayer(int count, float x, float y);
+void CoXlTestProbe(char kind, float x, float y, float used, int why);
+void CoXlTestProbeCounts(long* reads, long* off, long* written);
 
 static int g_failed;
 static const char* g_case;
@@ -46,7 +51,7 @@ static const char* g_case;
 #define TABLE 0x3601000u
 
 static uint16_t U16(float metres) { return (uint16_t)((metres + 500.0f) / 1000.0f * 65535.0f + 0.5f); }
-static uint16_t g_coarse[4], g_tileA[4], g_tileB[4];
+static uint16_t g_coarse[4], g_tileA[4], g_tileB[4], g_tileC[4];
 static float g_levelData[4];
 static uint8_t g_levelDesc[0x28];
 static uint8_t g_unit[0x60];
@@ -94,7 +99,7 @@ static void Start(const char* name)
     CoXlTestGame((uintptr_t)g_fake.image);
     CoXlTestWorldLevel((uintptr_t)g_lg, 0);
     CoXlTestGenLevel(8.0f);
-    for (int k = 0; k < 4; k++) { g_coarse[k] = U16(40.0f); g_tileA[k] = U16(45.0f); g_tileB[k] = U16(30.0f); }
+    for (int k = 0; k < 4; k++) { g_coarse[k] = U16(40.0f); g_tileA[k] = U16(45.0f); g_tileB[k] = U16(30.0f); g_tileC[k] = U16(20.0f); }
     CoXlTestCoarse(g_coarse, 2, 16383.5f);
     LevelDesc();
 }
@@ -315,6 +320,69 @@ int main(void)
     Budgets(900000, 100);
     CHECK(CoXlTestSpawnDue(0, 100.0f * 100.0f) == held + 1 && CoXlTestSpawnDue(0, 100.0f * 100.0f) == held + 2);
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+
+    Start("the research trace reads a grid as the game does and names why a stamp keeps the level's heights");
+    a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);
+    CoXlTestLayerTile(a, 1, AX, AY);
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTile(b, 1, BX, AY);
+    int c = CoXlTestTileAddAt(AX, CY2, g_tileC, 2, SPAN); /* south: the drop grid differs north and south */
+    CoXlTestLayerTile(c, 1, AX, CY2);
+    fa = Field(2100.0f, AY);
+    int differ = 0;
+    for (float x = 1990.0f; x <= 2110.0f; x += 0.37f) /* across the two tiles' meeting, the trace's read is the game's */
+        CHECK(CoXlTestTraceGridAt(a, x, AY + 11.7f) == Read(fa, x, AY + 11.7f));
+    for (float y = AY - 1700.0f; y <= AY + 1700.0f; y += 3.1f)
+    {
+        CHECK(CoXlTestTraceGridAt(a, AX + 5.3f, y) == Read(fa, AX + 5.3f, y));
+        differ += !Near(Read(fa, AX + 5.3f, y), Read(fa, AX + 5.3f, 2.0f * AY - y));
+    }
+    CHECK(differ > 100); /* the grid is not symmetric about its centre, so a flipped row shows */
+    int slot = -2;
+    float at[2] = {2100.0f, AY};
+    memcpy(g_unit + 0x50, at, 8);
+    CHECK(CoXlTestLayerWhy((uint64_t)(uintptr_t)g_unit, (uint64_t)(uintptr_t)g_levelDesc, &slot) == 0 && slot == a);
+    at[0] = BX - 1500.0f; memcpy(g_unit + 0x50, at, 8);
+    CHECK(CoXlTestLayerWhy((uint64_t)(uintptr_t)g_unit, (uint64_t)(uintptr_t)g_levelDesc, &slot) == 5 && slot == -1); /* no grid */
+    CHECK(CoXlTestLayerWhy((uint64_t)(uintptr_t)g_unit, 0, &slot) == 1);
+    float wide[2] = {4096.0f, 4096.0f};
+    memcpy(g_levelDesc + 0x14, wide, 8); /* not the level's extent */
+    at[0] = 2100.0f; memcpy(g_unit + 0x50, at, 8);
+    CHECK(CoXlTestLayerWhy((uint64_t)(uintptr_t)g_unit, (uint64_t)(uintptr_t)g_levelDesc, &slot) == 3);
+
+    Start("every build logs the layer reads near a player, each one off the ground as drawn, within a line budget");
+    a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);
+    CoXlTestLayerTile(a, 1, AX, AY);
+    long reads = 0, off = 0, written = 0;
+    CoXlTestProbePlayer(1, AX, AY);
+    CoXlTestProbe('H', AX + 10.0f, AY, 45.0f, 0);
+    CoXlTestProbeCounts(&reads, &off, &written);
+    CHECK(reads == 1 && off == 0 && written == 1);
+    CHECK(fake_host_logged("layer probe: ok H 0x0 at (3084.7, -4094.9), 10 m from a player: used 45.00, drawn 45.0"));
+    CoXlTestProbe('S', AX + 250.0f, AY, 45.45f, 0); /* under 0.5 m: one of the plain reads, not written */
+    CoXlTestProbe('S', AX, AY + 250.0f, 52.0f, 5);  /* the level's heights, 7 m over the tile */
+    CoXlTestProbeCounts(&reads, &off, &written);
+    CHECK(reads == 3 && off == 1 && written == 2);
+    CHECK(fake_host_logged("layer probe: OFF S 0x0 at (3074.7, -3844.9), 250 m from a player: used 52.00, drawn 45.0"));
+    CHECK(fake_host_logged("source 0 (no tile's grid)"));
+    CoXlTestProbe('S', AX + 350.0f, AY, 99.0f, 0);
+    CoXlTestProbe('S', AX + 212.2f, AY + 212.2f, 99.0f, 0); /* 300.1 m on the diagonal: a circle, not a square */
+    CoXlTestProbeCounts(&reads, &off, &written);
+    CHECK(reads == 3 && off == 1);
+    CoXlTestProbePlayer(0, AX, AY - 500.0f); /* no one has landed: the start area */
+    CoXlTestProbe('H', AX, AY - 600.0f, 45.0f, 0);
+    CoXlTestProbe('H', AX, AY + 400.0f, 45.0f, 0); /* 900 m from it */
+    CoXlTestProbeCounts(&reads, &off, &written);
+    CHECK(reads == 4 && off == 1);
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTile(b, 1, BX, AY);
+    CHECK(fake_host_logged("layer probe (a tile came in): 4 reads within 300 m of a player, 1 of them over 0.5 m off the ground as drawn (worst 6.99 m); ok 3, no tile's grid 1; 2 of 400 lines written"));
+    for (int k = 0; k < 300; k++) CoXlTestProbe('S', AX, AY - 500.0f, 60.0f, 0);
+    CoXlTestProbeCounts(&reads, &off, &written);
+    CHECK(reads == 304 && off == 301 && written == 153); /* the first 150 off, then the 192nd and the 256th */
+    for (int k = 0; k < 19700; k++) CoXlTestProbe('S', AX, AY - 500.0f, 60.0f, 0);
+    CoXlTestProbeCounts(&reads, &off, &written);
+    CHECK(reads == 20004 && off == 20001 && written == 400); /* past the budget */
 
     if (g_failed) { printf("layergrid: %d checks failed\n", g_failed); return 1; }
     printf("layergrid: all cases passed\n");

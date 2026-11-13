@@ -5302,8 +5302,10 @@ static float* g_heightCopy;
 static uint64_t g_heightSource, g_heightBytes;
 /* g_heightField (above WorldDispatch): the generator's descriptor, its data pointer replaced by the copy */
 static volatile LONG g_heightLent;
-static uint64_t NearLayerField(uint64_t unit, uint64_t field); /* difficulty_world_terrain.c: the near tile's grid */
-static int NearLayerHeight(uint64_t desc, float x, float y, float* height);
+static uint64_t NearLayerFieldWhy(uint64_t unit, uint64_t field, int* slot, int* why); /* difficulty_world_terrain.c: a tile's grid */
+static int NearLayerHeightWhy(uint64_t desc, float x, float y, float* height, int* why);
+static void NearLayerTrace(char kind, uint32_t caller, float x, float y, float z, int result, int why, float used);
+static void NearLayerTraceSnap(uint64_t unit, int slot, int why);
 static uint64_t WorldLayerSnap(uint64_t a, uint64_t b, uint64_t c, uint64_t field, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
 {
     uint8_t now[0x28];
@@ -5332,7 +5334,9 @@ static uint64_t WorldLayerSnap(uint64_t a, uint64_t b, uint64_t c, uint64_t fiel
             if (InterlockedIncrement(&g_heightLent) <= 3) Note("difficulty: extra large maps: lent the kept heightfield to a layer spawn");
         }
     }
-    uint64_t tile = NearLayerField(a, field); /* a stamp on or near the near tile: its 1 m grid (a = the stamp's level unit) */
+    int slot, why;
+    uint64_t tile = NearLayerFieldWhy(a, field, &slot, &why); /* a stamp on or near a tile: its 1 m grid (a = the stamp's level unit) */
+    NearLayerTraceSnap(a, slot, why);
     return g_layerSnap(a, b, c, tile != 0 ? tile : field, e, f, g, h);
 }
 
@@ -5350,8 +5354,12 @@ static float WorldLayerSample(uint64_t* holder, float x, float y)
         if (InterlockedIncrement(&g_heightLent) <= 3) Note("difficulty: extra large maps: lent the kept heightfield to a layer sample");
     }
     float tile;
-    if (NearLayerHeight(*holder, x, y, &tile)) return tile; /* on the near tile: its own height */
-    return g_layerSample(holder, x, y);
+    int why;
+    uint32_t caller = (uint32_t)((uintptr_t)__builtin_return_address(0) - (uintptr_t)GetModuleHandleW(NULL));
+    if (NearLayerHeightWhy(*holder, x, y, &tile, &why)) { NearLayerTrace('H', caller, x, y, 0.0f, 1, why, tile); return tile; } /* on a tile: the drawn ground */
+    float game = g_layerSample(holder, x, y);
+    NearLayerTrace('H', caller, x, y, 0.0f, 0, why, game);
+    return game;
 }
 
 /* An engine call through the world interface ([game+0x3326308]+0x168, method 0; exe 0x32F6A0: rcx the world, edx an
