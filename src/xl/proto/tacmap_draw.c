@@ -4,6 +4,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -391,6 +392,28 @@ static int TacLocalPlayer(const TacSnapshot* s)
 static int TacAlive(const TacPlayer* p) { return p->present && p->life < 2; }
 static int TacInside(const View* v, float u, float w) { return u >= v->x0 && u <= v->x1 && w >= v->y0 && w <= v->y1; }
 static int TacOutside(const View* v, float u, float w) { return u < v->x0 || u > v->x1 || w < v->y0 || w > v->y1; }
+
+/* Where a waypoint may go: on screen in the viewport, and in the world where a player can walk (the playable circle,
+ * else the world's square). The placement cursor, the readout and the right click all ask this one question, as the
+ * game's own map keeps its waypoint point inside its drawn map (game 0x18AB9FC). */
+static int TacOnMap(const View* v, const TacSnapshot* s, float u, float w)
+{
+    float x, y, half = s->size * 0.5f;
+    if (!TacInside(v, u, w)) return 0;
+    ToWorld(v, u, w, &x, &y);
+    if (fabsf(x) > half || fabsf(y) > half) return 0;
+    return s->playable <= 0.0f || x * x + y * y <= s->playable * s->playable;
+}
+
+/* HellForge's hide_pointer, found by its place right after backdrop, so the mod builds against SDK headers without it.
+ * Older hosts end HfDraw at backdrop and get no call: they show their pointer beside the crosshair. */
+static void TacHidePointer(const HfDraw* d)
+{
+    const size_t at = offsetof(HfDraw, backdrop) + sizeof(void*);
+    void (*hide)(void) = NULL;
+    if (d->size >= at + sizeof hide) memcpy(&hide, (const char*)d + at, sizeof hide);
+    if (hide != NULL) hide();
+}
 
 /* Where the segment a -> b leaves the viewport (inset): 1 with that point in *e, 0 with b itself when b is inside. */
 static int EdgePoint(const View* v, HfPoint a, HfPoint b, float inset, HfPoint* e)
@@ -978,11 +1001,11 @@ static void Input(TacScreen* sc, const TacSnapshot* s, const View* v, const HfIn
         sc->cy += (in->y - sc->dragY) * sc->mpp;
         sc->dragX = in->x; sc->dragY = in->y;
     }
-    if ((in->pressed & HF_MOUSE_RIGHT) && inside && sc->host.ping != NULL)
+    if ((in->pressed & HF_MOUSE_RIGHT) && TacOnMap(v, s, in->x, in->y) && sc->host.ping != NULL)
     {
         float wx, wy;
         ToWorld(v, in->x, in->y, &wx, &wy);
-        if (fabsf(wx) <= s->size / 2 && fabsf(wy) <= s->size / 2) sc->host.ping(sc->host.user, wx, wy, 0);
+        sc->host.ping(sc->host.user, wx, wy, 0);
     }
     TacInputKeys(sc, s, in, TacLocalPlayer(s));
     float half = s->size * 0.5f; /* the world's centre stays on screen */
@@ -1070,10 +1093,14 @@ static void TacScreenMap(const TacScreen* sc, const TacSnapshot* s, const HfDraw
         ToScreen(v, 0, 0, &u, &w);
         d->circle(u, w, s->playable / v->mpp, 0, Alpha(C_RED, 0.55f * reveal), 1.5f);
     }
-    f->hover = !in->closing && TacInside(v, in->x, in->y) && !sc->dragging;
+    f->hover = !in->closing && TacOnMap(v, s, in->x, in->y) && !sc->dragging;
     if (f->hover) { f->cursor[0] = in->x; f->cursor[1] = in->y; ToWorld(v, in->x, in->y, &f->cursorWorld[0], &f->cursorWorld[1]); }
     Symbols(d, v, s, v->mpp < 6.0f, reveal, f->hover ? f->cursor : NULL);
-    if (f->hover && reveal >= 1.0f) TacCursorTip(d, s, in, f->cursorWorld);
+    if (f->hover && reveal >= 1.0f)
+    {
+        TacCursorTip(d, s, in, f->cursorWorld);
+        TacHidePointer(d); /* the crosshair is the cursor here */
+    }
     Compass(d, v, f->chrome);
     ScaleBar(d, v, f->chrome);
     d->clip_pop();

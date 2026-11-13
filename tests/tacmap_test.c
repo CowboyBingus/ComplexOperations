@@ -2,6 +2,7 @@
  * is logged with its reason and leaves the session without a map, and the M key's path runs as the overlay host runs
  * it: can_open, opened, draw frames with the mouse, the closing, opened(0). The waypoint is read where MapPing writes
  * it: the avatar manager's records, moved in a build for eight. */
+#include <math.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -100,8 +101,45 @@ static void Image(HfImage* image, const HfRect* box, const HfRect* part, HfColou
 static void ClipPush(float x0, float y0, float x1, float y1) { g_drawn.clips++; }
 static void ClipPop(void) { g_drawn.clips--; }
 static void Backdrop(float dim, float desaturate, float blur) { g_drawn.backdrops++; }
-static const HfDraw kDraw = {sizeof(HfDraw), 1920.0f, 1080.0f, 1.0f, DrawRect, DrawLines, DrawPolygon, DrawCircle, DrawLabel, TextWidth,
-    ImageCreate, ImageUpdate, ImageFree, Image, ClipPush, ClipPop, Backdrop};
+/* Zeros after the table: a map that read past its size would find no function there rather than stray bytes. */
+static const struct { HfDraw d; void* after[2]; } kDrawPadded = {{sizeof(HfDraw), 1920.0f, 1080.0f, 1.0f, DrawRect, DrawLines, DrawPolygon, DrawCircle,
+    DrawLabel, TextWidth, ImageCreate, ImageUpdate, ImageFree, Image, ClipPush, ClipPop, Backdrop}, {NULL, NULL}};
+#define kDraw (kDrawPadded.d)
+
+/* A host with hide_pointer, placed right after backdrop as HellForge's HfDraw has it, built by bytes so the test needs no
+ * SDK header with the field; its own width (2580: a 3440x1440 window). size_old: a host whose table ends at backdrop. */
+#define HIDE_AT (offsetof(HfDraw, backdrop) + sizeof(void*))
+static int g_hides;
+static void HidePointer(void) { g_hides++; }
+static _Alignas(8) uint8_t g_wide[HIDE_AT + sizeof(void*)];
+static const HfDraw* WideDraw(float width, int size_old)
+{
+    void (*hide)(void) = HidePointer;
+    memcpy(g_wide, &kDraw, HIDE_AT);
+    memcpy(g_wide + HIDE_AT, &hide, sizeof hide);
+    HfDraw* d = (HfDraw*)g_wide;
+    d->size = (uint32_t)(size_old ? HIDE_AT : HIDE_AT + sizeof hide);
+    d->width = width;
+    return d;
+}
+
+/* One frame on the wide host: the hide_pointer calls and the placement tip it drew. */
+static int g_tips;
+static float TipLabel(float x, float y, const char* s, float size, uint32_t face, uint32_t align, HfColour c)
+{
+    if (strstr(s, "RMB: SET WAYPOINT") != NULL) g_tips++; /* the tip; the footer has "RMB" and "SET WAYPOINT" apart */
+    return DrawLabel(x, y, s, size, face, align, c);
+}
+static void WideFrame(const HfDraw* d, float x, float y, uint32_t pressed, uint32_t down, float dt)
+{
+    HfInput in = {sizeof in, x, y};
+    in.pressed = pressed;
+    in.down = down;
+    ((HfDraw*)d)->text = TipLabel;
+    g_hides = g_tips = 0;
+    CoXlTestTacTick();
+    g_fake.screen.draw(g_fake.screen.user, d, &in, dt);
+}
 
 /* One frame of the open screen, as the host draws it: the game thread's tick first, then draw. */
 static int Frame(const HfInput* in, float dt)
@@ -218,6 +256,91 @@ int main(void)
         g_fake.screen.draw(g_fake.screen.user, &kDraw, &in, 1.0f / 60.0f);
         CHECK(CoXlTestTacPing(&x, &y, &remove) == 0);
     }
+
+    /* 3440x1440: 2580 units wide, the viewport x 372 .. 2556, y 76 .. 1022, its centre (1464, 549). The fitted 16384 m
+     * world is 906 units square in its middle, 18.08 m a unit; playable 0.95 of the half: 7782 m, as the user's map. */
+    const float fit = 16384.0f / 906.0f;
+    PutF(g_lg + 0x2D70, 0.95f);
+    g_case = "3440x1440, on the terrain: the crosshair and tip, the pointer hidden, a right click pings there";
+    {
+        const HfDraw* d = WideDraw(2580.0f, 0);
+        WideFrame(d, 1464.0f, 549.0f, 0, 0, 1.0f / 60.0f); /* the snapshot takes the new playable radius */
+        float x = 0, y = 0;
+        int remove;
+        WideFrame(d, 1564.0f, 549.0f, HF_MOUSE_RIGHT, HF_MOUSE_RIGHT, 1.0f / 60.0f);
+        CHECK(g_hides == 1 && g_tips == 1);
+        CHECK(CoXlTestTacPing(&x, &y, &remove) == 1);
+        CHECK(fabsf(x - 100.0f * fit) < 20.0f && fabsf(y) < 20.0f && remove == 0);
+    }
+
+    g_case = "3440x1440, on the slate beside the world: no crosshair or tip, the pointer stays, a right click pings nothing";
+    {
+        const HfDraw* d = WideDraw(2580.0f, 0);
+        float x, y;
+        int remove;
+        WideFrame(d, 700.0f, 549.0f, HF_MOUSE_RIGHT, HF_MOUSE_RIGHT, 1.0f / 60.0f);
+        CHECK(g_hides == 0 && g_tips == 0);
+        CHECK(CoXlTestTacPing(&x, &y, &remove) == 0);
+        WideFrame(d, 2400.0f, 900.0f, HF_MOUSE_RIGHT, HF_MOUSE_RIGHT, 1.0f / 60.0f);
+        CHECK(g_hides == 0 && g_tips == 0);
+        CHECK(CoXlTestTacPing(&x, &y, &remove) == 0);
+    }
+
+    g_case = "3440x1440, on the terrain past the playable circle (7000, 7000): no placement, as the game's own map";
+    {
+        const HfDraw* d = WideDraw(2580.0f, 0);
+        float x, y;
+        int remove;
+        WideFrame(d, 1464.0f + 7000.0f / fit, 549.0f - 7000.0f / fit, HF_MOUSE_RIGHT, HF_MOUSE_RIGHT, 1.0f / 60.0f);
+        CHECK(g_hides == 0 && g_tips == 0);
+        CHECK(CoXlTestTacPing(&x, &y, &remove) == 0);
+        WideFrame(d, 1464.0f + 5000.0f / fit, 549.0f - 5000.0f / fit, HF_MOUSE_RIGHT, HF_MOUSE_RIGHT, 1.0f / 60.0f); /* 7071 m out: inside */
+        CHECK(g_hides == 1 && g_tips == 1);
+        CHECK(CoXlTestTacPing(&x, &y, &remove) == 1);
+    }
+
+    g_case = "3440x1440, on the side panel: neither";
+    {
+        const HfDraw* d = WideDraw(2580.0f, 0);
+        float x, y;
+        int remove;
+        WideFrame(d, 200.0f, 549.0f, HF_MOUSE_RIGHT, HF_MOUSE_RIGHT, 1.0f / 60.0f);
+        CHECK(g_hides == 0 && g_tips == 0);
+        CHECK(CoXlTestTacPing(&x, &y, &remove) == 0);
+    }
+
+    g_case = "dragging the map over the terrain: no crosshair, so the pointer shows";
+    {
+        const HfDraw* d = WideDraw(2580.0f, 0);
+        WideFrame(d, 1464.0f, 549.0f, HF_MOUSE_LEFT, HF_MOUSE_LEFT, 1.0f / 60.0f);
+        CHECK(g_hides == 0);
+        WideFrame(d, 1470.0f, 549.0f, 0, HF_MOUSE_LEFT, 1.0f / 60.0f);
+        CHECK(g_hides == 0);
+        WideFrame(d, 1470.0f, 549.0f, 0, 0, 1.0f / 60.0f); /* let go: the crosshair again */
+        CHECK(g_hides == 1);
+        WideFrame(d, 1470.0f, 549.0f, HF_MOUSE_LEFT, HF_MOUSE_LEFT, 1.0f / 60.0f); /* and back, for the cases below */
+        WideFrame(d, 1464.0f, 549.0f, 0, HF_MOUSE_LEFT, 1.0f / 60.0f);
+        WideFrame(d, 1464.0f, 549.0f, 0, 0, 1.0f / 60.0f);
+    }
+
+    g_case = "a HellForge whose HfDraw ends at backdrop: no hide_pointer call, the map draws on";
+    {
+        const HfDraw* d = WideDraw(2580.0f, 1);
+        WideFrame(d, 1464.0f, 549.0f, 0, 0, 1.0f / 60.0f);
+        CHECK(g_hides == 0 && g_tips == 1);
+    }
+
+    g_case = "while the map opens (before 0.4 s) the pointer stays, though the mouse is on the terrain";
+    {
+        const HfDraw* d = WideDraw(2580.0f, 0);
+        s->opened(s->user, 1);
+        int hidden = 0;
+        for (int i = 0; i < 23; i++) { WideFrame(d, 1464.0f, 549.0f, 0, 0, 1.0f / 60.0f); hidden += g_hides; } /* 0.383 s */
+        CHECK(hidden == 0);
+        WideFrame(d, 1464.0f, 549.0f, 0, 0, 2.0f / 60.0f);
+        CHECK(g_hides == 1);
+    }
+    PutF(g_lg + 0x2D70, 1.0f);
 
     /* MapPing is the game's: here a ret, the waypoint already in a record. Not moved, then moved: a build for four never
      * moves the avatar manager, so both read the game's place there. */
