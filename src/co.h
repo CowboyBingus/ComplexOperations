@@ -78,7 +78,7 @@ int co_ui_guarded(void);
 typedef struct CoRegs { uint64_t r15, r14, r13, r12, r11, r10, r9, r8, rdi, rsi, rbp, rbx, rdx, rcx, rax, flags; } CoRegs;
 
 /* The loadout cards for eight (co_cards.c). The card's height in reference units, which the caves of every store of
- * it read (780, the game's, or 532). The callbacks: `open` before the init's card loop and `ready` behind it (rdi = the
+ * it read (780, the game's, or 498). The callbacks: `open` before the init's card loop and `ready` behind it (rdi = the
  * screen), `layout` in front of each of its updates (rcx = the screen). */
 extern float co_card_height;
 void co_cards_open(CoRegs* regs);
@@ -96,7 +96,8 @@ float co_cards_scale(float rootHeight, float hudScale);
 int co_cards_place(int mode, float rootHeight, float hudScale, uint32_t card, CoCardPlace* p);
 /* The size a widget is at, or a running size animation's target in the table `tweens`: 1 when animating. */
 int co_cards_size_target(uintptr_t widget, uintptr_t tweens, float out[2]);
-/* An open screen's cards from four to eight: the slot to 532 and each card part sized by 780 to its end at once. */
+/* An open screen's cards from four to eight: the slot to 498, each card part sized by 780 to its end at once and an
+ * open slots panel collapsed. */
 void co_cards_to_eight(uintptr_t screen);
 #ifdef CO_TEST
 void co_cards_test_mode(int mode, uintptr_t screen);

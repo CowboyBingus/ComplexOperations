@@ -1,7 +1,8 @@
 /* The loadout cards' layout: eight cards in two rows at nine screen sizes, against the pixel places the design predicts
- * and the rules it keeps (under the top bar, on the game's bottom line, inside the 1920-wide container, the figure never
- * magnified); the hud scale's corner widgets; the game's four cards with cards 5 to 8 parked below the window; the
- * mode's rule; and the callbacks on a stand-in screen: the mode at opening, the switch from four to eight. */
+ * and the rules it keeps (31 under the mode tabs, on the game's bottom line, inside the 1920-wide container, the figure
+ * never magnified); the hud scale's corner widgets; the game's four cards with cards 5 to 8 parked below the window; the
+ * mode's rule; and the callbacks on a stand-in screen: the mode at opening, the switch from four to eight with the own
+ * card's slots collapsed. */
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -29,20 +30,20 @@ static float Fit(float w, float h, float* rootW, float* rootH)
     return k;
 }
 
-/* A card's drawn rectangle in pixels from the top left: 420 wide in its 480 root, 532 tall, at its scale. */
+/* A card's drawn rectangle in pixels from the top left: 420 wide in its 480 root, 498 tall, at its scale. */
 static Rect Drawn(float w, float h, float hud, uint32_t card, CoCardPlace* p)
 {
     float rootW, rootH;
     const float k = Fit(w, h, &rootW, &rootH);
     co_cards_place(CO_CARDS_EIGHT, rootH, hud, card, p);
     const float centre = (rootW - 1920.0f) / 2.0f + p->x * 1920.0f, bottom = rootH - 1080.0f + p->y;
-    return (Rect){(centre - 210.0f * p->scale) * k, (rootH - bottom - 532.0f * p->scale) * k, (centre + 210.0f * p->scale) * k,
+    return (Rect){(centre - 210.0f * p->scale) * k, (rootH - bottom - 498.0f * p->scale) * k, (centre + 210.0f * p->scale) * k,
                   (rootH - bottom) * k};
 }
 
 static int Near(float a, float b) { return fabsf(a - b) < 0.11f; }
 
-/* The design's predictions (DESIGN.md 7): the rows' y and the columns' x in pixels. */
+/* The design's predictions (DESIGN.md 9.7.4): the rows' y and the columns' x in pixels. */
 static int Predicted(float w, float h, const float rows[4], const float columns[8])
 {
     int ok = 1;
@@ -73,6 +74,15 @@ static void Setter(uint32_t rva, uint8_t field)
     DWORD before;
     memcpy(g_fake.image + rva, code, sizeof code);
     CHECK(VirtualProtect(g_fake.image + rva, sizeof code, PAGE_EXECUTE_READWRITE, &before));
+}
+
+/* The card assign 0x189C780 as far as the switch needs it: the open flag from r8b, the data from rdx at +0x1EDE0. */
+static void Assign(void)
+{
+    const uint8_t code[] = {0x44, 0x88, 0x81, 0x0C, 0xEE, 0x01, 0x00, 0x48, 0x89, 0x91, 0xE0, 0xED, 0x01, 0x00, 0xC3};
+    DWORD before;
+    memcpy(g_fake.image + 0x189C780u, code, sizeof code);
+    CHECK(VirtualProtect(g_fake.image + 0x189C780u, sizeof code, PAGE_EXECUTE_READWRITE, &before));
 }
 
 static void Put(void* at, uint64_t value) { memcpy(at, &value, 8); }
@@ -107,6 +117,7 @@ static void CheckCallbacks(void)
     Setter(0x14476A0u, 0x04);      /* position */
     Setter(0x1447ED0u, 0x14);      /* scale */
     Setter(0x144F160u, 0x2C);      /* anchor */
+    Assign();
     Put(image + 0x3326340u, (uint64_t)(uintptr_t)g_engine);
     Put(image + 0x347CEF0u, (uint64_t)(uintptr_t)g_context);
     Put(image + 0x347CD88u, (uint64_t)(uintptr_t)g_tweens);
@@ -164,22 +175,30 @@ static void CheckCallbacks(void)
     Size(Card(3) + 0x1D40, 480.0f, 206.0f);
     Animate(Card(3) + 0x1D40, 3, 480.0f, 780.0f);
     Put(g_tweens + 2 * 0x70 + 0x78, 0x1234);
+    /* The own player on card 2, assigned with the slots open. */
+    Card(1)[0x1EE0C] = 1;
+    Card(1)[0x1EE0E] = 1;
+    Put(Card(1) + 0x1EDF0, 0x55);
 
     /* A player on card 6 with three present (a card freed late): eight before that card is next placed. */
     Put32(g_screen + PLAYERS + 5 * 4, 2);
     co_cards_layout(&regs);
-    CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 532.0f);
+    CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 498.0f);
     CHECK(fake_host_logged("loadout cards: four to eight on the open screen (complex operation no, 3 players, cards 5 to 8: -1 2 -1 -1)"));
     for (uint32_t i = 0; i < 8; i++)
     {
         CoCardPlace p;
         co_cards_place(CO_CARDS_EIGHT, rootH, hud, i, &p);
-        CHECK(Field(Card(i), 0x10) == 532.0f && Field(Card(i) + 0x1C30, 0x10) == (i == 2 ? 42.0f : 532.0f));
+        CHECK(Field(Card(i), 0x10) == 498.0f && Field(Card(i) + 0x1C30, 0x10) == (i == 2 ? 42.0f : 498.0f));
         CHECK(Field(Card(i), 0x2C) == p.x && Field(Card(i), 0x8) == p.y && Field(Card(i), 0x14) == p.scale);
-        CHECK(Field(Card(i) + 0x1FA8, 0x14) == 0.8f && Field(Card(i) + 0x1FA8, 0x8) == p.figureY);
+        CHECK(Field(Card(i) + 0x1FA8, 0x14) == 0.528f && Field(Card(i) + 0x1FA8, 0x8) == p.figureY);
+        /* Only the open card is assigned again, with its own data, closed. */
+        uint64_t data;
+        memcpy(&data, Card(i) + 0x1EDE0, 8);
+        CHECK(Card(i)[0x1EE0C] == 0 && data == (i == 1 ? 0x55u : 0u));
     }
-    CHECK(Field(Card(0) + 0x1D40, 0x10) == 532.0f && Field(Card(0) + 0x5848, 0x10) == 128.0f);
-    CHECK(Field(Card(3) + 0x1D40, 0x10) == 206.0f && Field(Card(1) + 0x5848, 0x10) == 532.0f);
+    CHECK(Field(Card(0) + 0x1D40, 0x10) == 498.0f && Field(Card(0) + 0x5848, 0x10) == 128.0f);
+    CHECK(Field(Card(3) + 0x1D40, 0x10) == 206.0f && Field(Card(1) + 0x5848, 0x10) == 498.0f);
     float to[2];
     CHECK(co_cards_size_target((uintptr_t)(Card(0) + 0x5848), (uintptr_t)g_tweens, to) && to[1] == 128.0f);
     CHECK(!co_cards_size_target((uintptr_t)(Card(3) + 0x1D40), (uintptr_t)g_tweens, to) && to[1] == 206.0f);
@@ -187,13 +206,13 @@ static void CheckCallbacks(void)
     /* Never back to four while open: the player leaves, eight stays. */
     memset(g_screen + PLAYERS, 0xFF, 32);
     co_cards_layout(&regs);
-    CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 532.0f);
+    CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 498.0f);
 
-    /* The next opening with five players: eight from the start, so the constructor builds at 532. */
+    /* The next opening with five players: eight from the start, so the constructor builds at 498. */
     Put32(g_context + 0x16390, 5);
     co_card_height = 780.0f;
     co_cards_open(&regs);
-    CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 532.0f);
+    CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 498.0f);
     CHECK(fake_host_logged("loadout cards: eight (complex operation no, 5 players)"));
 
     /* A fifth player joining a four-card screen: switched in the first update after, with the complex term not due. */
@@ -203,7 +222,7 @@ static void CheckCallbacks(void)
     const unsigned asked = co_cards_test_complex_reads();
     Put32(g_context + 0x16390, 5);
     co_cards_layout(&regs);
-    CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 532.0f);
+    CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 498.0f);
     CHECK(co_cards_test_complex_reads() == asked);
     co_cards_test_clock(NULL);
 
@@ -231,15 +250,16 @@ int main(void)
         CoCardPlace p[8];
         Rect r[8];
         for (uint32_t i = 0; i < 8; i++) r[i] = Drawn(w, h, 0.9f, i, &p[i]);
-        /* 0.802 wherever the height binds, 0.865 on 16:10, where the figure would be magnified past it. */
-        CHECK(Near(p[0].scale * 1000.0f, tall ? 865.0f : 802.35f));
+        /* 0.752 wherever the height is 1080, 0.867 on 16:10: 0.75 of the game's size or more everywhere. */
+        CHECK(Near(p[0].scale * 1000.0f, tall ? 867.31f : 751.92f) && p[0].scale >= 0.75f);
         for (uint32_t i = 0; i < 8; i++)
         {
-            CHECK(p[i].scale == p[0].scale && p[i].figureScale == 0.8f && Near(p[i].figureY, -9.0f));
+            CHECK(p[i].scale == p[0].scale && p[i].figureScale == 0.528f && Near(p[i].figureY, -48.44f));
             CHECK(1.444f * p[i].scale * p[i].figureScale <= 1.0f);
-            /* Inside the container and the screen; the top row under the top bar, the bottom row on the game's line. */
+            /* Inside the container and the screen; the top row 31 under the tabs' 156, the bottom row on the game's line. */
             CHECK(r[i].left >= ((rootW - 1920.0f) / 2.0f) * k && r[i].right <= ((rootW + 1920.0f) / 2.0f) * k);
-            CHECK(r[i].top >= 80.0f * k - 0.01f && r[i].bottom <= h);
+            CHECK(r[i].top >= 187.0f * k - 0.01f && r[i].bottom <= h);
+            if (i < 4) CHECK(Near(r[i].top, 187.0f * k));
             if (i >= 4) CHECK(Near(r[i].bottom, h - 111.0f * k));
             /* Rows and columns 44 s apart, the same pitch everywhere. */
             if (i % 4) CHECK(Near((r[i].left - r[i - 1].right) / k, 44.0f * p[i].scale));
@@ -251,12 +271,12 @@ int main(void)
 
     g_case = "predictions";
     {
-        static const float kWide[4] = {106.7f, 675.8f, 722.9f, 1292.0f};
-        static const float kWideX[8] = {750.8f, 1200.1f, 1247.2f, 1696.5f, 1743.5f, 2192.8f, 2239.9f, 2689.2f};
-        static const float kSmall[4] = {53.3f, 337.9f, 361.4f, 646.0f};
-        static const float kSmallX[8] = {155.4f, 380.0f, 403.6f, 628.2f, 651.8f, 876.4f, 900.0f, 1124.6f};
-        static const float kTall[4] = {130.6f, 590.8f, 628.8f, 1089.0f};
-        static const float kTallX[8] = {176.3f, 539.6f, 577.7f, 941.0f, 979.0f, 1342.3f, 1380.4f, 1743.7f};
+        static const float kWide[4] = {249.3f, 748.6f, 792.7f, 1292.0f};
+        static const float kWideX[8] = {811.7f, 1232.8f, 1276.9f, 1697.9f, 1742.1f, 2163.1f, 2207.2f, 2628.3f};
+        static const float kSmall[4] = {124.7f, 374.3f, 396.4f, 646.0f};
+        static const float kSmallX[8] = {185.8f, 396.4f, 418.4f, 629.0f, 651.0f, 861.6f, 883.6f, 1094.2f};
+        static const float kTall[4] = {187.0f, 618.9f, 657.1f, 1089.0f};
+        static const float kTallX[8] = {174.2f, 538.5f, 576.6f, 940.9f, 979.1f, 1343.4f, 1381.5f, 1745.8f};
         CHECK(Predicted(3440, 1440, kWide, kWideX));
         CHECK(Predicted(1280, 720, kSmall, kSmallX));
         CHECK(Predicted(1920, 1200, kTall, kTallX));
@@ -264,11 +284,12 @@ int main(void)
 
     g_case = "the hud scale";
     {
-        /* Up to 80 / 66 the corner widgets stay in the top bar; above, the top row stays under them; 0.5 at the least. */
-        CHECK(co_cards_scale(1080.0f, 0.9f) == co_cards_scale(1080.0f, 1.2f) && co_cards_scale(1080.0f, NAN) == co_cards_scale(1080.0f, 0.9f));
+        /* Up to 187 / 66 the corner widgets stay above the tabs' limit; above, the top row stays under them; 0.5 at the
+         * least. */
+        CHECK(co_cards_scale(1080.0f, 0.9f) == co_cards_scale(1080.0f, 2.8f) && co_cards_scale(1080.0f, NAN) == co_cards_scale(1080.0f, 0.9f));
         CoCardPlace p;
-        co_cards_place(CO_CARDS_EIGHT, 1080.0f, 2.0f, 0, &p);
-        CHECK(Near(p.y + 532.0f * p.scale, 1080.0f - 132.0f) && p.scale < co_cards_scale(1080.0f, 0.9f));
+        co_cards_place(CO_CARDS_EIGHT, 1080.0f, 3.0f, 0, &p);
+        CHECK(Near(p.y + 498.0f * p.scale, 1080.0f - 198.0f) && p.scale < co_cards_scale(1080.0f, 0.9f));
         CHECK(co_cards_scale(1080.0f, 100.0f) == 0.5f && co_cards_scale(1080.0f, -5.0f) == co_cards_scale(1080.0f, 0.9f));
     }
 

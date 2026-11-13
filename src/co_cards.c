@@ -1,8 +1,8 @@
 /* The loadout screen's cards in a build for eight: where each card sits and how large it is drawn, per frame, from the
- * screen's size. Eight cards go in two rows of four, shorter than the game's (532 of 780 reference units, the figure
- * cut by the card's own clip and drawn at 0.8) and scaled as one so both rows fit between the bottom line and the top
- * bar. An operation for four with at most four players keeps the game's four-card screen. Addresses are game build
- * 25480438's (DESIGN.md of the cards study, layout D and section 9.5). */
+ * screen's size. Eight cards go in two rows of four, shorter than the game's (498 of 780 reference units, the slots
+ * collapsed and the figure drawn at 0.528) and scaled as one so both rows fit between the bottom line and the mode tabs.
+ * An operation for four with at most four players keeps the game's four-card screen. Addresses are game build
+ * 25480438's (DESIGN.md of the cards study, layout D and sections 9.5 and 9.7). */
 #include <string.h>
 #include <windows.h>
 
@@ -22,17 +22,25 @@
 #define CO_SET_SIZE 0x1447160u
 #define CO_SET_SCALE 0x1447ED0u
 #define CO_SET_ANCHOR 0x144F160u
+#define CO_CARD_ASSIGN 0x189C780u /* (card, data, expanded, r9b): the slots panel open or collapsed, as the game assigns */
+#define CO_CARD_DATA 0x1EDF0u
+#define CO_CARD_EXPANDED 0x1EE0Cu
+#define CO_CARD_FLAG 0x1EE0Eu
 
-/* The card in reference units: the game's 780 cut to 532 leaves the name plate above the slots and the figure from the
- * helmet to the lower chest. The rows are 44 apart, the game's gap between columns, and the columns 464 apart. */
+/* The card in reference units: 498 is the tallest that keeps the cards at 0.75 of the game's size or more between the
+ * tabs and the bottom line. The rows are 44 apart, the game's gap between columns, and the columns 464 apart. */
 #define CO_CARD_TALL 780.0f
-#define CO_CARD_SHORT 532.0f
+#define CO_CARD_SHORT 498.0f
 #define CO_CARD_GAP 44.0f
 #define CO_CARD_PITCH 464.0f
 #define CO_CARD_BOTTOM 111.0f     /* the game's card bottom, above the 55-unit box at 56 */
-#define CO_TOP_BAR 80.0f          /* the screen's top bar */
+/* The mode tabs (top bar L+0xF950, strip +0x930 at 83, list +0x1CC0 10 under it, tabs 63 tall: 0x17A9CB8, 0x17A9EB6,
+ * 0x17AE5BA) end 156 under the container's top, which is the root's on every shape; the cards keep 31 from them. */
+#define CO_TABS 187.0f
 #define CO_CORNER 66.0f           /* the hud-scaled corner widgets reach 66 h below the top */
-#define CO_FIGURE 0.8f
+/* With the slots collapsed (stack top at 184), the figure at 0.528 shows the helmet to the belt, as the game's own
+ * card does above its expanded slots: 64.5 % of the image above the stack in both. */
+#define CO_FIGURE 0.528f
 /* The figure image is 1.444 s f of its render tile's height; at most 0.692 keeps it from being magnified. */
 #define CO_FIGURE_MOST 0.692f
 #define CO_SCALE_LEAST 0.5f
@@ -64,6 +72,7 @@ static int Complex(int fresh)
 }
 
 typedef void (*SetFn)(uintptr_t widget, uint64_t pair);
+typedef void (*AssignFn)(uintptr_t card, uintptr_t data, uint8_t expanded, uint8_t flag);
 
 void co_cards_install(uintptr_t game) { g_game = game; }
 
@@ -80,7 +89,7 @@ int co_cards_eight(int complex, uint32_t players, const int32_t cardPlayers[8])
 
 float co_cards_scale(float rootHeight, float hudScale)
 {
-    const float top = hudScale == hudScale && hudScale * CO_CORNER > CO_TOP_BAR ? hudScale * CO_CORNER : CO_TOP_BAR;
+    const float top = hudScale == hudScale && hudScale * CO_CORNER > CO_TABS ? hudScale * CO_CORNER : CO_TABS;
     float s = (rootHeight - CO_CARD_BOTTOM - top) / (2.0f * CO_CARD_SHORT + CO_CARD_GAP);
     if (s > 1.0f) s = 1.0f;
     if (s > CO_FIGURE_MOST / CO_FIGURE) s = CO_FIGURE_MOST / CO_FIGURE;
@@ -155,7 +164,7 @@ static uint32_t Players(void)
     return context != 0 ? *(const uint32_t*)(context + CO_SESSION_PLAYERS) : 0u;
 }
 
-/* The slot goes first, so every later store and tween of the game takes 532. The size setter also ends a running
+/* The slot goes first, so every later store and tween of the game takes the short height. The size setter also ends a running
  * animation (0x14471A9..0x1447215, 0x14472C3..), so each part jumps to its end and none keeps a target of 780. */
 void co_cards_to_eight(uintptr_t screen)
 {
@@ -172,6 +181,15 @@ void co_cards_to_eight(uintptr_t screen)
             if (!running && to[1] != CO_CARD_TALL) continue;
             size(w, Pair(to[0], to[1] == CO_CARD_TALL ? CO_CARD_SHORT : to[1]));
         }
+    /* The own card was assigned open; the cave at 0x189CA88 collapses the later ones. This is the game's own assign
+     * call with the same data, so the panel, its box and the hover test (0x1894C92) all see the collapse. */
+    const AssignFn assign = (AssignFn)(g_game + CO_CARD_ASSIGN);
+    for (uint32_t i = 0; i < 8u; i++)
+    {
+        const uintptr_t card = screen + CO_CARD_BLOCK + i * CO_CARD_STRIDE;
+        if (*(const uint8_t*)(card + CO_CARD_EXPANDED) != 0)
+            assign(card, *(const uintptr_t*)(card + CO_CARD_DATA), 0, *(const uint8_t*)(card + CO_CARD_FLAG));
+    }
     g_mode = CO_CARDS_EIGHT;
 }
 

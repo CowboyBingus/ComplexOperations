@@ -587,7 +587,7 @@ def _caves():
         (0x147061F, '41c6859539270000', ''.join(' cmp byte ptr [rsp+0x%x], 0\n jne %d1f\n mov qword ptr [r13+0x%x], 0\n%d1:\n'
                                                 % (0x38 + k, k, NR + k * 0x9F0 + 0x9E8, k) for k in range(4, 8)) +
          ' mov byte ptr [r13+0x273995], 0\n jmp game+0x1470627', '146fc40 records 4..7 peer id clear'),
-    ] + CARD_SCALE + FIGURE_SLOT + GUARDS8 + HEIGHTS + LAYOUT
+    ] + CARD_SCALE + FIGURE_SLOT + GUARDS8 + HEIGHTS + COLLAPSE + LAYOUT
 
 # Eight cards at the game's size overlap: the init card loop sets each card root's scale to 0.5 before its pivot, so
 # the panel, its text and its figure image draw at half size. rsi is the card for the whole loop and rcx, rdx are
@@ -635,6 +635,15 @@ def _height_cave(rva, base, disp, size, note):
             % (CARD_HEIGHT, base, at, rva + size), 'card height from the slot: ' + note)
 
 HEIGHTS = [_height_cave(*h) for h in _HEIGHT_STORES]
+
+# 0x189CA20 assigns a card and opens its slots panel only for the own player (`sete r8b` behind the id compare at
+# 0x189CA86); 0x189CB90 and L's resets pass 0. Open adds 113 for the mission stratagems, too tall for the short card,
+# so with the short height in the slot it passes 0 as for any other player. The flags are dead at the call behind.
+COLLAPSE = [
+    (0x189CA88, '440fb64c2470' '410f94c0',
+     'movzx r9d, byte ptr [rsp+0x70]\n sete r8b\n push rax\n mov rax, DATA(%d)\n cmp dword ptr [rax], 0x44430000\n'
+     ' je 1f\n xor r8d, r8d\n1: pop rax\n jmp game+0x189CA92' % CARD_HEIGHT, '189ca20 card assign: slots collapsed when short'),
+]
 
 # The screen-set update hands L its update with a tail jump (0x1497C45, the case for L of 0x1497920; the only reference
 # to 0x1468320), after the canvas refit of the same update. The layout callback (co_cards.c) runs there every frame L is

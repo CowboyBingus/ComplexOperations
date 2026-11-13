@@ -151,11 +151,14 @@ a player. Otherwise it keeps the game's four cards, and cards 5 to 8 wait below 
 screen opens. While it is open, four cards turn into eight when the rule turns true, never back. The players are checked
 every update; the complex pick is checked four times a second, because that check reads the mission table.
 
-Eight cards stand in two rows of four. Each is 532 reference units tall instead of 780, which cuts the figure below
-the chest, and both rows scale together to fit between the screen's top bar and its bottom line.
+Eight cards stand in two rows of four. Each is 498 reference units tall instead of 780, and both rows scale together
+to fit between the screen's BRIEFING and LOADOUT tabs and its bottom line: 0.75 of the game's size at 16:9 and 21:9.
+Every card's slots stay collapsed, so the own card does not show the mission stratagems. The figure is drawn at
+0.528, so it shows the helmet down to the belt, as the game's own card does.
 
 Each of the 15 places that store a card's height reads it from the mod's memory instead, through code beside the
-game's: the card's constructor, the screen's and the card's resizes, and the expand and collapse animations. A
+game's: the card's constructor, the screen's and the card's resizes, and the expand and collapse animations. Where the
+game assigns a card, one more reads it and keeps the own card's slots collapsed while the height is short. A
 callback before the screen's card loop picks the mode and that height. Another places the cards behind the loop, and a
 third places them before each update of the screen.
 
