@@ -22,8 +22,8 @@ static const char kVoiceNamePin[] = "48 89 5C 24 20 57 41 54 41 57 48 83 EC 30 4
 #define CO_VOICE_POST 0x13A1CD0u   /* (system, u32 name hash, u32 line, u64* source, unit, entity, data, callback) */
 static const char kVoicePostPin[] = "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 57 41 54 41 55 41 56 41 57";
 /* (system, u32 line, u32 variant, u32 group, u32 entity, float delay, u32 intensity, mode, ...; 12 in all): the queued
- * slot, 0 when refused. Its state gate (0x13A01A5): refused when [system] & (mask >> 6), or when the mask's low six bits
- * are not all in [system]; 0x13A7020 sets bit 0 of [system] when the player manager counts one player (+0x84 <= 1). */
+ * slot, 0 when refused. Its state gate (0x13A01A5): refused when [system] & (mask >> 6), or when [system] & mask is not
+ * the mask's low six bits; 0x13A7020 sets bit 0 of [system] when the player manager counts one player (+0x84 <= 1). */
 #define CO_VOICE_REQUEST 0x13A0090u
 static const char kVoiceRequestPin[] = "40 55 53 56 57 41 54 41 55 41 57 48 8D 6C 24 A0 48 81 EC 60 01 00 00";
 #define CO_LINE_DEF 0x11FA230u     /* u8* (u32 voice, u32 group, u32 intensity): the line-def, its state mask at +0x34 */
@@ -50,6 +50,7 @@ static const char kEventOfPin[] = "48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 
 #define CO_VOICE_LINES 200u
 #define CO_VOICE_REQUESTS 150u
 #define CO_VOICE_KINDS 64u         /* (group, verdict, state) the request log tells apart */
+#define CO_VOICE_REFUSED 128u      /* groups whose first refusal is logged even once the budget is spent */
 
 typedef uint64_t (*DeltaFn)(uint64_t, uint64_t, uint64_t, uint64_t);
 typedef uint64_t (*NameFn)(uint64_t, uint64_t, uint64_t, uint64_t, char*, uint64_t);
@@ -76,6 +77,8 @@ static uintptr_t g_game;
 static unsigned g_lines, g_names, g_posts, g_requests, g_requestLines, g_otherKinds;
 static uint32_t g_lastValue = 0xFFFFFFFEu, g_lastCount = 0xFFFFFFFEu, g_lastEvent = 0xFFFFFFFEu;
 static struct { uint32_t group, verdict, state, seen; } g_kinds[CO_VOICE_KINDS];
+static uint32_t g_refused[CO_VOICE_REFUSED];
+static unsigned g_refusedCount;
 
 /* The game's open-addressing probe: {u32 key, u32 value} pairs. 0xFFFFFFFF when the key is not there. */
 static uint32_t Find(const uint8_t* map, uint32_t key)
@@ -181,29 +184,40 @@ uint32_t co_voice_verdict(uint32_t mask, uint32_t state, int haveLineDef, int qu
 {
     if (!haveLineDef) return kNoLineDef;
     if (mask != 0 && (state & (mask >> 6)) != 0) return kForbidden;
-    if (mask != 0 && (state & mask & 0x3Fu) != (mask & 0x3Fu)) return kNeeded;
+    if (mask != 0 && (state & mask) != (mask & 0x3Fu)) return kNeeded; /* and ecx,esi ; and esi,0x3F ; cmp (0x13A01C9) */
     return queued ? kQueued : kNotQueued;
 }
 
-/* One line per (group, verdict, state) when first seen and each 20th time, at most CO_VOICE_REQUESTS a session. */
+static int RefusedBefore(uint32_t group)
+{
+    for (unsigned i = 0; i < g_refusedCount; i++)
+        if (g_refused[i] == group) return 1;
+    return 0;
+}
+
+/* One line per (group, verdict, state) when first seen and each 20th time, at most CO_VOICE_REQUESTS a session; a group's
+ * first refusal is logged past that budget, so the ship's and the hub's lines cannot hide the first call-out. */
 void co_voice_request(uint64_t system, uint32_t line, uint32_t group, uint32_t entity, uint32_t intensity, uint64_t queued)
 {
-    int slot;
+    int slot, first = 0;
+    unsigned i, seen = 0;
+    char why[200], mood[24];
+    g_requests++;
+    if (g_requestLines >= CO_VOICE_REQUESTS && (queued != 0 || g_refusedCount >= CO_VOICE_REFUSED || RefusedBefore(group))) return;
     const uint32_t value = VoiceValue(entity, &slot), set = VoiceSet(value);
     const uint8_t* def = g_lineDef(set, group, intensity);
     const uint32_t mask = def != NULL ? *(const uint32_t*)(def + 0x34) : 0;
     const uint32_t state = system != 0 ? *(const uint32_t*)(uintptr_t)system : 0;
     const uint32_t verdict = co_voice_verdict(mask, state, def != NULL, queued != 0);
-    const char* text = g_lineText(set, line);
-    const char* mood = intensity == 0x5AE3F662u ? "spoken" : intensity == 0x802F7915u ? "combat" : intensity == 0x53347FB1u ? "mayhem" : "other";
-    unsigned i, seen = 0;
-    char why[160];
-    g_requests++;
+    if (queued == 0 && g_refusedCount < CO_VOICE_REFUSED && !RefusedBefore(group)) { g_refused[g_refusedCount++] = group; first = 1; }
     for (i = 0; i < CO_VOICE_KINDS && g_kinds[i].seen != 0; i++)
         if (g_kinds[i].group == group && g_kinds[i].verdict == verdict && g_kinds[i].state == state) break;
     if (i < CO_VOICE_KINDS) { if (g_kinds[i].seen == 0) { g_kinds[i].group = group; g_kinds[i].verdict = verdict; g_kinds[i].state = state; } seen = ++g_kinds[i].seen; }
-    else if (++g_otherKinds % 20 != 1) return; /* the table is full: each 20th of the kinds it has no room for */
-    if (seen > 1 && seen % 20 != 0) return;
+    else if (!first && ++g_otherKinds % 20 != 1) return; /* the table is full: each 20th of the kinds it has no room for */
+    if (!first && ((seen > 1 && seen % 20 != 0) || g_requestLines >= CO_VOICE_REQUESTS)) return;
+    if (intensity == 0x5AE3F662u) snprintf(mood, sizeof mood, "spoken");
+    else if (intensity == 0x802F7915u) snprintf(mood, sizeof mood, "combat");
+    else snprintf(mood, sizeof mood, "intensity 0x%08X", intensity);
     switch (verdict)
     {
     case kNoLineDef: snprintf(why, sizeof why, "refused: no line-def for this group"); break;
@@ -211,10 +225,17 @@ void co_voice_request(uint64_t system, uint32_t line, uint32_t group, uint32_t e
         snprintf(why, sizeof why, "refused: mask 0x%X, state 0x%X, forbidden bits 0x%X%s", mask, state, state & (mask >> 6),
                  (state & (mask >> 6) & 1u) != 0 ? " (solo: the game's rule for one player)" : "");
         break;
-    case kNeeded: snprintf(why, sizeof why, "refused: mask 0x%X, state 0x%X, needed bits 0x%X missing", mask, state, (mask & 0x3Fu) & ~state); break;
-    case kNotQueued: snprintf(why, sizeof why, "mask 0x%X, state 0x%X passed; not queued (speaker busy, priority, chance or no event)", mask, state); break;
+    case kNeeded:
+        snprintf(why, sizeof why, "refused: mask 0x%X, state 0x%X, state & mask 0x%X is not the mask's low bits 0x%X", mask, state,
+                 state & mask, mask & 0x3Fu);
+        break;
+    case kNotQueued:
+        snprintf(why, sizeof why, "mask 0x%X, state 0x%X passed the gate; not queued: the speaker check (0x13A7510, 0x13A2700) or the "
+                 "queue (slot +0x30 != 1 after 0x13A4F90) turned it down", mask, state);
+        break;
     default: snprintf(why, sizeof why, "mask 0x%X, state 0x%X; queued", mask, state); break;
     }
+    const char* text = g_lineText(set, line);
     RequestLine("voice: request %u for entity %u (value %d): line \"%.64s\" 0x%08X, group 0x%08X, %s; %s%s", g_requests, entity,
                 value == 0 ? -1 : (int)value, text != NULL ? text : "?", line, group, mood, why, seen > 1 ? " (again)" : "");
 }
@@ -266,11 +287,10 @@ static void RequestLine(const char* format, ...)
 {
     char text[400];
     va_list args;
-    if (g_requestLines >= CO_VOICE_REQUESTS) return;
     va_start(args, format);
     vsnprintf(text, sizeof text, format, args);
     va_end(args);
-    if (++g_requestLines == CO_VOICE_REQUESTS) co_log("%s (the last voice request line of this session)", text);
+    if (++g_requestLines == CO_VOICE_REQUESTS) co_log("%s (the request budget is spent; only each group's first refusal follows)", text);
     else co_log("%s", text);
 }
 
@@ -302,9 +322,10 @@ void co_voice_install(uintptr_t game)
 #ifdef CO_TEST
 void co_voice_test_reset(void)
 {
-    g_game = 0; g_lines = g_names = g_posts = g_requests = g_requestLines = g_otherKinds = 0;
+    g_game = 0; g_lines = g_names = g_posts = g_requests = g_requestLines = g_otherKinds = g_refusedCount = 0;
     g_lastValue = g_lastCount = g_lastEvent = 0xFFFFFFFEu;
     memset(g_kinds, 0, sizeof g_kinds);
+    memset(g_refused, 0, sizeof g_refused);
     g_delta = NULL; g_name = NULL; g_post = NULL; g_request = NULL;
 }
 

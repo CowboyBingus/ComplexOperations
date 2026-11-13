@@ -54,6 +54,7 @@ static int g_failed;
 static const char* g_case;
 static uint64_t g_seen[12];
 static uint64_t g_queued;
+static unsigned g_lineDefCalls;
 static uint8_t g_record[16], g_stratagemDef[0x3C], g_lastmagDef[0x3C], g_neededDef[0x3C];
 static int g_hashLength;
 static uint64_t g_playing;
@@ -93,6 +94,7 @@ static uint64_t TestRequest(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint
  * record keys the component by [record + 8] = 5, not by 77 (the manager maps 5 to slot 3). */
 static const uint8_t* TestLineDef(uint32_t set, uint32_t group, uint32_t intensity)
 {
+    g_lineDefCalls++;
     if (intensity != SPOKEN) return NULL;
     if (set == 0x8BC32987u) return group == LASTMAG ? g_lastmagDef : NULL; /* the set of a speaker with no voice */
     if (set != SET) return NULL;
@@ -286,6 +288,10 @@ static void TestVerdict(void)
     CHECK(co_voice_verdict(0x06, 0x02, 1, 0) == 3);  /* needs bits 1 and 2; only 1 set */
     CHECK(co_voice_verdict(0x06, 0x06, 1, 1) == 0);
     CHECK(co_voice_verdict(0x46, 0x07, 1, 0) == 2);  /* forbidden wins over needed */
+    /* the game compares state & mask, all of it, with the mask's low six bits: a state bit 6 and up inside the mask refuses */
+    CHECK(co_voice_verdict(0x9C0, 0x40, 1, 0) == 3);
+    CHECK(co_voice_verdict(0x46, 0x86, 1, 1) == 0);  /* bit 7 is outside the mask */
+    CHECK(co_voice_verdict(0x06, 0x106, 1, 1) == 0);
 }
 
 static void TestRequestGate(void)
@@ -307,7 +313,8 @@ static void TestRequestGate(void)
     CHECK(fake_host_logged("voice: request 2 for entity 77 (value 6): line \"?\" 0x00007777, group 0x5C4397B3, spoken; mask 0x0, state 0x1; queued\n"));
     g_queued = 0;
     request(s, 0x7777, 2, LASTMAG, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
-    CHECK(fake_host_logged("group 0x5C4397B3, spoken; mask 0x0, state 0x1 passed; not queued (speaker busy, priority, chance or no event)\n"));
+    CHECK(fake_host_logged("group 0x5C4397B3, spoken; mask 0x0, state 0x1 passed the gate; not queued: the speaker check (0x13A7510, "
+                           "0x13A2700) or the queue (slot +0x30 != 1 after 0x13A4F90) turned it down\n"));
     request(s, 0x7777, 2, 0xABCDEF01u, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
     CHECK(fake_host_logged("group 0xABCDEF01, spoken; refused: no line-def for this group\n"));
     Put32(0x3640000u, 0x2); /* co-op: bit 0 clear */
@@ -323,8 +330,13 @@ static void TestRequestGate(void)
     request(s, 0x7777, 1, LASTMAG, 99, 0, SPOKEN, 1, 0, 0, 0, 0);
     Put32(0x3640000u, 0x2);
     request(s, 0x7777, 1, NEEDED, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
-    CHECK(fake_host_logged("group 0x12345678, spoken; refused: mask 0xC06, state 0x2, needed bits 0x4 missing\n"));
+    CHECK(fake_host_logged("group 0x12345678, spoken; refused: mask 0xC06, state 0x2, state & mask 0x2 is not the mask's low bits 0x6\n"));
     CHECK(fake_host_logged("voice: request 8 for entity 99 (value -1): line \"?\" 0x00007777, group 0x5C4397B3, spoken; mask 0x0, state 0x8; queued\n"));
+    /* only the spoken and combat hashes are known; any other is shown as it is */
+    request(s, 0x7777, 1, 0x0BADF00Du, ENTITY, 0, 0x53347FB1u, 1, 0, 0, 0, 0);
+    CHECK(fake_host_logged("group 0x0BADF00D, intensity 0x53347FB1; refused: no line-def"));
+    request(s, 0x7777, 1, 0x0BADF00Eu, ENTITY, 0, 0x802F7915u, 1, 0, 0, 0, 0);
+    CHECK(fake_host_logged("group 0x0BADF00E, combat; refused: no line-def"));
 }
 
 /* Each (group, verdict, state) the first time and each 20th; their own budget, which names cannot use up. */
@@ -340,14 +352,35 @@ static void TestRequestBudget(void)
     Put32(0x3640000u, 0x1);
     for (int i = 0; i < 600; i++) { Put32(VM + 0x130, 4 + (uint32_t)(i & 1)); name(5, ENTITY, 1, 1, buffer, 0); }
     CHECK(Lines("(the last voice line of this session)") == 1);
+    g_fake.log[0] = 0; /* room in the fake log for the request lines */
     for (int i = 0; i < 40; i++) request(s, 0x313876CCu, 1, STRATAGEM, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
     CHECK(Lines("voice: request ") == 3);
     CHECK(fake_host_logged("voice: request 1 ") && fake_host_logged("voice: request 20 ") && fake_host_logged("voice: request 40 ") &&
           !fake_host_logged("voice: request 2 "));
     CHECK(fake_host_logged("(solo: the game's rule for one player) (again)"));
-    for (uint32_t g = 0; g < 300; g++) request(s, 0x313876CCu, 1, 0x1000u + g, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
-    CHECK(Lines("voice: request ") == 3 + 63 + 12); /* 63 new kinds fill the table; then each 20th of the other 237 */
-    CHECK(Lines("(the last voice request line of this session)") <= 1);
+    /* 100 new groups, each refused for the first time: all logged, past the full kinds table too */
+    for (uint32_t g = 0; g < 100; g++) request(s, 0x313876CCu, 1, 0x1000u + g, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
+    CHECK(Lines("voice: request ") == 103);
+    /* queued lines of a kind the full table has no room for: each 20th, until the budget is spent */
+    g_queued = 0x55;
+    for (int i = 0; i < 1000; i++) request(s, 0x7777, 2, LASTMAG, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
+    CHECK(Lines("voice: request ") == 150);
+    CHECK(Lines("(the request budget is spent; only each group's first refusal follows)") == 1);
+    /* spent: a queued line and a group refused before cost no lookup and no line; a group's first refusal still gets one */
+    unsigned calls = g_lineDefCalls;
+    request(s, 0x7777, 2, LASTMAG, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
+    g_queued = 0;
+    request(s, 0x313876CCu, 1, STRATAGEM, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
+    request(s, 0x313876CCu, 1, 0x1005u, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
+    CHECK(g_lineDefCalls == calls && Lines("voice: request ") == 150);
+    request(s, 0x313876CCu, 1, 0x2000u, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
+    CHECK(g_lineDefCalls == calls + 1 && Lines("voice: request ") == 151 && fake_host_logged("group 0x00002000, spoken; refused: no line-def"));
+    request(s, 0x313876CCu, 1, 0x2000u, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
+    CHECK(g_lineDefCalls == calls + 1 && Lines("voice: request ") == 151);
+    /* the first refusals have room for 128 groups: 101 before, this one, 26 more; then none */
+    for (uint32_t g = 1; g <= 40; g++) request(s, 0x313876CCu, 1, 0x2000u + g, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
+    CHECK(Lines("voice: request ") == 177);
+    CHECK(Lines("(the request budget is spent; only each group's first refusal follows)") == 1);
 }
 
 static void TestLinePost(void)
