@@ -4948,7 +4948,7 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
     {
         uint32_t now = 0xFFFFFFFFu, done = watch ? at : vanillaAt, doneOp = watch ? op : vanillaOp;
 #ifdef CO_RESEARCH
-        const int force = doneOp == 0x0A || doneOp == 0x0B || doneOp == 0x4A; /* the scatter cut's ops, a note even when commit barely moves */
+        const int force = doneOp == 0x0A || doneOp == 0x0B || doneOp == 0x4A || (doneOp >= 0x43 && doneOp <= 0x45); /* the scatter cut's ops, a note even when commit barely moves */
 #else
         const int force = 0;
 #endif

@@ -1,7 +1,8 @@
-/* The engine's scatter update on an extra large level: the far-scatter bake's views (op 0x4A) and the water camera's
- * view (ops 0x0A and 0x0B), both orthographic with near 1 and far 1001 at any aspect, are left out; any other view or
- * op, and any vanilla-size level, runs the engine's update. Each cut notes once per level, the water's once per record,
- * and ends at the ship. Run on the fake game. */
+/* The engine's scatter update on an extra large level: the far-scatter bake's views (op 0x4A), the water camera's view
+ * (ops 0x0A and 0x0B) and the fog volumes camera's view (ops 0x43..0x45), all orthographic with near 1 and far 1001 at
+ * any aspect, are left out; any other view or op (the in-game map's 0x4F among them), and any vanilla-size level, runs
+ * the engine's update. The bake's cut notes once per level, the others once per record; all end at the ship. Run on
+ * the fake game. */
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -19,6 +20,7 @@ static const char* g_case;
 
 static const char kWater[] = "the water camera's view is left out of the scatter update";
 static const char kBake[] = "the far-scatter bake's tile views are left out of the scatter update";
+static const char kFog[] = "the fog volumes camera's view is left out of the scatter update";
 
 /* A render camera as 0x212F10 reads it: near +0x20, far +0x24, projection +0x28 (0 orthographic), aspect +0x278. */
 static uint8_t g_view[0x300];
@@ -55,7 +57,23 @@ int main(void)
     CHECK(CoXlTestScatterUpdate(0x4A, 157, Ortho()) == 0);
     CHECK(Count(kBake) == 1);
 
+    g_case = "a complex level's fog volumes camera";
+    CHECK(CoXlTestScatterUpdate(0x43, 162, Ortho()) == 0);
+    CHECK(CoXlTestScatterUpdate(0x44, 163, Ortho()) == 0);
+    CHECK(CoXlTestScatterUpdate(0x44, 163, View(1.0f, 1001.0f, 0, 16.0f / 9.0f)) == 0);
+    CHECK(CoXlTestScatterUpdate(0x45, 164, Ortho()) == 0);
+    CHECK(Count(kFog) == 3);
+    CHECK(fake_host_logged("view is left out of the scatter update (op 0x44, record 163)"));
+    CHECK(CoXlTestScatterUpdate(0x44, 163, View(1.0f, 1001.0f, 1, 1.0f)) == 1);
+    CHECK(CoXlTestScatterUpdate(0x44, 163, View(0.1f, 3000.0f, 1, 16.0f / 9.0f)) == 1);
+    CHECK(Count(kWater) == 3);
+
     g_case = "the same view at other ops";
+    CHECK(CoXlTestScatterUpdate(0x4F, 165, Ortho()) == 1);
+    CHECK(CoXlTestScatterUpdate(0x50, 166, Ortho()) == 1);
+    CHECK(CoXlTestScatterUpdate(0x46, 154, Ortho()) == 1);
+    CHECK(CoXlTestScatterUpdate(0x47, 155, Ortho()) == 1);
+    CHECK(CoXlTestScatterUpdate(0x42, 150, Ortho()) == 1);
     CHECK(CoXlTestScatterUpdate(0x4B, 158, Ortho()) == 1);
     CHECK(CoXlTestScatterUpdate(0xB5, 161, Ortho()) == 1);
     CHECK(CoXlTestScatterUpdate(0x38, 78, Ortho()) == 1);
@@ -77,7 +95,8 @@ int main(void)
     CoXlTestGenLevel(8.0f);
     CHECK(CoXlTestScatterUpdate(0x0A, 159, Ortho()) == 0);
     CHECK(CoXlTestScatterUpdate(0x4A, 157, Ortho()) == 0);
-    CHECK(Count(kWater) == 1 && Count(kBake) == 1);
+    CHECK(CoXlTestScatterUpdate(0x44, 163, Ortho()) == 0);
+    CHECK(Count(kWater) == 1 && Count(kBake) == 1 && Count(kFog) == 1);
 
     g_case = "a vanilla-size level";
     g_fake.log[0] = 0;
@@ -85,11 +104,19 @@ int main(void)
     CHECK(CoXlTestScatterUpdate(0x0A, 104, Ortho()) == 1);
     CHECK(CoXlTestScatterUpdate(0x0B, 160, Ortho()) == 1);
     CHECK(CoXlTestScatterUpdate(0x4A, 157, Ortho()) == 1);
-    CHECK(Count(kWater) == 0 && Count(kBake) == 0);
+    CHECK(CoXlTestScatterUpdate(0x44, 163, Ortho()) == 1);
+    CHECK(Count(kWater) == 0 && Count(kBake) == 0 && Count(kFog) == 0);
 
     g_case = "a generation cut short at op 0x0A, then the ship";
     CoXlTestGenLevel(8.0f);
     CHECK(CoXlTestScatterUpdate(0x0A, 159, Ortho()) == 0);
+    CHECK(CoXlTestScatterUpdateAsIs(Ortho()) == 0);
+    CoXlTestWorldShip();
+    CHECK(CoXlTestScatterUpdateAsIs(Ortho()) == 1);
+
+    g_case = "a generation cut short at op 0x44, then the ship";
+    CoXlTestGenLevel(8.0f);
+    CHECK(CoXlTestScatterUpdate(0x44, 163, Ortho()) == 0);
     CHECK(CoXlTestScatterUpdateAsIs(Ortho()) == 0);
     CoXlTestWorldShip();
     CHECK(CoXlTestScatterUpdateAsIs(Ortho()) == 1);

@@ -1221,38 +1221,106 @@ static uintptr_t g_tdScatViewFlags;
 
 static LONG64 g_tdScatSkipped;
 static int g_tdScatHooked;
-/* Extra large maps: two load-time cameras, orthographic with near 1 and far 1001 (view +0x28 == 0, +0x20, +0x24), are
- * left out of the engine's scatter update: the far-scatter bake's tile views (op 0x4A) and the water camera of ops
- * 0x0A/0x0B (both aimed by 0xF487B0). Not the aspect: it follows the player's aspect_ratio setting. Their world-wide
- * boxes make the update fill cells and node vectors across the map, which the engine keeps all mission. The return
- * value is unused (0x210DEA) and the player's view fills its own cells. The far-scatter overlay loses its grass
- * density; water_height has no SpeedTree pass. Returns the op whose view is left out, or 0. */
+/* Extra large maps: three load-time cameras, orthographic with near 1 and far 1001 (view +0x28 == 0, +0x20, +0x24),
+ * are left out of the engine's scatter update: the far-scatter bake's tile views (op 0x4A, aimed by 0xF48990), the
+ * water camera (ops 0x0A/0x0B) and the fog volumes' camera (ops 0x43..0x45), both aimed by 0xF487B0 at the world's
+ * size. Not the aspect: it follows the player's aspect_ratio setting. Their world-wide boxes grow every layer's node
+ * vector to the whole map, which the engine keeps all mission. The return value is unused (0x210DEA) and the player's
+ * view fills its own cells. The far-scatter overlay loses its grass density; water_height and
+ * terrain_fog_volumes_generated have no SpeedTree pass. Returns the op whose view is left out, or 0. */
 static int g_tdScatCameraPinned; /* the render camera's near/far/projection writer (0x4D0F6A) is the reviewed one */
+static int TdScatterCutOp(LONG op) { return op == 0x4A || op == 0x0A || op == 0x0B || op == 0x43 || op == 0x44 || op == 0x45; }
 static LONG TdScatterSkipOp(const uint8_t* view)
 {
     const LONG op = g_genOp;
-    if (!g_tdScatCameraPinned || !(g_world.current > 1.0f) || (op != 0x4A && op != 0x0A && op != 0x0B)) return 0;
+    if (!g_tdScatCameraPinned || !(g_world.current > 1.0f) || !TdScatterCutOp(op)) return 0;
     struct { float nearZ, farZ; uint32_t projection; } v = {0, 0, 1};
     return !SafeRead((uintptr_t)view + 0x20, &v, sizeof v) && v.nearZ == 1.0f && v.farZ == 1001.0f && v.projection == 0 ? op : 0;
 }
 #ifdef CO_RESEARCH
-/* Research builds: where a load's SpeedTree memory goes. The update's first call of a job passes the job's copy of its
- * data, which starts with the system (layers [system+0x1C0] x 0x238, [system+0x1B8] of them, first [copy+0xF8]); it is
- * taken during the level's own ops 0x0A/0x0B/0x4A when the layer matches. A layer's tree [layer+0x40] has its node vector at +0x80 (count +0x90, capacity +0x98, 0xE0 a node, grown
- * only by 0x218860) and its cell size at +0x160. The grow hook splits growth by the caller of 0x9548C0: the scatter
- * update (0x213062), which the cut skips, or the tree culling (0x212565), which it does not. */
-static volatile uintptr_t g_rsScatSys;
+/* Research builds: where a load's SpeedTree memory goes. A scatter system (one a render world, built by 0x2102C0: its
+ * first field is the vtable exe+0x1673E48) has [sys+0x1B8] layers of 0x238 at [sys+0x1C0]; the update's job copy
+ * starts with it. A layer's tree [layer+0x40] has its node vector at +0x80 (count +0x90, capacity +0x98, 0xE0 a node,
+ * grown only by 0x218860) and its cell size at +0x160. The grow hook splits growth by the caller of 0x9548C0: the
+ * scatter update (0x213062), which the cut skips, or the tree culling (0x212565), which it does not. */
+#define RS_SYSTEMS 4
+static SRWLOCK g_rsLock = SRWLOCK_INIT;
+static uintptr_t g_rsVtable; /* exe+0x1673E48 when the system's constructor is the reviewed one, else 0: no capture */
+static uintptr_t g_rsSys[RS_SYSTEMS]; /* this level's systems, in the order first seen whole */
 static volatile LONG64 g_rsGrown[3], g_rsGrowCalls[3];
-static volatile LONG g_rsGrowNotes;
+static _Thread_local const uint8_t* t_rsView; /* the scatter update's view and system on this thread, for the grow hook */
+static _Thread_local uintptr_t t_rsSys;
+/* the growth of the record running now: one line for each, again at a memory note when it grew since */
+static struct
+{
+    LONG64 key, bytes[3], calls[3], printed;
+    LONG op, record;
+    uint64_t most;
+    uintptr_t chain[4], views[3], systems[3];
+    float nearFar[3][2];
+    uint32_t projection[3];
+    int viewCount;
+} g_rsOp;
 typedef uint8_t (*RsGrowFn)(uint8_t* vec, uint64_t n);
 static RsGrowFn g_rsGrow;
-static void RsTakeSystem(void* a, const uint8_t* layer)
+/* 1 when `sys` reads as a whole scatter system: its vtable, 1..64 layers, each with a readable tree, nodes within a
+ * capacity of at most 2^24 and a cell of 1..1024 m. A freed or unrelated object fails it. */
+static int RsSystemWhole(uintptr_t sys, uintptr_t* layersOut, uint32_t* countOut)
+{
+    uintptr_t vt = 0, layers = 0; uint32_t count = 0;
+    if (g_rsVtable == 0 || sys == 0 || SafeRead(sys, &vt, 8) || vt != g_rsVtable || SafeRead(sys + 0x1B8, &count, 4) || count == 0 || count > 64 ||
+        SafeRead(sys + 0x1C0, &layers, 8) || layers == 0) return 0;
+    for (uint32_t i = 0; i < count; i++)
+    {
+        uintptr_t tree = 0; uint64_t nodes = 0, cap = 0; float cell = 0;
+        if (SafeRead(layers + (uint64_t)i * 0x238u + 0x40, &tree, 8) || tree == 0 || SafeRead(tree + 0x90, &nodes, 8) || SafeRead(tree + 0x98, &cap, 8) ||
+            SafeRead(tree + 0x160, &cell, 4) || nodes > cap || cap > (1ull << 24) || !(cell >= 1.0f && cell <= 1024.0f)) return 0;
+    }
+    if (layersOut) *layersOut = layers;
+    if (countOut) *countOut = count;
+    return 1;
+}
+/* The job copy's system, kept the first time it reads whole and its layer is the one passed (job +0xF8 = first layer). */
+static uintptr_t RsTakeSystem(void* a, const uint8_t* layer)
 {
     uintptr_t sys = 0, layers = 0; uint32_t first = 0;
-    const LONG op = g_genOp;
-    if (a == NULL || g_rsScatSys != 0 || (op != 0x0A && op != 0x0B && op != 0x4A) || SafeRead((uintptr_t)a, &sys, 8) || sys == 0) return;
-    if (!SafeRead(sys + 0x1C0, &layers, 8) && !SafeRead((uintptr_t)a + 0xF8, &first, 4) && layers + (uint64_t)first * 0x238u == (uintptr_t)layer)
-        InterlockedCompareExchangePointer((void* volatile*)&g_rsScatSys, (void*)sys, NULL);
+    if (a == NULL || SafeRead((uintptr_t)a, &sys, 8) || sys == 0) return 0;
+    int free = 0;
+    for (int k = 0; k < RS_SYSTEMS; k++) { if (g_rsSys[k] == sys) return sys; free |= g_rsSys[k] == 0; }
+    if (!free) return 0; /* full: no checks on every frame's update */
+    if (SafeRead((uintptr_t)a + 0xF8, &first, 4) || !RsSystemWhole(sys, &layers, NULL) || layers + (uint64_t)first * 0x238u != (uintptr_t)layer) return 0;
+    AcquireSRWLockExclusive(&g_rsLock);
+    int k = 0;
+    while (k < RS_SYSTEMS && g_rsSys[k] != 0 && g_rsSys[k] != sys) k++;
+    if (k < RS_SYSTEMS && g_rsSys[k] == 0)
+    {
+        g_rsSys[k] = sys;
+        Note("scatter research: scatter system %u is 0x%llX (op 0x%02lX, record %ld)", (unsigned)k, (unsigned long long)sys, (long)g_genOp, (long)g_genRecord);
+    }
+    ReleaseSRWLockExclusive(&g_rsLock);
+    return sys;
+}
+/* Under g_rsLock: the current record's growth line, when it grew since the last one. */
+static void RsOpLine(void)
+{
+    const LONG64 calls = g_rsOp.calls[0] + g_rsOp.calls[1] + g_rsOp.calls[2];
+    if (calls == 0 || calls == g_rsOp.printed) return;
+    g_rsOp.printed = calls;
+    char views[320]; size_t at = 0; views[0] = 0;
+    for (int v = 0; v < g_rsOp.viewCount && v < 3; v++)
+    {
+        int k = 0; while (k < RS_SYSTEMS && g_rsSys[k] != g_rsOp.systems[v]) k++;
+        at += (size_t)snprintf(views + at, sizeof views - at, "%s0x%llX near %g far %g projection %u, system %d", v ? "; " : "", (unsigned long long)g_rsOp.views[v],
+            (double)g_rsOp.nearFar[v][0], (double)g_rsOp.nearFar[v][1], (unsigned)g_rsOp.projection[v], k < RS_SYSTEMS ? k : -1);
+        if (at >= sizeof views) at = sizeof views - 1;
+    }
+    Note("scatter research: node vectors grown during op 0x%02lX record %ld (level %ld): %lld MiB in %lld calls (scatter update %lld MiB in %lld, tree culling %lld MiB "
+        "in %lld, others %lld MiB in %lld), largest %llu nodes, first by x+0x%llX < x+0x%llX < x+0x%llX < x+0x%llX; views (%d): %s",
+        (long)g_rsOp.op, (long)g_rsOp.record, (long)(g_rsOp.key >> 32), (long long)((g_rsOp.bytes[0] + g_rsOp.bytes[1] + g_rsOp.bytes[2]) >> 20), (long long)calls,
+        (long long)(g_rsOp.bytes[0] >> 20), (long long)g_rsOp.calls[0], (long long)(g_rsOp.bytes[1] >> 20), (long long)g_rsOp.calls[1],
+        (long long)(g_rsOp.bytes[2] >> 20), (long long)g_rsOp.calls[2], (unsigned long long)g_rsOp.most, (unsigned long long)g_rsOp.chain[0],
+        (unsigned long long)g_rsOp.chain[1], (unsigned long long)g_rsOp.chain[2], (unsigned long long)g_rsOp.chain[3], g_rsOp.viewCount,
+        g_rsOp.viewCount ? views : "none in a scatter update");
 }
 static uint8_t RsGrow(uint8_t* vec, uint64_t n)
 {
@@ -1266,51 +1334,110 @@ static uint8_t RsGrow(uint8_t* vec, uint64_t n)
         for (USHORT i = 0; i < got && k < 4; i++)
             if ((uintptr_t)f[i] >= exe && (uintptr_t)f[i] < exe + 0x4000000u) x[k++] = (uintptr_t)f[i] - exe; /* the exe's frames, innermost first */
         if (k > 1 && x[0] == 0x954CD7u) who = x[1] == 0x213062u ? 0 : x[1] == 0x212565u ? 1 : 2;
-        InterlockedAdd64(&g_rsGrown[who], (LONG64)((n - cap) * 0xE0u)); InterlockedIncrement64(&g_rsGrowCalls[who]);
-        if (InterlockedIncrement(&g_rsGrowNotes) <= 64)
-            Note("scatter research: a node vector grows from %llu to %llu nodes (%llu MiB) by x+0x%llX < x+0x%llX < x+0x%llX < x+0x%llX (op 0x%02lX, record %ld)",
-                (unsigned long long)cap, (unsigned long long)n, (unsigned long long)(n * 0xE0u >> 20), (unsigned long long)x[0], (unsigned long long)x[1],
-                (unsigned long long)x[2], (unsigned long long)x[3], (long)g_genOp, (long)g_genRecord);
+        const LONG64 bytes = (LONG64)((n - cap) * 0xE0u);
+        InterlockedAdd64(&g_rsGrown[who], bytes); InterlockedIncrement64(&g_rsGrowCalls[who]);
+        struct { float nearZ, farZ; uint32_t projection; } v = {0, 0, 0};
+        const uint8_t* view = t_rsView;
+        const int known = view != NULL && !SafeRead((uintptr_t)view + 0x20, &v, sizeof v);
+        AcquireSRWLockExclusive(&g_rsLock);
+        const LONG64 key = (LONG64)g_world.levels << 32 | (uint32_t)g_genRecord;
+        if (g_rsOp.key != key)
+        {
+            RsOpLine();
+            memset(&g_rsOp, 0, sizeof g_rsOp);
+            g_rsOp.key = key; g_rsOp.op = g_genOp; g_rsOp.record = g_genRecord;
+            memcpy(g_rsOp.chain, x, sizeof x);
+        }
+        g_rsOp.bytes[who] += bytes; g_rsOp.calls[who]++;
+        if (n > g_rsOp.most) g_rsOp.most = n;
+        int at = 0;
+        while (known && at < g_rsOp.viewCount && g_rsOp.views[at] != (uintptr_t)view) at++;
+        if (known && at == g_rsOp.viewCount && at < 3)
+        {
+            g_rsOp.views[at] = (uintptr_t)view; g_rsOp.systems[at] = t_rsSys;
+            g_rsOp.nearFar[at][0] = v.nearZ; g_rsOp.nearFar[at][1] = v.farZ; g_rsOp.projection[at] = v.projection;
+            g_rsOp.viewCount++;
+        }
+        ReleaseSRWLockExclusive(&g_rsLock);
     }
     return g_rsGrow(vec, n);
 }
+/* Each level init: another world, other systems. The last record's line goes out first. */
+static void ScatterResearchLevel(void)
+{
+    AcquireSRWLockExclusive(&g_rsLock);
+    RsOpLine();
+    memset(&g_rsOp, 0, sizeof g_rsOp);
+    memset(g_rsSys, 0, sizeof g_rsSys);
+    ReleaseSRWLockExclusive(&g_rsLock);
+}
 /* At each memory note: the speedtree_plugin proxy ([exe+0x1A100D8]: live count +0x28, bytes +0x30, peak +0x40), the
  * container counters (exe+0x1939B60 bytes, +0x68 peak, +0x70 allocations, +0x78 frees), the growth by caller, and
- * each layer's node vector and cell size. */
-static void ScatterResearchLevel(void) { g_rsScatSys = 0; } /* each level init: another world, another system */
+ * each kept system's layers. A system that no longer reads whole is dropped with a line. */
 static void ScatterResearchNote(void)
 {
     const uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
     uintptr_t proxy = 0; uint64_t p[3] = {0}, k[4] = {0};
     if (!SafeRead(exe + 0x1A100D8u, &proxy, 8) && proxy) { SafeRead(proxy + 0x28, &p[0], 8); SafeRead(proxy + 0x30, &p[1], 8); SafeRead(proxy + 0x40, &p[2], 8); }
     SafeRead(exe + 0x1939B60u, k, sizeof k);
+    AcquireSRWLockExclusive(&g_rsLock);
+    RsOpLine();
     Note("scatter research: speedtree_plugin %llu live (%llu MiB, peak %llu MiB); containers %llu MiB (peak %llu MiB), %llu allocations, %llu frees; "
         "node vectors grown by the scatter update %lld MiB in %lld calls, by the tree culling %lld MiB in %lld, by others %lld MiB in %lld",
         (unsigned long long)p[0], (unsigned long long)(p[1] >> 20), (unsigned long long)(p[2] >> 20), (unsigned long long)(k[0] >> 20),
         (unsigned long long)(k[1] >> 20), (unsigned long long)k[2], (unsigned long long)k[3], (long long)(g_rsGrown[0] >> 20), (long long)g_rsGrowCalls[0],
         (long long)(g_rsGrown[1] >> 20), (long long)g_rsGrowCalls[1], (long long)(g_rsGrown[2] >> 20), (long long)g_rsGrowCalls[2]);
-    const uintptr_t sys = g_rsScatSys;
-    uintptr_t layers = 0; uint32_t count = 0;
-    if (sys == 0 || SafeRead(sys + 0x1C0, &layers, 8) || layers == 0 || SafeRead(sys + 0x1B8, &count, 4)) { Note("scatter research: no scatter system seen yet"); return; }
-    char line[640]; size_t at = 0; line[0] = 0;
-    for (uint32_t i = 0; i < count && i < 32; i++) /* eight layers a line: a note holds 1024 characters */
+    int any = 0;
+    for (int s = 0; s < RS_SYSTEMS; s++)
     {
-        uintptr_t tree = 0; uint64_t nodes = 0, cap = 0; float cell = 0;
-        if (SafeRead(layers + (uint64_t)i * 0x238u + 0x40, &tree, 8) || tree == 0 || SafeRead(tree + 0x90, &nodes, 8) || SafeRead(tree + 0x98, &cap, 8) ||
-            SafeRead(tree + 0x160, &cell, 4))
-            at += (size_t)snprintf(line + at, sizeof line - at, " %u: -;", i);
-        else
-            at += (size_t)snprintf(line + at, sizeof line - at, " %u: %llu/%llu (%llu MiB) %.1f m;", i, (unsigned long long)nodes, (unsigned long long)cap,
-                (unsigned long long)(cap * 0xE0u >> 20), (double)cell);
-        if (at >= sizeof line) at = sizeof line - 1;
-        if (i % 8 == 7 || i + 1 == count || i == 31)
+        const uintptr_t sys = g_rsSys[s];
+        uintptr_t layers = 0; uint32_t count = 0;
+        if (sys == 0) continue;
+        any = 1;
+        if (!RsSystemWhole(sys, &layers, &count))
         {
-            Note("scatter research: %u layers; nodes/capacity (node vector MiB) and cell size:%s", count, line);
-            at = 0; line[0] = 0;
+            Note("scatter research: scatter system %d (0x%llX) no longer reads whole; dropped", s, (unsigned long long)sys);
+            g_rsSys[s] = 0;
+            continue;
+        }
+        uint64_t nodes[64] = {0}, cap[64] = {0}, bytes = 0; float cell[64] = {0};
+        for (uint32_t i = 0; i < count; i++)
+        {
+            uintptr_t tree = 0;
+            SafeRead(layers + (uint64_t)i * 0x238u + 0x40, &tree, 8); SafeRead(tree + 0x90, &nodes[i], 8); SafeRead(tree + 0x98, &cap[i], 8); SafeRead(tree + 0x160, &cell[i], 4);
+            bytes += cap[i] * 0xE0u;
+        }
+        char line[640]; size_t at = 0; line[0] = 0;
+        for (uint32_t i = 0; i < count; i++) /* eight layers a line: a note holds 1024 characters */
+        {
+            at += (size_t)snprintf(line + at, sizeof line - at, " %u: %llu/%llu %.1f m;", i, (unsigned long long)nodes[i], (unsigned long long)cap[i], (double)cell[i]);
+            if (at >= sizeof line) at = sizeof line - 1;
+            if (i % 8 == 7 || i + 1 == count)
+            {
+                Note("scatter research: system %d (0x%llX), %u layers, node vectors %llu MiB; nodes/capacity and cell size:%s", s, (unsigned long long)sys, count,
+                    (unsigned long long)(bytes >> 20), line);
+                at = 0; line[0] = 0;
+            }
         }
     }
+    if (!any) Note("scatter research: no scatter system seen whole this level");
+    ReleaseSRWLockExclusive(&g_rsLock);
 }
 #endif
+/* the grow hook attributes growth to a view only inside the engine's update */
+static void TdScatterResearchBegin(void* a, const uint8_t* view)
+{
+#ifdef CO_RESEARCH
+    uintptr_t sys = 0;
+    t_rsSys = a != NULL && !SafeRead((uintptr_t)a, &sys, 8) ? sys : 0; t_rsView = view;
+#endif
+}
+static void TdScatterResearchDone(void)
+{
+#ifdef CO_RESEARCH
+    t_rsView = NULL; t_rsSys = 0;
+#endif
+}
 static void TdScatterUpdate(void* a, uint8_t* view, uint32_t c, uint8_t* layer, void* e, void* f, void* g, void* h)
 {
     const LONG skipOp = TdScatterSkipOp(view);
@@ -1328,11 +1455,13 @@ static void TdScatterUpdate(void* a, uint8_t* view, uint32_t c, uint8_t* layer, 
     }
     if (skipOp != 0)
     {
-        /* a level has two 0x0A records (about 104 and 159) and one 0x0B: a line for each, so a run shows which skipped */
+        /* a level has two 0x0A records (about 104 and 159), one 0x0B and one each of 0x43..0x45: a line for each, so a
+         * run shows which skipped */
         static volatile LONG64 noted = -1;
         const LONG64 key = (LONG64)g_world.levels << 32 | (uint32_t)g_genRecord;
         if (noted != key && InterlockedExchange64(&noted, key) != key)
-            Note("difficulty: extra large maps: the water camera's view is left out of the scatter update (op 0x%02lX, record %ld)", (long)skipOp, (long)g_genRecord);
+            Note("difficulty: extra large maps: the %s view is left out of the scatter update (op 0x%02lX, record %ld)",
+                skipOp >= 0x43 && skipOp <= 0x45 ? "fog volumes camera's" : "water camera's", (long)skipOp, (long)g_genRecord);
         InterlockedIncrement64(&g_tdScatSkipped);
         return;
     }
@@ -1348,8 +1477,10 @@ static void TdScatterUpdate(void* a, uint8_t* view, uint32_t c, uint8_t* layer, 
             return;
         }
     }
-    if (!TerrainDiagOn()) { g_tdScatterUpdate(a, view, c, layer, e, f, g, h); return; }
+    TdScatterResearchBegin(a, view);
+    if (!TerrainDiagOn()) { g_tdScatterUpdate(a, view, c, layer, e, f, g, h); TdScatterResearchDone(); return; }
     g_tdScatterUpdate(a, view, c, layer, e, f, g, h);
+    TdScatterResearchDone();
     InterlockedIncrement64(&g_tdScatUpdates);
     int slot = 0;
     for (; slot < 24; slot++)
@@ -1451,16 +1582,23 @@ static void ScatterBakeInstall(void)
     uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
     if (!ApiCodeMatches(exe + 0x212F10u, "48 89 5C 24 18 55 56 57 41 55 41 56 48 8D AC 24 E0 CB FF"))
     {
-        Note("difficulty: extra large maps: the engine's scatter update is not the reviewed one; the far-scatter bake keeps its grass, the water view its scatter (and no scatter cache figures)");
+        Note("difficulty: extra large maps: the engine's scatter update is not the reviewed one; the far-scatter bake keeps its grass, the water and fog views their scatter (and no scatter cache figures)");
         g_tdScatHooked = -1;
         return;
     }
     /* the camera message that sets view +0x20 near, +0x24 far and +0x28 projection, which the cut reads */
     g_tdScatCameraPinned = ApiCodeMatches(exe + 0x4D0F6Au, "F2 41 0F 10 40 08 F2 0F 11 41 20 41 8B 40 10 89 41 28");
     if (!g_tdScatCameraPinned) Note("difficulty: extra large maps: the render camera's layout is not the reviewed one; the load-time scatter views keep their scatter");
-    if (LoaderHook("extra large maps' load-time scatter views (bake and water camera)", exe + 0x212F10u, (void*)TdScatterUpdate, (void**)&g_tdScatterUpdate) == 0) g_tdScatHooked = 1;
+    if (LoaderHook("extra large maps' load-time scatter views (bake, water and fog cameras)", exe + 0x212F10u, (void*)TdScatterUpdate, (void**)&g_tdScatterUpdate) == 0) g_tdScatHooked = 1;
     else g_tdScatHooked = -1;
 #ifdef CO_RESEARCH
+    /* the system's constructor stores its vtable (lea rax, [exe+0x1673E48]; mov dword [rcx+8], 0x11), and the job reads
+     * the system, first layer and count from its copy as RsTakeSystem does */
+    if (ApiCodeMatches(exe + 0x2102DAu, "48 8D 05 67 3B 46 01 C7 41 08 11 00 00 00") &&
+        ApiCodeMatches(exe + 0x210D8Eu, "8B 91 F8 00 00 00 44 8B 81 F4 00 00 00 48 8B 31"))
+        g_rsVtable = exe + 0x1673E48u;
+    else
+        Note("scatter research: the scatter system's constructor or job is not the reviewed one; no system figures");
     if (ApiCodeMatches(exe + 0x218860u, "40 55 41 55 48 83 EC 38 80 79 28 00 4C 8B EA 48 8B 41 18"))
         LoaderHook("scatter research's node vector growth", exe + 0x218860u, (void*)RsGrow, (void**)&g_rsGrow);
     else
