@@ -522,6 +522,31 @@ uint64_t CoXlTestLayerField(uint64_t unit, uint64_t field) { return NearLayerFie
 int CoXlTestLayerHeight(uint64_t desc, float x, float y, float* h) { return NearLayerHeight(desc, x, y, h); }
 int CoXlTestLayerWhy(uint64_t unit, uint64_t field, int* slot) { int why; NearLayerFieldWhy(unit, field, slot, &why); return why; }
 float CoXlTestTraceGridAt(int slot, float x, float y) { return NearTraceGridAt(slot, x, y); }
+/* The layer spawn (exe 0xDBEC0) and 0xDFA60 on the fake game: the descriptor each passes on to the engine's own. */
+static uint64_t g_testPassed;
+static uint64_t TestLayerSpawnOrig(uint64_t unit, uint64_t list, uint64_t count, uint64_t field) { (void)unit; (void)list; (void)count; g_testPassed = field; return 0x5A; }
+static uint64_t TestLayerSnapOrig(uint64_t a, uint64_t b, uint64_t c, uint64_t field, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
+{ (void)a; (void)b; (void)c; (void)e; (void)f; (void)g; (void)h; g_testPassed = field; return 0x5B; }
+uint64_t CoXlTestLayerSpawn(uint64_t unit, uint64_t count, uint64_t field)
+{
+    LayerSpawnFn keep = g_layerSpawn;
+    g_layerSpawn = TestLayerSpawnOrig; g_testPassed = 0xDEAD;
+    uint64_t r = WorldLayerSpawn(unit, 0x77, count, field);
+    g_layerSpawn = keep;
+    return r == 0x5A ? g_testPassed : 0xBAD;
+}
+uint64_t CoXlTestLayerSnap(uint64_t unit, uint64_t field)
+{
+    WorldSpawnFn keep = g_layerSnap;
+    g_layerSnap = TestLayerSnapOrig; g_testPassed = 0xDEAD;
+    uint64_t r = WorldLayerSnap(unit, 1, 2, field, 5, 6, 7, 8);
+    g_layerSnap = keep;
+    return r == 0x5B ? g_testPassed : 0xBAD;
+}
+void CoXlTestLayerSpawnInstall(uintptr_t exe) { g_layerSpawn = NULL; WorldLayerSpawnInstall(exe); }
+uintptr_t CoXlTestLayerSpawnDetour(void) { return (uintptr_t)WorldLayerSpawn; }
+uintptr_t CoXlTestLayerSpawnOriginal(void) { return (uintptr_t)g_layerSpawn; }
+const float* CoXlTestHeightCopy(void) { return g_heightCopy; }
 void CoXlTestProbePlayer(int count, float x, float y)
 {
     g_stream.playerCount = count; g_streamPlayerAt[0][0] = x; g_streamPlayerAt[0][1] = y;

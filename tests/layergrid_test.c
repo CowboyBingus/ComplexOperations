@@ -37,6 +37,12 @@ float CoXlTestTraceGridAt(int slot, float x, float y);
 void CoXlTestProbePlayer(int count, float x, float y);
 void CoXlTestProbe(char kind, float x, float y, float used, int why);
 void CoXlTestProbeCounts(long* reads, long* off, long* written);
+uint64_t CoXlTestLayerSpawn(uint64_t unit, uint64_t count, uint64_t field);
+uint64_t CoXlTestLayerSnap(uint64_t unit, uint64_t field);
+void CoXlTestLayerSpawnInstall(uintptr_t exe);
+uintptr_t CoXlTestLayerSpawnDetour(void);
+uintptr_t CoXlTestLayerSpawnOriginal(void);
+const float* CoXlTestHeightCopy(void);
 
 static int g_failed;
 static const char* g_case;
@@ -89,6 +95,49 @@ static float Read(uint64_t desc, float x, float y)
 }
 
 static int Near(float a, float b) { return a > b - 0.05f && a < b + 0.05f; }
+
+/* A stamp's level unit for the layer spawn (exe 0xDBEC0): place +0x50, its SpeedTree groups +0x3D0, resource +0x10
+ * whose particle effects are counted at +0x48. */
+static uint8_t g_spawnUnit[0x400], g_spawnRes[0x100];
+static uint64_t SpawnUnit(float x, float y, uint32_t trees, uint32_t effects)
+{
+    memset(g_spawnUnit, 0, sizeof g_spawnUnit); memset(g_spawnRes, 0, sizeof g_spawnRes);
+    float at[2] = {x, y};
+    uint64_t res = (uint64_t)(uintptr_t)g_spawnRes;
+    memcpy(g_spawnUnit + 0x50, at, 8); memcpy(g_spawnUnit + 0x3D0, &trees, 4); memcpy(g_spawnUnit + 0x10, &res, 8); memcpy(g_spawnRes + 0x48, &effects, 4);
+    return (uint64_t)(uintptr_t)g_spawnUnit;
+}
+
+/* Hex bytes written into the fake engine image at rva. */
+static void Bytes(uint8_t* exe, uint32_t rva, const char* hex)
+{
+    for (const char* c = hex; *c;)
+    {
+        if (*c == ' ') { c++; continue; }
+        unsigned v = 0; sscanf(c, "%2x", &v); exe[rva++] = (uint8_t)v; c += 2;
+    }
+}
+static void SpawnPins(uint8_t* exe)
+{
+    Bytes(exe, 0xDBEC0u, "45 85 C0 0F 84 B4 23 00 00 48 8B C4 4C 89 48 20");
+    Bytes(exe, 0xDBEE2u, "48 8D A8 C8 F5 FF FF");
+    Bytes(exe, 0xDC47Au, "48 8B 85 58 0A 00 00");
+    Bytes(exe, 0xDD871u, "48 8B 95 58 0A 00 00");
+    Bytes(exe, 0x20BFD3u, "48 8B 8D C8 0A 00 00 48 89 8D A0 00 00 00");
+    Bytes(exe, 0x32E63Au, "E8 81 D8 DA FF 48 83 C4 58 C3");
+    Bytes(exe, 0x32E69Au, "E8 21 D8 DA FF 48 83 C4 58 C3");
+}
+/* Where the call at rva now goes: through a `jmp [rip+0]` stub, its target; else the call's own target. */
+static uintptr_t CallGoesTo(const uint8_t* exe, uint32_t rva)
+{
+    int32_t rel; memcpy(&rel, exe + rva + 1, 4);
+    const uint8_t* to = exe + rva + 5 + rel;
+    if (exe[rva] != 0xE8) return 0;
+    if (to >= exe && to < exe + FAKE_EXE_SIZE) return (uintptr_t)to;
+    if (to[0] != 0xFF || to[1] != 0x25 || to[2] || to[3] || to[4] || to[5]) return 0;
+    uint64_t target; memcpy(&target, to + 6, 8);
+    return (uintptr_t)target;
+}
 
 static uint8_t* g_lg;
 static void Start(const char* name)
@@ -349,6 +398,54 @@ int main(void)
     memcpy(g_levelDesc + 0x14, wide, 8); /* not the level's extent */
     at[0] = 2100.0f; memcpy(g_unit + 0x50, at, 8);
     CHECK(CoXlTestLayerWhy((uint64_t)(uintptr_t)g_unit, (uint64_t)(uintptr_t)g_levelDesc, &slot) == 3);
+
+    Start("a stamp's layer spawn by a tile hands its grid to every member, SpeedTree and particles included");
+    a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);
+    CoXlTestLayerTile(a, 1, AX, AY);
+    for (int k = 0; k < 4; k++) g_levelData[k] = 52.0f; /* the level's heights: 7 m over the tile, as at the user's drop */
+    CoXlTestHeightKept(g_levelData, 2, 2, 16384.0f);
+    CoXlTestProbePlayer(1, 2120.0f, AY);
+    uint64_t level = (uint64_t)(uintptr_t)g_levelDesc;
+    uint64_t given = CoXlTestLayerSpawn(SpawnUnit(2100.0f, AY, 2, 1), 3, level);
+    CHECK(given != level && given == Field(2100.0f, AY));
+    CHECK(Near(Read(given, 2600.0f, AY), 45.0f) && Near(Read(given, 1900.0f, AY), 40.0f)); /* what an inline read there takes */
+    CHECK(fake_host_logged("layer spawns (the first): 1 on a tile's grid for every member (1 with SpeedTree, 1 with particle effects); "
+        "1 within 300 m of a player, where the level's heights were 6.99 m off the drawn ground on average, 6.99 m at most"));
+    CHECK(CoXlTestLayerSpawn(SpawnUnit(1126.0f, AY, 2, 1), 3, level) == level);  /* no tile within reach: the level's own */
+    CHECK(CoXlTestLayerSpawn(SpawnUnit(2100.0f, AY, 0, 0), 3, 0) == 0);          /* no heightfield (0xDAEC8, 0xDB4F3) */
+    CHECK(CoXlTestLayerSpawn(SpawnUnit(2100.0f, AY, 0, 0), 3, given) == given);  /* a grid already: kept */
+    CHECK(CoXlTestLayerSpawn(SpawnUnit(2100.0f, AY, 0, 0), 0, level) == level);  /* no members: the engine returns at once */
+    CHECK(CoXlTestLayerSpawn(SpawnUnit(2600.0f, AY, 3, 0), 3, level) == given);  /* counted: SpeedTree, no particles */
+    CoXlTestLayerTile(a, 1, AX, AY);
+    CHECK(fake_host_logged("layer spawns (a tile came in): 2 on a tile's grid for every member (2 with SpeedTree, 1 with particle effects)"));
+
+    g_case = "0xDFA60 after the spawn keeps the grid it is given and never keeps it as the level's heightfield";
+    int slot2 = -2;
+    CHECK(CoXlTestLayerSnap(SpawnUnit(2100.0f, AY, 0, 0), given) == given);
+    CHECK(CoXlTestHeightCopy() == g_levelData);
+    CHECK(CoXlTestLayerWhy((uint64_t)(uintptr_t)g_spawnUnit, given, &slot2) == 0 && slot2 == a);
+    CHECK(CoXlTestLayerSnap(SpawnUnit(2100.0f, AY, 0, 0), level) == Field(2100.0f, AY)); /* a placed-unit call on its own still gets the grid */
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestProbePlayer(0, 0.0f, 0.0f);
+
+    Start("the layer spawn's two callers with a heightfield go through it, only on the reviewed code");
+    uint8_t* exe = fake_host_exe();
+    DWORD old;
+    VirtualProtect(exe, FAKE_EXE_SIZE, PAGE_EXECUTE_READWRITE, &old);
+    g_fake.strictCode = 1;
+    SpawnPins(exe);
+    CoXlTestLayerSpawnInstall((uintptr_t)exe);
+    CHECK(CoXlTestLayerSpawnOriginal() == (uintptr_t)exe + 0xDBEC0u);
+    CHECK(CallGoesTo(exe, 0x32E63Au) == CoXlTestLayerSpawnDetour() && CallGoesTo(exe, 0x32E69Au) == CoXlTestLayerSpawnDetour());
+    CHECK(fake_host_logged("a stamp layer by a tile spawns on its grid for every member"));
+    exe = fake_host_exe();
+    SpawnPins(exe);
+    exe[0xDC47Au + 3] = 0x50; /* SpeedTree's descriptor from another slot: not the reviewed code */
+    CoXlTestLayerSpawnInstall((uintptr_t)exe);
+    CHECK(CoXlTestLayerSpawnOriginal() == 0);
+    CHECK(CallGoesTo(exe, 0x32E63Au) == (uintptr_t)exe + 0xDBEC0u && CallGoesTo(exe, 0x32E69Au) == (uintptr_t)exe + 0xDBEC0u);
+    CHECK(fake_host_logged("the layer spawn is not the reviewed code"));
+    g_fake.strictCode = 0;
 
     Start("every build logs the layer reads near a player, each one off the ground as drawn, within a line budget");
     a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);

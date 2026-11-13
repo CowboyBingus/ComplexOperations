@@ -5308,7 +5308,11 @@ static uint64_t NearLayerFieldWhy(uint64_t unit, uint64_t field, int* slot, int*
 static int NearLayerHeightWhy(uint64_t desc, float x, float y, float* height, int* why);
 static void NearLayerTrace(char kind, uint32_t caller, float x, float y, float z, int result, int why, float used);
 static void NearLayerTraceSnap(uint64_t unit, int slot, int why);
-static uint64_t WorldLayerSnap(uint64_t a, uint64_t b, uint64_t c, uint64_t field, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
+static int NearLayerIsGrid(uint64_t desc);
+static uint64_t NearLayerSpawnField(uint64_t unit, uint64_t field);
+/* The level's descriptor at `field`: its data kept from generation, or the kept copy lent to a stack copy whose data the
+ * level has freed. A tile's grid is not the level's and is never kept. */
+static void WorldLayerKeep(uint64_t field)
 {
     uint8_t now[0x28];
     if (field != 0 && !SafeRead(field, now, sizeof now))
@@ -5336,10 +5340,71 @@ static uint64_t WorldLayerSnap(uint64_t a, uint64_t b, uint64_t c, uint64_t fiel
             if (InterlockedIncrement(&g_heightLent) <= 3) Note("difficulty: extra large maps: lent the kept heightfield to a layer spawn");
         }
     }
+}
+
+static uint64_t WorldLayerSnap(uint64_t a, uint64_t b, uint64_t c, uint64_t field, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
+{
+    if (!NearLayerIsGrid(field)) WorldLayerKeep(field);
     int slot, why;
     uint64_t tile = NearLayerFieldWhy(a, field, &slot, &why); /* a stamp on or near a tile: its 1 m grid (a = the stamp's level unit) */
     NearLayerTraceSnap(a, slot, why);
     return g_layerSnap(a, b, c, tile != 0 ? tile : field, e, f, g, h);
+}
+
+/* The layer spawn exe 0xDBEC0 (rcx the stamp's level unit, rdx/r8d its index list, r9 the heightfield, homed at
+ * [rbp+0xA58]) hands that descriptor on unchanged to inline reads besides 0xDFA60's: SpeedTree (0x20BC80's 8th
+ * argument, read at 0x20CAA9 for instances not aligned to the ground) and particle effects (0xE7D00, read at 0xE8689).
+ * Neither goes through 0xD5B10, so a stamp by a tile gets its grid here, for every member. */
+typedef uint64_t (*LayerSpawnFn)(uint64_t unit, uint64_t list, uint64_t count, uint64_t field);
+static LayerSpawnFn g_layerSpawn;
+static uint64_t WorldLayerSpawn(uint64_t unit, uint64_t list, uint64_t count, uint64_t field)
+{
+    if (field != 0 && (uint32_t)count != 0 && !NearLayerIsGrid(field))
+    {
+        WorldLayerKeep(field);
+        uint64_t grid = NearLayerSpawnField(unit, field);
+        if (grid != 0) field = grid;
+    }
+    return g_layerSpawn(unit, list, count, field);
+}
+
+/* 0xDBEC0's callers with a heightfield: 0x32E5F0 and 0x32E650 build it on their stack ([rsp+0x20], r9) and call it;
+ * the others pass none (0xDAEC8, 0xDB4F3, 0x32E6B0). Their calls go through a jump to WorldLayerSpawn. */
+static const struct { uint32_t site; const char* pin; } kLayerSpawnCalls[2] = {
+    {0x32E63Au, "E8 81 D8 DA FF 48 83 C4 58 C3"}, {0x32E69Au, "E8 21 D8 DA FF 48 83 C4 58 C3"}};
+static void WorldLayerSpawnInstall(uintptr_t exe)
+{
+    if (g_layerSpawn != NULL) return;
+    int pinned = ApiCodeMatches(exe + 0xDBEC0u, "45 85 C0 0F 84 B4 23 00 00 48 8B C4 4C 89 48 20") &&
+        ApiCodeMatches(exe + 0xDBEE2u, "48 8D A8 C8 F5 FF FF") && ApiCodeMatches(exe + 0xDC47Au, "48 8B 85 58 0A 00 00") &&
+        ApiCodeMatches(exe + 0xDD871u, "48 8B 95 58 0A 00 00") && ApiCodeMatches(exe + 0x20BFD3u, "48 8B 8D C8 0A 00 00 48 89 8D A0 00 00 00");
+    for (int i = 0; i < 2; i++) pinned = pinned && ApiCodeMatches(exe + kLayerSpawnCalls[i].site, kLayerSpawnCalls[i].pin);
+    if (!pinned) { Note("difficulty: extra large maps: the layer spawn is not the reviewed code; SpeedTree and particles by a tile keep the level's heights"); return; }
+    uint8_t* stub = AllocateNearGame(exe, 0x1000);
+    if (stub == NULL) { Note("difficulty: extra large maps: no room near the exe for the layer spawn's jump"); return; }
+    for (int i = 0; i < 2; i++)
+    {
+        intptr_t reach = (intptr_t)stub - (intptr_t)(exe + kLayerSpawnCalls[i].site + 5);
+        if (reach != (intptr_t)(int32_t)reach) { Note("difficulty: extra large maps: the layer spawn's jump is out of reach"); return; }
+    }
+    uint8_t code[14] = {0xFF, 0x25, 0, 0, 0, 0}; /* jmp [rip+0] WorldLayerSpawn */
+    uint64_t to = (uint64_t)(uintptr_t)WorldLayerSpawn;
+    memcpy(code + 6, &to, 8);
+    memcpy(stub, code, sizeof code);
+    DWORD old = 0;
+    if (!VirtualProtect(stub, 0x1000, PAGE_EXECUTE_READ, &old)) { Note("difficulty: extra large maps: the layer spawn's jump is not executable"); return; }
+    g_layerSpawn = (LayerSpawnFn)(exe + 0xDBEC0u);
+    MemoryBarrier();
+    for (int i = 0; i < 2; i++)
+    {
+        uintptr_t site = exe + kLayerSpawnCalls[i].site;
+        int32_t rel = (int32_t)((intptr_t)stub - (intptr_t)(site + 5));
+        if (!VirtualProtect((void*)site, 5, PAGE_EXECUTE_READWRITE, &old)) continue;
+        *(volatile int32_t*)(site + 1) = rel;
+        VirtualProtect((void*)site, 5, old, &old);
+        FlushInstructionCache(GetCurrentProcess(), (void*)site, 5);
+    }
+    Note("difficulty: extra large maps: a stamp layer by a tile spawns on its grid for every member (placed units, SpeedTree, particles)");
 }
 
 /* The engine's other height sampler (exe 0xD5B10: rcx the address of the descriptor pointer, x/y in xmm1/xmm2; it reads
@@ -6474,6 +6539,7 @@ static const char* InstallWorld(DifficultyInstall* d)
         LoaderHook("extra large maps' layer heightfield diagnostic", exe + 0xDFA60u, (void*)WorldLayerSnap, (void**)&g_layerSnap);
     if (ApiCodeMatches(exe + 0xD5B10u, kLayerSamplePin))
         LoaderHook("extra large maps' layer height sampler", exe + 0xD5B10u, (void*)WorldLayerSample, (void**)&g_layerSample);
+    WorldLayerSpawnInstall(exe);
     for (int i = 0; i < 4; i++)
         if (ApiCodeMatches(exe + kSpawners[i].rva, kSpawners[i].pin))
             LoaderHook("extra large maps' spawn diagnostic", exe + kSpawners[i].rva, kSpawnDetours[i], (void**)&g_worldSpawn[i]);
