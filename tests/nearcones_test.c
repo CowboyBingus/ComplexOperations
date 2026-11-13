@@ -16,6 +16,9 @@ void CoXlTestNearRecordEdit(uint8_t op, uint8_t* one);
 uintptr_t CoXlTestNearNoCells(void);
 void CoXlTestNearPeaks(const float* heights, float cx, float cy, int* narrow, int* wide, float* top, float* x, float* y);
 float CoXlTestNearNodeHeight(const float* heights, float cx, float cy, int i, int j);
+float CoXlTestNearCellLerp(const float* delta, int i, int j, float c, float r);
+float CoXlTestNearCellMiss(const float* ring, const float* delta, int i, int j);
+float CoXlTestNearTexelMiss(void);
 
 static int g_failed;
 static const char* g_case;
@@ -63,6 +66,8 @@ static int g_narrow, g_wide;
 static float g_top, g_x, g_y;
 static void Count(void) { CoXlTestNearPeaks(g_h, 100.0f, -200.0f, &g_narrow, &g_wide, &g_top, &g_x, &g_y); }
 static float Node(int i, int j) { return CoXlTestNearNodeHeight(g_h, 100.0f, -200.0f, i, j); }
+static float Lerp(const float* d, float c, float r) { return CoXlTestNearCellLerp(d, (int)(c / 4 >= 1023 ? 1023 : c / 4), (int)(r / 4 >= 1023 ? 1023 : r / 4), c, r); }
+static float Miss(const float* ring, const float* d, int i, int j) { return CoXlTestNearCellMiss(ring, d, i, j); }
 static void Pit(int r, int c) { g_h[(size_t)r * N + c] -= 3.0f / 1000.0f; }
 static float X(int c) { return 100.0f - 1152.0f + T / 2 + T * (float)c; }
 static float Y(int r) { return -200.0f + 1152.0f - T / 2 - T * (float)r; }
@@ -194,6 +199,62 @@ int main(void)
     Flat(0.0f); Pit(2048, 244); CHECK(fabsf(Node(61, 512) + 3.0f) < 1e-4f); /* the strip's last cells: 53-60 */
     Flat(0.0f); Pit(244, 2048); CHECK(fabsf(Node(512, 61) + 3.0f) < 1e-4f);
     Flat(0.0f); Pit(2048, 248); CHECK(fabsf(Node(62, 512) + 3.0f / 16) < 1e-4f);
+
+    /* Cells a texel a cell: where the target is the coarse surface (0 m here) the change is -T at every texel. */
+    float* ring = (float*)malloc((size_t)N * N * sizeof(float));
+    float* delta = (float*)calloc((size_t)1025 * 1025, sizeof(float));
+    if (ring == NULL || delta == NULL) { printf("nearcones: no memory\n"); return 1; }
+
+    Start("a cell's triangles: (i, j) (i + 1, j) (i + 1, j + 1) and (i, j) (i + 1, j + 1) (i, j + 1)", 1);
+    delta[512 * 1025 + 512] = 1.0f; delta[512 * 1025 + 513] = 2.0f; delta[513 * 1025 + 513] = 4.0f; delta[513 * 1025 + 512] = 8.0f;
+    CHECK(Lerp(delta, 2048, 2048) == 1.0f && Lerp(delta, 2052, 2048) == 2.0f && Lerp(delta, 2052, 2052) == 4.0f && Lerp(delta, 2048, 2052) == 8.0f);
+    CHECK(fabsf(Lerp(delta, 2051, 2049) - (1.0f + 0.75f * 1.0f + 0.25f * 2.0f)) < 1e-5f); /* x >= y: the first triangle */
+    CHECK(fabsf(Lerp(delta, 2049, 2051) - (1.0f + 0.25f * -4.0f + 0.75f * 7.0f)) < 1e-5f);
+    CHECK(fabsf(Lerp(delta, 2050, 2050) - 2.5f) < 1e-5f); /* the diagonal: (1 + 4) / 2 */
+    memset(delta, 0, (size_t)1025 * 1025 * sizeof(float));
+
+    Start("flat ground and slopes: the triangles are H - T", 1);
+    for (size_t k = 0; k < (size_t)N * N; k++) ring[k] = 2.0f;
+    for (int k = 0; k < 1025 * 1025; k++) delta[k] = 2.0f;
+    CHECK(Miss(ring, delta, 512, 512) < 1e-6f && Miss(ring, delta, 0, 0) < 1e-6f && Miss(ring, delta, 1023, 1023) < 1e-6f);
+    for (int r = 0; r < N; r++) for (int c = 0; c < N; c++) ring[(size_t)r * N + c] = 0.01f * (float)c - 0.02f * (float)r;
+    for (int j = 1; j < 1024; j++) for (int i = 1; i < 1024; i++) delta[j * 1025 + i] = 0.04f * (float)i - 0.08f * (float)j;
+    CHECK(Miss(ring, delta, 300, 700) < 1e-3f);
+    ring[(size_t)2801 * N + 1202] += 0.3f; CHECK(Miss(ring, delta, 300, 700) > 0.29f && Miss(ring, delta, 301, 700) < 1e-3f);
+    ring[(size_t)2801 * N + 1202] -= 0.3f; ring[(size_t)2804 * N + 1204] += 0.3f; /* a corner texel: all four cells */
+    CHECK(Miss(ring, delta, 300, 700) > 0.29f && Miss(ring, delta, 301, 700) > 0.29f && Miss(ring, delta, 300, 701) > 0.29f && Miss(ring, delta, 301, 701) > 0.29f);
+    ring[(size_t)2804 * N + 1204] = 1e6f; CHECK(Miss(ring, delta, 300, 700) < 1000.0f); /* as drawn: within 480 m */
+
+    Start("a crater wider than a cell under the coarse surface: no rim spike", 1);
+    Flat(0.0f);
+    for (int j = -7; j <= 7; j++)
+        for (int i = -7; i <= 7; i++)
+        {
+            float d = sqrtf((float)(i * i + j * j));
+            g_h[(size_t)(2050 + j) * N + 2050 + i] += (d < 4.0f ? -3.0f : d < 6.0f ? 2.0f : 0.0f) / 1000.0f;
+        }
+    for (size_t k = 0; k < (size_t)N * N; k++) ring[k] = -(g_h[k] * 1000.0f - 500.0f);
+    for (int j = 505; j <= 519; j++) for (int i = 505; i <= 519; i++) delta[j * 1025 + i] = -Node(i, j);
+    float nodes = 0, texels = 0;
+    int per = 0;
+    for (int j = 506; j < 518; j++)
+        for (int i = 506; i < 518; i++)
+        {
+            int flag = Miss(ring, delta, i, j) > CoXlTestNearTexelMiss();
+            per += flag;
+            for (int r = 4 * j; r <= 4 * j + 4; r++)
+                for (int c = 4 * i; c <= 4 * i + 4; c++)
+                {
+                    float t = g_h[(size_t)r * N + c] * 1000.0f - 500.0f, lerp = t + Lerp(delta, (float)c, (float)r);
+                    float drawn = flag ? t + ring[(size_t)r * N + c] : lerp;
+                    if (fabsf(lerp) > nodes) nodes = fabsf(lerp);
+                    if (fabsf(drawn) > texels) texels = fabsf(drawn);
+                }
+        }
+    CHECK(nodes > 1.0f);                                 /* the triangles alone: the rim stands out */
+    CHECK(texels <= CoXlTestNearTexelMiss() + 1e-4f);   /* a texel a cell where they miss: the coarse surface */
+    CHECK(per > 0 && per < 30);
+    free(ring); free(delta);
 
     free(g_h);
     if (g_failed) { printf("nearcones: %d check(s) failed\n", g_failed); return 1; }

@@ -491,6 +491,10 @@ void CoXlTestNearPeaks(const float* heights, float cx, float cy, int* narrow, in
     NearPeaks p; NearPeaksCount(heights, &p);
     *narrow = p.narrow; *wide = p.wide; *top = p.top; *x = p.topX; *y = p.topY;
 }
+/* A conform cell's change from its triangles at texel (c, r), and how far they miss H - T (NearCellLerp, NearCellMiss). */
+float CoXlTestNearCellLerp(const float* delta, int i, int j, float c, float r) { return NearCellLerp(delta, i, j, c, r); }
+float CoXlTestNearCellMiss(const float* ring, const float* delta, int i, int j) { return NearCellMiss(ring, delta, i, j); }
+float CoXlTestNearTexelMiss(void) { return NEAR_TEXEL_MISS; }
 /* A conform grid node's tile height (NearNodeHeight) on a tile centred on (cx, cy). */
 float CoXlTestNearNodeHeight(const float* heights, float cx, float cy, int i, int j)
 {
