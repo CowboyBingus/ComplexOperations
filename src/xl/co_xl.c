@@ -83,6 +83,7 @@ static double HitchNow(void)
 #include "proto/difficulty_world_move.c"
 #include "proto/difficulty_world_fargrass.c"
 #include "proto/xl_free.c"
+#include "proto/difficulty_world_fargrass_ground.c"
 #include "proto/living_world.c"
 #include "proto/difficulty_tacmap.c"
 #include "proto/test_daylight.c"
@@ -784,6 +785,22 @@ void CoXlTestFgFrames(const float* ms, int n, double* worst, double* mean)
 }
 int CoXlTestScatterBake(void) { return g_scatterTestBake; } /* the far-grass bake mark the engine's update ran under */
 void CoXlTestScatLimits(int bake, int* budget, uint64_t* most) { NearScatLimits(bake, budget, most); }
+void CoXlTestScatClear(void) { memset(g_scatCache, 0, sizeof g_scatCache); }
+void CoXlTestScatStore(float size, float half, int32_t ix, int32_t iy, float lo, float hi)
+{
+    uint32_t s, h; memcpy(&s, &size, 4); memcpy(&h, &half, 4);
+    NearScatStore(s, h, ix, iy, lo, hi);
+}
+int CoXlTestScatFind(float size, float half, int32_t ix, int32_t iy, float* lo, float* hi)
+{
+    uint32_t s, h; memcpy(&s, &size, 4); memcpy(&h, &half, 4);
+    return NearScatFind(s, h, ix, iy, lo, hi);
+}
+uint32_t CoXlTestScatSlot(float size, float half, int32_t ix, int32_t iy)
+{
+    uint32_t s, h; memcpy(&s, &size, 4); memcpy(&h, &half, 4);
+    return NearScatSlot(s, h, ix, iy);
+}
 int CoXlTestScatterUpdate(LONG op, LONG record, uint8_t* view)
 {
     g_genOp = op; g_genRecord = record; g_tdScatCameraPinned = 1;
@@ -894,6 +911,17 @@ void CoXlTestFgInstall(void* aim, void* generate) { g_fg.installed = 1; g_fg.aim
 void CoXlTestFgKeep(uint64_t record, uint32_t op) { FarGrassKeep(record, op); }
 uint64_t CoXlTestFgTex(int k) { return g_fg.tex[k]; }
 void CoXlTestFgTick(uint64_t level) { FarGrassTick(level); }
+/* The far-grass ground heights' job: a coarse grid over the world and, with tiles 1, one tile at (tx, ty). */
+void CoXlTestFgGroundJob(const uint16_t* coarse, uint32_t cn, float csize, const uint16_t* tile, uint32_t tn, float tsize, float tx, float ty, int tiles)
+{
+    FgGroundJob* j = &g_fgGround.job;
+    memset(j, 0, sizeof *j);
+    j->coarse.v = coarse; j->coarse.n = cn; j->coarse.size = csize;
+    j->tiles[0].ground.v = tile; j->tiles[0].ground.n = tn; j->tiles[0].ground.size = tsize; j->tiles[0].ground.cx = tx; j->tiles[0].ground.cy = ty;
+    j->tiles[0].centre[0] = tx; j->tiles[0].centre[1] = ty; j->count = tiles;
+}
+float CoXlTestFgGroundAt(float x, float y) { return FgGroundAt(&g_fgGround.job, x, y); }
+void CoXlTestFgGroundRows(uint16_t* out, int r0, int r1) { g_fgGround.job.out = out; FgGroundRows(&g_fgGround.job, r0, r1); }
 int CoXlTestFgBusy(void) { return FarGrassBusy(); }
 int CoXlTestFgSetting(void) { return g_fg.setting; }
 uint32_t CoXlTestFgBaked(void) { return g_fg.baked; }
