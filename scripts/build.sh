@@ -198,15 +198,40 @@ elif $test_mode; then
     mkdir -p -- "$out"
     mapfile -t harness < <(find "$root/tests/harness" -maxdepth 1 -type f -name '*.c' -print | sort)
 
-    # One test case: its id, its test file, and every src and harness source. Built with -DCO_TEST, run in build/tests.
+    test_flags=(-std=c11 -target x86_64-windows-gnu -O2 -g -Wall -Werror -Wno-unused-parameter -DCO_TEST
+        "${defines[@]}" "${includes[@]}" -I "$root/tests")
+
+    # The src and harness sources compile once per run, in parallel, and every test links the same objects: co_xl.c
+    # alone takes ~8 s, and compiling it into each of ~70 tests made a suite after any change take ~10 minutes.
+    objdir=$out/obj
+    rm -rf -- "$objdir"
+    mkdir -p -- "$objdir"
+    units=("${sources[@]}" "${harness[@]}")
+    objects=()
+    pids=()
+    for unit in "${units[@]}"; do
+        rel=${unit#"$root"/}
+        object=$objdir/${rel//\//_}.o
+        objects+=("$object")
+        "$zig" cc "${test_flags[@]}" -c "$unit" -o "$object" &
+        pids+=($!)
+    done
+    objects_failed=0
+    for pid in "${pids[@]}"; do
+        wait "$pid" || objects_failed=1
+    done
+    if ((objects_failed != 0)); then
+        echo 'The sources did not compile for the tests.' >&2
+        exit 1
+    fi
+
+    # One test case: its id, its test file and the objects above. Built with -DCO_TEST, run in build/tests.
     failed=0
     run_case() {
         local id=$1
         local test_file=$2
         local exe=$out/${id}_test.exe
-        if ! "$zig" cc -std=c11 -target x86_64-windows-gnu -O2 -g -Wall -Werror -Wno-unused-parameter -DCO_TEST \
-            "${defines[@]}" "${includes[@]}" -I "$root/tests" \
-            "$test_file" "${sources[@]}" "${harness[@]}" -o "$exe"; then
+        if ! "$zig" cc "${test_flags[@]}" "$test_file" "${objects[@]}" -o "$exe"; then
             printf '%s: did not compile\n' "$id"
             failed=$((failed + 1))
             return
