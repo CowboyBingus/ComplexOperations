@@ -2660,6 +2660,7 @@ static void TerrainDiagInstall(uintptr_t game);
 static void ScatterBakeInstall(void); /* difficulty_world_diag.c */
 #ifdef CO_RESEARCH
 static void ScatterResearchNote(void); /* difficulty_world_diag.c: SpeedTree memory at each memory note */
+static void ScatterResearchLevel(void);
 #endif
 /* difficulty_world_terrain.c: the map at vanilla density, as tiles drawn into the level's merge */
 static void TerrainInstall(uintptr_t game);
@@ -5330,7 +5331,10 @@ static void WorldLevel(uintptr_t level, uintptr_t preview)
     LevelKindSet(level, complex);
     co_rows_level(complex); /* the distance row its passes read */
     WorldLevelForget();
-    g_genOp = -1; /* the last level's op, also when its generation was cut short: no scatter cut before this level's first op */
+    g_genOp = -1; g_genRecord = -1; /* the last level's op, also when its generation was cut short: no scatter cut before this level's first op */
+#ifdef CO_RESEARCH
+    ScatterResearchLevel();
+#endif
     g_world.values->size = scale > 1.0f ? 2048.0f * scale : 0.0f;
     WorldWrite(scale, preview == 0);
     g_worldLevel = level;
@@ -5356,7 +5360,7 @@ static void WorldLevel(uintptr_t level, uintptr_t preview)
 static void WorldShip(void)
 {
     FpsLiftEnd("the ship");
-    g_genOp = -1; /* a generation cut short leaves its op: the scatter cut (difficulty_world_diag.c) ends with it */
+    g_genOp = -1; g_genRecord = -1; /* a generation cut short leaves its op: the scatter cut (difficulty_world_diag.c) ends with it */
     NearOneMipDrop();
     NearLevelLeft(1);
     if (co_pages_ship() & CO_PAGES_LIVE) { NetPositionRange(1.0f); InterlockedIncrement(&g_world.switches); }

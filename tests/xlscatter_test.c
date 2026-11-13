@@ -1,7 +1,7 @@
 /* The engine's scatter update on an extra large level: the far-scatter bake's views (op 0x4A) and the water camera's
- * view (ops 0x0A and 0x0B), both near 1, far 1001, aspect 1, are left out; any other view or op, and any vanilla-size
- * level, runs the engine's update. Each cut notes once per level, the water's once per record, and ends at the ship.
- * Run on the fake game. */
+ * view (ops 0x0A and 0x0B), both orthographic with near 1 and far 1001 at any aspect, are left out; any other view or
+ * op, and any vanilla-size level, runs the engine's update. Each cut notes once per level, the water's once per record,
+ * and ends at the ship. Run on the fake game. */
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -20,15 +20,15 @@ static const char* g_case;
 static const char kWater[] = "the water camera's view is left out of the scatter update";
 static const char kBake[] = "the far-scatter bake's tile views are left out of the scatter update";
 
-/* A render camera as 0x212F10 reads it: near +0x20, far +0x24, aspect +0x278. */
+/* A render camera as 0x212F10 reads it: near +0x20, far +0x24, projection +0x28 (0 orthographic), aspect +0x278. */
 static uint8_t g_view[0x300];
-static uint8_t* View(float nearZ, float farZ, float aspect)
+static uint8_t* View(float nearZ, float farZ, uint32_t projection, float aspect)
 {
     memset(g_view, 0, sizeof g_view);
-    memcpy(g_view + 0x20, &nearZ, 4); memcpy(g_view + 0x24, &farZ, 4); memcpy(g_view + 0x278, &aspect, 4);
+    memcpy(g_view + 0x20, &nearZ, 4); memcpy(g_view + 0x24, &farZ, 4); memcpy(g_view + 0x28, &projection, 4); memcpy(g_view + 0x278, &aspect, 4);
     return g_view;
 }
-static uint8_t* Ortho(void) { return View(1.0f, 1001.0f, 1.0f); }
+static uint8_t* Ortho(void) { return View(1.0f, 1001.0f, 0, 1.0f); }
 
 static int Count(const char* text) { int n = 0; for (const char* p = g_fake.log; (p = strstr(p, text)) != NULL; p++) n++; return n; }
 
@@ -62,10 +62,15 @@ int main(void)
     CHECK(CoXlTestScatterUpdate(0x22, 175, Ortho()) == 1);
 
     g_case = "other views at op 0x0A and 0x0B";
-    CHECK(CoXlTestScatterUpdate(0x0A, 159, View(1.0f, 1001.0f, 16.0f / 9.0f)) == 1);
-    CHECK(CoXlTestScatterUpdate(0x0B, 160, View(0.1f, 1001.0f, 1.0f)) == 1);
-    CHECK(CoXlTestScatterUpdate(0x0B, 160, View(1.0f, 2000.0f, 1.0f)) == 1);
-    CHECK(CoXlTestScatterUpdate(0x0A, 159, View(0.1f, 3000.0f, 21.0f / 9.0f)) == 1);
+    CHECK(CoXlTestScatterUpdate(0x0A, 159, View(1.0f, 1001.0f, 1, 1.0f)) == 1);
+    CHECK(CoXlTestScatterUpdate(0x0A, 159, View(1.0f, 1001.0f, 1, 16.0f / 9.0f)) == 1);
+    CHECK(CoXlTestScatterUpdate(0x0B, 160, View(0.1f, 1001.0f, 0, 1.0f)) == 1);
+    CHECK(CoXlTestScatterUpdate(0x0B, 160, View(1.0f, 2000.0f, 0, 1.0f)) == 1);
+    CHECK(CoXlTestScatterUpdate(0x0A, 159, View(0.1f, 3000.0f, 1, 21.0f / 9.0f)) == 1);
+
+    g_case = "the water camera with a player's own aspect_ratio";
+    CHECK(CoXlTestScatterUpdate(0x0B, 160, View(1.0f, 1001.0f, 0, 16.0f / 9.0f)) == 0);
+    CHECK(CoXlTestScatterUpdate(0x0A, 159, View(1.0f, 1001.0f, 0, 21.0f / 9.0f)) == 0);
 
     g_case = "the next complex level notes again";
     g_fake.log[0] = 0;

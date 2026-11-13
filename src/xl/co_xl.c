@@ -319,7 +319,7 @@ static int g_scatterTestCalled;
 static void ScatterTestEngine(void* a, uint8_t* view, uint32_t c, uint8_t* layer, void* e, void* f, void* g, void* h) { g_scatterTestCalled = 1; }
 int CoXlTestScatterUpdate(LONG op, LONG record, uint8_t* view)
 {
-    g_genOp = op; g_genRecord = record;
+    g_genOp = op; g_genRecord = record; g_tdScatCameraPinned = 1;
     g_tdScatterUpdate = ScatterTestEngine; g_scatterTestCalled = 0;
     TdScatterUpdate(NULL, view, 0, NULL, NULL, NULL, NULL, NULL);
     return g_scatterTestCalled;

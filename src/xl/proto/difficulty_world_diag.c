@@ -1221,23 +1221,24 @@ static uintptr_t g_tdScatViewFlags;
 
 static LONG64 g_tdScatSkipped;
 static int g_tdScatHooked;
-/* Extra large maps: two load-time cameras with near 1, far 1001 and aspect 1 (view +0x20, +0x24, +0x278) are left out
- * of the engine's scatter update: the far-scatter bake's tile views (op 0x4A) and the water camera of ops 0x0A/0x0B
- * (0xF487B0, square water_height target). Their world-wide boxes make the update fill cells and node vectors across
- * the whole map, which the engine keeps all mission. The call's return value is unused (0x210DEA) and the player's
- * view fills its own cells. The far-scatter overlay loses its grass density; water_height has no SpeedTree pass.
- * Returns the op whose view is left out, or 0. */
+/* Extra large maps: two load-time cameras, orthographic with near 1 and far 1001 (view +0x28 == 0, +0x20, +0x24), are
+ * left out of the engine's scatter update: the far-scatter bake's tile views (op 0x4A) and the water camera of ops
+ * 0x0A/0x0B (both aimed by 0xF487B0). Not the aspect: it follows the player's aspect_ratio setting. Their world-wide
+ * boxes make the update fill cells and node vectors across the map, which the engine keeps all mission. The return
+ * value is unused (0x210DEA) and the player's view fills its own cells. The far-scatter overlay loses its grass
+ * density; water_height has no SpeedTree pass. Returns the op whose view is left out, or 0. */
+static int g_tdScatCameraPinned; /* the render camera's near/far/projection writer (0x4D0F6A) is the reviewed one */
 static LONG TdScatterSkipOp(const uint8_t* view)
 {
     const LONG op = g_genOp;
-    if (!(g_world.current > 1.0f) || (op != 0x4A && op != 0x0A && op != 0x0B)) return 0;
-    float v[2] = {0}, aspect = 0;
-    return !SafeRead((uintptr_t)view + 0x20, v, 8) && !SafeRead((uintptr_t)view + 0x278, &aspect, 4) && v[0] == 1.0f && v[1] == 1001.0f && aspect == 1.0f ? op : 0;
+    if (!g_tdScatCameraPinned || !(g_world.current > 1.0f) || (op != 0x4A && op != 0x0A && op != 0x0B)) return 0;
+    struct { float nearZ, farZ; uint32_t projection; } v = {0, 0, 1};
+    return !SafeRead((uintptr_t)view + 0x20, &v, sizeof v) && v.nearZ == 1.0f && v.farZ == 1001.0f && v.projection == 0 ? op : 0;
 }
 #ifdef CO_RESEARCH
-/* Research builds: where a load's SpeedTree memory goes. The update's first call of a job passes its context
- * (system + 0x258; layers [system+0x1C0] x 0x238, [system+0x1B8] of them), so the system is taken when the layer
- * matches. A layer's tree [layer+0x40] has its node vector at +0x80 (count +0x90, capacity +0x98, 0xE0 a node, grown
+/* Research builds: where a load's SpeedTree memory goes. The update's first call of a job passes the job's copy of its
+ * data, which starts with the system (layers [system+0x1C0] x 0x238, [system+0x1B8] of them, first [copy+0xF8]); it is
+ * taken during the level's own ops 0x0A/0x0B/0x4A when the layer matches. A layer's tree [layer+0x40] has its node vector at +0x80 (count +0x90, capacity +0x98, 0xE0 a node, grown
  * only by 0x218860) and its cell size at +0x160. The grow hook splits growth by the caller of 0x9548C0: the scatter
  * update (0x213062), which the cut skips, or the tree culling (0x212565), which it does not. */
 static volatile uintptr_t g_rsScatSys;
@@ -1248,7 +1249,8 @@ static RsGrowFn g_rsGrow;
 static void RsTakeSystem(void* a, const uint8_t* layer)
 {
     uintptr_t sys = 0, layers = 0; uint32_t first = 0;
-    if (a == NULL || g_rsScatSys != 0 || SafeRead((uintptr_t)a, &sys, 8) || sys == 0 || sys + 0x258u != (uintptr_t)a) return;
+    const LONG op = g_genOp;
+    if (a == NULL || g_rsScatSys != 0 || (op != 0x0A && op != 0x0B && op != 0x4A) || SafeRead((uintptr_t)a, &sys, 8) || sys == 0) return;
     if (!SafeRead(sys + 0x1C0, &layers, 8) && !SafeRead((uintptr_t)a + 0xF8, &first, 4) && layers + (uint64_t)first * 0x238u == (uintptr_t)layer)
         InterlockedCompareExchangePointer((void* volatile*)&g_rsScatSys, (void*)sys, NULL);
 }
@@ -1275,6 +1277,7 @@ static uint8_t RsGrow(uint8_t* vec, uint64_t n)
 /* At each memory note: the speedtree_plugin proxy ([exe+0x1A100D8]: live count +0x28, bytes +0x30, peak +0x40), the
  * container counters (exe+0x1939B60 bytes, +0x68 peak, +0x70 allocations, +0x78 frees), the growth by caller, and
  * each layer's node vector and cell size. */
+static void ScatterResearchLevel(void) { g_rsScatSys = 0; } /* each level init: another world, another system */
 static void ScatterResearchNote(void)
 {
     const uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
@@ -1452,6 +1455,9 @@ static void ScatterBakeInstall(void)
         g_tdScatHooked = -1;
         return;
     }
+    /* the camera message that sets view +0x20 near, +0x24 far and +0x28 projection, which the cut reads */
+    g_tdScatCameraPinned = ApiCodeMatches(exe + 0x4D0F6Au, "F2 41 0F 10 40 08 F2 0F 11 41 20 41 8B 40 10 89 41 28");
+    if (!g_tdScatCameraPinned) Note("difficulty: extra large maps: the render camera's layout is not the reviewed one; the load-time scatter views keep their scatter");
     if (LoaderHook("extra large maps' load-time scatter views (bake and water camera)", exe + 0x212F10u, (void*)TdScatterUpdate, (void**)&g_tdScatterUpdate) == 0) g_tdScatHooked = 1;
     else g_tdScatHooked = -1;
 #ifdef CO_RESEARCH
