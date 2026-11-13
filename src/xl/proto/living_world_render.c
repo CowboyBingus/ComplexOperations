@@ -11,10 +11,17 @@
 #define LW_RT_REHASH 0x6F60F0u
 #define LW_RT_AFTER 0x6CEDADu   /* the return address of the render thread's call, after its dispatch */
 #define LW_RT_LONG 4096u   /* shorter tables cost too little to touch; a level in play uses a few hundred entries */
+#define LW_RT_RECORD 0x6FD1B0u     /* a job's recording */
+#define LW_RT_JOB_AFTER 0x6CA321u  /* the return address of its call in the job 0x6CA0C0 */
 
 typedef void (*LwRenderEndFn)(uintptr_t state);
 typedef void (*LwRenderRehashFn)(uintptr_t map, uint32_t buckets);
-static struct { void* endOrig; uintptr_t rehash, after, resize; volatile LONG shrunk, told; uint32_t copiesFreed; uint64_t copyBytesFreed; } g_lwRender;
+static struct
+{
+    void *endOrig, *recordOrig; uintptr_t rehash, after, resize, jobAfter; volatile LONG shrunk, told, jobGate, jobFreed, jobLargest;
+    volatile LONG64 jobBytes; uint32_t copiesFreed, jobsFreedAll; uint64_t copyBytesFreed, jobBytesAll;
+} g_lwRender;
+static void LwMaxLong(volatile LONG* at, LONG v) { LONG old; while ((old = *at) < v && InterlockedCompareExchange(at, v, old) != old) {} }
 
 /* A map: size +0, used +0x18, buckets +0x1C. Under an eighth used leaves room for 4 times the entries before the
  * next growth, so a table near its need is not rehashed back and forth. */
@@ -62,12 +69,60 @@ static void LwRenderCopiesFree(uintptr_t dev)
         freed, count, (double)bytes / 1048576.0, size, g_lwRender.copiesFreed, (double)g_lwRender.copyBytesFreed / 1048576.0);
 }
 
+#ifdef CO_RESEARCH
+#include "living_world_render_log.c" /* research: the tables and the copies held at once, per dispatch */
+#endif
+
+/* A job's copy (X = [job+0x3B0]) is read by its update pass 0x6C9FD0, which the job's start waits for (0x624650 at
+ * 0x6CBE39), and by its recording. After the recording the job only closes its command lists (X+0x60/+0x78/+0x90)
+ * and sets its done flag (0x6CA45F); the dispatch waits for that flag (0x6CD5F7) before it empties the copy (0x6CD646).
+ * So the copy can go here, on the job's thread, and a dispatch's long copies no longer all stand until its wait: only
+ * those of jobs under way do. The proxy allocator's counters are atomic (0x5C2ED0), as other threads use it too. */
+static void LwRenderJobDone(uintptr_t ret, uintptr_t job)
+{
+    if (ret != g_lwRender.jobAfter || !g_lwRender.jobGate || job == 0) return; /* not the dispatch's own call (0x6CCBA8) */
+    uintptr_t x = *(volatile uintptr_t*)(job + 0x3B0);
+    uint32_t cap = x != 0 ? *(volatile uint32_t*)(x + 0xC) : 0;
+    if (cap <= LW_RT_LONG) return;
+#ifdef CO_RESEARCH
+    LwRenderJobLog(x, cap);
+#endif
+    *(volatile uint32_t*)(x + 0x20) = 0; /* used 0: the reader 0x6E2230 then looks at no copy */
+    ((LwRenderResizeFn)g_lwRender.resize)(x + 8, 0);
+    *(volatile uint32_t*)(x + 0x28) = 0; *(volatile uint32_t*)(x + 0x2C) = 0xFFFFFFFFu;
+    InterlockedIncrement(&g_lwRender.jobFreed); InterlockedAdd64(&g_lwRender.jobBytes, (LONG64)cap * 24);
+    LwMaxLong(&g_lwRender.jobLargest, (LONG)cap);
+}
+typedef uint64_t (*LwRenderRecordFn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+static uint64_t LwRenderRecord(uint64_t a, uint64_t b, uint64_t job, uint64_t n, uint64_t e, uint64_t f, uint64_t g)
+{
+    uint64_t r = ((LwRenderRecordFn)g_lwRender.recordOrig)(a, b, job, n, e, f, g);
+    LwRenderJobDone((uintptr_t)__builtin_return_address(0), (uintptr_t)job);
+    return r;
+}
+
+/* The pass's frees at the jobs' ends; the jobs of the next dispatch free theirs in play on a complex level only. */
+static void LwRenderJobsNote(void)
+{
+    LONG n = InterlockedExchange(&g_lwRender.jobFreed, 0), largest = InterlockedExchange(&g_lwRender.jobLargest, 0);
+    LONG64 bytes = InterlockedExchange64(&g_lwRender.jobBytes, 0);
+    g_lwRender.jobGate = g_lwRender.recordOrig != NULL && g_lwRender.resize != 0 && LwLive() && LwRenderInPlay();
+    if (n == 0) return;
+    g_lwRender.jobsFreedAll += (uint32_t)n; g_lwRender.jobBytesAll += (uint64_t)bytes;
+    Note("living world: render job contexts: %u version copies given back at their jobs' ends (%.1f MB, largest %u entries); %u copies, %.1f MB in all",
+        (unsigned)n, (double)bytes / 1048576.0, (unsigned)largest, g_lwRender.jobsFreedAll, (double)g_lwRender.jobBytesAll / 1048576.0);
+}
+
 /* The shrink, then the copies measured against the short table. */
 static void LwRenderAfterDispatch(uintptr_t state)
 {
+#ifdef CO_RESEARCH
+    LwRenderPassLog(state);
+#endif
     LwRenderShrink(state + 0x88);
     LwRenderShrink(state + 0xB0);
     LwRenderCopiesFree(state - 0x1340);
+    LwRenderJobsNote();
 }
 
 static void LwDelayRender(void); /* living_world_waits.c, test only */
@@ -96,6 +151,25 @@ static uintptr_t LwRenderCopiesPins(uintptr_t exe)
         ApiCodeMatches(exe + 0x6CD5F7u, "E8 64 9B F5 FF") && ApiCodeMatches(exe + 0x6E2230u, "83 79 20 00 44 8B CA 4C 8B C1") ? exe + 0x6D55E0u : 0;
 }
 
+/* The job as reviewed: its functions, the job from [arg+0x70] passed to the recording, the recording's return, the
+ * tail reading X's barrier lists, the done flag, the dependency on the update pass and the dispatch's wait. */
+static int LwRenderJobPins(uintptr_t exe)
+{
+    return ApiCodeMatches(exe + LW_RT_RECORD, "45 85 C9 0F 84 0D 09 00 00 48 8B C4") && ApiCodeMatches(exe + 0x6CD36Fu, "48 8D 05 4A CD FF FF") &&
+        ApiCodeMatches(exe + 0x6CD422u, "48 8D 05 A7 CB FF FF") && ApiCodeMatches(exe + 0x6CA0F2u, "49 8B 59 70") && ApiCodeMatches(exe + 0x6CA27Du, "4C 8B C3") &&
+        ApiCodeMatches(exe + 0x6CA31Cu, "E8 8F 2E 03 00 45 33 E4") && ApiCodeMatches(exe + 0x6CA3A3u, "48 8B B8 B0 03 00 00") &&
+        ApiCodeMatches(exe + 0x6CA45Fu, "41 C7 85 90 00 00 00 01 00 00 00") && ApiCodeMatches(exe + 0x6CBE32u, "48 8B 89 F8 00 00 00 E8 12 88 F5 FF") &&
+        ApiCodeMatches(exe + 0x6CD5F0u, "48 8D 96 90 00 00 00 E8 64 9B F5 FF");
+}
+static void LwInstallRenderJobs(uintptr_t exe)
+{
+    if (g_lwRender.resize == 0 || !LwRenderJobPins(exe)) { Note("living world: the render jobs are not the reviewed code; their version copies go after the dispatch"); return; }
+    g_lwRender.jobAfter = exe + LW_RT_JOB_AFTER;
+    if (LoaderHook("living world: render job recording", exe + LW_RT_RECORD, (void*)LwRenderRecord, &g_lwRender.recordOrig) || g_lwRender.recordOrig == NULL)
+    { g_lwRender.recordOrig = NULL; Note("living world: the render jobs' recording could not be hooked; their version copies go after the dispatch"); return; }
+    Note("living world: render job contexts: a version copy over %u entries is given back at its job's end, in play", LW_RT_LONG);
+}
+
 /* The pins: the render thread's call after its dispatch, the batch end reading the changed ids' size (+0xB0) and
  * inserting into the versions (+0x88), the rehash's entry, and the insert's growth calling it with 2n+1 buckets. */
 static void LwInstallRender(void)
@@ -117,4 +191,5 @@ static void LwInstallRender(void)
     if (LoaderHook("living world: render version table", exe + LW_RT_END, (void*)LwRenderEnd, &g_lwRender.endOrig) || g_lwRender.endOrig == NULL)
     { g_lwRender.endOrig = NULL; Note("living world: the render frame end could not be hooked"); return; }
     Note("living world: the render version tables are kept short (%u entries and more, under an eighth used, are rehashed)", LW_RT_LONG);
+    LwInstallRenderJobs(exe);
 }

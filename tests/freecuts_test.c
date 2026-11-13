@@ -30,6 +30,12 @@ void CoXlTestBandTileIn(int slot);
 void CoXlTestRenderFramePins(void);
 void CoXlTestRenderAfter(uintptr_t state, void (*rehash)(uintptr_t, uint32_t), void (*resize)(uintptr_t, uint32_t));
 uintptr_t CoXlTestRenderCopiesPins(uintptr_t exe);
+void CoXlTestRenderJob(uintptr_t ret, uintptr_t after, uintptr_t job, void (*resize)(uintptr_t, uint32_t));
+void CoXlTestRenderJobHooked(void* original);
+int CoXlTestRenderJobGate(void);
+uint64_t CoXlTestRenderRecord(uint64_t job);
+int CoXlTestRenderJobPins(uintptr_t exe);
+void* CoXlTestRenderJobsInstall(uintptr_t exe, uintptr_t resize);
 
 static int g_failed;
 static const char* g_case;
@@ -62,6 +68,15 @@ static void Context(uint8_t* x, uint32_t count, uint32_t cap, uint32_t used)
     memcpy(x + 8, &count, 4); memcpy(x + 0xC, &cap, 4); memcpy(x + 0x10, &data, 8); memcpy(x + 0x20, &used, 4);
 }
 static uint32_t Cap(const uint8_t* x) { uint32_t c; memcpy(&c, x + 0xC, 4); return c; }
+static uint32_t U32(const uint8_t* at) { uint32_t v; memcpy(&v, at, 4); return v; }
+/* The recording 0x6FD1B0 as the hook calls it: its 7 arguments seen, its result handed back. */
+static uint64_t g_recordArgs[7];
+static uint64_t TestRecord(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f, uint64_t g)
+{
+    const uint64_t got[7] = {a, b, c, d, e, f, g};
+    memcpy(g_recordArgs, got, sizeof got);
+    return 99;
+}
 
 static uint64_t TestJob(uint64_t a, uint64_t b, uint64_t c, uint64_t job) { (void)a; (void)b; (void)c; (void)job; return 1; }
 /* One job of a 0x2B op over 800 items, its range starting at `first`: the region it is handed. */
@@ -313,6 +328,74 @@ int main(void)
         Pin((uintptr_t)exe + 0x6D55E0u);
         CHECK(CoXlTestRenderCopiesPins((uintptr_t)exe) == 0);
         g_fake.noMatch[0] = 0;
+    }
+
+    g_case = "a job's version copy at the job's end";
+    {
+        static uint8_t dev[0x1500], x[0x1A0], job[0x400];
+        uint64_t array[1] = {(uint64_t)(uintptr_t)x}, at = (uint64_t)(uintptr_t)array, xp = (uint64_t)(uintptr_t)x, pool = (uint64_t)(uintptr_t)dev + 0x1340;
+        uint32_t count = 1, size = 56114, used = 30000, buckets = 40959, one = 1;
+        const uintptr_t after = 0x6CA321u, d = (uintptr_t)dev, j = (uintptr_t)job;
+        memcpy(dev + 0x700, &count, 4); memcpy(dev + 0x708, &at, 8); memcpy(job + 0x3B0, &xp, 8);
+        memcpy(dev + 0x13C8, &size, 4); memcpy(dev + 0x13C8 + 0x18, &used, 4); memcpy(dev + 0x13C8 + 0x1C, &buckets, 4); /* a burst's table: not shrunk */
+        Context(x, 56114, 56114, 3); memcpy(x, &pool, 8); /* the copy the job read */
+        g_resized = 0;
+        CoXlTestLive(1);
+        memcpy(level + 0x1E4, &three, 4);
+        CoXlTestRenderJobHooked(NULL);
+        CoXlTestRenderAfter(d + 0x1340, TestRehash, TestResize);
+        CHECK(!CoXlTestRenderJobGate()); /* the recording not hooked: the copies wait for the dispatch */
+        CoXlTestRenderJob(after, after, j, TestResize);
+        CHECK(g_resized == 0 && Cap(x) == 56114);
+        CoXlTestRenderJobHooked((void*)TestRecord);
+        CoXlTestRenderAfter(d + 0x1340, TestRehash, TestResize);
+        CHECK(CoXlTestRenderJobGate() && g_resized == 0 && Cap(x) == 56114); /* a table in use: the dispatch frees nothing */
+        CoXlTestRenderJob(0x6CCBADu, after, j, TestResize); /* the dispatch's own call: its context is the next job's */
+        CHECK(g_resized == 0 && Cap(x) == 56114);
+        CoXlTestRenderJob(after, after, j, TestResize);
+        CHECK(g_resized == 1 && Cap(x) == 0 && U32(x + 8) == 0 && U32(x + 0x20) == 0 && U32(x + 0x28) == 0 && U32(x + 0x2C) == 0xFFFFFFFFu);
+        CoXlTestRenderJob(after, after, j, TestResize); /* once only */
+        CHECK(g_resized == 1);
+#ifdef CO_RESEARCH
+        CoXlTestRenderAfter(d + 0x1340, TestRehash, TestResize);
+        CHECK(fake_host_logged("living world: render dispatch: table 56114 entries, 30000 used, 40959 buckets; changed ids 0 entries, 0 used; 1 job copies over "
+                               "4096 entries (1.3 MB, largest 56114); at most 1 contexts held one at once (1.3 MB), 1 of them not yet emptied"));
+#else
+        CoXlTestRenderAfter(d + 0x1340, TestRehash, TestResize);
+#endif
+        CHECK(fake_host_logged("living world: render job contexts: 1 version copies given back at their jobs' ends (1.3 MB, largest 56114 entries); 1 copies, 1.3 MB in all"));
+        Context(x, 4096, 4096, 3); memcpy(x, &pool, 8);
+        CoXlTestRenderJob(after, after, j, TestResize); /* short: stays */
+        CHECK(g_resized == 1 && Cap(x) == 4096);
+        Context(x, 56114, 56114, 3); memcpy(x, &pool, 8);
+        CHECK(CoXlTestRenderRecord(j) == 99 && g_recordArgs[2] == j && g_recordArgs[0] == 1 && g_recordArgs[6] == 7);
+        CHECK(g_resized == 1 && Cap(x) == 56114); /* the hook's own caller is not the job's call */
+        memcpy(level + 0x1E4, &one, 4); /* the level still loads */
+        CoXlTestRenderAfter(d + 0x1340, TestRehash, TestResize);
+        CoXlTestRenderJob(after, after, j, TestResize);
+        CHECK(!CoXlTestRenderJobGate() && g_resized == 1 && Cap(x) == 56114);
+        memcpy(level + 0x1E4, &three, 4);
+        CoXlTestLive(0); /* a normal mission */
+        CoXlTestRenderAfter(d + 0x1340, TestRehash, TestResize);
+        CoXlTestRenderJob(after, after, j, TestResize);
+        CHECK(!CoXlTestRenderJobGate() && g_resized == 1 && Cap(x) == 56114);
+        CoXlTestRenderJobHooked(NULL);
+    }
+
+    g_case = "a job pin refused";
+    {
+        const uintptr_t e = (uintptr_t)exe, resize = e + 0x6D55E0u;
+        CHECK(CoXlTestRenderJobPins(e));
+        CHECK(CoXlTestRenderJobsInstall(e, 0) == NULL); /* the copies' own pins refused: no job frees either */
+        Pin(e + 0x6CA45Fu); /* the done flag after the recording */
+        CHECK(!CoXlTestRenderJobPins(e) && CoXlTestRenderJobsInstall(e, resize) == NULL);
+        Pin(e + 0x6CBE32u); /* the job waits for its update pass */
+        CHECK(!CoXlTestRenderJobPins(e));
+        Pin(e + 0x6FD1B0u);
+        CHECK(!CoXlTestRenderJobPins(e));
+        g_fake.noMatch[0] = 0;
+        CHECK(CoXlTestRenderJobsInstall(e, resize) != NULL && fake_host_logged("living world: render job contexts: a version copy over 4096 entries is given back at its job's end, in play"));
+        CoXlTestRenderJobHooked(NULL);
     }
 
     if (g_failed) { printf("freecuts: %d check(s) failed\n", g_failed); return 1; }
