@@ -78,9 +78,11 @@ int co_ui_guarded(void);
 typedef struct CoRegs { uint64_t r15, r14, r13, r12, r11, r10, r9, r8, rdi, rsi, rbp, rbx, rdx, rcx, rax, flags; } CoRegs;
 
 /* The loadout cards for eight (co_cards.c). The card's height in reference units, which the caves of every store of
- * it read (780, the game's, or 498). The callbacks: `open` before the init's card loop and `ready` behind it (rdi = the
+ * it read (780, the game's, or 498), and what the open slots panel adds for its mission stratagems (113, the game's,
+ * or 65 without the heading). The callbacks: `open` before the init's card loop and `ready` behind it (rdi = the
  * screen), `layout` in front of each of its updates (rcx = the screen). */
 extern float co_card_height;
+extern float co_card_mission;
 void co_cards_open(CoRegs* regs);
 void co_cards_ready(CoRegs* regs);
 void co_cards_layout(CoRegs* regs);
@@ -100,8 +102,8 @@ typedef struct CoCardFigure { float distance, height, clipY, clipHeight; } CoCar
 void co_cards_figure(float rootHeight, float cardHeight, float partHeight, float slotsTop, CoCardFigure* out);
 /* The size a widget is at, or a running size animation's target in the table `tweens`: 1 when animating. */
 int co_cards_size_target(uintptr_t widget, uintptr_t tweens, float out[2]);
-/* An open screen's cards from four to eight: the slot to 498, each card part sized by 780 to its end at once and an
- * open slots panel collapsed. */
+/* An open screen's cards from four to eight: the slots to 498 and 65, each card part sized by 780 to its end at once,
+ * and every slots panel without its MISSION STRATAGEMS heading. */
 void co_cards_to_eight(uintptr_t screen);
 #ifdef CO_TEST
 void co_cards_test_mode(int mode, uintptr_t screen);
