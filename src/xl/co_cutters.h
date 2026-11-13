@@ -1,5 +1,5 @@
 /* The engine's navmesh cutters (AI obstacles): one handle pool a physics world, [exe+0x27C6330 + 8 x world], with
- * room for the physics config's +0x4C (65536 under HellForge). A forest instance whose type has flag 0x40 gets one
+ * room for the physics config's +0x4C: 65536 under HellForge, 1048576 with the mod's early room (co_early_sites.h). A forest instance whose type has flag 0x40 gets one
  * (0x814F00 -> 0x812CC0), and its handle is stored as the instance's property 0x2A without a check. With the pool
  * full the allocator 0x75230 gives 0 (0x752F4), so the instance holds 0. Every reader of a handle skips 0 (0x812AE0,
  * 0x8128E0, 0x77F655) except the destroy 0x8127A0: it takes the pool of the batch's first handle (handle >> 30) and

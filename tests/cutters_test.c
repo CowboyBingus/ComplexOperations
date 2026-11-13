@@ -192,6 +192,11 @@ int main(void)
         CHECK(co_cutters_over((uintptr_t)g_exe, 0.50f) == 1);
         Pool(45874, 65536);
         CHECK(co_cutters_over((uintptr_t)g_exe, 0.70f) == 0);
+        Pool(838860, 1u << 20); /* the mod's early room */
+        CHECK(co_cutters_pool((uintptr_t)g_exe, 2, &used, &room) == 1 && used == 838860 && room == (1u << 20));
+        CHECK(co_cutters_over((uintptr_t)g_exe, 0.80f) == 0);
+        Pool(838861, 1u << 20);
+        CHECK(co_cutters_over((uintptr_t)g_exe, 0.80f) == 1);
         memset(g_exe + CO_CUTTERS_POOLS + 16u, 0, 8);
         CHECK(co_cutters_over((uintptr_t)g_exe, 0.0f) == 0); /* not read: no hold */
     }

@@ -2,6 +2,7 @@
  * before the game's setup; all of it or none; decided on what a machine is known to have then. And the navigation
  * grid's plan for every level of such a process, with HellForge's steps or without them. */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <windows.h>
 
@@ -53,6 +54,44 @@ static void Engine(uint8_t* image, uint64_t world)
     memcpy(image + RENDER_ENGINE_AT + 0x10E8u, &world, 8);
 }
 
+/* A navmesh cutter pool as the engine lays it out (0x7D7F60..0x7D808B) and hands out and takes back handles (0x75230,
+ * 0x75420, lookup 0x8128E0): index | live bit (next power of two of the room) | generation | kind and world (22..31). */
+static struct { uint32_t room, mask, live, generation, head; uint32_t* entries; } g_cut;
+static int CutInit(uint32_t room)
+{
+    uint32_t m = room - 1u, bits = 0;
+    m |= m >> 1; m |= m >> 2; m |= m >> 4; m |= m >> 8; m |= m >> 16;
+    const uint32_t x = ~(m | 0xFFC00000u);
+    g_cut.room = room; g_cut.mask = m; g_cut.live = m + 1u; g_cut.generation = (x + x) & x; g_cut.head = 0;
+    for (uint32_t c = (m + 1u) >> 1; c != 0; c >>= 1) bits++;
+    free(g_cut.entries);
+    if ((g_cut.entries = calloc(room, 4)) == NULL) return 0;
+    if (bits + 9u >= 32u) return 1; /* the engine leaves such a pool's free list empty */
+    for (uint32_t i = 0; i < room; i++) g_cut.entries[i] = (i + 1u) | g_cut.generation;
+    g_cut.entries[room - 1u] = g_cut.generation;
+    g_cut.head = 1; /* flag 0x100: index 0 is never handed out */
+    return 1;
+}
+static uint32_t CutMake(uint32_t user)
+{
+    const uint32_t index = g_cut.head & g_cut.mask;
+    if (index == 0) return 0; /* full: 0x752F4 */
+    const uint32_t e = g_cut.entries[index];
+    g_cut.head = ((g_cut.head + g_cut.live) & ~g_cut.mask) | (e & g_cut.mask);
+    return g_cut.entries[index] = ((e + 2u * g_cut.live) & g_cut.generation) | index | g_cut.live | user; /* flag 0x200 */
+}
+static int CutLive(uint32_t h)
+{
+    const uint32_t index = h & g_cut.mask;
+    return index < g_cut.room && (h & g_cut.live) != 0 && g_cut.entries[index] == h;
+}
+static void CutFree(uint32_t h)
+{
+    const uint32_t index = h & g_cut.mask;
+    g_cut.entries[index] = (h & ~(g_cut.live | g_cut.mask)) | (g_cut.head & g_cut.mask);
+    g_cut.head = ((g_cut.head + g_cut.live) & ~g_cut.mask) | index;
+}
+
 /* A HellForge that granted the capacity at boot, and a machine with the memory. */
 static void Machine(void)
 {
@@ -77,6 +116,27 @@ int main(void)
     }
     CHECK(U32(image + 0xAB19EEu + 6) == 0x100000u && U32(image + 0x4EE324u + 3) == 0x100000u && U32(image + 0x4EE340u + 3) == 0x400000u);
     CHECK(U32(image + 0x4EE32Bu + 3) == 0x8000u); /* HellForge's own stays */
+    /* The navmesh cutters (config +0x4C): HellForge's 65536 becomes the bodies' room, so every tree, whose cutter holds
+     * one of the world's bodies, gets one; the engine's pool with that room still keeps the kind and world bits clear
+     * and a generation bit, so a stale handle is not taken for its slot's next one. */
+    const uint32_t cutters = U32(image + 0x4EE371u + 3);
+    CHECK(U32(kCoEarlyPools[5].stock + 3) == 0x10000u && kCoEarlyPools[5].rva == 0x4EE371u);
+    CHECK(cutters == 0x100000u && cutters >= U32(image + 0xAB19EEu + 6));
+    CHECK(64ull * (cutters + 0x600u) + 160ull * (0x200u + 11u) <= 0xFFFFFFFFull); /* the block's size, a u32 (0x78A2C1) */
+    if (CutInit(cutters))
+    {
+        const uint32_t user = (2u << 30) | (1u << 24); /* world 2, a forest tree's kind (0x812DA0) */
+        uint32_t made = 0, clear = 1, first = 0, h;
+        while ((h = CutMake(user)) != 0)
+        {
+            if (made++ == 0) first = h;
+            if ((h & 0xFFC00000u) != user || (h >> 30) != 2u) clear = 0;
+        }
+        CHECK(made == cutters - 1u && clear && g_cut.generation != 0);
+        CutFree(first);
+        h = CutMake(user);
+        CHECK(h != 0 && (h & g_cut.mask) == (first & g_cut.mask) && h != first && CutLive(h) && !CutLive(first));
+    }
     CHECK(F32(image + CO_EARLY_BROADPHASE) == 17408.0f);
     for (size_t i = 0; i < 4; i++) CHECK(F32(image + kCoEarlyExtents[i].rva + 3) == 4096.0f && memcmp(image + kCoEarlyExtents[i].rva, kCoEarlyExtents[i].bytes, 3) == 0);
     /* the cell size's read reaches the mod's float: 1024 m over 32 cells; sized by 4096 / 128, laid out by 1024 / 32 */
