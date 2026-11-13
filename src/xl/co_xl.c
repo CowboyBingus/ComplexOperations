@@ -41,6 +41,7 @@
  * ship's level change, the density rules of a later branch); they are unused until their callers are written. */
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-function"
+#include "proto/xl_free.h"
 #include "proto/entity_records.c"
 #include "proto/difficulty_world_profile.c"
 #include "proto/difficulty_world.c"
@@ -62,6 +63,7 @@
 #include "proto/difficulty_world_destroy.c"
 #include "proto/difficulty_net_patience.c"
 #include "proto/difficulty_world_move.c"
+#include "proto/xl_free.c"
 #include "proto/living_world.c"
 #include "proto/difficulty_tacmap.c"
 #include "proto/test_daylight.c"
@@ -255,6 +257,7 @@ int CoXlTestLwNavTick(uintptr_t game)
 LONG CoXlTestNoiseHead(void) { return g_lwNoiseHead; }
 const char* CoXlTestGuards(uintptr_t game) { return CoXlGuards(game); }
 void CoXlTestRenderShrink(uintptr_t map, void (*rehash)(uintptr_t, uint32_t)) { g_lwRender.rehash = (uintptr_t)rehash; LwRenderShrink(map); }
+void CoXlTestRenderCopies(uintptr_t dev, void (*resize)(uintptr_t, uint32_t)) { g_lwRender.resize = (uintptr_t)resize; LwRenderCopiesFree(dev); }
 /* The route width's and the scatter set's stubs built at `stub`, and the notes of the guards that act on every level. */
 void CoXlTestRouteWidthBuild(uint8_t* stub, uintptr_t flag, uintptr_t back) { RouteWidthBuild(stub, flag, back); }
 void CoXlTestScatterSetBuild(uint8_t* stub, uintptr_t count, uintptr_t back) { ScatterSetBuild(stub, count, back); }
@@ -268,6 +271,37 @@ void CoXlTestTaskNote(volatile LONG* count) { g_tasksLeftOut = count; GuardNote(
 void CoXlTestWorldCurrent(float current) { g_world.current = current; }
 uint64_t CoXlTestPlaceJob(uint64_t job, uint64_t (*original)(uint64_t, uint64_t, uint64_t, uint64_t)) { g_placeJob = original; return WorldPlaceJob(0, 0, 0, job); }
 void CoXlTestHiveLordNote(uint64_t b) { HiveLordNote(b); }
+/* Op 0x2B's job regions (proto/difficulty_world.c): how many are made, the op's end on this thread, a job under way. */
+int CoXlTestPlaceRegions(void) { int n = 0; for (int k = 0; k < 8; k++) n += g_placeRegions[k] != NULL; return n; }
+void CoXlTestPlaceDone(void) { g_placeFree.pending = 1; g_placeFree.thread = GetCurrentThreadId(); WorldPlaceRegionsFree(); }
+void CoXlTestPlaceFreeTry(void) { WorldPlaceRegionsFree(); }
+void CoXlTestPlaceJobsIn(LONG delta) { InterlockedAdd(&g_placeJobsIn, delta); }
+/* The band pixels' release (proto/difficulty_world_move.c): tile `slot` live with pixels its texture took at render
+ * frame `made`; the drop tile's in g_matband, with a build holding them aside or not. */
+void CoXlTestBandTile(int slot, uint32_t* pixels, uint32_t made)
+{
+    g_tiles[slot].live = 1; g_tiles[slot].level = g_world.levels; g_tiles[slot].bandPixels = pixels; g_tiles[slot].band = 0;
+    g_tiles[slot].tex[0] = g_tiles[slot].tex[1] = 0; g_tiles[slot].bandFramed = 1; g_tiles[slot].bandFrame = made;
+}
+uint32_t* CoXlTestBandTilePixels(int slot) { return g_tiles[slot].bandPixels; }
+void CoXlTestBandDrop(uint64_t tex, uint32_t* pixels, uint32_t made, int stashed)
+{
+    g_matband.tex = tex; g_matband.pixels = pixels; g_matband.framed = 1; g_matband.frame = made;
+    g_near.state = NEAR_IN; g_move.stashed = stashed;
+}
+uint32_t* CoXlTestBandDropPixels(void) { return g_matband.pixels; }
+void CoXlTestBandTick(void) { MoveBandPixelsTick(); }
+int CoXlTestRenderFrame(uint32_t* frame) { return NearRenderFrame(frame); }
+void CoXlTestBandLevelGone(void) { g_matband.tex = 0; MoveLevelGone(); }
+/* The paths the frees rest on: a dispatcher call's start, the band's stash and take, the pins asked again, the render
+ * hook's order and its pins. */
+void CoXlTestDispatchBegins(uint64_t records, uint64_t index) { WorldDispatchBegins(records, index, 0); }
+void CoXlTestBandBuild(uint64_t tex, uint32_t* pixels, uint32_t made) { MoveBandStash(); g_move.stashed = 1; g_matband.tex = tex; g_matband.pixels = pixels; g_matband.framed = 1; g_matband.frame = made; }
+void CoXlTestBandTileIn(int slot) { g_tiles[slot].live = 1; g_tiles[slot].level = g_world.levels; MoveTileTakeBand(slot); MoveRestoreDrop(); }
+void CoXlTestRenderFramePins(void) { g_renderFramePinned = -1; }
+void CoXlTestRenderAfter(uintptr_t state, void (*rehash)(uintptr_t, uint32_t), void (*resize)(uintptr_t, uint32_t))
+{ g_lwRender.rehash = (uintptr_t)rehash; g_lwRender.resize = (uintptr_t)resize; LwRenderAfterDispatch(state); }
+uintptr_t CoXlTestRenderCopiesPins(uintptr_t exe) { return LwRenderCopiesPins(exe); }
 /* A level init's first step for `level`, and a stamp section's hold and cancel test (proto/difficulty_world_terrain.c). */
 void CoXlTestLevelInit(uintptr_t level) { LevelInitBegins(); g_worldLevel = level; }
 void CoXlTestSectionBegin(void) { SectionBegin(); }

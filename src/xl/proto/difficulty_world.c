@@ -4749,7 +4749,7 @@ static void HiveLordNote(uint64_t b)
 
 static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
 {
-    FpsLiftStep(records, index, (uint32_t)d);
+    WorldDispatchBegins(records, index, (uint32_t)d);
     EarlyPackages(records, b, index, f);
     uint32_t diagAt, diagOp;
     TerrainDiagBefore(records, index, (uint32_t)d, &diagAt, &diagOp);
@@ -5156,7 +5156,7 @@ static uint64_t WorldPlaceJob(uint64_t a, uint64_t b, uint64_t c, uint64_t job)
      * equal ranges, so the region is picked by the range's start. */
     if (current > 1.0f && items != 0)
     {
-        static uint8_t* regions[8];
+        uint8_t** regions = g_placeRegions;
         uint32_t slot = (uint32_t)((uint64_t)range[0] * 8u / items);
         if (slot > 7) slot = 7;
         if (regions[slot] == NULL)
@@ -6463,7 +6463,7 @@ static const char* InstallWorld(DifficultyInstall* d)
         if (ApiCodeMatches(exe + kSpawners[i].rva, kSpawners[i].pin))
             LoaderHook("extra large maps' spawn diagnostic", exe + kSpawners[i].rva, kSpawnDetours[i], (void**)&g_worldSpawn[i]);
     if (ApiCodeMatches(game + 0xF322F0u, kPlaceJobPin))
-        LoaderHook("extra large maps' stamp job timing", game + 0xF322F0u, (void*)WorldPlaceJob, (void**)&g_placeJob);
+        LoaderHook("extra large maps' stamp job timing", game + 0xF322F0u, (void*)WorldPlaceJobCounted, (void**)&g_placeJob);
     InstallWorldPlan(game); /* it notes its own refusal; the vanilla pass still runs then */
     const char* overlap = InstallWorldOverlap(game);
     if (overlap != NULL) Note("difficulty: extra large maps: the stamp overlap grid is not used: %s", overlap);

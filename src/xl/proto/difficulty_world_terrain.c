@@ -3432,7 +3432,8 @@ static uint32_t NearMatBand(uint32_t* tile, const uint32_t* coarse)
 #define NEAR_MAT_HOLD 3
 #define NEAR_MAT_ASYNC_SITE 0x1AB12Cu
 #define NEAR_MAT_SYNC_SITE 0x1AB157u
-static struct { uint64_t tex; uint32_t* pixels; ULONGLONG made; int holds; uint32_t taken; uint8_t* stub; int served; } g_matband;
+static struct { uint64_t tex; uint32_t* pixels; ULONGLONG made; int holds; uint32_t taken; uint8_t* stub; int served; int framed; uint32_t frame; } g_matband;
+
 static struct { LONG level; uint32_t* pixels; } g_levelMat = {.level = -1}; /* the level's material map as read at its conform */
 
 static int NearMatBandOn(void)
@@ -3483,7 +3484,7 @@ static void NearMatTexture(ULONGLONG t0)
     uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
     g_matband.tex = (uintptr_t)create == exe + 0x31E740u && ApiCodeMatches(exe + 0x31E740u, "48 89 5C 24 08 48 89 6C 24 10 56 57 41 54 41 56 41 57 48 83 EC 50") &&
         (uintptr_t)NearApi(0x10, 0x6B0) == exe + 0x31E920u ? create(4096, 4096, 1, g_matband.pixels) : 0;
-    g_matband.made = GetTickCount64(); g_matband.holds = 0; g_matband.served = 0;
+    g_matband.made = GetTickCount64(); g_matband.holds = 0; g_matband.served = 0; g_matband.framed = g_matband.tex != 0 && NearRenderFrame(&g_matband.frame);
     if (g_matband.tex == 0) { Note("difficulty: near terrain: the material band's texture was not created; the tile keeps its own map to the edge"); return; }
     Note("difficulty: near terrain: material band: %u texels of the tile's map take the coarse terrain's (from %.0f m inside the hidden square's edge, "
         "+-%.0f m), %.2f s; texture 0x%llX", g_matband.taken, (double)(NEAR_MAT_EDGE + NEAR_MAT_BAND), (double)(NEAR_MAT_WOBBLE / 2), (double)(GetTickCount64() - t0) / 1000.0,
@@ -5707,7 +5708,7 @@ static NearGround g_nearCoarseGround, g_nearTileGround;
  * mission: released with it; the drop tile's stay g_near's and g_matband's); near: the last time a player was within
  * reach (difficulty_world_move.c). */
 typedef struct { int live; LONG level; float centre[2]; uint64_t handle; NearGround ground; int cell[2]; uint64_t tex[2], band; uint32_t* bandPixels;
-    ULONGLONG seen; } NearTile;
+    ULONGLONG seen; int bandFramed; uint32_t bandFrame; } NearTile;
 static uint16_t* g_groundBuf[NEAR_TILES_MAX + 1]; /* NearGroundOf's copies: a tile slot each, the coarse terrain last */
 static NearTile g_tiles[NEAR_TILES_MAX];
 static volatile LONG g_tilesGen;
