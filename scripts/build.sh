@@ -2,14 +2,16 @@
 # Builds Complex Operations (complex_operations.dll, beside hellforge-mod.json) and, with --test, builds and runs every
 # tests/*_test.c against tests/harness. The Linux equivalent of HellForge's own mod build: the same Zig target and warning
 # flags, the SDK of a HellForge-Open checkout, and the tests as Windows executables under Wine.
-# Usage: scripts/build.sh [--test] [--package] [--players 4|8] [--test-first-slot <1-7>] [--only <test id>]
-#        [--hellforge <HellForge-Open checkout>] [--zig <zig>] [--no-dll] [--research]
+# Usage: scripts/build.sh [--test] [--package] [--check-data] [--players 4|8] [--test-first-slot <1-7>] [--only <test id>]
+#        [--hellforge <HellForge-Open checkout>] [--hellforge-cli <HellForge.Cli>] [--zig <zig>] [--no-dll] [--research]
 # --research builds a DLL that reads the extra large world's HELLFORGE_* research switches. Peers must generate alike,
 # so no other build reads them and a package is never built with it.
 # --players sets how many players a session takes (default 4); the DLL and the tests are built for that count.
 # --test-first-slot is a test aid for a PC with two game instances and never goes into a package: as host the mod
 # gives joining peers slots and player indexes from that number on. It needs --players 8.
-# Defaults: HELLFORGE_OPEN, else ~/HellForge; HELLFORGE_ZIG, else ~/.local/share/zig-native/zig.
+# --check-data (and --package) has HellForge's own CLI read hellforge-data.json: a HellForge that refuses the spec
+# refuses the whole mod, so a package is never built with one its CLI refuses.
+# Defaults: HELLFORGE_OPEN, else ~/HellForge; HELLFORGE_ZIG, else ~/.local/share/zig-native/zig; HELLFORGE_CLI.
 set -euo pipefail
 export LC_ALL=C
 
@@ -19,9 +21,11 @@ root=$(cd -- "$script_dir/.." && pwd -P)
 test_mode=false
 only=
 hellforge=${HELLFORGE_OPEN:-}
+hellforge_cli=${HELLFORGE_CLI:-}
 zig=${HELLFORGE_ZIG:-}
 no_dll=false
 package=false
+check_data=false
 research=false
 players=4
 first_slot=0
@@ -46,6 +50,18 @@ while (($#)); do
             fi
             hellforge=$2
             shift 2
+            ;;
+        --hellforge-cli)
+            if (($# < 2)); then
+                echo '--hellforge-cli needs the path of a HellForge.Cli built from HellForge dev.' >&2
+                exit 1
+            fi
+            hellforge_cli=$2
+            shift 2
+            ;;
+        --check-data)
+            check_data=true
+            shift
             ;;
         --zig)
             if (($# < 2)); then
@@ -223,10 +239,28 @@ elif $test_mode; then
     fi
 fi
 
-# The files a player installs, as one zip. HellForge builds data/ from the recipe on the player's PC.
+# The data spec, checked by HellForge's CLI (build-data without game data reads the spec only). The `edit` entry is
+# HellForge's since pull request 350; an older CLI refuses it here as an older launcher refuses the mod.
+if $check_data || $package; then
+    if [[ ! -f $root/hellforge-data.json ]]; then
+        echo 'hellforge-data.json is missing.' >&2
+        exit 1
+    fi
+    if [[ -z $hellforge_cli ]]; then
+        echo 'Checking hellforge-data.json needs HellForge.Cli from HellForge dev (pass --hellforge-cli, or set HELLFORGE_CLI).' >&2
+        exit 1
+    fi
+    if ! check=$("$hellforge_cli" build-data --mod "$root" 2>&1); then
+        printf '%s\nHellForge.Cli refused hellforge-data.json; a HellForge like it would refuse the mod.\n' "$check" >&2
+        exit 1
+    fi
+    printf 'HellForge.Cli read hellforge-data.json: %s\n' "$(tr -d '\n ' <<<"$check")"
+fi
+
+# The files a player installs, as one zip. HellForge builds data/ from the recipe and the data spec on the player's PC.
 if $package; then
     version=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/hellforge-mod.json")
-    files=(hellforge-mod.json complex_operations.dll hellforge-recipe.json hellforge-recipe.literals)
+    files=(hellforge-mod.json complex_operations.dll hellforge-recipe.json hellforge-recipe.literals hellforge-data.json)
     for file in "${files[@]}"; do
         if [[ ! -f $root/$file ]]; then
             echo "$file is missing; nothing packaged." >&2

@@ -455,7 +455,23 @@ With the part on, two guards act on every level, only where the game would go wr
 ### Requirements
 
 The part needs a HellForge with pull requests 362, 364 and 366: dev after 2026-11-11, or the first release after it.
-With an older HellForge the part is off and the rest of the mod works.
+With an older HellForge from pull request 350 on, the part is off and the rest of the mod works. A HellForge before
+pull request 350 does not load the mod at all (see Install).
+
+### Tab map
+
+The game fills the in-mission map's texture with a copy shader, `c4de51720b9cd9db` in archive `ee6b1ba7e22d71ed`. It
+places its 16 captures for a 2048 m world. On a 16 km world every capture lands outside the texture, so the map stays
+blank.
+
+- `hellforge-data.json` edits the shader's vertex and pixel stages to take the world size from the capture camera's
+  projection (8/S). At 2048 m this gives the game's own numbers, so the one edited shader is right on every level.
+- HellForge builds the edited shader from the player's game files. The spec holds only the new instruction bytes and
+  the digest of each game stage it edits. The shader patch tools (`patch_igm.py`) wrote those bytes; they are not in
+  this folder.
+- The DLL sets the zoom on a world above 2048 m (`src/xl/proto/difficulty_map_hud.c`): level 3 at 0.45 px/m, level 4
+  over the 2048 m around the player, and, while Tab is held, level 5 with the whole world full-screen.
+- On a 16 km world the map texture holds 8 m a texel.
 
 ## Extraction
 
@@ -559,7 +575,8 @@ the game drops four and more. It goes in on its own: when it cannot, the peer li
 ## Build
 
 ```text
-scripts/build.sh [--test] [--package] [--players 4|8] [--test-first-slot <1-7>] [--hellforge <checkout>] [--zig <zig>]
+scripts/build.sh [--test] [--package] [--check-data] [--players 4|8] [--test-first-slot <1-7>] [--hellforge <checkout>]
+                 [--hellforge-cli <HellForge.Cli>] [--zig <zig>]
 ```
 
 `--players` sets how many players a session takes (default 4). The DLL and the tests are built for that count.
@@ -571,29 +588,45 @@ and player indexes from that number on, so one joiner reaches the code for playe
 The script builds `complex_operations.dll` beside `hellforge-mod.json`. It takes the mod SDK from a HellForge checkout
 (`HELLFORGE_OPEN`, else `~/HellForge`) and Zig from `HELLFORGE_ZIG`, else `~/.local/share/zig-native/zig`.
 
-`--package` writes `build/package/complex-operations-<version>.zip` with the four files a player installs.
+`--package` writes `build/package/complex-operations-<version>.zip` with the five files a player installs.
+
+`--check-data` has HellForge's CLI read `hellforge-data.json`, as a launcher does when it lists the mod. `--package`
+does it too and packages nothing when the CLI refuses the spec. It takes the CLI from `--hellforge-cli`, else
+`HELLFORGE_CLI`: a `HellForge.Cli` built from HellForge dev with pull request 350.
 
 `--test` also builds and runs `tests/*_test.c` as Windows programs under Wine (`WINE`, else Proton Experimental's).
 The tests run the mod against a stand-in game image: no game is needed.
 
 ## Install
 
-The mod needs a HellForge with mod SDK 17 or newer. Older ones cannot build the level data from the recipe and refuse
-the mod. Complex operations need a newer one still (see Complex operations).
+The mod needs a HellForge with mod SDK 17 or newer that reads a data spec's `edit` entry (HellForge pull request 350):
+dev from 2026-11-11 on, or the first release after 0.4.0-beta. Complex operations need a newer one still (see
+Complex operations).
 
-Put these four files in one folder inside HellForge's mods folder:
+| HellForge | What the player sees |
+|---|---|
+| SDK 16 or older (0.4.0-beta) | The Mods page leaves the mod out: `needs HellForge mod SDK 17; this HellForge provides SDK 16.` |
+| SDK 17 without `edit` | The Mods page leaves the mod out: `hellforge-data.json: patches[0].resources[0]: a resource has exactly one of copy, include, icon, texture, animations, model, sounds or shader.` |
+
+Put these five files in one folder inside HellForge's mods folder:
 
 - `hellforge-mod.json`
 - `complex_operations.dll`
 - `hellforge-recipe.json`
 - `hellforge-recipe.literals`
+- `hellforge-data.json`
 
 HellForge builds the bay's level data and the Pelican's unit from the recipe and the player's own game files before a
-session, into the folder's `data/`. The recipe copies every unchanged value from the player's game. It ships only the values the mod changed (a moved
-vertex's new coordinate, for example) and the mod's own new data. Without the level data the mod leaves four pods.
+session, into the folder's `data/`. The recipe copies every unchanged value from the player's game. It ships only the
+values the mod changed (a moved vertex's new coordinate, for example) and the mod's own new data. Without the level
+data the mod leaves four pods.
 
 The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`, then `gunship_seats.py recipe` for the
 Pelican), which are not in this folder.
+
+HellForge also builds the Tab map's shader from `hellforge-data.json` and the player's game files (see Tab map), into
+its own cache outside the folder. The spec names the game's shader by the digest of each stage it edits. When the
+player's game has another shader there, the session says `its data could not be built` and leaves the whole mod out.
 
 ## Source
 
@@ -607,6 +640,7 @@ Pelican), which are not in this folder.
 | `scripts/sites/` | The reviewed site lists of the seven managers and the avatar manager. |
 | `scripts/gen_manager_sites.py` | Writes `co_manager_sites.h` from those lists and a dump of the game's code; assembles the loot rows' caves with GNU `as`. |
 | `hellforge-recipe.json`, `.literals` | The bay's level, geometry and collision data and the Pelican's seat nodes as a HellForge recipe. |
+| `hellforge-data.json` | The Tab map's copy shader edit as a HellForge data spec (see Tab map). |
 | `scripts/pod_sites.tsv` | The reviewed site list of the pod manager: one row for each instruction. |
 | `scripts/gen_pod_sites.py` | Writes `co_pod_sites.h` from the site list and a dump of the game's code. |
 | `tests/pods_test.c` | The refusals: another build, changed code, a failed write, a failed hook. |
