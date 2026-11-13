@@ -38,10 +38,13 @@ void CoXlTestProbePlayer(int count, float x, float y);
 void CoXlTestProbe(char kind, float x, float y, float used, int why);
 void CoXlTestProbeCounts(long* reads, long* off, long* written);
 uint64_t CoXlTestLayerSpawn(uint64_t unit, uint64_t count, uint64_t field);
+uint64_t CoXlTestThunk(int which, float* out, uint64_t* r9, uint64_t* fifth);
 uint64_t CoXlTestLayerSnap(uint64_t unit, uint64_t field);
 void CoXlTestLayerSpawnInstall(uintptr_t exe);
 uintptr_t CoXlTestLayerSpawnDetour(void);
 uintptr_t CoXlTestLayerSpawnOriginal(void);
+int CoXlTestGridEnter(uint64_t desc);
+void CoXlTestGridLeave(int k);
 const float* CoXlTestHeightCopy(void);
 
 static int g_failed;
@@ -409,15 +412,52 @@ int main(void)
     uint64_t given = CoXlTestLayerSpawn(SpawnUnit(2100.0f, AY, 2, 1), 3, level);
     CHECK(given != level && given == Field(2100.0f, AY));
     CHECK(Near(Read(given, 2600.0f, AY), 45.0f) && Near(Read(given, 1900.0f, AY), 40.0f)); /* what an inline read there takes */
-    CHECK(fake_host_logged("layer spawns (the first): 1 on a tile's grid for every member (1 with SpeedTree, 1 with particle effects); "
-        "1 within 300 m of a player, where the level's heights were 6.99 m off the drawn ground on average, 6.99 m at most"));
+    CHECK(fake_host_logged("layer spawns (the first): 1, 1 of them on a tile's grid for every member (1 with SpeedTree, 1 with particle effects); "
+        "1 within 300 m of a player, their members 0."));
+    CHECK(fake_host_logged(" 0 over 0.5 m; the drawn ground within 16 m of their centres up to "));
+    CHECK(!fake_host_logged("layer spawn off the ground"));
     CHECK(CoXlTestLayerSpawn(SpawnUnit(1126.0f, AY, 2, 1), 3, level) == level);  /* no tile within reach: the level's own */
     CHECK(CoXlTestLayerSpawn(SpawnUnit(2100.0f, AY, 0, 0), 3, 0) == 0);          /* no heightfield (0xDAEC8, 0xDB4F3) */
     CHECK(CoXlTestLayerSpawn(SpawnUnit(2100.0f, AY, 0, 0), 3, given) == given);  /* a grid already: kept */
     CHECK(CoXlTestLayerSpawn(SpawnUnit(2100.0f, AY, 0, 0), 0, level) == level);  /* no members: the engine returns at once */
     CHECK(CoXlTestLayerSpawn(SpawnUnit(2600.0f, AY, 3, 0), 3, level) == given);  /* counted: SpeedTree, no particles */
     CoXlTestLayerTile(a, 1, AX, AY);
-    CHECK(fake_host_logged("layer spawns (a tile came in): 2 on a tile's grid for every member (2 with SpeedTree, 1 with particle effects)"));
+    CHECK(fake_host_logged("layer spawns (a tile came in): 3, 2 of them on a tile's grid for every member (2 with SpeedTree, 1 with particle effects)"));
+    CHECK(fake_host_logged("layer spawns (a tile came in): 0 ran on the game thread, the rest on 1 other thread(s); 0 spawned on the level's heights by a tile"));
+
+    g_case = "a stamp by a tile whose grid is not ready spawns on the level's heights, is listed and logged off the ground";
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN); /* in, its grid not made yet */
+    CoXlTestProbePlayer(1, BX + 20.0f, AY);
+    CHECK(CoXlTestLayerSpawn(SpawnUnit(BX, AY, 1, 0), 3, level) == level);
+    CHECK(fake_host_logged("layer spawn off the ground: the stamp at (1026.2, -4094.9), 20 m from a player: its members read 52.00 (the level's heights)"));
+    CoXlTestLayerTile(b, 1, BX, AY);
+    CHECK(fake_host_logged("1 spawned on the level's heights by a tile, 0 of them since put back on a grid, 0 kept (not the streamer's to put back), 1 waiting"));
+
+    g_case = "a listed stamp the streamer holds goes out and comes back once a tile's grid covers it";
+    StreamGame();
+    Stream(1);
+    Slot(0, BX, AY, 20.0f, (uint64_t)(uintptr_t)g_spawnUnit, 0);
+    long destroys = g_destroys;
+    CoXlTestStreamScan();
+    int pLive = 0, pDue = 0; uint64_t pUnit = 0;
+    CoXlTestStreamSlotState(0, &pLive, &pDue, &pUnit);
+    CHECK(g_destroys == destroys + 1 && !pLive && pDue);
+    CoXlTestLayerTile(b, 1, BX, AY);
+    CHECK(fake_host_logged("1 spawned on the level's heights by a tile, 1 of them since put back on a grid, 0 kept (not the streamer's to put back), 0 waiting"));
+
+    g_case = "a grid write waits for the spawns reading it and says when one is still reading";
+    uint64_t current = Field(2100.0f, AY);
+    int k = CoXlTestGridEnter(current);
+    CHECK(k == a);
+    CoXlTestLayerTile(a, 1, AX, AY);
+    CHECK(fake_host_logged("waited for layer spawns reading them, 1 went on with one still reading"));
+    CHECK(CoXlTestGridEnter(current) < 0); /* its layout was written again: the old descriptor is not handed on */
+    CoXlTestGridLeave(k);
+    k = CoXlTestGridEnter(Field(2100.0f, AY));
+    CHECK(k == a);
+    CoXlTestGridLeave(k);
+    CoXlTestLayerTile(b, 0, BX, AY);
+    CoXlTestTileRemove(b);
 
     g_case = "0xDFA60 after the spawn keeps the grid it is given and never keeps it as the level's heightfield";
     int slot2 = -2;
@@ -480,6 +520,15 @@ int main(void)
     for (int k = 0; k < 19700; k++) CoXlTestProbe('S', AX, AY - 500.0f, 60.0f, 0);
     CoXlTestProbeCounts(&reads, &off, &written);
     CHECK(reads == 20004 && off == 20001 && written == 400); /* past the budget */
+
+    Start("the leaf thunks keep xmm1-xmm5 for the game's callers and pass the return address or the fifth argument on");
+    float out[8]; uint64_t r9 = 0, fifth = 0;
+    CHECK(CoXlTestThunk(0, out, &r9, &fifth) == 77);
+    CHECK(out[0] == 7.0f && out[1] == 1.0f && out[2] == 2.0f && out[3] == 3.0f && out[4] == 4.0f && out[5] == 5.0f);
+    CHECK(r9 != 0 && r9 == *(uint64_t*)&out[6]); /* the sampler's caller, for its RVA */
+    CHECK(CoXlTestThunk(1, out, &r9, &fifth) == 77);
+    CHECK(out[0] == 0.5f && out[1] == 1.0f && out[2] == 2.0f && out[3] == 3.0f && out[4] == 4.0f && out[5] == 5.0f);
+    CHECK(r9 == 0x44 && fifth == 0x5555);
 
     if (g_failed) { printf("layergrid: %d checks failed\n", g_failed); return 1; }
     printf("layergrid: all cases passed\n");

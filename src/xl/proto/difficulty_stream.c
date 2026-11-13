@@ -797,6 +797,38 @@ static void WorldStreamReplacePick(uint32_t* pick, float* key, uint32_t* picks, 
     if (k > key[m]) { pick[m] = i; key[m] = k; }
 }
 
+/* The stamps whose layers spawned on the level's heights by a live tile (NearLayerPendingAdd): once a grid covers one,
+ * a stamp the streamer may take out goes out and comes back on it, as after a tile's change; any other is counted
+ * (the start area's and the mission's stamps stay). One with no grid after 60 s is dropped. */
+static void WorldStreamPendingLocked(ULONGLONG now)
+{
+    AcquireSRWLockExclusive(&g_layerPending.lock);
+    if (g_layerPending.level != g_world.levels) { ReleaseSRWLockExclusive(&g_layerPending.lock); return; }
+    uint32_t keep = 0;
+    for (uint32_t p = 0; p < g_layerPending.count; p++)
+    {
+        float x = g_layerPending.e[p].x, y = g_layerPending.e[p].y;
+        if (NearLayerGridAt(x, y, NEAR_LAYER_REACH) < 0)
+        {
+            if (now - g_layerPending.e[p].at > 60000) g_layerPending.expired++;
+            else g_layerPending.e[keep++] = g_layerPending.e[p];
+            continue;
+        }
+        uint32_t i = 0;
+        while (i < g_stream.count && i < kStreamMaxLocations && g_streamUnit[i] != g_layerPending.e[p].unit) i++;
+        if (i < g_stream.count && i < kStreamMaxLocations && g_streamDeferred[i] && g_streamLive[i] && g_streamPoseGood[i] && !g_streamNeedsUnit[i] &&
+            !g_streamMission[i])
+        {
+            g_streamReplace[i] = 1;
+            g_streamSeen2[i] = 1.0f;
+            g_layerPending.replaced++;
+        }
+        else g_layerPending.kept++;
+    }
+    g_layerPending.count = keep;
+    ReleaseSRWLockExclusive(&g_layerPending.lock);
+}
+
 /* Every 0.25 s: the players' positions and every deferred location's nearest one. A location below kStreamInRadius
  * becomes due (and stays due); the due ones are ordered nearest first. A live location beyond kStreamOutRadius starts a
  * timer and is removed after kStreamOutTimeout, at most kStreamRemoveBatch in this pass. */
@@ -805,6 +837,7 @@ static void WorldStreamScanLocked(ULONGLONG now)
     if (now < g_stream.nextScan) return;
     g_stream.nextScan = now + 250;
     WorldStreamPlayersLocked();
+    WorldStreamPendingLocked(now);
     if (g_stream.bodyPending && !g_stream.bodyNoted) /* the after count, a scan after the 20th removal */
     {
         uint32_t after = 0;
@@ -1109,6 +1142,7 @@ static int WorldStreamInMission(void)
 static void WorldStreamTick(float dt)
 {
     if (g_streamInstallState != 1) return;
+    g_layerGameThread = GetCurrentThreadId();
     DestroyTick(); /* destroys that waited for their unit (difficulty_world_destroy.c) */
     if (dt > 0 && dt < 10.0f) { g_streamFrames++; g_streamFrameSum += dt; if (dt > g_streamFrameMax) g_streamFrameMax = dt; }
     if (g_streamInside) return; /* a generator call is inside: it owns the pass */

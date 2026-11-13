@@ -104,6 +104,20 @@ static uint32_t IndexQueryClamped(uint64_t index, uint32_t key, uint32_t mode, u
     return hits < places ? hits : places;
 }
 
+/* 0xC05360 is a leaf that never writes xmm0-xmm5, and its callers keep floats there across the call (0xFA85AA reads
+ * xmm2, 0xFCCB63 xmm3, 0xFCCE41 xmm5); the C detour may not, so this thunk keeps them and passes the stack argument on. */
+uint32_t CoIndexQueryThunk(uint64_t index, uint32_t key, uint32_t mode, uint64_t buffer, uint32_t places);
+uint32_t (*g_coIndexQueryClamped)(uint64_t, uint32_t, uint32_t, uint64_t, uint32_t) = IndexQueryClamped;
+__asm__(".text\n.p2align 4\n.globl CoIndexQueryThunk\nCoIndexQueryThunk:\n"
+        "  subq $0x98, %rsp\n"
+        "  movdqu %xmm0, 0x30(%rsp)\n  movdqu %xmm1, 0x40(%rsp)\n  movdqu %xmm2, 0x50(%rsp)\n"
+        "  movdqu %xmm3, 0x60(%rsp)\n  movdqu %xmm4, 0x70(%rsp)\n  movdqu %xmm5, 0x80(%rsp)\n"
+        "  movq 0xC0(%rsp), %rax\n  movq %rax, 0x20(%rsp)\n"
+        "  callq *g_coIndexQueryClamped(%rip)\n"
+        "  movdqu 0x30(%rsp), %xmm0\n  movdqu 0x40(%rsp), %xmm1\n  movdqu 0x50(%rsp), %xmm2\n"
+        "  movdqu 0x60(%rsp), %xmm3\n  movdqu 0x70(%rsp), %xmm4\n  movdqu 0x80(%rsp), %xmm5\n"
+        "  addq $0x98, %rsp\n  retq\n");
+
 /* The game thread's part, in the order the loader's tick called it. */
 static void CoXlTick(HfMod* mod, float dt, void* user)
 {
@@ -236,7 +250,7 @@ const char* CoXlInstall(uintptr_t game)
     /* refused, the game's rule stays: every step on the map holds every main objective */
     if ((why = co_unlock_install(game, g_importantList)) != NULL) Note("complex operations: mission unlock: %s; every step holds every main", why);
     if (g_streamInstallState == 1) SpanRescueInstall(); /* its passes follow the streamer's removals */
-    if (LoaderHook("the stamp index query's count (at most its places on a complex level)", game + CO_STAMP_QUERY, (void*)IndexQueryClamped, (void**)&g_indexQuery))
+    if (LoaderHook("the stamp index query's count (at most its places on a complex level)", game + CO_STAMP_QUERY, (void*)CoIndexQueryThunk, (void**)&g_indexQuery))
         return "the stamp index's query could not be hooked";
     co_nav_ship(WorldShip); /* the ship's navigation step is where play's world goes back to the game's */
     if (g_coApi->on_game_thread(g_coMod, CoXlTick, NULL) == 0) return "the game thread's tick could not be registered";
@@ -546,6 +560,40 @@ uint64_t CoXlTestLayerSnap(uint64_t unit, uint64_t field)
 void CoXlTestLayerSpawnInstall(uintptr_t exe) { g_layerSpawn = NULL; WorldLayerSpawnInstall(exe); }
 uintptr_t CoXlTestLayerSpawnDetour(void) { return (uintptr_t)WorldLayerSpawn; }
 uintptr_t CoXlTestLayerSpawnOriginal(void) { return (uintptr_t)g_layerSpawn; }
+int CoXlTestGridEnter(uint64_t desc) { return NearLayerGridEnter(desc); }
+void CoXlTestGridLeave(int k) { NearLayerGridLeave(k); }
+/* The two leaf thunks against a target that wipes xmm0-xmm5: out gets xmm1-xmm5 after the call, the target's r9 and
+ * fifth argument, and the address the runner's call returns to. which 0: the layer sampler's, 1: the index query's. */
+uint64_t g_coTestR9, g_coTestFifth;
+uint64_t CoXlTestWipe(void);
+__asm__(".text\n.p2align 4\nCoXlTestWipe:\n"
+        "  movq %r9, g_coTestR9(%rip)\n  movq 0x28(%rsp), %rax\n  movq %rax, g_coTestFifth(%rip)\n"
+        "  xorps %xmm0, %xmm0\n  xorps %xmm1, %xmm1\n  xorps %xmm2, %xmm2\n"
+        "  xorps %xmm3, %xmm3\n  xorps %xmm4, %xmm4\n  xorps %xmm5, %xmm5\n"
+        "  movl $0x40E00000, %eax\n  movd %eax, %xmm0\n  movl $77, %eax\n  retq\n");
+uint64_t CoXlTestThunkRunAsm(void* thunk, float* out, uint64_t fifth);
+__asm__(".text\n.p2align 4\nCoXlTestThunkRunAsm:\n"
+        "  pushq %rbx\n  subq $0x30, %rsp\n  movq %rdx, %rbx\n  movq %r8, 0x20(%rsp)\n  movq %rcx, %rax\n"
+        "  movl $0x3F000000, %r10d\n  movd %r10d, %xmm0\n  movl $0x3F800000, %r10d\n  movd %r10d, %xmm1\n"
+        "  movl $0x40000000, %r10d\n  movd %r10d, %xmm2\n  movl $0x40400000, %r10d\n  movd %r10d, %xmm3\n"
+        "  movl $0x40800000, %r10d\n  movd %r10d, %xmm4\n  movl $0x40A00000, %r10d\n  movd %r10d, %xmm5\n"
+        "  movl $0x11, %ecx\n  movl $0x22, %edx\n  movl $0x33, %r8d\n  movl $0x44, %r9d\n"
+        "  callq *%rax\n"
+        "0:\n  movss %xmm0, 0(%rbx)\n  movss %xmm1, 4(%rbx)\n  movss %xmm2, 8(%rbx)\n  movss %xmm3, 12(%rbx)\n"
+        "  movss %xmm4, 16(%rbx)\n  movss %xmm5, 20(%rbx)\n  leaq 0b(%rip), %rcx\n  movq %rcx, 24(%rbx)\n"
+        "  addq $0x30, %rsp\n  popq %rbx\n  retq\n");
+uint64_t CoXlTestThunk(int which, float* out, uint64_t* r9, uint64_t* fifth)
+{
+    float (*sample)(uint64_t*, float, float, uintptr_t) = g_coWorldLayerSample;
+    uint32_t (*query)(uint64_t, uint32_t, uint32_t, uint64_t, uint32_t) = g_coIndexQueryClamped;
+    g_coWorldLayerSample = (float (*)(uint64_t*, float, float, uintptr_t))(void*)CoXlTestWipe;
+    g_coIndexQueryClamped = (uint32_t (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint32_t))(void*)CoXlTestWipe;
+    g_coTestR9 = g_coTestFifth = 0;
+    uint64_t r = CoXlTestThunkRunAsm(which == 0 ? (void*)CoWorldLayerSampleThunk : (void*)CoIndexQueryThunk, out, 0x5555);
+    g_coWorldLayerSample = sample; g_coIndexQueryClamped = query;
+    *r9 = g_coTestR9; *fifth = g_coTestFifth;
+    return r;
+}
 const float* CoXlTestHeightCopy(void) { return g_heightCopy; }
 void CoXlTestProbePlayer(int count, float x, float y)
 {
