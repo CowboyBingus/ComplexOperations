@@ -36,7 +36,10 @@ PINS = [
     (0x667FB0, 0x667FC7, 'a span is full: no free list and every block handed out'),
     (0x6302F0, 0x63031B, "the trim: the hooked prologue and the caller's heap at [[gs:0x58]]+0x4350"),
     (0x3245FF, 0x324640, "trim-all: the pool [[0x1A10208]+0x318]'s workers +0x90 / +0x88 get +0x7D"),
-    (0x6253BF, 0x6253D2, 'a pool worker trims its own heap after its jobs when +0x7D is set'),
+    (0x6253BF, 0x6253D4, 'a pool worker trims its own heap after its jobs when +0x7D is set, clears it, loops'),
+    (0x625380, 0x625387, "the worker loop's head: the trim's result is not read"),
+    (0x08BD94, 0x08BDD0, "a trim-all copy: trim(1) on its own thread, then the workers' +0x7D stores"),
+    (0x627666, 0x6276A0, "a trim-all copy: trim(1) on its own thread, then the workers' +0x7D stores"),
 ]
 # rpmalloc's allocation entries the test runs beside the pinned code (not pins).
 EXEC = [

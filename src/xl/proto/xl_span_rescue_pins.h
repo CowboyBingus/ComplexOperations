@@ -80,6 +80,14 @@ static const struct { uint32_t rva; const char* hex; } kSrPins[] = {
     /* trim-all: the pool [[0x1A10208]+0x318]'s workers +0x90 / +0x88 get +0x7D */
     {0x3245FFu, "48 8B 35 02 BC 6E 01 B1 01 48 8B 9E 18 03 00 00 E8 DC BC 30 00 48 8B 83 90 00 00 00 8B 8B 88 00 00 00 48 8D 14 C8 48 3B C2 74 16 66 0F 1F 44 00"},
     {0x32462Fu, "00 48 8B 08 48 83 C0 08 C6 41 7D 01 48 3B C2 75 F0"},
-    /* a pool worker trims its own heap after its jobs when +0x7D is set */
-    {0x6253BFu, "0F B6 43 7D 84 C0 74 B9 33 C9 E8 22 AF 00 00 C6 43 7D 00"},
+    /* a pool worker trims its own heap after its jobs when +0x7D is set, clears it, loops */
+    {0x6253BFu, "0F B6 43 7D 84 C0 74 B9 33 C9 E8 22 AF 00 00 C6 43 7D 00 EB AC"},
+    /* the worker loop's head: the trim's result is not read */
+    {0x625380u, "48 8B 4B 20 41 8B C7"},
+    /* a trim-all copy: trim(1) on its own thread, then the workers' +0x7D stores */
+    {0x08BD94u, "48 8B 35 6D 44 98 01 B1 01 48 8B 9E 18 03 00 00 E8 47 45 5A 00 48 8B 83 90 00 00 00 8B 8B 88 00 00 00 48 8D 14 C8 48 3B C2 74 11 90 48 8B 08 48"},
+    {0x08BDC4u, "83 C0 08 C6 41 7D 01 48 3B C2 75 F0"},
+    /* a trim-all copy: trim(1) on its own thread, then the workers' +0x7D stores */
+    {0x627666u, "48 8B D9 B1 01 E8 80 8C 00 00 48 8B 83 90 00 00 00 8B 8B 88 00 00 00 48 8D 14 C8 48 3B C2 74 1A 66 66 0F 1F 84 00 00 00 00 00 48 8B 08 48 83 C0"},
+    {0x627696u, "08 C6 41 7D 01 48 3B C2 75 F0"},
 };

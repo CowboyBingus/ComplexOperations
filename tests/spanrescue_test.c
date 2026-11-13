@@ -18,6 +18,10 @@ int CoXlTestSrMarked(uintptr_t span);
 long long CoXlTestSrRegistered(void);
 int CoXlTestSrRescue(uintptr_t heap, uintptr_t span);
 void CoXlTestSrLast(long long* out);
+int CoXlTestSrThreadEnded(unsigned ms);
+void CoXlTestSrLock(int mode, int take);
+void CoXlTestSrCosts(long long* out);
+void CoXlTestSrPause(void (*pause)(void));
 int CoXlTestMemProbeOn(void);
 
 static int g_failed;
@@ -32,6 +36,9 @@ static const char* g_case;
 #define TRIM 0x6302F0u
 #define APP 0x1A10208u
 #define HEAPS 0x27B1100u
+#define CONFIG_REST 0x27B8C70u
+#define REGIONS 0x2360D04u
+#define WORKER_TRIM 0x6253C3u /* the test's entry: sub rsp, 8, then the worker's own `xor ecx, ecx; call trim` */
 #define CLASS 34u
 #define BLOCK 1040u
 #define COUNT 62u
@@ -47,17 +54,58 @@ typedef void (*UnmapFn)(void* address, size_t size, size_t offset, size_t releas
 static int g_newSpans, g_released, g_finalised, g_maps, g_unmaps, g_unmapSawBit, g_trims;
 static uintptr_t g_releasedSpan;
 static uint64_t g_trimArg;
+/* While spans churn they come from an arena of 65,536 spans, taken in turn and decommitted when released, so a
+ * released span's address stays unmapped for a long time and a late read of it faults. A rescued one may still be
+ * linked in the heap's lists until the pass ends; the test releases it then. */
+#define ARENA_SPANS 65536u
+static int g_grave;
+static CRITICAL_SECTION g_graveLock;
+static uint8_t* g_arena;
+static uint8_t g_arenaUsed[ARENA_SPANS];
+static uint32_t g_arenaNext;
+static void* g_graves[1 << 14];
+static int g_graveCount;
 static void* FakeMap(size_t size, size_t* offset)
 {
     g_maps++;
     *offset = 0;
-    return VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!g_grave || size != 0x10000) return VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    void* p = NULL;
+    EnterCriticalSection(&g_graveLock);
+    for (uint32_t k = 0; k < ARENA_SPANS && p == NULL; k++, g_arenaNext = (g_arenaNext + 1) % ARENA_SPANS)
+        if (!g_arenaUsed[g_arenaNext])
+        {
+            g_arenaUsed[g_arenaNext] = 1;
+            p = VirtualAlloc(g_arena + (size_t)g_arenaNext * 0x10000, 0x10000, MEM_COMMIT, PAGE_READWRITE);
+        }
+    LeaveCriticalSection(&g_graveLock);
+    return p;
+}
+static void ArenaFree(void* address)
+{
+    VirtualFree(address, 0x10000, MEM_DECOMMIT);
+    g_arenaUsed[((uint8_t*)address - g_arena) / 0x10000] = 0;
 }
 static void FakeUnmap(void* address, size_t size, size_t offset, size_t release)
 {
     g_unmaps++;
     g_unmapSawBit = CoXlTestSrMarked((uintptr_t)address);
+    if (g_grave && (uint8_t*)address >= g_arena && (uint8_t*)address < g_arena + (size_t)ARENA_SPANS * 0x10000)
+    {
+        EnterCriticalSection(&g_graveLock);
+        if (*(volatile uint64_t*)address != 0 && g_graveCount < (int)(sizeof g_graves / sizeof g_graves[0])) g_graves[g_graveCount++] = address;
+        else ArenaFree(address);
+        LeaveCriticalSection(&g_graveLock);
+        return;
+    }
     if (release) VirtualFree(address, 0, MEM_RELEASE);
+}
+static void Bury(void)
+{
+    EnterCriticalSection(&g_graveLock);
+    for (int i = 0; i < g_graveCount; i++) ArenaFree(g_graves[i]);
+    g_graveCount = 0;
+    LeaveCriticalSection(&g_graveLock);
 }
 /* 0x668D30 (heap, heap class, span count, class): a span from the cache or a new map, here always the map through the
  * config pointer, as rpmalloc's own map call sites do. */
@@ -429,6 +477,270 @@ static void Workers(void)
     CHECK(w0[0x7D] == 1 && w1[0x7D] == 1);
 }
 
+/* ---- the registry's lock ---------------------------------------------------------------------------------------- */
+typedef struct { int mode; HANDLE held, done; } Holder;
+static DWORD WINAPI HoldLock(void* p)
+{
+    Holder* h = (Holder*)p;
+    CoXlTestSrLock(h->mode, 1);
+    SetEvent(h->held);
+    WaitForSingleObject(h->done, INFINITE);
+    CoXlTestSrLock(h->mode, 0);
+    return 0;
+}
+static HANDLE Hold(Holder* h, int mode)
+{
+    h->mode = mode; h->held = CreateEventA(NULL, TRUE, FALSE, NULL); h->done = CreateEventA(NULL, TRUE, FALSE, NULL);
+    HANDLE t = CreateThread(NULL, 0, HoldLock, h, 0, NULL);
+    WaitForSingleObject(h->held, INFINITE);
+    return t;
+}
+static void LetGo(Holder* h, HANDLE t) { SetEvent(h->done); WaitForSingleObject(t, INFINITE); CloseHandle(t); CloseHandle(h->held); CloseHandle(h->done); }
+static uintptr_t g_unmapSpan;
+static DWORD WINAPI UnmapOne(void* unused) { (void)unused; ((UnmapFn) * (void**)(g_exe + UNMAP_AT))((void*)g_unmapSpan, 0x10000, 0, 0); return 0; }
+static uintptr_t g_trimHeap;
+static DWORD WINAPI TrimOne(void* unused) { (void)unused; SetQ(g_trimHeap, (uint64_t)(uintptr_t)NtCurrentTeb()); CoXlTestSrTrim(0); return 0; }
+static DWORD WINAPI StepOne(void* unused) { (void)unused; CoXlTestSrStep(256, 0, 100000, 1); return 0; }
+static void Locks(void)
+{
+    g_case = "an unmap waits for a reader of the headers";
+    Setup(1);
+    CHECK(CoXlTestSrInstall() == 1);
+    FakeMapping();
+    uintptr_t heap = NewHeap(), other = NewHeap();
+    uintptr_t span = Hand(heap, 0, COUNT, 1, 0);
+    SetQ(span + 0x18, span + 0x80);
+    Holder h;
+    HANDLE reader = Hold(&h, 1);
+    g_unmapSpan = span;
+    HANDLE u = CreateThread(NULL, 0, UnmapOne, NULL, 0, NULL);
+    CHECK(WaitForSingleObject(u, 100) == WAIT_TIMEOUT);
+    CHECK(g_unmaps == 0 && CoXlTestSrMarked(span));
+    LetGo(&h, reader);
+    CHECK(WaitForSingleObject(u, 5000) == WAIT_OBJECT_0); CloseHandle(u);
+    CHECK(g_unmaps == 1 && !CoXlTestSrMarked(span));
+    long long c[5]; CoXlTestSrCosts(c);
+    CHECK(c[3] > 0); /* the wait was measured */
+
+    g_case = "a scan and a rescue wait for an unmap";
+    span = Hand(heap, 0, COUNT, 1, 0);
+    SetQ(span + 0x18, span + 0x80); SetQ(heap + 0x718, 1);
+    CoXlTestSrHeap(other);
+    HANDLE w = Hold(&h, 2);
+    HANDLE t = CreateThread(NULL, 0, StepOne, NULL, 0, NULL);
+    CHECK(WaitForSingleObject(t, 100) == WAIT_TIMEOUT); /* the scan */
+    LetGo(&h, w);
+    CHECK(WaitForSingleObject(t, 5000) == WAIT_OBJECT_0); CloseHandle(t);
+    CHECK(CoXlTestSrStep(256, 0, 100001, 1) == 2); /* published; the game thread's heap has none */
+    CoXlTestSrHeap(heap); g_trimHeap = heap;
+    w = Hold(&h, 2);
+    t = CreateThread(NULL, 0, TrimOne, NULL, 0, NULL);
+    CHECK(WaitForSingleObject(t, 100) == WAIT_TIMEOUT); /* the rescue */
+    CHECK(Q(span) == 0 && Q(span + 0x18) == span + 0x80);
+    LetGo(&h, w);
+    CHECK(WaitForSingleObject(t, 5000) == WAIT_OBJECT_0); CloseHandle(t);
+    CHECK(Q(span) == span + 0x80 && Partial(heap) == span);
+}
+
+/* Spans mapped and released on another thread while passes scan and rescue, and each read of a header made slower:
+ * a reader inside a header that is going faults. A rescued span stays committed until its pass ends and the test
+ * empties the heap's lists, so only a read the lock should have kept out reaches a decommitted one. Odd slots are
+ * read by the scan only; even ones are stranded. */
+#define CHURN_LIVE 16u /* a span is released about one pass after it is made: often while that pass reads it */
+static volatile LONG g_churnStop;
+static uintptr_t g_churnHeap;
+static LONG g_churned;
+static void ChurnHeader(uintptr_t span, uint32_t cls, int plain)
+{
+    uint32_t size, count;
+    memcpy(&size, kRpmallocSizes + 8 * cls, 4); count = (uint32_t)kRpmallocSizes[8 * cls + 4] | (uint32_t)kRpmallocSizes[8 * cls + 5] << 8;
+    SetQ(span + 0x80, 0);
+    SetQ(span, 0); SetD(span + 8, count); SetD(span + 0xC, cls); SetD(span + 0x10, count); SetD(span + 0x14, count);
+    SetQ(span + 0x18, plain ? 0 : span + 0x80); SetD(span + 0x20, plain ? 0 : 1); SetD(span + 0x24, size); SetD(span + 0x2C, 1);
+    *(volatile uint64_t*)(span + 0x40) = g_churnHeap; /* last, as rpmalloc sets a span up */
+}
+static DWORD WINAPI Churn(void* unused)
+{
+    (void)unused;
+    uintptr_t live[CHURN_LIVE] = {0};
+    size_t off;
+    for (uint32_t k = 0; !g_churnStop; k++)
+    {
+        uint32_t i = k % CHURN_LIVE;
+        if (live[i] != 0) ((UnmapFn) * (void**)(g_exe + UNMAP_AT))((void*)live[i], 0x10000, 0, 0x10000);
+        live[i] = (uintptr_t)((MapFn) * (void**)(g_exe + MAP_AT))(0x10000, &off);
+        if (live[i] != 0) ChurnHeader(live[i], i, i & 1);
+        g_churned++;
+    }
+    for (int i = 0; i < (int)CHURN_LIVE; i++) if (live[i] != 0) ((UnmapFn) * (void**)(g_exe + UNMAP_AT))((void*)live[i], 0x10000, 0, 0x10000);
+    return 0;
+}
+static void Pause(void) { for (volatile int k = 0; k < 3000; k++) {} } /* about the time an unmap takes */
+static void Churning(void)
+{
+    g_case = "spans released during passes";
+    Setup(1);
+    CHECK(CoXlTestSrInstall() == 1);
+    FakeMapping();
+    g_churnHeap = NewHeap();
+    CoXlTestSrHeap(g_churnHeap);
+    if (g_arena == NULL) g_arena = (uint8_t*)VirtualAlloc(NULL, (size_t)ARENA_SPANS * 0x10000, MEM_RESERVE, PAGE_NOACCESS);
+    CHECK(g_arena != NULL);
+    g_churnStop = 0; g_churned = 0; g_grave = 1;
+    CoXlTestSrPause(Pause);
+    HANDLE t = CreateThread(NULL, 0, Churn, NULL, 0, NULL);
+    long long rescued = 0, found = 0, f[F_N];
+    ULONGLONG until = GetTickCount64() + 1500;
+    uint32_t pass = 0;
+    for (; GetTickCount64() < until; pass++)
+    {
+        uint32_t removed = 256 * (pass + 1);
+        unsigned long long now = 100000ull + 20003ull * pass;
+        CoXlTestSrStep(removed, 0, now, 1); CoXlTestSrStep(removed, 0, now + 1, 1); CoXlTestSrStep(removed, 0, now + 2, 1);
+        CoXlTestSrLast(f); rescued += f[F_RESCUED]; found += f[F_FOUND];
+        memset((void*)(g_churnHeap + 0x10), 0, 0x10 * 96);
+        Bury();
+        g_fake.log[0] = 0; /* the fake log holds 8 KB */
+    }
+    g_churnStop = 1;
+    WaitForSingleObject(t, INFINITE); CloseHandle(t);
+    Bury(); g_grave = 0;
+    CoXlTestSrPause(NULL);
+    CHECK(rescued > 0 && g_churned > 1000 && CoXlTestSrRegistered() == 0);
+    printf("  churn: %u passes, %ld spans mapped and released, %lld found stranded, %lld rescued\n", pass, (long)g_churned, found, rescued);
+}
+
+/* A rescue onto a partial list that holds a span: that span's prev is the rescued one, so freeing its last block
+ * (0x66A44E) unlinks it from the middle of the list. */
+static void Neighbour(void)
+{
+    g_case = "a rescued span ahead of a partial one; the partial one goes";
+    Setup(1);
+    CHECK(CoXlTestSrInstall() == 1);
+    FakeMapping();
+    uintptr_t heap = NewHeap();
+    CoXlTestSrHeap(heap);
+    void* b[COUNT];
+    uintptr_t full = Fill(heap, b);
+    void* lone = Alloc(heap);
+    uintptr_t partial = SpanOf(lone);
+    CHECK(partial != full && Partial(heap) == partial && g_newSpans == 2);
+    FreeElsewhere(b, 1, COUNT - 1);
+    Pass(256, 100000);
+    CHECK(Partial(heap) == full && Q(full + 0x48) == partial && Q(partial + 0x50) == full);
+    /* the partial span's other blocks are in the heap's class free list: hand them out, then free them all */
+    void* rest[COUNT]; int n = 0;
+    while (n < (int)COUNT && Q(heap + 8 + 0x10 * CLASS) != 0) rest[n++] = Alloc(heap);
+    CHECK(Partial(heap) == full); /* the class free list emptied; the partial head is still the rescued span */
+    for (int i = 0; i < n; i++) if (SpanOf(rest[i]) == partial) Free(rest[i]);
+    Free(lone);
+    CHECK(g_released == 1 && g_releasedSpan == partial);
+    CHECK(Partial(heap) == full && Q(full + 0x48) == 0);
+    for (int i = 0; i < n; i++) if (SpanOf(rest[i]) != partial) Free(rest[i]);
+}
+
+/* ---- the pool worker's trim -------------------------------------------------------------------------------------- */
+typedef void (*WorkerFn)(void);
+static void WorkerSite(void)
+{
+    static const uint8_t enter[] = {0x48, 0x83, 0xEC, 0x08}, leave[] = {0x48, 0x83, 0xC4, 0x08, 0xC3};
+    memcpy(g_exe + WORKER_TRIM, enter, sizeof enter);       /* 0x6253C7..0x6253CD stay the game's */
+    memcpy(g_exe + 0x6253CEu, leave, sizeof leave);
+    Thunk(TRIM, fake_host_detour((uintptr_t)(g_exe + TRIM) - (uintptr_t)g_fake.image));
+}
+static void Skip(void)
+{
+    g_case = "a worker trim only the pass asked for is skipped";
+    Setup(1);
+    SetD((uintptr_t)(g_exe + REGIONS), 9);
+    CHECK(CoXlTestSrInstall() == 1);
+    FakeMapping();
+    WorkerSite();
+    uintptr_t w1 = NewHeap(), w2 = NewHeap();
+    WorkerFn worker = (WorkerFn)(void*)(g_exe + WORKER_TRIM);
+    CoXlTestSrHeap(w1);
+    worker(); CHECK(g_trims == 1 && g_trimArg == 0); /* first seen: trims */
+    worker(); CHECK(g_trims == 1);                    /* nothing of the game's since */
+    CoXlTestSrTrim(1); CHECK(g_trims == 2 && g_trimArg == 1); /* a trim-all: the game raises every worker's flag */
+    worker(); CHECK(g_trims == 3);
+    worker(); CHECK(g_trims == 3);
+    CoXlTestSrHeap(w2);
+    worker(); CHECK(g_trims == 4);
+    worker(); CHECK(g_trims == 4);
+    CoXlTestSrTrim(0); CHECK(g_trims == 5); /* any other caller trims */
+    CoXlTestSrHeap(w1);
+    CoXlTestSrTrim(0x100); CHECK(g_trims == 6); /* only cl is the argument (0x630310) */
+    worker(); CHECK(g_trims == 6);
+    long long c[5]; CoXlTestSrCosts(c);
+    CHECK(c[0] == 3 && c[1] == 4 && c[2] == 1);
+    g_fake.log[0] = 0;
+    CoXlTestSrHeap(NewHeap());
+    Pass(256, 100000);
+    CHECK(fake_host_logged("pass 1 cost: an unmap waited at most 0.000 ms for the scan; pool worker trims since the last pass: 3 run ("));
+    CHECK(fake_host_logged("4 skipped (only the pass asked); 0 of 9 rpmalloc regions registered"));
+}
+
+static volatile LONG g_toggleStop;
+static DWORD WINAPI ToggleMap(void* unused)
+{
+    (void)unused;
+    void* volatile* at = (void* volatile*)(g_exe + MAP_AT);
+    void* def = g_exe + MAP_DEFAULT;
+    while (!g_toggleStop)
+    {
+        InterlockedCompareExchangePointer(at, (void*)0x1234, def);
+        InterlockedCompareExchangePointer(at, def, (void*)0x1234);
+    }
+    return 0;
+}
+static void Refusals(void)
+{
+    g_case = "a refused trim hook puts the span map back and ends the scan thread";
+    Setup(0); g_fake.noHook = (uintptr_t)(g_exe + TRIM) - (uintptr_t)g_fake.image;
+    CHECK(CoXlTestSrInstall() == -1);
+    CHECK(Q((uintptr_t)(g_exe + MAP_AT)) == (uint64_t)(uintptr_t)(g_exe + MAP_DEFAULT));
+    CHECK(Q((uintptr_t)(g_exe + UNMAP_AT)) == (uint64_t)(uintptr_t)(g_exe + UNMAP_DEFAULT));
+    CHECK(CoXlTestSrThreadEnded(5000) == 1);
+    CHECK(fake_host_logged("stranded spans: off: the trim could not be hooked"));
+
+    g_case = "a map-fail callback or other config refuses";
+    Setup(1); SetQ((uintptr_t)(g_exe + CONFIG_REST + 8), 0x1234);
+    CHECK(CoXlTestSrInstall() == -1);
+    Setup(1); SetQ((uintptr_t)(g_exe + CONFIG_REST), 1);
+    CHECK(CoXlTestSrInstall() == -1);
+    CHECK(fake_host_logged("map-fail callback"));
+
+    g_case = "a span map that changes during the install";
+    Setup(1);
+    int on = 0, atCheck = 0, atSwap = 0, bad = 0;
+    g_toggleStop = 0;
+    HANDLE t = CreateThread(NULL, 0, ToggleMap, NULL, 0, NULL);
+    for (int i = 0; i < 5000; i++)
+    {
+        CoXlTestSrReset(1); g_fake.hookCount = 0; g_fake.log[0] = 0;
+        int r = CoXlTestSrInstall();
+        void* map = *(void* volatile*)(g_exe + MAP_AT);
+        void* unmap = *(void* volatile*)(g_exe + UNMAP_AT);
+        if (r == 1)
+        {
+            on++;
+            bad |= unmap == g_exe + UNMAP_DEFAULT || map == g_exe + MAP_DEFAULT || g_fake.hookCount != 1;
+            SetQ((uintptr_t)(g_exe + UNMAP_AT), (uint64_t)(uintptr_t)(g_exe + UNMAP_DEFAULT));
+            InterlockedExchangePointer((void* volatile*)(g_exe + MAP_AT), g_exe + MAP_DEFAULT);
+        }
+        else
+        {
+            atCheck += fake_host_logged("not set up with its own span map");
+            atSwap += fake_host_logged("span map changed while it was wrapped");
+            bad |= unmap != g_exe + UNMAP_DEFAULT || g_fake.hookCount != 0 || (map != g_exe + MAP_DEFAULT && map != (void*)0x1234);
+        }
+    }
+    g_toggleStop = 1;
+    WaitForSingleObject(t, INFINITE); CloseHandle(t);
+    CHECK(!bad && on > 0 && atCheck > 0);
+    printf("  refusals: %d installed, %d refused at the check, %d refused at the map swap (put back)\n", on, atCheck, atSwap);
+}
+
 static void Install(void)
 {
     g_case = "every pinned byte is checked";
@@ -522,16 +834,23 @@ static DWORD WINAPI Watchdog(void* unused) { Sleep(120000); printf("spanrescue: 
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
+    InitializeCriticalSection(&g_graveLock);
     CloseHandle(CreateThread(NULL, 0, Watchdog, NULL, 0, NULL));
     g_exe = fake_host_exe();
     DWORD old;
-    if (!VirtualProtect(g_exe + 0x667000u, 0x5000, PAGE_EXECUTE_READWRITE, &old)) { printf("spanrescue: no executable page\n"); return 1; }
+    if (!VirtualProtect(g_exe + 0x667000u, 0x5000, PAGE_EXECUTE_READWRITE, &old) || !VirtualProtect(g_exe + 0x625000u, 0x1000, PAGE_EXECUTE_READWRITE, &old) ||
+        !VirtualProtect(g_exe + 0x630000u, 0x1000, PAGE_EXECUTE_READWRITE, &old)) { printf("spanrescue: no executable page\n"); return 1; }
     Vanilla();
     Rescue();
     Kinds();
     Race();
     Last();
     Workers();
+    Locks();
+    Churning();
+    Neighbour();
+    Skip();
+    Refusals();
     Install();
 #ifdef CO_RESEARCH
     Research();

@@ -13,7 +13,10 @@
 #define SR_UNMAP_DEFAULT 0x667920u
 #define SR_INITIALISED 0x2360FC4u
 #define SR_SIZES 0x27B0DF0u         /* {u32 block size, u16 count, u16 class}[96] */
+#define SR_CONFIG_REST 0x27B8C70u    /* the two config pointers after unmap; init zeroes them (0x66AAE4) */
+#define SR_REGIONS 0x2360D04u       /* regions mapped now: +1 at each map (0x667B3E..0x6691CA), -1 at a release (0x667D1C) */
 #define SR_TRIM 0x6302F0u
+#define SR_WORKER_TRIMS 0x6253CEu   /* return address of the pool worker's trim(0) when its +0x7D is set (0x6253C9) */
 #define SR_APP 0x1A10208u           /* [app+0x318] the pool: workers [+0x90], count [+0x88], trim flag [w+0x7D] */
 #define SR_SPAN 0x10000u
 #define SR_CLASSES 96u
@@ -44,6 +47,12 @@ typedef struct
     uint64_t* spans;
 } SrSlot;
 
+#ifdef CO_TEST
+static void (*volatile g_srTestPause)(void); /* the tests widen the time a header read takes */
+#define SR_TEST_PAUSE() do { if (g_srTestPause != NULL) g_srTestPause(); } while (0)
+#else
+#define SR_TEST_PAUSE() do { } while (0)
+#endif
 static SRWLOCK g_srLock = SRWLOCK_INIT; /* shared while span headers are read; exclusive while a span's bit is cleared */
 static struct
 {
@@ -62,6 +71,11 @@ static struct
     uint32_t removedAt, passRemoved, passLeft, passes, firstRemoved;
     uint32_t seen, overRoom; double scanMs;
     LONG64 fragFirst, fragLast; int fragOn;
+    volatile LONG quit;                  /* the scan thread ends (a refused install) */
+    HANDLE thread;
+    volatile LONG gameTrims;             /* trims with `global` set: every game store of a worker's +0x7D follows one */
+    struct { volatile uintptr_t heap; volatile LONG seen; } worker[SR_HEAPS];
+    volatile LONG64 waitMax, trimTicks, trimMax; volatile LONG trimsRun, trimsSkipped;
     struct { uint32_t found, rescued, changed, untaken, heaps, threads; LONG64 foundBytes, bytes, cls[3]; } last;
 } g_sr;
 
@@ -109,7 +123,12 @@ static void SrUnmapped(void* address, size_t size, size_t offset, size_t release
     {
         volatile uint64_t* leaf = SrLeaf(span, 0);
         uint32_t i = (uint32_t)(span >> 16) & 0xFFFFu;
+        LARGE_INTEGER a, b;
+        QueryPerformanceCounter(&a);
         AcquireSRWLockExclusive(&g_srLock);
+        QueryPerformanceCounter(&b);
+        for (LONG64 m = g_sr.waitMax; b.QuadPart - a.QuadPart > m; m = g_sr.waitMax)
+            if (InterlockedCompareExchange64(&g_sr.waitMax, b.QuadPart - a.QuadPart, m) == m) break;
         InterlockedAnd64((volatile LONG64*)&leaf[i >> 6], ~((LONG64)1 << (i & 63)));
         ReleaseSRWLockExclusive(&g_srLock);
         InterlockedDecrement64(&g_sr.registered);
@@ -198,7 +217,9 @@ static void SrRescueHere(void)
             {
                 uintptr_t span = (uintptr_t)s->spans[j];
                 uint32_t n = 0;
-                if (!SrMarked(span) || SrRescue(heap, span, &n) != 1) { s->changed++; continue; }
+                if (!SrMarked(span)) { s->changed++; continue; }
+                SR_TEST_PAUSE();
+                if (SrRescue(heap, span, &n) != 1) { s->changed++; continue; }
                 uint32_t cls = *(volatile uint32_t*)(span + 0xC), size = *(volatile uint32_t*)(span + 0x24);
                 s->rescued++; s->bytes += (LONG64)n * size;
                 if (cls >= 34 && cls <= 36) s->cls[cls - 34] += (LONG64)n * size;
@@ -211,12 +232,43 @@ static void SrRescueHere(void)
     }
 }
 
+/* A pool worker's trim that only the mod asked for: none of the game's +0x7D stores since this thread's last one.
+ * The game stores 1 only right after a trim(1) on its own thread (0x8BDA4, 0x32460F, 0x62766B), which this hook
+ * counts before it runs; so an unchanged count means the flag is the pass's. A thread seen first trims. */
+static int SrWorkerSkips(void)
+{
+    uintptr_t heap = SrHeapHere();
+    LONG game = g_sr.gameTrims;
+    for (int k = 0; heap != 0 && k < SR_HEAPS; k++)
+    {
+        if (g_sr.worker[k].heap == 0 && InterlockedCompareExchangePointer((void* volatile*)&g_sr.worker[k].heap, (void*)heap, NULL) == NULL)
+        { g_sr.worker[k].seen = game; return 0; } /* a thread not seen before: its flag may be the game's */
+        if (g_sr.worker[k].heap != heap) continue;
+        if (g_sr.worker[k].seen == game) return 1;
+        g_sr.worker[k].seen = game;
+        return 0;
+    }
+    return 0;
+}
 /* Every trim runs on its own thread outside any allocator call (its ten callers, none in rpmalloc); a pool worker's
- * comes after its jobs when its +0x7D is set (0x6253BF). */
+ * comes after its jobs when its +0x7D is set (0x6253BF) and its result is not read (0x6253CE, 0x625384). The
+ * argument is a byte (0x630310). Skipped, the worker keeps its caches as when nothing asked it to trim. */
 static uint64_t SrTrimmed(uint64_t global)
 {
+    uintptr_t from = (uintptr_t)__builtin_return_address(0);
     SrRescueHere();
-    return g_sr.trim(global);
+    if ((uint8_t)global != 0) InterlockedIncrement(&g_sr.gameTrims);
+    if (g_sr.on != 1 || from != g_sr.exe + SR_WORKER_TRIMS) return g_sr.trim(global);
+    if (SrWorkerSkips()) { InterlockedIncrement(&g_sr.trimsSkipped); return 0; }
+    LARGE_INTEGER a, b;
+    QueryPerformanceCounter(&a);
+    uint64_t r = g_sr.trim(global);
+    QueryPerformanceCounter(&b);
+    InterlockedIncrement(&g_sr.trimsRun);
+    InterlockedAdd64(&g_sr.trimTicks, b.QuadPart - a.QuadPart);
+    for (LONG64 m = g_sr.trimMax; b.QuadPart - a.QuadPart > m; m = g_sr.trimMax)
+        if (InterlockedCompareExchange64(&g_sr.trimMax, b.QuadPart - a.QuadPart, m) == m) break;
+    return r;
 }
 
 /* ---- The scan: the registry read on a thread of its own, the stranded spans listed by heap ------------------------ */
@@ -243,6 +295,7 @@ static void SrScan(void)
             {
                 uintptr_t span = ((uintptr_t)t << 32) | ((uintptr_t)(w * 64 + (uint32_t)__builtin_ctzll(bits)) << 16);
                 uint32_t n = 0;
+                SR_TEST_PAUSE();
                 uintptr_t heap = SrStranded(span, &n);
                 seen++;
                 if (heap == 0) continue;
@@ -263,7 +316,7 @@ static void SrScan(void)
 }
 static DWORD WINAPI SrScanThread(void* wake)
 {
-    while (WaitForSingleObject((HANDLE)wake, INFINITE) == WAIT_OBJECT_0) SrScan();
+    while (WaitForSingleObject((HANDLE)wake, INFINITE) == WAIT_OBJECT_0 && !g_sr.quit) SrScan();
     return 0;
 }
 
@@ -339,6 +392,16 @@ static void SrPassNote(uint32_t removed, ULONGLONG now)
         g_sr.passes, removed, removed - g_sr.removedAt, g_sr.passLeft, (long long)g_sr.registered, g_sr.seen, g_sr.scanMs, g_sr.last.found, g_sr.last.heaps,
         (double)g_sr.last.foundBytes * mb, g_sr.last.rescued, (double)g_sr.last.bytes * mb, (double)g_sr.last.cls[0] * mb, (double)g_sr.last.cls[1] * mb,
         (double)g_sr.last.cls[2] * mb, g_sr.last.threads, g_sr.last.changed, g_sr.last.untaken, g_sr.overRoom);
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    const double ms = f.QuadPart > 0 ? 1000.0 / (double)f.QuadPart : 0.0;
+    uint32_t regions = 0;
+    SafeRead(g_sr.exe + SR_REGIONS, &regions, 4);
+    LONG run = InterlockedExchange(&g_sr.trimsRun, 0), skipped = InterlockedExchange(&g_sr.trimsSkipped, 0);
+    LONG64 wait = InterlockedExchange64(&g_sr.waitMax, 0), spent = InterlockedExchange64(&g_sr.trimTicks, 0), longest = InterlockedExchange64(&g_sr.trimMax, 0);
+    Note("difficulty: stranded spans: pass %u cost: an unmap waited at most %.3f ms for the scan; pool worker trims since the last pass: %ld run (%.1f ms, longest %.1f ms), "
+        "%ld skipped (only the pass asked); %lld of %u rpmalloc regions registered",
+        g_sr.passes, (double)wait * ms, (long)run, (double)spent * ms, (double)longest * ms, (long)skipped, (long long)g_sr.registered, regions);
     LONG64 frag = 0, c3436 = 0;
     if (!MemProbeOn() || !SrFrag(&frag, &c3436)) return;
     if (!g_sr.fragOn) { g_sr.fragOn = 1; g_sr.fragFirst = g_sr.fragLast = frag; g_sr.firstRemoved = g_sr.removedAt; g_sr.firstAt = now; }
@@ -408,6 +471,13 @@ static void SpanRescueTick(void)
 }
 
 /* ---- Install: once, with the streamer, before the ship's and the mission's spans are mapped ---------------------- */
+/* A refusal after the scan thread started: it ends at its next wake. */
+static void SrRefused(const char* why)
+{
+    InterlockedExchange(&g_sr.quit, 1);
+    if (g_sr.wake != NULL) SetEvent(g_sr.wake);
+    Note("difficulty: stranded spans: off: %s", why);
+}
 static void SpanRescueInstall(void)
 {
     if (g_sr.on != 0) return;
@@ -421,6 +491,9 @@ static void SpanRescueInstall(void)
     void* volatile* unmapAt = (void* volatile*)(exe + SR_UNMAP_AT);
     if (*(volatile uint32_t*)(exe + SR_INITIALISED) != 1 || *mapAt != (void*)(exe + SR_MAP_DEFAULT) || *unmapAt != (void*)(exe + SR_UNMAP_DEFAULT))
     { Note("difficulty: stranded spans: off: rpmalloc is not set up with its own span map and unmap"); return; }
+    /* no map-fail callback (0x6678C2 calls it from inside rpmalloc) and no other config: as init left them */
+    if (*(volatile uint64_t*)(exe + SR_CONFIG_REST) != 0 || *(volatile uint64_t*)(exe + SR_CONFIG_REST + 8) != 0)
+    { Note("difficulty: stranded spans: off: rpmalloc has a map-fail callback or another config set"); return; }
     for (uint32_t c = 0; c < SR_CLASSES; c++)
     {
         uint8_t e[8]; memcpy(e, (const void*)(exe + SR_SIZES + 8 * c), 8);
@@ -430,34 +503,60 @@ static void SpanRescueInstall(void)
     if (g_sr.top == NULL) g_sr.top = (volatile uint64_t* volatile*)VirtualAlloc(NULL, SR_TOP * sizeof(void*), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     uint64_t* spans = g_sr.slot[0].spans != NULL ? g_sr.slot[0].spans : (uint64_t*)VirtualAlloc(NULL, (size_t)SR_HEAPS * SR_PER_HEAP * 8, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!g_sr.sync && g_sr.wake == NULL) g_sr.wake = CreateEventA(NULL, FALSE, FALSE, NULL);
-    HANDLE thread = (!g_sr.sync && g_sr.wake != NULL && g_sr.top != NULL && spans != NULL) ? CreateThread(NULL, 64 * 1024, SrScanThread, g_sr.wake, 0, NULL) : NULL;
-    if (g_sr.top == NULL || spans == NULL || (!g_sr.sync && thread == NULL)) { Note("difficulty: stranded spans: off: no memory or thread for the registry"); return; }
-    if (thread != NULL) { SetThreadPriority(thread, THREAD_PRIORITY_BELOW_NORMAL); CloseHandle(thread); }
+    g_sr.thread = (!g_sr.sync && g_sr.wake != NULL && g_sr.top != NULL && spans != NULL) ? CreateThread(NULL, 64 * 1024, SrScanThread, g_sr.wake, 0, NULL) : NULL;
+    if (g_sr.top == NULL || spans == NULL || (!g_sr.sync && g_sr.thread == NULL)) { Note("difficulty: stranded spans: off: no memory or thread for the registry"); return; }
+    if (g_sr.thread != NULL) SetThreadPriority(g_sr.thread, THREAD_PRIORITY_BELOW_NORMAL);
     for (int k = 0; k < SR_HEAPS; k++) g_sr.slot[k].spans = spans + (size_t)k * SR_PER_HEAP;
     g_sr.exe = exe;
-    if (LoaderHook("extra large maps: stranded spans (rpmalloc's trim)", exe + SR_TRIM, (void*)SrTrimmed, (void**)&g_sr.trim) || g_sr.trim == NULL)
-    { g_sr.trim = NULL; Note("difficulty: stranded spans: off: the trim could not be hooked"); return; }
-    /* The unmap first: no span is registered before every unmap clears its bit. */
+    /* The unmap first: no span is registered before every unmap clears its bit. A refused swap puts back what went in;
+     * bits set meanwhile stay, read by nothing. The trim hook goes in last, so a refusal leaves no hook. */
     g_sr.unmap = (SrUnmapFn)(exe + SR_UNMAP_DEFAULT); g_sr.map = (SrMapFn)(exe + SR_MAP_DEFAULT);
-    if (InterlockedCompareExchangePointer(unmapAt, (void*)SrUnmapped, (void*)g_sr.unmap) != (void*)g_sr.unmap ||
-        InterlockedCompareExchangePointer(mapAt, (void*)SrMapped, (void*)g_sr.map) != (void*)g_sr.map)
-    { Note("difficulty: stranded spans: off: rpmalloc's span map changed while it was wrapped"); return; }
+    if (InterlockedCompareExchangePointer(unmapAt, (void*)SrUnmapped, (void*)g_sr.unmap) != (void*)g_sr.unmap)
+    { SrRefused("rpmalloc's span unmap changed while it was wrapped"); return; }
+    if (InterlockedCompareExchangePointer(mapAt, (void*)SrMapped, (void*)g_sr.map) != (void*)g_sr.map)
+    {
+        InterlockedCompareExchangePointer(unmapAt, (void*)g_sr.unmap, (void*)SrUnmapped);
+        SrRefused("rpmalloc's span map changed while it was wrapped");
+        return;
+    }
+    if (LoaderHook("extra large maps: stranded spans (rpmalloc's trim)", exe + SR_TRIM, (void*)SrTrimmed, (void**)&g_sr.trim) || g_sr.trim == NULL)
+    {
+        InterlockedCompareExchangePointer(mapAt, (void*)g_sr.map, (void*)SrMapped);
+        InterlockedCompareExchangePointer(unmapAt, (void*)g_sr.unmap, (void*)SrUnmapped);
+        g_sr.trim = NULL;
+        SrRefused("the trim could not be hooked");
+        return;
+    }
     g_sr.on = 1;
     Note("difficulty: stranded spans: on: rpmalloc's 64 KiB spans are registered from now; after %u stamps removed (at most once in %llu s) a full span "
-        "holding deferred blocks goes back to its heap's partial list on that heap's thread", SR_EVERY, SR_GAP_MS / 1000);
+        "holding deferred blocks goes back to its heap's partial list on that heap's thread; a pool worker's trim only a pass asked for is skipped", SR_EVERY, SR_GAP_MS / 1000);
 }
 
 #ifdef CO_TEST
 void CoXlTestSrReset(int sync)
 {
     if (g_sr.top != NULL) for (uint32_t t = 0; t < SR_TOP; t++) if (g_sr.top[t] != NULL) memset((void*)g_sr.top[t], 0, SR_LEAF_WORDS * 8);
-    volatile uint64_t* volatile* top = g_sr.top; uint64_t* spans = g_sr.slot[0].spans; HANDLE wake = g_sr.wake;
-    memset(&g_sr, 0, sizeof g_sr);
-    g_sr.top = top; g_sr.sync = sync; g_sr.wake = wake; g_srTestHeap = 0;
+    volatile uint64_t* volatile* top = g_sr.top; uint64_t* spans = g_sr.slot[0].spans;
+    memset(&g_sr, 0, sizeof g_sr); /* an earlier scan thread keeps waiting on its own event */
+    g_sr.top = top; g_sr.sync = sync; g_srTestHeap = 0;
     if (spans != NULL) for (int k = 0; k < SR_HEAPS; k++) g_sr.slot[k].spans = spans + (size_t)k * SR_PER_HEAP;
 }
 int CoXlTestSrInstall(void) { SpanRescueInstall(); return g_sr.on; }
+/* The scan thread ended (1), runs (0), none (-1). */
+int CoXlTestSrThreadEnded(unsigned ms) { return g_sr.thread == NULL ? -1 : WaitForSingleObject(g_sr.thread, ms) == WAIT_OBJECT_0; }
+/* The registry's lock, as a reader (1) or the unmap (2) holds it; 0 lets go of what `mode` took. */
+void CoXlTestSrLock(int mode, int take)
+{
+    if (mode == 1) { if (take) AcquireSRWLockShared(&g_srLock); else ReleaseSRWLockShared(&g_srLock); }
+    else { if (take) AcquireSRWLockExclusive(&g_srLock); else ReleaseSRWLockExclusive(&g_srLock); }
+}
+void CoXlTestSrCosts(long long* out)
+{
+    long long v[] = {g_sr.trimsRun, g_sr.trimsSkipped, g_sr.gameTrims, g_sr.waitMax, g_sr.trimTicks};
+    memcpy(out, v, sizeof v);
+}
 void CoXlTestSrHeap(uintptr_t heap) { g_srTestHeap = heap; }
+void CoXlTestSrPause(void (*pause)(void)) { g_srTestPause = pause; }
 int CoXlTestSrStep(uint32_t removed, uint32_t left, unsigned long long now, int inPlay) { SrStep(removed, left, now, inPlay); return g_sr.phase; }
 uint64_t CoXlTestSrTrim(uint64_t global) { return SrTrimmed(global); }
 int CoXlTestSrMarked(uintptr_t span) { return SrMarked(span); }
