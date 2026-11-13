@@ -26,6 +26,9 @@
 #define CO_CARD_DATA 0x1EDF0u
 #define CO_CARD_EXPANDED 0x1EE0Cu
 #define CO_CARD_FLAG 0x1EE0Eu
+#define CO_CARD_PICKER 0x1EE11u   /* the slot list's state (0x189E2F0) */
+#define CO_CARD_BOX 0x5958u       /* the slots box; +0x15EC4 set while it is busy */
+#define CO_BOX_BUSY 0x15EC4u
 
 /* The card in reference units: 498 is the tallest that keeps the cards at 0.75 of the game's size or more between the
  * tabs and the bottom line. The rows are 44 apart, the game's gap between columns, and the columns 464 apart. */
@@ -187,8 +190,16 @@ void co_cards_to_eight(uintptr_t screen)
     for (uint32_t i = 0; i < 8u; i++)
     {
         const uintptr_t card = screen + CO_CARD_BLOCK + i * CO_CARD_STRIDE;
-        if (*(const uint8_t*)(card + CO_CARD_EXPANDED) != 0)
-            assign(card, *(const uintptr_t*)(card + CO_CARD_DATA), 0, *(const uint8_t*)(card + CO_CARD_FLAG));
+        if (*(const uint8_t*)(card + CO_CARD_EXPANDED) == 0) continue;
+        /* The assign skips the box's resize while the box is busy or animating (0x189C7B2..0x189C7E9): logged, so a
+         * switch with the picker open shows which way it went. */
+        const uintptr_t box = card + CO_CARD_BOX;
+        const unsigned busy = *(const uint8_t*)(box + CO_BOX_BUSY), picker = *(const uint8_t*)(card + CO_CARD_PICKER);
+        const unsigned animating = (*(const uint32_t*)box & 0x800000u) && ((*(const uint32_t*)(box + 0xA8u) >> 11) & 0x7FFu);
+        const float before = *(const float*)(box + 0x10u);
+        assign(card, *(const uintptr_t*)(card + CO_CARD_DATA), 0, *(const uint8_t*)(card + CO_CARD_FLAG));
+        co_log("loadout cards: card %u's slots collapsed (picker %u, box busy %u, animating %u, box height %.1f, then %.1f)",
+            i + 1u, picker, busy, animating, before, *(const float*)(box + 0x10u));
     }
     g_mode = CO_CARDS_EIGHT;
 }

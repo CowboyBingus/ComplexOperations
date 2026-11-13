@@ -179,12 +179,17 @@ static void CheckCallbacks(void)
     Card(1)[0x1EE0C] = 1;
     Card(1)[0x1EE0E] = 1;
     Put(Card(1) + 0x1EDF0, 0x55);
+    /* Its picker open: the box busy, at the open panel's 253 - 40. */
+    Card(1)[0x1EE11] = 2;
+    Card(1)[0x5958 + 0x15EC4] = 1;
+    Size(Card(1) + 0x5958, 480.0f, 213.0f);
 
     /* A player on card 6 with three present (a card freed late): eight before that card is next placed. */
     Put32(g_screen + PLAYERS + 5 * 4, 2);
     co_cards_layout(&regs);
     CHECK(co_cards_test_get_mode() == CO_CARDS_EIGHT && co_card_height == 498.0f);
     CHECK(fake_host_logged("loadout cards: four to eight on the open screen (complex operation no, 3 players, cards 5 to 8: -1 2 -1 -1)"));
+    CHECK(fake_host_logged("loadout cards: card 2's slots collapsed (picker 2, box busy 1, animating 0, box height 213.0, then 213.0)"));
     for (uint32_t i = 0; i < 8; i++)
     {
         CoCardPlace p;
