@@ -212,6 +212,31 @@ int main(void)
     CHECK(co_unlock_test_markers(lg, pos, NULL, (uint32_t*)(g_image + record + 0x2234u)) == 5);
     co_unlock_test_lines((uintptr_t)g_holo, 0, (uintptr_t)SLOT(2), 0, 0.5f);
     CHECK(g_drawn == 0x1Du);
+
+    g_case = "the war table's lines: one preview record, regenerated in place";
+    Note();
+    CHECK(co_unlock_test_markers(lg, pos, NULL, (uint32_t*)(g_image + record + 0x2234u)) == 5);
+    for (uint32_t k = 0; k < 16; k++) /* ids written anywhere else, more than any ring holds: not kept, nothing evicted */
+        CHECK(co_unlock_test_markers(lg, pos, NULL, (uint32_t*)(g_image + 0x3950000u + 0x100u * k)) == 5);
+    co_unlock_test_lines((uintptr_t)g_holo, 0, (uintptr_t)SLOT(2), 0, 0.5f);
+    CHECK(g_drawn == 0x05u);
+    /* a second record would lie past the pool's end (+0x25000): its ids are not kept and its lines are the game's */
+    const uint32_t record1 = record + 0x24FF0u;
+    Put32(record1, 3);
+    CHECK(co_unlock_test_markers(lg, pos, NULL, (uint32_t*)(g_image + record1 + 0x2234u)) == 5);
+    Put32(PREVIEWS + 0x4168CCu, 1);
+    co_unlock_test_lines((uintptr_t)g_holo, 0, (uintptr_t)SLOT(2), 0, 0.5f);
+    CHECK(g_drawn == 0x1Du);
+    Put32(PREVIEWS + 0x4168CCu, 0);
+    /* record 0 regenerated: the same ids, but mission 0's and mission 1's steps swap places */
+    g_pos[2] = Pos(310, 410); g_pos[4] = Pos(110, 210);
+    CHECK(co_unlock_test_markers(lg, pos, NULL, (uint32_t*)(g_image + record + 0x2234u)) == 5);
+    co_unlock_test_lines((uintptr_t)g_holo, 0, (uintptr_t)SLOT(2), 0, 0.5f);
+    CHECK(g_drawn == 0x0Du);                                 /* now mission 1's step: slots 0, 2, 3 */
+    co_unlock_forget();                                      /* regenerated with no note: no mission of the last one */
+    CHECK(co_unlock_test_markers(lg, pos, NULL, (uint32_t*)(g_image + record + 0x2234u)) == 5);
+    co_unlock_test_lines((uintptr_t)g_holo, 0, (uintptr_t)SLOT(2), 0, 0.5f);
+    CHECK(g_drawn == 0x1Du);
     free(g_holo);
 
     g_case = "which slots a step skips";
