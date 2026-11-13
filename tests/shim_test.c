@@ -61,14 +61,14 @@ int main(void)
     /* Moved: only a build for eight moves the player manager; a build for four reads the game's layout as before. */
     co_managers_test_force(1);
     CHECK(co_managers_slots(CO_SHIM_PLAYER_MANAGER) == (eight ? 8u : 4u));
-    CHECK(co_managers_offset(CO_SHIM_PLAYER_MANAGER, 0x2C8u) == (eight ? 0x828u : 0x2C8u));
-    CHECK(co_managers_offset(CO_SHIM_PLAYER_MANAGER, 0x2E0u) == (eight ? 0x840u : 0x2E0u));
+    CHECK(co_managers_offset(CO_SHIM_PLAYER_MANAGER, 0x2C8u) == (eight ? 0x878u : 0x2C8u));
+    CHECK(co_managers_offset(CO_SHIM_PLAYER_MANAGER, 0x2E0u) == (eight ? 0x890u : 0x2E0u));
     CHECK(co_managers_offset(CO_SHIM_PLAYER_MANAGER, 0x84u) == 0x84u && co_managers_offset(CO_SHIM_PLAYER_MANAGER, 0xE8u) == 0xE8u);
     CHECK(co_managers_offset(CO_SHIM_PLAYER_MANAGER, 0x3A8u) == 0x3A8u);
-    game = Start("the moved layout", 7, eight ? 0x828u : 0x2C8u, eight ? 0x840u : 0x2E0u);
+    game = Start("the moved layout", 7, eight ? 0x878u : 0x2C8u, eight ? 0x890u : 0x2E0u);
     CHECK(co_evp_players(game, players) == (eight ? 7 : -1));
     if (eight) CHECK(players[6].peer == 0x1100000000000006ull && players[6].life == 16u && players[2].local == 1);
-    game = Start("more players than eight", 9, eight ? 0x828u : 0x2C8u, eight ? 0x840u : 0x2E0u);
+    game = Start("more players than eight", 9, eight ? 0x878u : 0x2C8u, eight ? 0x890u : 0x2E0u);
     CHECK(co_evp_players(game, players) == -1);
 
     /* Back where the game has them: the reader follows. */

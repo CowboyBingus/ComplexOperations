@@ -74,6 +74,7 @@
 #include "proto/test_daylight.c"
 #include "proto/difficulty_world_memprobe.c"
 #include "proto/xl_span_rescue.c"
+#include "proto/xl_sun_slice.c"
 #pragma clang diagnostic pop
 
 /* The index query (0xC05360: rcx index, edx key, r8d, r9 buffer, [rsp+0x28] its places) writes at most its places and
@@ -193,6 +194,7 @@ static const char* CoXlGuards(uintptr_t game)
     LwInstallMover();
     LwInstallTrees();
     LwInstallZeroBox(); /* absent SpeedTree cells: a switched site, the empty box on complex levels only */
+    SunSliceInstall(game); /* the sun's last shadow slice: dynamic on a world over 2048 m */
     if (g_lwRec.insertOrig == NULL) return "the destruction records' room on a complex level could not be guarded";
     if (g_lwMover.passOrig == NULL) return "the navmesh boundary requests on a complex level could not be guarded";
     return NULL;
@@ -307,6 +309,17 @@ uint32_t* CoXlTestBandDropPixels(void) { return g_matband.pixels; }
 void CoXlTestBandTick(void) { MoveBandPixelsTick(); }
 int CoXlTestRenderFrame(uint32_t* frame) { return NearRenderFrame(frame); }
 void CoXlTestBandLevelGone(void) { g_matband.tex = 0; MoveLevelGone(); }
+/* render_world as the near terrain's wrapper sees it (proto/difficulty_world_terrain.c NearRunAt): a tile replaying
+ * (`active`) with its two textures, the level's one-mip heightmap, the call from the job consumer or not. */
+uint64_t CoXlTestNearRun(int consumer, int active, uint64_t tile0, uint64_t tile1, uint64_t oneMip, void* original)
+{
+    g_nearRunOriginal = (NearRunFn)original;
+    g_near.tex[0] = tile0; g_near.tex[1] = tile1;
+    g_oneMip.tex = oneMip; g_oneMip.level = g_world.levels;
+    InterlockedExchange(&g_nearActive, active);
+    return NearRunAt(consumer, 1, 2, 3, 0, 5, 6, 7, 8);
+}
+void CoXlTestNearReplaying(int active) { InterlockedExchange(&g_nearActive, active); }
 /* The paths the frees rest on: a dispatcher call's start, the band's stash and take, the pins asked again, the render
  * hook's order and its pins. */
 void CoXlTestDispatchBegins(uint64_t records, uint64_t index) { WorldDispatchBegins(records, index, 0); }

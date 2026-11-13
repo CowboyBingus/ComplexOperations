@@ -123,10 +123,45 @@ inplace('DP2', 0xA049B9, '4c 8d 74 24 48', '4c 8b 74 24 50', 1)   # lea r14,[rsp
 inplace('DP3', 0xA04D46, '48 8d 4c 24 50', '48 8b 4c 24 48', 1)   # lea rcx,[rsp+0x50] -> mov rcx,[rsp+0x48]
 inplace('DP4', 0xA04EAB, '48 8d 4c 24 50', '48 8b 4c 24 48', 1)
 
+# 0x874D80, the customization manager's frame: each player index holds the packages of its armor's and helmet's passive
+# (applied record +0x3C, +0x38) as a u32 pair. This frame's pairs go to the stack (four, the cookie behind), last
+# frame's are at game+0x37CED80 (four, a byte flag behind); a changed entry releases the old package and takes the new.
+# Both lists move to the mod's u32[16] each (DATA(PASSIVES): last frame's, then this frame's at +0x40), and the guard
+# of the build for four makes way (REPLACES8). From CP3 on r14 is the mod's list. co_counts.c carries the game's four
+# pairs over when the counts go in, and back when they go out.
+PASSIVES = 2   # the data slot (kCountData in co_counts.c)
+REPLACES8 = [0x874E26]
+cave('CP1', 0x874DE7, '0f 11 74 24 30 0f 11 7c 24 40', '''movups xmmword ptr [rsp+0x30], xmm6
+ movups xmmword ptr [rsp+0x40], xmm7
+ mov rcx, DATA(%d)
+ movups xmmword ptr [rcx+0x40], xmm6
+ movups xmmword ptr [rcx+0x50], xmm6
+ movups xmmword ptr [rcx+0x60], xmm6
+ movups xmmword ptr [rcx+0x70], xmm6
+ jmp game+0x874DF1''' % PASSIVES, 1)
+cave('CP2', 0x874E26, '8d 14 00 8b 43 c0', '''cmp eax, 8
+ jae game+0x874E3A
+ lea edx, [rax+rax*1]
+ mov rcx, DATA(%d)
+ mov eax, dword ptr [rbx-0x40]
+ mov dword ptr [rcx+rdx*4+0x40], eax
+ mov eax, dword ptr [rbx-0x44]
+ mov dword ptr [rcx+rdx*4+0x44], eax
+ jmp game+0x874E3A''' % PASSIVES, 1)
+cave('CP3', 0x874E4A, '4c 8d 35 2f 9f f5 02', 'mov r14, DATA(%d)\n jmp game+0x874E51' % PASSIVES, 1)
+inplace('CP4', 0x874E51, '41 b8 20 00 00 00', '41 b8 40 00 00 00', 1)   # mov r8d,0x20 -> 0x40: the compare's size
+inplace('CP5', 0x874E5A, '48 8d 4c 24 30', '49 8d 4e 40 90', 1)         # lea rcx,[rsp+0x30] -> [r14+0x40]
+inplace('CP6', 0x874E73, 'bd 08 00 00 00', 'bd 10 00 00 00', 1)         # mov ebp,8 -> 16 entries
+cave('CP7', 0x874E80, '8b 7c 34 30 42 8b 04 36 3b f8', 'mov edi, dword ptr [r14+rsi+0x40]\n mov eax, dword ptr [r14+rsi]\n cmp edi, eax\n'
+                                                       ' jmp game+0x874E8A', 1)
+# The game stores its two registers of pairs here and at 0x874F37; this frame's list becomes last frame's instead.
+cave('CP8', 0x874F30, '0f 11 35 49 9e f5 02', ''.join(' movups xmm0, xmmword ptr [r14+0x%x]\n movups xmmword ptr [r14+0x%x], xmm0\n' % (0x40 + o, o)
+                                                     for o in range(0, 0x40, 0x10)) + ' jmp game+0x874F3E', 1)
+
 # The game's code the tests run as it is, beside the patched code: the cull sums (phase 1 and the sum loop), the
-# reinforcement anchor's search, the whole encounter stage change and the whole dormancy pass.
+# reinforcement anchor's search, the whole encounter stage change, the whole dormancy pass and the customization frame.
 VANILLA = [(0x8C8DCB, 0x8C8EB3), (0x8C904B, 0x8C92CA), (0x92F138, 0x92F20F), (0x92F24F, 0x92F25D), (0x92F614, 0x92F89C),
-           (0xACB951, 0xACBA52), (0x9FAA30, 0x9FAC36), (0xA04910, 0xA04FB1)]
+           (0xACB951, 0xACBA52), (0x9FAA30, 0x9FAC36), (0xA04910, 0xA04FB1), (0x874D80, 0x874F71)]
 
 
 def test_header(dump):

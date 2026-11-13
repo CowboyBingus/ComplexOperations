@@ -1501,11 +1501,36 @@ static int TerrainNearCamShift(uint64_t camera, uintptr_t at, const float* v, fl
     return 1;
 }
 
-/* [api+0x10]+0x28 from the job consumer (return game 0xAB07E5): r9 points at entry +0x58 of the consumer's copy of the
- * job (0x1D0 bytes at rsp+0x50; +0x08 camera, +0x38/+0x39 gui offset/scale set, +0x40 gui, +0x48 offset, +0x50 scale) */
-static uint64_t NearRun(uint64_t a, uint64_t camera, uint64_t c, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
+static volatile LONG g_nearViewCalls; /* render_world calls this replay drew with the level's maps (NearRunAt) */
+
+/* The names a replay publishes, as the replay's jobs need them (tile) or as play has them (level: NearReplayEnd's state). */
+static void NearNamesTile(void)
 {
-    if (g_nearActive && (uintptr_t)__builtin_return_address(0) == g_world.game + 0xAB07E5u && d > 0x58)
+    NearPublishFn publish = (NearPublishFn)NearApi(0x10, 0x210);
+    if (publish == NULL) return;
+    for (int k = 0; k < 2; k++) publish(kNearNames[k], g_near.tex[k]);
+    publish(kNearRoadAlias, g_near.tex[0]);
+}
+
+static void NearNamesLevel(void)
+{
+    NearNameFn unpublish = (NearNameFn)NearApi(0x10, 0x218);
+    if (unpublish == NULL) return;
+    for (int k = 0; k < 2; k++) unpublish(kNearNames[k]);
+    unpublish(kNearRoadAlias);
+    NearOneMipPublish();
+}
+
+/* render_world ([api+0x10]+0x28) for the player's view (game 0xAB7AFC) and the merge's job consumer (0xAB0590, return
+ * 0xAB07E5), one after the other on one thread. The view's own layers (depth_prepass, imp_blend, far scatter: render
+ * config 0xEE6B1BA7E22D71ED) bind generated_heightmap and generated_materials by name, so while a tile replays every
+ * call but the consumer's gets the level's maps back: with the tile's under them the world was shaded from the tile's
+ * maps for the ~5 s of a build in play (user: "the screen occasionally turns to a green hue"). */
+static uint64_t NearRunAt(int consumer, uint64_t a, uint64_t camera, uint64_t c, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
+{
+    int view = g_nearActive && !consumer && g_near.tex[0] != 0 && g_near.tex[1] != 0;
+    if (view) { NearNamesLevel(); InterlockedIncrement(&g_nearViewCalls); }
+    if (g_nearActive && consumer && d > 0x58)
     {
         const uint8_t* job = (const uint8_t*)(uintptr_t)(d - 0x58);
         NearGuiFn offset = (NearGuiFn)NearApi(0xD0, 0x258), scale = (NearGuiFn)NearApi(0xD0, 0x270);
@@ -1526,7 +1551,16 @@ static uint64_t NearRun(uint64_t a, uint64_t camera, uint64_t c, uint64_t d, uin
             else if (!(hasOffset || hasScale)) { offset(gui, 0.0f, 0.0f); scale(gui, 1.0f, 1.0f); }
         }
     }
-    return g_nearRunOriginal(a, camera, c, d, e, f, g, h);
+    uint64_t r = g_nearRunOriginal(a, camera, c, d, e, f, g, h);
+    if (view && g_nearActive) NearNamesTile();
+    return r;
+}
+
+/* [api+0x10]+0x28 from the job consumer (return game 0xAB07E5): r9 points at entry +0x58 of the consumer's copy of the
+ * job (0x1D0 bytes at rsp+0x50; +0x08 camera, +0x38/+0x39 gui offset/scale set, +0x40 gui, +0x48 offset, +0x50 scale) */
+static uint64_t NearRun(uint64_t a, uint64_t camera, uint64_t c, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
+{
+    return NearRunAt((uintptr_t)__builtin_return_address(0) == g_world.game + 0xAB07E5u, a, camera, c, d, e, f, g, h);
 }
 
 static int NearRunInstall(void)
@@ -1779,6 +1813,8 @@ static void NearCameras(float half0, float half1, float cx, float cy)
 static void NearReplayEnd(int ok)
 {
     InterlockedExchange(&g_nearActive, 0);
+    LONG views = InterlockedExchange(&g_nearViewCalls, 0);
+    Note("difficulty: near terrain: the view drew %ld times with the level's maps while the tile replayed", (long)views);
     if (g_mat.on && g_mat.owner == MAT_TILE) InterlockedExchange(&g_mat.on, 0); /* the cameras go back below */
     g_near.matLeave = 0;
     if (g_near.R != 0)

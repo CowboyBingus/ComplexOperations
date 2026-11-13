@@ -345,8 +345,9 @@ static void WindowScanLocked(ULONGLONG now)
     g_win.nextScan = now + 250;
     uint32_t bodies = 0, slots = 0;
     if (!WorldStreamBodyStore(&bodies, &slots)) { g_win.refusedBodies++; return; }
-    /* a forest tree of a type with flag 0x40 takes a navmesh cutter from a pool of 65536 (co_cutters.h); a full pool
-     * leaves the tree without one, so the cutters wait under the bodies' share too */
+    /* a forest tree of a type with flag 0x40 takes a navmesh cutter with its body (co_cutters.h); a full pool leaves
+     * the tree without one. The early room makes the pool as large as the bodies' store, so the bodies' share holds
+     * first; the cutters' own share stays as a net for cutters made without a tree */
     const int cutters = co_cutters_over(ApiModuleBase("helldivers2.exe", NULL), WINDOW_BODY_SHARE);
     if ((float)bodies >= WINDOW_BODY_SHARE * (float)slots || cutters)
     { g_win.refusedBodies++; g_win.refusedCutters += cutters; WindowEvictFarLocked(); return; }

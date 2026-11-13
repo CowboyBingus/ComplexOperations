@@ -26,7 +26,10 @@ Every player in the session needs the mod.
 
 The game keeps one record for each player in seven managers: player, score, customization, kill streak, ship
 inventory, ship customization and ship modules. Each has four slots. A build for eight builds all seven in the mod's
-memory with eight slots and changes the 1,115 code sites that address them, the score manager's loot rows among them.
+memory with eight slots and changes the 1,135 code sites that address them, the score manager's loot rows among them.
+Some code carries an array's offset in an index register, not in a displacement. The generator scans the game for that
+form and refuses an unlisted hit. Where the code counts in whole records, the array moves by whole records: the
+customization manager's applied records by 12 and the player manager's second array by 26.
 6 caves do the loot rows' code that the game wrote out for four rows (see Mission).
 
 A build for eight also moves the avatar manager from eight slots to sixteen. Players' bodies hold a slot too, so
@@ -56,11 +59,12 @@ respawns. The mod's code goes in with the counts (see Session lists) and works f
 | Spawn exclusion around avatars (three lists of eight) | Avatars past eight are left out | Eight only |
 | Director and position lists from the frame allocator | Room for sixteen | Eight only |
 | Dormancy pass: far entities sleep by the nearest player (four positions, the stack cookie behind) | The positions of eight players in the mod's memory | Eight only |
+| Customization frame: the packages of each player's armor and helmet passives (four pairs, the stack cookie behind) | The pairs of eight players in the mod's memory; replaces the guard for four | Eight only |
 
 The fixes for rooms of eight go in a build for eight only, the one whose avatar manager holds more than eight. So does
-the dormancy pass's: it counts players, and only a build for eight has a fifth. 19 code sites change in a build for
-four, 35 in a build for eight. For four avatars or fewer the culls and the encounter give
-the game's own result. The anchor starts the fourth score at 0, which the game leaves unset.
+the dormancy pass's and the customization frame's: they count players, and only a build for eight has a fifth. 19
+code sites change in a build for four, 43 in a build for eight. For four avatars or fewer the culls and the encounter
+give the game's own result. The anchor starts the fourth score at 0, which the game leaves unset.
 
 Limits that remain:
 
@@ -83,9 +87,9 @@ bound. Among them are the galactic map's cursors, the game state's player rows, 
 result's and the mission summary's rows, the Activity record's lists (see Mission), the clan records and the clan
 station's rows. 77 guards cover the accesses to them: an index past the table's end skips the access, and for 0 to 3
 nothing changes. 66 guards are code beside the game's; 11 are a compare changed in place. The guards go in and out
-together with the counts. A build for eight keeps 29 of them. The loadout screen's 19 and the mission summary's 4 make
-way for their eight cards and rows (see Loadout screen and Mission); the galactic map's 24 and the name tags' 1 are
-its own (see Galactic map, Squad HUD and name tags).
+together with the counts. A build for eight keeps 28 of them. The loadout screen's 19, the mission summary's 4 and the
+customization frame's 1 make way for their eight cards, rows and pairs (see Loadout screen, Mission and Stack arrays);
+the galactic map's 24 and the name tags' 1 are its own (see Galactic map, Squad HUD and name tags).
 
 Some message handlers copy a list from the wire into a buffer of fixed size and trust the count. Nine guards keep
 such lists inside their buffers: the handler ignores a message whose list is too long, and two senders stop at what
@@ -410,6 +414,11 @@ On a complex mission the mod's density guards apply:
 - A full squad-slot table and more than 64 kinds of enemy in the spawn budget are refused instead of crashing, and so
   is a nearly full ray queue. The AI job gate for new spawns rises from 448 to 1024.
 - Mission locations' pickups, markers and samples spawn when a player comes within 600 m.
+
+On a world larger than 2048 m, the sun's last shadow slice stays dynamic, so shadows are sharp to 80 m from the
+camera. The game's static last slice would cover the whole 16 km map at 16 to 32 m a texel, and shadows would end at
+19 m (shadow quality low) or 56 m (high). A 2048 m mission keeps the game's slice. Log:
+`the sun's last slice stays dynamic`.
 
 The mod also keeps a complex level's destruction records, render version tables, tree extents and navmesh boundary
 requests within what the game holds. On a normal mission and on the ship none of these density and complex-level
