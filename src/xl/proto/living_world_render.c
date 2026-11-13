@@ -14,7 +14,7 @@
 
 typedef void (*LwRenderEndFn)(uintptr_t state);
 typedef void (*LwRenderRehashFn)(uintptr_t map, uint32_t buckets);
-static struct { void* endOrig; uintptr_t rehash, after; volatile LONG shrunk, told; } g_lwRender;
+static struct { void* endOrig; uintptr_t rehash, after, resize; volatile LONG shrunk, told; uint32_t copiesFreed; uint64_t copyBytesFreed; } g_lwRender;
 
 /* A map: size +0, used +0x18, buckets +0x1C. Under an eighth used leaves room for 4 times the entries before the
  * next growth, so a table near its need is not rehashed back and forth. */
@@ -29,6 +29,34 @@ static void LwRenderShrink(uintptr_t map)
         Note("living world: render version table: %u entries with %u in use, now %u", size, used, *(volatile uint32_t*)map);
 }
 
+/* Each pooled job context X (dev+0x700 count, +0x708 array; 0x6CC700) holds a copy of the versions at X+8 (count +0, cap
+ * +4, data +8, allocator +0x10), grown to the table's size for each job (0x6CD17C..0x6CD241) and never shrunk, so the
+ * load's long table leaves ~1.35 MB in each of ~900 contexts. Here, after the dispatch has waited for its jobs
+ * (0x6CD5F7) and emptied every copy (0x6CD646: used 0, which the find 0x6F51F0 checks first), a copy far over the
+ * short table goes (0x6D55E0 to 0); the next job's copy regrows it before its entries are written. */
+typedef void (*LwRenderResizeFn)(uintptr_t array, uint32_t n);
+static void LwRenderCopiesFree(uintptr_t dev)
+{
+    if (!LwLive() || g_lwRender.resize == 0) return;
+    uint32_t size = *(volatile uint32_t*)(dev + 0x13C8), count = *(volatile uint32_t*)(dev + 0x700);
+    uintptr_t contexts = *(volatile uintptr_t*)(dev + 0x708);
+    if (contexts == 0 || count > 0x100000u) return;
+    uint32_t freed = 0; uint64_t bytes = 0;
+    for (uint32_t i = 0; i < count; i++)
+    {
+        uintptr_t x = ((volatile uintptr_t*)contexts)[i];
+        if (x == 0) continue;
+        uint32_t cap = *(volatile uint32_t*)(x + 0xC);
+        if (cap <= LW_RT_LONG || cap / 4 <= size || *(volatile uint32_t*)(x + 0x20) != 0) continue;
+        ((LwRenderResizeFn)g_lwRender.resize)(x + 8, 0);
+        freed++; bytes += (uint64_t)cap * 24;
+    }
+    if (freed == 0) return;
+    g_lwRender.copiesFreed += freed; g_lwRender.copyBytesFreed += bytes;
+    Note("living world: render job contexts: %u of %u version copies given back (%.1f MB; table %u entries); %u copies, %.1f MB in all",
+        freed, count, (double)bytes / 1048576.0, size, g_lwRender.copiesFreed, (double)g_lwRender.copyBytesFreed / 1048576.0);
+}
+
 static void LwDelayRender(void); /* living_world_waits.c, test only */
 static void LwRenderEnd(uintptr_t state)
 {
@@ -39,6 +67,7 @@ static void LwRenderEnd(uintptr_t state)
 #endif
     LwRenderShrink(state + 0x88);
     LwRenderShrink(state + 0xB0);
+    LwRenderCopiesFree(state - 0x1340); /* after the shrink: the copies are measured against the short table */
 }
 
 /* The pins: the render thread's call after its dispatch, the batch end reading the changed ids' size (+0xB0) and
@@ -57,6 +86,16 @@ static void LwInstallRender(void)
         !ApiCodeMatches(exe + 0x6F4260u, "8B 43 1C 48 8B CB 8D 14 45 01 00 00 00 3B D6 0F 42 D6 E8"))
     { Note("living world: the render version table is not the reviewed code; not changed"); return; }
     g_lwRender.rehash = exe + LW_RT_REHASH;
+    /* the copies' pool and resize (LwRenderCopiesFree); other code there leaves the copies as the game keeps them */
+    if (ApiCodeMatches(exe + 0x6D55E0u, "48 89 5C 24 10 57 48 83 EC 30 48 8B D9 8B FA 3B 51 04 74 68") &&
+        ApiCodeMatches(exe + 0x6CD17Cu, "49 8B 9F B0 03 00 00 41 8B B1 C8 13 00 00 3B 73 0C 76 12 8B D6 48") &&
+        ApiCodeMatches(exe + 0x6CD637u, "48 8B 46 70 48 8B 88 B0 03 00 00 48 83 C1 08 E8 15 7F 00 00") &&
+        ApiCodeMatches(exe + 0x6CC700u, "48 8D 8F F8 06 00 00 E8 D4 44 FF FF 48 8B 8F 08 07 00 00") &&
+        ApiCodeMatches(exe + 0x6CC87Bu, "49 8B 83 08 07 00 00 41 0F 10 83 60 07 00 00 48 8B 14 C8") &&
+        ApiCodeMatches(exe + 0x6CC8BEu, "48 89 96 B0 03 00 00") && ApiCodeMatches(exe + 0x6D5560u, "48 83 EC 18 44 8B 01 45 33 D2 41 8B C0 44 89 51 18") &&
+        ApiCodeMatches(exe + 0x6CD5F7u, "E8 64 9B F5 FF") && ApiCodeMatches(exe + 0x6F51F0u, "83 79 18 00 74 56"))
+        g_lwRender.resize = exe + 0x6D55E0u;
+    else Note("living world: the render job contexts are not the reviewed code; their version copies stay");
     g_lwRender.after = exe + LW_RT_AFTER;
     if (LoaderHook("living world: render version table", exe + LW_RT_END, (void*)LwRenderEnd, &g_lwRender.endOrig) || g_lwRender.endOrig == NULL)
     { g_lwRender.endOrig = NULL; Note("living world: the render frame end could not be hooked"); return; }

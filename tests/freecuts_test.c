@@ -1,5 +1,6 @@
 /* Memory given back once nothing reads it: a spawned tile's band pixels after the render thread's upload (4 frame kicks
- * after the texture's create), and op 0x2B's job regions after the op returns. Each goes once, never twice, and not
+ * after the texture's create), op 0x2B's job regions after the op returns, and the render job contexts' emptied
+ * version copies once the device's table is short. Each goes once, never twice, and not
  * while a reader may still be there. Run on the fake game and exe. */
 #include <stdio.h>
 #include <string.h>
@@ -8,6 +9,8 @@
 #include "harness/fake_host.h"
 
 void CoXlTestWorldCurrent(float current);
+void CoXlTestLive(int complex);
+void CoXlTestRenderCopies(uintptr_t dev, void (*resize)(uintptr_t, uint32_t));
 uint64_t CoXlTestPlaceJob(uint64_t job, uint64_t (*original)(uint64_t, uint64_t, uint64_t, uint64_t));
 int CoXlTestPlaceRegions(void);
 void CoXlTestPlaceDone(void);
@@ -36,6 +39,22 @@ static int Gone(const void* p)
     return VirtualQuery(p, &mi, sizeof mi) != 0 && mi.State == MEM_FREE;
 }
 static uint32_t* Pixels(void) { return (uint32_t*)VirtualAlloc(NULL, 0x10000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE); }
+
+/* The engine's resize 0x6D55E0 as the cut calls it: to 0, the block freed, cap 0. */
+static uint32_t g_resized;
+static void TestResize(uintptr_t array, uint32_t n)
+{
+    g_resized++;
+    if (n == 0) { memset((void*)(array + 4), 0, 4); memset((void*)(array + 8), 0, 8); if (*(uint32_t*)array > 0) memset((void*)array, 0, 4); }
+}
+static void Context(uint8_t* x, uint32_t count, uint32_t cap, uint32_t used)
+{
+    static uint8_t block[16];
+    uint64_t data = (uint64_t)(uintptr_t)block;
+    memset(x, 0, 0x1A0);
+    memcpy(x + 8, &count, 4); memcpy(x + 0xC, &cap, 4); memcpy(x + 0x10, &data, 8); memcpy(x + 0x20, &used, 4);
+}
+static uint32_t Cap(const uint8_t* x) { uint32_t c; memcpy(&c, x + 0xC, 4); return c; }
 
 static uint64_t TestJob(uint64_t a, uint64_t b, uint64_t c, uint64_t job) { (void)a; (void)b; (void)c; (void)job; return 1; }
 
@@ -146,6 +165,34 @@ int main(void)
         CoXlTestPlaceDone();
         CHECK(CoXlTestPlaceRegions() == 0);
         CoXlTestWorldCurrent(1.0f);
+    }
+
+    g_case = "the render job contexts' version copies";
+    {
+        static uint8_t dev[0x1500], x[4][0x1A0];
+        uint64_t array[5] = {(uint64_t)(uintptr_t)x[0], (uint64_t)(uintptr_t)x[1], (uint64_t)(uintptr_t)x[2], 0, (uint64_t)(uintptr_t)x[3]};
+        uint64_t at = (uint64_t)(uintptr_t)array;
+        uint32_t count = 5, size = 2000;
+        memcpy(dev + 0x700, &count, 4); memcpy(dev + 0x708, &at, 8); memcpy(dev + 0x13C8, &size, 4);
+        Context(x[0], 56114, 56114, 0);  /* the load's copy, emptied: goes */
+        Context(x[1], 56114, 56114, 3);  /* a copy not emptied: stays */
+        Context(x[2], 6000, 6000, 0);    /* not 4 times the table: stays */
+        Context(x[3], 4096, 4096, 0);    /* short: stays */
+        const uintptr_t d = (uintptr_t)dev;
+        CoXlTestLive(0);
+        CoXlTestRenderCopies(d, TestResize); /* a normal mission: the game's */
+        CHECK(g_resized == 0 && Cap(x[0]) == 56114);
+        CoXlTestLive(1);
+        CoXlTestRenderCopies(d, TestResize);
+        CHECK(g_resized == 1 && Cap(x[0]) == 0 && Cap(x[1]) == 56114 && Cap(x[2]) == 6000 && Cap(x[3]) == 4096);
+        CHECK(fake_host_logged("living world: render job contexts: 1 of 5 version copies given back (1.3 MB; table 2000 entries); 1 copies, 1.3 MB in all"));
+        CoXlTestRenderCopies(d, TestResize); /* once only */
+        CHECK(g_resized == 1);
+        size = 0; memcpy(dev + 0x13C8, &size, 4);
+        Context(x[1], 56114, 56114, 0); /* emptied later, and the table emptied too: both long copies go */
+        CoXlTestRenderCopies(d, TestResize);
+        CHECK(g_resized == 3 && Cap(x[1]) == 0 && Cap(x[2]) == 0 && Cap(x[3]) == 4096);
+        CoXlTestLive(0);
     }
 
     if (g_failed) { printf("freecuts: %d check(s) failed\n", g_failed); return 1; }
