@@ -77,6 +77,16 @@ static int CodeMatches(uintptr_t address, const char* pattern)
         if (g_fake.noMatch[i] != 0 && (uintptr_t)g_fake.image + g_fake.noMatch[i] == address) return 0;
     for (size_t i = 0; i < sizeof g_fake.noMatchExe / sizeof g_fake.noMatchExe[0]; i++)
         if (g_fake.noMatchExe[i] != 0 && g_fake.exe != NULL && (uintptr_t)g_fake.exe + g_fake.noMatchExe[i] == address) return 0;
+    if (!g_fake.strictCode) return 1;
+    const uint8_t* at = (const uint8_t*)address;
+    for (const char* c = pattern; *c;)
+    {
+        if (*c == ' ') { c++; continue; }
+        if (*c == '?') { c += c[1] == '?' ? 2 : 1; at++; continue; }
+        unsigned v = 0;
+        if (sscanf(c, "%2x", &v) != 1 || c[1] == 0 || *at++ != (uint8_t)v) return 0;
+        c += 2;
+    }
     return 1;
 }
 

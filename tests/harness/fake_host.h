@@ -31,6 +31,7 @@ typedef struct FakeHost
     uintptr_t noMatchExe[2];  /* and for these RVAs in the exe */
     uintptr_t wrote[64];      /* every write asked for, refused or not, in order (the first 64) */
     int wroteCount;
+    int strictCode;           /* code_matches compares the pattern with the bytes there (?? any) */
     uintptr_t noHook;         /* hook fails for this address */
     struct { uintptr_t target; void* detour; } hooks[FAKE_HOOKS];
     int hookCount;
