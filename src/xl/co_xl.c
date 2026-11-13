@@ -481,6 +481,16 @@ void CoXlTestTileAdd(float cx, float cy, const uint16_t* heights, uint32_t n, fl
 int CoXlTestTilesLive(void) { return NearTilesLive(); }
 /* The game code a replayed tile step runs under (proto/difficulty_world_terrain.c NearStepPatch): 1 when patched. */
 int CoXlTestNearStepPatch(uint8_t op, int on) { return NearStepPatch(op, on); }
+/* A replayed step's record copy, and the cone count over a tile's heights centred on (cx, cy) (NearRecordEdit,
+ * NearPeaksCount). */
+void CoXlTestNearRecordEdit(uint8_t op, uint8_t* one) { NearRecordEdit(op, one); }
+uintptr_t CoXlTestNearNoCells(void) { return (uintptr_t)&kNearNoCells; }
+void CoXlTestNearPeaks(const float* heights, float cx, float cy, int* narrow, int* wide, float* top, float* x, float* y)
+{
+    g_near.centre[0] = cx; g_near.centre[1] = cy;
+    NearPeaks p; NearPeaksCount(heights, &p);
+    *narrow = p.narrow; *wide = p.wide; *top = p.top; *x = p.topX; *y = p.topY;
+}
 /* The layer grids and the stamps put back on new ground (proto/difficulty_world_terrain.c, difficulty_world_move.c,
  * difficulty_stream.c): a tile in a given slot, the coarse ground, a moving tile's build under way, a tile's change, the
  * descriptor and the sample a stamp's layers get, and the streamer's slots around a change. */
