@@ -25,6 +25,8 @@ uint32_t CoXlTestStampsReplace(float cx, float cy);
 int CoXlTestStreamFlag(uint32_t i);
 void CoXlTestStreamScan(void);
 void CoXlTestStreamSlotState(uint32_t i, int* live, int* due, uint64_t* unit);
+int CoXlTestLayerWhy(uint64_t unit, uint64_t field, int* slot);
+float CoXlTestTraceGridAt(int slot, float x, float y);
 
 static int g_failed;
 static const char* g_case;
@@ -39,7 +41,7 @@ static const char* g_case;
 #define TABLE 0x3601000u
 
 static uint16_t U16(float metres) { return (uint16_t)((metres + 500.0f) / 1000.0f * 65535.0f + 0.5f); }
-static uint16_t g_coarse[4], g_tileA[4], g_tileB[4];
+static uint16_t g_coarse[4], g_tileA[4], g_tileB[4], g_tileC[4];
 static float g_levelData[4];
 static uint8_t g_levelDesc[0x28];
 static uint8_t g_unit[0x60];
@@ -87,7 +89,7 @@ static void Start(const char* name)
     CoXlTestGame((uintptr_t)g_fake.image);
     CoXlTestWorldLevel((uintptr_t)g_lg, 0);
     CoXlTestGenLevel(8.0f);
-    for (int k = 0; k < 4; k++) { g_coarse[k] = U16(40.0f); g_tileA[k] = U16(45.0f); g_tileB[k] = U16(30.0f); }
+    for (int k = 0; k < 4; k++) { g_coarse[k] = U16(40.0f); g_tileA[k] = U16(45.0f); g_tileB[k] = U16(30.0f); g_tileC[k] = U16(20.0f); }
     CoXlTestCoarse(g_coarse, 2, 16383.5f);
     LevelDesc();
 }
@@ -184,6 +186,35 @@ int main(void)
     CHECK(live && unit == 0x3000);
     CoXlTestStreamSlotState(3, &live, &due, &unit);
     CHECK(!live && due && unit == 0);
+
+    Start("the research trace reads a grid as the game does and names why a stamp keeps the level's heights");
+    a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);
+    CoXlTestLayerTile(a, 1, AX, AY);
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTile(b, 1, BX, AY);
+    int c = CoXlTestTileAddAt(AX, CY2, g_tileC, 2, SPAN); /* south: the drop grid differs north and south */
+    CoXlTestLayerTile(c, 1, AX, CY2);
+    fa = Field(2100.0f, AY);
+    int differ = 0;
+    for (float x = 1990.0f; x <= 2110.0f; x += 0.37f) /* across the two tiles' meeting, the trace's read is the game's */
+        CHECK(CoXlTestTraceGridAt(a, x, AY + 11.7f) == Read(fa, x, AY + 11.7f));
+    for (float y = AY - 1700.0f; y <= AY + 1700.0f; y += 3.1f)
+    {
+        CHECK(CoXlTestTraceGridAt(a, AX + 5.3f, y) == Read(fa, AX + 5.3f, y));
+        differ += !Near(Read(fa, AX + 5.3f, y), Read(fa, AX + 5.3f, 2.0f * AY - y));
+    }
+    CHECK(differ > 100); /* the grid is not symmetric about its centre, so a flipped row shows */
+    int slot = -2;
+    float at[2] = {2100.0f, AY};
+    memcpy(g_unit + 0x50, at, 8);
+    CHECK(CoXlTestLayerWhy((uint64_t)(uintptr_t)g_unit, (uint64_t)(uintptr_t)g_levelDesc, &slot) == 0 && slot == a);
+    at[0] = BX - 1500.0f; memcpy(g_unit + 0x50, at, 8);
+    CHECK(CoXlTestLayerWhy((uint64_t)(uintptr_t)g_unit, (uint64_t)(uintptr_t)g_levelDesc, &slot) == 5 && slot == -1); /* no grid */
+    CHECK(CoXlTestLayerWhy((uint64_t)(uintptr_t)g_unit, 0, &slot) == 1);
+    float wide[2] = {4096.0f, 4096.0f};
+    memcpy(g_levelDesc + 0x14, wide, 8); /* not the level's extent */
+    at[0] = 2100.0f; memcpy(g_unit + 0x50, at, 8);
+    CHECK(CoXlTestLayerWhy((uint64_t)(uintptr_t)g_unit, (uint64_t)(uintptr_t)g_levelDesc, &slot) == 3);
 
     if (g_failed) { printf("layergrid: %d checks failed\n", g_failed); return 1; }
     printf("layergrid: all cases passed\n");

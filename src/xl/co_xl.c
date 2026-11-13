@@ -487,6 +487,8 @@ void CoXlTestNearBuilding(int building) { g_near.level = g_world.levels; g_near.
 void CoXlTestLayerTile(int slot, int in, float cx, float cy) { NearLayerTileChange(slot, in, cx, cy); }
 uint64_t CoXlTestLayerField(uint64_t unit, uint64_t field) { return NearLayerField(unit, field); }
 int CoXlTestLayerHeight(uint64_t desc, float x, float y, float* h) { return NearLayerHeight(desc, x, y, h); }
+int CoXlTestLayerWhy(uint64_t unit, uint64_t field, int* slot) { int why; NearLayerFieldWhy(unit, field, slot, &why); return why; }
+float CoXlTestTraceGridAt(int slot, float x, float y) { return NearTraceGridAt(slot, x, y); }
 void CoXlTestStreamSetup(uintptr_t game, uint8_t* context, uint8_t* array, uint32_t count)
 {
     AcquireSRWLockExclusive(&g_streamLock);
