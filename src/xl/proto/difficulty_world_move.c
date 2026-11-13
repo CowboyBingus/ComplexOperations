@@ -102,6 +102,8 @@ static int FarGrassBusy(void); /* difficulty_world_fargrass.c */
 static void FarGrassTick(uint64_t level);
 static void FarGrassLevelLeft(void);
 static void FarGrassInstall(uintptr_t game);
+static void FgGroundTick(uint64_t level); /* difficulty_world_fargrass_ground.c */
+static void FgGroundLevelLeft(void);
 
 static void MoveCraterUpdate(void* system, float dt, uint64_t r8, uint64_t r9)
 {
@@ -1275,6 +1277,7 @@ static void MoveLevelUpdate(uint64_t level)
     if (mv != MV_IDLE || g_move.state != MV_IDLE) { MoveCostAdd((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart, mv, ns, step, conf, bld); g_moveCost.pending = 1; }
     else if (g_moveCost.pending) MoveCostNote();
     FarGrassTick(level);
+    FgGroundTick(level);
 }
 
 static void MoveInstall(uintptr_t game)
@@ -1301,6 +1304,7 @@ static void NearLevelLeft(int ship)
     InterlockedExchange(&g_nearActive, 0);
     MoveHold(0);
     FarGrassLevelLeft();
+    FgGroundLevelLeft();
     /* only the ship: a level init advances g_world.levels, which every tile and hide gate already compares */
     if (ship) { NearTilesClear(); g_hide.handle = 0; }
 }
