@@ -1,6 +1,7 @@
 /* The voice lines' log against a stand-in game image: the hooks go in only on the reviewed code, pass every argument and
  * the result through, and the lines carry what the game reads there: the applied voice at (record + k) * 0x44 with k
- * as the code holds it, the speaker's component value and prefix, the name the game built, and the manager's count. */
+ * as the code holds it, the speaker's component value and prefix, the name the game built, the manager's count, and
+ * the state gate a request met (the solo rule refuses a mask with bit 6 when the state has bit 0). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +11,9 @@
 
 void co_voice_test_reset(void);
 void co_voice_test_lookups(uint64_t (*hash)(const char*, int, uint32_t), uint32_t (*event)(uint32_t));
+void co_voice_test_game(const uint8_t* (*lineDef)(uint32_t, uint32_t, uint32_t), const char* (*lineText)(uint32_t, uint32_t),
+    const uint8_t* (*record)(uint32_t), const uint32_t* (*voiceOf)(const uint8_t*));
+uint32_t co_voice_verdict(uint32_t mask, uint32_t state, int haveLineDef, int queued);
 void co_pods_test_reset(void);
 void co_managers_test_reset(void);
 
@@ -17,6 +21,13 @@ void co_managers_test_reset(void);
 #define READ 0x878329u
 #define NAME 0x139ECA0u
 #define POST 0x13A1CD0u
+#define REQUEST 0x13A0090u
+#define SETS 0x32B4598u
+#define SET 0x73917133u      /* the voice set of component value 6 here */
+#define STRATAGEM 0x21043F75u /* call_stratagem_equip_vehicle's group: mask 0x9C0 */
+#define LASTMAG 0x5C4397B3u  /* call_reload_lastmag_gen: mask 0 */
+#define SPOKEN 0x5AE3F662u
+#define NEEDED 0x12345678u   /* a stand-in group with mask 0xC06: needs bits 1 and 2, forbids 4 and 5 */
 #define SYSTEM 0x346D520u
 #define EVENT 0xABCD1234u
 #define CUSTOMIZATION 0x33264F8u
@@ -36,10 +47,14 @@ void co_managers_test_reset(void);
 typedef uint64_t (*DeltaFn)(uint64_t, uint64_t, uint64_t, uint64_t);
 typedef uint64_t (*NameFn)(uint64_t, uint64_t, uint64_t, uint64_t, char*, uint64_t);
 typedef uint64_t (*PostFn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+typedef uint64_t (*RequestFn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+    uint64_t, uint64_t);
 
 static int g_failed;
 static const char* g_case;
-static uint64_t g_seen[10];
+static uint64_t g_seen[12];
+static uint64_t g_queued;
+static uint8_t g_record[16], g_stratagemDef[0x3C], g_lastmagDef[0x3C], g_neededDef[0x3C];
 static int g_hashLength;
 static uint64_t g_playing;
 static HfMod* const g_mod = (HfMod*)&g_fake;
@@ -66,6 +81,32 @@ static uint64_t TestPost(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_
     return g_playing;
 }
 
+static uint64_t TestRequest(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h, uint64_t i,
+    uint64_t j, uint64_t k, uint64_t l)
+{
+    const uint64_t v[12] = {a, b, c, d, e, f, g, h, i, j, k, l};
+    memcpy(g_seen, v, sizeof v);
+    return g_queued;
+}
+
+/* The game's line-defs, line names, entity records and voice component, as far as the test needs them: entity 77's
+ * record keys the component by [record + 8] = 5, not by 77 (the manager maps 5 to slot 3). */
+static const uint8_t* TestLineDef(uint32_t set, uint32_t group, uint32_t intensity)
+{
+    if (intensity != SPOKEN) return NULL;
+    if (set == 0x8BC32987u) return group == LASTMAG ? g_lastmagDef : NULL; /* the set of a speaker with no voice */
+    if (set != SET) return NULL;
+    return group == STRATAGEM ? g_stratagemDef : group == LASTMAG ? g_lastmagDef : group == NEEDED ? g_neededDef : NULL;
+}
+static const char* TestLineText(uint32_t set, uint32_t line) { return set == SET && line == 0x313876CCu ? "call_stratagem_equip_vehicle_a_spoken" : NULL; }
+static const uint8_t* TestRecord(uint32_t entity) { return entity == ENTITY ? g_record : NULL; }
+static const uint32_t* TestVoiceOf(const uint8_t* record)
+{
+    uint32_t key;
+    memcpy(&key, record + 8, 4);
+    return key == 5 ? (const uint32_t*)(g_fake.image + VM + 0x134 + 4 * SLOT) : NULL;
+}
+
 /* The game's name hash and event map, as far as the test needs them: a prefixed name is an event, a bare one is not. */
 static uint64_t TestHash(const char* name, int length, uint32_t seed)
 {
@@ -78,6 +119,7 @@ static void Install(void)
 {
     co_voice_install((uintptr_t)g_fake.image);
     co_voice_test_lookups(TestHash, TestEvent);
+    co_voice_test_game(TestLineDef, TestLineText, TestRecord, TestVoiceOf);
 }
 
 static void Put32(uint32_t at, uint32_t v) { memcpy(g_fake.image + at, &v, 4); }
@@ -113,7 +155,18 @@ static void Start(const char* name, uint8_t k)
     g_fake.originals[1].original = (void*)TestName;
     g_fake.originals[2].target = (uintptr_t)(g_fake.image + POST);
     g_fake.originals[2].original = (void*)TestPost;
+    g_fake.originals[3].target = (uintptr_t)(g_fake.image + REQUEST);
+    g_fake.originals[3].original = (void*)TestRequest;
     g_playing = 4242;
+    g_queued = 0;
+    memset(g_record, 0, sizeof g_record);
+    g_record[8] = 5;
+    memset(g_stratagemDef, 0, sizeof g_stratagemDef);
+    memset(g_lastmagDef, 0, sizeof g_lastmagDef);
+    g_stratagemDef[0x34] = 0xC0; g_stratagemDef[0x35] = 0x09;
+    memset(g_neededDef, 0, sizeof g_neededDef);
+    g_neededDef[0x34] = 0x06; g_neededDef[0x35] = 0x0C;
+    Put32(SETS + 4 * 5, SET);
     PutPointer(SYSTEM, 0x3640000u);
     /* the customization manager: entity 77 is record 2 */
     PutPointer(CUSTOMIZATION, CM);
@@ -122,7 +175,7 @@ static void Start(const char* name, uint8_t k)
     Put32(ROWS, 0x83BFB97Cu); Put32(ROWS + 0x38, 0xEF050987u); Put32(ROWS + 0x70, 0x09E450ACu); Put32(ROWS + 0xA8, 0x7ED81796u);
     /* the voice manager: entity 77 at slot 3 with value 6, two entities */
     PutPointer(VOICE_MANAGER, VM);
-    Map(VM + 0x80, VM_MAP, ENTITY, SLOT);
+    Map(VM + 0x80, VM_MAP, 5, SLOT);
     Put32(VM + 0x130, 2);
     Put32(VM + 0x134 + 4 * SLOT, 6);
     memcpy(g_fake.image + PREFIX_TEXT, "vo_helldiver_soldier_female1", 29);
@@ -143,7 +196,7 @@ static void TestInstall(void)
 {
     Start("the hooks go in on the reviewed code", 0x24);
     co_voice_install((uintptr_t)g_fake.image);
-    CHECK(fake_host_detour(DELTA) != NULL && fake_host_detour(NAME) != NULL && fake_host_detour(POST) != NULL);
+    CHECK(fake_host_detour(DELTA) != NULL && fake_host_detour(NAME) != NULL && fake_host_detour(POST) != NULL && fake_host_detour(REQUEST) != NULL);
     CHECK(fake_host_logged("voice: logging the spawn's voice delta"));
 
     Start("another code at the voice read: nothing is hooked", 0x24);
@@ -156,6 +209,11 @@ static void TestInstall(void)
     g_fake.noMatch[0] = POST;
     co_voice_install((uintptr_t)g_fake.image);
     CHECK(fake_host_detour(DELTA) == NULL && fake_host_detour(POST) == NULL);
+
+    Start("another code at the request: nothing is hooked", 0x24);
+    g_fake.noMatch[0] = REQUEST;
+    co_voice_install((uintptr_t)g_fake.image);
+    CHECK(fake_host_detour(REQUEST) == NULL && fake_host_detour(NAME) == NULL);
 
     Start("a hook refused: the log says so", 0x24);
     g_fake.noHook = NAME;
@@ -195,7 +253,7 @@ static void TestDeltaUnknown(void)
 static void TestLineName(void)
 {
     char buffer[256] = {0};
-    Start("a line's name, value and prefix", 0x30);
+    Start("a line's name, value and prefix; the component keyed by the record's id", 0x30);
     Install();
     const NameFn name = (NameFn)fake_host_detour(NAME);
     if (name == NULL) { CHECK(0); return; }
@@ -203,11 +261,93 @@ static void TestLineName(void)
     CHECK(built == 0x101);
     CHECK(g_seen[0] == 5 && g_seen[1] == ENTITY && g_seen[2] == 0x1234 && g_seen[3] == 2 && g_seen[4] == (uint64_t)(uintptr_t)buffer && g_seen[5] == 66);
     CHECK(fake_host_logged("voice: line 1 for entity 77: component slot 3 value 6 (vo_helldiver_soldier_female1), 2 voiced entities (room for 8); "
-                           "name \"vo_helldiver_soldier_female1_reload_v02\", event 0xABCD1234\n"));
+                           "name \"vo_helldiver_soldier_female1_reload_v02\", variant 2, event 0xABCD1234\n"));
     CHECK(g_hashLength == 39);
     name(5, 99, 0x1234, 2, buffer, 66);
     CHECK(fake_host_logged("voice: line 2 for entity 99: component slot -1 value -1 (-), 2 voiced entities"));
-    CHECK(fake_host_logged("name \"reload_v01\", event 0x00000000 (none: the game drops the line)"));
+    CHECK(fake_host_logged("name \"reload_v01\", variant 2, event 0x00000000 (no such event: a request queued with it is dropped)"));
+    name(5, 99, 0x1234, 0, buffer, 66);
+    CHECK(fake_host_logged("name \"reload_v01\", variant 0, event 0x00000000 (variant 0: a base name, not an event; nothing dropped)"));
+    CHECK(!fake_host_logged("drops the line"));
+}
+
+/* The gate of 0x13A0090 (0x13A01A5..0x13A01D0) as the log reads it. */
+static void TestVerdict(void)
+{
+    g_case = "the state gate's verdicts";
+    CHECK(co_voice_verdict(0x9C0, 0x1, 1, 0) == 2);  /* solo: bit 0 is forbidden by 0x9C0 >> 6 = 0x27 */
+    CHECK(co_voice_verdict(0x40, 0x1, 1, 0) == 2);   /* 0x40 >> 6 = 1 */
+    CHECK(co_voice_verdict(0x40, 0x2, 1, 1) == 0);   /* co-op: bit 0 clear, other bits do not matter to 0x40 */
+    CHECK(co_voice_verdict(0x9C0, 0x8, 1, 1) == 0);  /* bit 3 is not in 0x27 */
+    CHECK(co_voice_verdict(0x9C0, 0x20, 1, 0) == 2); /* bit 5 is */
+    CHECK(co_voice_verdict(0x0, 0x3F, 1, 1) == 0);   /* mask 0 passes any state */
+    CHECK(co_voice_verdict(0x0, 0x3F, 1, 0) == 4);
+    CHECK(co_voice_verdict(0x0, 0x0, 0, 0) == 1);
+    CHECK(co_voice_verdict(0x06, 0x02, 1, 0) == 3);  /* needs bits 1 and 2; only 1 set */
+    CHECK(co_voice_verdict(0x06, 0x06, 1, 1) == 0);
+    CHECK(co_voice_verdict(0x46, 0x07, 1, 0) == 2);  /* forbidden wins over needed */
+}
+
+static void TestRequestGate(void)
+{
+    Start("a request: its arguments, result and gate", 0x30);
+    Install();
+    const RequestFn request = (RequestFn)fake_host_detour(REQUEST);
+    if (request == NULL) { CHECK(0); return; }
+    const uint64_t s = (uint64_t)(uintptr_t)(g_fake.image + 0x3640000u);
+    Put32(0x3640000u, 0x1); /* what 0x13A7020 leaves in solo */
+    CHECK(request(s, 0x313876CCu, 1, STRATAGEM, ENTITY, 0x3F800000u, SPOKEN, 1, 9, 10, 11, 12) == 0);
+    CHECK(g_seen[0] == s && g_seen[1] == 0x313876CCu && g_seen[2] == 1 && g_seen[3] == STRATAGEM && g_seen[4] == ENTITY &&
+          g_seen[5] == 0x3F800000u && g_seen[6] == SPOKEN && g_seen[7] == 1 && g_seen[8] == 9 && g_seen[9] == 10 && g_seen[10] == 11 &&
+          g_seen[11] == 12);
+    CHECK(fake_host_logged("voice: request 1 for entity 77 (value 6): line \"call_stratagem_equip_vehicle_a_spoken\" 0x313876CC, "
+                           "group 0x21043F75, spoken; refused: mask 0x9C0, state 0x1, forbidden bits 0x1 (solo: the game's rule for one player)\n"));
+    g_queued = 0x55;
+    CHECK(request(s, 0x7777, 2, LASTMAG, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0) == 0x55);
+    CHECK(fake_host_logged("voice: request 2 for entity 77 (value 6): line \"?\" 0x00007777, group 0x5C4397B3, spoken; mask 0x0, state 0x1; queued\n"));
+    g_queued = 0;
+    request(s, 0x7777, 2, LASTMAG, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
+    CHECK(fake_host_logged("group 0x5C4397B3, spoken; mask 0x0, state 0x1 passed; not queued (speaker busy, priority, chance or no event)\n"));
+    request(s, 0x7777, 2, 0xABCDEF01u, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
+    CHECK(fake_host_logged("group 0xABCDEF01, spoken; refused: no line-def for this group\n"));
+    Put32(0x3640000u, 0x2); /* co-op: bit 0 clear */
+    g_queued = 0x66;
+    request(s, 0x313876CCu, 1, STRATAGEM, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
+    CHECK(fake_host_logged("group 0x21043F75, spoken; refused: mask 0x9C0, state 0x2, forbidden bits 0x2\n"));
+    Put32(0x3640000u, 0x8);
+    request(s, 0x313876CCu, 1, STRATAGEM, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
+    CHECK(fake_host_logged("group 0x21043F75, spoken; mask 0x9C0, state 0x8; queued\n"));
+    /* a speaker with no voice uses the set 0x8BC32987, which the stand-in has no line-def for */
+    request(s, 0x313876CCu, 1, STRATAGEM, 99, 0, SPOKEN, 1, 0, 0, 0, 0);
+    CHECK(fake_host_logged("voice: request 7 for entity 99 (value -1): line \"?\" 0x313876CC, group 0x21043F75, spoken; refused: no line-def"));
+    request(s, 0x7777, 1, LASTMAG, 99, 0, SPOKEN, 1, 0, 0, 0, 0);
+    Put32(0x3640000u, 0x2);
+    request(s, 0x7777, 1, NEEDED, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
+    CHECK(fake_host_logged("group 0x12345678, spoken; refused: mask 0xC06, state 0x2, needed bits 0x4 missing\n"));
+    CHECK(fake_host_logged("voice: request 8 for entity 99 (value -1): line \"?\" 0x00007777, group 0x5C4397B3, spoken; mask 0x0, state 0x8; queued\n"));
+}
+
+/* Each (group, verdict, state) the first time and each 20th; their own budget, which names cannot use up. */
+static void TestRequestBudget(void)
+{
+    char buffer[256];
+    Start("the request lines a session gets", 0x30);
+    Install();
+    const RequestFn request = (RequestFn)fake_host_detour(REQUEST);
+    const NameFn name = (NameFn)fake_host_detour(NAME);
+    if (request == NULL || name == NULL) { CHECK(0); return; }
+    const uint64_t s = (uint64_t)(uintptr_t)(g_fake.image + 0x3640000u);
+    Put32(0x3640000u, 0x1);
+    for (int i = 0; i < 600; i++) { Put32(VM + 0x130, 4 + (uint32_t)(i & 1)); name(5, ENTITY, 1, 1, buffer, 0); }
+    CHECK(Lines("(the last voice line of this session)") == 1);
+    for (int i = 0; i < 40; i++) request(s, 0x313876CCu, 1, STRATAGEM, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
+    CHECK(Lines("voice: request ") == 3);
+    CHECK(fake_host_logged("voice: request 1 ") && fake_host_logged("voice: request 20 ") && fake_host_logged("voice: request 40 ") &&
+          !fake_host_logged("voice: request 2 "));
+    CHECK(fake_host_logged("(solo: the game's rule for one player) (again)"));
+    for (uint32_t g = 0; g < 300; g++) request(s, 0x313876CCu, 1, 0x1000u + g, ENTITY, 0, SPOKEN, 1, 0, 0, 0, 0);
+    CHECK(Lines("voice: request ") == 3 + 63 + 12); /* 63 new kinds fill the table; then each 20th of the other 237 */
+    CHECK(Lines("(the last voice request line of this session)") <= 1);
 }
 
 static void TestLinePost(void)
@@ -257,6 +397,9 @@ int main(void)
     TestDeltaRead(0x30, 0x7ED81796u);
     TestDeltaUnknown();
     TestLineName();
+    TestVerdict();
+    TestRequestGate();
+    TestRequestBudget();
     TestLinePost();
     TestBudget();
     if (g_failed == 0) printf("voice: all passed\n");

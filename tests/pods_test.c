@@ -84,7 +84,7 @@ int main(void)
 
     api = Start("the reviewed game", CO_GAME_BUILD);
     CHECK(Load(api) == 0);
-    CHECK(g_fake.hookCount == 14 && g_fake.writes == 0); /* six for the pods, four for the lists' counts, one for the session lists, three for the voice log */
+    CHECK(g_fake.hookCount == 15 && g_fake.writes == 0); /* six for the pods, four for the lists' counts, one for the session lists, four for the voice log */
     BuildState(FIRST_STATE);
     CHECK(co_pods_test_state() == 1);
     CHECK(fake_host_logged("have 8 slots (135 code sites changed)"));
@@ -146,17 +146,17 @@ int main(void)
     api = Start("the game already runs", CO_GAME_BUILD);
     g_fake.image[STATE_GLOBAL] = 1;
     CHECK(Load(api) == 0);
-    CHECK(g_fake.hookCount == 8 && fake_host_logged("already running when the mod loaded"));
+    CHECK(g_fake.hookCount == 9 && fake_host_logged("already running when the mod loaded"));
 
     api = Start("the constructor is other code", CO_GAME_BUILD);
     g_fake.noMatch[0] = STATE_CTOR;
     CHECK(Load(api) == 0);
-    CHECK(g_fake.hookCount == 8 && fake_host_logged("not the game code the mod was made for"));
+    CHECK(g_fake.hookCount == 9 && fake_host_logged("not the game code the mod was made for"));
 
     api = Start("the launch function is other code", CO_GAME_BUILD);
     g_fake.noMatch[0] = POD_LAUNCH;
     CHECK(Load(api) == 0);
-    CHECK(g_fake.hookCount == 9 && fake_host_logged("no new pods"));
+    CHECK(g_fake.hookCount == 10 && fake_host_logged("no new pods"));
     BuildState(FIRST_STATE);
     /* eight slots without new pods: the camera choice stays the game's */
     CHECK(co_pods_test_state() == 1 && memcmp(g_before + CAMERA_PICK, g_fake.image + CAMERA_PICK, 69) == 0);
