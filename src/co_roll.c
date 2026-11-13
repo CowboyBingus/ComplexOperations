@@ -13,16 +13,44 @@
 #include "co.h"
 
 #define CO_ROLL_SALT 0xC0A11CE5u
+#define CO_PICK_SALT 0x0E9E1A7Bu
 
-int co_complex_roll(uint32_t operation_seed, uint32_t planet, uint32_t chance_65536)
+static uint32_t Mix(uint32_t h)
 {
-    uint32_t h = operation_seed ^ (planet * 0x9E3779B1u) ^ CO_ROLL_SALT;
     h ^= h >> 16;
     h *= 0x85EBCA6Bu;
     h ^= h >> 13;
     h *= 0xC2B2AE35u;
     h ^= h >> 16;
-    return (h >> 16) < chance_65536;
+    return h;
+}
+
+int co_complex_roll(uint32_t operation_seed, uint32_t planet, uint32_t chance_65536)
+{
+    return (Mix(operation_seed ^ (planet * 0x9E3779B1u) ^ CO_ROLL_SALT) >> 16) < chance_65536;
+}
+
+/* Every planet with a level-11 operation has one complex operation for certain; the others roll as above. That
+ * guaranteed one is the board slot with the lowest key:
+ *
+ *   key = fmix32(board_seed ^ (planet * 0x9E3779B1) ^ (slot * 0x85EBCA77) ^ CO_PICK_SALT)
+ *
+ * A slot and the board seed are what a committed operation keeps: its record goes back into its own slot with its seed,
+ * and the slots generated after it draw other seeds (0x11E3E73 skips a slot in use without a draw). A key of the
+ * operation's seed would move the pick to or from the operation in play. A lowest key stays when another slot goes or
+ * one with a higher key comes, in any order of reading; the odd multiplier and fmix32 give two slots two keys. */
+uint32_t co_pick_key(uint32_t board_seed, uint32_t planet, uint32_t slot)
+{
+    return Mix(board_seed ^ (planet * 0x9E3779B1u) ^ (slot * 0x85EBCA77u) ^ CO_PICK_SALT);
+}
+
+uint32_t co_planet_decide(const CoOperation* ops, uint32_t count, uint32_t board_seed, uint32_t planet, uint32_t chance_65536, uint8_t* complex)
+{
+    uint32_t pick = count;
+    for (uint32_t i = 0; i < count; i++)
+        if (pick == count || co_pick_key(board_seed, planet, ops[i].slot) < co_pick_key(board_seed, planet, ops[pick].slot)) pick = i;
+    for (uint32_t i = 0; i < count; i++) complex[i] = (uint8_t)(i == pick || co_complex_roll(ops[i].seed, planet, chance_65536));
+    return pick;
 }
 
 /* The decision travels in the mission's seed. A client generates a mission with the host's seed (the host sends its

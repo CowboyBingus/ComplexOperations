@@ -1,5 +1,5 @@
 /* The complex part's decisions: each missing need turns it off with its own reason, a machine never makes a complex
- * mission it cannot or was not told to, and a mission entry's seed carries the roll at level 11 only. */
+ * mission it cannot or was not told to, and a mission entry's seed carries the decision at level 11 only. */
 #include <stdio.h>
 #include <string.h>
 
@@ -75,15 +75,15 @@ int main(void)
     for (uint32_t level = 0; level <= 12; level++)
     {
         uint32_t seed = 0x12345679u + level;
-        uint32_t got = co_complex_entry_seed(seed, level, 0xDEADBEEFu, 114u, 1);
-        if (level != CO_COMPLEX_LEVEL) CHECK(got == seed);
-        else CHECK(got == co_seed_marked(seed, co_complex_roll(0xDEADBEEFu, 114u, CO_COMPLEX_CHANCE)));
-        if (level == CO_COMPLEX_LEVEL) CHECK(!co_seed_is_complex(co_complex_entry_seed(seed, level, 0xDEADBEEFu, 114u, 0)));
+        for (int complex = 0; complex < 2; complex++)
+        {
+            uint32_t got = co_complex_entry_seed(seed, level, complex);
+            if (level != CO_COMPLEX_LEVEL) CHECK(got == seed);
+            else CHECK(got == co_seed_marked(seed, complex) && co_seed_is_complex(got) == complex);
+        }
     }
-    /* 0xDEADBEEF on planet 114 rolls complex at this chance (roll_test's vector 0x14FF), seed 0 on planet 0 too, and
-     * 0x00000001 on planet 0 (0x3C84) does too; 0x12345678 on planet 7 (0xB4BF) does not. */
-    CHECK(co_complex_entry_seed(0x10u, 11u, 0xDEADBEEFu, 114u, 1) == 0x11u);
-    CHECK(co_complex_entry_seed(0x11u, 11u, 0x12345678u, 7u, 1) == 0x10u);
+    CHECK(co_complex_entry_seed(0x10u, 11u, 1) == 0x11u && co_complex_entry_seed(0x11u, 11u, 0) == 0x10u);
+    CHECK(co_complex_chance() == CO_COMPLEX_CHANCE); /* no research switch in the tests */
 
     if (g_failed) return 1;
     printf("complex: all cases passed\n");

@@ -41,12 +41,25 @@ static void Entry(uint32_t i, uint32_t slot, uint32_t placement, uint32_t seed, 
     const uint32_t at = WAR + 0xF9A10u + i * 0x4Cu;
     Put(at + 0x28, slot, 4); Put(at + 0x2C, placement, 4); Put(at + 0x34, seed, 4); Put(at + 0x3C, difficulty, 4);
 }
-/* A board record's operation seed and planet, which the fill passes for its entries (0x11E5CCD, 0x11E5762). */
-static void Board(uint32_t index, uint32_t operation, uint16_t planet)
+/* A level-11 board record in use: its operation seed and planet, which the fill passes for its entries (0x11E5CCD,
+ * 0x11E5762). Slot 8 holds another operation of the planet, which rolls normal (C2F5784C, below), and the board seed
+ * makes slot 8 the planet's guaranteed one unless `guaranteed`: then it is the record's. */
+static void BoardAs(uint32_t index, uint32_t operation, uint16_t planet, int guaranteed)
 {
+    const uint32_t other = index == 8 ? 9 : 8;
     Put(WAR + 0xF7280u + index * 0x5Cu + 0x0Cu, operation, 4);
     Put(WAR + 0xF7280u + index * 0x5Cu + 0x10u, planet, 2);
+    Put(WAR + 0xF7280u + index * 0x5Cu + 0x20u, 11, 1);
+    Put(WAR + 0xF7280u + index * 0x5Cu + 0x34u, 1, 1);
+    Put(WAR + 0xF7280u + other * 0x5Cu + 0x0Cu, 0xC2F5784Cu, 4);
+    Put(WAR + 0xF7280u + other * 0x5Cu + 0x10u, planet, 2);
+    Put(WAR + 0xF7280u + other * 0x5Cu + 0x20u, 11, 1);
+    Put(WAR + 0xF7280u + other * 0x5Cu + 0x34u, 1, 1);
+    uint32_t board = 1;
+    while ((co_pick_key(board, planet, index) < co_pick_key(board, planet, other)) != guaranteed) board++;
+    Put(WAR + 0x17A2BCu, board, 4);
 }
+static void Board(uint32_t index, uint32_t operation, uint16_t planet) { BoardAs(index, operation, planet, 0); }
 static void Count(uint32_t n) { Put(WAR + 0xFFC08u, n, 4); }
 static void Highlight(uint32_t index) { Put(WAR + 0x17A2A0u, index, 4); if (index < 110) Put(WAR + 0xF7280u + index * 0x5Cu + 0x34u, 1, 1); }
 static void Pick(int32_t kind, int32_t placement, uint32_t difficulty)
@@ -154,7 +167,16 @@ static void Readers(void)
     CHECK(co_tag_board_mark(war, 7, &marked) == 1 && marked);
     Board(7, 0xC2F5784Cu, 114);
     CHECK(co_tag_board_mark(war, 7, &marked) == 1 && !marked);
+    CHECK(co_tag_board_mark(war, 8, &marked) == 1 && marked); /* the planet's guaranteed one */
     CHECK(co_tag_board_mark(war, 110, &marked) == 0 && co_tag_board_mark(war, 9, &marked) == 0); /* past the board; not in use */
+    BoardAs(7, 0xC2F5784Cu, 114, 1);
+    CHECK(co_tag_board_mark(war, 7, &marked) == 1 && marked && co_tag_board_mark(war, 8, &marked) == 1 && !marked);
+    Put(WAR + 0xF7280u + 7u * 0x5Cu + 0x20u, 10, 1);
+    CHECK(co_tag_board_mark(war, 7, &marked) == 0 && co_tag_board_mark(war, 8, &marked) == 1 && marked); /* level 10 */
+    Board(7, 0xC2F5784Cu, 114);
+    Put(WAR + 0xF9A0Cu, 1, 1);
+    CHECK(co_tag_board_mark(war, 7, &marked) == 0); /* a board flagged for its rebuild */
+    Put(WAR + 0xF9A0Cu, 0, 1);
 
     g_case = "W-T1 the briefing's reader";
     Entry(0, 3, 5, 0x1000, 11); Entry(1, 7, 6, 0x2000, 11); Entry(2, 7, 6, 0x3001, 11); Entry(3, 9, 6, 0x4001, 10);
