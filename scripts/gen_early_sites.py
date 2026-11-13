@@ -22,9 +22,28 @@ assert setup == 0x3326380
 assert game[0x4EDC62:0x4EDC65] == bytes([0x48, 0x89, 0x05]) and 0x4EDC69 + struct.unpack('<i', game[0x4EDC65:0x4EDC69])[0] == setup
 
 # What an extra large world needs in place of HellForge's value; the tenth is a size HellForge leaves the game's.
-OWN = {0xAB19EE: (0x100000, 'the Havok world\'s bodies'), 0x4EE324: (0x100000, 'static actors')}
+# Navmesh cutters (config +0x4C): every forest tree's cutter holds one of the world's bodies (0x8153FB), so with the
+# bodies' room no tree is left without one; 2^20 keeps one generation bit in the handle (allocator 0x75230).
+OWN = {0xAB19EE: (0x100000, 'the Havok world\'s bodies'), 0x4EE324: (0x100000, 'static actors'),
+       0x4EE371: (0x100000, 'navmesh cutters')}
 CONNECTORS = (0x4EE340, 7, 3, bytes([0xC7, 0x45, 0x88, 0x00, 0x00, 0x04, 0x00]), 0x400000)
 assert game[CONNECTORS[0]:CONNECTORS[0] + 7] == CONNECTORS[3]
+
+
+# The cutter room's way into the engine (exe): the config's +0x44..+0x54 copied to 0x27C31D8 (0x78A2E2), so +0x4C is
+# 0x27C31E0; each world's pool takes it as its room (0x7D7F4D -> [pool+0x24] at 0x7D7F60). The one block for the four
+# worlds' pools is sized 64 B a slot (16 B an entry x 4, shl esi,6 at 0x78A2C1) and cleared at once (0x78A2DD).
+assert exe[0x78A2B6:0x78A2BA] == bytes([0x41, 0x03, 0x77, 0x4C]) and exe[0x78A2C1:0x78A2C4] == bytes([0xC1, 0xE6, 0x06])
+assert exe[0x78A2E2:0x78A2EB] == bytes([0x41, 0x0F, 0x10, 0x47, 0x44, 0x0F, 0x11, 0x05, 0xEA]) and 0x78A2EE + struct.unpack('<i', exe[0x78A2EA:0x78A2EE])[0] == 0x27C31D8
+assert 0x7D7F53 + struct.unpack('<i', exe[0x7D7F4F:0x7D7F53])[0] == 0x27C31E0 and exe[0x7D7F60:0x7D7F64] == bytes([0x41, 0x89, 0x48, 0x24])
+# A handle is index | live bit (the room's next power of two) | generation | kind and world (bits 22..31, 0x7D7F7B):
+# a room up to 2^20 keeps at least one generation bit, so a stale handle is not taken for its slot's next one.
+assert exe[0x7D7F7B:0x7D7F82] == bytes([0x41, 0xC7, 0x40, 0x30, 0x00, 0x00, 0xC0])
+cutters = OWN[0x4EE371][0]
+assert cutters & (cutters - 1) == 0 and 0x10000 <= cutters <= 1 << 20
+# a forest tree's cutter is made with the tree's body (0x8153FB, description +0x20 at 0x8155EC): no more trees than bodies
+assert exe[0x8153FB:0x8153FF] == bytes([0x45, 0x8B, 0x34, 0x86]) and exe[0x8155EC:0x8155F0] == bytes([0x44, 0x89, 0x75, 0xE0])
+assert cutters >= OWN[0xAB19EE][0]
 
 
 def hexes(b): return ', '.join('0x%02X' % x for x in b)

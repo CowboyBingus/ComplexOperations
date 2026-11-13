@@ -129,7 +129,7 @@ void co_capacity_early(void)
     CoXlEarly(game);
     co_stamps_room(game); /* refused: the engine's room stays, and the poll finds the stamp index too small for the part */
     n->early = 1;
-    co_log("the engine has room for a world of %.0f m: physics bodies and static actors 1048576, a navigation grid of %u x %u cells", (double)CO_EARLY_WORLD, CO_EARLY_CELLS, CO_EARLY_CELLS);
+    co_log("the engine has room for a world of %.0f m: physics bodies, static actors and navmesh cutters 1048576, a navigation grid of %u x %u cells", (double)CO_EARLY_WORLD, CO_EARLY_CELLS, CO_EARLY_CELLS);
 }
 
 /* A grid of 32 x 32 is the mod's to plan for every level and the ship: HellForge's step leaves it alone. This does not
