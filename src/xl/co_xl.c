@@ -272,6 +272,7 @@ void CoXlTestRenderJobHooked(void* original) { g_lwRender.recordOrig = original;
 int CoXlTestRenderJobGate(void) { return g_lwRender.jobGate; }
 uint64_t CoXlTestRenderRecord(uint64_t job) { return LwRenderRecord(1, 2, job, 4, 5, 6, 7); }
 int CoXlTestRenderJobPins(uintptr_t exe) { return LwRenderJobPins(exe); }
+int CoXlTestRenderInstall(void) { LwInstallRender(); return g_lwRender.recordOrig != NULL; }
 void* CoXlTestRenderJobsInstall(uintptr_t exe, uintptr_t resize) { g_lwRender.recordOrig = NULL; g_lwRender.resize = resize; LwInstallRenderJobs(exe); return g_lwRender.recordOrig; }
 /* A level init's first step for `level`, and a stamp section's hold and cancel test (proto/difficulty_world_terrain.c). */
 void CoXlTestLevelInit(uintptr_t level) { LevelInitBegins(); g_worldLevel = level; }

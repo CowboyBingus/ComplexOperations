@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include "harness/fake_host.h"
+#include "co_render_job_bytes.h"
 
 void CoXlTestWorldCurrent(float current);
 void CoXlTestLive(int complex);
@@ -36,6 +37,7 @@ int CoXlTestRenderJobGate(void);
 uint64_t CoXlTestRenderRecord(uint64_t job);
 int CoXlTestRenderJobPins(uintptr_t exe);
 void* CoXlTestRenderJobsInstall(uintptr_t exe, uintptr_t resize);
+int CoXlTestRenderInstall(void);
 
 static int g_failed;
 static const char* g_case;
@@ -70,6 +72,36 @@ static void Context(uint8_t* x, uint32_t count, uint32_t cap, uint32_t used)
 static uint32_t Cap(const uint8_t* x) { uint32_t c; memcpy(&c, x + 0xC, 4); return c; }
 static uint32_t U32(const uint8_t* at) { uint32_t v; memcpy(&v, at, 4); return v; }
 /* The recording 0x6FD1B0 as the hook calls it: its 7 arguments seen, its result handed back. */
+/* The recording as the hooked game calls it, through three callers built in the fake exe: the copy it found, and its
+ * 7 arguments. A caller saves 7 arguments' frame, calls 0x6FD1B0 from its real call site and returns from the site after. */
+static uint8_t* g_driveX;
+static uint32_t g_capSeen;
+static uint64_t g_seen[7];
+static uint64_t TestRecordSeen(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f, uint64_t g)
+{
+    const uint64_t got[7] = {a, b, c, d, e, f, g};
+    memcpy(g_seen, got, sizeof got);
+    g_capSeen = Cap(g_driveX);
+    return 0x5EC0;
+}
+static void Caller(uint8_t* exe, uint32_t call)
+{
+    static const uint8_t frame[] = {0x48, 0x83, 0xEC, 0x48, 0x48, 0x8B, 0x44, 0x24, 0x70, 0x48, 0x89, 0x44, 0x24, 0x20, 0x48, 0x8B, 0x44, 0x24, 0x78,
+        0x48, 0x89, 0x44, 0x24, 0x28, 0x48, 0x8B, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00, 0x48, 0x89, 0x44, 0x24, 0x30};
+    static const uint8_t back[] = {0x48, 0x83, 0xC4, 0x48, 0xC3};
+    const int32_t rel = (int32_t)(0x6FD1B0 - (call + 5));
+    memset(exe + call - 0x2C, 0x90, 0x2C);
+    memcpy(exe + call - 0x2C, frame, sizeof frame);
+    exe[call] = 0xE8; memcpy(exe + call + 1, &rel, 4); memcpy(exe + call + 5, back, sizeof back);
+}
+typedef uint64_t (*Caller7)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+static int Drive(uint8_t* exe, uint32_t call, uint8_t* job)
+{
+    memset(g_seen, 0, sizeof g_seen); g_capSeen = 0;
+    const uint64_t r = ((Caller7)(void*)(exe + call - 0x2C))(0x11, 0x22, (uint64_t)(uintptr_t)job, 0x44, 0x55, 0x66, 0x77);
+    const uint64_t want[7] = {0x11, 0x22, (uint64_t)(uintptr_t)job, 0x44, 0x55, 0x66, 0x77};
+    return r == 0x5EC0 && memcmp(g_seen, want, sizeof want) == 0;
+}
 static uint64_t g_recordArgs[7];
 static uint64_t TestRecord(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f, uint64_t g)
 {
@@ -387,9 +419,9 @@ int main(void)
         const uintptr_t e = (uintptr_t)exe, resize = e + 0x6D55E0u;
         CHECK(CoXlTestRenderJobPins(e));
         CHECK(CoXlTestRenderJobsInstall(e, 0) == NULL); /* the copies' own pins refused: no job frees either */
-        Pin(e + 0x6CA45Fu); /* the done flag after the recording */
+        Pin(e + 0x6CA321u); /* the job's tail after the recording */
         CHECK(!CoXlTestRenderJobPins(e) && CoXlTestRenderJobsInstall(e, resize) == NULL);
-        Pin(e + 0x6CBE32u); /* the job waits for its update pass */
+        Pin(e + 0x6CBE0Bu); /* the job waits for its update pass */
         CHECK(!CoXlTestRenderJobPins(e));
         Pin(e + 0x6FD1B0u);
         CHECK(!CoXlTestRenderJobPins(e));
@@ -397,6 +429,77 @@ int main(void)
         CHECK(CoXlTestRenderJobsInstall(e, resize) != NULL && fake_host_logged("living world: render job contexts: a version copy over 4096 entries is given back at its job's end, in play"));
         CoXlTestRenderJobHooked(NULL);
     }
+
+    g_case = "the job pins cover every byte the free relies on";
+    {
+        const uintptr_t e = (uintptr_t)exe;
+        const size_t jobs = sizeof kRenderJobBytes / sizeof kRenderJobBytes[0], copies = sizeof kRenderCopiesBytes / sizeof kRenderCopiesBytes[0];
+        for (size_t i = 0; i < jobs; i++) memcpy(exe + kRenderJobBytes[i].rva, kRenderJobBytes[i].bytes, kRenderJobBytes[i].size);
+        for (size_t i = 0; i < copies; i++) memcpy(exe + kRenderCopiesBytes[i].rva, kRenderCopiesBytes[i].bytes, kRenderCopiesBytes[i].size);
+        g_fake.strictCode = 1;
+        CHECK(CoXlTestRenderJobPins(e) && CoXlTestRenderCopiesPins(e) == e + 0x6D55E0u);
+        uint32_t missed = 0, first = 0;
+        for (size_t i = 0; i < jobs; i++)
+            for (uint32_t k = 0; k < kRenderJobBytes[i].size; k++)
+            {
+                uint8_t* b = exe + kRenderJobBytes[i].rva + k;
+                *b ^= 0xFF;
+                if (CoXlTestRenderJobPins(e) && missed++ == 0) first = kRenderJobBytes[i].rva + k;
+                *b ^= 0xFF;
+            }
+        for (size_t i = 0; i < copies; i++)
+            for (uint32_t k = 0; k < kRenderCopiesBytes[i].size; k++)
+            {
+                uint8_t* b = exe + kRenderCopiesBytes[i].rva + k;
+                *b ^= 0xFF;
+                if (CoXlTestRenderCopiesPins(e) != 0 && missed++ == 0) first = kRenderCopiesBytes[i].rva + k;
+                *b ^= 0xFF;
+            }
+        if (missed) printf("  a changed byte the pins accept: %u, the first at exe+0x%X\n", missed, first);
+        CHECK(missed == 0);
+    }
+
+    g_case = "the recording's three callers";
+    {
+        static uint8_t dev[0x1500], x[0x1A0], job[0x400];
+        const uintptr_t e = (uintptr_t)exe;
+        uint64_t array[1] = {(uint64_t)(uintptr_t)x}, at = (uint64_t)(uintptr_t)array, xp = (uint64_t)(uintptr_t)x, pool = (uint64_t)(uintptr_t)dev + 0x1340;
+        uint32_t count = 1, size = 56114, used = 30000, buckets = 40959;
+        memcpy(dev + 0x700, &count, 4); memcpy(dev + 0x708, &at, 8); memcpy(job + 0x3B0, &xp, 8);
+        memcpy(dev + 0x13C8, &size, 4); memcpy(dev + 0x13C8 + 0x18, &used, 4); memcpy(dev + 0x13C8 + 0x1C, &buckets, 4);
+        g_fake.originals[0].target = e + 0x6FD1B0u; g_fake.originals[0].original = (void*)TestRecordSeen;
+        CHECK(CoXlTestRenderJobsInstall(e, (uintptr_t)TestResize) == (void*)TestRecordSeen); /* the reviewed bytes, strict */
+        g_fake.strictCode = 0;
+        void* detour = fake_host_detour(e + 0x6FD1B0u - (uintptr_t)g_fake.image);
+        CHECK(detour != NULL);
+        DWORD old;
+        CHECK(VirtualProtect(exe + 0x6CA000u, 0x34000, PAGE_EXECUTE_READWRITE, &old));
+        static const uint8_t jump[2] = {0xFF, 0xE0};
+        exe[0x6FD1B0] = 0x48; exe[0x6FD1B1] = 0xB8; memcpy(exe + 0x6FD1B2, &detour, 8); memcpy(exe + 0x6FD1BA, jump, 2); /* the hook's jump */
+        Caller(exe, 0x6CA31Cu); Caller(exe, 0x6CAE2Bu); Caller(exe, 0x6CCBA8u);
+        FlushInstructionCache(GetCurrentProcess(), exe + 0x6CA000u, 0x34000);
+        g_driveX = x;
+        Context(x, 56114, 56114, 3); memcpy(x, &pool, 8);
+        CoXlTestLive(1);
+        memcpy(level + 0x1E4, &three, 4);
+        CoXlTestRenderAfter((uintptr_t)dev + 0x1340, TestRehash, TestResize);
+        CHECK(CoXlTestRenderJobGate());
+        g_resized = 0;
+        CHECK(detour != NULL && Drive(exe, 0x6CAE2Bu, job)); /* the serial path (return 0x6CAE30) */
+        CHECK(g_capSeen == 56114 && g_resized == 0 && Cap(x) == 56114);
+        CHECK(detour != NULL && Drive(exe, 0x6CCBA8u, job)); /* the dispatch's own call (return 0x6CCBAD) */
+        CHECK(g_capSeen == 56114 && g_resized == 0 && Cap(x) == 56114);
+        CHECK(detour != NULL && Drive(exe, 0x6CA31Cu, job)); /* the job (return 0x6CA321): the copy stood through the recording */
+        CHECK(g_capSeen == 56114 && g_resized == 1 && Cap(x) == 0 && U32(x + 0x20) == 0);
+        CoXlTestRenderAfter((uintptr_t)dev + 0x1340, TestRehash, TestResize);
+        CoXlTestLive(0);
+        CoXlTestRenderJobHooked(NULL);
+        g_fake.originals[0].target = 0; g_fake.originals[0].original = NULL;
+    }
+
+    g_case = "the render install hooks the recording";
+    CHECK(CoXlTestRenderInstall());
+    CoXlTestRenderJobHooked(NULL);
 
     if (g_failed) { printf("freecuts: %d check(s) failed\n", g_failed); return 1; }
     printf("freecuts: all checks passed\n");

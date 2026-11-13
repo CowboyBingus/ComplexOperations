@@ -28,6 +28,7 @@ typedef struct FakeHost
     int failWriteAt;          /* the write with this number (from 0) fails; -1 for none */
     int writes;
     uintptr_t noMatch[4];     /* code_matches answers 0 for these addresses */
+    int strictCode;           /* code_matches compares the pattern with the bytes there (?? any) */
     uintptr_t noHook;         /* hook fails for this address */
     struct { uintptr_t target; void* detour; } hooks[FAKE_HOOKS];
     int hookCount;

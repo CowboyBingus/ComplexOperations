@@ -87,7 +87,9 @@ static void LwRenderJobDone(uintptr_t ret, uintptr_t job)
 #ifdef CO_RESEARCH
     LwRenderJobLog(x, cap);
 #endif
-    *(volatile uint32_t*)(x + 0x20) = 0; /* used 0: the reader 0x6E2230 then looks at no copy */
+    /* The context left as the dispatch's empty (0x6D5560) leaves one, for 0x6CD646 and the next copy. No safety net: a
+     * read after this would take the live table (0x6E2245) that the dispatch still fills; none comes (the tail above). */
+    *(volatile uint32_t*)(x + 0x20) = 0;
     ((LwRenderResizeFn)g_lwRender.resize)(x + 8, 0);
     *(volatile uint32_t*)(x + 0x28) = 0; *(volatile uint32_t*)(x + 0x2C) = 0xFFFFFFFFu;
     InterlockedIncrement(&g_lwRender.jobFreed); InterlockedAdd64(&g_lwRender.jobBytes, (LONG64)cap * 24);
@@ -150,15 +152,15 @@ static uintptr_t LwRenderCopiesPins(uintptr_t exe)
         ApiCodeMatches(exe + 0x6CD5F7u, "E8 64 9B F5 FF") && ApiCodeMatches(exe + 0x6E2230u, "83 79 20 00 44 8B CA 4C 8B C1") ? exe + 0x6D55E0u : 0;
 }
 
-/* The job as reviewed: its functions, the job from [arg+0x70] passed to the recording, the recording's return, the
- * tail reading X's barrier lists, the done flag, the dependency on the update pass and the dispatch's wait. */
+/* The job as reviewed, every instruction the free relies on (living_world_render_pins.h): the recording's prologue, the
+ * update pass, the job's arguments, call and whole tail, the feeder's dependency, and the dispatch's copy, entries and
+ * wait. */
+#include "living_world_render_pins.h"
 static int LwRenderJobPins(uintptr_t exe)
 {
-    return ApiCodeMatches(exe + LW_RT_RECORD, "45 85 C9 0F 84 0D 09 00 00 48 8B C4") && ApiCodeMatches(exe + 0x6CD36Fu, "48 8D 05 4A CD FF FF") &&
-        ApiCodeMatches(exe + 0x6CD422u, "48 8D 05 A7 CB FF FF") && ApiCodeMatches(exe + 0x6CA0F2u, "49 8B 59 70") && ApiCodeMatches(exe + 0x6CA27Du, "4C 8B C3") &&
-        ApiCodeMatches(exe + 0x6CA31Cu, "E8 8F 2E 03 00 45 33 E4") && ApiCodeMatches(exe + 0x6CA3A3u, "48 8B B8 B0 03 00 00") &&
-        ApiCodeMatches(exe + 0x6CA45Fu, "41 C7 85 90 00 00 00 01 00 00 00") && ApiCodeMatches(exe + 0x6CBE32u, "48 8B 89 F8 00 00 00 E8 12 88 F5 FF") &&
-        ApiCodeMatches(exe + 0x6CD5F0u, "48 8D 96 90 00 00 00 E8 64 9B F5 FF");
+    for (size_t i = 0; i < sizeof kLwJobPins / sizeof kLwJobPins[0]; i++)
+        if (!ApiCodeMatches(exe + kLwJobPins[i].rva, kLwJobPins[i].hex)) return 0;
+    return 1;
 }
 static void LwInstallRenderJobs(uintptr_t exe)
 {
