@@ -1236,7 +1236,7 @@ static int LwAimForward(int player, float* f)
 {
     uintptr_t m = 0; uint32_t slot = 0; float qv[4];
     if (player < 0 || player >= g_lwWorld.playersAt || !g_lwWorld.avatars[player] || !EvpPtr(g_lw.game + 0x3326D20u, &m) || m == 0 ||
-        !EvpHash(m + 0xF8, g_lwWorld.avatars[player], 8, 4, &slot) || SafeRead(m + 0x547858u + 0x78u * (uintptr_t)slot, qv, sizeof qv)) return 0;
+        !EvpHash(m + 0xF8, g_lwWorld.avatars[player], 8, 4, &slot) || SafeRead(m + co_managers_offset(0x3326D20u, 0x547858u) + 0x78u * (uintptr_t)slot, qv, sizeof qv)) return 0;
     float x = qv[0], y = qv[1], z = qv[2], w = qv[3], l = x * x + y * y + z * z + w * w;
     if (!(l > 0.9f && l < 1.1f)) return 0;
     float fx = 2.0f * (x * y - w * z), fy = 1.0f - 2.0f * (x * x + z * z), fl = sqrtf(fx * fx + fy * fy);
