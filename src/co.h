@@ -188,6 +188,8 @@ void co_capacity_game(uintptr_t game);
 const char* co_early_check(uintptr_t game, uintptr_t exe);
 const char* co_early_install(uintptr_t game, uintptr_t exe);
 int co_early_in(void);
+/* The trees a SpeedTree forest made after the install has room for (the game's: 98304). */
+uint32_t co_early_forest_room(void);
 /* Whether game.dll's plugin setup has begun (or cannot be read): the engine reads what it lays out from then on. */
 int co_early_setup_begun(uintptr_t game);
 /* The entity records' move to 16384 (xl/co_xl.c): hooked from `early`, done when the game builds its entity state.

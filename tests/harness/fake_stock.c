@@ -179,6 +179,11 @@ void fake_stock_early(uint8_t* image)
     memset(image + CO_EARLY_SETUP, 0, 8);
     memcpy(image + CO_STAMP_CELL_SITE, kCoStampCellGame, sizeof kCoStampCellGame);
     memcpy(exe + CO_EARLY_TILE_READ, kCoEarlyTileRead, 8);
+    for (size_t i = 0; i < 2; i++)
+    {
+        memcpy(exe + kCoEarlyForest[i].rva, kCoEarlyForest[i].stock, kCoEarlyForest[i].length);
+        memcpy(exe + kCoEarlyForestCalls[i].rva, kCoEarlyForestCalls[i].bytes, 5);
+    }
     memcpy(exe + FAKE_RENDER_CAP, kRenderCap, sizeof kRenderCap);
     memcpy(exe + FAKE_RENDER_POOL0, kRenderPool0, sizeof kRenderPool0);
     memcpy(exe + FAKE_RENDER_SCENE, kRenderScene, sizeof kRenderScene);

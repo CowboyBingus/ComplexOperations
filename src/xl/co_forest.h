@@ -1,5 +1,6 @@
 /* The engine's SpeedTree forest (world + 0x2308B8, ctor 0x20AA90): every tree a stamp's layers spawn takes one slot of
- * its instance grid (forest + 0x120, laid out by 0x7AD1D0 at 0x20AE39 with room 0x18000, fixed in the exe). The spawn
+ * its instance grid (forest + 0x120, laid out by 0x7AD1D0 at 0x20AE39 when the forest is made; room 0x18000, or the
+ * early room's CO_EARLY_FOREST_ROOM for a forest made after co_early_install). The spawn
  * 0x20BC80 first takes a record id per tree (free list +0xD8/+0xE0, else the next of the +0xF0 records), then a grid
  * slot per tree from 0x7AD5E0, and writes through it unchecked (0x20CF57): a full grid (free head [grid+0x2C] = -1)
  * returns 0 and the write crashes. The unspawn 0x20D1A0 gives both back. The grid keeps no count, so the trees are
