@@ -99,3 +99,81 @@ static void MoveBandPixelsTick(void)
         Note("difficulty: moving tiles: the drop tile's band pixels given back (64 MiB, %u this level)", g_move.pixelsFreed);
     }
 }
+
+/* ---- rpmalloc's caches after tile events ---------------------------------------------------------------------------
+ * The trim-all exe 0x3245F0 ([api+0x10]+0x520) releases this thread's cached spans and the global caches at once; each
+ * pool worker trims after its job loop and the render thread on message 0x29. The frame update 0xAB5000 calls it every
+ * 3600 s (game 0xAB762E) and calls the level update this runs in (0xAB519E), so the thread and the frame phase are
+ * the game's own. Once a burst of tile events is TRIM_QUIET frames past (their textures freed), outside a build. */
+#define TRIM_QUIET 8u
+#define TRIM_FOLLOW 60u /* frames: the workers' and the render thread's trims are done by then */
+static const char kTrimPin[] = "48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 30 48 8B 35 02 BC 6E 01 B1 01 48 8B 9E 18 03 00 00 E8 DC BC 30 00";
+static struct
+{
+    int pins; LONG level; uintptr_t call, stats;
+    int pending; uint32_t quiet, events, trims, follow; const char* last;
+    LONG64 mapped0, commit0;
+} g_trim = {.level = -1};
+
+/* The trim, the statistics leaf (memprobe's MP_RP_STATS) and the slot the game calls: 1 when all are the reviewed ones. */
+static int MoveTrimPins(void)
+{
+    if (g_trim.pins) return g_trim.pins > 0;
+    uintptr_t exe = ApiModuleBase("helldivers2.exe", NULL), api = 0, table = 0, fn = 0;
+    int ok = exe != 0 && ApiCodeMatches(exe + 0x3245F0u, kTrimPin) == 1 && ApiCodeMatches(exe + 0x324630u, "48 8B 08 48 83 C0 08 C6 41 7D 01") == 1 &&
+        ApiCodeMatches(exe + 0x324690u, "B8 29 00 00 00 66 89 42 0C") == 1 &&
+        ApiCodeMatches(exe + 0x66BE20u, "48 C7 41 10 00 00 00 00 4C 8B D1 48 63 15 52 54 CF 01") == 1 && ApiCodeMatches(exe + 0x66BF43u, "48 C1 E2 10 49 01 52 10 C3") == 1 &&
+        ApiCodeMatches(g_world.game + 0xAB761Cu, "48 8B 05 E5 EC 86 02 49 89 8E 18 76 AF 07 48 8B 48 10 FF 91 20 05 00 00") == 1 &&
+        !SafeRead(g_world.game + 0x3326308u, &api, 8) && api != 0 && !SafeRead(api + 0x10, &table, 8) && table != 0 && !SafeRead(table + 0x520, &fn, 8) &&
+        fn == exe + 0x3245F0u;
+    g_trim.pins = ok ? 1 : -1;
+    if (ok) { g_trim.call = fn; g_trim.stats = exe + 0x66BE20u; }
+    else Note("difficulty: moving tiles: rpmalloc's trim is not the reviewed code; tile events do not trim it");
+    return ok;
+}
+
+/* The process's commit in bytes as the memory notes take it (Wine: PagefileUsage), -1 when it does not read. */
+static LONG64 MoveTrimCommit(void)
+{
+    static BOOL (WINAPI* info)(HANDLE, void*, DWORD);
+    static int looked;
+    if (!looked) { looked = 1; HMODULE k = GetModuleHandleA("kernel32.dll"); if (k) info = (BOOL (WINAPI*)(HANDLE, void*, DWORD))(void*)GetProcAddress(k, "K32GetProcessMemoryInfo"); }
+    WorldMemCounters c; memset(&c, 0, sizeof c); c.cb = sizeof c;
+    return info != NULL && info(GetCurrentProcess(), &c, sizeof c) ? (LONG64)(c.priv ? c.priv : c.page) : -1;
+}
+
+static void MoveTrimEvent(const char* why)
+{
+    g_trim.pending = 1; g_trim.quiet = 0; g_trim.events++; g_trim.last = why;
+}
+
+/* Each mover frame: the follow-up line, then a due trim. 1 when it trimmed (the frame's one heavy step). */
+static int MoveTrimTick(void)
+{
+    if (g_trim.level != g_world.levels) { g_trim.level = g_world.levels; g_trim.pending = 0; g_trim.follow = 0; g_trim.events = 0; g_trim.trims = 0; }
+    if (g_trim.follow && --g_trim.follow == 0)
+    {
+        LONG64 s[7] = {0}, commit = MoveTrimCommit();
+        ((void (*)(void*))g_trim.stats)(s);
+        Note("difficulty: moving tiles: rpmalloc %u frames after trim %u: mapped %lld MB (%+lld since before it), commit %lld MB (%+lld); the frames' own allocations count too",
+            TRIM_FOLLOW, g_trim.trims, (long long)(s[0] >> 20), (long long)((s[0] - g_trim.mapped0) >> 20), (long long)(commit >> 20), (long long)((commit - g_trim.commit0) >> 20));
+    }
+    if (!g_trim.pending || ++g_trim.quiet < TRIM_QUIET || (g_move.state != MV_IDLE && g_move.state != MV_PACKAGE)) return 0;
+    g_trim.pending = 0;
+    if (!MoveTrimPins()) return 0;
+    LONG64 a[7] = {0}, b[7] = {0}, c0 = MoveTrimCommit();
+    ((void (*)(void*))g_trim.stats)(a);
+    LARGE_INTEGER t0, t1, hz; QueryPerformanceCounter(&t0);
+    ((void (*)(uint64_t))g_trim.call)(0);
+    QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
+    LONG64 c1 = MoveTrimCommit();
+    ((void (*)(void*))g_trim.stats)(b);
+    g_trim.trims++; g_trim.follow = TRIM_FOLLOW; g_trim.mapped0 = a[0]; g_trim.commit0 = c0;
+    Note("difficulty: moving tiles: rpmalloc trim %u after %u tile event(s) (the last: %s): %.1f ms on the game thread; mapped %lld -> %lld MB (%+lld), "
+        "global cache %lld -> %lld MB; commit %lld -> %lld MB (%+lld); the workers and the render thread trim their own heaps next",
+        g_trim.trims, g_trim.events, g_trim.last ? g_trim.last : "?", (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart,
+        (long long)(a[0] >> 20), (long long)(b[0] >> 20), (long long)((b[0] - a[0]) >> 20), (long long)(a[2] >> 20), (long long)(b[2] >> 20),
+        (long long)(c0 >> 20), (long long)(c1 >> 20), (long long)((c1 - c0) >> 20));
+    g_trim.events = 0;
+    return 1;
+}

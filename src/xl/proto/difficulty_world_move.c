@@ -33,7 +33,7 @@
  *     and names of 0x67, the package ([api+0x10]+0x300) when it was acquired here;
  *  6. the spawn (InitSpawnTerrain on the level's kept 0x69 record), the finalize, the coarse collision lowered and the
  *     coarse drawing hidden over the union of the live tiles (NearHideUnion).
- * A tile goes when no player has been within MOVE_KEEP of its square for MOVE_KEEP_MS: removed from the ground
+ * A tile goes when no player has been within MOVE_KEEP of its square for MOVE_KEEP_MS, a build or not: removed from the ground
  * queries, the coarse collision raised back from the level's CPU copy (lg+0xD8), the hidden nodes shown again, the
  * terrain destroyed ([api+8]+0x1E0 -> exe 0x1ADEA0) and its textures released a few frames later. The drop tile stays.
  *
@@ -599,6 +599,7 @@ static void MoveRelease(int slot)
     Note("difficulty: moving tiles: the tile of cell (%d, %d) released (no player within %.0f m for %u s); the coarse collision %s; %d tiles live",
         t.cell[0], t.cell[1], (double)MOVE_KEEP, MOVE_KEEP_MS / 1000, raised ? "raised back" : "NOT raised back (the level's copy did not read)", NearTilesLive());
     if (g_allocOn > 0 || MemProbeOn()) WorldMemoryNote("a tile released", 0xFFFFFFFFu, 0, 1); /* research (HELLFORGE_XL_ALLOCS=1 or MEMPROBE=1): what a release gives back */
+    MoveTrimEvent("a tile released");
 }
 
 /* The context's arena ([ctx+0]): the generation thread's arena is destroyed when the level is done (0x173BB80: its
@@ -704,6 +705,7 @@ static void MoveTileIn(uint64_t world)
         NearTilesLive(), (long long)g_moveHeldUpdates);
     if (g_allocOn > 0 || MemProbeOn()) WorldMemoryNote("a tile in", 0xFFFFFFFFu, 0, 1); /* research (HELLFORGE_XL_ALLOCS=1 or MEMPROBE=1): what a build keeps */
     MoveRestoreDrop(); /* g_near.tex / g_matband: the drop tile's again (the new tile's are in its entry) */
+    MoveTrimEvent("a tile in");
 }
 
 /* ---- Units left under the ground (living world audit 1f criterion 7) ----------------------------------------------
@@ -863,6 +865,63 @@ static void MoveGroundKeep(void)
     }
 }
 
+/* Nothing a build reads is a released tile's (TILES-TRIM-PROOFS.md), but while the merge exists its cameras may draw the
+ * world: over the tile's own square (+-NEAR_SIDE / 2), over 0x41's vanilla-space square (+-MOVE_MAT_HALF at the
+ * origin) and 20 km north for 0x63. A tile whose terrain (+-NEAR_SPAN / 2) is clear of both squares goes then; a
+ * nearer one waits for the teardown, so no pass of the build sees the world change. */
+#define MOVE_MAT_HALF 1024.0f
+static int MoveReleaseClear(int k)
+{
+    if (g_move.state == MV_IDLE || !g_move.merge) return 1;
+    /* 0x38 makes the merge cameras world-sized (+-8,192 m at the origin) and 0x4C's fill draws through cam0; they
+     * narrow only when the replay leaves NEAR_START (NearCameras). Until then no tile goes. */
+    if (g_move.state == MV_KICK || g_move.state == MV_SETUP || g_move.state == MV_LOOKUP || (g_move.state == MV_REPLAY && g_near.state == NEAR_START)) return 0;
+    const float* c = g_tiles[k].centre;
+    float build = fmaxf(fabsf(c[0] - g_move.centre[0]), fabsf(c[1] - g_move.centre[1])), origin = fmaxf(fabsf(c[0]), fabsf(c[1]));
+    return build >= NEAR_SIDE / 2 + NEAR_SPAN / 2 && origin >= MOVE_MAT_HALF + NEAR_SPAN / 2;
+}
+
+static const char* MoveStateName(int state)
+{
+    static const char* const names[] = {"idle", "package", "stamps", "kick", "setup", "lookup", "replay", "teardown", "unstamp", "spawn", "ready", "failing"};
+    return state >= 0 && state <= MV_FAILING ? names[state] : "?";
+}
+
+/* Tiles a player is near are kept, building or not. */
+static void MoveKeepSeen(ULONGLONG now)
+{
+    for (int k = 0; k < NEAR_TILES_MAX; k++)
+    {
+        if (!g_tiles[k].live || g_tiles[k].level != g_world.levels) continue;
+        for (int p = 0; p < g_move.players; p++)
+            if (MoveCellDistance(g_tiles[k].cell[0], g_tiles[k].cell[1], g_move.player[p][0], g_move.player[p][1]) <= MOVE_KEEP) { g_tiles[k].seen = now; break; }
+    }
+}
+
+/* The mover's state in the line lets a run check that no release falls inside the merge's world-sized window. */
+static void MoveReleaseTimed(int k)
+{
+    int building = g_move.state != MV_IDLE;
+    LARGE_INTEGER t0, t1, hz; QueryPerformanceCounter(&t0);
+    MoveRelease(k);
+    QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
+    double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+    if (building)
+        Note("difficulty: moving tiles: the release took %.1f ms on the game thread, during the build of cell (%d, %d) (mover %s, near state %d)", ms,
+            g_move.cell[0], g_move.cell[1], MoveStateName(g_move.state), g_near.state);
+    else Note("difficulty: moving tiles: the release took %.1f ms on the game thread", ms);
+}
+
+/* Every frame, building or not: an expired tile (not the drop tile) goes, one a frame. 1 when one went. */
+static int MoveReleaseTick(ULONGLONG now)
+{
+    if (g_move.players == 0) return 0;
+    MoveKeepSeen(now);
+    for (int k = 1; k < NEAR_TILES_MAX; k++)
+        if (g_tiles[k].live && g_tiles[k].level == g_world.levels && now - g_tiles[k].seen > MOVE_KEEP_MS && MoveReleaseClear(k)) { MoveReleaseTimed(k); return 1; }
+    return 0;
+}
+
 static void MoveTick(uint64_t level)
 {
     if (!g_moveInstalled || level == 0 || level != g_worldLevelLive || g_world.live != 8.0f || !TerrainOn() || !NearOn() || !MoveOn()) return;
@@ -912,24 +971,11 @@ static void MoveTick(uint64_t level)
     MoveGroundKeep(); /* before the frame's ground rays are cast */
     MoveFreeTick(0);
     MovePlayers();
+    if (MoveReleaseTick(now)) return; /* one release a frame, a build's step waits for the next */
+    if (MoveTrimTick()) return;
     if (g_move.state == MV_IDLE)
     {
         if (g_move.players == 0) return;
-        for (int k = 0; k < NEAR_TILES_MAX; k++)
-        {
-            if (!g_tiles[k].live || g_tiles[k].level != g_world.levels) continue;
-            for (int p = 0; p < g_move.players; p++)
-                if (MoveCellDistance(g_tiles[k].cell[0], g_tiles[k].cell[1], g_move.player[p][0], g_move.player[p][1]) <= MOVE_KEEP) { g_tiles[k].seen = now; break; }
-        }
-        for (int k = 1; k < NEAR_TILES_MAX; k++) /* the drop tile (slot 0) stays */
-            if (g_tiles[k].live && g_tiles[k].level == g_world.levels && now - g_tiles[k].seen > MOVE_KEEP_MS)
-            {
-                LARGE_INTEGER t0, t1, hz; QueryPerformanceCounter(&t0);
-                MoveRelease(k);
-                QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
-                Note("difficulty: moving tiles: the release took %.1f ms on the game thread", (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart);
-                return;
-            }
         if (NearTilesLive() >= MOVE_CAP) return;
         float best = 1e9f; int ba = 0, bb = 0, bp = -1;
         for (int p = 0; p < g_move.players; p++)
@@ -1122,11 +1168,10 @@ static void MoveCostAdd(double ms, int mv, int ns, int step, int conf, int bld)
 
 static void MoveCostNote(void)
 {
-    static const char* const mv[] = {"idle", "package", "stamps", "kick", "setup", "lookup", "replay", "teardown", "unstamp", "spawn", "ready", "failing"};
     char line[640]; int n = 0;
     for (int k = 0; k < 6 && g_moveCost.ms[k] > 0 && n < 600; k++)
         n += snprintf(line + n, sizeof line - n, " %.0f ms (%s, near state %d, step %d, building %d, conform phase %d);", g_moveCost.ms[k],
-            g_moveCost.mv[k] >= 0 && g_moveCost.mv[k] <= MV_FAILING ? mv[g_moveCost.mv[k]] : "?", g_moveCost.ns[k], g_moveCost.step[k], g_moveCost.bld[k], g_moveCost.conf[k]);
+            MoveStateName(g_moveCost.mv[k]), g_moveCost.ns[k], g_moveCost.step[k], g_moveCost.bld[k], g_moveCost.conf[k]);
     Note("difficulty: moving tiles: the build's cost on the game thread: %.0f ms over %u frames; the longest:%s", g_moveCost.sum, g_moveCost.frames, line);
     memset(&g_moveCost, 0, sizeof g_moveCost);
 }
