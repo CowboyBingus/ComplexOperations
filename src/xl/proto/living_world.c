@@ -3763,9 +3763,10 @@ static void LwInstallBlastSpares(uintptr_t game)
     if (!InRel32(r1) || !InRel32(r2) || !InRel32(r3)) { Note("living world: the explosion stub is out of reach of game.dll"); return; }
     int32_t v = (int32_t)r1; memcpy(block + 125, &v, 4); v = (int32_t)r2; memcpy(block + 147, &v, 4); v = (int32_t)r3; memcpy(block + 152, &v, 4);
     /* the C call's stack walks: the game function's frame, plus the four pushes and 0x80 in between (the pops have no call) */
-    static const uint16_t frame[5] = {CO_UNWIND_ALLOC(15, 0x80), CO_UNWIND_PUSH(8, 11), CO_UNWIND_PUSH(6, 10), CO_UNWIND_PUSH(4, 9), CO_UNWIND_PUSH(2, 8)};
-    if (co_unwind_range(block, 5, 0, NULL, 0, game + 0x13C2DC7u, block + 0x800) || co_unwind_range(block + 5, 108, 15, frame, 5, game + 0x13C2DC7u, block + 0x830) ||
-        co_unwind_range(block + 121, 35, 0, NULL, 0, game + 0x13C2DC7u, block + 0x860))
+    /* the C call's stack walks: the game function, plus the four pushes and 0x80 (the pops have no call) */
+    static const CoUnwindRange ranges[3] = {{0, 5, 0, 0, {0}},
+        {5, 108, 15, 5, {CO_UNWIND_ALLOC(15, 0x80), CO_UNWIND_PUSH(8, 11), CO_UNWIND_PUSH(6, 10), CO_UNWIND_PUSH(4, 9), CO_UNWIND_PUSH(2, 8)}}, {121, 35, 0, 0, {0}}};
+    if (co_unwind_block(block, ranges, 3, game + 0x13C2DC7u, block + 0x800, 0x800))
         Note("living world: the explosion stub has no unwind data; a stack walk from it stops there");
     DWORD protect; VirtualProtect(block, 0x1000, PAGE_EXECUTE_READ, &protect); FlushInstructionCache(GetCurrentProcess(), block, 0x1000);
     uint8_t patch[22]; memset(patch, 0xCC, sizeof patch);
@@ -3810,9 +3811,8 @@ static void LwInstallSmashSpares(void)
         r3 = (int64_t)(game + 0x7D0400u) - (int64_t)(uintptr_t)(block + 132);
     if (!InRel32(r1) || !InRel32(r2) || !InRel32(r3)) { Note("living world: the smash stub is out of reach of game.dll"); return; }
     int32_t v = (int32_t)r1; memcpy(block + 13, &v, 4); v = (int32_t)r2; memcpy(block + 123, &v, 4); v = (int32_t)r3; memcpy(block + 128, &v, 4);
-    static const uint16_t frame[1] = {CO_UNWIND_ALLOC(7, 0x80)}; /* the C call's stack walks: the game function's frame plus 0x80 */
-    if (co_unwind_range(block, 17, 0, NULL, 0, game + 0x7D03EFu, block + 0x800) || co_unwind_range(block + 17, 102, 7, frame, 1, game + 0x7D03EFu, block + 0x830) ||
-        co_unwind_range(block + 119, 13, 0, NULL, 0, game + 0x7D03EFu, block + 0x860))
+    static const CoUnwindRange ranges[3] = {{0, 17, 0, 0, {0}}, {17, 102, 7, 1, {CO_UNWIND_ALLOC(7, 0x80)}}, {119, 13, 0, 0, {0}}};
+    if (co_unwind_block(block, ranges, 3, game + 0x7D03EFu, block + 0x800, 0x800)) /* the C call's stack walks: the game function plus 0x80 */
         Note("living world: the smash stub has no unwind data; a stack walk from it stops there");
     DWORD protect; VirtualProtect(block, 0x1000, PAGE_EXECUTE_READ, &protect); FlushInstructionCache(GetCurrentProcess(), block, 0x1000);
     uint8_t patch[17]; memset(patch, 0xCC, sizeof patch);

@@ -10,6 +10,7 @@
 #include "co_watch.h"
 #include "xl/co_nav.h"
 #include "xl/co_aiw_log.h"
+#include "xl/co_unwind.h"
 
 const HfApi* g_coApi;
 HfMod* g_coMod;
@@ -87,5 +88,13 @@ HF_MOD_EXPORT int hellforge_mod_init(const HfApi* api, HfMod* mod)
     co_nav_reserve(0, exe);
     if (api->on(mod, HF_EVENT_GAME_LOADED, OnGameLoaded, NULL) != 0) { co_log("the game-loaded event could not be registered"); return 1; }
     co_capacity_init(); /* the game makes the generator's block once: only now is in time */
+    return 0;
+}
+
+/* The stubs' unwind tables are the OS's, outside the API: taken out with the mod, so none outlives its stub. */
+HF_MOD_EXPORT int hellforge_mod_unload(const HfApi* api, HfMod* mod, uint32_t reason)
+{
+    (void)api; (void)mod; (void)reason;
+    co_unwind_remove_all();
     return 0;
 }

@@ -712,6 +712,9 @@ uintptr_t CoXlTestLayerSpawnDetour(void) { return (uintptr_t)WorldLayerSpawn; }
 uintptr_t CoXlTestLayerSpawnOriginal(void) { return (uintptr_t)g_layerSpawn; }
 int CoXlTestGridEnter(uint64_t desc) { return NearLayerGridEnter(desc); }
 void CoXlTestGridLeave(int k) { NearLayerGridLeave(k); }
+void CoXlTestLayerChosen(void (*fn)(uint64_t)) { g_coTestLayerChosen = fn; }
+void CoXlTestGridReady(int slot, LONG ready) { InterlockedExchange(&g_layerGrid[slot].ready, ready); }
+void CoXlTestLayerCounts(long* grids, long* spawns, uint32_t* pending) { *grids = g_layerSpawnNote.grids; *spawns = g_layerSpawnNote.spawns; *pending = g_layerPending.count; }
 float CoXlTestSeen2(uint32_t i) { return g_streamSeen2[i]; }
 float CoXlTestSeen2Of(float side) { return MoveStampSeen2(side); }
 /* Unwinds from inside a stub laid over `site` (pre: before its 0x80 frame, else inside it) and from the site itself with
@@ -735,8 +738,8 @@ int CoXlTestUnwind(uintptr_t site, int pre, uint64_t out[4])
     static uint64_t stack[0x400];
     if (block == NULL) return -2;
     memset(block, 0xCC, 0x800);
-    static const uint16_t frame[1] = {CO_UNWIND_ALLOC(7, 0x80)};
-    if (co_unwind_range(block, 17, 0, NULL, 0, site, block + 0x800) || co_unwind_range(block + 17, 102, 7, frame, 1, site, block + 0x830)) return -3;
+    static const CoUnwindRange ranges[2] = {{0, 17, 0, 0, {0}}, {17, 102, 7, 1, {CO_UNWIND_ALLOC(7, 0x80)}}};
+    if (co_unwind_block(block, ranges, 2, site, block + 0x800, 0x800)) return -3;
     for (int i = 0; i < 0x400; i++) stack[i] = 0x1000u + (uint64_t)i;
     uint64_t rsp = (uint64_t)(uintptr_t)&stack[0x100];
     if (CoXlTestUnwindFrom((uint64_t)(uintptr_t)block + (pre ? 8u : 60u), rsp, &out[0], &out[1])) return -4;

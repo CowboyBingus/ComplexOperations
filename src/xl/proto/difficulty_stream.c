@@ -929,7 +929,8 @@ static void WorldStreamScanLocked(ULONGLONG now)
         }
         if (g_streamLive[i] && g_streamReplace[i]) /* its ground changed: picked below */
         {
-            if (g_streamPoseGood[i] && !g_streamNeedsUnit[i] && g_streamUnit[i] != 0 && !g_streamDrop[i])
+            /* not while a layer fill runs: its respawn waits for the fill, and the stamp would be missing until then */
+            if (g_streamPoseGood[i] && !g_streamNeedsUnit[i] && g_streamUnit[i] != 0 && !g_streamDrop[i] && !g_layerJob.running)
                 WorldStreamReplacePick(pick, pickKey, &picks, i, best / g_streamSeen2[i]);
             continue;
         }

@@ -5362,6 +5362,9 @@ static uint64_t WorldLayerSnap(uint64_t a, uint64_t b, uint64_t c, uint64_t fiel
  * Neither goes through 0xD5B10, so a stamp by a tile gets its grid here, for every member. */
 typedef uint64_t (*LayerSpawnFn)(uint64_t unit, uint64_t list, uint64_t count, uint64_t field);
 static LayerSpawnFn g_layerSpawn;
+#ifdef CO_TEST
+static void (*g_coTestLayerChosen)(uint64_t grid); /* a refill that begins between the choice and the entry */
+#endif
 static uint64_t WorldLayerSpawn(uint64_t unit, uint64_t list, uint64_t count, uint64_t field)
 {
     int slot = -1;
@@ -5374,6 +5377,9 @@ static uint64_t WorldLayerSpawn(uint64_t unit, uint64_t list, uint64_t count, ui
             uint64_t grid = NearLayerField(unit, field);
             if (grid == 0) break;
             chosen = 1;
+#ifdef CO_TEST
+            if (g_coTestLayerChosen != NULL) g_coTestLayerChosen(grid);
+#endif
             slot = NearLayerGridEnter(grid);
             if (slot >= 0) field = grid;
         }

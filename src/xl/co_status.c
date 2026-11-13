@@ -149,7 +149,8 @@ const char* co_status_install(uintptr_t game)
         return "the status-effect volumes' unit registry could not be enlarged";
     }
     /* the sixth stub calls C without a frame of its own: a stack walk from there unwinds as 0x13CC3E0 at the site */
-    (void)co_unwind_range(page + CO_STATUS_STUB * 5u, CO_STATUS_STUB, 0, NULL, 0, game + kCoStatusSites[5].rva, page + 0x1800);
+    static const CoUnwindRange sixth[1] = {{CO_STATUS_STUB * 5u, CO_STATUS_STUB, 0, 0, {0}}};
+    (void)co_unwind_block(page, sixth, 1, game + kCoStatusSites[5].rva, page + 0x1800, 0x800);
     g_status.page = page; g_status.hash = hash;
     co_status_hash(game);
     return NULL;

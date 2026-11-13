@@ -49,6 +49,9 @@ void CoXlTestProbeCounts(long* reads, long* off, long* written);
 uint64_t CoXlTestLayerSpawn(uint64_t unit, uint64_t count, uint64_t field);
 uint64_t CoXlTestThunk(int which, float* out, uint64_t* r9, uint64_t* fifth);
 int CoXlTestUnwind(uintptr_t site, int pre, uint64_t out[4]);
+void CoXlTestLayerChosen(void (*fn)(uint64_t));
+void CoXlTestGridReady(int slot, LONG ready);
+void CoXlTestLayerCounts(long* grids, long* spawns, uint32_t* pending);
 float CoXlTestSeen2(uint32_t i);
 float CoXlTestSeen2Of(float side);
 int CoXlTestThunkUnwind(uint64_t out[2], uint64_t* stackTop);
@@ -220,6 +223,14 @@ static void Budgets(uint32_t bodies, uint32_t cutters)
     memcpy(exe + 0x27E0000u + 0x40, &slots, 4); memcpy(exe + 0x27E0000u + 0x4C, &bodies, 4);
     memcpy(exe + 0x27C6330u + 16u, &pool, 8);
     memcpy(exe + 0x27F0000u + 0x20, &cutters, 4); memcpy(exe + 0x27F0000u + 0x24, &room, 4);
+}
+
+/* The race the spawn guards against: a refill takes the chosen grid out of use before the spawn enters it. */
+static int g_refillSlots[2] = {-1, -1};
+static void RefillBetween(uint64_t grid)
+{
+    (void)grid;
+    for (int k = 0; k < 2; k++) if (g_refillSlots[k] >= 0) CoXlTestGridReady(g_refillSlots[k], 0);
 }
 
 /* A function with a frame and saved registers, to stand for the game function a stub is laid over. */
@@ -545,6 +556,25 @@ int main(void)
     CHECK(CoXlTestSeen2(0) == CoXlTestSeen2Of(20.0f) && CoXlTestSeen2Of(20.0f) > 1.0f); /* ranked by how far its 20 m footprint is seen */
     CoXlTestLayerTile(b, 1, BX, AY);
     CHECK(fake_host_logged("1 spawned on the level's heights by a tile, 1 of them since put back on a grid, 0 kept (not the streamer's to put back), 0 waiting"));
+
+    g_case = "a refill between the grid's choice and the spawn's entry: the level's heights, not counted on a grid, listed once";
+    {
+        static uint8_t race[0x400];
+        float at2[2] = {2100.0f, AY};
+        memcpy(race + 0x50, at2, 8);
+        const uint64_t unit2 = (uint64_t)(uintptr_t)race;
+        long grids0 = 0, spawns0 = 0, grids1 = 0, spawns1 = 0; uint32_t pending0 = 0, pending1 = 0;
+        CoXlTestLayerCounts(&grids0, &spawns0, &pending0);
+        g_refillSlots[0] = a; g_refillSlots[1] = b; /* every live grid: the second choice finds none */
+        CoXlTestLayerChosen(RefillBetween);
+        CHECK(CoXlTestLayerSpawn(unit2, 3, level) == level);
+        CHECK(CoXlTestLayerSpawn(unit2, 3, level) == level); /* spawned again before its grid came */
+        CoXlTestLayerChosen(NULL);
+        g_refillSlots[0] = g_refillSlots[1] = -1;
+        CoXlTestGridReady(a, 1); CoXlTestGridReady(b, 1);
+        CoXlTestLayerCounts(&grids1, &spawns1, &pending1);
+        CHECK(spawns1 == spawns0 + 2 && grids1 == grids0 && pending1 == pending0 + 1);
+    }
 
     g_case = "a grid write waits for the spawns reading it and says when one is still reading";
     uint64_t current = Field(2100.0f, AY);

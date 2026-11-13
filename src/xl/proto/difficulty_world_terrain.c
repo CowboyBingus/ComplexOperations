@@ -7116,6 +7116,8 @@ static void NearLayerPendingAdd(uint64_t unit, float x, float y)
         g_layerPending.level = g_world.levels;
         g_layerPending.count = g_layerPending.added = g_layerPending.lost = g_layerPending.replaced = g_layerPending.kept = g_layerPending.expired = 0;
     }
+    for (uint32_t p = 0; p < g_layerPending.count; p++) /* a stamp spawned again before its grid came: listed once */
+        if (g_layerPending.e[p].unit == unit) { g_layerPending.e[p].x = x; g_layerPending.e[p].y = y; ReleaseSRWLockExclusive(&g_layerPending.lock); return; }
     if (g_layerPending.count < NEAR_PENDING)
     {
         g_layerPending.e[g_layerPending.count].unit = unit; g_layerPending.e[g_layerPending.count].x = x; g_layerPending.e[g_layerPending.count].y = y;
