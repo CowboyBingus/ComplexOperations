@@ -493,9 +493,16 @@ static void (*const kCountCallbacks[])(CoRegs*) = {
     [40] = SeatData, SeatList, SeatValid, Boosters, SeatNode,
 };
 #define CO_CALLBACKS (sizeof kCountCallbacks / sizeof kCountCallbacks[0])
-/* The data the caves read, by the numbers in DATA(n) of the generators: the loadout card's height (loadout_sites.HEIGHTS)
- * and the open slots panel's mission height (loadout_sites.MISSION). */
-static void* const kCountData[] = {&co_card_height, &co_card_mission};
+/* The customization frame's passive packages by player index (stack_sites.py CP1 to CP8): last frame's pairs, then this
+ * frame's. The game's last-frame pairs for four come along when the caves go in and go back when they go out, so each
+ * package taken is released once; the pairs of indexes 4 to 7 stay here between the two. */
+#define CO_PASSIVES_GAME 0x37CED80u
+#define CO_PASSIVES_GAME_SIZE 0x20u
+static uint32_t g_passives[32];
+/* The data the caves read, by the numbers in DATA(n) of the generators: the loadout card's height
+ * (loadout_sites.HEIGHTS), the open slots panel's mission height (loadout_sites.MISSION) and the passive pairs
+ * (stack_sites.PASSIVES). */
+static void* const kCountData[] = {&co_card_height, &co_card_mission, g_passives};
 #define CO_DATA (sizeof kCountData / sizeof kCountData[0])
 
 /* The session init clears the keys 1 to 3 itself; its hook (co_session.c) calls this behind it. */
@@ -778,6 +785,7 @@ void co_counts_undo(void)
     if (!g_on) return;
     g_on = 0;
     Back(CO_COUNT_SITES, CO_COUNT_CLEARS, CO_COUNT_CAVES);
+    if (Active(CO_G_STACK8)) memcpy((void*)(g_game + CO_PASSIVES_GAME), g_passives, CO_PASSIVES_GAME_SIZE);
     FigureBack();
     FigureFree();
     SyncedBack();
@@ -1000,6 +1008,7 @@ static void Apply(uintptr_t context, uintptr_t extension)
     g_furtherCount = g_waitFurtherCount = 0;
     memset(g_extras, 0, sizeof g_extras);
     memset(g_waiting, 0, sizeof g_waiting);
+    if (Active(CO_G_STACK8)) memcpy(g_passives, (const void*)(g_game + CO_PASSIVES_GAME), CO_PASSIVES_GAME_SIZE);
     /* The game cannot run on a mix: whatever is written goes back when one write fails. */
     for (size_t i = 0; i < CO_COUNT_SITES; i++)
         if (Active(kCoCountSites[i].group) && WriteSite(&kCoCountSites[i], kCoCountSites[i].now) != 0)
@@ -1137,7 +1146,11 @@ void co_counts_test_reset(void)
     memset(g_waiting, 0, sizeof g_waiting);
     g_scoreCount = 0;
     g_scoresTold = 0;
+    memset(g_passives, 0, sizeof g_passives);
 }
+
+/* The customization frame's passive pairs in the mod: last frame's, then this frame's. */
+const uint32_t* co_counts_test_passives(void) { return g_passives; }
 
 /* Every site, clear and cave site holds the game's bytes (a moved array's distance aside). */
 int co_counts_test_reviewed(const uint8_t* image)

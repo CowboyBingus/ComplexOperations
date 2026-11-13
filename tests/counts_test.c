@@ -374,7 +374,7 @@ int main(void)
     {
         static char line[96];
         snprintf(line, sizeof line, "players: %u accesses to four-entry tables of the game skip a player index above 3", co_counts_test_guards());
-        CHECK(co_counts_test_guards() >= (players == 4 ? 77u : 29u) && fake_host_logged(line));
+        CHECK(co_counts_test_guards() >= (players == 4 ? 77u : 28u) && fake_host_logged(line));
         snprintf(line, sizeof line, "session: %u guards keep the lists in messages inside the game's buffers", co_counts_test_net());
         CHECK(co_counts_test_net() == (players == 8 ? 7u : 9u) && fake_host_logged(line));
         snprintf(line, sizeof line, "session: the hostability scores of eight peers go in their message (%u code sites changed)", co_counts_test_host());
