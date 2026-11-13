@@ -139,6 +139,7 @@ typedef struct WorldStreamState
     uint32_t bodiesUsed, bodySlots;       /* the mission world's physics bodies at the last scan, and its store */
     uint32_t spawned, broken, removed, respawned; /* streamed now, records skipped, removals and respawns (cumulative) */
     uint32_t replaced;       /* removals because a tile changed the ground under them (cumulative) */
+    uint32_t respawnHeld;    /* spawn passes that held a level location's new unit over the window's budgets (cumulative) */
     uint32_t orderCount, orderCursor;     /* the due locations, nearest first */
     int captured, failed, generatorDone;  /* state, the capture was refused, the generator's op is at its count */
     int playerCount;
@@ -172,6 +173,7 @@ static ULONGLONG g_streamOutSince[kStreamMaxLocations];  /* tick it first went b
 static uint8_t g_streamMission[kStreamMaxLocations];     /* 1: an important location's stamp (WorldStreamMissionLocked) */
 static float g_streamOut2[kStreamMaxLocations];          /* > 0: this slot's own removal radius, squared (a far window stamp) */
 static uint8_t g_streamReplace[kStreamMaxLocations];     /* 1: the ground under it changed (a tile came or went): out and in again */
+static float g_streamSeen2[kStreamMaxLocations];         /* a flagged one's distance its meshes are drawn to, squared (WindowVisible) */
 
 static SRWLOCK g_streamLock = SRWLOCK_INIT;
 static volatile LONG g_streamOwn;     /* the streamer's own call: the thread id inside it (0: none) */
@@ -198,6 +200,7 @@ static void WorldStreamClearLocked(void)
     g_stream.removed = 0;
     g_stream.respawned = 0;
     g_stream.replaced = 0;
+    g_stream.respawnHeld = 0;
     g_stream.orderCount = 0;
     g_stream.orderCursor = 0;
     g_stream.captured = 0;
@@ -282,6 +285,7 @@ static void WorldStreamSort(uint32_t count)
 static void NearReportPlayer(const float* at);
 static void WindowLeaveLocked(uint32_t s);   /* difficulty_stream_window.c */
 static void WindowScanLocked(ULONGLONG now);
+static int WindowRespawnRoomLocked(uint32_t i, int* gates);
 static void WindowNoteLocked(void);
 static void DestroyTick(void);                /* difficulty_world_destroy.c */
 static void DestroyNote(void);
@@ -731,6 +735,17 @@ static uint8_t WorldStreamSpawn(uint8_t* pass, uint8_t* record, uint8_t* context
     return result;
 }
 
+/* A stamp flagged for new ground into the scan's kStreamReplaceBatch picks, which keep the largest keys: its nearest
+ * player's distance over the distance its meshes are drawn to, squared. Past 1 no player sees the swap; below it the
+ * farthest for its size goes first, where a swap shows least. */
+static void WorldStreamReplacePick(uint32_t* pick, float* key, uint32_t* picks, uint32_t i, float k)
+{
+    if (*picks < kStreamReplaceBatch) { pick[*picks] = i; key[(*picks)++] = k; return; }
+    uint32_t m = 0;
+    for (uint32_t j = 1; j < kStreamReplaceBatch; j++) if (key[j] < key[m]) m = j;
+    if (k > key[m]) { pick[m] = i; key[m] = k; }
+}
+
 /* Every 0.25 s: the players' positions and every deferred location's nearest one. A location below kStreamInRadius
  * becomes due (and stays due); the due ones are ordered nearest first. A live location beyond kStreamOutRadius starts a
  * timer and is removed after kStreamOutTimeout, at most kStreamRemoveBatch in this pass. */
@@ -758,7 +773,9 @@ static void WorldStreamScanLocked(ULONGLONG now)
     }
     float keep = kStreamInRadius * kStreamInRadius;
     float out = kStreamOutRadius * kStreamOutRadius;
-    uint32_t order = 0, removes = 0, replaces = 0, formationsDue = 0, bodies = 0, slots = 0;
+    uint32_t order = 0, removes = 0, picks = 0, formationsDue = 0, bodies = 0, slots = 0;
+    uint32_t pick[kStreamReplaceBatch];
+    float pickKey[kStreamReplaceBatch];
     int budget = WorldStreamBodyStore(&bodies, &slots) && (float)bodies < kStreamFormationShare * (float)slots;
     g_stream.bodiesUsed = bodies; g_stream.bodySlots = slots;
     for (uint32_t i = 0; i < g_stream.count; i++)
@@ -772,14 +789,10 @@ static void WorldStreamScanLocked(ULONGLONG now)
             float distance = dx * dx + dy * dy;
             if (distance < best) best = distance;
         }
-        if (g_streamLive[i] && g_streamReplace[i]) /* its ground changed: out now, due again at once */
+        if (g_streamLive[i] && g_streamReplace[i]) /* its ground changed: picked below */
         {
-            if (replaces < kStreamReplaceBatch && g_streamPoseGood[i] && !g_streamNeedsUnit[i] && g_streamUnit[i] != 0 && WorldStreamRemoveLocked(i))
-            {
-                replaces++;
-                g_stream.replaced++;
-                if (g_streamDeferred[i]) g_streamDue[i] = 1; /* a window slot is free now and enters again from the plan */
-            }
+            if (g_streamPoseGood[i] && !g_streamNeedsUnit[i] && g_streamUnit[i] != 0)
+                WorldStreamReplacePick(pick, pickKey, &picks, i, best / g_streamSeen2[i]);
             continue;
         }
         if (g_streamLive[i] && g_streamFormation[i]) continue; /* a far formation stays */
@@ -809,6 +822,13 @@ static void WorldStreamScanLocked(ULONGLONG now)
             g_streamDistance[i] = best;
             g_streamOrder[order++] = i;
         }
+    }
+    for (uint32_t k = 0; k < picks; k++) /* out now; due again (a window slot is free and enters again from the plan) */
+    {
+        uint32_t i = pick[k];
+        if (!WorldStreamRemoveLocked(i)) continue;
+        g_stream.replaced++;
+        if (g_streamDeferred[i]) g_streamDue[i] = 1;
     }
     g_stream.orderCount = order;
     g_stream.orderCursor = 0;
@@ -840,6 +860,7 @@ static void WorldStreamSpawnDueLocked(void)
         return;
     }
     uint8_t* stage = (uint8_t*)g_streamStage;
+    int gates[2] = {-1, -1}; /* the near and far budgets for a level location's new unit, read once (WindowRespawnRoomLocked) */
     LARGE_INTEGER start, now;
     QueryPerformanceCounter(&start);
     uint32_t cursor = g_stream.orderCursor;
@@ -862,7 +883,7 @@ static void WorldStreamSpawnDueLocked(void)
                 cursor++;
                 continue;
             }
-            if (g_streamNeedsUnit[i] && !WorldStreamRespawnLocked(i))
+            if (g_streamNeedsUnit[i] && (!WindowRespawnRoomLocked(i, gates) || !WorldStreamRespawnLocked(i)))
             {
                 cursor++;
                 continue;
@@ -997,8 +1018,8 @@ static void WorldStreamNoteLocked(ULONGLONG now)
     uint32_t due = WorldStreamDueCountLocked();
     uint32_t formations = 0, formationsLive = 0;
     for (uint32_t i = 0; i < g_stream.count; i++) if (g_streamFormation[i]) { formations++; if (g_streamLive[i]) formationsLive++; }
-    Note("difficulty: extra large maps: streaming: %u of %u spawned (%u due now, %u skipped; far formations %u of %u), %u removed so far, %u respawned so far, %d player(s), %.1f ms spent; physics bodies %u of %u; %.1f fps, slowest frame %.1f ms",
-        g_stream.spawned, g_stream.deferred, due, g_stream.broken, formationsLive, formations, g_stream.removed, g_stream.respawned, g_stream.playerCount, g_stream.spentMs,
+    Note("difficulty: extra large maps: streaming: %u of %u spawned (%u due now, %u skipped; far formations %u of %u), %u removed so far (%u for new ground), %u respawned so far (%u passes held over budget), %d player(s), %.1f ms spent; physics bodies %u of %u; %.1f fps, slowest frame %.1f ms",
+        g_stream.spawned, g_stream.deferred, due, g_stream.broken, formationsLive, formations, g_stream.removed, g_stream.replaced, g_stream.respawned, g_stream.respawnHeld, g_stream.playerCount, g_stream.spentMs,
         g_stream.bodiesUsed, g_stream.bodySlots,
         g_streamFrameSum > 0 ? (double)g_streamFrames / (double)g_streamFrameSum : 0.0, (double)g_streamFrameMax * 1000.0);
     g_streamFrames = 0; g_streamFrameSum = g_streamFrameMax = 0;

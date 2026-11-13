@@ -567,25 +567,78 @@ static int MoveStampMovable(uint32_t i, float cx, float cy, float reach)
         fabsf(g_streamAt[i][0] - cx) <= reach && fabsf(g_streamAt[i][1] - cy) <= reach;
 }
 
-/* The streamed stamps whose content stands where a tile came or went. Their layer units took their heights from the
- * ground as drawn when they spawned (a stamp that entered over a cell whose tile was not in yet, or while it was
- * building, stood on the coarse heights), so they float or sink by the new ground's difference. Each one the streamer
- * spawned is flagged; its scan takes it out (a few a pass, as its own removals) and it comes back on the ground as
- * drawn now: a window stamp enters its slot again from the plan, a level location is due at once. The mission's stamps
- * and the start area's content are never streamed, so they stay. Game thread. Returns how many were flagged. */
-static uint32_t MoveStampsReplace(float cx, float cy, const char* why)
+/* A stamp is put back only when the ground under it moved more than this. Its units already stand up to 0.5 m off the
+ * drawn ground: they read the nearest 1 m grid sample, up to 0.71 m away, which is 0.5 m of height on a 35 degree slope. */
+#define MOVE_STAMP_MOVED 0.5f
+#define MOVE_STAMP_STEP 4.0f   /* m between the footprint's samples: the coarse terrain's spacing, under which a tile's
+                                * own relief is what differs */
+#define MOVE_STAMP_SIDE 17     /* samples a side at most (a 64 m footprint at MOVE_STAMP_STEP) */
+
+/* Whether the ground under stream slot i moved by more than MOVE_STAMP_MOVED when the tile in `slot` came (gone NULL)
+ * or went (gone: its copy). Before and after are what its units read (the grid chosen by its level unit, the stamp's
+ * pose, else the level's heightfield) over its footprint (record +0xB0, map metres). *side: the footprint's side. */
+static int MoveStampGroundMoved(uint32_t i, int slot, const NearTile* gone, float cx, float cy, float* side)
+{
+    const float x = g_streamAt[i][0], y = g_streamAt[i][1];
+    float box[4];
+    if (SafeRead((uintptr_t)g_stream.array + (size_t)i * kStreamRecord + 0xB0, box, sizeof box) || !isfinite(box[0]) || !isfinite(box[1]) ||
+        !isfinite(box[2]) || !isfinite(box[3]))
+        box[0] = box[2] = x + g_stream.half, box[1] = box[3] = y + g_stream.half;
+    float x0 = fminf(box[0], box[2]) - g_stream.half, x1 = fmaxf(box[0], box[2]) - g_stream.half;
+    float y0 = fminf(box[1], box[3]) - g_stream.half, y1 = fmaxf(box[1], box[3]) - g_stream.half;
+    if (x1 - x0 < 1.0f) { x0 = x - 16.0f; x1 = x + 16.0f; } /* no footprint: foot_band_min around the pose */
+    if (y1 - y0 < 1.0f) { y0 = y - 16.0f; y1 = y + 16.0f; }
+    *side = fmaxf(x1 - x0, y1 - y0);
+    const int skip = gone != NULL ? -1 : slot;
+    const int before = NearLayerGridWith(x, y, skip, gone != NULL ? gone->centre : NULL), after = NearLayerGridWith(x, y, -1, NULL);
+    if (!before && !after) return 0; /* the level's heightfield both times */
+    const float span = NEAR_SPAN / 2;
+    if (before == after && (x1 < cx - span || x0 > cx + span || y1 < cy - span || y0 > cy + span)) return 0; /* the drawn ground moves only there */
+    int nx = (int)ceilf((x1 - x0) / MOVE_STAMP_STEP) + 1, ny = (int)ceilf((y1 - y0) / MOVE_STAMP_STEP) + 1;
+    nx = nx > MOVE_STAMP_SIDE ? MOVE_STAMP_SIDE : nx; ny = ny > MOVE_STAMP_SIDE ? MOVE_STAMP_SIDE : ny;
+    for (int r = 0; r < ny; r++)
+        for (int c = 0; c < nx; c++)
+        {
+            float px = x0 + (x1 - x0) * (float)c / (float)(nx - 1), py = y0 + (y1 - y0) * (float)r / (float)(ny - 1);
+            float was = before ? NearLayerGroundWith(px, py, skip, gone) : NearLevelFieldAt(px, py);
+            float now = after ? NearLayerGround(px, py) : NearLevelFieldAt(px, py);
+            if (fabsf(now - was) > MOVE_STAMP_MOVED) return 1;
+        }
+    return 0;
+}
+
+/* The streamed stamps whose ground a tile's coming or going moved. Their layer units took their heights from the
+ * ground as drawn when they spawned, so they float or sink by the difference. Each one the streamer spawned is
+ * flagged; its scan takes it out (the least seen first, a few a pass) and it comes back on the ground as drawn now: a
+ * window stamp enters its slot again from the plan, a level location is due again. A stamp whose ground stayed within
+ * MOVE_STAMP_MOVED stays (taking every one in reach out made 1568 stamps pop over 12 s for one tile). The mission's
+ * stamps and the start area's content are never streamed. Game thread. Returns how many were flagged. */
+static uint32_t MoveStampsReplace(int slot, const NearTile* gone, float cx, float cy, const char* why)
 {
     if (g_streamInstallState != 1 || g_streamInside) return 0;
     const float reach = NEAR_SPAN / 2 + NEAR_LAYER_REACH;
-    uint32_t flagged = 0;
+    uint32_t flagged = 0, inReach = 0;
+    LARGE_INTEGER t0, t1, hz;
+    QueryPerformanceCounter(&t0);
     AcquireSRWLockExclusive(&g_streamLock);
     if (g_stream.captured && g_stream.generatorDone && g_stream.level == g_worldLevel && g_stream.levels == g_world.levels)
         for (uint32_t i = 0; i < g_stream.count && i < kStreamMaxLocations; i++)
-            if (MoveStampMovable(i, cx, cy, reach)) { g_streamReplace[i] = 1; flagged++; }
+        {
+            if (!MoveStampMovable(i, cx, cy, reach)) continue;
+            inReach++;
+            float side = 0.0f;
+            if (!MoveStampGroundMoved(i, slot, gone, cx, cy, &side)) continue;
+            float seen = WindowVisible(side * 1.41421356f);
+            g_streamSeen2[i] = seen * seen > 1.0f ? seen * seen : 1.0f;
+            g_streamReplace[i] = 1;
+            flagged++;
+        }
     ReleaseSRWLockExclusive(&g_streamLock);
-    if (flagged)
-        Note("difficulty: moving tiles: %s at (%.0f, %.0f): %u streamed stamps on its ground go out and come back on it (%u a scan)", why, (double)cx,
-            (double)cy, flagged, (unsigned)kStreamReplaceBatch);
+    QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
+    if (inReach)
+        Note("difficulty: moving tiles: %s at (%.0f, %.0f): %u of %u streamed stamps in reach stand on ground that moved over %.1f m; they go out and come back on it (%u a scan, the least seen first; %.1f ms)",
+            why, (double)cx, (double)cy, flagged, inReach, (double)MOVE_STAMP_MOVED, (unsigned)kStreamReplaceBatch,
+            (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart);
     return flagged;
 }
 
@@ -623,7 +676,7 @@ static void MoveRelease(int slot)
     g_tileHidden[slot].lowered = 0;
     NearHideUnion(world, "a tile released");
     NearLayerTileChange(slot, 0, t.centre[0], t.centre[1]);
-    MoveStampsReplace(t.centre[0], t.centre[1], "a tile went");
+    MoveStampsReplace(slot, &t, t.centre[0], t.centre[1], "a tile went");
     typedef void (*DestroyFn)(uint64_t world, uint64_t handle);
     DestroyFn destroy = (DestroyFn)NearApi(0x08, 0x1E0);
     g_move.destroyTicks = -1;
@@ -740,7 +793,7 @@ static void MoveTileIn(uint64_t world)
     MoveTileTakeBand(slot);
     NearHideUnion(world, "a tile built in mission");
     NearLayerTileChange(slot, 1, g_move.centre[0], g_move.centre[1]);
-    MoveStampsReplace(g_move.centre[0], g_move.centre[1], "a tile is in");
+    MoveStampsReplace(slot, NULL, g_move.centre[0], g_move.centre[1], "a tile is in");
     g_move.built++;
     Note("difficulty: moving tiles: the tile of cell (%d, %d) is in after %.1f s (%u frames): ground %s, centre %.2f m (coarse %.2f m); %d tiles live; craters held %lld updates",
         g_move.cell[0], g_move.cell[1], (double)(GetTickCount64() - g_move.started) / 1000.0, g_move.frames, ground.v != NULL ? "read" : "NOT read",
