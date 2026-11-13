@@ -77,6 +77,19 @@ int co_ui_guarded(void);
 /* What a cave's callback sees: the registers as the game had them, in the order the cave pushed them (co_counts.c). */
 typedef struct CoRegs { uint64_t r15, r14, r13, r12, r11, r10, r9, r8, rdi, rsi, rbp, rbx, rdx, rcx, rax, flags; } CoRegs;
 
+/* The loadout cards for eight (co_cards.c). The card's height in reference units, which the caves of every store of
+ * it read (780, the game's); the layout callback, which the cave in front of the screen's update calls with rcx = the
+ * screen. */
+extern float co_card_height;
+void co_cards_layout(CoRegs* regs);
+void co_cards_install(uintptr_t game);
+/* A card's place for a layout: the game's (nothing set), the game's four cards, or eight in two rows. x is the anchor
+ * in the 1920-wide container, y the bottom in it; the figure's scale and its y below the card's top. */
+enum { CO_CARDS_GAME, CO_CARDS_FOUR, CO_CARDS_EIGHT };
+typedef struct CoCardPlace { float x, y, scale, figureScale, figureY; int shown; } CoCardPlace;
+float co_cards_scale(float rootHeight, float hudScale);
+int co_cards_place(int mode, float rootHeight, float hudScale, uint32_t card, CoCardPlace* p);
+
 /* The stack fixes' callbacks for avatars (co_avatars.c), in the counts' caves. `install` once with game.dll's base. */
 void co_avatars_install(uintptr_t game);
 void co_avatars_dist_sum(CoRegs* regs);

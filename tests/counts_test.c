@@ -48,6 +48,7 @@ int co_counts_test_join_slot(uintptr_t sync);
 uint32_t co_counts_test_join_index(uint8_t* flags);
 int co_counts_test_write_of(uint32_t rva);
 unsigned co_counts_test_loadout(void);
+extern float co_card_height;
 unsigned co_counts_test_synced(void);
 uintptr_t co_counts_test_synced_table(void);
 int co_counts_test_move_writes(void);
@@ -152,6 +153,7 @@ int co_counts_test_host_scores(const void* arguments);
 #define ACTIVITY_MADE2 0x12E682Eu   /* inc dword [rsi+0x1100]: the second maker's record is in the table */
 #define DROP_WORLD 0x13F8657u       /* lea eax,[rcx-1]: the world update's time-out drops a record (rdx) */
 #define DROP_TABLE 0x12E64F7u       /* lea eax,[rcx-1]: the same drop in 0x12E63E0 (rdx) */
+#define CARDS_UPDATE 0x1497C45u     /* jmp to L's update: the cards' layout first */
 #define ENTER 0x34C0000u            /* free in the stand-in: the test's ways into the caves */
 #define MANAGER_SIZE 0x380A0u       /* the score manager with its loot rows moved */
 #define CLAN_PAIR 0x12919A0u        /* a function: a clan pair by the player index in r8d */
@@ -551,7 +553,7 @@ int main(void)
         static char line[96];
         uint32_t value;
         snprintf(line, sizeof line, "players: the loadout screen has eight records and cards (%u code sites changed)", co_counts_test_loadout());
-        CHECK(co_counts_test_loadout() == 472u && fake_host_logged(line) == (players == 8));
+        CHECK(co_counts_test_loadout() == 485u && fake_host_logged(line) == (players == 8));
         memcpy(&value, image + LOADOUT_SIZE + 1, 4);
         CHECK(image[LOADOUT_SIZE] == 0xBA && value == (players == 8 ? 0x36FA70u : 0x2739D0u));
         CHECK(image[LOADOUT_BOUND] == 0xBF && image[LOADOUT_BOUND + 1] == players);
@@ -624,6 +626,49 @@ int main(void)
                 CHECK(((CardFn)(uintptr_t)cave)(NULL, kSlots[i]) == (kSlots[i] < 4 ? kSlots[i] : kSlots[i] < 8 ? kSlots[i] + 4 : 0xFFFFFFFFu));
         }
         else CHECK(image[FIGURE_SLOT] == 0x40 && image[FIGURE_SLOT + 1] == 0x53);
+
+        /* Run: every store of the card's height, through its cave. A stub makes a frame (rbp = rsp + 0x80) and jumps to
+         * the cave; where it goes back the test reads the stored height and returns it. The slot gives the game's 780
+         * until the mod sets another height, and the slot is what each store reads. */
+        static const struct { uint32_t rva; uint8_t size, rbp; int32_t at; } kHeights[] = {
+            {0x146C9CEu, 8, 0, 0x5C}, {0x146C9EFu, 8, 0, 0x64}, {0x146CEDBu, 8, 0, 0x64}, {0x146CEFFu, 8, 0, 0x5C},
+            {0x1471363u, 8, 0, 0x64}, {0x1471384u, 8, 0, 0x54}, {0x189AE82u, 7, 1, -0x2C}, {0x189E149u, 11, 0, 0x94},
+            {0x189E187u, 11, 0, 0x94}, {0x189E23Cu, 11, 0, 0x94}, {0x189E38Du, 7, 1, -0x35}, {0x189E3EAu, 7, 1, -0x45}};
+        /* push rbp; sub rsp,0xB0; lea rbp,[rsp+0x80]; jmp rdx */
+        static const uint8_t kFrameIn[] = {0x55, 0x48, 0x81, 0xEC, 0xB0, 0x00, 0x00, 0x00, 0x48, 0x8D, 0xAC, 0x24, 0x80, 0x00, 0x00, 0x00,
+                                           0xFF, 0xE2};
+        typedef uint32_t (*HeightFn)(void*, const void*);
+        Landing(ENTER + 0x200u, kFrameIn, sizeof kFrameIn);
+        for (size_t i = 0; i < sizeof kHeights / sizeof kHeights[0]; i++)
+        {
+            cave = Cave(kHeights[i].rva, kHeights[i].size);
+            CHECK((cave != NULL) == (players == 8));
+            if (cave == NULL) { CHECK(image[kHeights[i].rva] == 0xC7 && *(const float*)(image + kHeights[i].rva + kHeights[i].size - 4) == 780.0f); continue; }
+            /* mov eax,[rsp or rbp + at]; add rsp,0xB0; pop rbp; ret */
+            const int wide = kHeights[i].at >= 0x80;     /* past a disp8 */
+            uint8_t back[20] = {0x8B, kHeights[i].rbp ? 0x45 : wide ? 0x84 : 0x44};
+            size_t n = 2;
+            if (!kHeights[i].rbp) back[n++] = 0x24;
+            if (wide) { memcpy(back + n, &kHeights[i].at, 4); n += 4; }
+            else back[n++] = (uint8_t)kHeights[i].at;
+            memcpy(back + n, (const uint8_t[]){0x48, 0x81, 0xC4, 0xB0, 0x00, 0x00, 0x00, 0x5D, 0xC3}, 9);
+            Landing(kHeights[i].rva + kHeights[i].size, back, n + 9);
+            const float heights[2] = {780.0f, 532.0f};
+            for (int h = 0; h < 2; h++)
+            {
+                co_card_height = heights[h];
+                uint32_t got = ((HeightFn)(uintptr_t)(g_fake.image + ENTER + 0x200u))(NULL, cave), want;
+                memcpy(&want, &heights[h], 4);
+                CHECK(got == want);
+            }
+            co_card_height = 780.0f;
+        }
+
+        /* The layout's cave in front of L's update: the callback, then the update itself. */
+        cave = Cave(CARDS_UPDATE, 5);
+        CHECK((cave != NULL) == (players == 8));
+        if (cave != NULL) CHECK(cave[0] == 0x9C && cave[134] == 0xE9 && Leads(cave + 135, 0x1468320u));
+        else CHECK(image[CARDS_UPDATE] == 0xE9 && Leads(image + CARDS_UPDATE + 1, 0x1468320u));
     }
     {
         /* A build for eight gives the mission summary eight rows and cards in a bigger allocation and bounds the rows'
