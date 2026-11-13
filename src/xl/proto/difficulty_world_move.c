@@ -1272,9 +1272,12 @@ static void MoveLevelUpdate(uint64_t level)
     QueryPerformanceCounter(&t0);
     MoveTick(level);
     QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
+    g_hitchCost.tiles += (float)((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart);
     if (mv != MV_IDLE || g_move.state != MV_IDLE) { MoveCostAdd((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart, mv, ns, step, conf, bld); g_moveCost.pending = 1; }
     else if (g_moveCost.pending) MoveCostNote();
+    const double grass = HitchNow();
     FarGrassTick(level);
+    g_hitchCost.tiles += (float)(HitchNow() - grass);
 }
 
 static void MoveInstall(uintptr_t game)

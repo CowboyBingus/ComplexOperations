@@ -11,6 +11,7 @@ void CoXlTestLive(int complex);
 int CoXlTestLiving(uintptr_t game);
 void CoXlTestLwPins(uint8_t* image);
 LONG CoXlTestNoiseHead(void);
+int CoXlTestLwSettle(uint32_t i, uint64_t peer, const float* at, uint64_t now, float* use);
 
 static int g_failed;
 static const char* g_case;
@@ -75,6 +76,17 @@ int main(void)
         CHECK(*flag == 1);
         CoXlTestLive(0);
         CHECK(*flag == 0);
+    }
+
+    g_case = "a passing player is held at its own place, also after the player manager shifted its index";
+    {
+        float use[2];
+        const float a0[2] = {100.0f, 200.0f}, a1[2] = {900.0f, 200.0f}, b0[2] = {5000.0f, 7000.0f}, b1[2] = {5001.0f, 7000.0f};
+        CHECK(CoXlTestLwSettle(0, 0xA, a0, 1000, use) == 0 && use[0] == 100.0f);
+        CHECK(CoXlTestLwSettle(0, 0xA, a1, 1200, use) == 1 && use[0] == 100.0f && use[1] == 200.0f); /* a pod: held */
+        CHECK(CoXlTestLwSettle(0, 0xB, b0, 1400, use) == 0 && use[0] == 5000.0f && use[1] == 7000.0f); /* B now at index 0 */
+        CHECK(CoXlTestLwSettle(0, 0xB, b1, 1600, use) == 0 && use[0] == 5001.0f);
+        CHECK(CoXlTestLwSettle(1, 0xA, a1, 1600, use) == 0 && use[0] == 900.0f); /* A at index 1: its reading as it is */
     }
 
     if (g_failed) { printf("livingworld: %d checks failed\n", g_failed); return 1; }

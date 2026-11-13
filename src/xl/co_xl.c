@@ -43,7 +43,17 @@
 #include "co_forest.h"
 #include "co_podstart.h"
 #include "co_settle.h"
+#include "co_hitch.h"
 #include "../co_watch.h"
+
+/* The mod's work in the game frame under way (co_hitch.h): the timed parts add to it, CoXlTick hands it on. */
+static CoHitchCost g_hitchCost;
+static double HitchNow(void)
+{
+    LARGE_INTEGER t, f;
+    QueryPerformanceCounter(&t); QueryPerformanceFrequency(&f);
+    return f.QuadPart > 0 ? (double)t.QuadPart * 1000.0 / (double)f.QuadPart : 0.0;
+}
 
 /* Six of the copied files' functions were called from loader code that did not come along (the watch thread, the
  * ship's level change, the density rules of a later branch); they are unused until their callers are written. */
@@ -104,17 +114,69 @@ static uint32_t IndexQueryClamped(uint64_t index, uint32_t key, uint32_t mode, u
     return hits < places ? hits : places;
 }
 
+/* From each reinforcement pod's start: the frames and the mod's share in them, noted once the watch is over. A frame is
+ * the wall-clock time from the previous tick to this one (the game's dt is clamped: a 1528 ms stall read 43 ms), and it
+ * holds that tick's work and the level update after it, so it goes with the work timed since the previous tick began. */
+static CoHitch g_hitch;
+static long g_hitchPods;
+static LONG g_hitchSun;
+static double g_hitchLast;
+static uint64_t g_hitchIdle, g_hitchBusy; /* the system's CPU times as the watch began (GetSystemTimes, 100 ns) */
+static uint64_t HitchFiletime(FILETIME t) { return ((uint64_t)t.dwHighDateTime << 32) | t.dwLowDateTime; }
+/* The share of the system's CPU time busy since the watch began, the load the frame times were taken under; -1 unread. */
+static double HitchLoad(int begin)
+{
+    FILETIME idle, kernel, user;
+    if (!GetSystemTimes(&idle, &kernel, &user)) return -1.0;
+    const uint64_t i = HitchFiletime(idle), all = HitchFiletime(kernel) + HitchFiletime(user); /* kernel time holds the idle time */
+    if (begin) { g_hitchIdle = i; g_hitchBusy = all; return 0.0; }
+    const uint64_t di = i - g_hitchIdle, da = all - g_hitchBusy;
+    return da > 0 && da >= di ? 100.0 * (double)(da - di) / (double)da : -1.0;
+}
+static void HitchNote(const CoHitch* h, long pod)
+{
+    char line[1400]; int n = 0;
+    for (int k = 0; k < CO_HITCH_KEEP && h->top[k].ms > 0.0f && n < (int)sizeof line - 200; k++)
+    {
+        const CoHitchFrame* f = &h->top[k];
+        n += snprintf(line + n, sizeof line - n, " +%.2f s %.1f ms (mod %.1f: streamer %.1f with %u destroyed, window %.1f with %u in, spawns %.1f, living world %.1f, tiles %.1f; shadows drawn whole %u);",
+            (double)f->atMs / 1000.0, (double)f->ms, (double)co_hitch_own(&f->cost), (double)f->cost.stream, (unsigned)f->cost.removed, (double)f->cost.window,
+            (unsigned)f->cost.entered, (double)f->cost.spawn, (double)f->cost.living, (double)f->cost.tiles, (unsigned)f->cost.sunWhole);
+    }
+    Note("complex operations: frames as pod %ld came in (wall clock, the system's CPU %.0f %% busy): %u over %.1f s, mean %.1f ms; over 16.7 ms %u, 25 ms %u, 33 ms %u, 50 ms %u; the mod's share %.0f ms (%.1f %%), %u stamp units destroyed, far shadows drawn whole %u times; the slowest:%s",
+        pod, HitchLoad(0), h->frames, (double)h->sum / 1000.0, h->frames ? (double)h->sum / (double)h->frames : 0.0, h->over16, h->over25, h->over33, h->over50,
+        (double)h->own, h->sum > 0.0f ? 100.0 * (double)h->own / (double)h->sum : 0.0, h->removed, h->sunWhole, n ? line : " none");
+}
+static void HitchTick(void)
+{
+    const double tick = HitchNow(), frame = g_hitchLast > 0.0 ? tick - g_hitchLast : -1.0;
+    g_hitchLast = tick;
+    CoHitchCost cost = g_hitchCost;
+    memset(&g_hitchCost, 0, sizeof g_hitchCost);
+    const LONG sun = g_sun.full;
+    cost.sunWhole = (uint16_t)(sun - g_hitchSun);
+    g_hitchSun = sun;
+    co_hitch_level(&g_hitch, g_world.levels);
+    const ULONGLONG now = GetTickCount64();
+    const long pods = co_podstart_starts();
+    if (pods != g_hitchPods) { g_hitchPods = pods; if (co_hitch_arm(&g_hitch, now)) HitchLoad(1); }
+    if (co_hitch_frame(&g_hitch, now, (float)frame, &cost)) HitchNote(&g_hitch, pods);
+}
+
 /* The game thread's part, in the order the loader's tick called it. */
 static void CoXlTick(HfMod* mod, float dt, void* user)
 {
     (void)mod; (void)user;
+    HitchTick();
     StatusWatch(g_difficultyGame); /* the registry's hash, should the game have made the registry only now */
     WorldStreamTick(dt);
     SpanRescueTick();
     NetPatienceTick();
     TerrainDiagTick();
     TerrainProbeTick();
+    const double living = HitchNow();
     LivingTick();
+    g_hitchCost.living += (float)(HitchNow() - living);
     DaylightTick();
     TacTick();
     co_density_tick(dt);
@@ -258,6 +320,8 @@ void CoXlTestLwPins(uint8_t* image)
         }
 }
 int CoXlTestLiving(uintptr_t game) { if (!LwEnabled()) return 0; CoXlLiving(game); return 1; }
+/* The living world's held place for the player at EvpPlayers index `i`, peer `peer`, read at `at` (x, y). */
+int CoXlTestLwSettle(uint32_t i, uint64_t peer, const float* at, uint64_t now, float* use) { return LwSettleAt(i, peer, at, now, use); }
 /* The living world's navmesh pins (all in the exe) written into a fake exe, and a complex level's nav tick with no
  * director: 1 when it got past the pins, -1 when they refused. */
 void CoXlTestLwNavPins(uint8_t* exe)
@@ -580,12 +644,46 @@ uint32_t CoXlTestSpawnDue(uint32_t i, float distance2)
     return g_stream.respawnHeld;
 }
 int CoXlTestStreamFlag(uint32_t i) { return g_streamReplace[i]; }
-void CoXlTestStreamScan(void)
+void CoXlTestStreamFlagClear(uint32_t i) { g_streamReplace[i] = 0; }
+int CoXlTestStreamQueued(uint32_t i) { return g_streamDrop[i]; }
+/* One scan; `frames` frames' removals after it (each WorldStreamTick's drain), or all of them for -1. The removals. */
+uint32_t CoXlTestStreamScanFrames(int frames)
 {
     AcquireSRWLockExclusive(&g_streamLock);
     g_stream.nextScan = 0;
     WorldStreamScanLocked(GetTickCount64());
+    uint32_t done = 0;
+    for (int f = 0; frames < 0 ? g_streamDropCount > 0 : f < frames; f++) done += WorldStreamDrainLocked(kStreamDropsPerFrame, 1.0e9);
     ReleaseSRWLockExclusive(&g_streamLock);
+    return done;
+}
+void CoXlTestStreamScan(void) { CoXlTestStreamScanFrames(-1); }
+/* A frame's removals under `ms`: how many went, and how many wait. */
+uint32_t CoXlTestStreamDrain(double ms, uint32_t* waiting)
+{
+    AcquireSRWLockExclusive(&g_streamLock);
+    uint32_t done = WorldStreamDrainLocked(kStreamDropsPerFrame, ms);
+    *waiting = g_streamDropCount;
+    ReleaseSRWLockExclusive(&g_streamLock);
+    return done;
+}
+void CoXlTestStreamOutSince(uint32_t i, ULONGLONG since) { g_streamOutSince[i] = since; }
+void co_capacity_test_places(int region, uint32_t places);
+/* Slots [base, high) as live far window stamps, then one eviction over the bodies' budget: the far removals queued. */
+uint32_t CoXlTestWindowEvictFar(uint32_t base, uint32_t high)
+{
+    AcquireSRWLockExclusive(&g_streamLock);
+    const uint32_t oldBase = g_win.base, oldHigh = g_win.high, before = g_streamDropFar, places = co_gen_places(HF_GEN_LOCATIONS_A);
+    co_capacity_test_places(HF_GEN_LOCATIONS_A, high);
+    g_win.base = base; g_win.high = high;
+    for (uint32_t s = base; s < high; s++) { g_win.handle[s] = 1; g_streamOut2[s] = 1.0e6f; }
+    WindowEvictFarLocked();
+    const uint32_t queued = g_streamDropFar - before;
+    for (uint32_t s = base; s < high; s++) g_win.handle[s] = 0; /* the far slots stay (their removal radius) */
+    g_win.base = oldBase; g_win.high = oldHigh; g_win.farHoldUntil = 0;
+    co_capacity_test_places(HF_GEN_LOCATIONS_A, places);
+    ReleaseSRWLockExclusive(&g_streamLock);
+    return queued;
 }
 void CoXlTestStreamSlotState(uint32_t i, int* live, int* due, uint64_t* unit) { *live = g_streamLive[i]; *due = g_streamDue[i]; *unit = g_streamUnit[i]; }
 /* The streamer's own SpawnLevelLayers calls (WorldStreamSpawnDueLocked): `spawn` stands in for the original and `pass`

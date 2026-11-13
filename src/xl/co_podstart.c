@@ -17,7 +17,7 @@ static const char kShipPin[] = "48 8B 0D 5D C3 9F 02 48 8D 54 24 30 48 81 C1 58 
 typedef float* (*StartFn)(void* manager, float* out, void* record, uint8_t* params);
 static StartFn g_start;
 static float (*g_scale)(void);
-static volatile LONG g_noted;
+static volatile LONG g_noted, g_starts;
 
 int co_podstart_cap(float* start, const float* target, float reach)
 {
@@ -34,12 +34,13 @@ static float* Start(void* manager, float* out, void* record, uint8_t* params)
 {
     float* start = g_start(manager, out, record, params);
     if (start == NULL || params == NULL || g_scale == NULL || !(g_scale() > 1.0f)) return start;
+    InterlockedIncrement(&g_starts);
     float target[3], was[2] = {start[0], start[1]};
     memcpy(target, params + CO_PODSTART_TARGET, sizeof target);
     if (co_podstart_cap(start, target, CO_PODSTART_REACH))
-        co_log("complex operations: reinforcement pod %ld started %.0f m from its drop point (%.0f, %.0f); it starts %.0f m away",
+        co_log("complex operations: reinforcement pod %ld started %.0f m from its drop point (%.0f, %.0f); it starts %.0f m away, %.0f m above it",
             (long)InterlockedIncrement(&g_noted), (double)hypotf(was[0] - target[0], was[1] - target[1]), (double)target[0], (double)target[1],
-            (double)CO_PODSTART_REACH);
+            (double)CO_PODSTART_REACH, (double)(start[2] - target[2]));
     return start;
 }
 
@@ -54,6 +55,8 @@ const char* co_podstart_install(uintptr_t game, float (*scale)(void))
     return NULL;
 }
 
+long co_podstart_starts(void) { return (long)g_starts; }
+
 #ifdef CO_TEST
-void co_podstart_test_reset(void) { g_start = NULL; g_scale = NULL; g_noted = 0; }
+void co_podstart_test_reset(void) { g_start = NULL; g_scale = NULL; g_noted = 0; g_starts = 0; }
 #endif

@@ -243,4 +243,6 @@ void co_capacity_test_commit(uint32_t mb) { g_commitTest = mb; }
 /* A machine whose complex part is on or off, for the parts that only ask. */
 void co_capacity_test_on(int on) { g_capacity.settled = 1; g_capacity.on = on; }
 void co_capacity_test_unsettled(void) { g_capacity.settled = 0; g_capacity.on = 0; }
+/* A region's places as HellForge granted them. */
+void co_capacity_test_places(int region, uint32_t places) { g_capacity.have.regions[region].places = places; }
 #endif
