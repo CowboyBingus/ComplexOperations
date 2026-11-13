@@ -195,7 +195,7 @@ static const char* CoXlGuards(uintptr_t game)
     LwInstallMover();
     LwInstallTrees();
     LwInstallZeroBox(); /* absent SpeedTree cells: a switched site, the empty box on complex levels only */
-    SunSliceInstall(game); /* the sun's last shadow slice: dynamic on a world over 2048 m */
+    SunSliceInstall(game); /* the sun's last shadow slice: about the camera on a world over 2048 m, else dynamic */
     if (g_lwRec.insertOrig == NULL) return "the destruction records' room on a complex level could not be guarded";
     if (g_lwMover.passOrig == NULL) return "the navmesh boundary requests on a complex level could not be guarded";
     return NULL;
