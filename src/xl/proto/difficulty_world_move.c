@@ -216,18 +216,23 @@ static int MoveOn(void)
     return on;
 }
 
+/* A player passing in a hellpod builds no tile on the way: the place held before counts until the pod has landed. */
+static CoSettle g_moveSettle;
 static void MovePlayers(void)
 {
     g_move.players = 0;
     EvpPlayer players[EVT_MAX_PLAYERS];
     int count = EvpPlayers(g_world.game, players);
+    const ULONGLONG now = GetTickCount64();
+    co_settle_level(&g_moveSettle, g_world.levels);
     for (int i = 0; count > 0 && i < count && g_move.players < EVT_MAX_PLAYERS; i++)
     {
         if (players[i].avatar == 0) continue;
         ActHealth h;
         float at[3] = {0.0f, 0.0f, 0.0f};
         if (!ActHealthOf(g_world.game, players[i].avatar, &h) || h.unit == 0 || !EvpUnitPosition(h.unit, at) || !isfinite(at[0]) || !isfinite(at[1])) continue;
-        g_move.player[g_move.players][0] = at[0]; g_move.player[g_move.players][1] = at[1]; g_move.players++;
+        co_settle_at(&g_moveSettle, (uint32_t)i, at, now, g_move.player[g_move.players]);
+        g_move.players++;
     }
     if (g_streamObserverOn) { g_move.player[g_move.players][0] = g_streamObserverAt[0]; g_move.player[g_move.players][1] = g_streamObserverAt[1]; g_move.players++; }
     if (g_eye.on) /* the test eye walks like a player: not when it looks from high above (elevated views) */

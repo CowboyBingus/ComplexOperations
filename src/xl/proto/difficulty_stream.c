@@ -294,6 +294,8 @@ static void WindowNoteLocked(void);
 static void DestroyTick(void);                /* difficulty_world_destroy.c */
 static void DestroyNote(void);
 static const char* InstallDestroyQueue(void);
+/* A player passing in a hellpod streams no stamps on the way, and the ones at the place held stay (co_settle.h). */
+static CoSettle g_streamSettle;
 static void WorldStreamPlayersLocked(void)
 {
     g_stream.playerCount = 0;
@@ -301,14 +303,15 @@ static void WorldStreamPlayersLocked(void)
     {
         EvpPlayer players[EVT_MAX_PLAYERS];
         int count = EvpPlayers(g_stream.game, players);
+        const ULONGLONG now = GetTickCount64();
+        co_settle_level(&g_streamSettle, g_world.levels);
         for (int i = 0; count > 0 && i < count && g_stream.playerCount < EVT_MAX_PLAYERS; i++)
         {
             if (players[i].avatar == 0) continue;
             ActHealth h;
             float at[3] = {0.0f, 0.0f, 0.0f};
             if (!ActHealthOf(g_stream.game, players[i].avatar, &h) || h.unit == 0 || !EvpUnitPosition(h.unit, at)) continue;
-            g_streamPlayerAt[g_stream.playerCount][0] = at[0];
-            g_streamPlayerAt[g_stream.playerCount][1] = at[1];
+            co_settle_at(&g_streamSettle, (uint32_t)i, at, now, g_streamPlayerAt[g_stream.playerCount]);
             if (g_stream.playerCount == 0) NearReportPlayer(at);
             g_stream.playerCount++;
         }
@@ -815,7 +818,9 @@ static void WorldStreamScanLocked(ULONGLONG now)
                 if (g_streamOutSince[i] == 0) g_streamOutSince[i] = now;
             }
             else g_streamOutSince[i] = 0;
-            if (g_streamOutSince[i] != 0 && now - g_streamOutSince[i] >= kStreamOutTimeout && removes < kStreamRemoveBatch &&
+            /* far behind after a long move, they go with the put-back's batch: the forest grid needs their room */
+            if (g_streamOutSince[i] != 0 && now - g_streamOutSince[i] >= kStreamOutTimeout &&
+                removes < co_settle_removals(best, kStreamRemoveBatch, kStreamReplaceBatch) &&
                 g_streamPoseGood[i] && !g_streamNeedsUnit[i] && g_streamUnit[i] != 0)
             {
                 if (WorldStreamRemoveLocked(i)) removes++;
