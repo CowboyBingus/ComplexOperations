@@ -1183,7 +1183,7 @@ static int TerrainStep(uint64_t records, uint32_t end, uint32_t at, uint64_t con
  * 5. The level's merge records run again on copies, as the level ran them: 0x39 clear, 0x3C its Voronoi cells (+0x108
  *    progress zeroed), the vanilla-density tiles that touch the near square (TerrainBuild, drawn as at 0x40), 0x40
  *    smoothing (not 0x94, 0x3E or 0x3F: they squeeze the level into the tile, NearPlan; the conform holds the level's
- *    pads and flatten zones instead), 0x3D zone heights (materials repeating every 2048 m, as on a vanilla map), 0x0D route
+ *    pads and flatten zones instead), 0x3D zone heights (at the level's texture scale, NearStepPatch), 0x0D route
  *    segments, 0x63 stamp heights, 0x42, 0x41 materials, 0x64 finalize.
  * 6. Once the queue is empty, the tile's heightmap is read back (+0x1A8/+0x1D0/+0x1D8: the GPU work before it is done, and
  *    the heights are logged), the cameras and gui go back as the level had them and both names are unpublished (0x66
@@ -1545,24 +1545,6 @@ static int NearRunInstall(void)
     return 1;
 }
 
-/* The zone height materials' coordinates (RenderZoneHeightmap 0xF4A280 loads 1.0 at 0xF4A39C): 8.0 repeats them every
- * 2048 m as on a vanilla map (the tile's 0x3D only; see WorldDispatch's research knob). 1 when set. */
-static int NearZoneRepeat(int on)
-{
-    uintptr_t load = g_world.game + 0xF4A39Cu + 5u;
-    int32_t rel = 0;
-    if (SafeRead(load, &rel, 4)) return 0;
-    uintptr_t one = g_world.game + 0x23C6D70u, eight = g_world.game + 0x23C7524u, now = load + 4 + (intptr_t)rel;
-    if (now != (on ? one : eight)) return 0;
-    int32_t to = (int32_t)((intptr_t)(on ? eight : one) - (intptr_t)(load + 4));
-    DWORD old = 0;
-    if (!VirtualProtect((void*)load, 4, PAGE_EXECUTE_READWRITE, &old)) return 0;
-    *(volatile int32_t*)load = to;
-    VirtualProtect((void*)load, 4, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), (void*)load, 4);
-    return 1;
-}
-
 /* The level's coarse caps in the near tile. RenderHeightmapVoronoi (0x3C, 0xF499B0) phase 1 draws each subregion's
  * route-cell area twice: its point heights (material 0x13DD2DCAD2968560, layer terrain_height, additive) and, when
  * the subregion type's descriptor has +0xD8 set (test r13, r13 / je at 0xF4A07B), again at the constant height
@@ -1582,6 +1564,16 @@ static int NearCapSkip(int on)
     VirtualProtect((void*)(at + 3), 1, old, &old);
     FlushInstructionCache(GetCurrentProcess(), (void*)(at + 3), 1);
     return 1;
+}
+
+/* The game's code a replayed step runs under: 0x3C without the replayed level's caps (NearCapSkip). 0x3D keeps the
+ * level's own zone texture scale (1.0 at 0xF4A39C, coordinates position / world size), so the tile draws the zone
+ * heights the coarse terrain has, at its own resolution. At 8.0 a jungle zone material's 512 m pattern repeated every
+ * 64 m: run spk1's drop tile got 8045 cones 1.5-4.5 m tall and 1-4 m wide on that lattice; vanilla planet 211 has none.
+ * 1 when patched. */
+static int NearStepPatch(uint8_t op, int on)
+{
+    return op == 0x3C && NearCapSkip(on);
 }
 
 static uint32_t NearTexelBytes(uint32_t format)
@@ -2085,13 +2077,11 @@ static int NearRunStep(uint64_t records, uint32_t end, uint64_t context, uint64_
      * the sampler's float load). */
     int swapCaps = g_near.stepOp[s] == 0x3E || g_near.stepOp[s] == 0x3F;
     if (swapCaps) { memcpy(live, (void*)(uintptr_t)g_near.lg, sizeof live); memcpy((void*)(uintptr_t)g_near.lg, g_near.caps, sizeof live); }
-    int zone = g_near.stepOp[s] == 0x3D && NearZoneRepeat(1);
-    int caps = g_near.stepOp[s] == 0x3C && NearCapSkip(1);
+    int caps = NearStepPatch(g_near.stepOp[s], 1);
     if (mat) TerrainMatPatch(1);
     fault = WorldTileGuarded(g_near.one, context, &index, &g_near.phase, g, h, 1, &calls);
     if (mat) TerrainMatPatch(0);
-    if (caps) NearCapSkip(0);
-    if (zone) NearZoneRepeat(0);
+    if (caps) NearStepPatch(g_near.stepOp[s], 0);
     if (swapCaps) memcpy((void*)(uintptr_t)g_near.lg, live, sizeof live);
     if (fault)
     {
