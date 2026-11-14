@@ -15,17 +15,23 @@
  *   more. A link between two pins has no limit: the pad's own ground holds there and no road is drawn.
  * - Pads that disagree: where two pins stand further apart in height than the limit joins, the links between them
  *   may climb more too (GradeRelax), so the road meets both pads and no step is left at a pad's edge.
- * - Landings: a link may carry a slope of its own it never exceeds (`most`), relaxed or not. The roads about a
- *   junction are held near level with it, so one road's grade is not the other's cross slope where their beds meet.
+ * - Landings: a link may carry a slope of its own it never exceeds (`most`), relaxed or not. Where two lines meet
+ *   the links in each other's bed are level, and the links after them take the grade in two steps (GRADE_RAMP,
+ *   GRADE_RAMP2), so the grade changes by a step a station. A step gives way only between pins that disagree.
  * - Arterials first: a station may be marked `later` (a spur's). The others are solved without them and then stand;
  *   the later ones are solved against those heights (GradeSolveStaged). So a spur takes the whole difference to the
  *   road it joins, and no spur's hill lifts or tilts an arterial. A pin a settled station cannot reach comes to it.
+ *   A later station in an arterial's bed (`bed`) stands at the arterial's own surface: the bed is the arterial's.
  * - Bends: crests and dips are eased by a fixed count of averaging passes, the cap and the grade enforced after
  *   each, so easing rounds a crest only within the cap. */
 #define GRADE_LINKS 8
 #define GRADE_FAR 1.0e30f
 #define GRADE_ROUNDS 4096u
 #define GRADE_FREE 1.0e6f /* a link's own limit: none (between two pins) */
+#define GRADE_FEET 8u
+#define GRADE_LEVEL 0.0087269f /* tan 0.5 degrees: a link in another line's bed */
+#define GRADE_RAMP 0.1227846f  /* tan 7 degrees: the first link after a level or settled stretch */
+#define GRADE_RAMP2 0.2493280f /* tan 14 degrees: the second */
 typedef struct GradeStation
 {
     float ground, target, low, high;
@@ -43,6 +49,8 @@ typedef struct GradeStation
     uint8_t roads; /* its first links that are pieces of road; the rest tie it to a road beside it */
     uint8_t later; /* solved after the others, against their heights (a spur's own stations) */
     uint8_t fixed; /* GradeSolveStaged: its height is settled; `ground` holds it and no other pin moves it */
+    uint8_t bed;   /* a later station in an earlier line's bed: it stands at the mean of its feet's heights */
+    uint32_t foot[GRADE_FEET]; float footW[GRADE_FEET]; /* the stations of that line about it and their shares (sum 1) */
 } GradeStation;
 
 static int GradeLink(GradeStation* s, uint32_t a, uint32_t b, float metres)
@@ -177,7 +185,7 @@ static uint32_t GradeSolveFrom(GradeStation* s, uint32_t n, float slope, uint32_
         for (uint32_t i = 0; i < n; i++)
         {
             next[i] = s[i].target;
-            if (s[i].links != 2 || s[i].pinned) continue;
+            if (s[i].roads != 2 || s[i].pinned) continue; /* its two pieces of road: a tie is no third arm */
             const float a = s[i].gap[0], b = s[i].gap[1];
             const float line = (s[s[i].link[0]].target * b + s[s[i].link[1]].target * a) / (a + b);
             next[i] = 0.5f * (s[i].target + line);
@@ -218,14 +226,22 @@ static void GradeRelax(GradeStation* s, uint32_t n, float hard, float steep, flo
             w = w > torn ? w : torn;
             w = w < 0.0f ? 0.0f : w > 1.0f ? 1.0f : w;
             s[i].lim[k] = hard + (steep - hard) * w * w * (3.0f - 2.0f * w);
-            /* a landing is level only where the land is: from half the cap off its ground it gives way to the
-             * link's own limit, whole at the cap or between pins that disagree, so it builds no platform */
-            if (k >= s[i].roads || !(s[i].most[k] > 0.0f)) continue;
-            const float offA = s[i].pinned ? 0.0f : a + cap, offB = s[j].pinned ? 0.0f : b + cap;
-            float u = ((offA > offB ? offA : offB) - 0.5f * cap) / (0.5f * cap);
-            u = u > torn ? u : torn;
-            u = u < 0.0f ? 0.0f : u > 1.0f ? 1.0f : u;
-            if (s[i].lim[k] > s[i].most[k]) s[i].most[k] += (s[i].lim[k] - s[i].most[k]) * u * u * (3.0f - 2.0f * u);
+        }
+}
+/* After GradePins with the relaxed limits standing: a ramp link of slope `step` between pins that still disagree
+ * takes what is lacking there (low - high, the same along the torn stretch) on top, up to its own limit. A pad's
+ * step is worse than a bend, and a road that can meet its pins keeps the whole ramp. */
+static void GradeRampGive(GradeStation* s, uint32_t n, float step)
+{
+    for (uint32_t i = 0; i < n; i++)
+        for (uint32_t k = 0; k < s[i].roads; k++)
+        {
+            const uint32_t j = s[i].link[k];
+            if (s[i].most[k] != step || s[i].lim[k] >= GRADE_FREE || !(s[i].lim[k] > step)) continue;
+            const float ta = s[i].low - s[i].high, tb = s[j].low - s[j].high, lack = ta > tb ? ta : tb;
+            if (!(lack > 0.0f)) continue;
+            const float most = step + lack / s[i].gap[k];
+            s[i].most[k] = most < s[i].lim[k] ? most : s[i].lim[k];
         }
 }
 /* The worn path: the profile within `soft` wherever that keeps each station within its `earth` of the ground, and
@@ -247,29 +263,40 @@ static uint32_t GradeSolveCapped(GradeStation* s, uint32_t n, float soft, float 
         torn = GradeSolveFrom(s, n, hard, passes, under, 1, last);
         if (last) break;
         GradeRelax(s, n, hard, steep, cap);
+        /* the outer step first, the inner one only for what is still lacking then: both ends of a link read the
+         * same lack, so its two slots stay equal */
+        for (int inner = 0; inner < 2; inner++)
+        {
+            GradePins(s, n, hard, under, under + n, under + 2 * n, 0);
+            GradeRampGive(s, n, inner ? GRADE_RAMP : GRADE_RAMP2);
+        }
     }
     free(under);
     return torn;
 }
 /* Two stages: the stations not marked `later` among themselves, as if the later ones were not there; then all of
  * them with the first stage's heights standing. A link between two stations of the first stage keeps the limit
- * that stage gave it. Returns both stages' torn stations. Without a later station, or without memory, one solve. */
+ * that stage gave it. A later station marked `bed` then stands at its feet's mean (the earlier line's surface where
+ * it lies), like a settled station. Returns both stages' torn stations. Without a later station, or without memory,
+ * one solve. */
 static uint32_t GradeSolveStaged(GradeStation* s, uint32_t n, float soft, float hard, float steep, float cap, uint32_t passes)
 {
     uint32_t first = 0;
     for (uint32_t i = 0; i < n; i++) first += !s[i].later;
     uint32_t* map = first != 0 && first != n ? (uint32_t*)malloc(4 * (size_t)n) : NULL;
     GradeStation* a = map != NULL ? (GradeStation*)malloc(sizeof *a * first) : NULL;
-    if (a == NULL) { free(map); return GradeSolveCapped(s, n, soft, hard, steep, cap, passes); }
+    float* own = a != NULL ? (float*)malloc(4 * (size_t)n) : NULL;
+    if (own == NULL) { free(a); free(map); return GradeSolveCapped(s, n, soft, hard, steep, cap, passes); }
     for (uint32_t i = 0, m = 0; i < n; i++) map[i] = s[i].later ? 0xFFFFFFFFu : m++;
     for (uint32_t i = 0; i < n; i++)
     {
         if (s[i].later) continue;
         GradeStation* t = &a[map[i]];
-        *t = s[i]; t->links = 0;
+        *t = s[i]; t->links = t->roads = 0;
         for (uint32_t k = 0; k < s[i].links; k++)
         {
             if (s[s[i].link[k]].later) continue;
+            if (k < s[i].roads) t->roads++; /* the links close up: a tie must not move among the pieces of road */
             t->link[t->links] = map[s[i].link[k]]; t->gap[t->links] = s[i].gap[k]; t->most[t->links++] = s[i].most[k];
         }
     }
@@ -280,15 +307,24 @@ static uint32_t GradeSolveStaged(GradeStation* s, uint32_t n, float soft, float 
         if (s[i].later) continue;
         s[i].ground = a[map[i]].target; s[i].pinned = 1; s[i].fixed = 1;
     }
+    for (uint32_t i = 0; i < n; i++)
+    {
+        own[i] = s[i].ground;
+        if (!s[i].later || !s[i].bed || s[i].pinned) continue;
+        double z = 0.0;
+        for (uint32_t q = 0; q < GRADE_FEET; q++) z += (double)s[i].footW[q] * s[s[i].foot[q]].ground;
+        s[i].ground = (float)z; s[i].pinned = 1; s[i].fixed = 1;
+    }
     torn += GradeSolveCapped(s, n, soft, hard, steep, cap, passes);
     for (uint32_t i = 0; i < n; i++)
     {
+        if (s[i].later && s[i].fixed) { s[i].ground = own[i]; s[i].pinned = 0; s[i].fixed = 0; }
         if (s[i].later) continue;
         const GradeStation* t = &a[map[i]];
         s[i].ground = t->ground; s[i].pinned = t->pinned; s[i].fixed = 0; s[i].low = t->low; s[i].high = t->high;
         for (uint32_t k = 0, q = 0; k < s[i].links; k++) if (!s[s[i].link[k]].later) s[i].lim[k] = t->lim[q++];
     }
-    free(a); free(map);
+    free(a); free(map); free(own);
     return torn;
 }
 /* The links that may climb more than `hard`: their count, metres and the steepest the profile takes on one (as a

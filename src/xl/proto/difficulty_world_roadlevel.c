@@ -322,7 +322,10 @@ static int RoadGradeSolve(void)
         g_grade.pinned += f->s[i].pinned;
     }
     GradeFieldLinks(f);
+    GradeFieldRuns(f);
     g_grade.landings = GradeFieldLand(f, &g_grade.landed);
+    f->beds = GradeFieldBeds(f);
+    f->ramps = GradeFieldRamps(f);
     GradeFieldTies(f);
     for (uint32_t i = 0; i < f->stations; i++)
     {
@@ -506,7 +509,9 @@ static void RoadGradeReport(uintptr_t block, const char* what, const wchar_t* fi
 
 /* grade-stations-<level>.tsv: every station's x, y (metres from the world's centre), ground, target, the pins' low and
  * high, pinned, links, cross tangent, band, cap, pad weight and 1 inside a place: what the profile was solved from;
- * then the steepest its links may take in degrees (0: all between pins) and 1 for a spur's end at its place's edge. */
+ * then the steepest its links may take in degrees (0: all between pins), 1 for a spur's end at its place's edge, the
+ * landing (1 on a level link, 2 a spur's station at its arterial's height), 1 for a spur's own station and the links
+ * that are pieces of road. */
 static void RoadGradeStationsFile(void)
 {
     const GradeField* f = &g_grade.f;
@@ -518,16 +523,17 @@ static void RoadGradeStationsFile(void)
     for (uint32_t i = 0; i < f->stations; i++)
     {
         char line[240]; DWORD wrote;
-        float most = 0.0f;
+        float most = 0.0f; int level = 0;
         for (uint32_t k = 0; k < f->s[i].links; k++)
         {
             const float lim = f->s[i].lim[k] > GRADE_HARD ? f->s[i].lim[k] : GRADE_HARD;
             if (lim < GRADE_FREE && lim > most) most = lim;
+            level |= k < f->s[i].roads && f->s[i].most[k] == GRADE_LEVEL;
         }
-        const int len = snprintf(line, sizeof line, "%u\t%.1f\t%.1f\t%.2f\t%.2f\t%.2f\t%.2f\t%u\t%u\t%.3f\t%.1f\t%.2f\t%.2f\t%d\t%.2f\t%u\n", i, (double)(f->xy[2 * i] - half), (double)(f->xy[2 * i + 1] - half),
+        const int len = snprintf(line, sizeof line, "%u\t%.1f\t%.1f\t%.2f\t%.2f\t%.2f\t%.2f\t%u\t%u\t%.3f\t%.1f\t%.2f\t%.2f\t%d\t%.2f\t%u\t%d\t%u\t%u\n", i, (double)(f->xy[2 * i] - half), (double)(f->xy[2 * i + 1] - half),
             (double)f->s[i].ground, (double)f->s[i].target, (double)(f->s[i].low > -1.0e29f ? f->s[i].low : -9999.0f), (double)(f->s[i].high < 1.0e29f ? f->s[i].high : 9999.0f),
             f->s[i].pinned, f->s[i].links, (double)f->s[i].cross, (double)f->band[i], (double)f->s[i].earth, (double)RoadGradePadAt(f->xy[2 * i], f->xy[2 * i + 1]),
-            RoadGradeInPlace(f->xy[2 * i], f->xy[2 * i + 1]), (double)(atanf(most) * 57.29578f), f->s[i].edge);
+            RoadGradeInPlace(f->xy[2 * i], f->xy[2 * i + 1]), (double)(atanf(most) * 57.29578f), f->s[i].edge, f->s[i].bed ? 2 : level, f->s[i].later, f->s[i].roads);
         WriteFile(out, line, TsvLength(line, sizeof line, len), &wrote, NULL);
     }
     CloseHandle(out);
@@ -640,9 +646,11 @@ static int RoadGradeStep(uint64_t context)
             "the steepest taken %.1f deg at (%.0f, %.0f)", (long)g_world.levels, g_grade.steep, g_grade.steepMetres, (double)(atanf(GRADE_STEEP) * 57.29578f),
             (double)(atanf(GRADE_HARD) * 57.29578f), (double)(2.0f * GRADE_EARTH), (double)(atanf(g_grade.steepest) * 57.29578f),
             (double)(g_grade.steepAt[0] - g_grade.world / 2), (double)(g_grade.steepAt[1] - g_grade.world / 2));
-        Note("roads: level %ld grade: junctions: %u stations where roads meet or a line turns over 30 deg, %u links within %.0f m of them held to %.1f deg; the rim: %u "
+        Note("roads: level %ld grade: beds: %u lines, %u spur stations at their arterial's height, %u links ramped after a level or settled stretch", (long)g_world.levels,
+            g_grade.f.runs, g_grade.f.beds, g_grade.f.ramps);
+        Note("roads: level %ld grade: junctions: %u stations where two lines meet over 30 deg, %u links in each other's bed (%.0f m) held to %.1f deg; the rim: %u "
             "stations within %.0f m of the playable radius (%.0f m) or past it%s; relaxed: %.2f %% of the roads' length may take over %.1f deg", (long)g_world.levels,
-            g_grade.landings, g_grade.landed, (double)GRADE_LAND, (double)(atanf(GRADE_LAND_SLOPE) * 57.29578f), g_grade.past, (double)GRADE_RIM, (double)g_grade.playable,
+            g_grade.landings, g_grade.landed, (double)GRADE_OWN, (double)(atanf(GRADE_LEVEL) * 57.29578f), g_grade.past, (double)GRADE_RIM, (double)g_grade.playable,
             g_grade.past != 0 ? " (graded like the rest: the rim holds nothing on this level)" : "", g.metres > 0.0 ? 100.0 * g_grade.steepMetres / g.metres : 0.0,
             (double)(atanf(GRADE_HARD) * 57.29578f));
         RoadGradeStationsFile();
