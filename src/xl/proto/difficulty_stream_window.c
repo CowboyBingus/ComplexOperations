@@ -431,6 +431,26 @@ static void WindowNoteLocked(void)
     Note("difficulty: extra large maps: navmesh cutters: %u of %u%s; %u scans over their budget; %llu not made (the first at %u of %u), %llu handles of 0 left out of a destroy",
         cutters, cutterRoom, cut ? "" : ", not read", g_win.refusedCutters, (unsigned long long)seen.failed, seen.usedAtFail, seen.roomAtFail,
         (unsigned long long)seen.dropped);
+    CoNavCutSeen cuts;
+    co_navcut_seen(&cuts);
+    Note("difficulty: extra large maps: navmesh cuts: the largest %u half-edges of %u; %llu left uncut and %llu cut away over the limit (the last %u half-edges of %u segments at (%.0f, %.0f)); %llu faces over the segment budget, %llu silhouettes left out",
+        cuts.largest, CO_NAVCUT_MAX, (unsigned long long)cuts.uncut, (unsigned long long)cuts.hidden, cuts.worstEdges, cuts.worstSegments,
+        (double)cuts.worstAt[0], (double)cuts.worstAt[1], (unsigned long long)cuts.partial, (unsigned long long)cuts.leftOut);
+    Note("difficulty: extra large maps: navmesh cuts done again: %llu ended, %llu as 0 polygons and %llu as more than 1 (the last %u polygons of %u half-edges, a face of %u edges); faces with no silhouette: %llu ended, %llu as 0 polygons and %llu as more than 1",
+        (unsigned long long)cuts.againEnded, (unsigned long long)cuts.againNone, (unsigned long long)cuts.againMany, cuts.oddFaces, cuts.oddEdges,
+        cuts.oddOwn, (unsigned long long)cuts.aloneEnded, (unsigned long long)cuts.aloneNone, (unsigned long long)cuts.aloneMany);
+#ifdef CO_RESEARCH
+    CoNavCutStudy study;
+    co_navcut_study(&study);
+    Note("difficulty: extra large maps: navmesh cuts, one face alone and done again: %llu the same polygons, %llu not (the last %u alone, %u done again, a face of %u edges); %llu faces not kept",
+        (unsigned long long)study.same, (unsigned long long)study.differ, study.differAlone, study.differAgain, study.differOwn,
+        (unsigned long long)study.notKept);
+    Note("difficulty: extra large maps: navmesh cuts by segments (512, 1024, 2048 and over): %llu, %llu, %llu whole; %llu, %llu, %llu stopped; %llu, %llu, %llu whole over 2.29 half-edges a segment; the most %.2f, %.2f, %.2f",
+        (unsigned long long)study.ended[0], (unsigned long long)study.ended[1], (unsigned long long)study.ended[2],
+        (unsigned long long)study.stopped[0], (unsigned long long)study.stopped[1], (unsigned long long)study.stopped[2],
+        (unsigned long long)study.steep[0], (unsigned long long)study.steep[1], (unsigned long long)study.steep[2],
+        study.most[0] / 100.0, study.most[1] / 100.0, study.most[2] / 100.0);
+#endif
     uint32_t trees = 0, treeRoom = 0;
     const int counted = WorldStreamTrees(&trees, &treeRoom);
     Note("difficulty: extra large maps: SpeedTree forest: %u trees of %u%s; %u scans over its budget; %u streamer calls held, the most one call added %u",

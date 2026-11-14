@@ -42,6 +42,7 @@
 #include "co_switch.h"
 #include "co_steer.h"
 #include "co_cutters.h"
+#include "co_navcut.h"
 #include "co_forest.h"
 #include "co_podstart.h"
 #include "co_settle.h"
@@ -350,6 +351,17 @@ const char* CoXlInstall(uintptr_t game)
     /* refused, a forest instance made while the cutter pool was full still crashes the destroy (co_cutters.h) */
     if ((why = co_cutters_install(g_coApi->module_base("helldivers2.exe", NULL))) != NULL) Note("navmesh cutters: %s; a handle of 0 is not left out", why);
     else Note("navmesh cutters: the engine's destroy leaves out handles of 0 (a cutter not made while its pool was full)");
+    /* refused, a face under more silhouettes than 8192 half-edges hold still crashes the cutter (co_navcut.h) */
+    if ((why = co_navcut_install(g_coApi->module_base("helldivers2.exe", NULL))) != NULL) Note("navmesh cuts: %s; a cut is not bounded", why);
+    else
+    {
+#ifdef CO_RESEARCH
+        char limits[32] = ""; unsigned edges = 0, segments = 0; /* HELLFORGE_XL_NAVCUT=<edges>,<segments>; no package reads it */
+        if (GetEnvironmentVariableA("HELLFORGE_XL_NAVCUT", limits, sizeof limits) > 0 && sscanf(limits, "%u,%u", &edges, &segments) == 2)
+        { co_navcut_limits(edges, segments); Note("navmesh cuts: research limits asked for: %u half-edges, %u segments a face", edges, segments); }
+#endif
+        Note("navmesh cuts: a face takes silhouettes up to %u segments, and a cut over %u half-edges is done again uncut", CO_NAVCUT_BUDGET, CO_NAVCUT_MAX);
+    }
     /* refused, a reinforcement pod still starts at the destroyer and crosses the map to its drop point */
     if ((why = co_podstart_install(game, PodStartScale)) != NULL) Note("complex operations: hellpod start: %s", why);
     if ((why = InstallWorld(&d)) != NULL || (why = InstallWorldStreamStep(&d)) != NULL || (why = InstallMapHud(&d)) != NULL) return why;
