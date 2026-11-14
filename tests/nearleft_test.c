@@ -10,6 +10,8 @@
 void CoXlTestGame(uintptr_t game);
 void CoXlTestWorldLevel(uintptr_t level, uintptr_t preview);
 void CoXlTestWorldShip(void);
+void CoXlTestRoadsLevel(const uint8_t* ops, uint32_t n, uint32_t planned);
+uint8_t CoXlTestLocationOp(uint32_t i);
 LONG CoXlTestLevels(void);
 void CoXlTestMission(uintptr_t level, int complex);
 void CoXlTestOneMipArm(uint64_t tex, uint64_t* renderSlot);
@@ -92,8 +94,10 @@ int main(void)
     const uintptr_t lg = (uintptr_t)g_lg;
 
     Start("a complex level's own level init, then its set-up");
+    { static const uint8_t earlier[3] = {0x16, 0x82, 0x2B}; CoXlTestRoadsLevel(earlier, 3, 0); } /* a level before this one */
     CoXlTestWorldLevel(lg, 0);
     const LONG levels = CoXlTestLevels();
+    CHECK(CoXlTestLocationOp(0) == 0 && CoXlTestLocationOp(1) == 0 && CoXlTestLocationOp(2) == 0); /* its places' ops are not this level's */
     NearSetUp(); /* op 0x38, op 0x69, the replay and a build in play all come after the level's init */
     CHECK(NearAllOn() && CoXlTestLevels() == levels);
     CHECK(CoXlTestOneMipSpawn(HEIGHTMAP, MATERIALS) == 0x99 && g_spawns == 1 && g_spawnSaw == TEX && g_renderSlot == STOCK_TEX); /* the level's own spawn takes the copy */
