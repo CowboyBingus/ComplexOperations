@@ -60,6 +60,14 @@ void CoXlTestLwFight(int f, float x, float y, uint32_t age, uint32_t seenAgo, in
 void CoXlTestLwFightsClear(void);
 int CoXlTestLwFightHandOver(int f);
 int CoXlTestLwFightOfSquad(int i);
+void CoXlTestLwHeard(int members);
+void CoXlTestLwGoalStub(int on, const float* off, float r);
+int CoXlTestLwGoals(float* to);
+void CoXlTestLwOfflineAt(uint32_t later);
+void CoXlTestLwSendSetup(int online, const float* sq, const float* fight);
+int CoXlTestLwSend(float* target, int* moves, int* nextPoint, int* sentAt);
+uint32_t CoXlTestLwFightTargetOf(int f);
+int CoXlTestLwNoiseGate(uint32_t avatar, uint32_t unit, uint32_t source, uint32_t sent, uint32_t ago, float moved, int fixed, float away);
 
 static int g_failed;
 static const char* g_case;
@@ -178,6 +186,41 @@ static void BandEdge(void)
         CoXlTestLwWalk(0.1f, &stage, &held, pos, &at);
         CHECK(CoXlTestLwIntent() == 0 && Count(why) == ended + 1);
     }
+    g_case = "back at the band's edge 241 s after its first wait there: the end says since its first wait, not that it waited 240 s";
+    CoXlTestLwReinforce(far0, sq, point);
+    CoXlTestLwWalk(0.1f, &stage, &held, pos, &at);
+    CoXlTestLwPlayerAt(in);
+    for (int k = 0; k < 5; k++) CoXlTestLwWalk(0.1f, &stage, &held, pos, &at);
+    CHECK(held == 1);
+    CoXlTestLwHoldAge(3, 0);
+    CoXlTestLwHoldAge(0, 300000);
+    CoXlTestLwSlotsChecked(0, 241000); /* not waiting now (it was online), its first wait 241 s ago */
+    const float inA[2] = {pos[0] - 140.0f, pos[1]};
+    CoXlTestLwPlayerAt(inA);
+    const int again = Count("240 s since its first wait at the spawn band"), whole = Count("240 s, waiting at the spawn band");
+    CoXlTestLwWalk(0.1f, &stage, &held, pos, &at);
+    CHECK(CoXlTestLwIntent() == 0 && Count("240 s since its first wait at the spawn band") == again + 1 && Count("240 s, waiting at the spawn band") == whole);
+    g_case = "waiting a second time when the first wait's 240 s pass: the same reason";
+    CoXlTestLwReinforce(far0, sq, point);
+    CoXlTestLwWalk(0.1f, &stage, &held, pos, &at);
+    CoXlTestLwPlayerAt(in);
+    for (int k = 0; k < 5; k++) CoXlTestLwWalk(0.1f, &stage, &held, pos, &at);
+    CoXlTestLwHoldAge(3, 0);
+    CoXlTestLwHoldAge(0, 300000);
+    CoXlTestLwSlotsChecked(0, 10000);
+    const float inB[2] = {pos[0] - 140.0f, pos[1]};
+    CoXlTestLwPlayerAt(inB);
+    CoXlTestLwWalk(0.1f, &stage, &held, pos, &at);
+    CHECK(held == 1 && CoXlTestLwIntent() == 2);
+    CoXlTestLwHoldAge(4, 231000);
+    const float inC[2] = {pos[0] - 140.0f, pos[1]};
+    CoXlTestLwPlayerAt(inC);
+    CoXlTestLwWalk(0.1f, &stage, &held, pos, &at);
+    CHECK(CoXlTestLwIntent() == 0 && Count("240 s since its first wait at the spawn band") == again + 2 && Count("240 s, waiting at the spawn band") == whole);
+    g_case = "a wait that began before this intent is not this intent's";
+    CoXlTestLwReinforce(far0, sq, point);
+    CoXlTestLwHoldAge(5, 300000);
+    CHECK((CoXlTestLwIntentLate(0) & 2) == 0);
 }
 
 /* Waiting squads: lanes round the player and the points tried in each. */
@@ -657,28 +700,31 @@ static void OnlineLimit(void)
 static void FightAim(void)
 {
     const float fight[2] = {1000, 0}, at[2] = {800, 0};
-    const float p100[2] = {1100, 0}, p120[2] = {1120, 0}, p200[2] = {1200, 0}, p400[2] = {1400, 0};
+    const float p100[2] = {1100, 0}, p120[2] = {1120, 0}, p122[2] = {1122, 0}, p145[2] = {1145, 0}, p400[2] = {1400, 0};
     int stage, moves; float t[2];
     g_case = "on its way, the fight's target alive 100 m from the fight's point: its point is where the target is";
     CoXlTestLwReinforceOn(fight, 20000, 2);
     CoXlTestLwFightTarget(0, 0x400001, p100);
     CHECK(CoXlTestLwReinforceTick(at, 0, 0, &stage, t, &moves) == 2 && stage == 0 && t[0] == 1100.0f && moves == 0);
-    g_case = "the target 100 m on within 10 s of the last new point: the point is kept; after 10 s it follows";
-    CoXlTestLwFightTarget(0, 0x400001, p200);
+    g_case = "the target 45 m on within 10 s of the last new point: the point is kept; after 10 s it follows";
+    CoXlTestLwFightTarget(0, 0x400001, p145);
     CHECK(CoXlTestLwReinforceTick(at, 0, 5000, &stage, t, &moves) == 2 && t[0] == 1100.0f);
-    CHECK(CoXlTestLwReinforceTick(at, 0, 11000, &stage, t, &moves) == 2 && t[0] == 1200.0f);
+    CHECK(CoXlTestLwReinforceTick(at, 0, 11000, &stage, t, &moves) == 2 && t[0] == 1145.0f);
     g_case = "the target dead: the fight's point";
     CoXlTestLwFightTarget(0, 0x400001, NULL);
     CHECK(CoXlTestLwReinforceTick(at, 0, 22000, &stage, t, &moves) == 2 && t[0] == 1000.0f && stage == 0);
-    g_case = "a target under 30 m from its point: the point is kept";
+    g_case = "a target 20 m from its point: the point is kept; 22 m: the point follows";
     CoXlTestLwReinforceOn(fight, 20000, 2);
     CoXlTestLwFightTarget(0, 0x400001, p100);
     CoXlTestLwReinforceTick(at, 0, 0, &stage, t, &moves);
     CoXlTestLwFightTarget(0, 0x400001, p120);
     CHECK(CoXlTestLwReinforceTick(at, 0, 11000, &stage, t, &moves) == 2 && t[0] == 1100.0f);
+    CoXlTestLwFightTarget(0, 0x400001, p122);
+    CHECK(CoXlTestLwReinforceTick(at, 0, 12000, &stage, t, &moves) == 2 && t[0] == 1122.0f);
     g_case = "a member engaged on the way: it joins where it is, its point not moved";
-    CoXlTestLwFightTarget(0, 0x400001, p400);
-    CHECK(CoXlTestLwReinforceTick(at, 1, 22000, &stage, t, &moves) == 2 && stage == 1 && t[0] == 1100.0f);
+    CoXlTestLwFightTarget(0, 0x400001, p100);
+    CHECK(CoXlTestLwReinforceTick(at, 1, 33000, &stage, t, &moves) == 2 && stage == 1 && t[0] == 1122.0f);
+    (void)p400;
 
     g_case = "arrived with nobody engaged, the fight 39 m from its leader: it stays";
     const float p39[2] = {1039, 0}, p45[2] = {1045, 0};
@@ -743,6 +789,203 @@ static void FightAim(void)
     CHECK(CoXlTestLwReinforceTick(at, 0, 1000, &stage, t, &moves) == 2 && stage == 0 && t[0] == 1070.0f && moves == 0);
 }
 
+/* The fight's target on ground with no navmesh (a Helldiver on a rock): the fight's point, where enemies stand. */
+static void AimOffNavmesh(void)
+{
+    const float fight[2] = {1000, 0}, at[2] = {800, 0}, rock[2] = {1100, 0}, nearBy[2] = {961, 0}, on[2] = {1131, 0};
+    int stage, moves; float t[2], to[2];
+    g_case = "on its way, no navmesh at the fight's target: its goal and its point are the fight's point, noted";
+    CoXlTestLwReinforceOn(fight, 20000, 2);
+    CoXlTestLwFightTarget(0, 0x400001, rock);
+    CoXlTestLwGoalStub(1, rock, 25.0f);
+    const int notes = Count("no navmesh at its fight's target");
+    CHECK(CoXlTestLwReinforceTick(at, 0, 0, &stage, t, &moves) == 2 && stage == 0 && t[0] == 1000.0f);
+    CHECK(CoXlTestLwGoals(to) == 1 && to[0] == 1000.0f && Count("no navmesh at its fight's target") == notes + 1);
+    g_case = "the target stays there: no goal again, and the squad arrives within 40 m of the fight's point and stays";
+    CHECK(CoXlTestLwReinforceTick(at, 0, 11000, &stage, t, &moves) == 2 && stage == 0 && CoXlTestLwGoals(to) == 1);
+    CHECK(CoXlTestLwReinforceTick(nearBy, 0, 12000, &stage, t, &moves) == 2 && stage == 1 && moves == 0);
+    CHECK(CoXlTestLwReinforceTick(nearBy, 0, 30000, &stage, t, &moves) == 2 && stage == 1 && moves == 0 && CoXlTestLwGoals(to) == 1);
+    g_case = "the target 31 m on, on ground with navmesh: the squad goes to it";
+    CoXlTestLwFightTarget(0, 0x400001, on);
+    CHECK(CoXlTestLwReinforceTick(nearBy, 0, 41000, &stage, t, &moves) == 2 && stage == 0 && moves == 1 && t[0] == 1131.0f);
+    CHECK(CoXlTestLwGoals(to) == 2 && to[0] == 1131.0f);
+    g_case = "no navmesh at the target nor at the fight's point: it ends";
+    CoXlTestLwReinforceOn(fight, 20000, 2);
+    CoXlTestLwFightTarget(0, 0x400001, rock);
+    CoXlTestLwGoalStub(1, rock, 200.0f);
+    const int ends = Count("no navmesh at the point");
+    CHECK(CoXlTestLwReinforceTick(at, 0, 0, &stage, t, &moves) == 0 && Count("no navmesh at the point") == ends + 1 && CoXlTestLwGoals(to) == 0);
+    g_case = "its fight over before its first goal: it ends with the fight, no goal is tried";
+    CoXlTestLwReinforceOn(fight, 20000, 2);
+    CoXlTestLwGoalStub(1, rock, 5000.0f);
+    CoXlTestLwHoldAge(2, 0);
+    const int over = Count("the fight ended before it got there");
+    CHECK(CoXlTestLwReinforceTick(at, 0, 0, &stage, t, &moves) == 0 && Count("the fight ended before it got there") == over + 1 && Count("no navmesh at the point") == ends + 1);
+    g_case = "an arrived squad's move to a target with no navmesh: its goal is the fight's point again, it is not left with a point it has no goal for";
+    CoXlTestLwReinforceOn(fight, 20000, 2);
+    CoXlTestLwFightTarget(0, 0, NULL);
+    CoXlTestLwGoalStub(1, rock, 25.0f);
+    CHECK(CoXlTestLwReinforceTick(fight, 0, 0, &stage, t, &moves) == 2 && stage == 1 && CoXlTestLwGoals(to) == 1);
+    CoXlTestLwFightTarget(0, 0x400001, rock);
+    CHECK(CoXlTestLwReinforceTick(fight, 0, 11000, &stage, t, &moves) == 2 && moves == 1 && t[0] == 1000.0f && CoXlTestLwGoals(to) == 2 && to[0] == 1000.0f);
+    CHECK(CoXlTestLwReinforceTick(fight, 0, 22000, &stage, t, &moves) == 2 && stage == 1 && moves == 1 && CoXlTestLwGoals(to) == 2);
+    g_case = "a goal after a new point on its way and after a move";
+    CoXlTestLwReinforceOn(fight, 20000, 2);
+    CoXlTestLwFightTarget(0, 0x400001, rock);
+    CoXlTestLwGoalStub(1, NULL, 0);
+    CHECK(CoXlTestLwReinforceTick(at, 0, 0, &stage, t, &moves) == 2 && CoXlTestLwGoals(to) == 1 && to[0] == 1100.0f);
+    CoXlTestLwFightTarget(0, 0x400001, on);
+    CHECK(CoXlTestLwReinforceTick(at, 0, 11000, &stage, t, &moves) == 2 && CoXlTestLwGoals(to) == 2 && to[0] == 1131.0f);
+    CHECK(CoXlTestLwReinforceTick(on, 0, 12000, &stage, t, &moves) == 2 && stage == 1);
+    CoXlTestLwFightTarget(0, 0x400001, fight);
+    CHECK(CoXlTestLwReinforceTick(on, 0, 23000, &stage, t, &moves) == 2 && stage == 0 && moves == 1 && CoXlTestLwGoals(to) == 3 && to[0] == 1000.0f);
+    CoXlTestLwFightTarget(0, 0, NULL);
+    CoXlTestLwGoalStub(0, NULL, 0);
+}
+
+/* The send (LwReinforce): where the squad is sent, what starts anew, and a squad with no navmesh to go to. */
+static void Send(void)
+{
+    const float sq[2] = {900, 0}, fight[2] = {1000, 0}, p[2] = {1060, 0}, farOff[2] = {1200, 0};
+    float t[2], to[2]; int moves, next, sentAt;
+    g_case = "an offline squad sent: its point is the fight's target where it is; its moves and its clocks start anew; 10 s to its next new point";
+    CoXlTestLwSendSetup(0, sq, fight);
+    CoXlTestLwFightTarget(0, 0x400001, p);
+    CHECK(CoXlTestLwSend(t, &moves, &next, &sentAt) == 2 && t[0] == 1060.0f && moves == 0 && next > 9000 && next <= 11000 && sentAt == 1);
+    g_case = "the target 200 m from the fight's point: the squad is sent to the point";
+    CoXlTestLwSendSetup(0, sq, fight);
+    CoXlTestLwFightTarget(0, 0x400001, farOff);
+    CHECK(CoXlTestLwSend(t, &moves, &next, &sentAt) == 2 && t[0] == 1000.0f);
+    g_case = "an online squad sent, no navmesh at the target: its goal is the fight's point";
+    CoXlTestLwSendSetup(1, sq, fight);
+    CoXlTestLwFightTarget(0, 0x400001, p);
+    CoXlTestLwGoalStub(1, p, 25.0f);
+    CHECK(CoXlTestLwSend(t, &moves, &next, &sentAt) == 2 && t[0] == 1000.0f && CoXlTestLwGoals(to) == 1 && to[0] == 1000.0f && moves == 0x100);
+    g_case = "none at the point either: it stays the patrol it was, noted; it rests, and the fight waits before it sends again";
+    CoXlTestLwSendSetup(1, sq, fight);
+    CoXlTestLwFightTarget(0, 0x400001, p);
+    CoXlTestLwGoalStub(1, p, 200.0f);
+    const int notes = Count("is not sent: no navmesh");
+    CHECK(CoXlTestLwSend(t, &moves, &next, &sentAt) == 0 && Count("is not sent: no navmesh") == notes + 1 && sentAt == 1 && moves == (3 | 0x100) && t[0] == 900.0f);
+    CHECK(CoXlTestLwSend(t, &moves, &next, &sentAt) == 0 && Count("is not sent: no navmesh") == notes + 1);
+    CoXlTestLwFightTarget(0, 0, NULL);
+    CoXlTestLwGoalStub(0, NULL, 0);
+}
+
+/* One reinforcement's time: 180 s at the fight and 600 s online, each summed over its moves and its online stretches. */
+static void OneClock(void)
+{
+    const float fight[2] = {1000, 0}, at[2] = {800, 0}, p45[2] = {1045, 0};
+    int stage, moves; float t[2];
+    g_case = "100 s at its first point, a move, then 79 s at the next: it stays; 81 s: 180 s at the fight";
+    CoXlTestLwReinforceOn(fight, 1000, 2);
+    CoXlTestLwFightTarget(0, 0, NULL);
+    CHECK(CoXlTestLwReinforceTick(fight, 0, 0, &stage, t, &moves) == 2 && stage == 1);
+    CoXlTestLwFightTarget(0, 0x400001, p45);
+    CHECK(CoXlTestLwReinforceTick(fight, 0, 100000, &stage, t, &moves) == 2 && stage == 0 && moves == 1);
+    CHECK(CoXlTestLwReinforceTick(p45, 0, 101000, &stage, t, &moves) == 2 && stage == 1);
+    const int stays = Count("180 s at the fight");
+    CHECK(CoXlTestLwReinforceTick(p45, 0, 101000 + 79000, &stage, t, &moves) == 2 && Count("180 s at the fight") == stays);
+    CHECK(CoXlTestLwReinforceTick(p45, 0, 101000 + 81000, &stage, t, &moves) == 0 && Count("180 s at the fight") == stays + 1);
+    CoXlTestLwFightTarget(0, 0, NULL);
+    g_case = "on its way: 200 s online, offline, 239 s online, offline, then 160 s: it goes on; 162 s: 600 s online";
+    CoXlTestLwReinforceOn(fight, 1000, 2);
+    CHECK(CoXlTestLwReinforceTick(at, 0, 0, &stage, t, &moves) == 2);
+    CoXlTestLwOfflineAt(200000);
+    CHECK(CoXlTestLwReinforceTick(at, 0, 500000, &stage, t, &moves) == 2);
+    CHECK(CoXlTestLwReinforceTick(at, 0, 500000 + 239000, &stage, t, &moves) == 2);
+    CoXlTestLwOfflineAt(500000 + 239000);
+    CHECK(CoXlTestLwReinforceTick(at, 0, 800000, &stage, t, &moves) == 2);
+    const int caps = Count("600 s online");
+    CHECK(CoXlTestLwReinforceTick(at, 0, 800000 + 160000, &stage, t, &moves) == 2 && Count("600 s online") == caps);
+    CHECK(CoXlTestLwReinforceTick(at, 0, 800000 + 162000, &stage, t, &moves) == 0 && Count("600 s online") == caps + 1);
+    g_case = "at the fight: 460 s online on its way, then 139 s there: it stays; 141 s: 600 s online";
+    CoXlTestLwReinforceOn(fight, 1000, 2);
+    CHECK(CoXlTestLwReinforceTick(at, 0, 0, &stage, t, &moves) == 2);
+    CoXlTestLwOfflineAt(230000);
+    CHECK(CoXlTestLwReinforceTick(at, 0, 300000, &stage, t, &moves) == 2);
+    CoXlTestLwOfflineAt(530000);
+    CHECK(CoXlTestLwReinforceTick(fight, 0, 600000, &stage, t, &moves) == 2 && stage == 1);
+    CHECK(CoXlTestLwReinforceTick(fight, 0, 600000 + 139000, &stage, t, &moves) == 2 && Count("600 s online") == caps + 1);
+    CHECK(CoXlTestLwReinforceTick(fight, 0, 600000 + 141000, &stage, t, &moves) == 0 && Count("600 s online") == caps + 2);
+}
+
+/* Arrival is against where the fight is now; members who heard something are not given a new point; the hand-over. */
+static void AimRules(void)
+{
+    const float fight[2] = {1000, 0}, at[2] = {800, 0}, p100[2] = {1100, 0}, p120[2] = {1120, 0}, p45[2] = {1045, 0}, p150[2] = {1150, 0}, p151[2] = {1151, 0};
+    const float m41[2] = {1079, 0}, m39[2] = {1081, 0}, other[2] = {1070, 0};
+    int stage, moves; float t[2];
+    g_case = "its point 20 m behind the fight's target: 41 m from the target it has not arrived; 39 m it has, and it stays";
+    CoXlTestLwReinforceOn(fight, 20000, 2);
+    CoXlTestLwFightTarget(0, 0x400001, p100);
+    CoXlTestLwReinforceTick(at, 0, 0, &stage, t, &moves);
+    CoXlTestLwFightTarget(0, 0x400001, p120);
+    CHECK(CoXlTestLwReinforceTick(m41, 0, 11000, &stage, t, &moves) == 2 && stage == 0 && t[0] == 1100.0f);
+    CHECK(CoXlTestLwReinforceTick(m39, 0, 12000, &stage, t, &moves) == 2 && stage == 1);
+    CHECK(CoXlTestLwReinforceTick(m39, 0, 23000, &stage, t, &moves) == 2 && stage == 1 && moves == 0);
+    g_case = "the fight's target 150 m from its point is where its squads go; 151 m: the point, and no tell of that target";
+    CoXlTestLwReinforceOn(fight, 20000, 2);
+    CoXlTestLwFightTarget(0, 0x400001, p150);
+    CHECK(CoXlTestLwReinforceTick(at, 0, 0, &stage, t, &moves) == 2 && t[0] == 1150.0f);
+    CoXlTestLwReinforceOn(fight, 20000, 2);
+    CoXlTestLwFightTarget(0, 0x400001, p151);
+    const int tells = Count("told of its target");
+    CHECK(CoXlTestLwReinforceTick(at, 0, 0, &stage, t, &moves) == 2 && t[0] == 1000.0f);
+    CHECK(CoXlTestLwReinforceTick(fight, 0, 1000, &stage, t, &moves) == 2 && stage == 1 && moves == 0 && Count("told of its target") == tells);
+    CoXlTestLwFightTarget(0, 0x400001, p45);
+    CHECK(CoXlTestLwReinforceTick(fight, 2, 2000, &stage, t, &moves) == 2 && Count("told of its target") == tells);
+    CoXlTestLwFightTarget(0, 0x400001, fight);
+    CHECK(CoXlTestLwReinforceTick(fight, 0, 3000, &stage, t, &moves) == 2 && Count("told of its target") == tells + 1);
+
+    g_case = "a member at alert 1 or 2 on its way: no new point; calm again: the new point";
+    CoXlTestLwReinforceOn(fight, 20000, 2);
+    CoXlTestLwFightTarget(0, 0x400001, p100);
+    CoXlTestLwHeard(1);
+    CHECK(CoXlTestLwReinforceTick(at, 0, 0, &stage, t, &moves) == 2 && t[0] == 1000.0f);
+    CoXlTestLwHeard(0);
+    CHECK(CoXlTestLwReinforceTick(at, 0, 1000, &stage, t, &moves) == 2 && t[0] == 1100.0f);
+    g_case = "arrived, a member at alert 2, the fight 45 m off: no move before a tell nor 16 s after one; told 1 s ago, it moves";
+    CoXlTestLwReinforceOn(fight, 20000, 2);
+    CoXlTestLwFightTarget(0, 0, NULL);
+    CHECK(CoXlTestLwReinforceTick(fight, 0, 0, &stage, t, &moves) == 2 && stage == 1);
+    CoXlTestLwFightTarget(0, 0x400001, p45);
+    CoXlTestLwHeard(1);
+    CHECK(CoXlTestLwReinforceTick(fight, 0, 1000, &stage, t, &moves) == 2 && stage == 1 && moves == 0);  /* tell 1 follows in this tick */
+    CHECK(CoXlTestLwReinforceTick(fight, 0, 17000, &stage, t, &moves) == 2 && stage == 1 && moves == 0); /* tell 2 follows */
+    CHECK(CoXlTestLwReinforceTick(fight, 0, 18000, &stage, t, &moves) == 2 && stage == 0 && moves == 1 && t[0] == 1045.0f);
+    CoXlTestLwHeard(0);
+
+    g_case = "on its way, a new point 2 s ago, its fight handed over: the other fight's place on the next tick";
+    CoXlTestLwReinforceOn(fight, 60000, 2);
+    CoXlTestLwFightTarget(0, 0x400001, p100);
+    CHECK(CoXlTestLwReinforceTick(at, 0, 0, &stage, t, &moves) == 2 && t[0] == 1100.0f);
+    CoXlTestLwFightTarget(0, 0, NULL);
+    CoXlTestLwFight(1, other[0], other[1], 60000, 0, 5, GetTickCount64());
+    CHECK(CoXlTestLwFightHandOver(0) == 1);
+    CHECK(CoXlTestLwReinforceTick(at, 0, 2000, &stage, t, &moves) == 2 && stage == 0 && t[0] == 1070.0f);
+}
+
+/* A player's body is told by its avatar entity: its noises are not under the 120 s rule of a source in place. */
+static void NoiseBody(void)
+{
+    g_case = "a noise from a player's avatar entity 30 s after it drew squads there may draw again; a unit handle is no entity";
+    CHECK(CoXlTestLwNoiseGate(0x502, 0x9001, 0x502, 0x502, 30000, 0.0f, 0, 100.0f) == 0);
+    CHECK(CoXlTestLwNoiseGate(0x502, 0x9001, 0x9001, 0x9001, 30000, 0.0f, 0, 100.0f) == 2);
+    g_case = "another source in place: once per 120 s within 50 m";
+    CHECK(CoXlTestLwNoiseGate(0x502, 0x9001, 0x1D5, 0x1D5, 119000, 0.0f, 0, 100.0f) == 2);
+    CHECK(CoXlTestLwNoiseGate(0x502, 0x9001, 0x1D5, 0x1D5, 121000, 0.0f, 0, 100.0f) == 0);
+    CHECK(CoXlTestLwNoiseGate(0x502, 0x9001, 0x1D5, 0x1D5, 30000, 51.0f, 0, 100.0f) == 0);
+    g_case = "the test's noise counted as a source in place: the avatar under the 120 s rule";
+    CHECK(CoXlTestLwNoiseGate(0x502, 0x9001, 0x502, 0x502, 30000, 0.0f, 1, 100.0f) == 2);
+    CHECK(CoXlTestLwNoiseGate(0x502, 0x9001, 0x502, 0x502, 121000, 0.0f, 1, 100.0f) == 0);
+    g_case = "a source noted for no player near is still noted for the 120 s rule";
+    const int farOff = Count("draws no squad: the nearest player is"), rule = Count("draws no squad: this source drew squads");
+    CHECK(CoXlTestLwNoiseGate(0x502, 0x9001, 0x777, 0, 0, 0.0f, 0, 900.0f) == 1 && Count("draws no squad: the nearest player is") == farOff + 1);
+    CHECK(CoXlTestLwNoiseGate(0x502, 0x9001, 0x777, 0x777, 30000, 0.0f, 0, 100.0f) == 2 && Count("draws no squad: this source drew squads") == rule + 1);
+    CHECK(CoXlTestLwNoiseGate(0x502, 0x9001, 0x777, 0x777, 31000, 0.0f, 0, 100.0f) == 2 && Count("draws no squad: this source drew squads") == rule + 1);
+}
+
 /* What places a fight. Run 5: four units at level 7 walked 1 km east at 1.7 m/s and took the fight's point along. */
 static void FightPlace(void)
 {
@@ -787,6 +1030,35 @@ static void FightPlace(void)
     CHECK(CoXlTestLwFightTake(40, 0, 2, 2, 0, 0, t3, 0, pos, &eng, &seen) == 0 && fabsf(pos[0] - 10.0f) < 0.01f && eng == 8);
     g_case = "the next scan's units 20 m on: the point follows them";
     CHECK(CoXlTestLwFightTake(30, 0, 3, 3, 0, 0, t4, 0, pos, &eng, &seen) == 0 && pos[0] == 30.0f && eng == 3);
+    g_case = "level 7 units standing 10 m from the point keep the fight seen 60 s after its last placing unit, no longer";
+    const uint64_t t5 = now + 200000;
+    CoXlTestLwFightsClear();
+    CoXlTestLwFightTake(0, 0, 6, 6, 0, 0, t5, 0, pos, &eng, &seen);
+    CHECK(CoXlTestLwFightTake(10, 0, 4, 0, 0, 0, t5 + 60000, 0, pos, &eng, &seen) == 0 && seen == t5 + 60000);
+    CHECK(CoXlTestLwFightTake(10, 0, 4, 0, 0, 0xB, t5 + 61000, 0, pos, &eng, &seen) == -1 && seen == t5 + 60000 && eng == 4 && CoXlTestLwFightTargetOf(0) == 0);
+    g_case = "a unit that sees its target again: the fight is seen and the 60 s start again";
+    CHECK(CoXlTestLwFightTake(0, 0, 5, 1, 0, 0, t5 + 62000, 0, pos, &eng, &seen) == 0 && seen == t5 + 62000);
+    CHECK(CoXlTestLwFightTake(10, 0, 4, 0, 0, 0, t5 + 122000, 0, pos, &eng, &seen) == 0 && seen == t5 + 122000);
+    g_case = "a call counts as a placing unit";
+    CoXlTestLwFightsClear();
+    CHECK(CoXlTestLwFightTake(500, 0, 8, 0, 1, 0, t5, 0, pos, &eng, &seen) == 0);
+    CHECK(CoXlTestLwFightTake(500, 0, 4, 0, 0, 0, t5 + 60000, 0, pos, &eng, &seen) == 0 && seen == t5 + 60000);
+    CHECK(CoXlTestLwFightTake(500, 0, 4, 0, 0, 0, t5 + 61000, 0, pos, &eng, &seen) == -1);
+    g_case = "a fight keeps its target while it lives within 150 m of the point; one that left or died gives way to the scan's";
+    const float p50[2] = {50, 0}, p151[2] = {151, 0};
+    CoXlTestLwFightsClear();
+    CoXlTestLwFightTake(0, 0, 6, 6, 0, 0xA, t5, 0, pos, &eng, &seen);
+    CHECK(CoXlTestLwFightTargetOf(0) == 0xA);
+    CoXlTestLwFightTarget(0, 0xA, p50);
+    CoXlTestLwFightTake(0, 0, 6, 6, 0, 0xB, t5 + 1000, 0, pos, &eng, &seen);
+    CHECK(CoXlTestLwFightTargetOf(0) == 0xA);
+    CoXlTestLwFightTarget(0, 0xA, p151);
+    CoXlTestLwFightTake(0, 0, 6, 6, 0, 0xB, t5 + 2000, 0, pos, &eng, &seen);
+    CHECK(CoXlTestLwFightTargetOf(0) == 0xB);
+    CoXlTestLwFightTarget(0, 0xB, NULL);
+    CoXlTestLwFightTake(0, 0, 6, 6, 0, 0xC, t5 + 3000, 0, pos, &eng, &seen);
+    CHECK(CoXlTestLwFightTargetOf(0) == 0xC);
+    CoXlTestLwFightTarget(0, 0, NULL);
     CoXlTestLwFightsClear();
 }
 
@@ -824,6 +1096,11 @@ int main(void)
     PlanCap();
     OnlineLimit();
     FightAim();
+    AimOffNavmesh();
+    Send();
+    OneClock();
+    AimRules();
+    NoiseBody();
     FightPlace();
     TeleportGround();
     if (g_failed) { printf("lwreinforce: %d checks failed\n", g_failed); return 1; }

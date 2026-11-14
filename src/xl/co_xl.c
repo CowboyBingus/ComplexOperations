@@ -574,7 +574,7 @@ int CoXlTestMoveSettle(uint32_t e, uint64_t until, uint32_t ask, uint64_t now) {
 void CoXlTestLwFight(int f, float x, float y, uint32_t age, uint32_t seenAgo, int engaged, uint64_t now)
 {
     LwFight* fi = &g_lwFights[f]; memset(fi, 0, sizeof *fi);
-    fi->live = 1; fi->pos[0] = x; fi->pos[1] = y; fi->born = now - age; fi->seen = now - seenAgo; fi->engaged = fi->peak = engaged;
+    fi->live = 1; fi->pos[0] = x; fi->pos[1] = y; fi->born = now - age; fi->seen = fi->hotAt = now - seenAgo; fi->engaged = fi->peak = engaged;
 }
 void CoXlTestLwFightsClear(void) { memset(g_lwFights, 0, sizeof g_lwFights); g_lwWorld.count = 0; }
 int CoXlTestLwFightNearest(float x, float y, float within, int skip) { float at[2] = {x, y}; return LwFightNearest(at, within, skip); }
@@ -738,7 +738,7 @@ void CoXlTestLwStallApply(int intent, int tries, const int* read, float atX, flo
 uint32_t CoXlTestLwStallCount(int what) { return what == 0 ? g_lwWorld.stallResent : what == 1 ? g_lwWorld.stallSnapped : what == 2 ? g_lwWorld.stallNewGoal : what == 3 ? g_lwWorld.stallResumed : what == 4 ? g_lwWorld.stallAction : g_lwWorld.stallBusy; }
 int CoXlTestLwStallWaits(int set) { if (set >= 0) g_lwSquads[0].stallWaits = (uint8_t)set; return g_lwSquads[0].stallWaits; }
 /* The band-edge wait's clocks moved back by ms: 0 the intent's start, 1 the time at this point; 2: the fight ends. */
-void CoXlTestLwHoldAge(int what, uint32_t ms) { LwSquad* q = &g_lwSquads[0]; if (what == 0) { q->intentAt -= ms; g_lwFights[0].born -= ms; q->fightBorn -= ms; } else if (what == 1) q->heldAt -= ms; else if (what == 2) g_lwFights[0].live = 0; else if (what == 4) q->heldFrom -= ms; else { memset(&g_lwNodes[0], 0, sizeof g_lwNodes[0]); g_lwNodeCount = 1; } } /* 3: one route node, for an intent's end; 4: its wait in this intent */
+void CoXlTestLwHoldAge(int what, uint32_t ms) { LwSquad* q = &g_lwSquads[0]; if (what == 0) { q->intentAt -= ms; g_lwFights[0].born -= ms; q->fightBorn -= ms; } else if (what == 1) q->heldAt -= ms; else if (what == 2) g_lwFights[0].live = 0; else if (what == 4) q->heldFrom -= ms; else if (what == 5) q->heldFrom = q->intentAt - ms; else { memset(&g_lwNodes[0], 0, sizeof g_lwNodes[0]); g_lwNodeCount = 1; } } /* 3: one route node, for an intent's end; 4: its wait in this intent; 5: a wait that began ms before this intent */
 /* Squad 0 online on its way to fight 0 (live, at `fight`), sent `sentAgo` ms ago, with one route node for an end. A
  * fight's target as the test gives it: live at `at`, or dead (at NULL); target 0 puts the game's read back. */
 static int g_testTargetLive; static float g_testTargetAt[3];
@@ -759,12 +759,67 @@ void CoXlTestLwReinforceOn(const float* fight, uint32_t sentAgo, int intent)
 }
 /* One online tick of squad 0's reinforcement `later` ms from now, its leader at `at`, `engaged` members engaged: its
  * intent after it; its stage, point and moves. */
+static int g_testHeard;
+void CoXlTestLwHeard(int members) { g_testHeard = members; } /* members at alert 1 or 2 in the ticks that follow */
 int CoXlTestLwReinforceTick(const float* at, int engaged, uint32_t later, int* stage, float* target, int* moves)
 {
     LwSquad* q = &g_lwSquads[0]; const uint32_t members[1] = {0};
-    LwReinforceTick(q, members, 1, engaged, at, GetTickCount64() + later);
+    LwReinforceTick(q, members, 1, engaged, g_testHeard, at, GetTickCount64() + later);
     *stage = q->intentStage; target[0] = q->target[0]; target[1] = q->target[1]; *moves = q->moves;
     return q->intent;
+}
+/* The goal call of squad 0's reinforcement as the test gives it: no navmesh within `r` of `off` (NULL: everywhere
+ * has), the squad's job set; on 0 puts the game's call back. Then the goals sent since and the last one's place. */
+static struct { int n, hasOff; float off[2], r, to[2]; } g_testGoal;
+static int TestGoTo(LwSquad* q, const float* target)
+{
+    (void)q;
+    if (g_testGoal.hasOff && LwDist2(target, g_testGoal.off[0], g_testGoal.off[1]) <= g_testGoal.r * g_testGoal.r) return 0;
+    g_testGoal.n++; g_testGoal.to[0] = target[0]; g_testGoal.to[1] = target[1];
+    return 1;
+}
+void CoXlTestLwGoalStub(int on, const float* off, float r)
+{
+    memset(&g_testGoal, 0, sizeof g_testGoal);
+    g_lwGoTo = on ? TestGoTo : LwSquadGoTo; g_lwSquads[0].jobSet = (uint8_t)(on != 0);
+    if (off) { g_testGoal.hasOff = 1; g_testGoal.off[0] = off[0]; g_testGoal.off[1] = off[1]; g_testGoal.r = r; }
+}
+int CoXlTestLwGoals(float* to) { to[0] = g_testGoal.to[0]; to[1] = g_testGoal.to[1]; return g_testGoal.n; }
+/* Squad 0 goes offline `later` ms from now on its way and is online again (its state only). */
+void CoXlTestLwOfflineAt(uint32_t later) { LwSquad* q = &g_lwSquads[0]; q->state = LW_OFFLINE; LwIntentOfflineAt(q, GetTickCount64() + later); q->state = LW_ONLINE; }
+/* The send: squad 0 a patrol at `sq` (online with its job set, or offline) that kept 3 moves and an old point from an
+ * earlier reinforcement, fight 0 live at `fight`. CoXlTestLwSend sends 1 squad: its intent after, its point, its
+ * moves, the ms to its next new point, whether the fight's send time was set. */
+void CoXlTestLwSendSetup(int online, const float* sq, const float* fight)
+{
+    const float pl[2] = {0, 0};
+    CoXlTestLwReinforce(pl, sq, sq);
+    LwSquad* q = &g_lwSquads[0];
+    q->state = online ? LW_ONLINE : LW_OFFLINE; q->jobSet = (uint8_t)(online != 0); q->intent = LW_PATROL; q->fight = -1; q->survivors = 8; q->moves = 3; q->stageSum = 170000; q->onSum = 590000; q->aimMiss = 1;
+    memcpy(g_lwFights[0].pos, fight, sizeof(float) * 2); g_lwFights[0].seen = g_lwFights[0].hotAt = GetTickCount64(); g_lwFights[0].engaged = 3;
+    memset(&g_lwNodes[0], 0, sizeof g_lwNodes[0]); g_lwNodeCount = 1;
+}
+int CoXlTestLwSend(float* target, int* moves, int* nextPoint, int* sentAt)
+{
+    LwSquad* q = &g_lwSquads[0]; ULONGLONG now = GetTickCount64();
+    LwReinforce(0, 1);
+    target[0] = q->target[0]; target[1] = q->target[1]; *moves = q->moves | (q->stageSum || q->onSum || q->aimMiss ? 0x100 : 0); *nextPoint = (int)(q->retargetAt - now); *sentAt = g_lwFights[0].sentAt != 0;
+    return q->intent;
+}
+uint32_t CoXlTestLwFightTargetOf(int f) { return g_lwFights[f].target; }
+/* The noise gate for a noise from `source` `away` m from the player, whose avatar entity and unit handle are given;
+ * `sent` drew squads `ago` ms before, `moved` m from here. fixed: the test's source in place. The skip reason. */
+int CoXlTestLwNoiseGate(uint32_t avatar, uint32_t unit, uint32_t source, uint32_t sent, uint32_t ago, float moved, int fixed, float away)
+{
+    ULONGLONG now = GetTickCount64() + 1000000;
+    LwNoise n; memset(&n, 0, sizeof n); n.source = source; n.pos[0] = away; n.type = 27;
+    g_lwWorld.playersAt = 1; g_lwWorld.players[0][0] = g_lwWorld.players[0][1] = 0; g_lwWorld.avatars[0] = avatar; g_lwWorld.units[0] = unit;
+    memset(g_lwNoiseSent, 0, sizeof g_lwNoiseSent);
+    g_lwNoiseSent[0].source = sent; g_lwNoiseSent[0].pos[0] = away + moved; g_lwNoiseSent[0].at = now - ago;
+    g_lwNoiseFixed = fixed ? source : 0;
+    int skip = LwNoiseGate(&n, 320.0f, now);
+    g_lwNoiseFixed = 0;
+    return skip;
 }
 /* The limits of squad 0's intent `later` ms from now: bit 0 late online, bit 1 late at the band's edge. */
 int CoXlTestLwIntentLate(uint32_t later) { LwSquad* q = &g_lwSquads[0]; ULONGLONG now = GetTickCount64() + later; return LwIntentLate(q, now) | LwHoldLate(q, now) << 1; }
