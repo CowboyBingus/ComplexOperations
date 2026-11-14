@@ -24,6 +24,15 @@ int CoXlTestLwFightOfSquad(int i);
 int CoXlTestLwAlertList(uint32_t id, uint32_t lv, float d, int note);
 int CoXlTestLwAlertFights(uint32_t lv);
 
+int CoXlTestLwOnlineSteps(int online, uint64_t wideUntil, uint64_t now);
+int CoXlTestLwOnlineStep(uint64_t wideUntil, uint64_t now);
+int CoXlTestLwOnProp(float top, float drawn, uint32_t owner, float hitZ);
+int CoXlTestLwPropTake(void);
+void CoXlTestLwSpacedText(char* out, size_t size, int squad, float dist, uint64_t ago);
+const char* CoXlTestLwFitText(int ends);
+
+int CoXlTestLwNoiseSkip(float playerDist, float reach, uint64_t sinceSent, float moved);
+int CoXlTestLwGoalCanSend(int route, int records, uint64_t* after);
 static int g_failed;
 static const char* g_case;
 #define CHECK(what) do { if (!(what)) { printf("FAILED %s: %s\n", g_case, #what); g_failed++; } } while (0)
@@ -275,6 +284,69 @@ static void Alerts(void)
     CHECK(Count("40 alerted units") == 1 && Count("(and more)") == 1);
 }
 
+/* Run 3: 15 of 19 online squads were placed wide and never ticked again (no members read, no goal, never offline). */
+static void WideTick(void)
+{
+    g_case = "a squad placed wide is ticked while its members are listed for the keeper, and after";
+    CHECK(CoXlTestLwOnlineSteps(1, 0, 1000) == 1);
+    CHECK(CoXlTestLwOnlineSteps(1, 6000, 1000) == 3);
+    CHECK(CoXlTestLwOnlineSteps(1, 6000, 5999) == 3);
+    CHECK(CoXlTestLwOnlineSteps(1, 6000, 6000) == 1);
+    CHECK(CoXlTestLwOnlineSteps(1, 6000, 900000) == 1);
+    CHECK(CoXlTestLwOnlineSteps(0, 6000, 1000) == 0);
+    g_case = "a goal that could not be sent leaves the squad goal-less, so the stall check asks again";
+    uint64_t after = 1;
+    CHECK(CoXlTestLwGoalCanSend(1, 1, &after) == 1 && after == 5000);
+    CHECK(CoXlTestLwGoalCanSend(0, 1, &after) == 0 && after == 0); /* the route used up and no new one */
+    CHECK(CoXlTestLwGoalCanSend(1, 0, &after) == 0 && after == 0); /* no job or squad record this tick */
+    CHECK(CoXlTestLwGoalCanSend(0, 0, &after) == 0 && after == 0);
+    g_case = "the squad loop's step runs the tick of a wide squad (with no game the tick frees the squad), counts it and closes the listing";
+    CHECK(CoXlTestLwOnlineStep(0, 1000) == 7);
+    CHECK(CoXlTestLwOnlineStep(6000, 1000) == 5);   /* listed: ticked, counted, the listing still open */
+    CHECK(CoXlTestLwOnlineStep(6000, 6000) == 7);   /* the listing over: ticked and closed */
+    CHECK(CoXlTestLwOnlineStep(6000, 900000) == 7);
+}
+/* Run 3: 16 ground hits 0.6-6.4 m over the drawn ground, none under it; the line now names the body under the hit. */
+static void Props(void)
+{
+    char t[160];
+    g_case = "a ground hit over the drawn ground is a prop's top when a unit's body is the hit, no more than 2 m up";
+    CHECK(CoXlTestLwOnProp(58.4f, 56.7f, 0x68CC, 58.4f) == 1);
+    CHECK(CoXlTestLwOnProp(58.4f, 56.7f, 0x68CC, 58.7f) == 1);  /* the static hit within 0.3 m of the ground hit */
+    CHECK(CoXlTestLwOnProp(58.4f, 56.7f, 0x68CC, 58.8f) == 0);
+    CHECK(CoXlTestLwOnProp(58.4f, 56.7f, 0x68CC, 58.0f) == 0);  /* the ground ray hit something the static ray does not see */
+    CHECK(CoXlTestLwOnProp(58.4f, 56.7f, 0, 58.4f) == 0);       /* terrain off the drawn ground */
+    CHECK(CoXlTestLwOnProp(58.4f, 56.7f, 0x68CC, NAN) == 0);    /* no static hit */
+    CHECK(CoXlTestLwOnProp(58.7f, 56.7f, 0x68CC, 58.7f) == 1);  /* 2 m up */
+    CHECK(CoXlTestLwOnProp(58.8f, 56.7f, 0x68CC, 58.8f) == 0);  /* higher: a wall or a roof */
+    CHECK(CoXlTestLwOnProp(57.2f, 56.7f, 0x68CC, 57.2f) == 0);  /* within 0.5 m: the drawn ground's own case */
+    CHECK(CoXlTestLwOnProp(55.0f, 56.7f, 0x68CC, 55.0f) == 0);  /* under the drawn ground: never */
+    CHECK(CoXlTestLwOnProp(58.4f, -9999.0f, 0x68CC, 58.4f) == 0);
+    CHECK(CoXlTestLwOnProp(58.4f, NAN, 0x68CC, 58.4f) == 0);
+    CHECK(CoXlTestLwPropTake() == 0); /* noted only: the 0.5 m test stays until a run names the bodies */
+    g_case = "the spacing refusal names its blocker and the distance";
+    CoXlTestLwSpacedText(t, sizeof t, 3590, 43.4f, 0);
+    CHECK(strcmp(t, "within 60 m of an online squad: squad 3590, 43 m away") == 0);
+    CoXlTestLwSpacedText(t, sizeof t, -1, 12.0f, 31500);
+    CHECK(strcmp(t, "within 60 m of a request in the last minute: 12 m away, 32 s ago") == 0);
+    CoXlTestLwSpacedText(t, sizeof t, 0, 59.6f, 0);
+    CHECK(strcmp(t, "within 60 m of an online squad: squad 0, 60 m away") == 0);
+    g_case = "a noise far from every player, or from a source in place that drew squads in the last 120 s, draws none";
+    CHECK(CoXlTestLwNoiseSkip(3600.0f, 320.0f, ~0ull, 0.0f) == 1);  /* run 3: the emitter 3.6 km from the player */
+    CHECK(CoXlTestLwNoiseSkip(400.0f, 320.0f, ~0ull, 0.0f) == 0);
+    CHECK(CoXlTestLwNoiseSkip(401.0f, 320.0f, ~0ull, 0.0f) == 1);
+    CHECK(CoXlTestLwNoiseSkip(600.0f, 600.0f, ~0ull, 0.0f) == 0);   /* a player within its reach */
+    CHECK(CoXlTestLwNoiseSkip(601.0f, 600.0f, ~0ull, 0.0f) == 1);
+    CHECK(CoXlTestLwNoiseSkip(100.0f, 320.0f, 119999, 0.0f) == 2);
+    CHECK(CoXlTestLwNoiseSkip(100.0f, 320.0f, 120000, 0.0f) == 0);
+    CHECK(CoXlTestLwNoiseSkip(100.0f, 320.0f, 5000, 49.0f) == 2);
+    CHECK(CoXlTestLwNoiseSkip(100.0f, 320.0f, 5000, 50.0f) == 0);   /* it moved on: a new place */
+    CHECK(CoXlTestLwNoiseSkip(3600.0f, 320.0f, 5000, 0.0f) == 1);
+    g_case = "a member's refusal says which test failed";
+    CHECK(strcmp(CoXlTestLwFitText(1), "a member's slot navmesh is too far over or under the ground") == 0);
+    CHECK(strcmp(CoXlTestLwFitText(0), "a member's way along the navmesh to its slot is blocked") == 0);
+}
+
 int main(void)
 {
     g_case = "set-up";
@@ -284,6 +356,8 @@ int main(void)
     Gate();
     Fights();
     Alerts();
+    WideTick();
+    Props();
     if (g_failed) { printf("lwfight: %d checks failed\n", g_failed); return 1; }
     printf("lwfight: all cases passed\n");
     return 0;

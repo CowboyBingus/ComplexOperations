@@ -848,6 +848,47 @@ static void LwInvestigate(const LwEvent* e, int pass)
     Note("living world: noise type %u at (%.0f, %.0f, %.1f) from %08X, reach %.0f m%s: %s", e->type, (double)e->pos[0], (double)e->pos[1], (double)e->pos[2], e->source,
         (double)e->reach, pass ? ", online squads" : "", picked ? list : "no calm squad in reach");
 }
+/* A source that stays in one place must not draw squads for good (run 3: one entity on the Helldivers' side, far from
+ * every player, emitted every few seconds and drew the squads in its reach 84 times). A noise draws nobody with no
+ * player within LW_NOISE_PLAYER of it or within its reach; and a source that is no player's body draws squads once per
+ * LW_NOISE_SOURCE_MS while it stays within LW_NOISE_FIXED of where it last did (D, all three). */
+#define LW_NOISE_PLAYER 400.0f
+#define LW_NOISE_SOURCE_MS 120000u
+#define LW_NOISE_FIXED 50.0f
+/* 0 the noise may draw squads, 1 no player near, 2 its fixed source drew squads `sinceSent` ms ago at `moved` m from here
+ * (sinceSent ~0 for a source that drew none, or a player's body). */
+static int LwNoiseSkip(float playerDist, float reach, ULONGLONG sinceSent, float moved)
+{
+    if (playerDist > (reach > LW_NOISE_PLAYER ? reach : LW_NOISE_PLAYER)) return 1;
+    if (sinceSent < LW_NOISE_SOURCE_MS && moved < LW_NOISE_FIXED) return 2;
+    return 0;
+}
+static struct { uint32_t source; float pos[2]; ULONGLONG at, noted; } g_lwNoiseSent[16];
+static uint32_t g_lwNoiseSkips[3];
+static int LwNoiseSource(uint32_t source)
+{
+    for (int i = 0; i < 16; i++) if (g_lwNoiseSent[i].source == source && g_lwNoiseSent[i].at) return i;
+    return -1;
+}
+/* The gate for one noise: its skip reason (LwNoiseSkip), noted once per source and LW_NOISE_SOURCE_MS. */
+static int LwNoiseGate(const LwNoise* n, float reach, ULONGLONG now)
+{
+    int body = 0, k = LwNoiseSource(n->source);
+    for (int i = 0; i < g_lwWorld.playersAt; i++) if (g_lwWorld.units[i] == n->source) body = 1;
+    ULONGLONG since = k >= 0 && !body ? now - g_lwNoiseSent[k].at : ~0ull;
+    float moved = k >= 0 ? sqrtf(LwDist2(g_lwNoiseSent[k].pos, n->pos[0], n->pos[1])) : 0, away = sqrtf(LwNearestPlayer2(n->pos[0], n->pos[1]));
+    int skip = LwNoiseSkip(away, reach, since, moved);
+    if (!skip) return 0;
+    g_lwNoiseSkips[skip]++;
+    static struct { uint32_t source; ULONGLONG at; } noted[8]; static int next;
+    for (int i = 0; i < 8; i++) if (noted[i].source == n->source && noted[i].at && now - noted[i].at < LW_NOISE_SOURCE_MS) return skip;
+    noted[next].source = n->source; noted[next].at = now; next = (next + 1) % 8;
+    if (skip == 1) Note("living world: noise type %u at (%.0f, %.0f) from %08X draws no squad: the nearest player is %.0f m away (reach %.0f m, limit %.0f m)", n->type,
+        (double)n->pos[0], (double)n->pos[1], n->source, (double)away, (double)reach, (double)(reach > LW_NOISE_PLAYER ? reach : LW_NOISE_PLAYER));
+    else Note("living world: noise type %u at (%.0f, %.0f) from %08X draws no squad: this source drew squads %.0f s ago, %.0f m from here (one send per %.0f s for a source that stays in place)",
+        n->type, (double)n->pos[0], (double)n->pos[1], n->source, (double)since / 1000.0, (double)moved, (double)LW_NOISE_SOURCE_MS / 1000.0);
+    return skip;
+}
 /* each squads tick, before the squads: the noises since the last tick */
 static void LwNoiseDrain(void)
 {
@@ -855,7 +896,7 @@ static void LwNoiseDrain(void)
     static LONG level;
     LONG head = g_lwNoiseHead;
     MemoryBarrier();
-    if (level != g_lwMission) { level = g_lwMission; g_lwNoiseTail = head; memset(g_lwEvents, 0, sizeof g_lwEvents); } /* a new mission: nothing from before */
+    if (level != g_lwMission) { level = g_lwMission; g_lwNoiseTail = head; memset(g_lwEvents, 0, sizeof g_lwEvents); memset(g_lwNoiseSent, 0, sizeof g_lwNoiseSent); } /* a new mission: nothing from before */
     if (head - g_lwNoiseTail > (LONG)LW_NOISE_RING) g_lwNoiseTail = head - (LONG)LW_NOISE_RING;
     ULONGLONG now = GetTickCount64();
     for (; g_lwNoiseTail != head; g_lwNoiseTail++)
@@ -877,10 +918,18 @@ static void LwNoiseDrain(void)
             if (o->at < g_lwEvents[oldest].at) oldest = i;
         }
         if (same >= 0) { g_lwEvents[same].at = now; continue; }
+        if (LwNoiseGate(&n, reach, now)) continue;
         LwEvent* e = &g_lwEvents[oldest];
         memcpy(e->pos, n.pos, sizeof e->pos); e->reach = reach; e->source = n.source; e->at = e->born = now; e->type = n.type; e->onlinePending = 1;
         g_lwHear.events++;
+        uint32_t sentBefore = g_lwHear.sent;
         LwInvestigate(e, 0);
+        if (g_lwHear.sent != sentBefore) /* this source drew squads here */
+        {
+            int k = LwNoiseSource(n.source);
+            if (k < 0) { k = 0; for (int i = 1; i < 16; i++) if (g_lwNoiseSent[i].at < g_lwNoiseSent[k].at) k = i; }
+            g_lwNoiseSent[k].source = n.source; g_lwNoiseSent[k].pos[0] = n.pos[0]; g_lwNoiseSent[k].pos[1] = n.pos[1]; g_lwNoiseSent[k].at = now;
+        }
     }
     for (int i = 0; i < 16; i++)
         if (g_lwEvents[i].onlinePending && now - g_lwEvents[i].born >= LW_HEAR_ONLINE_MS) { g_lwEvents[i].onlinePending = 0; LwInvestigate(&g_lwEvents[i], 1); }
@@ -888,8 +937,9 @@ static void LwNoiseDrain(void)
 static void LwHearNote(void)
 {
     if (!g_lwNoiseOn || (g_lwHear.heard == 0 && g_lwHear.sent == 0)) return;
-    Note("living world: noise (30 s): %u emissions, %u from the Helldivers' side in reach, %u events, %u squads sent, %u members told, %u investigations ended",
-        g_lwHear.heard, g_lwHear.kept, g_lwHear.events, g_lwHear.sent, g_lwHear.told, g_lwHear.ended);
+    Note("living world: noise (30 s): %u emissions, %u from the Helldivers' side in reach, %u events, %u squads sent, %u members told, %u investigations ended; drew no squad: %u with no player near, %u from a source in place that drew squads in the last %.0f s",
+        g_lwHear.heard, g_lwHear.kept, g_lwHear.events, g_lwHear.sent, g_lwHear.told, g_lwHear.ended, g_lwNoiseSkips[1], g_lwNoiseSkips[2], (double)LW_NOISE_SOURCE_MS / 1000.0);
+    memset(g_lwNoiseSkips, 0, sizeof g_lwNoiseSkips);
     memset(&g_lwHear, 0, sizeof g_lwHear);
 }
 static void LwReinforce(int f, int want)

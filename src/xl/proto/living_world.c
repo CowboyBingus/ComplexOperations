@@ -572,7 +572,7 @@ static struct
     uint32_t goals, goalNoFace, goalReplans, goalStuck; /* goals sent, next nodes without a face within 25 m, replans, none found (30 s) */
     uint32_t heights, underGround, overGround; float worstUnder, worstOver; /* members against the drawn ground (30 s) */
     uint32_t wide; float wideWorst; /* points taken with the face more than 2 m off the drawn ground (30 s) */
-    uint32_t building, undrawn, overNav; float overNavWorst; /* points refused: in the cell being built; the ground hit not the drawn ground (30 s) */
+    uint32_t building, undrawn, onProp, overNav; float overNavWorst; /* points refused: in the cell being built; the ground hit not the drawn ground (30 s) */
     int popMade, popPass, popTries, popTicks; float popNearest; double popMs; /* the populate, resumed each tick (LW_POP_MS) */
 } g_lwWorld;
 static LONG g_lwMission; /* counts the missions: the next one's level can get the last one's address, and is not it */
@@ -864,6 +864,7 @@ static int LwHiddenFar(const float* p);
 static int LwSeenFromView(int i, const float* point);
 static int g_lwFarSpawn; /* LwOnline: a far (sightline) squad's request */
 static int LwMembersFit(uintptr_t slot, const float* pos, uint32_t n);
+static const char* g_lwFitWhy = "a member would not reach its slot"; /* which of LwMembersFit's tests refused */
 static int LwSlotsHidden(const float* p, uint32_t n);
 static void LwRefuseCount(const char* why);
 
@@ -878,12 +879,21 @@ static void LwRecentAdd(const float* p) { int k = g_lwRecent.next++ % LW_RECENT;
 /* Spacing (D; audit 1 criterion 11, lw16i: two squads came online at one spot 14 s apart): no squad comes online within
  * LW_SPACING of a squad that is online or pending (its live position) or of a request in the last 60 s. */
 #define LW_SPACING 60.0f
+static char g_lwSpacedWhy[160];
+/* The spacing rule's text: the blocker (a squad's index, or -1 for a request `ago` ms old) and its distance. */
+static void LwSpacedText(char* out, size_t size, int squad, float dist, ULONGLONG ago)
+{
+    if (squad >= 0) snprintf(out, size, "within %.0f m of an online squad: squad %d, %.0f m away", (double)LW_SPACING, squad, (double)dist);
+    else snprintf(out, size, "within %.0f m of a request in the last minute: %.0f m away, %.0f s ago", (double)LW_SPACING, (double)dist, (double)ago / 1000.0);
+}
 static int LwRecentNear(const float* p)
 {
     ULONGLONG now = GetTickCount64();
-    for (int k = 0; k < LW_RECENT; k++) if (g_lwRecent.at[k] && now - g_lwRecent.at[k] < 60000 && LwDist2(g_lwRecent.p[k], p[0], p[1]) < LW_SPACING * LW_SPACING) return 1;
     for (int i = 0; i < g_lwWorld.count; i++)
-        if ((g_lwSquads[i].state == LW_ONLINE || g_lwSquads[i].state == LW_PENDING) && LwDist2(g_lwSquads[i].pos, p[0], p[1]) < LW_SPACING * LW_SPACING) return 1;
+        if ((g_lwSquads[i].state == LW_ONLINE || g_lwSquads[i].state == LW_PENDING) && LwDist2(g_lwSquads[i].pos, p[0], p[1]) < LW_SPACING * LW_SPACING)
+        { LwSpacedText(g_lwSpacedWhy, sizeof g_lwSpacedWhy, i, sqrtf(LwDist2(g_lwSquads[i].pos, p[0], p[1])), 0); return 1; }
+    for (int k = 0; k < LW_RECENT; k++) if (g_lwRecent.at[k] && now - g_lwRecent.at[k] < 60000 && LwDist2(g_lwRecent.p[k], p[0], p[1]) < LW_SPACING * LW_SPACING)
+    { LwSpacedText(g_lwSpacedWhy, sizeof g_lwSpacedWhy, -1, sqrtf(LwDist2(g_lwRecent.p[k], p[0], p[1])), now - g_lwRecent.at[k]); return 1; }
     return 0;
 }
 
@@ -1049,7 +1059,7 @@ static int LwOnlinePlace(LwSquad* q, uintptr_t slot, uint32_t cap, float* pos, f
     }
     float ground = pos[2];
     LwGround(pos[0], pos[1], &ground);
-    if (!LwMembersFit(slot, pos, cap)) { g_lwOnlineWhy = "a member would not reach its slot"; q->retry = GetTickCount64() + 3000; LwHoldNext(q); return 0; }
+    if (!LwMembersFit(slot, pos, cap)) { g_lwOnlineWhy = g_lwFitWhy; q->retry = GetTickCount64() + 3000; LwHoldNext(q); return 0; }
     q->wide = (uint8_t)g_lwPlaceWide;
     /* sight is asked where the members will stand: on the ground, not at a face under it */
     float see[3] = {pos[0], pos[1], ground > pos[2] ? ground : pos[2]};
@@ -1095,9 +1105,9 @@ static void LwOnline(LwSquad* q)
     if (rec == 0) { snprintf(g_lwRoomWhy, sizeof g_lwRoomWhy, "the spawn request returned no record"); g_lwOnlineWhy = g_lwRoomWhy; LwRefuseCount(g_lwRoomWhy); g_lwWorld.refused++; return; }
     uint8_t used = 0;
     if (SafeRead(rec + 0x12, &used, 1) || used != 1) { snprintf(g_lwRoomWhy, sizeof g_lwRoomWhy, "the spawn queue was full"); g_lwOnlineWhy = g_lwRoomWhy; LwRefuseCount(g_lwRoomWhy); g_lwWorld.refused++; return; } /* the queue was full: nothing queued */
-    Note("living world: squad %d requested at (%.0f, %.0f, %.1f) (snapped %.1f m), %.0f m from the nearest player, out of sight, %u of %u members (group 0x%llx)",
+    Note("living world: squad %d requested at (%.0f, %.0f, %.1f) (snapped %.1f m), %.0f m from the nearest player, out of sight, %u of %u members (group 0x%llx)%s",
         (int)(q - g_lwSquads), (double)pos[0], (double)pos[1], (double)pos[2], (double)sqrtf(LwDist2(wanted, pos[0], pos[1])),
-        (double)sqrtf(LwNearestPlayer2(pos[0], pos[1])), cap, size, (unsigned long long)q->definition);
+        (double)sqrtf(LwNearestPlayer2(pos[0], pos[1])), cap, size, (unsigned long long)q->definition, q->wide ? ", placed wide" : "");
     q->reqZ = pos[2]; q->arrived = 0; q->viewed = 0; q->checkedCount = 0; q->appearSeen = 0; q->appearGap = 1e9f; q->farOn = 0; q->inView = 0; q->lookAt = 0;
     g_lwEvery[q - g_lwSquads] = 1;
     q->state = LW_PENDING; q->rec = rec; q->cap = (uint8_t)cap; q->since = GetTickCount64(); q->jobSet = 0; q->jobAt = 0; q->farSince = 0; q->seenCount = 0; q->lost = 0; q->squad = 0;
@@ -1161,6 +1171,37 @@ static float LwFaceReach(int tilesOn, int keeper, float top, float drawn, float 
  * every member stays on the point). So with the face more than LW_FACE_NEAR off the ground the request goes in at the
  * face's height; nearer, at the ground hit's as before (audit 1g, 9). */
 static float LwRequestZ(float top, float face) { return fabsf(top - face) > LW_FACE_NEAR ? face : top; }
+/* A ground hit over the drawn ground that is a prop's top. The ground ray takes the topmost surface, so a rock or a
+ * wall on the terrain reads as "not the drawn ground", and a squad of nine needs ten such points clear. The static
+ * ray down from over the hit (LwTopOwner) names the body: `owner` is its unit, 0 for terrain, and `hitZ` its height.
+ * A unit's body whose top is the ground hit, no more than LW_FACE_NEAR over the drawn ground, is stood on as the
+ * game's own spawn snap does; terrain off the drawn ground, a miss or a higher top stays refused. */
+#define LW_PROP_SAME 0.3f
+#define LW_PROP_TAKE 0 /* 0: such a hit is only noted and stays refused, until a run's notes show what the bodies are */
+static int LwOnProp(float top, float drawn, uint32_t owner, float hitZ)
+{
+    if (owner == 0 || !isfinite(top) || !isfinite(hitZ) || !isfinite(drawn) || drawn < -9000.0f) return 0;
+    return fabsf(hitZ - top) <= LW_PROP_SAME && top > drawn + 0.5f && top <= drawn + LW_FACE_NEAR;
+}
+static uint32_t LwTopOwner(float x, float y, float top, float* hitZ);
+/* The ground hit against the drawn ground: 1 the drawn ground within 0.5 m, 2 a prop's top (LwOnProp), 0 neither.
+ * Each hit off the drawn ground is noted with its body, 40 a mission. */
+static int LwDrawnOk(float x, float y, float top, float drawn, const char* what)
+{
+    static LONG mission = -1; static int lines;
+    if (drawn >= -9000.0f && fabsf(top - drawn) <= 0.5f) return 1;
+    float hitZ = NAN; uint32_t owner = drawn < -9000.0f ? 0 : LwTopOwner(x, y, top, &hitZ);
+    int prop = LwOnProp(top, drawn, owner, hitZ);
+    int tile = -1; MoveDrawnGround(x, y, &tile);
+    if (prop) g_lwWorld.onProp++;
+    if (!prop || !LW_PROP_TAKE) g_lwWorld.undrawn++;
+    if (mission != g_lwMission) { mission = g_lwMission; lines = 0; }
+    if (lines < 40 && ++lines)
+        Note("living world: placement: %s at (%.0f, %.0f) in tile %d: ground hit %.1f, drawn ground %.1f (hit - drawn %+.1f); the static ray under it: hit %.1f, body of unit %08X: %s%s",
+            what, (double)x, (double)y, tile, (double)top, (double)drawn, (double)(top - drawn), (double)hitZ, owner,
+            prop ? (LW_PROP_TAKE ? "a prop's top, taken" : "a prop's top no more than 2 m up, refused all the same") : owner == 0 ? "terrain or no static body, refused" : "a unit's body, refused (not the hit, or over 2 m up)", lines == 40 ? " (the last such line this mission)" : "");
+    return prop && LW_PROP_TAKE ? 2 : 0;
+}
 static int LwPlace(uintptr_t slot, float* pos)
 {
     typedef int (*SnapFn)(uint32_t nav, float* p, float radius, float* out, float* normal, uint32_t layer);
@@ -1193,7 +1234,7 @@ static int LwPlace(uintptr_t slot, float* pos)
     {
         float drawn = d;
         if (MoveCellBuilding(p[0], p[1])) { g_lwWorld.building++; LwPlaceRefused("in the cell being built", top, p[2], drawn); return 0; }
-        if (drawn < -9000.0f || fabsf(top - drawn) > 0.5f) { g_lwWorld.undrawn++; LwPlaceRefused("the ground hit is not the drawn ground", top, p[2], drawn < -9000.0f ? NAN : drawn); return 0; }
+        if (!LwDrawnOk(p[0], p[1], top, drawn, "a point")) { LwPlaceRefused("the ground hit is not the drawn ground", top, p[2], drawn < -9000.0f ? NAN : drawn); return 0; }
         if (fabsf(top - p[2]) > LW_FACE_NEAR) { g_lwPlaceWide = 1; g_lwWorld.wide++; if (fabsf(top - p[2]) > g_lwWorld.wideWorst) g_lwWorld.wideWorst = fabsf(top - p[2]); }
         p[2] = LwRequestZ(top, p[2]);
     }
@@ -1275,11 +1316,17 @@ static int LwSlotHeightOk(float z, float top, float reach)
     if (reach > LW_FACE_NEAR) return fabsf(z - top) <= reach;
     return z >= top - 0.9f && z <= top + LW_FACE_NEAR;
 }
+/* The refusal's text for a member whose cast along the navmesh ended at its slot (`ends`) or short of it. */
+static const char* LwFitText(int ends)
+{
+    return ends ? "a member's slot navmesh is too far over or under the ground" : "a member's way along the navmesh to its slot is blocked";
+}
 static int LwMembersFit(uintptr_t slot, const float* pos, uint32_t n)
 {
     typedef uint64_t (*CastFn)(uint32_t world, const float* from, const float* to, float radius, uint32_t layer, float* out);
     uintptr_t table = 0, fn = 0, wp = 0;
     uint32_t world = 0;
+    g_lwFitWhy = "a member would not reach its slot (no cast, ground or unit kind)";
     if (n <= 1) return 1;
     if (!EvpPtr(g_lw.game + 0x3326330u, &table) || !EvpPtr(table + 0x18, &fn) || fn == 0 || !EvpPtr(g_lw.game + 0x346D508u, &wp) || wp == 0 ||
         SafeRead(wp, &world, 4)) return 0;
@@ -1309,7 +1356,7 @@ static int LwMembersFit(uintptr_t slot, const float* pos, uint32_t n)
             if (MoveTilesOn())
             {
                 int tile; float drawn = MoveDrawnGround(to[0], to[1], &tile);
-                if (drawn < -9000.0f || fabsf(top - drawn) > 0.5f) { g_lwWorld.undrawn++; return 0; }
+                if (!LwDrawnOk(to[0], to[1], top, drawn, "a member's slot")) { g_lwFitWhy = "a member's slot ground hit is not the drawn ground"; return 0; }
                 reach = LwFaceReach(1, MoveKeepOn(), top, drawn, g_lwWallReach ? *g_lwWallReach : 0.0f);
             }
             for (int j = 0; j < nv; j++)
@@ -1318,7 +1365,9 @@ static int LwMembersFit(uintptr_t slot, const float* pos, uint32_t n)
                 ((CastFn)fn)(world, pos, to, v[j].radius, v[j].layer, out);
                 /* a member starts at the cast's height and its ground ray reaches `up` (1.00 m for these units) over it:
                  * one started deeper under the ground never meets it (audit 1g, 9: the old 2 m tolerance could bury it) */
-                if (!isfinite(out[0]) || LwDist2(to, out[0], out[1]) > 0.1f * 0.1f || !LwSlotHeightOk(out[2], top, reach)) { g_lwWorld.crowded++; return 0; }
+                int ends = isfinite(out[0]) && LwDist2(to, out[0], out[1]) <= 0.1f * 0.1f;
+                if (!ends || !LwSlotHeightOk(out[2], top, reach))
+                { g_lwFitWhy = LwFitText(ends); g_lwWorld.crowded++; return 0; }
                 if (out[2] < top - 0.9f || out[2] > top + LW_FACE_NEAR) g_lwPlaceWide = 1;
             }
         }
@@ -1393,6 +1442,23 @@ static int LwRayClear(const float* eye, uint32_t unit, const float* point)
     int blocked = n >= 1 && dist < len - 0.5f;
     if (blocked) { if (owner) g_lwWorld.blockUnit++; else g_lwWorld.blockTerrain++; }
     return !blocked;
+}
+/* The static body under a ground hit: the sight ray (static bodies only) from 1.5 m over `top` straight down 3 m.
+ * Its hit's owning unit (hit +0x1C; 0 for terrain, and 0 with no hit or no ray) and *hitZ its height (hit +0x18,
+ * metres along the ray; NAN with none). */
+static uint32_t LwTopOwner(float x, float y, float top, float* hitZ)
+{
+    typedef uint32_t (*RayFn)(uint32_t handle, const float* from, const float* dir, float length, uint32_t leaveOut, void* hit, uint32_t max);
+    uintptr_t table = 0, fn = 0; uint32_t none = 0;
+    uint32_t handle = LwSightRay(&table);
+    *hitZ = NAN;
+    if (handle == 0 || !EvpPtr(table + 0x68, &fn) || fn == 0 || SafeRead(g_lw.game + LW_NONE, &none, 4)) return 0;
+    const float from[3] = {x, y, top + 1.5f}, down[3] = {0, 0, -1};
+    uint8_t hit[0x40] = {0};
+    if (((RayFn)fn)(handle, from, down, 3.0f, none, hit, 1) < 1) return 0;
+    float dist; uint32_t owner; memcpy(&dist, hit + 0x18, 4); memcpy(&owner, hit + 0x1C, 4);
+    *hitZ = from[2] - dist;
+    return owner;
 }
 /* Out of sight: from every player within LW_SIGHT, a unit's chest (1.0 m), head-over (2.5 m) and a tall unit's top (4.5 m)
  * all blocked, measured from the higher of the navmesh face and the ground ray's top surface: members stand on the
@@ -1649,11 +1715,20 @@ static int LwNodeHasFace(int node)
     return face;
 }
 
+/* 1 when a goal can be sent (a route node left, the squad's records there). When not, the last goal no longer stands:
+ * left set, a squad standing at it read as "there" to the stall check for good, with no node left to reach. Goal-less,
+ * the stall check asks again. */
+static int LwGoalCanSend(LwSquad* q, int route, int records)
+{
+    if (route && records) return 1;
+    q->goalAt = 0;
+    return 0;
+}
 static void LwSendGoal(LwSquad* q)
 {
     if (LwIntentGoal(q)) return; /* an intent picks the destination (Phase 2) */
     if (q->pathAt >= q->pathLen) LwPlan(q);
-    if (q->pathAt >= q->pathLen || LwJobRecord(q->squad) == 0 || LwSquadRecord(q->squad) == 0) return;
+    if (!LwGoalCanSend(q, q->pathAt < q->pathLen, LwJobRecord(q->squad) != 0 && LwSquadRecord(q->squad) != 0)) return;
     if (!LwNodeHasFace(q->path[q->pathAt])) /* the next node has no navmesh: another destination whose next node has */
     {
         g_lwWorld.goalNoFace++;
@@ -1987,6 +2062,21 @@ static void LwWideAsk(LwSquad* q)
     uint32_t members[32];
     int n = LwMembers(q->squad, members);
     for (int k = 0; k < n; k++) MoveSettleAsk(members[k], q->wideUntil + 1000);
+}
+/* What an online squad does in a tick: 1 its own tick, 2 its members listed for the keeper. A squad placed wide is
+ * listed for LW_WIDE_MS and ticks all the while: without its tick it gets no goal, is never kept, never goes offline
+ * and holds its units and its fight's place for good. */
+static int LwOnlineSteps(int online, ULONGLONG wideUntil, ULONGLONG now)
+{
+    if (!online) return 0;
+    return 1 | (wideUntil != 0 && now < wideUntil ? 2 : 0);
+}
+/* An online squad's tick: listed for the keeper while that lasts, and always its own tick. */
+static void LwOnlineStep(LwSquad* q, int* removals, int* online, ULONGLONG now)
+{
+    int steps = LwOnlineSteps(q->state == LW_ONLINE, q->wideUntil, now);
+    if (steps & 2) LwWideAsk(q); else q->wideUntil = 0;
+    if (steps & 1) { LwOnlineTick(q, removals); (*online)++; }
 }
 static void LwPendingTick(LwSquad* q)
 {
@@ -2996,7 +3086,7 @@ static void LwSquadsTick(void)
             else
             {
                 if (!back && LwPatrolYields(q)) { why = "a squad waiting at the band's edge has its points here"; q->retry = now + 3000; goto offlineDone; } /* living_world_patrols.c */
-                if (!back && LwRecentNear(q->pos)) { why = "within 60 m of an online squad or a request in the last minute"; g_lwWorld.spaced++; q->retry = now + 3000; goto offlineDone; } /* spaced from online squads and recent requests (audit 1, 11) */
+                if (!back && LwRecentNear(q->pos)) { why = g_lwSpacedWhy; g_lwWorld.spaced++; q->retry = now + 3000; goto offlineDone; } /* spaced from online squads and recent requests (audit 1, 11) */
                 if (farBand && !back)
                 {
                     if ((float)(farUnits + q->survivors) > LwFarShareLimit())
@@ -3034,8 +3124,7 @@ static void LwSquadsTick(void)
             else if (q->held && why) LwHeldWhy(q, why, near2);
         }
         else if (q->state == LW_PENDING) { LwPendingTick(q); online++; }
-        if (q->state == LW_ONLINE && q->wideUntil) LwWideAsk(q);
-        else if (q->state == LW_ONLINE) { LwOnlineTick(q, &removals); online++; }
+        else if (q->state == LW_ONLINE) LwOnlineStep(q, &removals, &online, now);
     }
     g_lwWorld.online = online;
     for (int i = 0; i < g_lwWorld.count; i++) /* the visited ones' marks, from what the visit left */
@@ -3067,6 +3156,8 @@ static void LwSquadsTick(void)
                 "%u sight rays, %.1f us each; blocked by terrain %u, by static scenery %u", g_lwWorld.noFace, g_lwWorld.moved,
                 g_lwWorld.overhead, g_lwWorld.overNav, (double)g_lwWorld.overNavWorst, g_lwWorld.crowded, g_lwWorld.seen, g_lwWorld.seenSlot, g_lwWorld.building, g_lwWorld.undrawn, g_lwWorld.spaced, (double)LW_SPACING,
                 g_lwWorld.rays, g_lwWorld.rays ? g_lwWorld.rayUs / g_lwWorld.rays : 0.0, g_lwWorld.blockTerrain, g_lwWorld.blockUnit);
+        if (g_lwWorld.onProp) Note("living world: placement (30 s): %u ground hits over the drawn ground were a prop's top no more than 2 m up (points and members' slots; %s)", g_lwWorld.onProp, LW_PROP_TAKE ? "taken" : "refused all the same");
+        g_lwWorld.onProp = 0;
         g_lwWorld.building = g_lwWorld.undrawn = g_lwWorld.seenSlot = g_lwWorld.spaced = g_lwWorld.overNav = 0; g_lwWorld.overNavWorst = 0;
         g_lwWorld.noFace = g_lwWorld.moved = g_lwWorld.overhead = g_lwWorld.seen = g_lwWorld.rays = g_lwWorld.blockUnit = g_lwWorld.blockTerrain = g_lwWorld.crowded = 0; g_lwWorld.rayUs = 0;
         if (g_lwWorld.goals || g_lwWorld.goalNoFace || g_lwWorld.stalled || g_lwWorld.stalledOther)

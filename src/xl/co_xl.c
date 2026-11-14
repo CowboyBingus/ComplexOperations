@@ -473,6 +473,34 @@ int CoXlTestNetVec(uintptr_t cfg, float scale, uint32_t* types, uint8_t* widen, 
 }
 float CoXlTestLwFaceReach(int tilesOn, int keeper, float top, float drawn, float wall) { return LwFaceReach(tilesOn, keeper, top, drawn, wall); }
 float CoXlTestLwRequestZ(float top, float face) { return LwRequestZ(top, face); }
+int CoXlTestLwOnlineSteps(int online, uint64_t wideUntil, uint64_t now) { return LwOnlineSteps(online, wideUntil, now); }
+/* Squad 0 online with no game behind it: its tick finds the squad entity gone and frees it. 1 when it was ticked, +2
+ * when its keeper listing was closed, +4 when it was counted online. */
+int CoXlTestLwOnlineStep(uint64_t wideUntil, uint64_t now)
+{
+    LwSquad* q = &g_lwSquads[0]; int removals = 0, online = 0;
+    memset(q, 0, sizeof *q); q->state = LW_ONLINE; q->squad = 0x1234; q->wide = wideUntil != 0; q->wideUntil = wideUntil; q->cap = q->alive = 6;
+    if (g_lwWorld.count < 1) g_lwWorld.count = 1;
+    LwOnlineStep(q, &removals, &online, now);
+    int r = (q->state != LW_ONLINE ? 1 : 0) | (q->wideUntil == 0 ? 2 : 0) | (online == 1 ? 4 : 0);
+    memset(q, 0, sizeof *q);
+    return r;
+}
+int CoXlTestLwNoiseSkip(float playerDist, float reach, uint64_t sinceSent, float moved) { return LwNoiseSkip(playerDist, reach, sinceSent, moved); }
+/* Squad 0 with a goal sent at 5000: whether a goal can be sent now, and (*after) its goal time then. */
+int CoXlTestLwGoalCanSend(int route, int records, uint64_t* after)
+{
+    LwSquad* q = &g_lwSquads[0];
+    memset(q, 0, sizeof *q); q->goalAt = 5000;
+    int r = LwGoalCanSend(q, route, records);
+    *after = q->goalAt;
+    memset(q, 0, sizeof *q);
+    return r;
+}
+int CoXlTestLwOnProp(float top, float drawn, uint32_t owner, float hitZ) { return LwOnProp(top, drawn, owner, hitZ); }
+int CoXlTestLwPropTake(void) { return LW_PROP_TAKE; }
+void CoXlTestLwSpacedText(char* out, size_t size, int squad, float dist, uint64_t ago) { LwSpacedText(out, size, squad, dist, ago); }
+const char* CoXlTestLwFitText(int ends) { return LwFitText(ends); }
 int CoXlTestLwSlotHeightOk(float z, float top, float reach) { return LwSlotHeightOk(z, top, reach); }
 int CoXlTestMoveKeepWhich(float z, float ground, int listing) { return MoveKeepWhich(z, ground, listing); }
 int CoXlTestMoveSettle(uint32_t e, uint64_t until, uint32_t ask, uint64_t now) { if (ask) MoveSettleAsk(ask, until); return MoveSettleListed(e, now); }
