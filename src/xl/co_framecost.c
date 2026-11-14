@@ -10,7 +10,7 @@
 
 static const char* const kPartNames[CO_FC_PARTS] = {
     "status", "streamer", "span rescue", "net patience", "terrain diagnostics", "terrain probe", "living world",
-    "daylight", "tactical map", "density", "scatter merge", "moving tiles", "ground keep", "far grass"};
+    "daylight", "tactical map", "density", "scatter merge", "moving tiles", "ground keep", "far grass", "nav swaps"};
 
 static struct
 {
@@ -19,6 +19,7 @@ static struct
     int lastPlay, cores;
     long mission, budgetMission;
     int64_t part[CO_FC_PARTS]; /* the frame being closed: its parts so far */
+    int64_t extra[CO_FX_COUNT]; int grass;
     volatile LONG64 offThread; /* ticks timed on other threads since the window began */
     CoFcContextFn context;
     /* the window */
@@ -29,6 +30,8 @@ static struct
     double sum, worst, worstTimed, worstTop, timedSum;
     int worstTopPart;
     int windowLines, detailLines;
+    /* the window's slowest frames over CO_FC_SLOW_MS, slowest first, noted at its close */
+    struct { double ms, timed, top, at, extra[CO_FX_COUNT]; int part, grass; const char* front; } slow[CO_FC_SLOW_LINES_WINDOW];
     /* the last window, for the tests */
     double low1, low01; uint32_t lastOver25, lastOver33, lastOver1s; int lastStarved;
 #ifdef CO_TEST
@@ -84,13 +87,16 @@ static void WindowStart(int64_t now)
     CpuTimes(&g_fc.sysBusy, &g_fc.sysAll, &g_fc.proc);
     InterlockedExchange64(&g_fc.offThread, 0);
     g_fc.frames = g_fc.kept = g_fc.over25 = g_fc.over33 = g_fc.over1s = g_fc.slowNoted = 0;
+    memset(g_fc.slow, 0, sizeof g_fc.slow);
     g_fc.sum = g_fc.worst = g_fc.worstTimed = g_fc.worstTop = g_fc.timedSum = 0; g_fc.worstTopPart = 0;
 }
 
+static void SlowLines(void);
 static void WindowClose(int64_t now)
 {
     double wallMs = Ms(now - g_fc.windowAt), offMs = Ms(InterlockedExchange64(&g_fc.offThread, 0));
     if (g_fc.frames == 0) return;
+    SlowLines();
     if (g_fc.budgetMission != g_fc.mission) { g_fc.budgetMission = g_fc.mission; g_fc.windowLines = 0; }
     if (g_fc.windowLines > CO_FC_WINDOW_LINES_MISSION) return;
     if (++g_fc.windowLines > CO_FC_WINDOW_LINES_MISSION)
@@ -121,14 +127,33 @@ static void WindowClose(int64_t now)
         busyPct, sysCores, g_fc.cores, gameCores, elseCores, starved, ai, nestText);
 }
 
-/* A detailed line for a slow frame, while the session's budget lasts. */
-static void SlowLine(double ms, double timed, int topPart, double top)
+/* A slow frame kept for the window's close if it is among the window's slowest: the first ones were the lines before,
+ * and a window with a 1.3 s stall noted two 25 ms frames instead of it. */
+static void SlowKeep(double ms, double timed, int topPart, double top, double at)
 {
-    if (g_fc.slowNoted >= CO_FC_SLOW_LINES_WINDOW || g_fc.detailLines >= CO_FC_DETAIL_LINES_SESSION) return;
-    g_fc.slowNoted++;
-    co_log("frame times: a %.1f ms frame (QPC; the game's window %s): timed parts (CoXlTick, the level update) %.2f ms (the most: %s %.2f ms), untimed %.1f ms",
-        ms, Front(), timed, kPartNames[topPart], top, ms - timed);
-    if (++g_fc.detailLines == CO_FC_DETAIL_LINES_SESSION) co_log("frame times: %d slow-frame lines this session; the window lines go on", CO_FC_DETAIL_LINES_SESSION);
+    int k = CO_FC_SLOW_LINES_WINDOW;
+    while (k > 0 && ms > g_fc.slow[k - 1].ms) k--;
+    if (k == CO_FC_SLOW_LINES_WINDOW) return;
+    memmove(&g_fc.slow[k + 1], &g_fc.slow[k], (CO_FC_SLOW_LINES_WINDOW - 1 - k) * sizeof g_fc.slow[0]);
+    g_fc.slow[k].ms = ms; g_fc.slow[k].timed = timed; g_fc.slow[k].top = top; g_fc.slow[k].part = topPart; g_fc.slow[k].at = at;
+    g_fc.slow[k].front = Front(); g_fc.slow[k].grass = g_fc.grass;
+    for (int x = 0; x < CO_FX_COUNT; x++) g_fc.slow[k].extra[x] = Ms(g_fc.extra[x]);
+}
+
+/* The window's slowest frames, one detailed line each while the session's budget lasts. */
+static void SlowLines(void)
+{
+    for (int k = 0; k < CO_FC_SLOW_LINES_WINDOW && g_fc.slow[k].ms > 0; k++)
+    {
+        if (g_fc.detailLines >= CO_FC_DETAIL_LINES_SESSION) break;
+        g_fc.slowNoted++;
+        co_log("frame times: a %.1f ms frame (QPC; the game's window %s): timed parts (CoXlTick, the level update) %.2f ms (the most: %s %.2f ms), untimed %.1f ms; "
+            "%.1f s into the window; AI joins %.1f ms, world update %.1f ms, far-grass job %s", g_fc.slow[k].ms, g_fc.slow[k].front, g_fc.slow[k].timed,
+            kPartNames[g_fc.slow[k].part], g_fc.slow[k].top, g_fc.slow[k].ms - g_fc.slow[k].timed, g_fc.slow[k].at, g_fc.slow[k].extra[CO_FX_JOIN],
+            g_fc.slow[k].extra[CO_FX_WORLD], g_fc.slow[k].grass ? "out" : "not out");
+        if (++g_fc.detailLines == CO_FC_DETAIL_LINES_SESSION) co_log("frame times: %d slow-frame lines this session; the window lines go on", CO_FC_DETAIL_LINES_SESSION);
+    }
+    memset(g_fc.slow, 0, sizeof g_fc.slow);
 }
 
 /* The frame from the last tick's start to `now`, with its parts. */
@@ -150,12 +175,13 @@ static void FrameClose(int64_t now)
     if (ms > CO_FC_HITCH_MS) g_fc.over33++;
     if (!(ms > CO_FC_SLOW_MS)) return;
     g_fc.over25++;
-    SlowLine(ms, timed, topPart, top);
+    SlowKeep(ms, timed, topPart, top, Ms(g_fc.last - g_fc.windowAt) / 1000.0); /* where it started */
 }
 
 static void Begin(int64_t now, int play, long mission)
 {
     g_fc.thread = GetCurrentThreadId();
+    if (g_fc.lastPlay && (!play || mission != g_fc.mission)) SlowLines(); /* a window cut short still names its stalls */
     if (play && (!g_fc.lastPlay || g_fc.windowAt == 0 || mission != g_fc.mission)) WindowStart(now); /* windows count play only */
     else if (play)
     {
@@ -163,6 +189,7 @@ static void Begin(int64_t now, int play, long mission)
         if (Ms(now - g_fc.windowAt) >= CO_FC_WINDOW_MS) { WindowClose(now); WindowStart(now); }
     }
     for (int p = 0; p < CO_FC_PARTS; p++) g_fc.part[p] = 0;
+    memset(g_fc.extra, 0, sizeof g_fc.extra); g_fc.grass = 0;
     g_fc.last = g_fc.at = now; g_fc.lastPlay = play; g_fc.mission = mission;
 }
 
@@ -188,6 +215,13 @@ static void Nested(int inner, int outer, int64_t since, int64_t now)
     if (outer >= 0 && outer < CO_FC_PARTS && GetCurrentThreadId() == g_fc.thread) g_fc.part[outer] -= ticks;
 }
 
+/* The game thread's only: another thread's wait or update is not this frame's. */
+static void Extra(int which, int64_t since, int64_t now)
+{
+    if (which < 0 || which >= CO_FX_COUNT || since == 0 || g_fc.at == 0 || GetCurrentThreadId() != g_fc.thread) return;
+    g_fc.extra[which] += now - since;
+}
+
 int64_t co_framecost_now(void)
 {
     LARGE_INTEGER t; QueryPerformanceCounter(&t);
@@ -200,6 +234,8 @@ void co_framecost_begin(int play, long mission) { Begin(co_framecost_now(), play
 void co_framecost_mark(int part) { Mark(part, co_framecost_now()); }
 int64_t co_framecost_add(int part, int64_t since) { return Add(part, since, co_framecost_now()); }
 void co_framecost_nested(int inner, int outer, int64_t since) { Nested(inner, outer, since, co_framecost_now()); }
+void co_framecost_extra(int which, int64_t since) { Extra(which, since, co_framecost_now()); }
+void co_framecost_grass(int out) { if (out && GetCurrentThreadId() == g_fc.thread) g_fc.grass = 1; }
 
 #ifdef CO_TEST
 void co_framecost_test_reset(int64_t freq) { memset((void*)&g_fc, 0, sizeof g_fc); g_fc.freq = freq; g_fc.cores = 16; }
@@ -209,6 +245,9 @@ void co_framecost_test_begin(int64_t now, int play, long mission) { Begin(now, p
 void co_framecost_test_mark(int part, int64_t now) { Mark(part, now); }
 int64_t co_framecost_test_add(int part, int64_t since, int64_t now) { return Add(part, since, now); }
 void co_framecost_test_nested(int inner, int outer, int64_t since, int64_t now) { Nested(inner, outer, since, now); }
+void co_framecost_test_extra(int which, int64_t since, int64_t now) { Extra(which, since, now); }
+double co_framecost_test_slow(int k, double* join, double* world, int* grass)
+{ *join = g_fc.slow[k].extra[CO_FX_JOIN]; *world = g_fc.slow[k].extra[CO_FX_WORLD]; *grass = g_fc.slow[k].grass; return g_fc.slow[k].ms; }
 int co_framecost_test_window_lines(void) { return g_fc.windowLines; }
 int co_framecost_test_detail_lines(void) { return g_fc.detailLines; }
 void co_framecost_test_last(double* low1, double* low01, uint32_t* over25, uint32_t* over33, uint32_t* over1s, int* starved)
