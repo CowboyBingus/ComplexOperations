@@ -30,7 +30,7 @@ static void LwCutInit(void)
         mode, cap, adds, removes, g_lwCut.client == 0 ? "is left to the game" : g_lwCut.client == 1 ? "adds around its players" : "adds none");
 }
 
-static void LwCutNote(ULONGLONG now, const CoCuttersTick* t)
+static void LwCutLines(ULONGLONG now, const CoCuttersTick* t)
 {
     if (now - g_lwCut.notedAt < LW_CUT_NOTE_MS || g_lwCut.ticks == 0) return;
     uint32_t used = 0, room = 0;
@@ -96,7 +96,7 @@ static void LwCutFrame(int mission, int host)
     g_lwCut.players = players; g_lwCut.last = last; g_lwCut.squads = squads; g_lwCut.beside = beside; g_lwCut.left = left;
     g_lwCut.usSum += t.us; if (t.us > g_lwCut.usWorst) g_lwCut.usWorst = t.us;
     g_lwCut.holdSum += t.holdUs; if (t.holdUs > g_lwCut.holdWorst) g_lwCut.holdWorst = t.holdUs;
-    LwCutNote(now, &t);
+    LwCutLines(now, &t);
 }
 
 /* The mission's kind changed: the hooks record on a complex level only, and leaving one drops every record (the
