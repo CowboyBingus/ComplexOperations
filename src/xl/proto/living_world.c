@@ -877,6 +877,7 @@ static int LwPlace(uintptr_t slot, float* pos);
 static int g_lwPlaceWide; /* set by LwPlace and LwMembersFit (below) */
 static int LwHidden(const float* p);
 static int LwHiddenFar(const float* p);
+static int LwSlotsHiddenFar(const float* p, uint32_t n);
 static int LwSeenFromView(int i, const float* point);
 static int g_lwFarSpawn; /* LwOnline: a far (sightline) squad's request */
 static int g_lwMeetSpawn; /* LwOnline: a road patrol waiting at the ring's edge: the far squads' sight test, asked again in 1 s */
@@ -1082,7 +1083,7 @@ static int LwOnlinePlace(LwSquad* q, uintptr_t slot, uint32_t cap, float* pos, f
     /* sight is asked where the members will stand: on the ground, not at a face under it */
     float see[3] = {pos[0], pos[1], ground > pos[2] ? ground : pos[2]};
     const int farTest = g_lwFarSpawn || g_lwMeetSpawn;
-    if (g_lwTestVisible ? !LwSeenByAny(see, LW_SIGHT) && (++g_lwTestUnseen, 1) : !(farTest ? LwHiddenFar(see) : LwHidden(see) && (!LwSlotsChecked(q, GetTickCount64()) || LwSlotsHidden(see, cap))))
+    if (g_lwTestVisible ? !LwSeenByAny(see, LW_SIGHT) && (++g_lwTestUnseen, 1) : !(farTest ? LwHiddenFar(see) && (!g_lwMeetSpawn || LwSlotsHiddenFar(see, cap)) : LwHidden(see) && (!LwSlotsChecked(q, GetTickCount64()) || LwSlotsHidden(see, cap))))
     { g_lwOnlineWhy = farTest ? "sight: seen on the host's screen (or no off-screen read)" : "sight: seen"; q->retry = GetTickCount64() + (g_lwMeetSpawn ? 1000 : 3000); LwHoldNext(q); return 0; }
     return 1;
 }
@@ -1619,6 +1620,25 @@ static int LwHiddenFar(const float* p)
         }
     }
     if (offUsed) g_lwOffScreen++;
+    return 1;
+}
+
+/* LwSlotsHidden by the far rule, for a road patrol waiting at the ring's edge: 155 m away a member that appears at
+ * the edge of cover is seen, so each slot is unseen or off the screen of the player who has the line to it. */
+static int LwSlotsHiddenFar(const float* p, uint32_t n)
+{
+    for (uint32_t m = 0; n > 1 && m < n; m++)
+    {
+        float t[3], top = NAN;
+        LwMemberSlot(p, m, n, t);
+        t[2] = (LwGround(t[0], t[1], &top) && isfinite(top) && top > p[2] ? top : p[2]) + 1.0f;
+        for (int i = 0; i < g_lwWorld.playersAt; i++)
+        {
+            if (LwDist2(g_lwWorld.players[i], t[0], t[1]) > LW_SIGHT * LW_SIGHT) continue;
+            const int seen = LwSeenFromView(i, t);
+            if (seen != 0 && !(seen == 1 && LwOffScreen(i, t))) { g_lwWorld.seenSlot++; return 0; }
+        }
+    }
     return 1;
 }
 
