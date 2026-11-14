@@ -94,19 +94,297 @@ static int LwSteerOk(const LwSquad* q)
 {
     return q->state == LW_ONLINE && LwCalm(q) && (!q->alerted || (q->calmSince && GetTickCount64() - q->calmSince >= LW_STEER_CALM));
 }
-/* the job position and an immediate repath for an online squad (S6, P) */
+static uintptr_t LwNavRecord(uint32_t squad); static int LwSnapAt(uint32_t nav, uint32_t layer, const float* at, float* out);
+static int LwLeaderSnap(uint32_t leader, uint32_t* world, uint32_t* layer); static void LwGoalLine(LwSquad* q, uint32_t leader, const float* raw, int hit, int later);
+/* An online squad's goal (S6, P): the job position, as state 10's tick reads it (0x7FD440 scatters 10 m around the
+ * leader's and snaps 25 m in the leader's nav world with its agent type; on a miss the squad's own position is its
+ * destination), and a path request now, as the tick decides only when the squad has stopped or arrived. The point is
+ * snapped the tick's way, so every scatter around it finds its face and a destination the tick writes over this one
+ * lies within 10 m of it. Layer 0 only for a leader without a nav record (0x7ED020). */
 static int LwSquadGoTo(LwSquad* q, const float* target)
 {
+    uintptr_t sq = 0;
+    float p[3] = {target[0], target[1], target[2]}, raw[3];
+    if (q->state != LW_ONLINE || q->squad == 0 || LwJobRecord(q->squad) == 0 || (sq = LwSquadRecord(q->squad)) == 0) return 0;
+    if (!LwGround(p[0], p[1], &p[2])) return 0;
+    uint32_t leader = EvpU32(sq + 0x20, 0), world = 0, layer = 0;
+    if (!LwLeaderSnap(leader, &world, &layer)) { world = EvpU32(g_lwWorld.dir + 0x648, 0); layer = 0; }
+    memcpy(raw, p, sizeof raw);
+    int hit = LwSnapAt(world, layer, raw, p) == 1;
+    if (hit) { g_lw.goal(q->squad, p); LwGoalSent(q, p); if (LwNavRecord(q->squad)) g_lw.repath(NULL, q->squad, p); }
+    LwGoalLine(q, leader, raw, hit, 0);
+    return hit;
+}
+
+static void LwGoalSent(LwSquad* q, const float* goal)
+{
+    memcpy(q->goalTo, goal, sizeof q->goalTo); q->goalAt = GetTickCount64(); q->stillSince = 0; q->goalNode = -1;
+    q->stallTries = q->stallWaits = 0;
+    if (q->goalSends < 255) q->goalSends++;
+}
+
+/* The squad's nav record ([game+0x3326418]: hash +0x30, records +0x50, 0xA8 each; 0x5B34F0, P), or 0. */
+static uintptr_t LwNavRecord(uint32_t squad)
+{
+    uintptr_t navs = 0, recs = 0; uint32_t i = 0;
+    return EvpPtr(g_lw.game + 0x3326418u, &navs) && EvpHash(navs + 0x30, squad, 8, 4, &i) && EvpPtr(navs + 0x50, &recs) ? recs + 0xA8ull * i : 0;
+}
+/* The game's 25 m navmesh snap (0x23C7614) at a point in nav world `nav`, layer `layer`: 1 with the face point in out. */
+static int LwSnapAt(uint32_t nav, uint32_t layer, const float* at, float* out)
+{
     typedef int (*SnapFn)(uint32_t nav, float* p, float radius, float* out, float* normal, uint32_t layer);
-    typedef void (*RepathFn)(void*, uint32_t, const float*);
-    uintptr_t table = 0, fn = 0, navs = 0; uint32_t slot;
-    float p[3] = {target[0], target[1], target[2]};
-    if (q->state != LW_ONLINE || q->squad == 0 || LwJobRecord(q->squad) == 0 || LwSquadRecord(q->squad) == 0) return 0;
-    if (!LwGround(p[0], p[1], &p[2]) || !EvpPtr(g_lw.game + 0x3326330u, &table) || !EvpPtr(table + 0x10, &fn) || !fn ||
-        ((SnapFn)fn)(EvpU32(g_lwWorld.dir + 0x648, 0), p, 25.0f, p, NULL, 0) == 0 || !isfinite(p[2])) return 0;
-    g_lw.goal(q->squad, p);
-    if (EvpPtr(g_lw.game + 0x3326418u, &navs) && EvpHash(navs + 0x30, q->squad, 8, 4, &slot)) ((RepathFn)(g_lw.game + 0x5B36C0u))(NULL, q->squad, p);
+    uintptr_t table = 0, fn = 0; float p[3] = {at[0], at[1], at[2]};
+    if (!EvpPtr(g_lw.game + 0x3326330u, &table) || !EvpPtr(table + 0x10, &fn) || !fn) return -1;
+    if (((SnapFn)fn)(nav, p, 25.0f, p, NULL, layer) == 0 || !isfinite(p[2])) return 0;
+    memcpy(out, p, sizeof p);
     return 1;
+}
+/* "hit N m", "miss", or "?" when the snap is not there. */
+static const char* LwSnapWord(uint32_t nav, uint32_t layer, const float* at, char* out, size_t size)
+{
+    float p[3]; int r = LwSnapAt(nav, layer, at, p);
+    if (r < 0) return "?";
+    if (r == 0) return "miss";
+    snprintf(out, size, "hit %.1f m", (double)sqrtf(LwDist2(at, p[0], p[1]) + (p[2] - at[2]) * (p[2] - at[2])));
+    return out;
+}
+/* The scatter's nav world and the leader's layer, as 0x7ED200 snaps (0x7ED363: [AiEnemy manager +0x22D0]; 0x7ED020:
+ * the leader's own nav record +0x9C, layer 0 without one). */
+static int LwLeaderSnap(uint32_t leader, uint32_t* world, uint32_t* layer)
+{
+    uintptr_t mgr = 0, nav = leader ? LwNavRecord(leader) : 0;
+    if (!EvpPtr(g_lw.game + 0x33266C8u, &mgr)) return 0;
+    *world = EvpU32(mgr + 0x22D0, 0); *layer = nav ? EvpU32(nav + 0x9C, 0) : 0;
+    return 1;
+}
+
+/* The goal line (every build, capped): what tells a standing squad's cause in one run, at the send and 5 s on. A
+ * squad whose leader's agent type finds no face where layer 0 does stood on its own position (the tick's fallback);
+ * one whose leader has flag bit 14 set, or that is held, gets no destination from the tick at all (0x7FD55A). */
+#define LW_GOAL_LINES 200u
+static const char* const kLwIntentNames[4] = {"patrol", "investigate", "reinforce", "retake"};
+static uintptr_t LwAiRecord(uint32_t unit);
+static void LwGoalLine(LwSquad* q, uint32_t leader, const float* raw, int hit, int later)
+{
+    uintptr_t nav = LwNavRecord(q->squad), sq = LwSquadRecord(q->squad), job = LwJobRecord(q->squad), lj = leader ? LwJobRecord(leader) : 0, ai = leader ? LwAiRecord(leader) : 0;
+    uintptr_t beh = 0, cur = 0, want = 0; uint32_t bi = 0, world = 0, layer = 0, world0 = EvpU32(g_lwWorld.dir + 0x648, 0);
+    float jp[3] = {0}, lp[3] = {0}, own[3] = {0}, dest[3] = {0}, t[3]; char a[24], b[24], c[24];
+    int lead = LwLeaderSnap(leader, &world, &layer);
+    int typeHit = lead && LwSnapAt(world, layer, raw, t) == 1, zeroHit = lead && LwSnapAt(world, 0, raw, t) == 1;
+    if (nav) { SafeRead(nav + 0x54, own, sizeof own); SafeRead(nav + 0x60, dest, sizeof dest); }
+    int ownDest = nav && LwDist2(dest, own[0], own[1]) < 2.0f * 2.0f && LwDist2(dest, q->goalTo[0], q->goalTo[1]) > LW_ARRIVE * LW_ARRIVE;
+    if (later) { if (ownDest) g_lwWorld.goalOwnDest++; }
+    else
+    {
+        g_lwWorld.goalSendsAll++;
+        if (lead && !typeHit && zeroHit) g_lwWorld.goalTypeMiss++;
+        if (q->goalLines >= 4 || g_lwWorld.goalLines >= LW_GOAL_LINES) return; /* a squad's first four goals */
+        q->goalLines++; g_lwWorld.goalLines++;
+        memcpy(q->goalRaw, raw, sizeof q->goalRaw); q->goalLineAt = GetTickCount64(); q->goalLineHit = (uint8_t)hit;
+    }
+    if (job) SafeRead(job, jp, sizeof jp);
+    if (lj) SafeRead(lj, lp, sizeof lp);
+    int states = EvpPtr(g_lw.game + 0x3326A48u, &beh) && EvpHash(beh + 0x20, q->squad, 8, 4, &bi) && EvpPtr(beh + 0x40, &cur) && EvpPtr(beh + 0x50, &want);
+    Note("living world: squad %d (%08X, group %llX, %s stage %d) goal %s: %s at (%.0f, %.0f, %.1f); state %d (wanted %d); leader %08X flag bit 14 %d, agent type %08X; held %d; nav %s: agent %d, result %u, "
+         "flags %08X, +16 %u, may move %d; job point %.0f m from the goal, the leader's %.0f m from the squad's; snap 25 m at the asked point: the leader's type %s, layer 0 %s (nav world %u), layer 0 %s (the "
+         "loader's nav world %u); destination %.0f m from the squad's own position, %.0f m from the goal%s",
+        (int)(q - g_lwSquads), q->squad, (unsigned long long)q->definition, kLwIntentNames[q->intent & 3], q->intentStage, later ? "5 s on" : "sent", hit ? "set" : "refused, no face for the leader's type",
+        (double)raw[0], (double)raw[1], (double)raw[2], states ? (int)EvpU32(cur + 0x58ull * bi, 0xFFFFFFFFu) : -1, states ? (int)EvpU32(want + 4ull * bi, 0xFFFFFFFFu) : -1,
+        leader, ai ? (int)(EvpU32(ai + 0xE4, 0) >> 14 & 1) : -1, layer, sq ? (int)(EvpU32(sq + 0x18, 0) & 0xFF) : -1, nav ? "found" : "missing", nav ? (int)EvpU32(nav + 8, 0) : 0, nav ? EvpU32(nav + 0xC, 0) : 0,
+        nav ? EvpU32(nav + 0x10, 0) : 0, nav ? EvpU32(nav + 0x16, 0) & 0xFF : 0, nav ? (int)(EvpU32(nav + 0x91, 0) & 0xFF) : -1,
+        job ? (double)sqrtf(LwDist2(jp, q->goalTo[0], q->goalTo[1])) : -1.0, job && lj ? (double)sqrtf(LwDist2(jp, lp[0], lp[1])) : -1.0,
+        lead ? LwSnapWord(world, layer, raw, a, sizeof a) : "?", lead ? LwSnapWord(world, 0, raw, b, sizeof b) : "?", world, LwSnapWord(world0, 0, raw, c, sizeof c), world0,
+        nav ? (double)sqrtf(LwDist2(dest, own[0], own[1])) : -1.0, nav ? (double)sqrtf(LwDist2(dest, q->goalTo[0], q->goalTo[1])) : -1.0,
+        !later && g_lwWorld.goalLines == LW_GOAL_LINES ? " (the last such line this mission)" : "");
+}
+/* The goal line's second half, 5 s after the send. */
+static void LwGoalLineLater(LwSquad* q, ULONGLONG now)
+{
+    uintptr_t sq;
+    if (!q->goalLineAt || now - q->goalLineAt < 5000) return;
+    q->goalLineAt = 0;
+    if ((sq = LwSquadRecord(q->squad)) != 0) LwGoalLine(q, EvpU32(sq + 0x20, 0), q->goalRaw, q->goalLineHit, 1);
+}
+
+/* B2: the loader sends an online squad one goal and repeats it only at a node or an intent's end, so when the game does
+ * not walk it nothing recovers it. Stalled: 30 s without 20 m of way toward its goal (3 m moved without one). A squad
+ * milling in the game's 10 m scatter (0x7ED200) moves, and comes up to 20 m nearer, but gets nowhere: its tries start
+ * again only LW_STALL_CLEAR nearer its goal than at its last recovery, at its goal, or with another goal. */
+#define LW_STALL_MS 30000u
+#define LW_STALL_WAY 20.0f
+#define LW_STALL_CLEAR 60.0f
+static void LwIntentEnd(LwSquad* q, const char* why);
+#define LW_STALL_LINES 40u
+#define LW_STALL_OTHER_LINES 20u
+#define LW_STALL_FIX_LINES 60u
+/* Way made since the window began: nearer the goal in a straight line, or along its path (a detour walks away from
+ * the goal first). `path`: what is left of the path to the goal (LwStallPath), under 0 unknown. */
+static int LwStallMoved(const LwSquad* q, const float* at, float path)
+{
+    if (!q->goalAt) return LwDist2(q->stillFrom, at[0], at[1]) > 3.0f * 3.0f;
+    if (path > 0 && q->stillPath - path >= LW_STALL_WAY) return 1;
+    return q->stillWay - sqrtf(LwDist2(at, q->goalTo[0], q->goalTo[1])) >= LW_STALL_WAY;
+}
+static void LwStallFixNote(LwSquad* q, const char* what)
+{
+    if (g_lwWorld.stallFixLines >= LW_STALL_FIX_LINES) return;
+    g_lwWorld.stallFixLines++;
+    Note("living world: squad %d stalled (try %u, %u waits): %s%s", (int)(q - g_lwSquads), q->stallTries, q->stallWaits, what, g_lwWorld.stallFixLines == LW_STALL_FIX_LINES ? " (the last such line this mission)" : "");
+}
+/* A new goal: a patrol's next node (or a new destination not back through this one); an event squad's intent ends,
+ * which sends it on its route. A retake keeps its garrison. The tries go on: the next stall is not a first one. */
+static void LwStallNewGoal(LwSquad* q)
+{
+    uint8_t tries = q->stallTries;
+    g_lwWorld.stallNewGoal++;
+    if (q->intent == LW_INVESTIGATE || q->intent == LW_REINFORCE) { LwStallFixNote(q, "no way to its point online: the intent ends"); LwIntentEnd(q, "no way to its point online"); q->stallTries = tries; return; }
+    if (q->intent != LW_PATROL) { LwStallFixNote(q, "a retake keeps its goal"); return; }
+    if (q->pathAt + 1 < q->pathLen) q->pathAt++;
+    else { if (q->pathAt < q->pathLen) { q->prevNode = q->path[q->pathAt]; q->prevValid = 1; } q->pathLen = q->pathAt = 0; LwPlan(q); }
+    LwStallFixNote(q, "a new route node as its goal");
+    LwSendGoal(q);
+    q->stallTries = tries;
+}
+/* What a calm squad gets once per 30 s stall, from what LwStallRead read (the game is not needed to decide):
+ * - a brain action drives the leader (flag bit 14: 0x7FD552 and 0x7FD8BA leave such a squad alone): nothing, noted;
+ * - a path request in flight (nav +0x16 = 0, exe 0xBDD86F) or the request cooldown (+0x88): the next window, twice
+ *   at most (a request still in flight after 60 s is not coming back);
+ * - first: the goal again; then the goal moved onto the leader's navmesh layer when that is 5 m or more from it
+ *   (0x5B36C0 drops a re-send within 0.5-5 m of the last pathed point), else a new goal. A patrol never takes the moved
+ *   goal: it takes a new node. */
+enum { LW_STALL_ACTION = 1, LW_STALL_BUSY, LW_STALL_RESEND, LW_STALL_SNAP, LW_STALL_NEWGOAL };
+static int LwStallStep(LwSquad* q, int action, int busy, int snapOff)
+{
+    if (action || (busy && q->stallWaits < 2)) { if (q->stallWaits < 255) q->stallWaits++; return action ? LW_STALL_ACTION : LW_STALL_BUSY; }
+    q->stallWaits = 0;
+    if (q->stallTries < 255) q->stallTries++;
+    if (q->stallTries < 2) return LW_STALL_RESEND;
+    return snapOff && q->intent != LW_PATROL ? LW_STALL_SNAP : LW_STALL_NEWGOAL;
+}
+/* What the recovery reads of the game: the squad has its records; a brain action; a request in flight or cooling
+ * down; held (AiSquad +0x18); a nav record (0x5B36C0 does not test for one); the goal's snap on the leader's layer. */
+typedef struct LwStallRead { int ok, action, busy, held, nav, hit; float snap[3]; } LwStallRead;
+static void LwStallReadGame(const LwSquad* q, const uint32_t* members, int n, uintptr_t nav, LwStallRead* r)
+{
+    uintptr_t sq = LwSquadRecord(q->squad), ai = n > 0 ? LwAiRecord(members[0]) : 0, clock = 0;
+    uint64_t cool = 0, tick = 0; uint32_t world = 0, layer = 0; uint8_t held = 0;
+    memset(r, 0, sizeof *r);
+    if (n <= 0 || sq == 0 || !q->jobSet || LwJobRecord(q->squad) == 0) return;
+    if (nav && EvpPtr(g_lw.game + 0x3326348u, &clock)) { SafeRead(nav + 0x88, &cool, 8); SafeRead(clock + 0x18, &tick, 8); }
+    r->ok = 1; r->nav = nav != 0; r->action = ai && (EvpU32(ai + 0xE4, 0) >> 14 & 1); r->busy = nav && ((EvpU32(nav + 0x16, 1) & 0xFF) == 0 || (tick && tick < cool));
+    r->held = !SafeRead(sq + 0x18, &held, 1) && held;
+    r->hit = LwLeaderSnap(members[0], &world, &layer) && LwSnapAt(world, layer, q->goalTo, r->snap) == 1;
+}
+/* The stalled squad's step, with the game's own calls (P): 0xA13520 writes the squad's and every listed member's job
+ * position; 0x5B36C0 asks for a path; 0x8050E0 gives a held squad (AiSquad +0x18) its nav agent and followers back, as
+ * the game's state 10 does after each destination (0x7FD771). A held squad's nav status is frozen (no agent: 0x5B2020),
+ * so the game's own check (0x7FCA9C) may never come to resume it. */
+static void LwStallApply(LwSquad* q, const float* at, const LwStallRead* r)
+{
+    if (!r->ok) return;
+    int step = LwStallStep(q, r->action, r->busy, r->hit && LwDist2(r->snap, q->goalTo[0], q->goalTo[1]) >= 5.0f * 5.0f);
+    if (step == LW_STALL_ACTION) { g_lwWorld.stallAction++; LwStallFixNote(q, "a brain action drives the leader (flag bit 14): left to it"); return; }
+    if (step == LW_STALL_BUSY) { g_lwWorld.stallBusy++; LwStallFixNote(q, "its path request is in flight or cooling down: the next window"); return; }
+    if (r->held) { g_lw.resume(NULL, q->squad); g_lwWorld.stallResumed++; LwStallFixNote(q, "it was held (AiSquad +0x18): resumed"); }
+    q->stallDist = sqrtf(LwDist2(at, q->goalTo[0], q->goalTo[1]));
+    if (step == LW_STALL_NEWGOAL) { LwStallNewGoal(q); return; }
+    if (step == LW_STALL_SNAP) { g_lwWorld.stallSnapped++; LwStallFixNote(q, "its goal moved onto the leader's navmesh layer"); memcpy(q->goalTo, r->snap, sizeof q->goalTo); q->stillWay = q->stallDist = sqrtf(LwDist2(at, q->goalTo[0], q->goalTo[1])); }
+    else { g_lwWorld.stallResent++; LwStallFixNote(q, "its goal sent again"); }
+    g_lw.goal(q->squad, q->goalTo);
+    if (r->nav) g_lw.repath(NULL, q->squad, q->goalTo);
+}
+/* The stall line: the fields that tell the game-side causes apart (B2 follow-up): leader flag bit 14 (a brain action),
+ * AiSquad +0x18 held and nav +0x91 0 (paused by a hold), the request fields, the leader's job against the squad's, and
+ * the snap at the goal on layer 0 and on the leader's layer. */
+static void LwStallLine(LwSquad* q, const uint32_t* members, int n, const float* at, ULONGLONG now, uintptr_t nav, uint8_t pending, const char* steer, int last)
+{
+    float near2 = 1e18f;
+    for (int i = 0; i < g_lwWorld.playersAt; i++) { float d2 = LwDist2(g_lwWorld.players[i], at[0], at[1]); if (d2 < near2) near2 = d2; }
+    uintptr_t job = LwJobRecord(q->squad), lead = n > 0 ? LwJobRecord(members[0]) : 0, ai = n > 0 ? LwAiRecord(members[0]) : 0, beh = 0, cur = 0, want = 0, clock = 0, sq = LwSquadRecord(q->squad);
+    float jp[3] = {0}, lp[3] = {0}, dest[3] = {0}, pathed[3] = {0}; uint32_t bi = 0, jobKind = job ? EvpU32(job + 0xC, 0) : 0;
+    if (job) SafeRead(job, jp, sizeof jp);
+    if (lead) SafeRead(lead, lp, sizeof lp);
+    int states = EvpPtr(g_lw.game + 0x3326A48u, &beh) && EvpHash(beh + 0x20, q->squad, 8, 4, &bi) && EvpPtr(beh + 0x40, &cur) && EvpPtr(beh + 0x50, &want);
+    uint64_t cool = 0, tick = 0; uint32_t layer = 0, agent = 0, status = 0, flags = 0;
+    if (nav) { SafeRead(nav + 0x60, dest, sizeof dest); SafeRead(nav + 0x6C, pathed, sizeof pathed); SafeRead(nav + 0x88, &cool, 8); agent = EvpU32(nav + 8, 0);
+        status = EvpU32(nav + 0xC, 0); flags = EvpU32(nav + 0x10, 0); }
+    if (EvpPtr(g_lw.game + 0x3326348u, &clock)) SafeRead(clock + 0x18, &tick, 8);
+    char s0[24], s1[24], s2[24];
+    uint32_t world = 0, world0 = EvpU32(g_lwWorld.dir + 0x648, 0);
+    const char* snap0 = LwSnapWord(world0, 0, q->goalTo, s0, sizeof s0);
+    const char* snap1 = n > 0 && LwLeaderSnap(members[0], &world, &layer) ? LwSnapWord(world, layer, q->goalTo, s1, sizeof s1) : "?";
+    const char* snap2 = snap1[0] != '?' ? LwSnapWord(world, 0, q->goalTo, s2, sizeof s2) : "?"; /* the scatter's world without its layer: world or layer at fault */
+    char goalWords[96] = "no goal sent";
+    if (q->goalAt) snprintf(goalWords, sizeof goalWords, "%.0f m from its goal (%.0f, %.0f, %.1f), sent %.0f s ago, %u sends", (double)sqrtf(LwDist2(at, q->goalTo[0], q->goalTo[1])),
+        (double)q->goalTo[0], (double)q->goalTo[1], (double)q->goalTo[2], (double)(now - q->goalAt) / 1000.0, q->goalSends);
+    Note("living world: squad %d (%08X, %s stage %d, %s, %.0f m from the nearest player, %d of %u members) made no way for 30 s (%s), %s; job %u, its point %.0f m from the goal, leader %08X's %.0f m from it; state %d (wanted %d); "
+         "leader flag bit 14 %d, held %d; nav %s: agent %d, status %u, flags %08X, +16 %u, may move %d, pending %u for %.0f s, cooldown %lld us, the leader's layer %u, destination %.0f m and last "
+         "path %.0f m from the goal; snap 25 m at the goal: layer 0 %s (nav world %u), the leader's layer %s and layer 0 %s (the scatter's nav world %u)%s",
+        (int)(q - g_lwSquads), q->squad, kLwIntentNames[q->intent & 3], q->intentStage, q->farOn ? "far" : "near", (double)sqrtf(near2), n, q->cap,
+        steer, goalWords, jobKind, job ? (double)sqrtf(LwDist2(q->goalTo, jp[0], jp[1])) : -1.0,
+        n > 0 ? members[0] : 0, lead ? (double)sqrtf(LwDist2(jp, lp[0], lp[1])) : -1.0,
+        states ? (int)EvpU32(cur + 0x58ull * bi, 0xFFFFFFFFu) : -1, states ? (int)EvpU32(want + 4ull * bi, 0xFFFFFFFFu) : -1,
+        ai ? (int)(EvpU32(ai + 0xE4, 0) >> 14 & 1) : -1, sq ? (int)(EvpU32(sq + 0x18, 0) & 0xFF) : -1, nav ? "found" : "missing", (int)agent, status, flags, nav ? EvpU32(nav + 0x16, 0) & 0xFF : 0,
+        nav ? (int)(EvpU32(nav + 0x91, 0) & 0xFF) : -1,
+        pending, q->pendSince ? (double)(now - q->pendSince) / 1000.0 : 0.0, nav && tick ? (long long)(cool - tick) : 0LL, layer,
+        (double)sqrtf(LwDist2(q->goalTo, dest[0], dest[1])), (double)sqrtf(LwDist2(q->goalTo, pathed[0], pathed[1])), snap0, world0, snap1, snap2, world,
+        last ? " (the last such line this mission)" : "");
+}
+
+/* What is left of the squad's path (0x5B2A70: the sum of the path's corner-to-corner lengths, 0 without a path), while
+ * its destination is its goal or the tick's scatter point by it; -1 otherwise. */
+static float LwStallPath(const LwSquad* q, uintptr_t nav)
+{
+    uintptr_t navs = 0; float dest[3] = {0};
+    if (!nav || !q->goalAt || !EvpPtr(g_lw.game + 0x3326418u, &navs) || SafeRead(nav + 0x60, dest, sizeof dest)) return -1.0f;
+    if (LwDist2(dest, q->goalTo[0], q->goalTo[1]) > LW_ARRIVE * LW_ARRIVE) return -1.0f;
+    float left = g_lw.pathLeft(navs, q->squad);
+    return left > 0 && isfinite(left) ? left : -1.0f;
+}
+static void LwStallMark(LwSquad* q, const float* at, ULONGLONG now, float path)
+{
+    q->stillSince = now; q->stillFrom[0] = at[0]; q->stillFrom[1] = at[1]; q->stillWay = q->goalAt ? sqrtf(LwDist2(at, q->goalTo[0], q->goalTo[1])) : 0; q->stillPath = path;
+}
+static void LwStallCheckAt(LwSquad* q, const uint32_t* members, int n, const float* at, ULONGLONG now, uintptr_t nav, float path);
+static void LwStallCheck(LwSquad* q, const uint32_t* members, int n, const float* at, ULONGLONG now)
+{
+    uintptr_t nav = q->squad ? LwNavRecord(q->squad) : 0;
+    LwStallCheckAt(q, members, n, at, now, nav, LwStallPath(q, nav));
+}
+static void LwStallCheckAt(LwSquad* q, const uint32_t* members, int n, const float* at, ULONGLONG now, uintptr_t nav, float path)
+{
+    uint8_t pending = nav ? (uint8_t)EvpU32(nav + 0x90, 0) : 0;
+    if (!pending) q->pendSince = 0; else if (!q->pendSince) q->pendSince = now;
+    LwGoalLineLater(q, now);
+    if (q->intent != LW_PATROL && q->intentStage != 0) { q->stillSince = 0; return; } /* at its point: standing there is its job */
+    if (q->goalAt && LwDist2(at, q->goalTo[0], q->goalTo[1]) <= LW_ARRIVE * LW_ARRIVE) { q->stillSince = 0; q->stallTries = q->stallWaits = 0; return; } /* there */
+    int moved = q->stillSince && LwStallMoved(q, at, path);
+    if (!q->stillSince || (moved && q->goalAt))
+    {
+        if (moved && q->stallDist - sqrtf(LwDist2(at, q->goalTo[0], q->goalTo[1])) >= LW_STALL_CLEAR) q->stallTries = q->stallWaits = 0; /* on its way again */
+        LwStallMark(q, at, now, path);
+        return;
+    }
+    if (now - q->stillSince < LW_STALL_MS) return;
+    LwStallMark(q, at, now, path); /* once per 30 s */
+    /* no node with a face, or no ground under it, last time: nothing else asks again, standing or wandering */
+    int ask = !q->rushed && !q->goalAt && q->intent == LW_PATROL && q->jobSet && LwSteerOk(q);
+    if (moved) { if (ask) { g_lwWorld.stallNoGoal++; LwSendGoal(q); } return; }
+    /* calm with a goal is the stall; alert, rushing or goal-less squads are noted apart (their own cap), so a long fight
+     * standing its ground does not use up the calm ones' lines */
+    const char* steer = q->rushed ? "rushing" : !LwSteerOk(q) ? (LwCalm(q) ? "calm under 10 s, goal held" : "alert, goal held") : !q->goalAt ? "calm, no goal sent" : "calm";
+    int calm = !q->rushed && q->goalAt && LwSteerOk(q);
+    if (calm) g_lwWorld.stalled++; else g_lwWorld.stalledOther++;
+    uint32_t* lines = calm ? &g_lwWorld.stallLines : &g_lwWorld.stallOtherLines, cap = calm ? LW_STALL_LINES : LW_STALL_OTHER_LINES;
+    uint8_t kind = calm ? 1 : 2; /* one line of each kind per squad */
+    if (!(q->stallNoted & kind) && *lines < cap)
+    {
+        q->stallNoted |= kind; (*lines)++;
+        LwStallLine(q, members, n, at, now, nav, pending, steer, *lines == cap);
+    }
+    LwStallRead r;
+    if (calm) { LwStallReadGame(q, members, n, nav, &r); LwStallApply(q, at, &r); }
+    else if (ask) { g_lwWorld.stallNoGoal++; LwSendGoal(q); }
 }
 
 /* Phase 2b (KB living-world-plan "Phase 2 design", living-world-p2-contact): fights draw squads in. Once a second the
@@ -199,10 +477,12 @@ static void LwIntentEnd(LwSquad* q, const char* why)
     int node = LwNearestNode(q->pos[0], q->pos[1]);
     if (node >= 0) q->node = (uint16_t)node;
     q->prevValid = 0; q->pathLen = q->pathAt = 0; LwPlan(q);
+    q->goalAt = 0; /* the intent's point is no goal now: goal-less until a patrol goal is set */
     if (q->state == LW_ONLINE && q->jobSet && q->pathAt < q->pathLen)
     {
         float goal[3] = {g_lwNodes[q->path[q->pathAt]].x, g_lwNodes[q->path[q->pathAt]].y, 0};
-        if (LwSteerOk(q)) LwSquadGoTo(q, goal); else q->goalPending = 1; /* ending in a fight: the game keeps it */
+        if (!LwSteerOk(q)) q->goalPending = 1; /* ending in a fight: the game keeps it */
+        else if (LwSquadGoTo(q, goal)) q->goalNode = (int16_t)q->path[q->pathAt];
     }
 }
 /* offline: the route to the node nearest the point */
@@ -227,6 +507,21 @@ static int LwIntentRoute(LwSquad* q)
     q->pathLen = (uint8_t)n; q->pathAt = 0;
     return 1;
 }
+/* The first offline arrival of this intent: its time starts the wait (1). An earlier arrival of the same intent keeps its
+ * time (0); the stage time of an earlier intent is older than this intent's start (LwIntentEnd rests a squad before its
+ * next intent, so the two never share a millisecond). */
+static int LwIntentFirstArrival(LwSquad* q, ULONGLONG now)
+{
+    if (q->intentStageAt >= q->intentAt) return 0;
+    q->intentStageAt = now;
+    return 1;
+}
+/* A point no squad may come online at: nearer a player than the spawn band (LwSquadsTick's nearBand). */
+static int LwInsideBand(const float* p)
+{
+    float rMin = g_lwWorld.rMin > 0 ? g_lwWorld.rMin : LW_R_MIN;
+    return g_lwWorld.playersAt > 0 && LwNearestPlayer2(p[0], p[1]) < rMin * rMin;
+}
 /* LwWalk, at the end of the path: 1 = stay (searching), 0 = patrol on */
 static int LwIntentArrived(LwSquad* q)
 {
@@ -235,8 +530,11 @@ static int LwIntentArrived(LwSquad* q)
     {
         if (q->intentStage == 0)
         {
-            q->intentStage = 1; q->intentStageAt = now;
-            Note("living world: squad %d reached the fight at (%.0f, %.0f) offline after %.0f s", (int)(q - g_lwSquads), (double)q->target[0], (double)q->target[1], (double)(now - q->intentAt) / 1000.0);
+            /* LwIntentInside sends an arrived squad back to stage 0 when a player steps up; arriving again keeps the
+             * first arrival's time, so the 120 s wait is not restarted by every push */
+            q->intentStage = 1;
+            if (LwIntentFirstArrival(q, now))
+                Note("living world: squad %d reached the fight at (%.0f, %.0f) offline after %.0f s", (int)(q - g_lwSquads), (double)q->target[0], (double)q->target[1], (double)(now - q->intentAt) / 1000.0);
         }
         if (LwFightOf(q) && now - q->intentStageAt < 120000) return 1;
         LwIntentEnd(q, LwFightOf(q) ? "waited 120 s" : "the fight is over");
@@ -246,9 +544,13 @@ static int LwIntentArrived(LwSquad* q)
     if (q->intent != LW_INVESTIGATE) return 0;
     if (q->intentStage == 0)
     {
-        q->intentStage = 1; q->intentStageAt = now; q->intentSearch = 30000u + (uint32_t)(30000.0f * LwUnit());
-        Note("living world: squad %d reached the noise at (%.0f, %.0f) offline after %.0f s, %.0f m from it; searches %.0f s", (int)(q - g_lwSquads),
-            (double)q->target[0], (double)q->target[1], (double)(now - q->intentAt) / 1000.0, (double)sqrtf(LwDist2(q->pos, q->target[0], q->target[1])), (double)q->intentSearch / 1000.0);
+        q->intentStage = 1;
+        if (LwIntentFirstArrival(q, now))
+        {
+            q->intentSearch = 30000u + (uint32_t)(30000.0f * LwUnit());
+            Note("living world: squad %d reached the noise at (%.0f, %.0f) offline after %.0f s, %.0f m from it; searches %.0f s", (int)(q - g_lwSquads),
+                (double)q->target[0], (double)q->target[1], (double)(now - q->intentAt) / 1000.0, (double)sqrtf(LwDist2(q->pos, q->target[0], q->target[1])), (double)q->intentSearch / 1000.0);
+        }
     }
     if (now - q->intentStageAt < q->intentSearch) return 1;
     LwIntentEnd(q, "searched");
@@ -1172,6 +1474,7 @@ static uint16_t g_lwRegion[LW_NODES_MAX]; /* garrison index + 1, 0 = none */
 static uint8_t g_lwRegionAdj[LW_REGIONS_MAX][LW_REGIONS_MAX / 8];
 static int g_lwRegionStrength[LW_REGIONS_MAX], g_lwRegionNodes[LW_REGIONS_MAX]; /* nodes: 0 = a garrison sharing its nearest node with another (no region) */
 static uint8_t g_lwRegionHeld[LW_REGIONS_MAX];
+static uint8_t g_lwRegionShared[LW_REGIONS_MAX]; /* noted: its own garrison has no strength, other garrisons hold it */
 static struct { uintptr_t owner; int garrisons, built, seeded, nodes; ULONGLONG next, noteAt; uint32_t lost, regained; } g_lwTerr;
 static int LwRegionOfNode(int node) { return g_lwTerr.built && node >= 0 && node < g_lwNodeCount ? (int)g_lwRegion[node] - 1 : -1; }
 static int LwRegionsTouch(int a, int b) { return a >= 0 && b >= 0 && a < LW_REGIONS_MAX && b < LW_REGIONS_MAX && (a == b || (g_lwRegionAdj[a][b / 8] >> (b % 8)) & 1); }
@@ -1197,7 +1500,7 @@ static void LwTerritoryBuild(void)
 {
     static uint16_t queue[LW_NODES_MAX];
     int head = 0, tail = 0, seeds = 0;
-    memset(g_lwRegion, 0, sizeof g_lwRegion); memset(g_lwRegionAdj, 0, sizeof g_lwRegionAdj); memset(g_lwRegionHeld, 0, sizeof g_lwRegionHeld);
+    memset(g_lwRegion, 0, sizeof g_lwRegion); memset(g_lwRegionAdj, 0, sizeof g_lwRegionAdj); memset(g_lwRegionHeld, 0, sizeof g_lwRegionHeld); memset(g_lwRegionShared, 0, sizeof g_lwRegionShared);
     for (int gi = 0; gi < g_lwGarrisonCount && gi < LW_REGIONS_MAX; gi++)
     {
         LwGarrison* g = &g_lwGarrisons[gi];
@@ -1248,6 +1551,17 @@ static void LwTerritoryBuild(void)
         len += (size_t)snprintf(line + len, sizeof line - len, "%.0f,%.0f,%d;", (double)g_lwNodes[a].x, (double)g_lwNodes[a].y, (int)g_lwRegion[a] - 1);
     }
 }
+/* Once per region: its own garrison is cleared yet the region holds, through the garrisons whose nearest route node is
+ * in it (no region of their own, counted for it as extra). Names them, so "held" can be read in a log. */
+static void LwRegionSharedNote(int r, int regions)
+{
+    char line[400]; size_t len = 0; line[0] = 0;
+    for (int o = 0; o < regions && len < sizeof line - 32; o++)
+        if (o != r && g_lwGarrisons[o].haveCenter && !g_lwRegionNodes[o] && LwRegionOfNode(LwNearestNode(g_lwGarrisons[o].center[0], g_lwGarrisons[o].center[1])) == r)
+        { int st = LwGarrisonStrength(&g_lwGarrisons[o]); if (st > 0) len += (size_t)snprintf(line + len, sizeof line - len, "%s%08X %d", len ? ", " : "", g_lwGarrisons[o].entity, st); }
+    g_lwRegionShared[r] = 1;
+    Note("living world: territory: region %d (garrison %08X, cleared) holds through other garrisons: %s", r, g_lwGarrisons[r].entity, line[0] ? line : "none listed");
+}
 static void LwTerritoryTick(void)
 {
     ULONGLONG now = GetTickCount64();
@@ -1290,14 +1604,25 @@ static void LwTerritoryTick(void)
         }
         g_lwRegionHeld[r] = now1;
         held += now1; lost += !now1;
+        if (now1 && g->cleared && LwGarrisonStrength(g) == 0 && !g_lwRegionShared[r]) LwRegionSharedNote(r, regions);
     }
     g_lwTerr.seeded = 1;
     if (now >= g_lwTerr.noteAt)
     {
         g_lwTerr.noteAt = now + 30000;
-        char list[700]; size_t len = 0;
-        for (int r = 0; r < regions && len < sizeof list - 16; r++) if (g_lwRegionNodes[r]) len += (size_t)snprintf(list + len, sizeof list - len, "%d:%d ", r, g_lwRegionStrength[r]);
-        Note("living world: territory (30 s): %d held, %d lost; %u lost and %u held again so far; strength by region: %s", held, lost, g_lwTerr.lost, g_lwTerr.regained, list);
+        /* every region, over as many lines as it takes (one line held only the first ~110 of 131) */
+        char list[700]; size_t len = 0; int first = 1;
+        for (int r = 0; r <= regions; r++)
+        {
+            if (r == regions || len > sizeof list - 16)
+            {
+                if (first) Note("living world: territory (30 s): %d held, %d lost; %u lost and %u held again so far; strength by region: %s", held, lost, g_lwTerr.lost, g_lwTerr.regained, list);
+                else if (len) Note("living world: territory (30 s, continued): strength by region: %s", list);
+                first = 0; len = 0; list[0] = 0;
+                if (r == regions) break;
+            }
+            if (g_lwRegionNodes[r]) len += (size_t)snprintf(list + len, sizeof list - len, "%d:%d ", r, g_lwRegionStrength[r]);
+        }
     }
 }
 
@@ -1381,8 +1706,51 @@ static int LwTestTraceOn(void) { static int on = -1; if (on < 0) { char t[4] = "
  * A refusal there depends only on the point (sight, navmesh), and squads sent together queue on one spot (the 60 m
  * request spacing), so after 20 s without coming online it moves 25 degrees along the edge around the nearest player;
  * a player stepping up to it pushes it back out to the edge. 1 = wait. The wait ends with the fight or after 240 s
- * (reinforcing), after 180 s (investigating). */
-static int LwIntentHold(LwSquad* q, float nx, float ny)
+ * (reinforcing), after 180 s (investigating). `keep`: a squad already waiting stays in the hold though neither it
+ * nor its step is in the band, so the wait's ends and its moves along the edge still come. */
+/* Squads waiting at the edge each keep a lane: LW_HOLD_LANE x (0, +1, -1, +2, ...) round the player from the point's
+ * bearing, the first lane no other waiting squad has. Lanes are over LW_SPACING apart with the points tried in them,
+ * so one squad coming online does not refuse the next for a minute. */
+#define LW_HOLD_LANE 0.56f
+#define LW_HOLD_SHIFT 0.2618f
+static int LwHoldLane(int rank) { return rank == 0 ? 0 : (rank + 1) / 2 * (rank & 1 ? 1 : -1); }
+static int LwHoldFreeLane(const LwSquad* q)
+{
+    for (int rank = 0; rank < 16; rank++)
+    {
+        int lane = LwHoldLane(rank), taken = 0;
+        for (const LwSquad* o = g_lwSquads; o < g_lwSquads + g_lwWorld.count && !taken; o++) taken = o != q && o->state == LW_OFFLINE && o->held && o->holdLane == lane;
+        if (!taken) return lane;
+    }
+    return 0;
+}
+/* The k-th point a waiting squad tries at bearing a from the player: a refusal there depends only on the point (the
+ * navmesh, what stands over it, sight), and a patrol passes these checks by walking on to another one. Nine points:
+ * 8, 14 and 20 m outside the band's edge, on the bearing and 10 m to either side. */
+static void LwHoldPoint(const float* pl, float a, float rMin, int k, float* out)
+{
+    static const float side[3] = {0.0f, 10.0f, -10.0f};
+    float r = rMin + 8.0f + 6.0f * (float)(k % 3), b = a + side[k / 3 % 3] / r;
+    out[0] = pl[0] + r * cosf(b); out[1] = pl[1] + r * sinf(b);
+}
+/* After a refused request: a waiting squad's next point (LwOnlinePlace). All nine refused, its bearing moves on by
+ * LW_HOLD_SHIFT, away from the lower lanes, and stays moved (holdShift): the patch was a dead end. */
+static void LwHoldNext(LwSquad* q)
+{
+    if (!q->held || q->state != LW_OFFLINE || g_lwWorld.playersAt <= 0) return;
+    float rMin = g_lwWorld.rMin > 0 ? g_lwWorld.rMin : LW_R_MIN, best = 3e38f, p[2]; int pi = 0;
+    for (int i = 0; i < g_lwWorld.playersAt; i++) { float d2 = LwDist2(q->pos, g_lwWorld.players[i][0], g_lwWorld.players[i][1]); if (d2 < best) { best = d2; pi = i; } }
+    for (int t = 0; t < 18; t++)
+    {
+        q->holdTry = (uint8_t)((q->holdTry + 1) % 9);
+        if (q->holdTry == 0) { float turn = q->holdLane < 0 ? -LW_HOLD_SHIFT : LW_HOLD_SHIFT; q->holdShift += turn; q->holdA += turn; }
+        LwHoldPoint(g_lwWorld.players[pi], q->holdA, rMin, q->holdTry, p);
+        if (LwNearestPlayer2(p[0], p[1]) < rMin * rMin || p[0] * p[0] + p[1] * p[1] >= g_lwWorld.radius * g_lwWorld.radius) continue;
+        q->pos[0] = p[0]; q->pos[1] = p[1];
+        return;
+    }
+}
+static int LwIntentHoldAt(LwSquad* q, float nx, float ny, int keep)
 {
     if ((q->intent != LW_INVESTIGATE && q->intent != LW_REINFORCE) || q->intentStage != 0) { q->held = 0; return 0; }
     float rMin = g_lwWorld.rMin > 0 ? g_lwWorld.rMin : LW_R_MIN, edge = rMin + 5.0f;
@@ -1391,14 +1759,15 @@ static int LwIntentHold(LwSquad* q, float nx, float ny)
     if (pi < 0) { q->held = 0; return 0; }
     const float* pl = g_lwWorld.players[pi];
     float d0 = sqrtf(best), d1 = sqrtf(LwNearestPlayer2(nx, ny));
-    if (d0 >= rMin && !(d1 < edge && d1 < d0)) { if (d0 > edge + 20.0f) q->held = 0; return 0; } /* outside and not crossing inward; still waiting while near the edge */
+    if (d0 >= rMin && !(d1 < edge && d1 < d0) && !(keep && q->held && d0 <= edge + 20.0f)) { if (d0 > edge + 20.0f) q->held = 0; return 0; } /* outside and not crossing inward; still waiting while near the edge */
     ULONGLONG now = GetTickCount64();
     if (q->intent == LW_REINFORCE && !LwFightOf(q)) { LwIntentEnd(q, "the fight ended while it waited at the spawn band"); return 1; }
     if (q->intent == LW_REINFORCE && now - q->intentAt > 240000) { LwIntentEnd(q, "240 s, waiting at the spawn band"); return 1; }
     if (q->intent == LW_INVESTIGATE && now - q->intentAt > 180000) { LwIntentEnd(q, "180 s, waiting at the spawn band"); return 1; }
     if (!q->held)
     {
-        q->heldAt = now;
+        q->heldAt = now; q->holdA = atan2f(q->pos[1] - pl[1], q->pos[0] - pl[0]); q->holdTry = 0; q->holdShift = 0; q->holdLane = (int8_t)LwHoldFreeLane(q);
+        if (q->heldFrom < q->intentAt) q->heldFrom = now; /* once per intent: a push in and out does not start it again */
         Note("living world: squad %d (%s) waits at the spawn band's edge at (%.0f, %.0f), %.0f m from the nearest player, to come online there", (int)(q - g_lwSquads),
             q->intent == LW_REINFORCE ? "reinforcing" : "investigating", (double)q->pos[0], (double)q->pos[1], (double)d0);
     }
@@ -1407,21 +1776,21 @@ static int LwIntentHold(LwSquad* q, float nx, float ny)
     int push = d0 < rMin && now - q->pushAt >= 3000;
     if (push || (d0 >= rMin && now - q->heldAt > 20000))
     {
-        /* inside: straight out. At the edge: up to 25 degrees toward the point's bearing from the player (audit 2d: always
-         * +25 degrees walked squads round the player); already on it, 25 degrees either way in turn, off the refused spot */
+        /* inside: straight out. At the edge: up to 25 degrees toward its lane by the point's bearing from the player
+         * (audit 2d: always +25 degrees walked squads round the player); in its lane, LwHoldNext tries the points there */
         float a = atan2f(q->pos[1] - pl[1], q->pos[0] - pl[0]), r = rMin + 8.0f;
         if (d0 >= rMin)
         {
-            float da = atan2f(q->target[1] - pl[1], q->target[0] - pl[0]) - a;
+            float da = atan2f(q->target[1] - pl[1], q->target[0] - pl[0]) + LW_HOLD_LANE * (float)q->holdLane + q->holdShift - q->holdA;
             while (da > 3.14159265f) da -= 6.2831853f;
             while (da < -3.14159265f) da += 6.2831853f;
-            a += fabsf(da) > 0.087f ? (da > 0.436f ? 0.436f : da < -0.436f ? -0.436f : da) : ((now / 20000) & 1 ? 0.436f : -0.436f);
+            a = q->holdA + (da > 0.436f ? 0.436f : da < -0.436f ? -0.436f : da);
         }
         float px = pl[0] + r * cosf(a), py = pl[1] + r * sinf(a);
         if (LwNearestPlayer2(px, py) >= rMin * rMin && px * px + py * py < g_lwWorld.radius * g_lwWorld.radius)
         {
             Note("living world: squad %d %s along the spawn band's edge to (%.0f, %.0f)", (int)(q - g_lwSquads), d0 < rMin ? "steps back out" : "moves", (double)px, (double)py);
-            q->pos[0] = px; q->pos[1] = py;
+            q->pos[0] = px; q->pos[1] = py; q->holdA = a; q->holdTry = 0; /* the bearing's first point */
             if (push) q->pushAt = now;
         }
         q->heldAt = now;
@@ -1429,6 +1798,7 @@ static int LwIntentHold(LwSquad* q, float nx, float ny)
     q->held = 1;
     return 1;
 }
+static int LwIntentHold(LwSquad* q, float nx, float ny) { return LwIntentHoldAt(q, nx, ny, 0); }
 /* LwWalk, offline, at the end of its path (or with none): an INVESTIGATE or REINFORCE squad inside the band where no
  * squad comes online steps back out to its edge through LwIntentHold with the point as its next step. One that already reached its point there goes back to walking in (stage 0),
  * so it comes online at the edge and walks the rest with its online goal (audit 2c, 5: 7 of 16 offline arrivals were
@@ -1438,9 +1808,9 @@ static int LwIntentInside(LwSquad* q)
     float rMin = g_lwWorld.rMin > 0 ? g_lwWorld.rMin : LW_R_MIN;
     if (q->intentStage != 0 && LwNearestPlayer2(q->pos[0], q->pos[1]) < rMin * rMin)
     {
-        Note("living world: squad %d (%s) is at its point inside the spawn band, %.0f m from the nearest player: it walks in online from the band's edge", (int)(q - g_lwSquads),
+        if (q->insideAt < q->intentAt) Note("living world: squad %d (%s) is at its point inside the spawn band, %.0f m from the nearest player: it walks in online from the band's edge", (int)(q - g_lwSquads),
             q->intent == LW_REINFORCE ? "reinforcing" : "investigating", (double)sqrtf(LwNearestPlayer2(q->pos[0], q->pos[1])));
-        q->intentStage = 0; q->intentSent = 0;
+        q->intentStage = 0; q->intentSent = 0; q->insideAt = GetTickCount64(); /* noted once per intent */
     }
     if (q->intentStage != 0 || LwNearestPlayer2(q->pos[0], q->pos[1]) >= rMin * rMin) return 0; /* outside: the last leg walks on and waits at the edge (LwIntentLeg) */
     return LwIntentHold(q, q->target[0], q->target[1]);
@@ -1454,6 +1824,12 @@ static int LwIntentLeg(LwSquad* q, float dt)
     if ((q->intent != LW_INVESTIGATE && q->intent != LW_REINFORCE && q->intent != LW_RETAKE) || q->intentStage != 0) return 0;
     float reach = q->intent == LW_INVESTIGATE ? LW_HEAR_NEAR : LW_FIGHT_JOIN;
     float dx = q->target[0] - q->pos[0], dy = q->target[1] - q->pos[1], d = sqrtf(dx * dx + dy * dy);
+    /* Within reach of a point inside the band, an offline squad waits at the band's edge in stage 0 instead of arriving
+     * unseen: it comes online there and walks in with its online goal. Waiting is the hold's inward step to the point,
+     * which keeps the hold's own ends (the fight over, 240 s / 180 s) and its moves along the edge. A squad that arrived
+     * once and was pushed out of the band keeps waiting too: arriving again just outside it ran a push-arrive loop. */
+    if (d <= reach && q->intent != LW_RETAKE && LwInsideBand(q->target)) return LwIntentHold(q, q->target[0], q->target[1]);
+    if (d <= reach && q->intent != LW_RETAKE && q->held && q->intentStageAt >= q->intentAt) return LwIntentHoldAt(q, q->target[0], q->target[1], 1);
     if (d <= reach) return 0;
     float step = q->speed * (q->intent == LW_REINFORCE ? LW_RUSH : 1.0f) * dt, go = d - reach * 0.5f;
     if (step > go) step = go;

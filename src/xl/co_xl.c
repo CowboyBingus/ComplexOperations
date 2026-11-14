@@ -485,6 +485,162 @@ float CoXlTestLwAibSteer(float stock, float cur, float lat)
     return h[0x47C / 4];
 }
 LONG CoXlTestNoiseHead(void) { return g_lwNoiseHead; }
+/* An offline reinforcing squad (index 0) on the way to fight 0 at `t`, one player at `pl`, an extra large disc: the
+ * offline walk's arrival and band-edge hold (living_world_intent.c), without the game. */
+void CoXlTestLwReinforce(const float* pl, const float* at, const float* t)
+{
+    memset(&g_lwWorld, 0, sizeof g_lwWorld); memset(g_lwFights, 0, sizeof g_lwFights);
+    g_lwWorld.count = 1; g_lwWorld.playersAt = 1; g_lwWorld.rMin = 150.0f; g_lwWorld.radius = 7782.0f;
+    memcpy(g_lwWorld.players[0], pl, sizeof(float) * 2);
+    LwSquad* q = &g_lwSquads[0]; memset(q, 0, sizeof *q);
+    ULONGLONG now = GetTickCount64();
+    q->state = LW_OFFLINE; q->intent = LW_REINFORCE; q->speed = 2.0f; q->fight = 0; q->intentAt = now - 1000; q->intentStageAt = now - 60000;
+    q->pos[0] = at[0]; q->pos[1] = at[1]; q->target[0] = t[0]; q->target[1] = t[1];
+    g_lwFights[0].live = 1; g_lwFights[0].born = now - 2000;
+}
+void CoXlTestLwPlayerAt(const float* pl) { memcpy(g_lwWorld.players[0], pl, sizeof(float) * 2); }
+/* One offline walk step of squad 0: its stage, held flag, position and stage time; the push timer is cleared first. */
+void CoXlTestLwWalk(float dt, int* stage, int* held, float* pos, uint64_t* stageAt)
+{
+    LwSquad* q = &g_lwSquads[0];
+    q->pushAt = 0;
+    LwWalk(q, dt);
+    *stage = q->intentStage; *held = q->held; pos[0] = q->pos[0]; pos[1] = q->pos[1]; *stageAt = q->intentStageAt;
+}
+int CoXlTestLwIntent(void) { return g_lwSquads[0].intent; }
+/* The refusal gates' counts as the 30 s note lists them (then cleared). */
+void CoXlTestLwRefuse(const char* why) { LwRefuseCount(why); }
+void CoXlTestLwRefuseList(char* out, size_t size) { LwRefuseList(out, size); }
+/* The squad a member belongs to: listed, or lost in the last 10 s. */
+void CoXlTestLwLostAdd(uint32_t id, int squad) { LwLostAdd(id, squad); }
+int CoXlTestLwSquadOf(uint32_t id, uint64_t later, int* dead) { g_lwWorld.count = 0; return LwSquadOfMember(id, GetTickCount64() + later, dead); }
+void CoXlTestLwSlot(const float* pos, uint32_t i, uint32_t n, float* to) { LwMemberSlot(pos, i, n, to); }
+/* The units the status note gives as the limit: the bubbles' budgets under the density rules, else the effective cap. */
+int CoXlTestLwBudget(int density, int eff, int b0, int b1)
+{
+    g_lwWorld.eff = eff; g_lwDensity.on = density; g_lwDensity.count = 2; g_lwDensity.budget[0] = b0; g_lwDensity.budget[1] = b1;
+    int r = LwUnitBudget(); g_lwDensity.on = -1; return r;
+}
+/* Every build's note of why a waiting event squad is not online: index 0 (reinforcing) with `why`. */
+void CoXlTestLwHeldWhy(const char* why) { g_lwSquads[0].intent = LW_REINFORCE; LwHeldWhy(&g_lwSquads[0], why, 160.0f * 160.0f); }
+/* Squad 0 online and calm with a goal (fresh: a new stretch sent at `now`; 2: no goal sent, 3: rushing, 4: a patrol
+ * left goal-less by its last send, 5: a retaking squad at its garrison likewise), its leader at
+ * `at` at `now` ms: the stall check; the 30 s count of calm still squads (the others' count in `other`). */
+uint32_t CoXlTestLwStallOther(void) { return g_lwWorld.stalledOther; }
+static float g_testStallPath = -1.0f;
+uint32_t CoXlTestLwStall(int fresh, const float* at, const float* goal, uint64_t now)
+{
+    LwSquad* q = &g_lwSquads[0];
+    if (fresh) { memset(q, 0, sizeof *q); q->state = LW_ONLINE; q->cap = 9; float g[3] = {goal[0], goal[1], 0}; LwGoalSent(q, g); q->goalAt = now; g_lwWorld.stalled = g_lwWorld.stalledOther = 0; }
+    if (fresh == 2) q->goalAt = 0; /* no goal sent */
+    if (fresh == 3) q->rushed = 1;
+    if (fresh) q->pathLen = 1; /* a route: a goal send plans none here */
+    if (fresh == 4 || fresh == 5 || fresh == 8) { q->goalAt = 0; q->jobSet = 1; } /* a goal send that found nothing */
+    if (fresh == 8) q->intent = LW_INVESTIGATE; /* on its way, goal-less */
+    if (fresh == 5) { q->intent = LW_RETAKE; q->intentStage = 1; }
+    if (fresh == 6 || fresh == 7) { q->intent = LW_REINFORCE; q->intentStage = fresh == 6; } /* at its point; on its way */
+    LwStallCheckAt(q, NULL, 0, at, now, 0, g_testStallPath);
+    return g_lwWorld.stalled;
+}
+/* What is left of squad 0's path at the next stall checks (under 0: unknown). */
+void CoXlTestLwStallPath(float left) { g_testStallPath = left; }
+/* Waiting squads' lanes and points: the lane of the rank-th waiting squad; the k-th point at bearing a from a player
+ * at the origin with a 150 m band; squad `idx` of two waiting at one point, 21 s there, moved by the hold. */
+int CoXlTestLwHoldLane(int rank) { return LwHoldLane(rank); }
+/* The lane a newly waiting squad 2 takes when squads 0 and 1 wait in lanes a and b (99: not waiting). */
+int CoXlTestLwHoldFree(int a, int b)
+{
+    memset(g_lwSquads, 0, 3 * sizeof g_lwSquads[0]); g_lwWorld.count = 3;
+    for (int i = 0; i < 3; i++) g_lwSquads[i].state = LW_OFFLINE; /* walking squads keep lane 0 in their record: not taken */
+    if (a != 99) { g_lwSquads[0].state = LW_OFFLINE; g_lwSquads[0].held = 1; g_lwSquads[0].holdLane = (int8_t)a; }
+    if (b != 99) { g_lwSquads[1].state = LW_OFFLINE; g_lwSquads[1].held = 1; g_lwSquads[1].holdLane = (int8_t)b; }
+    return LwHoldFreeLane(&g_lwSquads[2]);
+}
+void CoXlTestLwHoldPoint(float a, int k, float* out) { const float pl[2] = {0, 0}; LwHoldPoint(pl, a, 150.0f, k, out); }
+void CoXlTestLwHoldTwo(int idx, float* pos)
+{
+    LwSquad* q = &g_lwSquads[idx];
+    if (idx == 1) { *q = g_lwSquads[0]; g_lwWorld.count = 2; q->holdLane = (int8_t)LwHoldFreeLane(q); }
+    q->heldAt -= 21000; q->pushAt = 0;
+    LwIntentHoldAt(q, q->target[0], q->target[1], 1);
+    pos[0] = q->pos[0]; pos[1] = q->pos[1];
+}
+/* Squad 0 waiting in `lane` with all nine points refused: how far its bearing turns. */
+float CoXlTestLwHoldTurn(int lane)
+{
+    LwSquad* q = &g_lwSquads[0]; q->state = LW_OFFLINE; q->held = 1; q->holdLane = (int8_t)lane; q->holdTry = 8; q->holdA = 1.0f; q->holdShift = 0;
+    LwHoldNext(q);
+    return fabsf(q->holdA - 1.0f - q->holdShift) < 0.0001f ? q->holdShift : 99.0f;
+}
+/* After a refused request, squad 0's next point at the edge. */
+void CoXlTestLwHoldNext(float* pos) { LwHoldNext(&g_lwSquads[0]); pos[0] = g_lwSquads[0].pos[0]; pos[1] = g_lwSquads[0].pos[1]; }
+void CoXlTestLwStallLines(uint32_t n) { g_lwWorld.stallLines = n; }
+uint32_t CoXlTestLwStallNoGoal(void) { return g_lwWorld.stallNoGoal; }
+/* Squad 0's stall tries: set when `set` >= 0; what they are. */
+int CoXlTestLwStallTries(int set) { if (set >= 0) g_lwSquads[0].stallTries = (uint8_t)set; return g_lwSquads[0].stallTries; }
+/* A stalled squad's step (LW_STALL_*: 1 left to a brain action, 2 waits for its path request, 3 goal again, 4 goal
+ * moved onto the leader's layer, 5 new goal) from its intent, its tries so far and what the recovery read. */
+int CoXlTestLwStallStep(int intent, int tries, int action, int busy, int snapOff, int* after)
+{
+    LwSquad* q = &g_lwSquads[0]; q->intent = (uint8_t)intent; q->stallTries = (uint8_t)tries;
+    int r = LwStallStep(q, action, busy, snapOff); *after = q->stallTries; return r;
+}
+/* LwOnline's checks for squad 0 (held or not) with placement and room answered by the test: how often each ran, and the
+ * retry it left (ms from now, 0 = none). */
+static int g_testPlaceOk, g_testRoomOk, g_testPlaces, g_testRooms;
+static int TestPlace(LwSquad* q, uintptr_t slot, uint32_t cap, float* pos, float* target) { (void)q; (void)slot; (void)cap; (void)pos; (void)target; g_testPlaces++; return g_testPlaceOk; }
+static int TestRoom(uint32_t members) { (void)members; g_testRooms++; snprintf(g_lwRoomWhy, sizeof g_lwRoomWhy, "the cap: bubble 70 online + 9 over 72 (1 players)"); return g_testRoomOk; }
+int CoXlTestLwGates(int held, int placeOk, int roomOk, int* places, int* rooms, int* retryMs)
+{
+    LwSquad* q = &g_lwSquads[0]; float pos[3] = {0}, target[3] = {0};
+    q->held = (uint8_t)held; q->retry = 0; g_testPlaceOk = placeOk; g_testRoomOk = roomOk; g_testPlaces = g_testRooms = 0;
+    g_lwGates.place = TestPlace; g_lwGates.room = TestRoom;
+    int r = LwOnlineGates(q, 0, 9, pos, target);
+    g_lwGates.place = LwOnlinePlace; g_lwGates.room = LwRoomFor;
+    *places = g_testPlaces; *rooms = g_testRooms; *retryMs = q->retry ? (int)(q->retry - GetTickCount64()) : 0;
+    return r;
+}
+/* Whether squad 0's member slots are sight-checked: waiting at the band's edge or not, `waited` ms into its wait. */
+int CoXlTestLwSlotsChecked(int held, uint32_t waited) { LwSquad* q = &g_lwSquads[0]; ULONGLONG now = GetTickCount64(); q->held = (uint8_t)held; q->heldFrom = now - waited; return LwSlotsChecked(q, now); }
+uint64_t CoXlTestLwHeldFrom(void) { return g_lwSquads[0].heldFrom; }
+/* Goals wait for the job's state entry: the squad's state (-1 unread) and the ms since its job was asked for. */
+int CoXlTestLwJobSettled(int state, uint32_t waited) { return LwJobSettled(state, waited); }
+/* Squad 0 on its way to node 0 at (nodeX, 0), with a goal at (goalX, 0) sent for node `goalNode` (-2: no goal sent):
+ * whether the leader at (atX, 0) has reached the node. */
+int CoXlTestLwNodeReached(int intent, float nodeX, float goalX, int goalNode, float atX)
+{
+    LwSquad* q = &g_lwSquads[0]; float g[3] = {goalX, 0, 0}, at[2] = {atX, 0};
+    memset(q, 0, sizeof *q); q->state = LW_ONLINE; q->intent = (uint8_t)intent; q->pathLen = 1; g_lwNodes[0].x = nodeX; g_lwNodes[0].y = 0;
+    if (goalNode != -2) { LwGoalSent(q, g); q->goalNode = (int16_t)goalNode; }
+    return LwNodeReached(q, at);
+}
+/* A calm stalled squad's recovery (LwStallApply) with the game's calls counted: squad 0 at (atX, 0) with its goal at
+ * (goalX, 0); read[] = {ok, action, busy, held, nav record, leader-layer hit}, the snap at (snapX, 0). calls[] = goal
+ * sends, path requests, resumes; to[] = the last goal's and the last path request's x. */
+static int g_stallCalls[3]; static float g_stallTo[2];
+static void StallGoalStub(uint32_t squad, const float* pos) { (void)squad; g_stallCalls[0]++; g_stallTo[0] = pos[0]; }
+static void StallRepathStub(void* nav, uint32_t squad, const float* pos) { (void)nav; (void)squad; g_stallCalls[1]++; g_stallTo[1] = pos[0]; }
+static void StallResumeStub(void* squads, uint32_t squad) { (void)squads; (void)squad; g_stallCalls[2]++; }
+void CoXlTestLwStallApply(int intent, int tries, const int* read, float atX, float goalX, float snapX, int* calls, float* to, float* goalNow)
+{
+    LwSquad* q = &g_lwSquads[0]; float at[2] = {atX, 0};
+    LwStallRead r = {read[0], read[1], read[2], read[3], read[4], read[5], {snapX, 0, 0}};
+    q->intent = (uint8_t)intent; q->stallTries = (uint8_t)tries; q->goalTo[0] = goalX; q->goalTo[1] = 0; q->goalAt = 1; q->state = LW_ONLINE;
+    memset(g_stallCalls, 0, sizeof g_stallCalls); g_stallTo[0] = g_stallTo[1] = -1;
+    g_lw.goal = StallGoalStub; g_lw.repath = StallRepathStub; g_lw.resume = StallResumeStub;
+    LwStallApply(q, at, &r);
+    memcpy(calls, g_stallCalls, sizeof g_stallCalls); memcpy(to, g_stallTo, sizeof g_stallTo); *goalNow = q->goalTo[0];
+}
+uint32_t CoXlTestLwStallCount(int what) { return what == 0 ? g_lwWorld.stallResent : what == 1 ? g_lwWorld.stallSnapped : what == 2 ? g_lwWorld.stallNewGoal : what == 3 ? g_lwWorld.stallResumed : what == 4 ? g_lwWorld.stallAction : g_lwWorld.stallBusy; }
+int CoXlTestLwStallWaits(int set) { if (set >= 0) g_lwSquads[0].stallWaits = (uint8_t)set; return g_lwSquads[0].stallWaits; }
+/* The band-edge wait's clocks moved back by ms: 0 the intent's start, 1 the time at this point; 2: the fight ends. */
+void CoXlTestLwHoldAge(int what, uint32_t ms) { LwSquad* q = &g_lwSquads[0]; if (what == 0) { q->intentAt -= ms; g_lwFights[0].born -= ms; } else if (what == 1) q->heldAt -= ms; else if (what == 2) g_lwFights[0].live = 0; else { memset(&g_lwNodes[0], 0, sizeof g_lwNodes[0]); g_lwNodeCount = 1; } } /* 3: one route node, for an intent's end */
+void CoXlTestLwStallSet(int rushed, float dist) { g_lwSquads[0].rushed = (uint8_t)rushed; g_lwSquads[0].stallDist = dist; }
+/* An intent's end with no patrol goal set: whether the squad still has a goal. */
+int CoXlTestLwIntentEndGoal(void) { LwSquad* q = &g_lwSquads[0]; q->goalAt = 5; q->intent = LW_INVESTIGATE; LwIntentEnd(q, "test"); return q->goalAt != 0; }
+int CoXlTestLwGoalNode(void) { float g[3] = {1, 2, 3}; g_lwSquads[0].goalNode = 7; LwGoalSent(&g_lwSquads[0], g); return g_lwSquads[0].goalNode; }
+/* A refusal counted, then a new mission's clear: the first 30 s list is empty. */
+void CoXlTestLwMissionClear(void) { LwMissionClear(); }
 const char* CoXlTestGuards(uintptr_t game) { return CoXlGuards(game); }
 void CoXlTestRenderShrink(uintptr_t map, void (*rehash)(uintptr_t, uint32_t)) { g_lwRender.rehash = (uintptr_t)rehash; LwRenderShrink(map); }
 void CoXlTestRenderCopies(uintptr_t dev, void (*resize)(uintptr_t, uint32_t)) { g_lwRender.resize = (uintptr_t)resize; LwRenderCopiesFree(dev); }
