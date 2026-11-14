@@ -2567,7 +2567,7 @@ static void LwTestCommands(void)
 
 /* With the 30 s notes: the obstacle smashes spared, and where the members stood against the drawn ground; the
  * counts start again. */
-static void LwTiltScan(void); static void LwTiltNote(void); static void LwTiltBaseline(void); /* living_world_tilt.c */
+static void LwTiltScan(void); static void LwTiltNote(void); static void LwTiltBaseline(void); static void LwTiltClient(void); /* living_world_tilt.c */
 static void LwLeanNote(void); /* living_world_leancap.c */
 static void LwGroundNote(void)
 {
@@ -4292,6 +4292,7 @@ static void LivingTickBody(void)
     LwPatrolsOff();
     int host = 0, mission = ActMission(g_lw.game, &host, NULL);
     LwPfFrame(mission); /* every peer, before this frame's physics step */
+    if (mission && !host) LwTiltClient();
     if (!mission || !host) return;
     LwTraceTick();
     uintptr_t dir;
