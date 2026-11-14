@@ -501,6 +501,7 @@ typedef struct LwSquad
     uint16_t home1; /* 2d: its home region + 1 (0 = none yet) */
     int8_t fight; uint8_t rushed, rushedN, tells; ULONGLONG retargetAt, tellAt; /* REINFORCE: its fight (g_lwFights index); members sped up (0x7EFFC0), how many; fight target tells; next goal refresh, next tell */
     float goalTo[3], stillFrom[2], stillWay, stillPath; ULONGLONG goalAt, stillSince, pendSince, jobAt; uint8_t goalSends, stallNoted, stallTries, stallWaits, goalLines, goalLineHit; int16_t goalNode; float stallDist, goalRaw[3]; ULONGLONG goalLineAt; /* jobAt: its job asked for; goalNode: the route node goalTo was sent for, -1 none */ /* the last goal sent online and when; the leader still since; the nav's request pending since (the stall note) */
+    uint8_t planKind; float planDist; /* the last plan's home rule + 1 and distance to its destination, until its goal is sent (LwRouteNote) */
     uint16_t prevNode; uint8_t prevValid, goalPending, alerted; ULONGLONG calmSince; /* the node it walked from (no route starts back to it); a patrol goal held while members are alert; alert since it came online, calm since */
 } LwSquad;
 static int LwIntentArrived(LwSquad* q); static int LwIntentGoal(LwSquad* q); static void LwIntentOnline(LwSquad* q, const uint32_t* members, int n, const float* at);
@@ -561,7 +562,7 @@ static struct
     uint32_t crowded; /* points where a member's slot cast would not reach its slot (30 s) */
     uint32_t seenSlot, spaced; /* points refused: a member's slot in sight; within LW_SPACING of a squad or recent request (30 s) */
     uint32_t swapWaits, swapWaitLines; /* far swaps that waited for an event squad's hold (30 s); their lines this mission */
-    uint32_t stallResent, stallSnapped, stallNewGoal, stallResumed, stallAction, stallBusy, stallNoGoal, stallFixLines, goalSendsAll, goalTypeMiss, goalOwnDest, goalLines, holdRefuseLines; /* stall recoveries (30 s); their lines this mission */
+    uint32_t stallResent, stallSnapped, stallNewGoal, stallResumed, stallAction, stallBusy, stallNoGoal, stallFixLines, goalSendsAll, goalTypeMiss, goalOwnDest, goalLines, holdRefuseLines, routeLines, routeFailLines; /* stall recoveries (30 s); their lines this mission */
     uint32_t stalled, stalledOther, stallLines, stallOtherLines; /* online squads still 30 s: calm with a goal, other (30 s); their lines this mission */
     uint32_t goals, goalNoFace, goalReplans, goalStuck; /* goals sent, next nodes without a face within 25 m, replans, none found (30 s) */
     uint32_t heights, underGround, overGround; float worstUnder, worstOver; /* members against the drawn ground (30 s) */
@@ -658,9 +659,9 @@ static int LwNearestNode(float x, float y)
 #define LW_PLAN_DRAWS 128
 static void LwPlan(LwSquad* q)
 {
-    int local = g_lwWorld.radius > LW_ROAM;
-    int home = LwTerritoryGoalOk(q, -1) && LwUnit() < 0.7f; /* 2d: most goals stay in the home region or a neighbour (D) */
-    int most = (local ? 24 : 8) * (home ? 2 : 1);
+    int local = g_lwWorld.radius > LW_ROAM, base = local ? 24 : 8;
+    int has = LwTerritoryGoalOk(q, -1), home = has && LwUnit() < 0.7f; /* 2d: most goals stay in the home region or a neighbour (D) */
+    int most = base * (home ? 2 : 1), routes = 0;
     for (int tries = 0, draws = 0; tries < most && draws < most * LW_PLAN_DRAWS && g_lwNodeCount > 0; draws++)
     {
         int goal = (int)(LwRand() % (uint32_t)g_lwNodeCount);
@@ -668,12 +669,20 @@ static void LwPlan(LwSquad* q)
         if (g_lwNodes[goal].x * g_lwNodes[goal].x + g_lwNodes[goal].y * g_lwNodes[goal].y > r * r) continue;
         if (local && LwDist2(q->pos, g_lwNodes[goal].x, g_lwNodes[goal].y) > LW_ROAM * LW_ROAM) continue;
         tries++;
-        if (home && tries <= (local ? 24 : 8) && !LwTerritoryGoalOk(q, goal)) continue; /* then any goal, so the squad never stands still */
+        if (home && tries <= base && !LwTerritoryGoalOk(q, goal)) continue; /* then any goal, so the squad never stands still */
         int n = LwPath(q->node, goal, q->path, LW_PATH_MAX);
-        if (n > 0 && q->prevValid && q->path[0] == q->prevNode && tries <= most / 2) continue; /* back the way it came: an about-turn (user, real play) */
-        if (n > 0) { q->pathLen = (uint8_t)n; q->pathAt = 0; return; }
+        routes++;
+        /* Back the way it came: an about-turn (user, real play). Counted in routes searched, not in tries: a squad
+         * with no home node in range spends its first tries on the home rule and would turn about freely after them. */
+        if (n > 0 && q->prevValid && q->path[0] == q->prevNode && routes <= base / 2) continue;
+        if (n > 0)
+        {
+            q->pathLen = (uint8_t)n; q->pathAt = 0;
+            q->planKind = (uint8_t)(1 + (!has ? 0 : !home ? 1 : tries <= base ? 2 : 3)); q->planDist = sqrtf(LwDist2(q->pos, g_lwNodes[goal].x, g_lwNodes[goal].y));
+            return;
+        }
     }
-    q->pathLen = 0; q->pathAt = 0;
+    q->pathLen = 0; q->pathAt = 0; q->planKind = 0;
 }
 
 /* The world's squads for this mission: on route nodes inside the playable disc, away from the players. */
@@ -1714,23 +1723,47 @@ static int LwGoalCanSend(LwSquad* q, int route, int records)
     q->goalAt = 0;
     return 0;
 }
+/* A new route's first goal, once per route (capped): the one line that tells a route end that went on from one that
+ * left the squad goal-less, with what the checks of a run need: the destination, its distance and the home rule. */
+#define LW_ROUTE_LINES 400u
+#define LW_ROUTE_FAIL_LINES 40u
+static void LwRouteNote(LwSquad* q)
+{
+    static const char* const kHome[4] = {"no home rule (the squad has no home region)", "no home rule (the free draw)", "home rule kept", "home rule gave way (no home node in its tries)"};
+    int kind = q->planKind;
+    q->planKind = 0;
+    if (kind == 0 || q->pathLen == 0 || g_lwWorld.routeLines >= LW_ROUTE_LINES) return;
+    g_lwWorld.routeLines++;
+    int goal = q->path[q->pathLen - 1];
+    Note("living world: squad %d takes a new route: to node %d at (%.0f, %.0f), %.0f m away, %d nodes; %s; its goal is sent%s", (int)(q - g_lwSquads), goal, (double)g_lwNodes[goal].x,
+        (double)g_lwNodes[goal].y, (double)q->planDist, (int)q->pathLen, kHome[(kind - 1) & 3], g_lwWorld.routeLines == LW_ROUTE_LINES ? " (the last route line this mission)" : "");
+}
+static void LwRouteFail(LwSquad* q, const char* why)
+{
+    if (g_lwWorld.routeFailLines >= LW_ROUTE_FAIL_LINES) return;
+    g_lwWorld.routeFailLines++;
+    Note("living world: squad %d gets no patrol goal (%s): goal-less until the stall check asks again%s", (int)(q - g_lwSquads), why,
+        g_lwWorld.routeFailLines == LW_ROUTE_FAIL_LINES ? " (the last route line of this kind this mission)" : "");
+}
 static void LwSendGoal(LwSquad* q)
 {
     if (LwIntentGoal(q)) return; /* an intent picks the destination (Phase 2) */
     if (q->pathAt >= q->pathLen) LwPlan(q);
-    if (!LwGoalCanSend(q, q->pathAt < q->pathLen, LwJobRecord(q->squad) != 0 && LwSquadRecord(q->squad) != 0)) return;
+    int route = q->pathAt < q->pathLen, records = LwJobRecord(q->squad) != 0 && LwSquadRecord(q->squad) != 0;
+    if (!LwGoalCanSend(q, route, records)) { LwRouteFail(q, !route ? "no destination found" : "its job or squad record is missing"); return; }
     if (!LwNodeHasFace(q->path[q->pathAt])) /* the next node has no navmesh: another destination whose next node has */
     {
         g_lwWorld.goalNoFace++;
         int t = 0;
         for (; t < 8; t++) { g_lwWorld.goalReplans++; LwPlan(q); if (q->pathAt < q->pathLen && LwNodeHasFace(q->path[q->pathAt])) break; }
-        if (t == 8) { g_lwWorld.goalStuck++; q->pathLen = q->pathAt = 0; q->goalAt = 0; return; } /* goal-less: the stall check asks again */
+        if (t == 8) { g_lwWorld.goalStuck++; q->pathLen = q->pathAt = 0; q->goalAt = 0; q->planKind = 0; LwRouteFail(q, "no next node with navmesh in 8 plans"); return; } /* goal-less: the stall check asks again */
     }
     float goal[3] = {g_lwNodes[q->path[q->pathAt]].x, g_lwNodes[q->path[q->pathAt]].y, 0};
     /* The job position alone leaves the destination to state 10's scatter (0x7ED200), which falls back to the squad's
      * own position on a miss; the point snapped here and pathed directly (0x5B36C0) is the destination itself. */
-    if (!LwSquadGoTo(q, goal)) { q->goalAt = 0; q->pathLen = q->pathAt = 0; return; } /* goal-less: the stall check asks again, for another route */
+    if (!LwSquadGoTo(q, goal)) { q->goalAt = 0; q->pathLen = q->pathAt = 0; q->planKind = 0; LwRouteFail(q, "no ground or no navmesh face at the goal point"); return; } /* goal-less: the stall check asks again, for another route */
     g_lwWorld.goals++; q->goalNode = (int16_t)q->path[q->pathAt];
+    LwRouteNote(q);
 }
 
 /* The job asked for, goals wait for state 10's entry (0x7FD790): it runs in the next behaviour update and sets its
@@ -1989,9 +2022,11 @@ static void LwOnlineTick(LwSquad* q, int* removals)
     if (LwNodeReached(q, at))
     {
         q->prevNode = q->node; q->prevValid = 1; q->node = q->path[q->pathAt++];
-        if (q->jobSet) { if (LwSteerOk(q)) LwSendGoal(q); else q->goalPending = 1; } /* a goal would pull members still at alert 1-2 out of the game's own reaction */
-        Note("living world: squad %d reached node %u at (%.0f, %.0f); next %s", (int)(q - g_lwSquads), q->node, (double)at[0], (double)at[1],
-            q->pathAt < q->pathLen ? "node on its route" : "a new destination");
+        /* Written before the send: a route end whose plan succeeds would read as a node on its route after it. */
+        int send = q->jobSet && LwSteerOk(q);
+        Note("living world: squad %d reached node %u at (%.0f, %.0f); next %s%s", (int)(q - g_lwSquads), q->node, (double)at[0], (double)at[1],
+            q->pathAt < q->pathLen ? "node on its route" : "a new destination", send ? "" : q->jobSet ? ", its goal held while it is alert or calm under 10 s" : ", its goal held until its job is set");
+        if (send) LwSendGoal(q); else if (q->jobSet) q->goalPending = 1; /* a goal would pull members still at alert 1-2 out of the game's own reaction */
     }
     /* test instrument (HELLFORGE_LW_TEST_CYCLE=1): a squad with losses is sent offline once, 45 s after it came online,
      * through the same path as the distance rule (which runs confirmed it), so its return shows the survivor count */
@@ -2075,7 +2110,7 @@ static void LwPendingTick(LwSquad* q)
     if (used == 1 && id != none && id != 0)
     {
         Note("living world: squad %d is online as %08X after %.1f s", (int)(q - g_lwSquads), id, (double)(GetTickCount64() - q->since) / 1000.0);
-        q->squad = id; q->state = LW_ONLINE; q->rec = 0; q->moved = 0; q->goalAt = q->stillSince = q->pendSince = 0; q->goalSends = q->stallNoted = q->stallTries = q->stallWaits = q->goalLines = 0; q->goalLineAt = 0;
+        q->squad = id; q->state = LW_ONLINE; q->rec = 0; q->moved = 0; q->goalAt = q->stillSince = q->pendSince = 0; q->goalSends = q->stallNoted = q->stallTries = q->stallWaits = q->goalLines = 0; q->goalLineAt = 0; q->planKind = 0; /* a route planned offline is not a new route online */
         /* keep at once (audit 1, criterion 6): the dispatch wrote rec+8 inside the director (0x954F4C), and the members
          * that exist by now must not meet the next despawner pass (0x572C69) with keep 0 */
         uint32_t members[32];

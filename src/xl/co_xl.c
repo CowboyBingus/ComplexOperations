@@ -436,14 +436,12 @@ int CoXlTestNetVec(uintptr_t cfg, float scale, uint32_t* types, uint8_t* widen, 
 }
 float CoXlTestLwFaceReach(int tilesOn, int keeper, float top, float drawn, float wall) { return LwFaceReach(tilesOn, keeper, top, drawn, wall); }
 float CoXlTestLwRequestZ(float top, float face) { return LwRequestZ(top, face); }
-/* A square grid of route nodes `step` apart over a disc of `radius`, squad 0 on the node nearest (x, y): `plans` new
- * destinations. Returns the plans that found no route; `beyond` counts destinations over LW_ROAM away, `turned` routes that
- * start with the node it came from (the one before in the last route). */
-int CoXlTestLwPlans(float radius, float step, float x, float y, int plans, int* beyond, int* turned)
+/* A square grid of route nodes `step` apart over a disc of `radius`, no home regions. */
+static void LwTestGrid(float radius, float step)
 {
-    LwSquad* q = &g_lwSquads[0]; int side = (int)(2 * radius / step) + 1, failed = 0;
     static int16_t at[128][128];
-    g_lwNodeCount = 0; g_lwTerr.built = 0; *beyond = *turned = 0;
+    int side = (int)(2 * radius / step) + 1;
+    g_lwNodeCount = 0; g_lwTerr.built = 0;
     for (int j = 0; j < side && j < 128; j++) for (int i = 0; i < side && i < 128; i++)
     {
         float nx = -radius + step * (float)i, ny = -radius + step * (float)j;
@@ -453,7 +451,17 @@ int CoXlTestLwPlans(float radius, float step, float x, float y, int plans, int* 
         if (i > 0 && at[j][i - 1] >= 0) LwLink(at[j][i], at[j][i - 1]);
         if (j > 0 && at[j - 1][i] >= 0) LwLink(at[j][i], at[j - 1][i]);
     }
-    memset(q, 0, sizeof *q); g_lwWorld.radius = radius;
+    g_lwWorld.radius = radius;
+}
+/* On that grid, squad 0 on the node nearest (x, y): `plans` new destinations. Returns the plans that found no route;
+ * `beyond` counts destinations over LW_ROAM away, `turned` routes that start with the node it came from (the one
+ * before in the last route). */
+int CoXlTestLwPlans(float radius, float step, float x, float y, int plans, int* beyond, int* turned)
+{
+    LwSquad* q = &g_lwSquads[0]; int failed = 0;
+    *beyond = *turned = 0;
+    LwTestGrid(radius, step);
+    memset(q, 0, sizeof *q);
     q->node = (uint16_t)LwNearestNode(x, y); q->pos[0] = g_lwNodes[q->node].x; q->pos[1] = g_lwNodes[q->node].y;
     for (int k = 0; k < plans; k++)
     {
@@ -466,6 +474,36 @@ int CoXlTestLwPlans(float radius, float step, float x, float y, int plans, int* 
         q->prevNode = q->node; q->prevValid = 1; q->node = q->path[0]; q->pos[0] = g_lwNodes[q->node].x; q->pos[1] = g_lwNodes[q->node].y;
         q->pathLen = q->pathAt = 0;
     }
+    return failed;
+}
+/* The same grid with squad 0 standing at `at` (not moved between plans), come from its node's first neighbour. With
+ * `home` {x, y, radius} the nodes inside that disc are its home region and the rest another that does not touch it.
+ * Returns the plans without a route; `inHome` counts destinations in the home region, `turned` routes that start back
+ * to that neighbour; each of the first `notes` routes is noted twice (one line a route). */
+int CoXlTestLwPlansAt(float radius, float step, const float* at, const float* home, int plans, int notes, int* inHome, int* turned)
+{
+    LwSquad* q = &g_lwSquads[0]; int failed = 0;
+    *inHome = *turned = 0;
+    LwTestGrid(radius, step);
+    memset(q, 0, sizeof *q);
+    q->node = (uint16_t)LwNearestNode(at[0], at[1]); q->pos[0] = at[0]; q->pos[1] = at[1];
+    if (g_lwNodes[q->node].degree) { q->prevNode = g_lwNodes[q->node].next[0]; q->prevValid = 1; }
+    if (home)
+    {
+        memset(g_lwRegionAdj, 0, sizeof g_lwRegionAdj);
+        for (int i = 0; i < g_lwNodeCount; i++) g_lwRegion[i] = LwDist2(home, g_lwNodes[i].x, g_lwNodes[i].y) <= home[2] * home[2] ? 1 : 2;
+        g_lwTerr.built = 1; q->home1 = 1;
+    }
+    for (int k = 0; k < plans; k++)
+    {
+        q->pathLen = q->pathAt = 0;
+        LwPlan(q);
+        if (q->pathLen == 0) { failed++; continue; }
+        if (LwRegionOfNode(q->path[q->pathLen - 1]) == 0) (*inHome)++;
+        if (q->prevValid && q->path[0] == q->prevNode) (*turned)++;
+        if (k < notes) { LwRouteNote(q); LwRouteNote(q); } /* the second call writes nothing: one line a route */
+    }
+    g_lwTerr.built = 0;
     return failed;
 }
 int CoXlTestLwOnlineSteps(int online, uint64_t wideUntil, uint64_t now) { return LwOnlineSteps(online, wideUntil, now); }

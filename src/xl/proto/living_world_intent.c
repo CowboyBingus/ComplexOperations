@@ -539,7 +539,7 @@ static void LwIntentEnd(LwSquad* q, const char* why)
     {
         float goal[3] = {g_lwNodes[q->path[q->pathAt]].x, g_lwNodes[q->path[q->pathAt]].y, 0};
         if (!LwSteerOk(q)) q->goalPending = 1; /* ending in a fight: the game keeps it */
-        else if (LwSquadGoTo(q, goal)) q->goalNode = (int16_t)q->path[q->pathAt];
+        else if (LwSquadGoTo(q, goal)) { q->goalNode = (int16_t)q->path[q->pathAt]; LwRouteNote(q); }
     }
 }
 /* offline: the route to the node nearest the point */
