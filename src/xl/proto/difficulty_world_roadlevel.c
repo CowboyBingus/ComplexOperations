@@ -14,8 +14,9 @@
  * - The draw: the game's own leveller's material 0x671080F3766141AF through generator [R+0x28] (0xFB8A6A; triangles
  *   as 0xFB88BE feeds them: float3 pixels with the height as z, layer 0, the colour at game+0x23C8540, float2 uv
  *   with the weight in u). Its shader eases u and sets height x a + ground x (1 - a). The field is drawn on a
- *   GRADE_STEP lattice, each cell once, so no ground is set twice. On a pad's flat ground and past the rim the weight
- *   is 0; a pad's band is graded like any ground (RoadGradeFree).
+ *   GRADE_STEP lattice, each cell once, so no ground is set twice. The shader's easing is per vertex (its vertex
+ *   stage: saturate, then u u (3 - 2u)); between vertices the eased weight and the height run straight. On a pad's
+ *   flat ground and past the rim the weight is 0; beside a pad it falls over the pad's band (RoadGradeShare).
  * HELLFORGE_XL_ROAD_GRADE=0 (research) leaves the ground as it is; the reports are still written. */
 #define GRADE_SOFT 0.0787017f  /* tan 4.5 degrees where the cap allows: a sustained 5 with room for the 4 m lattice */
 #define GRADE_HARD 0.1227846f  /* tan 7 degrees, held everywhere: nothing over 8 on the 4 m lattice */
@@ -53,20 +54,26 @@ static int RoadGradeOn(void)
     return on;
 }
 
-/* A pad's weight at (dx, dy) from its centre, as NearPadRaster weighs it. */
-static float RoadGradePadWeight(const NearPad* p, float dx, float dy)
+/* A pad's weight at (dx, dy) from its centre, as NearPadRaster weighs it; least: its bands taken this wide at least. */
+static float RoadGradePadWeight(const NearPad* p, float dx, float dy, float least)
 {
     if (p->rect)
     {
         const float lx = fabsf(dx * p->c + dy * p->s), ly = fabsf(-dx * p->s + dy * p->c);
-        float ta = (lx - p->a) / p->ba, tb = (ly - p->b) / p->bb;
+        float ta = (lx - p->a) / fmaxf(p->ba, least), tb = (ly - p->b) / fmaxf(p->bb, least);
         ta = ta < 0 ? 0 : ta > 1 ? 1 : ta; tb = tb < 0 ? 0 : tb > 1 ? 1 : tb;
         return p->k * (1 - ta * ta * (3 - 2 * ta)) * (1 - tb * tb * (3 - 2 * tb));
     }
-    float t = (sqrtf(dx * dx + dy * dy) - p->a) / p->ba; t = t < 0 ? 0 : t > 1 ? 1 : t;
+    float t = (sqrtf(dx * dx + dy * dy) - p->a) / fmaxf(p->ba, least); t = t < 0 ? 0 : t > 1 ? 1 : t;
     return p->k * (1 - t * t * (3 - 2 * t));
 }
-static float RoadGradePadReach(const NearPad* p) { return p->rect ? sqrtf((p->a + p->ba) * (p->a + p->ba) + (p->b + p->bb) * (p->b + p->bb)) : p->a + p->ba; }
+#define GRADE_FADE 48.0f /* beside a road a pad's band counts this wide at least (RoadGradeShare) */
+#define GRADE_FOOT 1.0e-3f /* pad weight: the feet's mean may lack this much of the line's own without a loss of share */
+static float RoadGradePadReach(const NearPad* p)
+{
+    const float ba = fmaxf(p->ba, GRADE_FADE), bb = fmaxf(p->bb, GRADE_FADE);
+    return p->rect ? sqrtf((p->a + ba) * (p->a + ba) + (p->b + bb) * (p->b + bb)) : p->a + ba;
+}
 
 /* The level's pads in GRADE_CELL cells (corner metres). */
 static void RoadGradePadIndex(void)
@@ -102,14 +109,12 @@ static void RoadGradePadIndex(void)
     g_grade.padStart = start; g_grade.padItem = item;
 }
 
-/* How much of the road's height a point may take (corner metres): none past the rim or on a pad's flat ground.
- * Only the pads op 0x3F flattened count: a stamp's footprint is no flat ground, its stamp takes its pose on the graded
- * level. A pad's band is ground like any other, so a road is graded through it up to the flat part: the share falls
- * from whole at GRADE_SKIRT of the pad's weight to none at GRADE_PIN, where a station keeps the pad's height. The
- * same share holds on the level and on a near tile, which reads the level's surface where the road was drawn. */
+/* The largest weight of the pads op 0x3F flattened at a point (corner metres), their bands `least` wide at least. A
+ * stamp's footprint is no flat ground (its stamp takes its pose on the graded level) and a flatten zone's box is not
+ * level: neither counts. */
 #define GRADE_PIN 0.98f
 #define GRADE_SKIRT 0.9f
-static float RoadGradePadAt(float x, float y)
+static float RoadGradePadWide(float x, float y, float least)
 {
     const float half = g_grade.world / 2;
     float pad = 0.0f;
@@ -120,12 +125,14 @@ static float RoadGradePadAt(float x, float y)
         {
             const NearPad* p = &g_pads.pad[g_grade.padItem[q]];
             if (p->foot || p->zone) continue;
-            const float w = RoadGradePadWeight(p, x - half - p->cx, y - half - p->cy);
+            const float w = RoadGradePadWeight(p, x - half - p->cx, y - half - p->cy, least);
             if (w > pad) pad = w;
         }
     }
     return pad;
 }
+static float RoadGradePadAt(float x, float y) { return RoadGradePadWide(x, y, 0.0f); }
+static float RoadGradeFade(float x, float y) { return RoadGradePadWide(x, y, GRADE_FADE); }
 /* 1 inside a stamp's own footprint (corner metres): the place's ground, where its own terrain rules. */
 static int RoadGradeInPlace(float x, float y)
 {
@@ -146,14 +153,40 @@ static float RoadGradeRim(float x, float y)
     const float rim = (g_grade.playable - r) / GRADE_RIM;
     return rim < 0.0f ? 0.0f : rim > 1.0f ? 1.0f : rim;
 }
-static float RoadGradeFree(float x, float y)
-{
-    return RoadGradeRim(x, y) * (1.0f - GradeSmooth((RoadGradePadAt(x, y) - GRADE_SKIRT) / (GRADE_PIN - GRADE_SKIRT)));
-}
 /* A station that keeps its ground: on a pad's flat part or within GRADE_RIM of the playable radius. */
 static int RoadGradePinned(float x, float y) { return RoadGradePadAt(x, y) >= GRADE_PIN || RoadGradeRim(x, y) < 1.0f; }
-/* The cap at a point: whole on open ground, none on a pad's flat part and at the rim, eased between. */
-static float RoadGradeEarth(float x, float y) { return GRADE_EARTH * RoadGradeRim(x, y) * (1.0f - GradeSmooth(RoadGradePadAt(x, y) / GRADE_PIN)); }
+/* The cap at a station: whole on open ground, none at the rim and where a pad's flat part lies within the bed's half
+ * width (the largest pad weight on two rings about the station, bands as RoadGradeShare takes them), eased between:
+ * a cut on the line would stand as a wall against flat ground the bed touches, and the cap falls slowly enough
+ * towards such a pad for the limit to follow it. */
+static float RoadGradeEarth(float x, float y)
+{
+    float pad = RoadGradeFade(x, y);
+    for (int q = 0; q < 16; q++)
+    {
+        const float r = q < 8 ? GRADE_FULL : GRADE_FULL / 2, a = 0.7853982f * (float)q, w = RoadGradeFade(x + r * cosf(a), y + r * sinf(a));
+        if (w > pad) pad = w;
+    }
+    return GRADE_EARTH * RoadGradeRim(x, y) * (1.0f - GradeSmooth(pad / GRADE_PIN));
+}
+/* The field with the road's share at a point (corner metres): the weight the draw and a near tile take, *z and *d
+ * as GradeFieldAt gives them. The share is whole but for three things, each continuous and from positions alone:
+ * - past the rim: none;
+ * - where the road's stations stand on a pad's flat part, they and their neighbours: none, the pad's ground holds
+ *   and the pins already put the road at its height;
+ * - a pad beside the road: where the pad counts more here than on the line, the share falls with the pad's weight
+ *   over its whole band (GRADE_FADE wide at least), so flat ground in a road's band gets no wall at its edge. On
+ *   the line itself the pad counts the same, so a road onto a pad is drawn whole to its first station there and
+ *   no step is left where its profile comes down to the pad. */
+static float RoadGradeShare(float x, float y, float* z, float* d)
+{
+    const float fade = RoadGradeFade(x, y);
+    GradeFoot on = {fade > 0.0f ? RoadGradeFade : NULL, 0.0f, 0.0f};
+    const float w = GradeFieldAt(&g_grade.f, x, y, z, d, &on);
+    if (!(w > 0.0f)) return 0.0f;
+    const float beside = GradeSmooth((1.0f - fade + GRADE_FOOT) / (1.0f - on.foot + GRADE_FOOT)); /* 1 on the line itself */
+    return w * RoadGradeRim(x, y) * (1.0f - GradeSmooth(on.held)) * beside;
+}
 static float RoadGradeGround(void* unused, float x, float y);
 
 /* The capture's ground at a point (corner metres); not finite when it cannot be read. */
@@ -171,7 +204,7 @@ static float RoadGradeMove(void* unused, float x, float y)
 {
     float z = NAN, d;
     (void)unused;
-    const float w = GradeFieldAt(&g_grade.f, x, y, &z, &d) * RoadGradeFree(x, y), h = RoadGradeGround(NULL, x, y);
+    const float w = RoadGradeShare(x, y, &z, &d), h = RoadGradeGround(NULL, x, y);
     return w > 0.0f && isfinite(z) && isfinite(h) ? GradeSmooth(w) * (z - h) : isfinite(h) ? 0.0f : NAN;
 }
 /* The roads' own height at a point: the designed surface, where a road reaches. */
@@ -179,7 +212,7 @@ static float RoadGradeDesigned(void* unused, float x, float y)
 {
     float z = NAN, d;
     (void)unused;
-    return GradeFieldAt(&g_grade.f, x, y, &z, &d) > 0.0f ? z : NAN;
+    return GradeFieldAt(&g_grade.f, x, y, &z, &d, NULL) > 0.0f ? z : NAN;
 }
 /* The level's final capture (g_near.global, 4 m) between its four samples about a point. */
 static float RoadGradeLevel(void* unused, float x, float y)
@@ -257,13 +290,19 @@ static int RoadGradeSolve(void)
         if (!isfinite(h)) return 0;
         f->s[i].ground = h;
         f->s[i].pinned = (uint8_t)RoadGradePinned(x, y);
+        f->s[i].flat = (uint8_t)(RoadGradePadAt(x, y) >= GRADE_PIN);
         f->s[i].earth = RoadGradeEarth(x, y);
         f->s[i].floor = water ? g_nearWater.high + GRADE_WATER : -GRADE_FAR;
         g_grade.pinned += f->s[i].pinned;
     }
     GradeFieldLinks(f);
     GradeFieldTies(f);
-    for (uint32_t i = 0; i < f->stations; i++) f->s[i].cross = GradeFieldCross(f, i, RoadGradeGround, NULL);
+    for (uint32_t i = 0; i < f->stations; i++)
+    {
+        f->s[i].cross = GradeFieldCross(f, i, RoadGradeGround, NULL);
+        f->s[i].held = f->s[i].flat;
+        for (uint32_t k = 0; k < f->s[i].links; k++) f->s[i].held &= f->s[f->s[i].link[k]].flat;
+    }
     g_grade.torn = GradeSolveCapped(f->s, f->stations, GRADE_SOFT, GRADE_HARD, GRADE_PASSES);
     uint32_t at = 0;
     g_grade.deep = GradeOverCap(f->s, f->stations, GRADE_MISS, &g_grade.deepest, &at, &g_grade.deepMetres);
@@ -303,18 +342,19 @@ static uint32_t RoadGradeBatch(GradeTriFn tri, uint64_t gui, uint64_t material, 
         const uint32_t k = g_grade.next;
         if ((k & 7) == 0 && g_grade.cell[k >> 3] == 0) { g_grade.next += 7; continue; }
         if (!((g_grade.cell[k >> 3] >> (k & 7)) & 1)) continue;
-        float v[4][3], uv[4][2], most_ = 0.0f, seen = NAN;
+        float v[4][3], uv[4][2], most_ = 0.0f; double seen = 0.0, shares = 0.0;
         for (int q = 0; q < 4; q++)
         {
             const float x = (float)(k % g_grade.cells + (q == 1 || q == 2)) * GRADE_STEP, y = (float)(k / g_grade.cells + (q >= 2)) * GRADE_STEP;
             float z = NAN, d;
-            const float w = GradeFieldAt(&g_grade.f, x, y, &z, &d) * RoadGradeFree(x, y);
+            const float w = RoadGradeShare(x, y, &z, &d);
             v[q][0] = x * px; v[q][1] = y * px; v[q][2] = z; uv[q][0] = w; uv[q][1] = 0.0f;
             if (w > most_) most_ = w;
-            if (isfinite(z)) seen = z;
+            if (w > 0.0f) { seen += (double)w * z; shares += w; }
         }
         if (!(most_ > 0.0f)) continue;
-        for (int q = 0; q < 4; q++) if (!isfinite(v[q][2])) v[q][2] = seen; /* a corner no road is listed at has weight 0 */
+        /* a corner without a share has no height of its own: the cell's, by the shares of the corners that have */
+        for (int q = 0; q < 4; q++) if (!(uv[q][0] > 0.0f)) v[q][2] = (float)(seen / shares);
         tri(gui, v[0], v[1], v[2], 0, colour, material, uv[0], uv[1], uv[2]);
         tri(gui, v[0], v[2], v[3], 0, colour, material, uv[0], uv[2], uv[3]);
         given += 2; g_grade.drawn++;
@@ -324,7 +364,7 @@ static uint32_t RoadGradeBatch(GradeTriFn tri, uint64_t gui, uint64_t material, 
 
 /* ---- the reports ---- */
 /* A surface only where a road is drawn whole: off the pads' flat ground and its skirt and off the rim. */
-static float RoadGradeClear(void* ctx, float x, float y) { return RoadGradeFree(x, y) < 1.0f ? NAN : g_grade.under(ctx, x, y); }
+static float RoadGradeClear(void* ctx, float x, float y) { return RoadGradeRim(x, y) < 1.0f || RoadGradePadAt(x, y) > GRADE_SKIRT ? NAN : g_grade.under(ctx, x, y); }
 /* A surface up to the places' edges: inside a stamp's footprint the place's own terrain is not the road's. */
 static float RoadGradeOpen(void* ctx, float x, float y) { return RoadGradeInPlace(x, y) ? NAN : g_grade.under(ctx, x, y); }
 /* "x\ty" from the world's centre, or two empty fields when the measure has no sample. */
@@ -349,9 +389,10 @@ static void RoadGradeLine(char* out, size_t size, const GradeRoad* g)
  * highest fill against the capture (`moved`); clear of pads: metres, steepest, metres over 5 and 8, cross slope, the
  * two worst places; the whole road's two worst places, each with the pad weight there and 1 inside a place; the
  * shoulders' steepest span and sharpest crease with places; up to the places' edges: metres, steepest, metres over 5
- * and 8, cross slope, the two places, shoulder and crease. Places are metres from the world's centre, empty when the
- * measure has no sample. */
-static void RoadGradeReport(uintptr_t block, const char* what, const wchar_t* file, GradeHeightFn height, int moved)
+ * and 8, cross slope, the two places, shoulder and crease; then the steepest between neighbouring samples (whole, up
+ * to the places' edges, its place) and the steepest across the bed 3 to 6 m off the line (the same three). Places
+ * are metres from the world's centre, empty when the measure has no sample. base: GradeRoadShoulder's. */
+static void RoadGradeReport(uintptr_t block, const char* what, const wchar_t* file, GradeHeightFn height, int moved, GradeHeightFn base)
 {
     const RoadsLayout L = {g_routeEdges, g_routePoints, 0};
     RoadEdge* e = NULL; uint32_t points = 0;
@@ -378,9 +419,9 @@ static void RoadGradeReport(uintptr_t block, const char* what, const wchar_t* fi
         else { first = g_spurs.spur[k - n].first; end = g_spurs.spur[k - n].end; edge = g_spurs.spur[k - n].edge; }
         if (end > points || end <= first) continue;
         memset(&one, 0, sizeof one); memset(&clear, 0, sizeof clear); memset(&open, 0, sizeof open);
-        GradeRoadAlong(height, NULL, pts + 2 * (size_t)first, end - first, &one);
-        GradeRoadAlong(RoadGradeClear, NULL, pts + 2 * (size_t)first, end - first, &clear);
-        GradeRoadAlong(RoadGradeOpen, NULL, pts + 2 * (size_t)first, end - first, &open);
+        GradeRoadAlong(height, base, NULL, pts + 2 * (size_t)first, end - first, &one);
+        GradeRoadAlong(RoadGradeClear, base, NULL, pts + 2 * (size_t)first, end - first, &clear);
+        GradeRoadAlong(RoadGradeOpen, base, NULL, pts + 2 * (size_t)first, end - first, &open);
         float low = 0.0f, high = 0.0f;
         for (uint32_t p = first; moved && p < end; p++)
         {
@@ -398,20 +439,21 @@ static void RoadGradeReport(uintptr_t block, const char* what, const wchar_t* fi
             deep[spur]++;
             if (listed + 24 < sizeof list) listed += (size_t)snprintf(list + listed, sizeof list - listed, " %s %u", spur ? "spur" : "edge", spur ? k - n : k);
         }
-        char line[900], at[10][40]; DWORD wrote;
+        char line[1100], at[10][40]; DWORD wrote;
         RoadGradePlace(at[0], 40, clear.steepAt, clear.steepest > 0.0f); RoadGradePlace(at[1], 40, clear.crossAt, clear.cross > 0.0f);
         RoadGradePlace(at[2], 40, one.steepAt, one.steepest > 0.0f); RoadGradePlace(at[3], 40, one.crossAt, one.cross > 0.0f);
         RoadGradePlace(at[4], 40, one.sideAt, one.side > 0.0f); RoadGradePlace(at[5], 40, one.creaseAt, one.crease > 0.0f);
         RoadGradePlace(at[6], 40, open.steepAt, open.steepest > 0.0f); RoadGradePlace(at[7], 40, open.crossAt, open.cross > 0.0f);
+        RoadGradePlace(at[8], 40, open.briefAt, open.brief > 0.0f); RoadGradePlace(at[9], 40, open.edgeAt, open.edge > 0.0f);
         const int len = snprintf(line, sizeof line, "%s\t%u\t%u\t%.1f\t%.2f\t%.2f\t%.0f\t%.0f\t%.0f\t%.0f\t%.1f\t%.2f\t%.2f\t%.2f\t%.1f\t%.2f\t%.0f\t%.0f\t%.2f\t%s\t%s"
-            "\t%s\t%.2f\t%d\t%s\t%.2f\t%d\t%.2f\t%s\t%.2f\t%s\t%.1f\t%.2f\t%.0f\t%.0f\t%.2f\t%s\t%s\t%.2f\t%.2f\n",
+            "\t%s\t%.2f\t%d\t%s\t%.2f\t%d\t%.2f\t%s\t%.2f\t%s\t%.1f\t%.2f\t%.0f\t%.0f\t%.2f\t%s\t%s\t%.2f\t%.2f\t%.2f\t%.2f\t%s\t%.2f\t%.2f\t%s\n",
             spur ? "spur" : "arterial", spur ? k - n : k, edge, one.metres, (double)one.steepest, (double)GradeRoad95(&one), one.over[0], one.over[1], one.over[2], one.over[3],
             one.metres > 0.0 ? one.rise / (one.metres / 1000.0) : 0.0, (double)one.cross, (double)low, (double)high, clear.metres, (double)clear.steepest, clear.over[0],
             clear.over[1], (double)clear.cross, at[0], at[1],
             at[2], (double)RoadGradePadAt(one.steepAt[0], one.steepAt[1]), RoadGradeInPlace(one.steepAt[0], one.steepAt[1]),
             at[3], (double)RoadGradePadAt(one.crossAt[0], one.crossAt[1]), RoadGradeInPlace(one.crossAt[0], one.crossAt[1]),
             (double)one.side, at[4], (double)one.crease, at[5], open.metres, (double)open.steepest, open.over[0], open.over[1], (double)open.cross, at[6], at[7],
-            (double)open.side, (double)open.crease);
+            (double)open.side, (double)open.crease, (double)one.brief, (double)open.brief, at[8], (double)one.edge, (double)open.edge, at[9]);
         if (out != INVALID_HANDLE_VALUE) WriteFile(out, line, TsvLength(line, sizeof line, len), &wrote, NULL);
     }
     if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
@@ -493,7 +535,7 @@ static void RoadGradeCensus(uintptr_t block, uint64_t context)
         float xy[2], own = GRADE_NO_HEIGHT, z = NAN, d;
         if (SafeRead(block + (offset - 0x90) + 0xE0ull * i, xy, 8) || SafeRead(block + (offset - 0x90) + 0xE0ull * i + 0xC, &own, 4) || own == GRADE_NO_HEIGHT) continue;
         fixed++;
-        if (!(GradeFieldAt(&g_grade.f, xy[0], xy[1], &z, &d) * RoadGradeFree(xy[0], xy[1]) > 0.0f) || !isfinite(z)) continue;
+        if (!(RoadGradeShare(xy[0], xy[1], &z, &d) > 0.0f) || !isfinite(z)) continue;
         inBand++;
         if (fabsf(own - z) > worst) worst = fabsf(own - z);
     }
@@ -561,9 +603,9 @@ static int RoadGradeStep(uint64_t context)
         RoadGradeStationsFile();
         RoadGradePadsFile();
         g_grade.ready = 1;
-        RoadGradeReport(gen, "the ground before (the capture)", L"grade-before", RoadGradeGround, 0);
-        RoadGradeReport(gen, "the roads as designed", L"grade-designed", RoadGradeDesigned, 1);
-        RoadGradeReport(gen, "what the grading adds (the eased weight times the cut or fill)", L"grade-move", RoadGradeMove, 0);
+        RoadGradeReport(gen, "the ground before (the capture)", L"grade-before", RoadGradeGround, 0, NULL);
+        RoadGradeReport(gen, "the roads as designed", L"grade-designed", RoadGradeDesigned, 1, NULL);
+        RoadGradeReport(gen, "what the grading adds (the eased weight times the cut or fill; shoulders: over the ground's own side slope)", L"grade-move", RoadGradeMove, 0, RoadGradeGround);
         RoadGradeCensus(gen, context);
         g_grade.off = !RoadGradeOn() || g_grade.cell == NULL;
         if (g_grade.off) { Note("roads: level %ld grade: off (HELLFORGE_XL_ROAD_GRADE=0, research): the ground stays as it is", (long)g_world.levels); return 0; }
@@ -602,7 +644,7 @@ static void RoadGradeAfterNote(uintptr_t block)
     if (g_grade.afterLevel == g_world.levels || g_grade.level != g_world.levels || !g_grade.ready || g_near.level != g_world.levels || g_near.global == NULL ||
         g_near.columns < 2 || g_near.rows < 2) return;
     g_grade.afterLevel = g_world.levels;
-    RoadGradeReport(block, g_grade.off ? "the level's 4 m heights (not graded)" : "the level's 4 m heights after grading", L"grade-after", RoadGradeLevel, 0);
+    RoadGradeReport(block, g_grade.off ? "the level's 4 m heights (not graded)" : "the level's 4 m heights after grading", L"grade-after", RoadGradeLevel, 0, NULL);
 }
 
 /* ---- a near tile ----
@@ -611,8 +653,7 @@ static float RoadGradeTileWeight(float wx, float wy)
 {
     if (!g_grade.ready || g_grade.off || g_grade.level != g_world.levels) return 0.0f;
     float z, d;
-    const float x = wx + g_grade.world / 2, y = wy + g_grade.world / 2, w = GradeFieldAt(&g_grade.f, x, y, &z, &d);
-    return w > 0.0f ? GradeSmooth(w * RoadGradeFree(x, y)) : 0.0f;
+    return GradeSmooth(RoadGradeShare(wx + g_grade.world / 2, wy + g_grade.world / 2, &z, &d));
 }
 /* The level's surface at a tile texel, sharpened on the core: the level holds the road at 4 m a sample, the tile
  * has 0.56 m, so within half the core it takes the roads' own height and eases to the level's surface at the core's edge.
@@ -624,10 +665,24 @@ static float RoadGradeSharpen(float wx, float wy, float coarse)
     if (!g_grade.ready || g_grade.off || g_grade.level != g_world.levels) return coarse;
     float z = NAN, d;
     const float x = wx + g_grade.world / 2, y = wy + g_grade.world / 2;
-    if (!(GradeFieldAt(&g_grade.f, x, y, &z, &d) > 0.0f) || !(d < GRADE_CORE) || !isfinite(z)) return coarse;
+    const float share = RoadGradeShare(x, y, &z, &d); /* within the core the field's weight is 1: the share alone */
+    if (!(share > 0.0f) || !(d < GRADE_CORE) || !isfinite(z)) return coarse;
     float s = (GRADE_CORE - d) / (GRADE_CORE / 2);
-    s = (s > 1.0f ? 1.0f : s) * RoadGradeFree(x, y) * (1.0f - GradeSmooth(fabsf(z - coarse) / GRADE_SHARP));
+    s = (s > 1.0f ? 1.0f : s) * share * (1.0f - GradeSmooth(fabsf(z - coarse) / GRADE_SHARP));
     return coarse + s * (z - coarse);
+}
+/* How much of a tile's own fine relief a graded road keeps at a point: none on the worn core (GRADE_FLAT to either
+ * side: an FRV's 2.6 m track with room to pass another), rising without a crease to GRADE_ROUGH of it at the bed's
+ * edge, and from there with the tile's share to all of it at the band's end. So the bed is no bare bench and no line
+ * shows where the detail stops. 0 off the roads. */
+#define GRADE_FLAT 4.0f
+#define GRADE_ROUGH 0.35f
+static float RoadGradeDetail(float wx, float wy)
+{
+    if (!g_grade.ready || g_grade.off || g_grade.level != g_world.levels) return 0.0f;
+    float z, d;
+    const float share = GradeSmooth(RoadGradeShare(wx + g_grade.world / 2, wy + g_grade.world / 2, &z, &d));
+    return share * GRADE_ROUGH * GradeSmooth((d - GRADE_FLAT) / (GRADE_FULL - GRADE_FLAT));
 }
 /* When a tile's heights are in: the roads on them, where they cross its hidden square. */
 static void RoadGradeTileNote(void)
@@ -642,5 +697,5 @@ static void RoadGradeTileNote(void)
     snprintf(what, sizeof what, "the near tile at (%.0f, %.0f), 0.56 m heights", (double)g_near.centre[0], (double)g_near.centre[1]);
     wchar_t file[40]; /* a file a tile: grade-tile_<x>_<y>-<level>.tsv */
     swprintf(file, 40, L"grade-tile_%.0f_%.0f", (double)g_near.centre[0], (double)g_near.centre[1]);
-    RoadGradeReport(gen, what, file, RoadGradeTile, 0);
+    RoadGradeReport(gen, what, file, RoadGradeTile, 0, NULL);
 }

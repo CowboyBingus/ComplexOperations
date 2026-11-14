@@ -1617,12 +1617,44 @@ void CoXlTestGradePads(const float* pads, uint32_t n)
  * there keeps its ground. */
 float CoXlTestGradeFree(float world, float playable, float x, float y, int* pinned)
 {
+    float z, d;
+    g_grade.f = g_testField; /* lent, as for the draw */
     g_grade.world = world; g_grade.playable = playable;
     RoadGradePadIndex();
     *pinned = RoadGradePinned(x, y);
-    return RoadGradeFree(x, y);
+    const float share = RoadGradeShare(x, y, &z, &d);
+    memset(&g_grade.f, 0, sizeof g_grade.f);
+    return share;
 }
-float CoXlTestGradeFieldAt(float x, float y, float* z, float* d) { return GradeFieldAt(&g_testField, x, y, z, d); }
+float CoXlTestGradeFieldAt(float x, float y, float* z, float* d) { return GradeFieldAt(&g_testField, x, y, z, d, NULL); }
+/* One more pad after CoXlTestGradePads' own: a rectangle along the axes, half sizes a and b, bands ba and bb. */
+void CoXlTestGradeRect(float cx, float cy, float a, float b, float ba, float bb)
+{
+    if (g_pads.count < NEAR_PADS) g_pads.pad[g_pads.count++] = (NearPad){.cx = cx, .cy = cy, .c = 1.0f, .a = a, .b = b, .ba = ba, .bb = bb, .k = 1.0f, .rect = 1};
+}
+/* A station's marks after CoXlTestGradeLevel: bit 0 on a pad's flat part, bit 1 its neighbours too. */
+int CoXlTestGradeStationOn(uint32_t i) { return g_testField.s[i].flat | g_testField.s[i].held << 1; }
+/* A road's measures on a surface (base: the ground `height` is a move of, or NULL): out = shoulder, crease, the
+ * steepest between neighbouring samples and its x, y, the steepest across the bed 3 to 6 m out and its x, y. */
+void CoXlTestGradeMeasures(float (*height)(void*, float, float), float (*base)(void*, float, float), const float* pts, uint32_t n, double out[8])
+{
+    static GradeRoad g;
+    memset(&g, 0, sizeof g);
+    GradeRoadAlong(height, base, NULL, pts, n, &g);
+    out[0] = g.side; out[1] = g.crease; out[2] = g.brief; out[3] = g.briefAt[0]; out[4] = g.briefAt[1]; out[5] = g.edge; out[6] = g.edgeAt[0]; out[7] = g.edgeAt[1];
+}
+/* The share of a tile's fine relief a road keeps at a point from the world's centre (RoadGradeDetail). */
+float CoXlTestGradeDetail(float world, float playable, float wx, float wy)
+{
+    g_grade.f = g_testField; /* lent, as for the draw */
+    g_grade.world = world; g_grade.playable = playable; g_grade.ready = 1; g_grade.off = 0; g_grade.level = g_world.levels;
+    RoadGradePadIndex();
+    const float share = RoadGradeDetail(wx, wy);
+    memset(&g_grade.f, 0, sizeof g_grade.f); g_grade.ready = 0; g_grade.level = -1;
+    return share;
+}
+/* The fine relief (NearFineOf) at texel (c, r) of `side` x `side` heights in thousandths of a metre. */
+float CoXlTestNearFine(const float* heights, int side, int c, int r) { return NearFineOf(heights, side, c, r); }
 float CoXlTestGradeStation(uint32_t i, float* xy, float* band, uint32_t* links)
 { xy[0] = g_testField.xy[2 * i]; xy[1] = g_testField.xy[2 * i + 1]; *band = g_testField.band[i]; *links = g_testField.s[i].links; return g_testField.s[i].target; }
 uint32_t CoXlTestGradeFieldPieces(uint32_t* unlinked, uint32_t* capped) { *unlinked = g_testField.unlinked; *capped = g_testField.capped; return g_testField.segs; }
@@ -1631,7 +1663,7 @@ void CoXlTestGradeRoad(float (*height)(void*, float, float), const float* pts, u
 {
     static GradeRoad g;
     memset(&g, 0, sizeof g);
-    GradeRoadAlong(height, NULL, pts, n, &g);
+    GradeRoadAlong(height, NULL, NULL, pts, n, &g);
     out[0] = g.metres; for (int k = 0; k < 4; k++) out[1 + k] = g.over[k];
     out[5] = g.rise; out[6] = g.steepest; out[7] = GradeRoad95(&g); out[8] = g.cross;
 }
@@ -1733,7 +1765,7 @@ void CoXlTestGradeShoulder(float (*height)(void*, float, float), const float* pt
 {
     static GradeRoad g;
     memset(&g, 0, sizeof g);
-    GradeRoadAlong(height, NULL, pts, n, &g);
+    GradeRoadAlong(height, NULL, NULL, pts, n, &g);
     out[0] = g.side; out[1] = g.sideAt[0]; out[2] = g.sideAt[1]; out[3] = g.crease; out[4] = g.creaseAt[0]; out[5] = g.creaseAt[1];
 }
 /* 1 inside a stamp's footprint (corner metres); *open: RoadGradeOpen there over a surface that is 7 m everywhere. */
