@@ -512,7 +512,8 @@ typedef struct LwSquad
 static int LwIntentArrived(LwSquad* q); static int LwIntentGoal(LwSquad* q); static void LwIntentOnline(LwSquad* q, const uint32_t* members, int n, const float* at);
 static int LwSteerOk(const LwSquad* q); static int LwSquadGoTo(LwSquad* q, const float* target); static void LwGoalSent(LwSquad* q, const float* goal); static void LwStallCheck(LwSquad* q, const uint32_t* members, int n, const float* at, ULONGLONG now); static uint32_t LwAwareDetector(uint32_t unit); static void LwIntentOffline(LwSquad* q); static int LwIntentHold(LwSquad* q, float nx, float ny); static void LwHoldNext(LwSquad* q); static int LwIntentInside(LwSquad* q); static int LwIntentLeg(LwSquad* q, float dt); static int LwTerritoryGoalOk(const LwSquad* q, int node); static void LwTerritoryTick(void); static void LwIntentTrace(void); static void LwAggroTrace(void); static void LwRetakeScan(void); static void LwTestClear(int seq, uint32_t entity); static void LwRetakeWait(int seq, float s); static void LwRetakeUnfit(int seq); static void LwRetakeTakenCmd(int seq); static int64_t LwFillMasks(uintptr_t desc, float* budget, char* trace, size_t traceLen); static void LwNoiseDrain(void); static void LwHearNote(void); static void LwFightScan(void); static void LwRushNote(void); static void LwTestNoise(int seq, int type, float dx, float dy);
 static void LwDensityOnline(const float* pos, uint32_t members); static int LwDensityOn(void); static int LwDensityRoom(const float* pos, uint32_t members, uint32_t held, char* why, size_t whyLen); static float LwDensityPopulateUnits(int eff); static float LwFarShareLimit(void); static int LwUnitBudget(void); static int LwDensitySameBubble(const LwSquad* a, const LwSquad* b); static void LwDensityTick(float dt); static void LwDensityNote(void); static void LwDensityBudgetCmd(int n); static void LwSyncCensus(int seq); /* living_world_density.c */
-static int LwPatrolFar(const LwSquad* q); static int LwPatrolFarSum(int walking, int standing); static float LwLeadNear2(const LwSquad* q); static void LwPatrolAsked(const LwSquad* q); static int LwPatrolHolds(int idx); static void LwPatrolHoldTaken(void); static int LwPatrolYields(const LwSquad* q); static int LwRoadPlan(LwSquad* q, int home); static void LwPatrolsOldCmd(int on); static void LwPatrolsTick(void); /* living_world_patrols.c */
+static int LwMeetWaits(const LwSquad* q); static int LwMeetHold(LwSquad* q, float nx, float ny); static void LwMeetWhy(LwSquad* q, const char* why); static void LwNoFaceNote(const LwSquad* q); /* living_world_patrols.c */
+static int LwPatrolFar(const LwSquad* q); static int LwPatrolFarSum(int walking, int standing); static float LwLeadNear2(const LwSquad* q); static void LwPatrolAsked(const LwSquad* q); static int LwPatrolHolds(int idx); static void LwPatrolHoldTaken(void); static int LwPatrolYields(const LwSquad* q); static int LwRoadPlan(LwSquad* q, int home); static void LwPatrolsOldCmd(int on); static void LwTravelCmd(int seq, float v, float s); static void LwTravelBackCmd(int seq, float v); static void LwRoadPatrolsCmd(int on); static void LwPatrolsTick(void); /* living_world_patrols.c */
 static void LwLodTick(void); static void LwLodNote(void); static void LwLodCmd(int on); static int LwLodFullUnits(void); /* living_world_lod.c */
 static void LwDeferTick(uintptr_t lg, uint32_t seed); static void LwDeferNote(void); static void LwSpawnSourcesNote(int seq); /* living_world_defer.c */
 static void LwSyncDump(int seq); /* living_world_density.c */
@@ -550,9 +551,9 @@ static LwSquad g_lwSquads[LW_SQUADS_MAX];
 #define LW_SLICES 8
 static uint8_t g_lwEvery[LW_SQUADS_MAX];
 static struct { uint32_t n; float dt[LW_SLICES]; } g_lwSlice;
-/* Every tick, not one slice in eight: squads online or pending, test squads, and an event squad waiting at the band's
- * edge, so its tries to come online are not eight ticks apart while filler near it tries every tick. */
-static uint8_t LwEveryOf(const LwSquad* q) { return q->state == LW_PENDING || q->state == LW_ONLINE || q->cycled == 1 || q->pulled == 2 || q->held; }
+/* Every tick, not one slice in eight: squads online or pending, test squads, and an event squad or a road patrol
+ * waiting at the band's edge, so its tries to come online are not eight ticks apart while filler near it tries every tick. */
+static uint8_t LwEveryOf(const LwSquad* q) { return q->state == LW_PENDING || q->state == LW_ONLINE || q->cycled == 1 || q->pulled == 2 || q->held || LwMeetWaits(q); }
 static struct
 {
     uintptr_t dir, lg; uint32_t seed;
@@ -788,6 +789,7 @@ static void LwWalk(LwSquad* q, float dt)
         float dx = t->x - q->pos[0], dy = t->y - q->pos[1], d = sqrtf(dx * dx + dy * dy);
         float nx = d <= step ? t->x : q->pos[0] + dx / d * step, ny = d <= step ? t->y : q->pos[1] + dy / d * step;
         if (LwIntentHold(q, nx, ny)) return; /* Phase 2: an intent squad waits at the spawn band's edge, so it comes online there */
+        if (LwMeetHold(q, nx, ny)) return; /* a road patrol never walks into the ring offline (living_world_patrols.c) */
         if (d <= step) { q->pos[0] = t->x; q->pos[1] = t->y; q->prevNode = q->node; q->prevValid = 1; q->node = q->path[q->pathAt++]; step -= d; }
         else { q->pos[0] = nx; q->pos[1] = ny; step = 0; }
     }
@@ -877,6 +879,7 @@ static int LwHidden(const float* p);
 static int LwHiddenFar(const float* p);
 static int LwSeenFromView(int i, const float* point);
 static int g_lwFarSpawn; /* LwOnline: a far (sightline) squad's request */
+static int g_lwMeetSpawn; /* LwOnline: a road patrol waiting at the ring's edge: the far squads' sight test, asked again in 1 s */
 static int LwMembersFit(uintptr_t slot, const float* pos, uint32_t n);
 static const char* g_lwFitWhy = "a member would not reach its slot"; /* which of LwMembersFit's tests refused */
 static int LwSlotsHidden(const float* p, uint32_t n);
@@ -971,6 +974,7 @@ static int LwFillerCandidate(const LwSquad* q, const LwSquad* except, float* at)
     if (q == except || q->state != LW_ONLINE || q->farOn || q->forceOff || q->alive == 0 || q->intent != LW_PATROL) return 0; /* a squad on an intent is busy (Phase 2) */
     if (except && !LwDensitySameBubble(q, except)) return 0; /* room in another bubble is no room for this one */
     if (GetTickCount64() - q->since < 60000) return 0; /* just online: it has not had the time to walk into view */
+    if (co_lw_meet_keeps(LwRoadSquad((int)(q - g_lwSquads)), LwNearestPlayer2(q->pos[0], q->pos[1]), LW_R_ON)) return 0; /* a road patrol near a player is what a road is for */
     uint32_t members[32]; int n = LwMembers(q->squad, members);
     if (n <= 0 || !LwLeader(members, n, at)) return 0;
     for (int k = 0; k < n; k++) if (LwAlert(members[k]) != 0) return 0;
@@ -1077,8 +1081,9 @@ static int LwOnlinePlace(LwSquad* q, uintptr_t slot, uint32_t cap, float* pos, f
     q->wide = (uint8_t)g_lwPlaceWide;
     /* sight is asked where the members will stand: on the ground, not at a face under it */
     float see[3] = {pos[0], pos[1], ground > pos[2] ? ground : pos[2]};
-    if (g_lwTestVisible ? !LwSeenByAny(see, LW_SIGHT) && (++g_lwTestUnseen, 1) : !(g_lwFarSpawn ? LwHiddenFar(see) : LwHidden(see) && (!LwSlotsChecked(q, GetTickCount64()) || LwSlotsHidden(see, cap))))
-    { g_lwOnlineWhy = g_lwFarSpawn ? "sight: seen on the host's screen (or no off-screen read)" : "sight: seen"; q->retry = GetTickCount64() + 3000; LwHoldNext(q); return 0; }
+    const int farTest = g_lwFarSpawn || g_lwMeetSpawn;
+    if (g_lwTestVisible ? !LwSeenByAny(see, LW_SIGHT) && (++g_lwTestUnseen, 1) : !(farTest ? LwHiddenFar(see) : LwHidden(see) && (!LwSlotsChecked(q, GetTickCount64()) || LwSlotsHidden(see, cap))))
+    { g_lwOnlineWhy = farTest ? "sight: seen on the host's screen (or no off-screen read)" : "sight: seen"; q->retry = GetTickCount64() + (g_lwMeetSpawn ? 1000 : 3000); LwHoldNext(q); return 0; }
     return 1;
 }
 /* The checks' order. A squad waiting at the band's edge is placed before room is asked for it: a refusal for room makes
@@ -1768,7 +1773,7 @@ static void LwSendGoal(LwSquad* q)
     if (!LwGoalCanSend(q, route, records)) { LwRouteFail(q, !route ? "no destination found" : "its job or squad record is missing"); return; }
     if (!LwNodeHasFace(q->path[q->pathAt])) /* the next node has no navmesh: another destination whose next node has */
     {
-        g_lwWorld.goalNoFace++;
+        g_lwWorld.goalNoFace++; LwNoFaceNote(q);
         int t = 0;
         for (; t < 8; t++) { g_lwWorld.goalReplans++; LwPlan(q); if (q->pathAt < q->pathLen && LwNodeHasFace(q->path[q->pathAt])) break; }
         if (t == 8) { g_lwWorld.goalStuck++; q->pathLen = q->pathAt = 0; q->goalAt = 0; q->planKind = 0; LwRouteFail(q, "no next node with navmesh in 8 plans"); return; } /* goal-less: the stall check asks again */
@@ -2353,7 +2358,7 @@ static void LwTestStage(int seq, float d)
  * enemy within 120 m are skipped (LwEnemiesNear). The best count wins; then teleported there (LwTestTeleport). One
  * pass on the game thread (about 15k rays, ~0.1 s). */
 static int g_lwTeleportForce; /* "teleport! X Y": the enemy check skipped (going back to a garrison) */
-static void LwTestTeleport(int seq, float x, float y);
+static int LwTestTeleport(int seq, float x, float y);
 static int LwEnemiesNear(float x, float y, float r, float* nearest);
 static void LwTestGarrisons(int seq);
 static void LwTestVantage(int seq)
@@ -2386,36 +2391,40 @@ static void LwTestVantage(int seq)
     LwTestTeleport(seq, best[0], best[1]);
 }
 
-static void LwTestTeleport(int seq, float x, float y)
+static int g_lwTeleportQuiet; /* the travel command's steps: only a refusal is noted */
+/* 1 when the Helldiver was moved. */
+static int LwTestTeleport(int seq, float x, float y)
 {
     ActHealth h; const char* why = "";
     uintptr_t mgr = 0, descs = 0, d = 0, local = 0; uint32_t i = 0;
     uint32_t e = ActLocalAvatar(g_lw.game, 0, &h, &why);
     float pos[3] = {x, y, 0};
-    if (!e) { Note("living world: test command %d: teleport: %s", seq, why); return; }
-    if (x * x + y * y > g_lwWorld.radius * g_lwWorld.radius) { Note("living world: test command %d: teleport: (%.0f, %.0f) is outside the playable disc", seq, (double)x, (double)y); return; }
-    if (!ApiCodeMatches(g_lw.game + 0x5A2BB0u, "48 89 5C 24 08 48 89 6C 24 10 56 57 41 54 41 56 41 57 48 83 EC 40")) { Note("living world: test command %d: teleport: 0x5A2BB0 is not the reviewed code", seq); return; }
+    if (!e) { Note("living world: test command %d: teleport: %s", seq, why); return 0; }
+    if (x * x + y * y > g_lwWorld.radius * g_lwWorld.radius) { Note("living world: test command %d: teleport: (%.0f, %.0f) is outside the playable disc", seq, (double)x, (double)y); return 0; }
+    if (!ApiCodeMatches(g_lw.game + 0x5A2BB0u, "48 89 5C 24 08 48 89 6C 24 10 56 57 41 54 41 56 41 57 48 83 EC 40")) { Note("living world: test command %d: teleport: 0x5A2BB0 is not the reviewed code", seq); return 0; }
     if (!EvpPtr(g_lw.game + 0x3326558u, &mgr) || !EvpHash(mgr + 0x48A0, e, 8, 4, &i) || !EvpPtr(mgr + 0x48B8, &descs) || !EvpPtr(descs + 8u * i, &d) ||
-        EvpU32(d + 8, 0) != e) { Note("living world: test command %d: teleport: the Helldiver %08X has no motion record", seq, e); return; }
-    if (((uint8_t (*)(void*, uint32_t))(g_lw.game + 0x4A52B0u))(NULL, e)) { Note("living world: test command %d: teleport: the Helldiver is attached (vehicle or pod)", seq); return; }
-    if (!LwGround(x, y, &pos[2])) { Note("living world: test command %d: teleport: no ground at (%.0f, %.0f)", seq, (double)x, (double)y); return; }
+        EvpU32(d + 8, 0) != e) { Note("living world: test command %d: teleport: the Helldiver %08X has no motion record", seq, e); return 0; }
+    if (((uint8_t (*)(void*, uint32_t))(g_lw.game + 0x4A52B0u))(NULL, e)) { Note("living world: test command %d: teleport: the Helldiver is attached (vehicle or pod)", seq); return 0; }
+    if (!LwGround(x, y, &pos[2])) { Note("living world: test command %d: teleport: no ground at (%.0f, %.0f)", seq, (double)x, (double)y); return 0; }
     /* XL: the ground ray can hit something below the terrain where the tile's collision is not in yet (lw88a: put at
      * z -36.7 at (2500, 1800), the height plan there about 60 m: the Helldiver died at once and the mission ended) */
     float plan = g_lwWorld.radius > 1500.0f && g_near.global != NULL && g_near.level == g_world.levels ? NearGlobalAt(x, y) : -9999.0f;
     /* under the water a Helldiver drowns (kind 8 damage; lw92a: put at z -40.7 by water at -39.0, dead 9 s later) */
     float water = g_nearWater.level == g_world.levels ? g_nearWater.high : -500.0f;
-    if (pos[2] < water + 0.5f) { Note("living world: test command %d: teleport: the ground at (%.0f, %.0f) reads %.1f m, under the water at %.1f m", seq, (double)x, (double)y, (double)pos[2], (double)water); return; }
-    if (plan > -9000.0f && pos[2] < plan - 3.0f) { Note("living world: test command %d: teleport: the ground at (%.0f, %.0f) reads %.1f m, %.1f m under the height plan: not streamed in yet", seq, (double)x, (double)y, (double)pos[2], (double)(plan - pos[2])); return; }
+    if (pos[2] < water + 0.5f) { Note("living world: test command %d: teleport: the ground at (%.0f, %.0f) reads %.1f m, under the water at %.1f m", seq, (double)x, (double)y, (double)pos[2], (double)water); return 0; }
+    if (plan > -9000.0f && pos[2] < plan - 3.0f) { Note("living world: test command %d: teleport: the ground at (%.0f, %.0f) reads %.1f m, %.1f m under the height plan: not streamed in yet", seq, (double)x, (double)y, (double)pos[2], (double)(plan - pos[2])); return 0; }
     /* a solo Helldiver put among enemies dies and, reinforced on the same spot, dies again until the mission fails
      * (lw67a, lw71a: back on the ship 90 s later); such a point is refused */
     float nearest; int foes = LwEnemiesNear(x, y, 120.0f, &nearest);
-    if (foes && !g_lwTeleportForce) { Note("living world: test command %d: teleport: %d enemies within 120 m of (%.0f, %.0f), the nearest %.0f m", seq, foes, (double)x, (double)y, (double)nearest); return; }
+    if (foes && !g_lwTeleportForce) { Note("living world: test command %d: teleport: %d enemies within 120 m of (%.0f, %.0f), the nearest %.0f m", seq, foes, (double)x, (double)y, (double)nearest); return 0; }
     pos[2] += 0.1f;
     ((void (*)(void*, uint32_t, const float*))(g_lw.game + 0x5A2BB0u))(NULL, e, pos);
     float back[3] = {0, 0, 0};
     if (EvpPtr(mgr + 0x48D0, &local)) SafeRead(local + 0xA4u * i, back, sizeof back);
+    if (g_lwTeleportQuiet) return 1;
     Note("living world: test command %d: teleported the Helldiver %08X to (%.0f, %.0f, %.1f); its motion record reads (%.0f, %.0f, %.1f)", seq, e,
         (double)pos[0], (double)pos[1], (double)pos[2], (double)back[0], (double)back[1], (double)back[2]);
+    return 1;
 }
 
 /* Test command "aim X Y": how far the camera's view (player - camera, across the ground) is from the direction to (X, Y),
@@ -2939,6 +2948,9 @@ static void LwTestCommands(void)
         else if (strcmp(cmds[c], "profile repick") == 0) InterlockedExchange(&g_lwFlatRepick, 1);
         else if (sscanf(cmds[c], "spawn %15s %f %f %d", mode, &d, &deg, &idx) >= 2) LwTestSpawn(seq, mode, d, deg, idx);
         else if (sscanf(cmds[c], "patrols old %d", &idx) == 1) LwPatrolsOldCmd(idx);
+        else if (sscanf(cmds[c], "travel %f %f", &d, &deg) == 2) LwTravelCmd(seq, d, deg);
+        else if (sscanf(cmds[c], "travelback %f", &d) == 1) LwTravelBackCmd(seq, d);
+        else if (sscanf(cmds[c], "roadpatrols %d", &idx) == 1) LwRoadPatrolsCmd(idx);
         else if (sscanf(cmds[c], "offline %d", &idx) == 1 && idx >= 0 && idx < g_lwWorld.count && g_lwSquads[idx].state == LW_ONLINE) g_lwSquads[idx].forceOff = 1;
         else if (strncmp(cmds[c], "kill garrison", 13) == 0) LwKillArm();
         else if (strncmp(cmds[c], "clear garrison", 14) == 0) { unsigned id = 0; sscanf(cmds[c], "clear garrison %x", &id); LwTestClear(seq, id); }
@@ -3137,10 +3149,10 @@ static void LwSquadsTick(void)
                     if (!inView && !LwAboutToBeSeen(q)) { why = "not in a player's sight (nor its way ahead)"; q->retry = now + 3000; goto offlineDone; }
                 }
                 uint32_t off0 = g_lwOffScreen;
-                g_lwFarSpawn = farBand && !back;
+                g_lwFarSpawn = farBand && !back; g_lwMeetSpawn = !g_lwFarSpawn && !back && LwMeetWaits(q);
                 LwOnline(q); requested = q->state == LW_PENDING;
                 if (requested && q->pulled) { q->pulled = 0; q->node = (uint16_t)LwNearestNode(q->pos[0], q->pos[1]); q->pathLen = q->pathAt = 0; } /* back onto the routes */
-                g_lwFarSpawn = 0;
+                g_lwFarSpawn = g_lwMeetSpawn = 0;
                 if (farBand && !back) farTries++; else attempts++;
                 if (requested && farBand && !back)
                 {
@@ -3160,6 +3172,7 @@ static void LwSquadsTick(void)
                 if (q->state != LW_OFFLINE && g_lwHold.idx == (int)(q - g_lwSquads)) g_lwHold.idx = -1; /* served */
             }
         offlineDone:
+            if (why) LwMeetWhy(q, why); /* a waiting road patrol: its refusals counted, room made (living_world_patrols.c) */
             if (q->pulled == 2 && why) LwStagedWhy(q, why, near2); /* test notes */
             else if (q->held && why) LwHeldWhy(q, why, near2);
         }

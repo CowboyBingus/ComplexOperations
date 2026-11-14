@@ -13,6 +13,8 @@ static const char* g_case;
 static CoLwRoads g_r;
 int CoXlTestLwRoadPlan(int n, int at, int prev, int refused);
 int CoXlTestLwRoadPatrolsOn(void);
+float CoXlTestLwMeetWalk(int index, int n, int at, float px, float px2, int moveAt, int seconds, int old, float* out);
+int CoXlTestLwPlansRoads(float radius, float step, float x, float y, int plans, int* failed);
 
 int main(void)
 {
@@ -102,6 +104,36 @@ int main(void)
     CHECK(CoXlTestLwRoadPlan(5, 0, -1, -1) == 1 && CoXlTestLwRoadPlan(5, 0, -1, 1) == -1);
     g_case = "road patrols are on in a build that reads no research switch";
     CHECK(CoXlTestLwRoadPatrolsOn() == 1);
+
+    /* A line of road nodes 100 m apart, the patrol from node 5 (x 500) toward node 30 at 2 m/s, a player at x 2000. */
+    float o[5], least;
+    g_case = "a road patrol stops at the ring's edge and waits there: it never walks in offline";
+    least = CoXlTestLwMeetWalk(0, 30, 5, 2000.0f, 2000.0f, 9999, 700, 0, o);  /* 1345 m to the edge: 673 s */
+    CHECK(least >= 155.0f && least < 156.0f && o[0] > 1844.0f && o[0] <= 1845.0f && o[1] == 1 && o[2] == 1 && o[3] == 0 && o[4] == 0);
+    g_case = "a minute at the edge without coming online: it turns back and walks away";
+    least = CoXlTestLwMeetWalk(0, 30, 5, 2000.0f, 2000.0f, 9999, 760, 0, o);
+    CHECK(least >= 155.0f && o[1] == 0 && o[2] == 1 && o[3] == 1 && o[0] < 1820.0f && o[0] > 1700.0f);
+    g_case = "after the turn its next plan does not lead straight back to the player";
+    least = CoXlTestLwMeetWalk(0, 30, 5, 2000.0f, 2000.0f, 9999, 900, 0, o);
+    CHECK(least >= 155.0f && o[3] == 1 && o[0] < 1560.0f);
+    g_case = "a player who walks up to a waiting patrol pushes it back along its stretch, the edge's distance away";
+    least = CoXlTestLwMeetWalk(0, 30, 5, 2000.0f, 1960.0f, 690, 692, 0, o);
+    CHECK(o[4] == 1 && o[3] == 0 && o[1] == 1 && o[0] < 1805.1f && o[0] > 1800.0f);
+    g_case = "pushed with the whole stretch behind it inside the ring: it turns back";
+    least = CoXlTestLwMeetWalk(0, 30, 5, 2000.0f, 1850.0f, 690, 692, 0, o);
+    CHECK(o[3] == 1 && o[4] == 0 && o[1] == 0);
+    g_case = "the player gone from its way: it walks on, without a turn";
+    least = CoXlTestLwMeetWalk(0, 30, 5, 2000.0f, 5000.0f, 690, 720, 0, o);
+    CHECK(o[1] == 0 && o[2] == 1 && o[3] == 0 && o[0] > 1890.0f);
+    g_case = "the old rules, and a squad that is no road patrol: both walk into the ring";
+    least = CoXlTestLwMeetWalk(0, 30, 5, 2000.0f, 2000.0f, 9999, 760, 1, o);
+    CHECK(least < 5.0f && o[2] == 0);
+    least = CoXlTestLwMeetWalk(1, 30, 5, 2000.0f, 2000.0f, 9999, 760, 0, o);
+    CHECK(least < 5.0f && o[2] == 0);
+
+    g_case = "a squad off the roads never draws a road node as its destination";
+    int failed = 0;
+    CHECK(CoXlTestLwPlansRoads(7782.0f, 200.0f, 3000.0f, 3000.0f, 300, &failed) == 0 && failed == 0);
 
     if (g_failed) { printf("%d check(s) failed\n", g_failed); return 1; }
     return 0;

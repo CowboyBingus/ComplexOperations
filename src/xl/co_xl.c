@@ -48,6 +48,7 @@
 #include "co_hitch.h"
 #include "co_lw_view.h"
 #include "co_lw_roads.h"
+#include "co_lw_meet.h"
 #include "../co_watch.h"
 
 /* The mod's work in the game frame under way (co_hitch.h): the timed parts add to it, CoXlTick hands it on. */
@@ -512,6 +513,35 @@ int CoXlTestLwPlans(float radius, float step, float x, float y, int plans, int* 
         q->pathLen = q->pathAt = 0;
     }
     return failed;
+}
+/* That grid with a road node beside every grid node within 1000 m of (x, y), joined to it: squad 1 (no road patrol)
+ * there plans `plans` times. Returns the plans whose destination is a road node; `failed` those without a route. */
+int CoXlTestLwPlansRoads(float radius, float step, float x, float y, int plans, int* failed)
+{
+    LwSquad* q = &g_lwSquads[1]; int onRoad = 0;
+    *failed = 0;
+    LwTestGrid(radius, step);
+    const int grid = g_lwNodeCount;
+    memset(g_lwNodeKind, 0, sizeof g_lwNodeKind);
+    for (int i = 0; i < grid && g_lwNodeCount < LW_NODES_MAX; i++)
+    {
+        const float at[2] = {x, y};
+        if (LwDist2(at, g_lwNodes[i].x, g_lwNodes[i].y) > 1000.0f * 1000.0f) continue;
+        LwNode* n = &g_lwNodes[g_lwNodeCount]; memset(n, 0, sizeof *n); n->x = g_lwNodes[i].x + 7.0f; n->y = g_lwNodes[i].y + 7.0f;
+        g_lwNodeKind[g_lwNodeCount] = CO_LW_ROADS_POINT; LwLink(i, g_lwNodeCount); g_lwNodeCount++; g_lwRoadNodes++;
+    }
+    memset(q, 0, sizeof *q);
+    q->node = (uint16_t)LwNearestNode(x, y); q->pos[0] = x; q->pos[1] = y;
+    for (int k = 0; k < plans; k++)
+    {
+        q->pathLen = q->pathAt = 0;
+        LwPlan(q);
+        if (q->pathLen == 0) { (*failed)++; continue; }
+        if (q->path[q->pathLen - 1] >= grid) onRoad++;
+    }
+    const int roads = g_lwRoadNodes;
+    g_lwNodeCount = g_lwRoadNodes = 0; memset(g_lwNodeKind, 0, sizeof g_lwNodeKind);
+    return roads > 0 ? onRoad : -1;
 }
 /* The same grid with squad 0 standing at `at` (not moved between plans), come from its node's first neighbour. With
  * `home` {x, y, radius} the nodes inside that disc are its home region and the rest another that does not touch it.
