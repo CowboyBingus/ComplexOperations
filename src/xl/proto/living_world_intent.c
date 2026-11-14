@@ -955,7 +955,7 @@ static void LwRetakeScan(void)
         if (LwPlayerWithin(g->center, LW_RETAKE_PLAYER)) continue;
         /* the squad arrives at this node, so it must be at the garrison: within max(60 m, 0.75 x the mean node spacing
          * sqrt(disc area / nodes)); XL routes are ~184 m apart, vanilla ~24 m (lw113a: an XL post 98 m from its node) */
-        float spacing = g_lwNodeCount > 0 ? sqrtf(3.14159f * g_lwWorld.radius * g_lwWorld.radius / (float)g_lwNodeCount) : 0.0f, gate = 0.75f * spacing > LW_RETAKE_NODE ? 0.75f * spacing : LW_RETAKE_NODE;
+        float spacing = g_lwNodeCount > g_lwRoadNodes ? sqrtf(3.14159f * g_lwWorld.radius * g_lwWorld.radius / (float)(g_lwNodeCount - g_lwRoadNodes)) : 0.0f, gate = 0.75f * spacing > LW_RETAKE_NODE ? 0.75f * spacing : LW_RETAKE_NODE;
         int node = LwNearestNode(g->center[0], g->center[1]);
         if (node < 0 || LwDist2(g->center, g_lwNodes[node].x, g_lwNodes[node].y) > gate * gate) continue;
         int pick = -1, bestTier = 3; float best = reach * reach;

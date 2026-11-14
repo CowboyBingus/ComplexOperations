@@ -182,10 +182,15 @@ static void LwPatrolsOff(void)
  * +0 x, y in map space, +0x10 + 8 k up to 16 edge pointers, NULL-terminated), count u32 G+0x11A71B4; an edge (0x48)
  * holds its end nodes at +0x10 / +0x18 and is walkable when both route cells +0x20 / +0x28 are set. World = map -
  * [lg+0x1E0] / 2. Copied once the level is generated ([lg+0x1E4] == 3), keyed to the level's seed [lg+0x8]. */
-#define LW_NODES_MAX 8192
+#define LW_NODES_MAX 16384 /* the level's nodes, the walking grid's and the roads' (living_world_patrols.c) */
 typedef struct LwNode { float x, y; uint16_t next[16]; uint8_t degree; } LwNode;
 static LwNode g_lwNodes[LW_NODES_MAX];
 static int g_lwNodeCount;
+/* Roads (living_world_patrols.c): a node's kind (1 a road's end, 2 a point along a road), how many of the second kind
+ * there are, and whether the path being searched is a road patrol's. */
+static uint8_t g_lwNodeKind[LW_NODES_MAX];
+static int g_lwRoadNodes, g_lwPathRoad;
+static float LwRoadCost(int a, int b); static int LwRoadSquad(int index); static void LwRoadRoutes(uintptr_t lg);
 
 /* Why the squads wait, noted once per mission (a reason that keeps them from starting is never silent). */
 static char g_lwWhy[160];
@@ -350,7 +355,7 @@ static int LwPath(int a, int b, uint16_t* out, int max)
         for (int k = 0; k < g_lwNodes[u].degree; k++)
         {
             int v = g_lwNodes[u].next[k];
-            float dx = g_lwNodes[v].x - g_lwNodes[u].x, dy = g_lwNodes[v].y - g_lwNodes[u].y, c = cost[u] + sqrtf(dx * dx + dy * dy);
+            float dx = g_lwNodes[v].x - g_lwNodes[u].x, dy = g_lwNodes[v].y - g_lwNodes[u].y, c = cost[u] + sqrtf(dx * dx + dy * dy) * LwRoadCost(u, v);
             if (closed[v] || c >= cost[v] || size >= LW_NODES_MAX * 4) continue;
             cost[v] = c; from[v] = (int16_t)u;
             float hx = g_lwNodes[b].x - g_lwNodes[v].x, hy = g_lwNodes[b].y - g_lwNodes[v].y;
@@ -500,6 +505,7 @@ typedef struct LwSquad
 static int LwIntentArrived(LwSquad* q); static int LwIntentGoal(LwSquad* q); static void LwIntentOnline(LwSquad* q, const uint32_t* members, int n, const float* at);
 static int LwSteerOk(const LwSquad* q); static uint32_t LwAwareDetector(uint32_t unit); static void LwIntentOffline(LwSquad* q); static int LwIntentHold(LwSquad* q, float nx, float ny); static int LwIntentInside(LwSquad* q); static int LwIntentLeg(LwSquad* q, float dt); static int LwTerritoryGoalOk(const LwSquad* q, int node); static void LwTerritoryTick(void); static void LwIntentTrace(void); static void LwAggroTrace(void); static void LwRetakeScan(void); static void LwTestClear(int seq, uint32_t entity); static void LwRetakeWait(int seq, float s); static void LwRetakeUnfit(int seq); static void LwRetakeTakenCmd(int seq); static int64_t LwFillMasks(uintptr_t desc, float* budget, char* trace, size_t traceLen); static void LwNoiseDrain(void); static void LwHearNote(void); static void LwFightScan(void); static void LwRushNote(void); static void LwTestNoise(int seq, int type, float dx, float dy);
 static void LwDensityOnline(const float* pos, uint32_t members); static int LwDensityOn(void); static int LwDensityRoom(const float* pos, uint32_t members, uint32_t held, char* why, size_t whyLen); static float LwDensityPopulateUnits(int eff); static float LwFarShareLimit(void); static int LwDensitySameBubble(const LwSquad* a, const LwSquad* b); static void LwDensityTick(float dt); static void LwDensityNote(void); static void LwDensityBudgetCmd(int n); static void LwSyncCensus(int seq); /* living_world_density.c */
+static int LwPatrolFar(const LwSquad* q); static float LwLeadNear2(const float* pos); static void LwPatrolsTick(void); /* living_world_patrols.c */
 static void LwLodTick(void); static void LwLodNote(void); static void LwLodCmd(int on); static int LwLodFullUnits(void); /* living_world_lod.c */
 static void LwDeferTick(uintptr_t lg, uint32_t seed); static void LwDeferNote(void); static void LwSpawnSourcesNote(int seq); /* living_world_defer.c */
 static void LwSyncDump(int seq); /* living_world_density.c */
@@ -644,15 +650,18 @@ static void LwPlan(LwSquad* q)
 {
     int local = g_lwWorld.radius > LW_ROAM;
     int home = LwTerritoryGoalOk(q, -1) && LwUnit() < 0.7f; /* 2d: most goals stay in the home region or a neighbour (D) */
-    int most = (local ? 24 : 8) * (home ? 2 : 1);
+    int most = (local ? 24 : 8) * (home ? 2 : 1), road = LwRoadSquad((int)(q - g_lwSquads));
     for (int tries = 0; tries < most; tries++)
     {
         int goal = (int)(LwRand() % (uint32_t)g_lwNodeCount);
+        if (tries < most / 2 && (road ? !g_lwNodeKind[goal] : g_lwNodeKind[goal] == 2)) continue; /* a road patrol's goals lie on roads, the others' off them */
         if (home && tries < (local ? 24 : 8) && !LwTerritoryGoalOk(q, goal)) continue; /* then any goal, so the squad never stands still */
         float r = g_lwWorld.radius;
         if (g_lwNodes[goal].x * g_lwNodes[goal].x + g_lwNodes[goal].y * g_lwNodes[goal].y > r * r) continue;
         if (local && LwDist2(q->pos, g_lwNodes[goal].x, g_lwNodes[goal].y) > LW_ROAM * LW_ROAM) continue;
+        g_lwPathRoad = road;
         int n = LwPath(q->node, goal, q->path, LW_PATH_MAX);
+        g_lwPathRoad = 0;
         if (n > 0 && q->prevValid && q->path[0] == q->prevNode && tries < most / 2) continue; /* back the way it came: an about-turn (user, real play) */
         if (n > 0) { q->pathLen = (uint8_t)n; q->pathAt = 0; return; }
     }
@@ -715,6 +724,7 @@ static void LwPopulate(void)
         }
         int node = (int)(LwRand() % (uint32_t)g_lwNodeCount);
         if (g_lwNodes[node].degree == 0) continue;
+        if (LwRoadSquad(made) != (g_lwNodeKind[node] == 2)) continue; /* a road patrol starts on a road, the others off them */
         int to = g_lwNodes[node].next[LwRand() % g_lwNodes[node].degree];
         float t = LwUnit(), x = g_lwNodes[node].x + t * (g_lwNodes[to].x - g_lwNodes[node].x), y = g_lwNodes[node].y + t * (g_lwNodes[to].y - g_lwNodes[node].y), r = g_lwWorld.radius;
         if (x * x + y * y > r * r || LwNearestPlayer2(x, y) < least * least) continue;
@@ -864,6 +874,7 @@ static int LwFillerCandidate(const LwSquad* q, const LwSquad* except, float* at)
 {
     if (q == except || q->state != LW_ONLINE || q->farOn || q->forceOff || q->alive == 0 || q->intent != LW_PATROL) return 0; /* a squad on an intent is busy (Phase 2) */
     if (except && !LwDensitySameBubble(q, except)) return 0; /* room in another bubble is no room for this one */
+    if (GetTickCount64() - q->since < 60000) return 0; /* just online: it has not had the time to walk into view */
     uint32_t members[32]; int n = LwMembers(q->squad, members);
     if (n <= 0 || !LwLeader(members, n, at)) return 0;
     for (int k = 0; k < n; k++) if (LwAlert(members[k]) != 0) return 0;
@@ -1216,7 +1227,7 @@ static int LwHidden(const float* p)
  * the line-of-sight test alone; the aim note prints both (lw52 measures it). The cone: the vertical FOV widened by a
  * 2.4 aspect (ultrawide) plus 10 deg, across the ground. The owner is the player within 15 m of the camera (none when
  * dead or in the reinforce view). Other players' views are unknown: for them only line of sight counts. */
-static int g_lwViewOwner = -1; static float g_lwViewCam[3], g_lwViewFwd[2], g_lwViewHalf; static ULONGLONG g_lwViewAt;
+static int g_lwViewOwner = -1; static float g_lwViewCam[3], g_lwViewFwd[2], g_lwViewHalf, g_lwViewFov; static ULONGLONG g_lwViewAt;
 static int LwRayClear(const float* eye, uint32_t unit, const float* point);
 static int LwViewRead(void)
 {
@@ -1239,6 +1250,7 @@ static int LwViewRead(void)
     if (!(pl > 0.2f) || (px * fx + py * fy) / pl < cosf(30.0f * 3.14159265f / 180.0f)) return -1; /* the y row is not the view here */
     g_lwViewCam[0] = cx; g_lwViewCam[1] = cy; g_lwViewCam[2] = pos[2]; g_lwViewFwd[0] = fx; g_lwViewFwd[1] = fy;
     g_lwViewHalf = atanf(tanf(0.5f * fov) * 2.4f) + 10.0f * 3.14159265f / 180.0f;
+    g_lwViewFov = fov;
     g_lwViewOwner = owner;
     return owner;
 }
@@ -1325,9 +1337,10 @@ static int LwSeenByAny(const float* p, float range)
  * F = vertical_fov / 4, and vertical_fov is clamped to 45-90 deg. The host cannot know each player's setting or preset:
  * the band assumes the farthest drawing, F = 45 / 4 deg and the high preset (near 350, far 1000, msf 0.05), m0 = 0.
  * Solved by bisection (the angle falls, the threshold rises with d). r 1 / 2 / 4 / 8 m: about 701 / 811 / 952 / 1630 m. */
+static float g_lwBandFov = 45.0f * 3.14159265f / 180.0f; /* the narrowest view any player has now (LwBandTick) */
 static float LwFarBand(float r)
 {
-    const float F = 45.0f / 4.0f * 3.14159265f / 180.0f, nearD = 350.0f, farD = 1000.0f, msf = 0.05f;
+    const float F = g_lwBandFov, nearD = 350.0f, farD = 1000.0f, msf = 0.05f;
     if (!(r > 0.05f)) r = 0.05f;
     float lo = nearD, hi = 6000.0f;
     for (int k = 0; k < 40; k++)
@@ -1369,21 +1382,21 @@ static void LwGroupRadiusSeen(uintptr_t definition, float r)
         if (g_lwRadii[k].definition == definition)
         {
             if (r > g_lwRadii[k].radius) { g_lwRadii[k].radius = r; g_lwRadii[k].band = LwFarBand(r); g_lwRadiiGen++;
-                Note("living world: group 0x%llx: units up to %.2f m radius: drawn to %.0f m through a 4x zoom", (unsigned long long)definition, (double)r, (double)g_lwRadii[k].band); }
+                Note("living world: group 0x%llx: units up to %.2f m radius: drawn to %.0f m in a %.0f deg view", (unsigned long long)definition, (double)r, (double)g_lwRadii[k].band, (double)(g_lwBandFov * 57.29578f)); }
             return;
         }
         if (empty < 0 && g_lwRadii[k].definition == 0) empty = k;
     }
     if (empty >= 0) { g_lwRadii[empty].definition = definition; g_lwRadii[empty].radius = r; g_lwRadii[empty].band = LwFarBand(r); g_lwRadiiGen++;
-        Note("living world: group 0x%llx: units up to %.2f m radius: drawn to %.0f m through a 4x zoom", (unsigned long long)definition, (double)r, (double)g_lwRadii[empty].band); }
+        Note("living world: group 0x%llx: units up to %.2f m radius: drawn to %.0f m in a %.0f deg view", (unsigned long long)definition, (double)r, (double)g_lwRadii[empty].band, (double)(g_lwBandFov * 57.29578f)); }
 }
 /* A squad's band, cached per squad: recomputed only when its group changes or any group's radius is learned. */
 static float LwSquadBand(LwSquad* q)
 {
     if (q->bandGen != g_lwRadiiGen || q->bandDef != q->definition)
     {
-        static float defaultBand;
-        if (defaultBand == 0) defaultBand = LwFarBand(LW_RADIUS_DEFAULT);
+        static float defaultBand; static uint32_t defaultGen;
+        if (defaultGen != g_lwRadiiGen) { defaultBand = LwFarBand(LW_RADIUS_DEFAULT); defaultGen = g_lwRadiiGen; }
         q->band = defaultBand;
         for (int k = 0; k < LW_RADII; k++) if (g_lwRadii[k].definition == q->definition) { q->band = g_lwRadii[k].band; break; }
         q->bandGen = g_lwRadiiGen; q->bandDef = q->definition;
@@ -2613,7 +2626,7 @@ static int LwTickSums(int* units, int* waiting)
         const LwSquad* q = &g_lwSquads[i];
         if (!g_lwEvery[i]) continue;
         int n = q->state == LW_PENDING ? q->cap : q->state == LW_ONLINE ? q->alive : 0;
-        *units += n; if (q->farOn) farSum += n;
+        *units += n; if (LwPatrolFar(q)) farSum += n;
         *waiting |= q->state == LW_OFFLINE && q->cycled == 1;
     }
     g_lwWorld.onlineUnits = *units; g_lwWorld.farUnits = farSum;
@@ -2653,6 +2666,7 @@ static void LwSquadsTick(void)
         if (LwCopyRoutes(lg) == 0) return;
         g_lwWorld.radius = LwPlayRadius(lg);
         if (!LwGridRoutes(g_lwWorld.radius)) { g_lwNodeCount = 0; return; } /* copied again next tick, then the grid */
+        LwRoadRoutes(lg);
     }
     if (!g_lwWorld.populated) { if (g_lwWorld.playersAt == 0) { LwWhy("no player position yet"); return; } LwPopulate(); if (g_lwWorld.populated <= 0) return; }
     ULONGLONG now = GetTickCount64();
@@ -2682,7 +2696,7 @@ static void LwSquadsTick(void)
             const char* why = NULL; char whyBuf[128]; /* test notes for a staged squad (pulled 2): the gate it fails */
             LwWalk(q, dt);
             if (q->state != LW_OFFLINE) continue; /* it became a garrison (2c) */
-            float near2 = LwNearestPlayer2(q->pos[0], q->pos[1]);
+            float near2 = LwLeadNear2(q->pos); /* the band looks ahead of a vehicle (living_world_patrols.c) */
             float rMin = g_lwWorld.rMin > 0 ? g_lwWorld.rMin : LW_R_MIN;
             int back = q->cycled == 1 && near2 >= rMin * rMin; /* test cycle: back at once (the budget still applies) */
             if (waiting && !back) { why = "a test-cycle squad is served first"; goto offlineDone; }
@@ -2744,6 +2758,7 @@ static void LwSquadsTick(void)
     g_lwSlice.dt[slice] = 0;
     LW_SECT(LW_S_AFTER);
     LwLodTick(); /* after the squads' ticks: tiers from this tick's members and positions */
+    LwPatrolsTick(); /* what each player sees of the patrols, and the squads that should give way */
     LwWallSample();
     if (now - g_lwWorld.noteAt > 30000)
     {
@@ -4330,6 +4345,7 @@ static void LwLiveSet(int complex)
 #include "living_world_intent.c" /* Phase 2: squad intents (investigate noise) */
 #include "living_world_aggro.c" /* calm enemies near a player, and what their eyes see of them, logged */
 #include "living_world_density.c" /* enemy density: a budget per player bubble (KB living-world-density-design) */
+#include "living_world_patrols.c" /* roads for the squads, the far share's rules, and what each player sees of the patrols */
 #include "living_world_lod.c" /* data-only AI LOD for hidden, calm loader squads (KB living-world-density-design, C3) */
 #include "living_world_flat.c" /* test instrument: whole-frame sampling profile (KB xl-destruction-record-map-full) */
 #include "living_world_alloc.c" /* test instrument: large commits by caller (after living_world_flat.c: its function keys) */
