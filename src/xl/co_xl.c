@@ -1371,6 +1371,8 @@ int CoXlTestGradeStationPin(uint32_t i, float* xy, float* target, float* ground)
     xy[0] = g_testField.xy[2 * i]; xy[1] = g_testField.xy[2 * i + 1]; *target = g_testField.s[i].target; *ground = g_testField.s[i].ground;
     return g_testField.s[i].pinned | g_testField.s[i].edge << 1 | g_testField.s[i].later << 2;
 }
+/* The ground's slope across the road at a station of the test field (GradeFieldCross), as a tangent. */
+float CoXlTestGradeStationCross(uint32_t i) { return g_testField.s[i].cross; }
 void CoXlTestRoadsRim(float playable) { g_roadsPlayable = playable; }
 int CoXlTestRoadsSpurPad(uint32_t own, float* at, float* away) { return RoadsSpurPad(own, at, away); }
 void CoXlTestRoadsKeepPlace(uint32_t i, uint64_t place) { g_roadKeep.place[i] = place; }

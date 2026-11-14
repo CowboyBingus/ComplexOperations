@@ -41,6 +41,7 @@ float CoXlTestNearFine(const float* heights, int side, int c, int r);
 int CoXlTestGradeRoads(const float* pts, const uint32_t* counts, const uint32_t* ends, uint32_t chains, int spur, float (*ground)(float, float), float world,
     float playable, double out[6]);
 int CoXlTestGradeStationPin(uint32_t i, float* xy, float* target, float* ground);
+float CoXlTestGradeStationCross(uint32_t i);
 
 static int g_failed, g_checked;
 static const char* g_case = "";
@@ -791,6 +792,20 @@ static void Together(void)
         g_case = "arms that meet at 90 degrees are not tied: the landing holds them";
         counts[1] = Line(g_road + 102, 400.0f, 1000.0f, 400.0f, 1300.0f, 51);
         CHECK(CoXlTestGradeRoads(g_road, counts, fan, 2, 0, GroundSide, WORLD, 4000.0f, out) >= 0 && CoXlTestGradeTies(&untied) == 0);
+        g_case = "a tie points across the road: the ground's slope along two roads side by side is not their cross slope";
+        g_tilt = 0.0f; g_rise = 0.05f;
+        counts[0] = Line(g_road, 200.0f, 1000.0f, 800.0f, 1000.0f, 101);
+        counts[1] = Line(g_road + 202, 201.0f, 1010.0f, 801.0f, 1010.0f, 101);
+        CHECK(CoXlTestGradeRoads(g_road, counts, ends, 2, 0, GroundSide, WORLD, 4000.0f, out) >= 0 && CoXlTestGradeTies(&untied) == 101);
+        CHECK(CoXlTestGradeStationCross(50) < 1.0e-4f && CoXlTestGradeStationCross(151) < 1.0e-4f);
+        g_case = "a station on a pad is tied only within 8 m: a pad's height is not the next road's to choose";
+        {
+            const float pad[6] = {500.0f - 1024.0f, 1000.0f - 1024.0f, 2.0f, 1.0f, 1.0f, 0.0f};
+            CoXlTestGradePads(pad, 1);
+            CHECK(CoXlTestGradeRoads(g_road, counts, ends, 2, 0, GroundSide, WORLD, 4000.0f, out) >= 0 && CoXlTestGradeTies(&untied) == 100);
+            CoXlTestGradePads(pad, 0);
+        }
+        g_tilt = 0.2f; g_rise = 0.0f;
         g_tilt = 0.4f;
     }
 
@@ -1349,6 +1364,7 @@ static void Meet(void)
         const int marks = CoXlTestGradeStationPin(i, xy, &t, &g);
         if (fabsf(xy[0] - 1200.0f) < 0.5f && fabsf(xy[1] - 2000.0f) < 0.5f) { node = i; CHECK(!(marks & 4)); }
         if (xy[1] > 2000.5f) { own++; CHECK(marks & 4); } else CHECK(!(marks & 4));
+        CHECK(!(marks & 1)); /* a settled arterial is held for the spurs' solve only */
         if (i < 68) { with[i] = t; if (fabsf(t - alone[i]) > moved) moved = fabsf(t - alone[i]); }
     }
     CHECK(node != 0xFFFFFFFFu && own == 30);
@@ -1421,7 +1437,41 @@ static void Meet(void)
             if (!(marks & 4)) CHECK(t == 100.0f); /* the arterial on its level ground, to the bit */
             if (xy[1] > 2039.5f) CHECK((marks & 1) && fabsf(t - 112.0f) < 0.01f);
         }
+        g_case = "a spur's pinned end no link can reach: the arterial stands, the pin is missed by the whole lack, no step at the junction";
+        g_meetSpur = 0.8f; /* 32 m over the road, 40 m away */
+        CHECK(CoXlTestGradeRoads(brief, two, ends, 2, 1, GroundMeet, 4096.0f, 4000.0f, out) >= 0 && out[2] == 1.0 && out[3] > 18.0);
+        float before = 100.0f;
+        for (uint32_t i = 68 + 5; i-- > 0;)
+        {
+            float xy[2], t, g;
+            const int marks = CoXlTestGradeStationPin(i, xy, &t, &g);
+            if (!(marks & 4)) { CHECK(t == 100.0f); continue; }
+            CHECK(t - before <= 0.3250f * 10.0f + 1.0e-3f && t - before > 2.5f); /* from the junction up: each link at its limit */
+            before = t;
+        }
+        CHECK(before > 112.0f && before < 114.0f); /* 40 m at 18 degrees is 13 m: the pad at 132 m is not met */
         CoXlTestGradePads(pad, 0);
+    }
+    g_case = "an arterial on ground steeper than 7 degrees keeps its steeper links when a spur hangs on it";
+    g_meetAlong = 0.3f; g_meetSpur = 0.0f;
+    { static const uint32_t one[1] = {68}; CHECK(CoXlTestGradeRoads(pts, one, ends, 1, 0, GroundMeet, 4096.0f, 4000.0f, out) >= 0 && out[4] >= 60.0); }
+    const double relaxed = out[4];
+    CHECK(CoXlTestGradeRoads(pts, counts, ends, 2, 1, GroundMeet, 4096.0f, 4000.0f, out) >= 0 && out[4] >= relaxed);
+    g_case = "an arterial's corner is level for 20 m either way, also past a spur's junction 12 m from it";
+    {
+        static float bent[2 * 100], cornerAlone[68], t, g; float xy[2];
+        static const uint32_t one[1] = {68}, two[2] = {68, 31};
+        g_meetAlong = 0.06f; g_meetSpur = 0.0f;
+        for (uint32_t i = 0; i < 68; i++) { bent[2 * i] = i < 34 ? 999.0f + 6.0f * (float)i : 1197.0f; bent[2 * i + 1] = i < 34 ? 2000.0f : 2000.0f - 6.0f * (float)(i - 33); }
+        for (uint32_t i = 0; i < 31; i++) { bent[2 * (68 + i)] = 1185.0f; bent[2 * (68 + i) + 1] = 2300.0f - 10.0f * (float)i; }
+        CHECK(CoXlTestGradeRoads(bent, one, ends, 1, 0, GroundMeet, 4096.0f, 4000.0f, out) >= 0 && out[0] == 1.0);
+        const double links = out[1];
+        for (uint32_t i = 0; i < 68; i++) CoXlTestGradeStationPin(i, xy, &cornerAlone[i], &g);
+        CHECK(fabsf(cornerAlone[33] - cornerAlone[30]) <= 0.0306f * 18.0f + 1.0e-3f && fabsf(cornerAlone[30] - cornerAlone[27]) > 0.0306f * 18.0f);
+        CHECK(CoXlTestGradeRoads(bent, two, ends, 2, 1, GroundMeet, 4096.0f, 4000.0f, out) >= 0 && out[0] == 2.0 && out[1] >= links + 2.0);
+        float moved2 = 0.0f;
+        for (uint32_t i = 0; i < 68; i++) { CoXlTestGradeStationPin(i, xy, &t, &g); if (fabsf(t - cornerAlone[i]) > moved2) moved2 = fabsf(t - cornerAlone[i]); }
+        CHECK(moved2 < 0.02f);
     }
     g_meetAlong = 0.06f; g_meetSpur = 0.11f;
 
