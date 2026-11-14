@@ -157,6 +157,7 @@ typedef struct WorldStreamState
     int forestBad;           /* one note when the forest does not read */
     uint32_t gone;           /* slots given up: their unit was no longer this world's at its removal (cumulative) */
     uint32_t looks, listed;  /* the world's unit list searched before a removal, and its length at the last */
+    uint32_t lookBad, lookFails; /* the looks that did not read: in a row now, and in all */
     double lookMs, lookMost; /* those searches' time in all, and the longest */
 } WorldStreamState;
 static WorldStreamState g_stream;
@@ -247,6 +248,7 @@ static void WorldStreamClearLocked(void)
     g_stream.forestBad = 0;
     g_stream.gone = 0;
     g_stream.looks = g_stream.listed = 0;
+    g_stream.lookBad = g_stream.lookFails = 0;
     g_stream.lookMs = g_stream.lookMost = 0.0;
     memset(g_streamUnit, 0, sizeof g_streamUnit);         /* a unit's address means nothing once its level is not this one */
     memset(g_streamResource, 0, sizeof g_streamResource);
@@ -433,34 +435,33 @@ static int WorldStreamTrees(uint32_t* trees, uint32_t* room)
  * the generator to 0 (0xAB3CAE..0xAB3CED) and then destroys every unit of the main world itself, 20 a call
  * (0xAB3CF3..0xAB3DCB), while the game state still says mission. A stamp unit kept here is freed memory from then on,
  * and DestroyUnit frees whatever ends the world's list when it does not find its unit (exe 0x3389C3..0x3389F2). */
+#define kStreamStateUnread 0xFFFFFFFFu /* the state did not read: neither in play nor left */
 static uint32_t WorldStreamGenerator(void)
 {
     uint32_t state = 0;
-    return g_stream.level != 0 && !SafeRead(g_stream.level + 0x1E4, &state, 4) ? state : 0xFFFFFFFFu;
+    return g_stream.level != 0 && !SafeRead(g_stream.level + 0x1E4, &state, 4) ? state : kStreamStateUnread;
 }
 static int WorldStreamInPlay(void) { return WorldStreamGenerator() == 3; }
 
-/* DestroyUnit (exe 0x338960) trusts its unit: it runs the world's queued destroys (0x12D600: the units at world+0x30,
- * count +0x10030), then destroys and frees its argument whether the unit list ([world+0x230590], count +0x230588) held
- * it or not (0x3389D1..0x338A3F). 1 when no queued destroy holds the unit, the list does and it is this world's
- * ([unit+0x18], the constructor at 0xD7879); 0 when not; -1 when the lists do not read. The destroy reads the same
- * list unlocked on this thread a moment later, so the look is as safe as the call. */
+/* DestroyUnit (exe 0x338960) trusts its unit: it destroys and frees its argument whether the unit list
+ * ([world+0x230590], count +0x230588) held it or not (0x3389D1..0x338A3F). 1 when the list holds the unit and it is
+ * this world's ([unit+0x18], the constructor at 0xD7879); 0 when not; -1 when the list does not read. The destroy reads
+ * the same list unlocked on this thread a moment later, so the look is as safe as the call. The world's queued
+ * destroys (world+0x30) are not searched: their one writer (0x12D2D0) stores objects of the handle table only, which
+ * a stamp unit is not (its +8 is the world's allocator, 0xD784B, where the drain reads a handle, 0x12E71B). */
 #define DIF_STREAM_UNITS 0x230588u      /* u32 count; the array's address 8 bytes on */
-#define DIF_STREAM_QUEUED 0x30u         /* 8192 u64: units whose destroy is queued */
-#define DIF_STREAM_QUEUED_COUNT 0x10030u
+enum { kStreamUnitsMost = 1u << 22 };   /* the search's bound, not an engine limit: a count above it is taken for a misread */
 static int WorldStreamListed(uint64_t world, uint64_t unit)
 {
-    uint32_t count = 0, queued = 0;
+    uint32_t count = 0;
     uint64_t list = 0, in = 0;
-    if (SafeRead((uintptr_t)world + DIF_STREAM_UNITS, &count, 4) || SafeRead((uintptr_t)world + DIF_STREAM_UNITS + 8, &list, 8) ||
-        SafeRead((uintptr_t)world + DIF_STREAM_QUEUED_COUNT, &queued, 4) || count > (1u << 22) || queued > 8192 || (count != 0 && list == 0)) return -1;
+    if (SafeRead((uintptr_t)world + DIF_STREAM_UNITS, &count, 4) || SafeRead((uintptr_t)world + DIF_STREAM_UNITS + 8, &list, 8) || count > kStreamUnitsMost) return -1;
     const double t0 = HitchNow();
-    const int waits = SafeFind((uintptr_t)world + DIF_STREAM_QUEUED, queued, unit);
-    const int found = waits == 0 ? SafeFind((uintptr_t)list, count, unit) : 0;
+    const int found = SafeFind((uintptr_t)list, count, unit);
     const double ms = HitchNow() - t0;
     g_stream.looks++; g_stream.listed = count; g_stream.lookMs += ms;
     if (ms > g_stream.lookMost) g_stream.lookMost = ms;
-    if (waits < 0 || found < 0) return -1;
+    if (found < 0) return -1;
     return found == 1 && !SafeRead((uintptr_t)unit + 0x18, &in, 8) && in == world;
 }
 
@@ -481,14 +482,17 @@ static void WorldStreamGoneLocked(uint32_t i, uint64_t unit)
     g_streamReplace[i] = 0;
     if (g_stream.spawned > 0) g_stream.spawned--;
     if (g_stream.gone++ == 0)
-        Note("difficulty: extra large maps: content streaming: slot %u's stamp unit 0x%llX is not in the world's unit list any more (or its destroy is queued): "
+        Note("difficulty: extra large maps: content streaming: slot %u's stamp unit 0x%llX is not in the world's unit list any more: "
             "the slot is given up with no destroy call; further ones are counted", i, (unsigned long long)unit);
     WindowLeaveLocked(i);
 }
 
 /* Remove one streamed location: DestroyUnit (the table's +0x388) takes its stamp unit and the layer units go; the real
  * record's +0xA8 is zeroed and the location waits for a new stamp unit. Only a location this streamer queued
- * (g_streamLive) is ever passed here. */
+ * (g_streamLive) is ever passed here. 1 removed; 0 not, for good (given up, or removal is off); -1 not this frame: the
+ * world's unit list did not read, which one torn read can do, so the slot is asked again and removal goes off only
+ * after kStreamLookFails such looks in a row. */
+enum { kStreamLookFails = 8 };
 static int WorldStreamRemoveLocked(uint32_t i)
 {
     if (g_stream.destroyBad || g_streamInside || !WorldStreamInPlay()) return 0;
@@ -514,10 +518,15 @@ static int WorldStreamRemoveLocked(uint32_t i)
     const int listed = WorldStreamListed(world, unit);
     if (listed < 0)
     {
-        g_stream.destroyBad = 1;
-        Note("difficulty: extra large maps: content streaming: removal off: the world's unit list does not read");
-        return 0;
+        g_stream.lookFails++;
+        if (++g_stream.lookBad >= kStreamLookFails)
+        {
+            g_stream.destroyBad = 1;
+            Note("difficulty: extra large maps: content streaming: removal off: the world's unit list did not read %u times in a row", g_stream.lookBad);
+        }
+        return -1;
     }
+    g_stream.lookBad = 0;
     if (listed == 0) { WorldStreamGoneLocked(i, unit); return 0; }
     if (g_stream.removed == 0) g_stream.bodyBeforeSeen = WorldStreamBodies(&g_stream.bodyBefore);
     ((WorldStreamAnimWaitFn)wait)(world);
@@ -890,7 +899,7 @@ static int WorldStreamDropLocked(uint32_t i, int kind)
 static void WindowEvictedLocked(void); /* difficulty_stream_window.c */
 /* Each frame: up to `most` queued removals, until they took `ms`. Each is asked again, as frames went by since its
  * scan: still live with its own unit, and still out of reach (its timer runs), flagged for new ground, or a far slot.
- * The removals done. */
+ * A slot whose look did not read goes back to the queue's head and ends the frame's removals. The removals done. */
 static uint32_t WorldStreamDrainLocked(uint32_t most, double ms)
 {
     uint32_t done = 0, given = 0; /* a slot given up cost a search of the world's unit list: it counts as a removal here */
@@ -905,14 +914,23 @@ static uint32_t WorldStreamDrainLocked(uint32_t most, double ms)
         if (i >= g_stream.count || !g_streamLive[i] || !g_streamPoseGood[i] || g_streamNeedsUnit[i] || g_streamUnit[i] == 0) continue;
         if (kind == STREAM_DROP_OUT ? g_streamOutSince[i] == 0 : kind == STREAM_DROP_REPLACE ? !g_streamReplace[i] : !(g_streamOut2[i] > 0.0f)) continue;
         const uint32_t gone = g_stream.gone;
-        if (!WorldStreamRemoveLocked(i)) { given += g_stream.gone != gone; continue; }
-        done++;
-        if (kind == STREAM_DROP_REPLACE) /* due again: a window slot is free and enters again from the plan */
+        const int removed = WorldStreamRemoveLocked(i);
+        if (removed < 0)
+        {
+            g_streamDropHead = (g_streamDropHead + kStreamDropQueue - 1) % kStreamDropQueue; g_streamDropCount++;
+            g_streamDrop[i] = (uint8_t)kind;
+            if (kind == STREAM_DROP_FAR) g_streamDropFar++;
+            break;
+        }
+        const int left = removed || g_stream.gone != gone; /* the slot left the world's count: destroyed, or given up */
+        if (!left) continue;
+        done += removed != 0; given += removed == 0;
+        if (removed && kind == STREAM_DROP_REPLACE) /* due again: a window slot is free and enters again from the plan */
         {
             g_stream.replaced++;
             if (g_streamDeferred[i]) g_streamDue[i] = 1;
         }
-        else if (kind == STREAM_DROP_FAR) WindowEvictedLocked();
+        else if (kind == STREAM_DROP_FAR) WindowEvictedLocked(); /* a far slot given up is free as well */
         if (HitchNow() - t0 >= ms) break;
     }
     return done;
@@ -1283,8 +1301,8 @@ static void WorldStreamLeftLocked(uint32_t state)
         }
         Note("difficulty: extra large maps: content streaming: the level left play (generator state %d): streaming stopped; %u stamp units, %u queued removals "
             "and %u more flagged for new ground are forgotten, none is destroyed from here on; %u removed in play, %u given up (their unit was gone); the "
-            "world's unit list searched %u times (%.2f ms in all, the longest %.3f ms, %u units at the last)", (int)state, units, g_streamDropCount, flagged,
-            g_stream.removed, g_stream.gone, g_stream.looks, g_stream.lookMs, g_stream.lookMost, g_stream.listed);
+            "world's unit list searched %u times (%.2f ms in all, the longest %.3f ms, %u units at the last); %u looks did not read", (int)state, units,
+            g_streamDropCount, flagged, g_stream.removed, g_stream.gone, g_stream.looks, g_stream.lookMs, g_stream.lookMost, g_stream.listed, g_stream.lookFails);
         g_streamLeft.frames = kStreamLeftFrames; g_streamLeft.destroys = g_streamDestroys; g_streamLeft.levels = g_stream.levels;
     }
     WorldStreamClearLocked();
@@ -1328,8 +1346,9 @@ static void WorldStreamTick(float dt)
     }
     if (state != 3) /* no scan, removal, window work or spawn; nothing is destroyed */
     {
-        /* 5 is a second pipeline in play, back to 3 after it (0xF7451E); before play the level is still generating */
-        if (state != 5 && g_stream.played) WorldStreamLeftLocked(state);
+        /* 5 is a second pipeline in play, back to 3 after it (0xF7451E); before play the level is still generating; a
+         * state that does not read says nothing about the level, so the tick only waits */
+        if (state != 5 && state != kStreamStateUnread && g_stream.played) WorldStreamLeftLocked(state);
         ReleaseSRWLockExclusive(&g_streamLock);
         return;
     }

@@ -318,7 +318,7 @@ static uint64_t NearMainWorld(void)
 /* The world's find, exe 0x1BCF30, which neither inserts nor locks: 1 when `handle` is a terrain of `world`, 0 when not,
  * -1 when the map does not read. The destroy (0x1ADEA0) finds with insert (0x1B86C0) and frees the handle's object, so
  * a handle not found here is never given to it. */
-static int NearTerrainIn(uint64_t world, uint64_t handle)
+static int NearTerrainEntry(uint64_t world, uint64_t handle, uint64_t* at)
 {
     const uint64_t map = world + NEAR_TERRAINS;
     uint64_t entries = 0, key = 0;
@@ -337,12 +337,14 @@ static int NearTerrainIn(uint64_t world, uint64_t handle)
     for (uint32_t steps = 0; steps <= count; steps++)
     {
         if (SafeRead(entries + (uint64_t)i * 0x170, &key, 8) || SafeRead(entries + (uint64_t)i * 0x170 + 0x168, &next, 4)) return -1;
-        if (key == handle) return 1;
+        if (key == handle) { *at = entries + (uint64_t)i * 0x170; return 1; }
         if (next == 0x7FFFFFFFu) return 0;
         i = next;
     }
     return -1;
 }
+
+static int NearTerrainIn(uint64_t world, uint64_t handle) { uint64_t at = 0; return NearTerrainEntry(world, handle, &at); }
 
 /* Under the world's terrain lock, which the destroy takes too (so never held across it). */
 static int NearTerrainInLocked(uint64_t world, uint64_t handle)
@@ -352,6 +354,20 @@ static int NearTerrainInLocked(uint64_t world, uint64_t handle)
     const int in = NearTerrainIn(world, handle);
     if (locked) g_nearTerrainLock[1](world + 0x230520u);
     return in;
+}
+
+/* A handle is its terrain's address (the spawn returns the 0xAA8-byte object, exe 0x1ABF49..0x1AC198), which a later
+ * terrain can get again. The entry also keeps the spawn's descriptor (copied at 0x1ABFAA..0x1AC038): the heightmap
+ * it was spawned with at +0x40 and the material map at +0x48 (0x1AB0A7, 0x1AB0B5), which tell the two apart.
+ * That field (`material`: the second) of a listed terrain; 0 when it is not listed or does not read. */
+static uint64_t NearTerrainMapLocked(uint64_t world, uint64_t handle, int material)
+{
+    const int locked = world != 0 && g_nearTerrainLock[0] != NULL && g_nearTerrainLock[1] != NULL;
+    uint64_t at = 0, map = 0;
+    if (locked) g_nearTerrainLock[0](world + 0x230520u);
+    if (NearTerrainEntry(world, handle, &at) != 1 || SafeRead(at + (material ? 0x48u : 0x40u), &map, 8)) map = 0;
+    if (locked) g_nearTerrainLock[1](world + 0x230520u);
+    return map;
 }
 
 /* Terrains a replay found still in the world (NearTilesLeft): the new level takes their slots, so their handles wait
