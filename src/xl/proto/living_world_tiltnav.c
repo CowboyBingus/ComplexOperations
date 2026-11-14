@@ -10,15 +10,18 @@
  *   game keeps for its own line (0x7B2133: [cell+0x50] +0x60 carvers, +0x40 painters, +0x20 volumes).
  * - Whether a carver can reach the face over it. Havok hands a face only the carvers whose box meets the face's own box
  *   raised by the character height along up (0xB2E2C6..0xB2E361, 0xB7F2F0; the height is [settings+0x18], 0xB2DEF7);
- *   a face that floats over a prop's top is never cut. */
+ *   a cut piece is dropped when its centroid lies inside a carver, a point test in 3D (0xB32A3E..0xB32BF3, 0xB7EB40,
+ *   0x82F010). A face that floats over a prop's top is never cut. The box Havok asks is the carver's volume's own
+ *   ([[object+0x68]+0x18] +0x30 / +0x40, written at 0x82F5C7), not the grid object's. */
 #define LW_TN_BUF 131072u     /* object pointers one gather may hand back: the grid holds no more objects */
 #define LW_TN_CELLS 4096u     /* nav cells whose last build start is kept (64 x 64 at most) */
 #define LW_TN_CELL_LINES 6    /* cell lines a 30 s window */
 #define LW_TN_GROW 1.0f       /* metres an object's box is grown before it is asked for the prop's point */
 enum { LW_TN_CARVER, LW_TN_GEOMETRY, LW_TN_PAINTER, LW_TN_INERT, LW_TN_KINDS };
 
-/* carverLo..carverHi: the world heights the carvers over the point span; owner: the first object's resource (+0x60) */
-typedef struct { uint32_t n[LW_TN_KINDS]; uint32_t flags, material, painters; float lo, hi, carverLo, carverHi; uint64_t owner; int read; } LwTnAt;
+/* carverLo..carverHi: the world heights the carver objects' boxes span; volumes: the carvers whose volume's own box
+ * holds the point's (x, y), volLo..volHi the heights those span; owner: the first object's resource (+0x60) */
+typedef struct { uint32_t n[LW_TN_KINDS]; uint32_t flags, material, painters, volumes; float lo, hi, carverLo, carverHi, volLo, volHi; uint64_t owner; int read; } LwTnAt;
 typedef struct { uint32_t at[LW_TN_KINDS], game[3]; float box[4]; ULONGLONG tick; uint32_t builds; uint8_t noted; } LwTnCell;
 static struct
 {
@@ -58,6 +61,13 @@ static int LwTnOver(const float* m, const float* lo, const float* hi, const floa
     return 1;
 }
 
+/* A carver's volume's world box, the one Havok's queries ask: 1 when read. */
+static int LwTnVolumeBox(uintptr_t carver, float* lo, float* hi)
+{
+    uintptr_t volume = 0;
+    return EvpPtr(carver + 0x18, &volume) && !SafeRead(volume + 0x30, lo, 12) && !SafeRead(volume + 0x40, hi, 12) && hi[0] >= lo[0] && hi[1] >= lo[1] && hi[2] >= lo[2];
+}
+
 /* The objects of the grid cells lo..hi (0x7ADA50, as the build start asks): how many, -1 when the lever's pins did not
  * hold or the cells hold more than the buffer. */
 static int LwTnGather(uintptr_t grid, uint32_t lo, uint32_t hi)
@@ -88,6 +98,13 @@ static void LwTnObjects(uintptr_t nav, const float* p, LwTnAt* out)
         {
             if (out->n[LW_TN_CARVER] == 0 || zlo < out->carverLo) out->carverLo = zlo;
             if (out->n[LW_TN_CARVER] == 0 || zhi > out->carverHi) out->carverHi = zhi;
+        }
+        float vlo[3], vhi[3];
+        if (kind == LW_TN_CARVER && LwTnVolumeBox(carver, vlo, vhi) && p[0] >= vlo[0] && p[0] <= vhi[0] && p[1] >= vlo[1] && p[1] <= vhi[1])
+        {
+            if (out->volumes == 0 || vlo[2] < out->volLo) out->volLo = vlo[2];
+            if (out->volumes == 0 || vhi[2] > out->volHi) out->volHi = vhi[2];
+            out->volumes++;
         }
         out->painters += painter != 0;
         out->n[kind]++;
@@ -142,9 +159,13 @@ static int LwTnFace(float x, float y, float z, uint32_t agent, float* f)
     return ((SnapFn)fn)(id, f, 10.0f, f, NULL, agent) != 0 && isfinite(f[2]);
 }
 
-/* Where a face at height z lies against carvers spanning lo..hi, as Havok hands a face its carvers: 1 the face is over
- * them, -1 they are over the face raised by the character height, 0 they meet. */
-static int LwTnMiss(float z, float lo, float hi, float height) { return z > hi ? 1 : z + height < lo ? -1 : 0; }
+/* Where navmesh heights flo..fhi lie against carver boxes spanning lo..hi, as Havok hands a triangle its carvers (the
+ * triangle's box raised by the character height): 1 all of it is over them, -1 they are over all of it raised, 0 they
+ * meet. */
+static int LwTnReach(float flo, float fhi, float lo, float hi, float height) { return flo > hi ? 1 : fhi + height < lo ? -1 : 0; }
+
+/* A face against the prop's surface in the same column: 1 over it, -1 under it, 0 within 0.3 m of it. */
+static int LwTnAgainst(float face, float surface) { return face > surface + 0.3f ? 1 : face < surface - 0.3f ? -1 : 0; }
 
 /* The face in the column of (x, y): the closest face asked from z and from heights around it, the first that lies
  * within 0.5 m across. The closest face alone is the nearest in 3D, which may be a face beside the column. */
@@ -157,6 +178,23 @@ static int LwTnColumnFace(float x, float y, float z, uint32_t agent, float* fz)
         if (LwTnFace(x, y, z + kFrom[k], agent, f) && hypotf(f[0] - x, f[1] - y) < 0.5f) { *fz = f[2]; return 1; }
     }
     return 0;
+}
+
+/* The navmesh's heights around a column: the faces in the columns of (x, y) and of the 8 points 4 m around it (a nav
+ * cell's size on these levels). The input triangle Havok boxes is not kept by the game; this stands for its heights.
+ * The number of columns with a face. */
+static int LwTnAround(float x, float y, float z, float* lo, float* hi)
+{
+    int n = 0;
+    for (int k = 0; k < 9; k++)
+    {
+        float fz;
+        if (!LwTnColumnFace(x + 4.0f * (float)(k % 3 - 1), y + 4.0f * (float)(k / 3 - 1), z, 0, &fz)) continue;
+        if (n == 0 || fz < *lo) *lo = fz;
+        if (n == 0 || fz > *hi) *hi = fz;
+        n++;
+    }
+    return n;
 }
 
 /* The objects in the box (x0, y0, x1, y1), by kind: the engine's gather over its grid cells, counted as LwTnKind. */
@@ -220,6 +258,24 @@ static void LwTnCellStart(uintptr_t grid, uint32_t cellId)
 /* Whether a cell's box holds more carvers, geometry or painters now than its last build was handed. */
 static int LwTnLate(const uint32_t* at, const uint32_t* now) { return now[LW_TN_CARVER] > at[LW_TN_CARVER] || now[LW_TN_GEOMETRY] > at[LW_TN_GEOMETRY] || now[LW_TN_PAINTER] > at[LW_TN_PAINTER]; }
 
+/* Whether (x, y) lies in the box of a built cell: 0 or 1 by box and point alone. */
+static int LwTnInBox(const float* box, float x, float y) { return x >= box[0] && x <= box[2] && y >= box[1] && y <= box[3]; }
+
+/* The built cells whose box holds (x, y): 1 when one of them holds more now than its last build was handed, 0 when
+ * none does, -1 when no built cell holds the point. */
+static int LwTnPointLate(uintptr_t nav, float x, float y)
+{
+    int found = -1;
+    for (uint32_t k = 0; k < LW_TN_CELLS; k++)
+    {
+        const LwTnCell* c = &g_lwTn.cell[k]; uint32_t now[LW_TN_KINDS];
+        if (c->builds == 0 || !LwTnInBox(c->box, x, y) || !LwTnBoxCount(nav + 0x6710u, c->box, now)) continue;
+        if (LwTnLate(c->at, now)) return 1;
+        found = 0;
+    }
+    return found;
+}
+
 /* With the 30 s notes: each cell built since the last note, and how many cells' boxes hold more now than their last
  * build was handed (those objects are not in the cell's navmesh until it is built again). */
 static void LwTnNote(void)
@@ -248,17 +304,20 @@ static void LwTnNote(void)
 #ifdef CO_TEST
 int CoXlTestTnKind(uint32_t flags, uintptr_t carver) { return LwTnKind(flags, carver); }
 int CoXlTestTnOver(const float* m, const float* lo, const float* hi, const float* p, float grow, float* zlo, float* zhi) { return LwTnOver(m, lo, hi, p, grow, zlo, zhi); }
-int CoXlTestTnMiss(float z, float lo, float hi, float height) { return LwTnMiss(z, lo, hi, height); }
+int CoXlTestTnReach(float flo, float fhi, float lo, float hi, float height) { return LwTnReach(flo, fhi, lo, hi, height); }
+int CoXlTestTnAgainst(float face, float surface) { return LwTnAgainst(face, surface); }
+int CoXlTestTnInBox(const float* box, float x, float y) { return LwTnInBox(box, x, y); }
 int CoXlTestTnLate(const uint32_t* at, const uint32_t* now) { return LwTnLate(at, now); }
 int CoXlTestTnAgentIndex(uintptr_t exe, uint32_t hash) { return LwTnAgentIndex(exe, hash); }
 /* The engine's cell and gather steps as the test's own; then the objects over p as the probe counts them. */
 void CoXlTestTnObjects(uintptr_t nav, uint32_t (*cell)(uintptr_t, float, float), uint32_t (*gather)(uintptr_t, uint32_t, uint32_t, uintptr_t*, uint32_t),
-    const float* p, uint32_t* counts, uint32_t* flags, uint32_t* material, int* read, float* carverZ, uint32_t* painters, uint64_t* owner)
+    const float* p, uint32_t* counts, uint32_t* flags, uint32_t* material, int* read, float* carverZ, uint32_t* painters, uint64_t* owner, float* volumeZ, uint32_t* volumes)
 {
     LwTnAt at;
     g_lwNj.cell = (LwNjCellFn)cell; g_lwNj.gather = (LwNjGatherFn)gather;
     LwTnObjects(nav, p, &at);
     memcpy(counts, at.n, sizeof at.n); *flags = at.flags; *material = at.material; *read = at.read;
     carverZ[0] = at.carverLo; carverZ[1] = at.carverHi; *painters = at.painters; *owner = at.owner;
+    volumeZ[0] = at.volLo; volumeZ[1] = at.volHi; *volumes = at.volumes;
 }
 #endif

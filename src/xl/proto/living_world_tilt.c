@@ -40,9 +40,11 @@ static struct
     uint32_t propCarver, propGeometry, propPainter, propBare, propUnread, faceAny, agentAsked, agentFace, inStreamed, inLevel, noStamp;
     /* four-corner samples 30 deg or more from upright (the same measure on any level): a window's, then the level's */
     uint32_t up30, upChecked, upOnProp, lvFour, lvOff30, lvUp30, lvUpChecked, lvUpOnProp;
-    /* the props' carvers against the face in the unit's column: the face over them, under them, met by them, no face;
-     * the same column asked for the unit's own agent type; units still where they were first seen, and those that moved */
-    uint32_t carverOver, carverUnder, carverMeets, carverNoFace, agentColumn, propStayed, propWalked;
+    /* props with a carver's volume box over the unit's point: with a face in that column (not cut) or none; the not
+     * cut by the navmesh's heights around the column against the boxes, by the face against the prop's surface, and by
+     * whether the point's nav cell was built before its carvers; props with a carver object but no volume box over
+     * the point; the column asked for the unit's own agent type; units still where first seen, and those that moved */
+    uint32_t notCut, cut, reachOver, reachUnder, reachMeets, faceOver, faceAt, faceUnder, lateCell, builtCell, carverBeside, agentColumn, propStayed, propWalked;
     /* corners that went from a start under a surface to a miss or back between two scans */
     uint32_t flips, flipSamples, flipMax, flipId;
     uint32_t seenId[LW_TILT_SEEN]; ULONGLONG seenAt[LW_TILT_SEEN];
@@ -385,13 +387,19 @@ static int LwTiltCheck(uintptr_t mgr, uint32_t id, const float* p, const float* 
     else if (at.n[LW_TN_PAINTER]) g_lwTilt.propPainter++;
     else g_lwTilt.propBare++;
     uint32_t agent = LwTnAgent(id); float fz;
-    if (at.n[LW_TN_CARVER])
+    if (at.n[LW_TN_CARVER] && at.volumes == 0) g_lwTilt.carverBeside++;
+    if (at.volumes)
     {
-        if (!LwTnColumnFace(p[0], p[1], f[2], 0, &fz)) g_lwTilt.carverNoFace++;
+        if (!LwTnColumnFace(p[0], p[1], f[2], 0, &fz)) g_lwTilt.cut++;
         else
         {
-            int miss = LwTnMiss(fz, at.carverLo, at.carverHi, g_lwTn.height);
-            if (miss > 0) g_lwTilt.carverOver++; else if (miss < 0) g_lwTilt.carverUnder++; else g_lwTilt.carverMeets++;
+            float flo = fz, fhi = fz;
+            LwTnAround(p[0], p[1], fz, &flo, &fhi);
+            int reach = LwTnReach(flo, fhi, at.volLo, at.volHi, g_lwTn.height), against = LwTnAgainst(fz, f[2]), late = LwTnPointLate(LwTnNav(&navId), p[0], p[1]);
+            g_lwTilt.notCut++;
+            if (reach > 0) g_lwTilt.reachOver++; else if (reach < 0) g_lwTilt.reachUnder++; else g_lwTilt.reachMeets++;
+            if (against > 0) g_lwTilt.faceOver++; else if (against < 0) g_lwTilt.faceUnder++; else g_lwTilt.faceAt++;
+            if (late > 0) g_lwTilt.lateCell++; else if (late == 0) g_lwTilt.builtCell++;
         }
     }
     if (LwTnAgentIndex(g_navExe, agent) > 0) /* place 0 and no type ask with no filter: nothing new to read */
@@ -423,15 +431,18 @@ static void LwTiltPropLine(uintptr_t mgr, uint32_t id, const float* p)
     LwTnAt at; LwTnObjects(LwTnNav(&navId), f, &at);
     uint32_t agent = LwTnAgent(id); int place = LwTnAgentIndex(g_navExe, agent);
     int a = LwTnColumnFace(p[0], p[1], f[2], 0, &any), o = place > 0 && LwTnColumnFace(p[0], p[1], f[2], agent, &own);
-    int miss = a && at.n[LW_TN_CARVER] ? LwTnMiss(any, at.carverLo, at.carverHi, g_lwTn.height) : 0;
+    float flo = any, fhi = any; int around = a ? LwTnAround(p[0], p[1], any, &flo, &fhi) : 0;
+    int reach = a && at.volumes ? LwTnReach(flo, fhi, at.volLo, at.volHi, g_lwTn.height) : 0, late = LwTnPointLate(LwTnNav(&navId), p[0], p[1]);
     const LwTiltUnit* t = LwTiltTrack(g_lwTilt.track, id, p);
     float moved = t ? sqrtf((p[0] - t->first[0]) * (p[0] - t->first[0]) + (p[1] - t->first[1]) * (p[1] - t->first[1]) + (p[2] - t->first[2]) * (p[2] - t->first[2])) : -1.0f;
     Note("living world: tilt: unit %08X on prop %08X (surface z %.2f), %.1f m from where it was first seen, %u corner flips: nav objects over that point%s: %u carvers, %u geometry, "
-        "%u painters, %u inert, %u with a painter set; the first: flags %X, material %08X, resource %016llX, z %.2f to %.2f; the carvers span z %.2f to %.2f; agent type %08X (place %d); "
-        "the face in its column for any agent: %sz %.2f%s; for its own type: %sz %.2f",
+        "%u painters, %u inert, %u with a painter set; the first: flags %X, material %08X, resource %016llX, z %.2f to %.2f; the carver objects' boxes span z %.2f to %.2f; %u carver volume boxes hold the point, z %.2f to %.2f; agent type %08X (place %d); "
+        "the face in its column for any agent: %sz %.2f%s; the navmesh in %d columns within 4 m: z %.2f to %.2f%s; its nav cell: %s; for its own type: %sz %.2f",
         id, u[0], (double)f[2], (double)moved, t ? t->flips : 0u, at.read ? "" : " (not read)", at.n[LW_TN_CARVER], at.n[LW_TN_GEOMETRY], at.n[LW_TN_PAINTER], at.n[LW_TN_INERT],
-        at.painters, at.flags, at.material, (unsigned long long)at.owner, (double)at.lo, (double)at.hi, (double)at.carverLo, (double)at.carverHi, agent, place,
-        a ? "" : "none, ", (double)any, !a || !at.n[LW_TN_CARVER] ? "" : miss > 0 ? " (over the carvers: not cut)" : miss < 0 ? " (under the carvers' reach: not cut)" : " (the carvers reach it)",
+        at.painters, at.flags, at.material, (unsigned long long)at.owner, (double)at.lo, (double)at.hi, (double)at.carverLo, (double)at.carverHi, at.volumes, (double)at.volLo, (double)at.volHi, agent, place,
+        a ? "" : "none, ", (double)any, !a ? "" : !at.volumes ? "" : " (not cut by a carver whose box holds the point)", around, (double)flo, (double)fhi,
+        !a || !at.volumes ? "" : reach > 0 ? " (all over the boxes)" : reach < 0 ? " (all under the boxes' reach)" : " (the boxes meet these heights)",
+        late > 0 ? "holds more now than its last build was handed" : late == 0 ? "built with what it holds now" : "no build seen",
         o ? "" : place > 0 ? "none, " : "not asked, ", (double)own);
 }
 
@@ -585,11 +596,14 @@ static void LwTiltNote(void)
             ReleaseSRWLockShared(&g_streamLock);
         }
         if (g_lwTilt.onProp)
-            Note("living world: tilt on props (30 s): of the %u with a carver over the prop's point: the face in the unit's column lies over the carvers %u, under their reach %u, "
-                "within it %u, no face in the column %u (character height %.2f m); a face in the column for the unit's own agent type %u of %u asked; "
+            Note("living world: tilt on props (30 s): of the %u on a prop, a carver's volume box holds the unit's point for %u: NOT CUT (a face in that column for any agent) %u, "
+                "cut (no face) %u; a carver object but no volume box over the point %u. Of the not cut: the navmesh within 4 m lies all over the boxes %u, all under their reach %u, "
+                "at heights the boxes meet %u (not decisive: a triangle spans more); the face lies over the prop's surface %u, at it %u, under it %u; the nav cell holds more now "
+                "than its last build was handed %u, was built with what it holds %u (character height %.2f m); a face in the column for the unit's own agent type %u of %u asked; "
                 "units within %.0f m of where they were first seen %u, further %u",
-                g_lwTilt.propCarver, g_lwTilt.carverOver, g_lwTilt.carverUnder, g_lwTilt.carverMeets, g_lwTilt.carverNoFace, (double)g_lwTn.height, g_lwTilt.agentColumn,
-                g_lwTilt.agentAsked, (double)LW_TILT_STAYED, g_lwTilt.propStayed, g_lwTilt.propWalked);
+                g_lwTilt.onProp, g_lwTilt.notCut + g_lwTilt.cut, g_lwTilt.notCut, g_lwTilt.cut, g_lwTilt.carverBeside, g_lwTilt.reachOver, g_lwTilt.reachUnder, g_lwTilt.reachMeets,
+                g_lwTilt.faceOver, g_lwTilt.faceAt, g_lwTilt.faceUnder, g_lwTilt.lateCell, g_lwTilt.builtCell, (double)g_lwTn.height, g_lwTilt.agentColumn, g_lwTilt.agentAsked,
+                (double)LW_TILT_STAYED, g_lwTilt.propStayed, g_lwTilt.propWalked);
         if (g_lwTilt.onProp)
             Note("living world: tilt on props (30 s): of the %u on a prop: nav objects over the prop's point: a carver %u, geometry and no carver %u, a painter only %u, none %u, not read %u; "
                 "a face at its column for any agent %u; asked for the unit's own agent type %u, a face %u; in a streamed stamp's footprint %u, a level-made stamp's %u, no stamp's %u",
@@ -602,7 +616,8 @@ static void LwTiltNote(void)
     g_lwTilt.checked = g_lwTilt.onProp = g_lwTilt.navUnder = g_lwTilt.navTop = g_lwTilt.propStatic = g_lwTilt.propDynamic = g_lwTilt.propNone = g_lwTilt.propNoRecord = 0;
     g_lwTilt.propCarver = g_lwTilt.propGeometry = g_lwTilt.propPainter = g_lwTilt.propBare = g_lwTilt.propUnread = g_lwTilt.faceAny = g_lwTilt.agentAsked = g_lwTilt.agentFace = 0;
     g_lwTilt.inStreamed = g_lwTilt.inLevel = g_lwTilt.noStamp = g_lwTilt.up30 = g_lwTilt.upChecked = g_lwTilt.upOnProp = 0;
-    g_lwTilt.carverOver = g_lwTilt.carverUnder = g_lwTilt.carverMeets = g_lwTilt.carverNoFace = g_lwTilt.agentColumn = g_lwTilt.propStayed = g_lwTilt.propWalked = 0;
+    g_lwTilt.notCut = g_lwTilt.cut = g_lwTilt.reachOver = g_lwTilt.reachUnder = g_lwTilt.reachMeets = g_lwTilt.faceOver = g_lwTilt.faceAt = g_lwTilt.faceUnder = 0;
+    g_lwTilt.lateCell = g_lwTilt.builtCell = g_lwTilt.carverBeside = g_lwTilt.agentColumn = g_lwTilt.propStayed = g_lwTilt.propWalked = 0;
     g_lwTilt.flips = g_lwTilt.flipSamples = 0;
     g_lwTilt.windowLines = g_lwTilt.windowFits = 0;
     g_lwTilt.four = g_lwTilt.fitsOnProp = 0; memset(g_lwTilt.cls, 0, sizeof g_lwTilt.cls);

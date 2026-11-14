@@ -21,11 +21,13 @@ uint32_t CoXlTestTiltFlips(uint8_t* prev, const float* readings, float len);
 int CoXlTestTiltTrack(void* table, uint32_t id, const float* p, float* first);
 int CoXlTestTnKind(uint32_t flags, uintptr_t carver);
 int CoXlTestTnOver(const float* m, const float* lo, const float* hi, const float* p, float grow, float* zlo, float* zhi);
-int CoXlTestTnMiss(float z, float lo, float hi, float height);
+int CoXlTestTnReach(float flo, float fhi, float lo, float hi, float height);
+int CoXlTestTnAgainst(float face, float surface);
+int CoXlTestTnInBox(const float* box, float x, float y);
 int CoXlTestTnLate(const uint32_t* at, const uint32_t* now);
 int CoXlTestTnAgentIndex(uintptr_t exe, uint32_t hash);
 void CoXlTestTnObjects(uintptr_t nav, uint32_t (*cell)(uintptr_t, float, float), uint32_t (*gather)(uintptr_t, uint32_t, uint32_t, uintptr_t*, uint32_t),
-    const float* p, uint32_t* counts, uint32_t* flags, uint32_t* material, int* read, float* carverZ, uint32_t* painters, uint64_t* owner);
+    const float* p, uint32_t* counts, uint32_t* flags, uint32_t* material, int* read, float* carverZ, uint32_t* painters, uint64_t* owner, float* volumeZ, uint32_t* volumes);
 enum { FITS, MISSED, UNDER, LOOSE, GROUND }; /* the diagnostic's classes, in its order */
 enum { CARVER, GEOMETRY, PAINTER, INERT };   /* what a cell's build does with a nav object */
 
@@ -189,6 +191,15 @@ static uint32_t FakeGather(uintptr_t grid, uint32_t lo, uint32_t hi, uintptr_t* 
     for (uint32_t k = 0; k < g_gather.n && k < 5; k++) buf[k] = (uintptr_t)g_objects[k];
     return g_gather.n;
 }
+/* A carver (0x28 B: its volume at +0x18) whose volume's world box (+0x30 / +0x40) is (x0, y0, z0)..(x1, y1, z1). */
+static uint8_t g_volumes[3][0xD0], g_carvers[3][0x28];
+static uintptr_t Carver(int k, float x0, float y0, float z0, float x1, float y1, float z1)
+{
+    const float lo[4] = {x0, y0, z0, 0}, hi[4] = {x1, y1, z1, 0}; uintptr_t v = (uintptr_t)g_volumes[k];
+    memcpy(g_volumes[k] + 0x30, lo, sizeof lo); memcpy(g_volumes[k] + 0x40, hi, sizeof hi); memcpy(g_carvers[k] + 0x18, &v, 8);
+    return (uintptr_t)g_carvers[k];
+}
+
 static void Object(int k, float x, float y, float z, float zlo, float zhi, uint32_t flags, uint32_t material, uint64_t owner, uintptr_t carver, uintptr_t painter)
 {
     const float m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1}, box[6] = {-1, -1, zlo, 1, 1, zhi};
@@ -221,13 +232,22 @@ static void NavObjects(void)
     const float flat[3] = {1, 0.5f, -1};
     CHECK(!CoXlTestTnOver(turned, lo, flat, within, 0, &zlo, &zhi)); /* a box turned inside out */
 
-    g_case = "a face against the carvers under it";
-    CHECK(CoXlTestTnMiss(7.0f, 5.0f, 6.2f, 2.0f) == 1);  /* the face floats over the carver's top */
-    CHECK(CoXlTestTnMiss(6.2f, 5.0f, 6.2f, 2.0f) == 0);
-    CHECK(CoXlTestTnMiss(5.5f, 5.0f, 6.2f, 2.0f) == 0);
-    CHECK(CoXlTestTnMiss(3.0f, 5.0f, 6.2f, 2.0f) == 0);  /* the character's height over the face reaches it */
-    CHECK(CoXlTestTnMiss(2.9f, 5.0f, 6.2f, 2.0f) == -1);
-    CHECK(CoXlTestTnMiss(2.9f, 5.0f, 6.2f, 2.5f) == 0);
+    g_case = "the navmesh's heights against the carvers' boxes";
+    CHECK(CoXlTestTnReach(7.0f, 7.0f, 5.0f, 6.2f, 2.0f) == 1);   /* the face floats over the boxes' top */
+    CHECK(CoXlTestTnReach(6.2f, 6.2f, 5.0f, 6.2f, 2.0f) == 0);
+    CHECK(CoXlTestTnReach(6.0f, 9.0f, 5.0f, 6.2f, 2.0f) == 0);   /* a triangle that dips to the boxes meets them */
+    CHECK(CoXlTestTnReach(6.3f, 9.0f, 5.0f, 6.2f, 2.0f) == 1);
+    CHECK(CoXlTestTnReach(1.0f, 3.0f, 5.0f, 6.2f, 2.0f) == 0);   /* the character's height over its top reaches them */
+    CHECK(CoXlTestTnReach(1.0f, 2.9f, 5.0f, 6.2f, 2.0f) == -1);
+    CHECK(CoXlTestTnReach(1.0f, 2.9f, 5.0f, 6.2f, 2.5f) == 0);
+
+    g_case = "a face against the prop's surface";
+    CHECK(CoXlTestTnAgainst(6.6f, 6.2f) == 1 && CoXlTestTnAgainst(6.4f, 6.2f) == 0 && CoXlTestTnAgainst(6.0f, 6.2f) == 0 && CoXlTestTnAgainst(5.8f, 6.2f) == -1);
+
+    g_case = "a point in a built cell's box";
+    const float cellBox[4] = {-10, 20, 30, 60};
+    CHECK(CoXlTestTnInBox(cellBox, 0, 40) && CoXlTestTnInBox(cellBox, -10, 20) && CoXlTestTnInBox(cellBox, 30, 60));
+    CHECK(!CoXlTestTnInBox(cellBox, -10.1f, 40) && !CoXlTestTnInBox(cellBox, 30.1f, 40) && !CoXlTestTnInBox(cellBox, 0, 19.9f) && !CoXlTestTnInBox(cellBox, 0, 60.1f));
 
     g_case = "objects filed after a cell's build";
     const uint32_t then[4] = {3, 2, 1, 9}, same[4] = {3, 2, 1, 12}, fewer[4] = {2, 1, 0, 0}, c1[4] = {4, 2, 1, 9}, g1[4] = {3, 3, 1, 9}, p1[4] = {3, 2, 2, 9};
@@ -249,26 +269,33 @@ static void NavObjects(void)
 
     g_case = "the nav objects over a prop's point";
     static uint8_t nav[0x6800];
-    uint32_t counts[4], flags, material, painters; int read; float cz[2]; uint64_t owner;
+    uint32_t counts[4], flags, material, painters, volumes; int read; float cz[2], vz[2]; uint64_t owner;
     const float p[3] = {10.5f, 20.2f, 6.2f};
     Object(0, 10, 20, 5, 0, 1.2f, 0x1, 0xAA, 0x1122334455667788ull, 0, 0x2000);  /* geometry, with a painter set */
-    Object(1, 10, 20, 5, 0, 1.2f, 0x6, 0xBB, 0x99ull, 0x1000, 0);                /* a carver, z 5 to 6.2 */
-    Object(2, 50, 50, 5, 0, 9.0f, 0x6, 0xCC, 0x98ull, 0x1000, 0);                /* a carver elsewhere in the cell */
-    Object(3, 10.4f, 19.5f, 3, 0, 1.0f, 0x6, 0xDD, 0x97ull, 0x1000, 0);          /* a carver under it, z 3 to 4 */
+    Object(1, 10, 20, 5, 0, 1.2f, 0x6, 0xBB, 0x99ull, Carver(0, 9.2f, 19.1f, 5.1f, 10.8f, 20.9f, 5.9f), 0); /* a carver, its box z 5 to 6.2, its volume's 5.1 to 5.9 */
+    Object(2, 50, 50, 5, 0, 9.0f, 0x6, 0xCC, 0x98ull, Carver(1, 49, 49, 5, 51, 51, 14), 0);                  /* a carver elsewhere in the cell */
+    Object(3, 10.4f, 19.5f, 3, 0, 1.0f, 0x6, 0xDD, 0x97ull, Carver(2, 9.4f, 18.5f, 3.2f, 10.45f, 20.5f, 3.8f), 0); /* under it; its volume's box ends 5 cm short of the point */
     Object(4, 12.4f, 20, 5, 0, 1.0f, 0x30, 0xEE, 0x96ull, 0, 0x2000);            /* a painter 0.9 m beside the point */
     g_gather.n = 5;
-    CoXlTestTnObjects((uintptr_t)nav, FakeCell, FakeGather, p, counts, &flags, &material, &read, cz, &painters, &owner);
+    CoXlTestTnObjects((uintptr_t)nav, FakeCell, FakeGather, p, counts, &flags, &material, &read, cz, &painters, &owner, vz, &volumes);
     CHECK(read == 1 && g_gather.grid == (uintptr_t)nav + 0x6710u && g_gather.x == 10.5f && g_gather.y == 20.2f && g_gather.lo == 77 && g_gather.hi == 77);
     CHECK(counts[CARVER] == 2 && counts[GEOMETRY] == 1 && counts[PAINTER] == 1 && counts[INERT] == 0);
     CHECK(flags == 0x1 && material == 0xAA && owner == 0x1122334455667788ull); /* the first over the point */
     CHECK(cz[0] == 3.0f && cz[1] == 6.2f && painters == 2);
+    CHECK(volumes == 1 && vz[0] == 5.1f && vz[1] == 5.9f); /* the volume's own box, not the object's */
+    Carver(2, 9.4f, 18.5f, 3.2f, 10.5f, 20.5f, 3.8f);
+    CoXlTestTnObjects((uintptr_t)nav, FakeCell, FakeGather, p, counts, &flags, &material, &read, cz, &painters, &owner, vz, &volumes);
+    CHECK(volumes == 2 && vz[0] == 3.2f && vz[1] == 5.9f);
+    memset(g_carvers[0] + 0x18, 0, 8); /* a carver with no volume */
+    CoXlTestTnObjects((uintptr_t)nav, FakeCell, FakeGather, p, counts, &flags, &material, &read, cz, &painters, &owner, vz, &volumes);
+    CHECK(volumes == 1 && vz[0] == 3.2f && vz[1] == 3.8f && counts[CARVER] == 2);
     g_gather.n = 0;
-    CoXlTestTnObjects((uintptr_t)nav, FakeCell, FakeGather, p, counts, &flags, &material, &read, cz, &painters, &owner);
+    CoXlTestTnObjects((uintptr_t)nav, FakeCell, FakeGather, p, counts, &flags, &material, &read, cz, &painters, &owner, vz, &volumes);
     CHECK(read == 1 && counts[CARVER] + counts[GEOMETRY] + counts[PAINTER] + counts[INERT] == 0 && painters == 0);
     g_gather.n = 200000; /* more than the grid can hold: not read */
-    CoXlTestTnObjects((uintptr_t)nav, FakeCell, FakeGather, p, counts, &flags, &material, &read, cz, &painters, &owner);
+    CoXlTestTnObjects((uintptr_t)nav, FakeCell, FakeGather, p, counts, &flags, &material, &read, cz, &painters, &owner, vz, &volumes);
     CHECK(read == 0 && counts[CARVER] == 0);
-    CoXlTestTnObjects(0, FakeCell, FakeGather, p, counts, &flags, &material, &read, cz, &painters, &owner);
+    CoXlTestTnObjects(0, FakeCell, FakeGather, p, counts, &flags, &material, &read, cz, &painters, &owner, vz, &volumes);
     CHECK(read == 0);
 }
 
