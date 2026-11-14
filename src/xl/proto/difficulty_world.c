@@ -4853,6 +4853,8 @@ static void HiveLordNote(uint64_t b)
 static void RoadsAfterOp(uintptr_t block, uint64_t context, uint64_t record, uint32_t op, uint32_t before, int counted); /* difficulty_world_roads.c */
 static void RoadsSpacingBegin(uintptr_t block, uint64_t record); /* difficulty_world_roadbuild.c */
 static void RoadsSpacingEnd(void);
+static void RoadsToleranceBegin(void);
+static void RoadsToleranceEnd(void);
 static void RoadsArterialsApply(uintptr_t block, const uint8_t* ops, uint32_t total);
 static void RoadsArterialsPoints(uintptr_t block);
 static void RoadsSpursBuild(uintptr_t block, uint64_t context);
@@ -5055,9 +5057,13 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
      * lock, their order) */
     const int objCaps = watch && op == 0x16 && g_world.current > 1.0f && g_difficulty.missions > 1 && g_world.values != NULL;
     if (objCaps) { AcquireSRWLockExclusive(&g_explorationLock); g_world.values->capMul = g_difficulty.missions; }
+    /* the arterials are chosen on the edges op 0x0E reads: the zone passes after op 0x86 close some (flag 2) */
+    if (watch && op == 0x0E) { uint32_t placed = 0; SafeRead(block + 0x11A7108, &placed, 4); RoadsArterialsApply(block, g_locationOp, placed < DIF_LOCATIONS ? placed : DIF_LOCATIONS); }
     if (watch && op == 0x0E) RoadsSpacingBegin(block, records + (uint64_t)at * 0x19B0u); /* the level's own op 0x0E only */
+    if (watch && op == 0x2B) RoadsToleranceBegin();
     uint64_t r = g_worldDispatch(records, b, index, d, e, f, g, h);
     if (watch && op == 0x0E) RoadsSpacingEnd();
+    if (watch && op == 0x2B) RoadsToleranceEnd();
     if (objCaps) { g_world.values->capMul = 1; ReleaseSRWLockExclusive(&g_explorationLock); }
     if (sortLock) ReleaseSRWLockExclusive(&g_sortContextLock);
     if (vanilla2B && vanillaOp == 0xB5) HiveLordNote(b);
@@ -5099,7 +5105,6 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
         {
             RoadsAfterOp(watch ? block : vanillaBlock, b, records + (uint64_t)ranAt * 0x19B0u, watch ? op : vanillaOp, watch ? before : vanillaBefore, watch);
             /* a complex level's arterials, before op 0x0E gives the edges points and op 0x0F their corridors */
-            if (watch && op == 0x86) { uint32_t placed = 0; SafeRead(block + 0x11A7108, &placed, 4); RoadsArterialsApply(block, g_locationOp, placed < DIF_LOCATIONS ? placed : DIF_LOCATIONS); }
             if (watch && op == 0x0E) RoadsArterialsPoints(block);
             if (watch && op == 0x0F) RoadsSpursBuild(block, b); /* before op 0x2B places a stamp */
             if (watch) RoadsSlopeNote(block); /* once the level's height capture is kept */
@@ -5877,6 +5882,7 @@ static void RouteWidthBuild(uint8_t* stub, uintptr_t flag, uintptr_t back)
     rel = (int32_t)((int64_t)back - (int64_t)(uintptr_t)(stub + 36)); memcpy(stub + 32, &rel, 4);
 }
 static const char* InstallRoadSpacing(uintptr_t game); /* difficulty_world_roadbuild.c */
+static const char* InstallRoadTolerance(uintptr_t game);
 static const char* InstallRouteWidth(uintptr_t game)
 {
     if (!ApiCodeMatches(game + 0xF53086u, "F3 0F 10 B2 20 01 00 00") || !ApiCodeMatches(game + 0xF530A2u, "F3 0F 5E F0") ||
@@ -6645,6 +6651,8 @@ static const char* InstallWorld(DifficultyInstall* d)
     if (routeWidth != NULL) Note("difficulty: extra large maps: %s", routeWidth);
     const char* roadSpacing = InstallRoadSpacing(game);
     if (roadSpacing != NULL) Note("difficulty: extra large maps: %s", roadSpacing);
+    const char* roadTolerance = InstallRoadTolerance(game);
+    if (roadTolerance != NULL) Note("difficulty: extra large maps: %s", roadTolerance);
     const char* towns = InstallTowns(game);
     if (ApiCodeMatches(game + 0xFB8F08u, "41 0F 28 C4 F3 0F 59 C3"))
     {

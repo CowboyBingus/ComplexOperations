@@ -15,6 +15,9 @@ float CoXlTestRoadsSpacing(const uint8_t* recs, uint32_t n, const uint8_t* taken
 void CoXlTestRoadSpacingBuild(uint8_t* stub, uintptr_t constant, uintptr_t back);
 void CoXlTestRoadSpacingAt(uint8_t* stub);
 const char* CoXlTestInstallRoadSpacing(uintptr_t game, uint8_t** stub);
+const char* CoXlTestInstallRoadTolerance(uintptr_t game, uint8_t** stub);
+void CoXlTestRoadsTolerance(int begin);
+void CoXlTestRoadsShape(uint8_t (*fn)(uint64_t, const float*, float, const float*, const float*, float, float*, float*));
 void CoXlTestRoadsSpacingBegin(uintptr_t block, uint64_t record);
 void CoXlTestRoadsSpacingEnd(void);
 uint32_t CoXlTestRoadsArterials(const uint8_t* recs, uint32_t edges, const uint32_t* ends, const float* nodeXY, uint32_t nodes, const float* termXY, uint32_t terms,
@@ -275,6 +278,71 @@ static void Install(void)
     VirtualProtect(g_fake.image + 0xF38000u, 0x2000, was, &was);
 }
 
+/* Op 0x2B's road test on the fake image: entered at 0xF30DA8 as the game does (rbp its frame, xmm6 the road's width,
+ * al the overlap), through the installed jump and the installed page, back at 0xF30DB4. Returns whether the game's
+ * next jump, je, would be taken: the depth is then not let through. */
+typedef uint8_t (*ToleranceFn)(uint8_t* frame, float* widthThenDepth, uint8_t overlap);
+static uint8_t* g_toleranceStub;
+static void InstallTolerance(void)
+{
+    static const uint8_t width[7] = {0xF3, 0x41, 0x0F, 0x10, 0x74, 0xC2, 0x30};
+    static const uint8_t site[23] = {0xE8, 0xD8, 0xB3, 0x09, 0x00, 0x80, 0xBD, 0xF8, 0x20, 0x00, 0x00, 0x00, 0xF3, 0x0F, 0x10, 0x45, 0x98, 0x74, 0x10, 0xF3, 0x0F, 0x59, 0x35};
+    static const uint8_t bit[17] = {0x0F, 0xB6, 0x88, 0x70, 0x01, 0x00, 0x00, 0x8B, 0x45, 0xD0, 0x80, 0xE1, 0x01, 0x88, 0x4C, 0x24, 0x58};
+    /* push rbp; sub rsp, 0x18; movups [rsp], xmm6; mov rbp, rcx; movss xmm6, [rdx]; mov al, r8b; jmp 0xF30DA8 */
+    static const uint8_t enter[] = {0x55, 0x48, 0x83, 0xEC, 0x18, 0x0F, 0x11, 0x34, 0x24, 0x48, 0x89, 0xCD, 0xF3, 0x0F, 0x10, 0x32, 0x44, 0x88, 0xC0, 0xE9, 0, 0, 0, 0};
+    /* sete al; movss [rdx], xmm0; movups xmm6, [rsp]; add rsp, 0x18; pop rbp; ret */
+    static const uint8_t leave[] = {0x0F, 0x94, 0xC0, 0xF3, 0x0F, 0x11, 0x02, 0x0F, 0x10, 0x34, 0x24, 0x48, 0x83, 0xC4, 0x18, 0x5D, 0xC3};
+    static uint8_t frame[0x2200];
+    uint8_t* stub = NULL;
+    g_case = "install: op 0x2B's road test jumps to a stub that is code and lets no depth through on an arterial";
+    memcpy(g_fake.image + 0xF30D72u, width, sizeof width); memcpy(g_fake.image + 0xF345E8u, bit, sizeof bit);
+    memcpy(g_fake.image + 0xF30DA3u, site, sizeof site);
+    const char* why = CoXlTestInstallRoadTolerance((uintptr_t)g_fake.image, &stub);
+    CHECK(why == NULL && stub != NULL);
+    if (why != NULL || stub == NULL) return;
+    MEMORY_BASIC_INFORMATION page;
+    CHECK(VirtualQuery(stub, &page, sizeof page) == sizeof page && page.State == MEM_COMMIT && page.Protect == PAGE_EXECUTE_READWRITE);
+    if (page.Protect != PAGE_EXECUTE_READWRITE) return; /* running a data page would end the test run, not fail it */
+    int32_t rel; memcpy(&rel, g_fake.image + 0xF30DA9u, 4);
+    CHECK(g_fake.image[0xF30DA8u] == 0xE9 && g_fake.image + 0xF30DADu + rel == stub && g_fake.image[0xF30DADu] == 0x90 && g_fake.image[0xF30DB3u] == 0x90 && g_fake.image[0xF30DB4u] == 0x74);
+    uint8_t* at = g_fake.image + 0xF30C00u; DWORD was;
+    CHECK(VirtualProtect(g_fake.image + 0xF30000u, 0x1000, PAGE_EXECUTE_READWRITE, &was));
+    memcpy(at, enter, sizeof enter);
+    rel = (int32_t)((g_fake.image + 0xF30DA8u) - (at + sizeof enter)); memcpy(at + 20, &rel, 4);
+    memcpy(g_fake.image + 0xF30DB4u, leave, sizeof leave);
+    FlushInstructionCache(GetCurrentProcess(), g_fake.image + 0xF30000u, 0x1000);
+    const ToleranceFn test = (ToleranceFn)(void*)at;
+    uint8_t* rbp = frame + 0x100;
+    const float depth = 3.25f; memcpy(rbp - 0x68, &depth, 4);
+    float v;
+    /* the switch off: the game's own test of its flag, whatever the width */
+    rbp[0x20F8] = 0; v = 8.0f; CHECK(test(rbp, &v, 1) == 1 && Bits(v) == Bits(depth));
+    rbp[0x20F8] = 1; v = 8.0f; CHECK(test(rbp, &v, 1) == 0 && Bits(v) == Bits(depth));
+    /* on: an arterial's width takes the flag for clear; a narrower road keeps the game's test */
+    stub[0x38] = 1;
+    rbp[0x20F8] = 1; v = 8.0f; CHECK(test(rbp, &v, 1) == 1 && Bits(v) == Bits(depth));
+    rbp[0x20F8] = 1; v = 10.0f; CHECK(test(rbp, &v, 0) == 1);
+    rbp[0x20F8] = 1; v = 7.75f; CHECK(test(rbp, &v, 1) == 0 && Bits(v) == Bits(depth));
+    rbp[0x20F8] = 0; v = 2.0f; CHECK(test(rbp, &v, 1) == 1);
+    CoXlTestRoadsTolerance(0); CHECK(stub[0x38] == 0); /* after the level's op 0x2B */
+    CoXlTestRoadsTolerance(1); CHECK(stub[0x38] == 0); /* no arterials on this level */
+    memcpy(g_fake.image + 0xF30DB4u, site + 17, 2);
+    VirtualProtect(g_fake.image + 0xF30000u, 0x1000, was, &was);
+    g_toleranceStub = stub;
+}
+
+/* The game's shape test stood in for: shape 7 reaches 1.5 m into any strip, any other shape into none. */
+static uint32_t g_shapeCalls; static float g_shapeAngle, g_shapePos[2];
+static uint8_t Shape(uint64_t shape, const float* pos, float angle, const float* p0, const float* p1, float half, float* at, float* depth)
+{
+    (void)p0; (void)p1; (void)at;
+    g_shapeCalls++;
+    if (shape != 7) return 0;
+    g_shapeAngle = angle; memcpy(g_shapePos, pos, 8);
+    *depth = half - 2.5f;
+    return 1;
+}
+
 static void SpacingGlue(void)
 {
     static uint8_t stub[0x40], record[0x100];
@@ -532,6 +600,8 @@ static void ArterialsGlue(void)
     Put32(g_block + 0x11A71D4u, 15);
     g_case = "spurs: each place's straight way to the nearest arterial point, as points and index capsules";
 
+    g_case = "tolerance: the switch is on for the op 0x2B of a level with arterials";
+    if (g_toleranceStub != NULL) { CoXlTestRoadsTolerance(1); CHECK(g_toleranceStub[0x38] == 1); CoXlTestRoadsTolerance(0); CHECK(g_toleranceStub[0x38] == 0); }
     g_case = "corridor: what stands in the arterials' and the spurs' strips, by kind";
     {
         /* x, y, half side: the objective and the outpost (each at its own spur's start; the outpost's box 5 m from
@@ -554,6 +624,18 @@ static void ArterialsGlue(void)
         { const float p[2] = {1500, 6.5f}, box[4] = {1499, 5, 1501, 8}; memcpy(plan, p, 8); memcpy(plan + 0xB0, box, 16); }       /* 5 m from edge 1: inside its 6 m */
         { const float p[2] = {1500, 7.5f}, box[4] = {1499, 6, 1501, 9}; memcpy(plan + size, p, 8); memcpy(plan + size + 0xB0, box, 16); } /* 6 m: not inside */
         CoXlTestRoadsStamps(6, plan, 2);
+        g_fake.log[0] = 0;
+        CoXlTestRoadsCorridor(block, before, 3, 8);
+        /* the shapes: own 3's reaches in, own 5's does not; the places name none */
+        static uint64_t shapes[2] = {7, 8};
+        { const uint64_t cell = (uint64_t)(uintptr_t)&shapes[0]; const float angle = 0.5f; memcpy(g_block + LOCATIONS_AT + 0xE0u * 3 + 0x90, &cell, 8); memcpy(g_block + LOCATIONS_AT + 0xE0u * 3 + 8, &angle, 4); }
+        { const uint64_t cell = (uint64_t)(uintptr_t)&shapes[1]; memcpy(g_block + LOCATIONS_AT + 0xE0u * 5 + 0x90, &cell, 8); }
+        CoXlTestRoadsShape(Shape);
+        g_fake.log[0] = 0; g_shapeCalls = 0;
+        CoXlTestRoadsCorridor(block, before, 3, 8);
+        CHECK(Lines("corridor shapes: of the 2 own stamps with a box in the strip 1 have a shape inside the half width (the deepest 1.50 m in), 0 not readable; "
+            "of the 2 places of other ops 0 have, 2 not readable") == 1);
+        CHECK(g_shapeCalls >= 2 && Bits(g_shapeAngle) == Bits(0.5f) && memcmp(g_shapePos, g_block + LOCATIONS_AT + 0xE0u * 3, 8) == 0);
         g_fake.log[0] = 0;
         CoXlTestRoadsCorridor(block, before, 3, 8);
         CHECK(Lines("corridor: 3.0 km of arterials and 0.0 km of spurs (8 pairs): inside the strip 2 of the level's own op 0x2B stamps (2 centred, 1 on a spur), "
@@ -694,6 +776,7 @@ int main(void)
     if (g_block == NULL) { printf("roadbuild: no memory\n"); return 1; }
     Layout();
     Install();
+    InstallTolerance();
     SpacingGlue();
     ArterialsGlue();
     VirtualFree(g_block, 0, MEM_RELEASE);

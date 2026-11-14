@@ -5,7 +5,8 @@
  *   places are free (0xF38CBF..0xF38D41). A 16 km level asks for more than the 65535 ids op 0x0F can name, so edges
  *   went without points, and so without a path or a stamp corridor. The level's op 0x0E divides by the smallest
  *   spacing, in steps of 0.25 m from 5, at which every edge gets its points.
- * - Arterials. After op 0x86 (the game's own paths between important locations: flag 8), those edges and the shortest
+ * - Arterials. Before op 0x0E, on the edges as it reads them (op 0x86's paths between important locations carry flag 8;
+ *   the zone passes after it close edges, flag 2, and a closed edge gets no points), those edges and the shortest
  *   connections from them to the node nearest each objective, outpost and op 0x17 place take 8 m, the width two vehicles pass on (a convoy
  *   map's op 0x87 raises its convoy edges to 10, 0xF8B264). Every later reader of the width (op 0x0F's capsules, the stamp tests, op 0x0D's line) sees it. */
 #define ROADS_SPACING_GAME 5.0f
@@ -161,6 +162,52 @@ static void RoadsSpacingBegin(uintptr_t block, uint64_t record)
     VirtualFree(taken, 0, MEM_RELEASE);
 }
 static void RoadsSpacingEnd(void) { if (g_roadSpacing.key != NULL) *g_roadSpacing.key = 0; }
+
+/* ---- No stamp across an arterial ----
+ * Op 0x2B's stamp test (0xF30B60) rejects a candidate whose shapes reach into a road's half width (0xFCC180, depth
+ * over 0), but a type whose definition has bit 0 at +0x170 (0xF345E8) may reach in up to 0.55 x the width
+ * (0xF30DA8..0xF30DC4): past the middle of the road. During the level's own op 0x2B a road of an arterial's width
+ * takes no such stamp: the stub answers 0xF30DA8's test as for a type without the bit. xmm6 is the road's width there
+ * (0xF30D72); al, the overlap, is kept. */
+static const uint8_t kRoadToleranceStub[42] = {
+    0xF3, 0x0F, 0x10, 0x45, 0x98,                   /*  0 movss xmm0, [rbp-0x68] (the depth, as 0xF30DAF) */
+    0x80, 0x3D, 0x2C, 0x00, 0x00, 0x00, 0x00,       /*  5 cmp byte [rip -> +0x38], 0 (the level's own op 0x2B runs) */
+    0x74, 0x10,                                     /* 12 je 30 */
+    0x0F, 0x2F, 0x35, 0x27, 0x00, 0x00, 0x00,       /* 14 comiss xmm6, [rip -> +0x3C] (an arterial's width) */
+    0x72, 0x07,                                     /* 21 jb 30 */
+    0x38, 0xC0,                                     /* 23 cmp al, al (equal: no depth is let through) */
+    0xE9, 0, 0, 0, 0,                               /* 25 jmp 0xF30DB4 (rel32 at 26) */
+    0x80, 0xBD, 0xF8, 0x20, 0x00, 0x00, 0x00,       /* 30 cmp byte [rbp+0x20F8], 0 (the game's test) */
+    0xE9, 0, 0, 0, 0};                              /* 37 jmp 0xF30DB4 (rel32 at 38) */
+static volatile uint8_t* g_roadTolerance; /* the stub's switch (+0x38); null: not installed */
+static void RoadToleranceBuild(uint8_t* stub, uintptr_t back)
+{
+    memset(stub, 0xCC, 0x40);
+    memcpy(stub, kRoadToleranceStub, sizeof kRoadToleranceStub);
+    int32_t rel = (int32_t)((int64_t)back - (int64_t)(uintptr_t)(stub + 30)); memcpy(stub + 26, &rel, 4);
+    rel = (int32_t)((int64_t)back - (int64_t)(uintptr_t)(stub + 42)); memcpy(stub + 38, &rel, 4);
+    const float width = ROADS_ARTERIAL_WIDTH;
+    memset(stub + 0x38, 0, 4); memcpy(stub + 0x3C, &width, 4);
+}
+static const char* InstallRoadTolerance(uintptr_t game)
+{
+    if (!ApiCodeMatches(game + 0xF30D72u, "F3 41 0F 10 74 C2 30") || !ApiCodeMatches(game + 0xF30DA3u, "E8 D8 B3 09 00 80 BD F8 20 00 00 00 F3 0F 10 45 98 74 10 F3 0F 59 35") ||
+        !ApiCodeMatches(game + 0xF345E8u, "0F B6 88 70 01 00 00 8B 45 D0 80 E1 01 88 4C 24 58"))
+        return "op 0x2B's road test is not the reviewed one; a stamp type that may overlap a road keeps doing so on an arterial";
+    uint8_t* stub = AllocateNearGame(game, 0x40);
+    if (stub == NULL) return "no memory within 2 GB of game.dll for op 0x2B's road test";
+    RoadToleranceBuild(stub, game + 0xF30DB4u);
+    DWORD protect; /* the switch is in the page the test jumps into: code that can be written */
+    if (!VirtualProtect(stub, 0x40, PAGE_EXECUTE_READWRITE, &protect)) return "op 0x2B's road test stub could not be made code";
+    FlushInstructionCache(GetCurrentProcess(), stub, 0x40);
+    uint8_t jump[12] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
+    int32_t rel = DifficultyJumpRel(game + 0xF30DA8u, (uintptr_t)stub); memcpy(jump + 1, &rel, 4);
+    /* the jump goes in last; with the switch off the stub runs the game's own test */
+    if (ApiWrite(game + 0xF30DA8u, jump, 12)) return "op 0x2B's road test could not be written";
+    g_roadTolerance = stub + 0x38;
+    return NULL;
+}
+static void RoadsToleranceEnd(void) { if (g_roadTolerance != NULL) *g_roadTolerance = 0; }
 
 /* ---- the arterials ---- */
 typedef struct RoadsGraph
@@ -362,6 +409,9 @@ static void RoadsArterialsApply(uintptr_t block, const uint8_t* ops, uint32_t to
     RoadsFreeEdges(e, n);
 }
 
+/* Before the level's own op 0x2B: its road test takes no tolerant stamp on an arterial while the level has any. */
+static void RoadsToleranceBegin(void) { if (g_roadTolerance != NULL) *g_roadTolerance = g_arterials.level == g_world.levels && g_arterials.count != 0; }
+
 /* After the level's op 0x0E: the arterial edges it left without points have no path and no corridor (none is the aim). */
 static void RoadsArterialsPoints(uintptr_t block)
 {
@@ -552,6 +602,11 @@ static void RoadsSpursBuild(uintptr_t block, uint64_t context)
  * What stands in the strips a vehicle is to drive: every location whose box (+0xB0) comes nearer an arterial's or a
  * spur's point pair than half its width, as the stamp tests measure it. The level's own op 0x2B stamps, the stamps
  * the mod added, the plan's, and the places of other ops (a spur's own place apart) are counted on their own. */
+/* A box in a strip is not yet a rock on the road: the box (+0xB0) is the bounds of the location's shapes (0xF30C42),
+ * and the game tests the shapes (0xFCC180: the circles and quads of [[location+0x90]] at the location's position and
+ * angle +8 against the capsule of a pair and a half width; 1 and the depth when they overlap; called so at 0xF81CCF). */
+typedef uint8_t (*RoadShapeFn)(uint64_t shape, const float* pos, float angle, const float* p0, const float* p1, float half, float* at, float* depth);
+static RoadShapeFn g_roadShape; /* tests: in place of the game's 0xFCC180 */
 #define ROADS_STRIP_CELL 64.0f
 #define ROADS_STRIP_GRID 512
 typedef struct RoadStrip { float seg[4], half; uint32_t edge, spur; } RoadStrip; /* spur: 1 + its index; 0 an arterial's pair */
@@ -616,8 +671,34 @@ static int RoadStripsHit(const RoadStrips* t, const float pos[2], const float lo
     return found;
 }
 
+/* The deepest the location's shapes reach into a strip its box touches: -1 not readable, 0 in none. */
+static float RoadStripsShape(const RoadStrips* t, RoadShapeFn fn, const uint8_t* loc, const float lo[2], const float hi[2], uint32_t own)
+{
+    uint64_t cell, shape = 0; float pos[2], angle, deepest = 0.0f;
+    memcpy(&cell, loc + 0x90, 8); memcpy(pos, loc, 8); memcpy(&angle, loc + 8, 4);
+    if (cell == 0 || SafeRead(cell, &shape, 8) || shape == 0) return -1.0f;
+    const int x0 = RoadStripCell(lo[0], t->grid), x1 = RoadStripCell(hi[0], t->grid), y0 = RoadStripCell(lo[1], t->grid), y1 = RoadStripCell(hi[1], t->grid);
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++)
+        {
+            const size_t c = (size_t)y * (size_t)t->grid + (size_t)x;
+            for (uint32_t k = t->start[c]; k < t->start[c + 1]; k++)
+            {
+                const RoadStrip* s = &t->s[t->item[k]];
+                float at[2] = {0, 0}, depth = 0.0f;
+                if ((own != 0 && s->spur == own) || !(StampSegmentBox(s->seg, lo, hi) < s->half)) continue;
+                if (fn(shape, pos, angle, &s->seg[0], &s->seg[2], s->half, at, &depth) && depth > deepest) deepest = depth;
+            }
+        }
+    return deepest;
+}
+
 enum { ROADS_IN_OWN, ROADS_IN_ADDED, ROADS_IN_PLAN, ROADS_IN_PLACE, ROADS_IN_KINDS };
-typedef struct RoadsCensus { uint32_t box[ROADS_IN_KINDS], centred[ROADS_IN_KINDS], onSpur[ROADS_IN_KINDS], listed; float nearest; HANDLE file; float halfWorld; } RoadsCensus;
+typedef struct RoadsCensus
+{
+    uint32_t box[ROADS_IN_KINDS], centred[ROADS_IN_KINDS], onSpur[ROADS_IN_KINDS], listed; float nearest; HANDLE file; float halfWorld;
+    RoadShapeFn shapeFn; uint32_t shapeIn[ROADS_IN_KINDS], shapeUnread[ROADS_IN_KINDS]; float deepest;
+} RoadsCensus;
 static void RoadsCensusItem(RoadsCensus* c, const RoadStrips* t, int kind, uint32_t index, uint32_t op, const uint8_t* loc, uint32_t own)
 {
     static const char* const kNames[ROADS_IN_KINDS] = {"own", "added", "plan", "place"};
@@ -627,10 +708,15 @@ static void RoadsCensusItem(RoadsCensus* c, const RoadStrips* t, int kind, uint3
     if (!(lo[0] <= hi[0]) || !(lo[1] <= hi[1]) || !RoadStripsHit(t, pos, lo, hi, own, &hit)) return;
     c->box[kind]++; c->centred[kind] += (uint32_t)hit.centred; c->onSpur[kind] += hit.spur != 0;
     if (kind != ROADS_IN_PLACE && hit.d < c->nearest) c->nearest = hit.d;
-    char line[224]; DWORD wrote;
-    const int len = snprintf(line, sizeof line, "%s\t%u\t0x%X\t%u\t0x%X\t0x%X\t%.1f\t%.1f\t%.1f\t%.1f\t%.2f\t%.1f\t%u\t%s\t%d\n", kNames[kind], index, op, type, flags, raw,
+    /* the shapes of the level's own locations: the generation still holds them (op 0x2B read them for its last test) */
+    float depth = -1.0f;
+    if (c->shapeFn != NULL && (kind == ROADS_IN_OWN || kind == ROADS_IN_PLACE)) depth = RoadStripsShape(t, c->shapeFn, loc, lo, hi, own);
+    if (depth > 0.0f) { c->shapeIn[kind]++; if (kind == ROADS_IN_OWN && depth > c->deepest) c->deepest = depth; }
+    else if (depth < 0.0f) c->shapeUnread[kind]++;
+    char line[240]; DWORD wrote;
+    const int len = snprintf(line, sizeof line, "%s\t%u\t0x%X\t%u\t0x%X\t0x%X\t%.1f\t%.1f\t%.1f\t%.1f\t%.2f\t%.1f\t%u\t%s\t%d\t%.2f\n", kNames[kind], index, op, type, flags, raw,
         (double)(pos[0] - c->halfWorld), (double)(pos[1] - c->halfWorld), (double)(hi[0] - lo[0]), (double)(hi[1] - lo[1]), (double)hit.d, (double)hit.half, hit.edge,
-        hit.spur ? "spur" : "arterial", hit.centred);
+        hit.spur ? "spur" : "arterial", hit.centred, (double)depth);
     if (c->file != INVALID_HANDLE_VALUE) WriteFile(c->file, line, TsvLength(line, sizeof line, len), &wrote, NULL);
     if (c->listed++ < 8)
         Note("roads: level %ld corridor: %s %u (op 0x%X, type %u, flags 0x%X, location +0xC8 0x%X) at (%.0f, %.0f), box %.1f x %.1f m, %.2f m from the middle of %s %u's %.1f m half width%s",
@@ -639,7 +725,8 @@ static void RoadsCensusItem(RoadsCensus* c, const RoadStrips* t, int kind, uint3
 }
 
 /* After the level's op 0x2B and the mod's stamps: one line, the first eight finds, and corridor-<level>.tsv with all
- * (kind, index, op, and of the 0xE0 location record type +0xD8, flags +0xD4 and the u32 at +0xC8, x, y in world metres, box, distance, half width, edge, class, centred).
+ * (kind, index, op, and of the 0xE0 location record type +0xD8, flags +0xD4 and the u32 at +0xC8, x, y in world metres, box, distance, half width, edge, class, centred,
+ * and how deep its shapes reach into a strip: 0 none, -1 not tested).
  * before: the locations op 0x2B found; the ones from there on are its own, then the added ones. */
 static void RoadsCorridorNote(uintptr_t block, const uint8_t* ops, uint32_t before, uint32_t total)
 {
@@ -687,6 +774,8 @@ static void RoadsCorridorNote(uintptr_t block, const uint8_t* ops, uint32_t befo
     if (!RoadStripsIndex(&t, 2048.0f * g_world.current)) goto done;
     RoadsCensus c; memset(&c, 0, sizeof c);
     c.nearest = ROADS_NONE; c.halfWorld = 1024.0f * g_world.current;
+    c.shapeFn = g_roadShape != NULL ? g_roadShape :
+        ApiCodeMatches(g_world.game + 0xFCC180u, "48 8B C4 55 53 56 57 41 54 41 55 41 56 41 57 48 8D A8 18 FF FF FF") ? (RoadShapeFn)(g_world.game + 0xFCC180u) : NULL;
     wchar_t name[48];
     swprintf(name, 48, L"corridor-%ld.tsv", (long)g_world.levels);
     c.file = OpenLog(name);
@@ -715,6 +804,11 @@ static void RoadsCorridorNote(uintptr_t block, const uint8_t* ops, uint32_t befo
         c.box[ROADS_IN_ADDED], c.centred[ROADS_IN_ADDED], c.onSpur[ROADS_IN_ADDED], c.box[ROADS_IN_PLAN], c.centred[ROADS_IN_PLAN], c.onSpur[ROADS_IN_PLAN],
         c.box[ROADS_IN_PLACE], c.centred[ROADS_IN_PLACE], c.onSpur[ROADS_IN_PLACE], all > 0 ? stamps / all : 0.0, clear,
         (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart);
+    if (c.shapeFn == NULL) Note("roads: level %ld corridor shapes: the game's shape test is not the reviewed one; boxes only", (long)g_world.levels);
+    else
+        Note("roads: level %ld corridor shapes: of the %u own stamps with a box in the strip %u have a shape inside the half width (the deepest %.2f m in), %u not readable; "
+            "of the %u places of other ops %u have, %u not readable", (long)g_world.levels, c.box[ROADS_IN_OWN], c.shapeIn[ROADS_IN_OWN], (double)c.deepest,
+            c.shapeUnread[ROADS_IN_OWN], c.box[ROADS_IN_PLACE], c.shapeIn[ROADS_IN_PLACE], c.shapeUnread[ROADS_IN_PLACE]);
 done:
     if (t.item != NULL) VirtualFree(t.item, 0, MEM_RELEASE);
     if (t.start != NULL) VirtualFree(t.start, 0, MEM_RELEASE);

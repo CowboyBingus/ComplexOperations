@@ -933,6 +933,9 @@ void CoXlTestRoadsLevel(const uint8_t* ops, uint32_t n, uint32_t planned)
     g_plan.level = g_world.levels; g_plan.count = planned;
 }
 void CoXlTestRoadsCorridor(uintptr_t block, const uint8_t* ops, uint32_t before, uint32_t total) { RoadsCorridorNote(block, ops, before, total); }
+void CoXlTestRoadsShape(uint8_t (*fn)(uint64_t, const float*, float, const float*, const float*, float, float*, float*)) { g_roadShape = fn; }
+const char* CoXlTestInstallRoadTolerance(uintptr_t game, uint8_t** stub) { const char* why = InstallRoadTolerance(game); *stub = g_roadTolerance != NULL ? (uint8_t*)g_roadTolerance - 0x38 : NULL; return why; }
+void CoXlTestRoadsTolerance(int begin) { if (begin) RoadsToleranceBegin(); else RoadsToleranceEnd(); }
 /* The mod's added locations from `first` on, and `planned` plan entries at cand (each CoXlTestStampCandidateSize bytes, the location first). */
 uint32_t CoXlTestStampCandidateSize(void) { return (uint32_t)sizeof(StampCandidate); }
 void CoXlTestRoadsStamps(uint32_t first, void* cand, uint32_t planned)
