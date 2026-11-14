@@ -28,6 +28,8 @@
 #define CO_SUM_SET_SCALE 0x1447ED0u
 #define CO_SUM_SET_SHOWN 0x14508E0u
 #define CO_SUM_REFRESH 0x19901B0u /* a card takes its row's player: name, figure, state */
+#define CO_SUM_UNLISTEN 0xB0B020u /* (entity, listener, -1): the listener leaves the entity's events, as 0x18A1630 calls it */
+#define CO_SUM_FILL_AFTER 900u    /* updates of the summary before the fill, so the game's own row is seen first */
 #define CO_SUM_SESSION 0x347CEF0u /* the session context: +0x16390 the peers' count, entries of 0x20 from +0x16398 with
                                      the figure position at +0x14 (0x18A18EC) */
 
@@ -44,6 +46,11 @@ typedef void (*ShownFn)(uintptr_t widget, uint8_t on);
 static uintptr_t g_game;
 static uint32_t g_logged = ~0u;
 static int g_figures;
+static uint64_t g_seen;
+static uint64_t (*g_clock)(void) = GetTickCount64;
+#ifdef CO_RESEARCH
+static uint32_t g_fillWait;
+#endif
 
 void co_summary_install(uintptr_t game) { g_game = game; }
 
@@ -78,6 +85,8 @@ void co_summary_place(const uint8_t present[8], float canvasWidth, CoSummaryPlac
     const float row = (float)n * CO_SUM_PITCH - (CO_SUM_PITCH - CO_SUM_WIDE), room = canvas - 2.0f * CO_SUM_SIDE;
     if (row > room) p->scale = room / row;
     p->x = (CO_SUM_WINDOW - row * p->scale) / 2.0f;
+    /* Only card 1's node has no left margin (0x1992F53): a row that starts with another card starts 20 x scale in. */
+    if (!present[0]) p->x -= (CO_SUM_PITCH - CO_SUM_WIDE) / 2.0f * p->scale;
 }
 
 static uint64_t Pair(float a, float b)
@@ -101,9 +110,10 @@ static int Present(uintptr_t card)
 }
 
 #ifdef CO_RESEARCH
-/* HELLFORGE_CO_SUMMARY_FILL=5..8, alone in a session: cards 5 to that number show the local player, each with its own
- * figure position (4 and up), so one player sees the row and the figures of a full session. The position is the local
- * peer's for the length of the card's refresh only. */
+/* HELLFORGE_CO_SUMMARY_FILL=5..8, alone in a session: after 900 updates cards 5 to that number show the local player,
+ * each with its own figure position (4 and up), so one player sees the row and the figures of a full session. The
+ * position is the local peer's for the length of the card's refresh only. A filled figure leaves the player's events:
+ * its event 0xCC (0x18A17A7) would read the peer's own position again and put two figures on one record. */
 static int g_fill = -1;
 
 static void Fill(uintptr_t screen)
@@ -116,6 +126,7 @@ static void Fill(uintptr_t screen)
     }
     const uintptr_t session = *(const uintptr_t*)(g_game + CO_SUM_SESSION);
     if (g_fill == 0 || session == 0 || *(const uint32_t*)(session + 0x16390u) != 1u) return;
+    if (g_fillWait < CO_SUM_FILL_AFTER) { g_fillWait++; return; }
     uint32_t from = 8;
     for (uint32_t i = 0; i < 4u && from == 8u; i++)
         if (Present(Card(screen, i))) from = i;
@@ -130,6 +141,7 @@ static void Fill(uintptr_t screen)
         *position = i;
         ((void (*)(uintptr_t))(g_game + CO_SUM_REFRESH))(card);
         *position = own;
+        ((void (*)(uint32_t, uintptr_t, uint32_t))(g_game + CO_SUM_UNLISTEN))(*(const uint32_t*)row, card + CO_SUM_FIGURE, 0xFFFFFFFFu);
         co_log("mission summary: research fill: card %u shows the player of card %u (figure position %d, record %d)", i + 1u,
             from + 1u, *(const int32_t*)(card + CO_SUM_FIGURE + 0x8E4u), *(const int32_t*)(card + CO_SUM_FIGURE + 0x8E0u));
     }
@@ -142,6 +154,17 @@ void co_summary_layout(CoRegs* regs)
 {
     const uintptr_t screen = (uintptr_t)regs->rdi, set = g_game != 0 ? *(const uintptr_t*)(g_game + CO_SUM_ROOT) : 0;
     if (g_game == 0 || set == 0 || screen == 0 || *(const uintptr_t*)(Card(screen, 0) + CO_SUM_CARD_ROW) == 0) return;
+    /* The summary is updated every frame it is open: a second without one is a new summary, named in the log again. */
+    const uint64_t now = g_clock();
+    if (now - g_seen > 1000u)
+    {
+        g_logged = ~0u;
+        g_figures = 0;
+#ifdef CO_RESEARCH
+        g_fillWait = 0;
+#endif
+    }
+    g_seen = now;
 #ifdef CO_RESEARCH
     Fill(screen);
 #endif
@@ -195,8 +218,11 @@ void co_summary_test_reset(void)
 {
     g_logged = ~0u;
     g_figures = 0;
+    g_seen = 0;
 #ifdef CO_RESEARCH
     g_fill = -1;
+    g_fillWait = 0;
 #endif
 }
+void co_summary_test_clock(uint64_t (*clock)(void)) { g_clock = clock != NULL ? clock : GetTickCount64; }
 #endif

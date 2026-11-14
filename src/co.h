@@ -89,6 +89,7 @@ void co_summary_place(const uint8_t present[8], float canvasWidth, CoSummaryPlac
 int co_summary_player(const uint32_t* pairs, uint32_t count, uint32_t empty, uint32_t factor, uint32_t id);
 #ifdef CO_TEST
 void co_summary_test_reset(void);
+void co_summary_test_clock(uint64_t (*clock)(void));
 #endif
 
 /* The loadout cards for eight (co_cards.c). The card's height in reference units, which the caves of every store of

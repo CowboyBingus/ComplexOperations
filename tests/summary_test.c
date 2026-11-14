@@ -10,6 +10,9 @@
 #include "co.h"
 #include "harness/fake_host.h"
 
+static uint64_t g_now = 5000;
+static uint64_t Clock(void) { return g_now; }
+
 static int g_failed;
 static const char* g_case;
 
@@ -33,6 +36,13 @@ static float Field(const uint8_t* w, uint32_t at) { float v; memcpy(&v, w + at, 
 static uint32_t Word(const uint8_t* at) { uint32_t v; memcpy(&v, at, 4); return v; }
 static void Put32(void* at, uint32_t value) { memcpy(at, &value, 4); }
 static void Put(void* at, uint64_t value) { memcpy(at, &value, 8); }
+
+static int Count(const char* text)
+{
+    int n = 0;
+    for (const char* at = strstr(g_fake.log, text); at != NULL; at = strstr(at + 1, text)) n++;
+    return n;
+}
 
 static void Code(uint32_t rva, const uint8_t* code, size_t size)
 {
@@ -121,10 +131,19 @@ static void CheckRule(void)
         co_summary_place(kRows[i].present, kRows[i].canvas, &p);
         const float row = (460.0f * (float)kRows[i].cards - 40.0f) * p.scale;
         CHECK(p.compact && p.cards == kRows[i].cards && Near(p.scale, kRows[i].scale) && memcmp(p.shown, kRows[i].present, 8) == 0);
-        CHECK(Near(p.x + row / 2.0f, 960.0f) && p.scale <= 1.0f && p.scale > 0.49f);
+        /* The first shown card's left edge: the container's x, plus that card's own left margin when it is not card 1. */
+        const float left = p.x + (kRows[i].present[0] ? 0.0f : 20.0f * p.scale);
+        CHECK(Near(left + row / 2.0f, 960.0f) && p.scale <= 1.0f && p.scale > 0.49f);
         const float canvas = kRows[i].canvas >= 1920.0f && kRows[i].canvas <= 30720.0f ? kRows[i].canvas : 1920.0f;
-        CHECK(p.x + (canvas - 1920.0f) / 2.0f > 55.99f && p.x + row + (canvas - 1920.0f) / 2.0f < canvas - 55.99f);
+        CHECK(left + (canvas - 1920.0f) / 2.0f > 55.99f && left + row + (canvas - 1920.0f) / 2.0f < canvas - 55.99f);
     }
+    /* A row without card 1: cards 2 to 8 at 16:9 fill the room, so the container starts 20 x scale left of 56; card 7
+     * alone is centred with its margin taken off. */
+    static const uint8_t kNoFirst[8] = {0, 1, 1, 1, 1, 1, 1, 1};
+    co_summary_place(kNoFirst, 1920.0f, &p);
+    CHECK(Near(p.scale, 1808.0f / 3180.0f) && Near(p.x, 56.0f - 20.0f * p.scale));
+    co_summary_place(kLate, 1920.0f, &p);
+    CHECK(p.scale == 1.0f && Near(p.x, 960.0f - 210.0f - 20.0f));
     /* Six and seven at 16:9 and 21:9, the numbers the layout's study names. */
     static const uint8_t kSix[8] = {1, 1, 1, 1, 1, 1}, kSeven[8] = {1, 1, 1, 1, 1, 1, 1};
     co_summary_place(kSix, 1920.0f, &p);
@@ -190,6 +209,14 @@ static void CheckCallback(void)
     g_screen[NODE + 0x28] = 0;
     co_summary_layout(&regs);
     CHECK(Shown(1.0f) == 0x0Fu && g_screen[NODE + 0x28] == 0);
+    /* The same row a second later is a new summary: named again, and still no pass asked for. */
+    const int named = Count("mission summary: no player on cards 5 to 8");
+    g_now += 16;
+    co_summary_layout(&regs);
+    CHECK(Count("mission summary: no player on cards 5 to 8") == named);
+    g_now += 1001;
+    co_summary_layout(&regs);
+    CHECK(Count("mission summary: no player on cards 5 to 8") == named + 1 && g_screen[NODE + 0x28] == 0);
 
     /* A player joins card 6 at 21:9: three cards at full size, centred; then five more at 16:9: eight at 0.497. */
     Player(0x505);
@@ -223,6 +250,9 @@ static void CheckCallback(void)
     uint8_t refresh[] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0x8B, 0x00, 0x89, 0x81, 0x2C, 0x22, 0x01, 0x00, 0xC3};
     Put(refresh + 2, (uint64_t)(uintptr_t)(g_session + 0x163AC));
     Code(0x19901B0u, refresh, sizeof refresh);
+    /* the listener's removal keeps its entity and key at the figure's +0x8E8 and +0x8EC: mov [rdx+0x8E8],ecx; mov [rdx+0x8EC],r8d; ret */
+    static const uint8_t kUnlisten[] = {0x89, 0x8A, 0xE8, 0x08, 0x00, 0x00, 0x44, 0x89, 0x82, 0xEC, 0x08, 0x00, 0x00, 0xC3};
+    Code(0xB0B020u, kUnlisten, sizeof kUnlisten);
     SetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL", "7");
     Screen(1920.0f);
     Player(0x77);
@@ -233,12 +263,17 @@ static void CheckCallback(void)
     co_summary_layout(&regs);
     CHECK(Shown(1.0f) == 0x0Fu && Word(Row(4)) == 0);      /* two peers: no fill */
     Put32(g_session + 0x16390, 1);
+    /* 900 updates show the game's row; the fill comes with the next. */
+    for (int i = 0; i < 900; i++) co_summary_layout(&regs);
+    CHECK(Shown(1.0f) == 0x0Fu && Word(Row(4)) == 0 && Field(g_screen + BOX, 0x4) == 56.0f);
+    CHECK(fake_host_logged("mission summary: no player on cards 5 to 8: the game's four cards"));
     co_summary_layout(&regs);
     CHECK(Shown(1.0f) == 0x72u && Word(g_session + 0x163AC) == 1);
     for (uint32_t i = 4; i < 8; i++)
     {
         CHECK(Word(Row(i)) == (i < 7 ? 0x77u : 0u) && Word(Row(i) + 0x248) == (i < 7 ? 0xABCDu : 0u));
         CHECK(Word(Card(i) + 0x11948 + 0x8E4) == (i < 7 ? i : 0u));
+        CHECK(Word(Card(i) + 0x11948 + 0x8E8) == (i < 7 ? 0x77u : 0u) && Word(Card(i) + 0x11948 + 0x8EC) == (i < 7 ? 0xFFFFFFFFu : 0u));
     }
     CHECK(fake_host_logged("mission summary: research fill: card 7 shows the player of card 2 (figure position 6, record -1)"));
     SetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL", NULL);
@@ -251,6 +286,7 @@ int main(void)
     g_coApi = fake_host_reset(CO_GAME_BUILD);
     g_screen = VirtualAlloc(NULL, SCREEN, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (g_screen == NULL) { printf("summary: no memory for the stand-in screen\n"); return 1; }
+    co_summary_test_clock(Clock);
     g_case = "the rule and the row";
     CheckRule();
     g_case = "the player lookup";

@@ -246,8 +246,8 @@ The summary shows its cards in one row (`src/co_summary.c`):
   row fits the canvas with the game's 56 units either side, and the row is centred.
 - The scale for five to eight cards is 0.80, 0.66, 0.57 and 0.50 at 16:9, and 1.00, 0.91, 0.78 and 0.68 at 21:9.
 - The game's own layout places the cards, so a card's buttons are pressed where they are drawn.
-- A research build takes `HELLFORGE_CO_SUMMARY_FILL` (5 to 8) in a session of one: cards 5 to that number show the
-  local player, each with its own figure position.
+- A research build takes `HELLFORGE_CO_SUMMARY_FILL` (5 to 8) in a session of one. After 900 updates of the summary,
+  cards 5 to that number show the local player, each with its own figure position.
 
 Limits that remain:
 
