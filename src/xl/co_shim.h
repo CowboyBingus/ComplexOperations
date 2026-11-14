@@ -38,6 +38,7 @@ HANDLE co_open_log(const wchar_t* name);
 const char* co_shim_build(void);
 
 int co_safe_read(uintptr_t address, void* buffer, size_t size);
+int co_safe_find(uintptr_t list, size_t count, uint64_t value); /* 1 found, 0 absent, -1 unreadable */
 /* Zeroed read-write pages within reach of a 32-bit offset from all of game.dll; NULL when there are none. `find` with
  * MEM_RESERVE alone only takes the address space. */
 uint8_t* co_find_near_game(uintptr_t game, size_t bytes, DWORD type);
@@ -98,6 +99,7 @@ static inline void ApiLog(HfMod* mod, const char* format, ...)
 }
 static inline HANDLE OpenLog(const wchar_t* name) { return co_open_log(name); }
 static inline int SafeRead(uintptr_t address, void* buffer, size_t size) { return co_safe_read(address, buffer, size); }
+static inline int SafeFind(uintptr_t list, size_t count, uint64_t value) { return co_safe_find(list, count, value); }
 static inline int ApiWrite(uintptr_t address, const void* data, size_t size) { return g_coApi->write(address, data, size); }
 static inline int ApiCodeMatches(uintptr_t address, const char* pattern) { return g_coApi->code_matches(address, pattern); }
 static inline int ExeCodeMatches(uintptr_t address, const char* pattern) { return co_exe_code_matches(address, pattern); }

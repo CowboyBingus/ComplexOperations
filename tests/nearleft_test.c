@@ -28,6 +28,7 @@ void CoXlTestHide(uint64_t handle);
 uint64_t CoXlTestHideHandle(void);
 void CoXlTestMoveHold(int on);
 LONG64 CoXlTestMoveHoldSince(void);
+void CoXlTestMapsNextLevel(uint64_t matTex);
 
 static int g_failed;
 static const char* g_case;
@@ -54,6 +55,32 @@ static uint64_t FakeSpawn(void* world, float* pose, uint32_t a, uint32_t type, u
     (void)world; (void)pose; (void)a; (void)type; (void)name; (void)resource; (void)hash; (void)size; (void)range; (void)flag;
     g_spawns++; g_spawnSaw = g_renderSlot;
     return 0x99;
+}
+
+/* The texture releases ([api+0x10]: +0x198 the one-mip copy's, +0x6B0 the material map's) and the main world
+ * ([[game+0x3326340]+0x10E8]) with its terrains by handle (+0x230550: entries +8, count +0x18, buckets +0x1C). */
+#define TABLE10 0x3602000u
+#define ENGINE 0x3603000u
+#define MAT_TEX 0x8888000ull
+static uint64_t g_released, g_matGone;
+static int g_releases, g_matGones;
+static uint8_t* g_mainWorld;
+static uint8_t g_terrainEntry[0x170];
+static void FakeRelease(uint64_t tex) { g_releases++; g_released = tex; }
+static void FakeMatGone(uint64_t tex) { g_matGones++; g_matGone = tex; }
+static void MapsGame(uint64_t listed, int worldReads)
+{
+    const uintptr_t game = (uintptr_t)g_fake.image, t10 = game + TABLE10, engine = game + ENGINE, release = (uintptr_t)FakeRelease, gone = (uintptr_t)FakeMatGone;
+    const uint64_t world = worldReads ? (uint64_t)(uintptr_t)g_mainWorld : 0, entries = (uint64_t)(uintptr_t)g_terrainEntry;
+    const uint32_t count = listed != 0, buckets = 1, last = 0x7FFFFFFFu;
+    memcpy(g_fake.image + API + 0x10, &t10, 8);
+    memcpy(g_fake.image + TABLE10 + 0x198, &release, 8);
+    memcpy(g_fake.image + TABLE10 + 0x6B0, &gone, 8);
+    memcpy(g_fake.image + 0x3326340u, &engine, 8);
+    memcpy(g_fake.image + ENGINE + 0x10E8, &world, 8);
+    memcpy(g_terrainEntry, &listed, 8); memcpy(g_terrainEntry + 0x168, &last, 4);
+    memcpy(g_mainWorld + 0x230550u + 8, &entries, 8); memcpy(g_mainWorld + 0x230550u + 0x18, &count, 4); memcpy(g_mainWorld + 0x230550u + 0x1C, &buckets, 4);
+    g_releases = g_matGones = 0; g_released = g_matGone = 0;
 }
 
 static uint64_t Slot(void) { uint64_t v; memcpy(&v, g_fake.image + TABLE + 0x198, 8); return v; }
@@ -129,6 +156,41 @@ int main(void)
     CHECK(CoXlTestOneMipArmed() && Slot() != (uint64_t)(uintptr_t)FakeSpawn);
     CHECK(CoXlTestOneMipSpawn(HEIGHTMAP, MATERIALS) == 0x99 && g_spawns == 1 && g_spawnSaw == STOCK_TEX && g_renderSlot == STOCK_TEX);
     CHECK(CoXlTestOneMipSpawn(0x1234u, MATERIALS) == 0x99 && g_spawns == 2 && g_spawnSaw == STOCK_TEX); /* another spawn: the game's too */
+
+    /* The level terrain keeps its heightmap and material map by address, uncounted (exe 0x1AB0A7, 0x1AB0B5), and a
+     * generation cancelled before the spawn's ready call leaves it in the world: its maps are never released then. */
+    g_mainWorld = (uint8_t*)VirtualAlloc(NULL, 0x231000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    Start("the last level's terrain is still in the world at the next level: its maps stay allocated");
+    CoXlTestWorldLevel(lg, 0);
+    NearSetUp();
+    CHECK(CoXlTestOneMipSpawn(HEIGHTMAP, MATERIALS) == 0x99);
+    MapsGame(0x99, 1);
+    CoXlTestMapsNextLevel(MAT_TEX);
+    CHECK(g_releases == 0 && g_matGones == 0 && CoXlTestOneMipTex() == 0);
+    CHECK(fake_host_logged("terrain 0x99 is still in the world: its one-mip heightmap stays allocated") && fake_host_logged("terrain 0x99 is still in the world: its material map stays allocated"));
+
+    Start("the last level's terrain is gone at the next level (or another terrain is listed): its maps are released");
+    CoXlTestWorldLevel(lg, 0);
+    NearSetUp();
+    CHECK(CoXlTestOneMipSpawn(HEIGHTMAP, MATERIALS) == 0x99);
+    MapsGame(0x77, 1);
+    CoXlTestMapsNextLevel(MAT_TEX);
+    CHECK(g_releases == 1 && g_released == TEX && g_matGones == 1 && g_matGone == MAT_TEX && !fake_host_logged("stays allocated"));
+
+    Start("no terrain was spawned with the maps: released as before");
+    CoXlTestWorldLevel(lg, 0);
+    NearSetUp();
+    MapsGame(0, 1); /* the level never reached its spawn; a terrain with handle 0 is no terrain */
+    CoXlTestMapsNextLevel(MAT_TEX);
+    CHECK(g_releases == 1 && g_matGones == 1);
+
+    Start("the main world does not read at the next level: released as before");
+    CoXlTestWorldLevel(lg, 0);
+    NearSetUp();
+    CHECK(CoXlTestOneMipSpawn(HEIGHTMAP, MATERIALS) == 0x99);
+    MapsGame(0x99, 0);
+    CoXlTestMapsNextLevel(MAT_TEX);
+    CHECK(g_releases == 1 && g_released == TEX && g_matGones == 1 && !fake_host_logged("stays allocated"));
 
     if (g_failed) { printf("nearleft: %d checks failed\n", g_failed); return 1; }
     printf("nearleft: all cases passed\n");

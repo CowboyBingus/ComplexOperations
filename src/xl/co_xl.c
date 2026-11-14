@@ -621,6 +621,8 @@ void CoXlTestSectionEnd(void) { SectionEnd(); }
 /* The destroy queue's hook (proto/difficulty_world_destroy.c) on a fake exe; a mission in play as level init sets it
  * (level 0: the ship, as WorldShip leaves it). */
 int CoXlTestDestroyInstall(void) { InstallDestroyQueue(); return g_destroyQueue != NULL; }
+/* The unit table alone, as the install leaves it (0 = not known). */
+void CoXlTestDestroyTable(uintptr_t at, void* lock, void* unlock) { g_destroyTableAt = at; g_destroyLock = (DestroyLockFn)lock; g_destroyUnlock = (DestroyLockFn)unlock; }
 void CoXlTestDestroyTick(void) { DestroyTick(); }
 LONG CoXlTestDestroyWaiting(void) { return g_destroyWaiting; }
 /* Level init and the ship's set-up as the stubs call them, and the near terrain's state they leave or clear
@@ -686,6 +688,14 @@ void CoXlTestOneMipArm(uint64_t tex, uint64_t* renderSlot)
 int CoXlTestOneMipArmed(void) { return g_oneMip.armed; }
 uint64_t CoXlTestOneMipTex(void) { return g_oneMip.tex; }
 uint64_t CoXlTestOneMipSpawn(uint32_t type, uint32_t name) { return NearOneMipSpawn(NULL, NULL, 0, type, name, 0, 0, NULL, NULL, 0); }
+/* The next extra large level's op 0x38 and its first replay's drop, the last level's material map being `matTex`. */
+void CoXlTestMapsNextLevel(uint64_t matTex)
+{
+    g_coarseMat.tex = matTex; g_coarseMat.terrain = g_oneMip.terrain;
+    g_world.levels++;
+    NearOneMipLevel();
+    NearCoarseMatDrop();
+}
 void CoXlTestNearActive(LONG on, uint64_t cam) { g_nearActive = on; g_near.cam[0] = cam; }
 LONG CoXlTestNearActiveNow(void) { return g_nearActive; }
 int CoXlTestCamShift(uint64_t camera) { const float v[3] = {1, 2, 3}; float out[3]; return TerrainNearCamShift(camera, g_world.game + 0xAB0725u, v, out); }
@@ -997,6 +1007,8 @@ void CoXlTestStreamTick(void)
     if (g_stream.deferred == 0) g_stream.deferred = g_stream.count;
     WorldStreamTick(0.016f);
 }
+/* The look before a removal: slots given up, searches of the world's unit list, the session's destroy calls. */
+void CoXlTestStreamBelt(uint32_t* gone, uint32_t* looks, long* destroys) { *gone = g_stream.gone; *looks = g_stream.looks; *destroys = g_streamDestroys; }
 void CoXlTestStreamOutSince(uint32_t i, ULONGLONG since) { g_streamOutSince[i] = since; }
 void co_capacity_test_places(int region, uint32_t places);
 /* Slots [base, high) as live far window stamps, then one eviction over the bodies' budget: the far removals queued. */

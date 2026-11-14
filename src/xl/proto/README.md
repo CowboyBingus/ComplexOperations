@@ -49,6 +49,7 @@ The tactical map's types (`HfScreen`, `HfDraw`, `HfInput`) are the mod SDK's own
 | `living_world.c`, `living_world_intent.c` | The per-mission resets count missions (`g_lwMission`) instead of comparing level addresses. |
 | `difficulty_world.c` | Level init asks `co_generation_decision` where it asked for difficulty 11; the complex level's radii stub (`../co_normal.c`) goes in behind HellForge's. |
 | `living_world.c`, `difficulty_stream.c`, `difficulty_world_terrain.c` | `hellforge_lw_test` and `hellforge_research_stream_observer` are not exported. |
+| `difficulty_stream.c`, `safe_read.c` | A level that left play is forgotten whole (`WorldStreamLeftLocked`). A removal looks its unit up in the world's unit list first (`WorldStreamListed`, `SafeFind`). |
 | `difficulty_world.c` | The install ends with `../co_chain.c`: the mod's stubs in front of HellForge's keyed generator steps. |
 | `difficulty_world.c` | A level init whose decision is "leave" logs one line and sets up a normal level. |
 | `difficulty_world.c` | `WorldShip` is called from the ship's navigation step (`../co_nav.c`), which the mod chains in front of HellForge's. |
