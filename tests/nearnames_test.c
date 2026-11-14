@@ -25,7 +25,6 @@ void CoXlTestNearResetTick(void);
 void CoXlTestNearResetDone(LONG done);
 void CoXlTestNearAtmosMapsEarlier(void);
 void CoXlTestNearResetEarlier(void);
-int CoXlTestNearResetProbeOwed(void);
 LONG CoXlTestNearNamesSky(void);
 void CoXlTestNearCraterMaps(uint64_t source, uint64_t offset, uint64_t scorch);
 int CoXlTestNearCraterMapsMake(int newLevel);
@@ -64,6 +63,7 @@ static const char* g_case;
 #define CUT 0x78AC014u      /* G+: the camera cut */
 #define PROBE_WEIGHT 0x7938498u
 #define PROBE_FACES 0x793849Cu
+#define PROBE_SKIP 0x79384A2u /* G+: the next render makes no probe capture */
 
 /* The published-name overlay: a name's resource, 0 when unpublished (the render config's own). */
 static struct { uint32_t name; uint64_t resource; } g_names[8];
@@ -419,73 +419,40 @@ int main(void)
 
     Setup("a finalize's jobs run: the reset is asked for, then applied once on the game thread", 1);
     SetFrames(0);
-    memset(g_G + PROBE_ALL, 0, 12); g_G[CUT] = 0;
+    memset(g_G + PROBE_ALL, 0, 12); g_G[CUT] = 0; g_G[PROBE_SKIP] = 0;
     uint32_t faces = 5; memcpy(g_G + PROBE_FACES, &faces, 4);
     float weight = 0;
-    CoXlTestNearReset(0, 1);
-    CoXlTestNearConsume(queue, 1, (void*)Consumer); /* jobs of no finalize: the probe is left alone */
-    memcpy(&weight, g_G + PROBE_WEIGHT, 4);
-    CHECK(weight == 0.0f && CoXlTestNearResetState() == 0);
-    CoXlTestNearReset(1, -1);
-    *(uint32_t*)(g_queue + 0x10) = 3;
-    CoXlTestNearConsume(queue, 1, (void*)Consumer); /* the game's code not the reviewed one: nothing written */
-    memcpy(&weight, g_G + PROBE_WEIGHT, 4);
-    CHECK(weight == 0.0f);
     CoXlTestNearReset(1, 1);
+    CoXlTestNearResetTick(); /* queued, its jobs not run yet: a reset now would be undone by the clears */
+    CHECK(Frames() == 0 && g_G[PROBE_ALL] == 0 && g_G[PROBE_SKIP] == 0 && g_G[CUT] == 0 && CoXlTestNearResetState() == 1);
     *(uint32_t*)(g_queue + 0x10) = 3;
     CoXlTestNearConsume(queue, 1, (void*)Consumer);
     CHECK(CoXlTestNearResetState() == 2);
-    /* in the consumer: the weight alone, for the probe update that runs before the next view */
+    /* the consumer writes nothing itself: the probe update that sends the weight runs after the level update */
     memcpy(&weight, g_G + PROBE_WEIGHT, 4); memcpy(&faces, g_G + PROBE_FACES, 4);
-    CHECK(weight == 1.0f && faces == 5 && g_G[PROBE_ALL] == 0 && g_G[CUT] == 0 && Frames() == 0);
-    weight = 0.5f; memcpy(g_G + PROBE_WEIGHT, &weight, 4); /* that probe update ran first and let it fall */
+    CHECK(weight == 0.0f && faces == 5 && g_G[PROBE_ALL] == 0 && g_G[PROBE_SKIP] == 0 && g_G[CUT] == 0 && Frames() == 0);
     CoXlTestNearResetTick();
     memcpy(&weight, g_G + PROBE_WEIGHT, 4); memcpy(&faces, g_G + PROBE_FACES, 4);
-    /* the first part: no six-face flag yet, and the face counter beside the weight is left alone */
-    CHECK(Frames() == 8 && g_G[PROBE_ALL] == 0 && g_G[CUT] == 1 && weight == 1.0f && faces == 5);
-    CHECK(CoXlTestNearResetProbeOwed() == 1);
+    /* the game's own sequence in one tick: this frame's capture skipped, six faces at weight 1 owed to the next */
+    CHECK(Frames() == 8 && g_G[CUT] == 1 && g_G[PROBE_SKIP] == 1 && g_G[PROBE_ALL] == 1 && weight == 1.0f && faces == 0);
+    CHECK(g_G[PROBE_SKIP - 1] == 0 && g_G[PROBE_SKIP + 1] == 0);
     CHECK(fake_host_logged("after a replayed finalize: 8 frames of history invalidation"));
-    CHECK(fake_host_logged("probe weight 1, the six-face light probe capture after the next view; the sky LUTs were cleared"));
+    CHECK(fake_host_logged("probe capture skipped for one frame, then six faces at weight 1; the sky LUTs were cleared"));
     CHECK(CoXlTestNearResetState() == 0);
-    SetFrames(0); g_G[CUT] = 0; weight = 0.25f; memcpy(g_G + PROBE_WEIGHT, &weight, 4);
-    CoXlTestNearResetTick(); /* a second level update before the frame's view and consumer: nothing yet */
-    memcpy(&weight, g_G + PROBE_WEIGHT, 4);
-    CHECK(Frames() == 0 && g_G[PROBE_ALL] == 0 && g_G[CUT] == 0 && weight == 0.25f && CoXlTestNearResetProbeOwed() == 1);
+    SetFrames(0); memset(g_G + PROBE_ALL, 0, 12); g_G[CUT] = 0; g_G[PROBE_SKIP] = 0;
     *(uint32_t*)(g_queue + 0x10) = 0;
-    CoXlTestNearConsume(queue, 0, (void*)Consumer); /* the next frame's consumer call, made after its view */
-    CoXlTestNearResetTick();
-    memcpy(&weight, g_G + PROBE_WEIGHT, 4); memcpy(&faces, g_G + PROBE_FACES, 4);
-    CHECK(g_G[PROBE_ALL] == 1 && weight == 1.0f && faces == 0 && CoXlTestNearResetProbeOwed() == 0);
-    CHECK(Frames() == 0 && g_G[CUT] == 0); /* the second part is the capture alone */
-    g_G[PROBE_ALL] = 0;
     CoXlTestNearConsume(queue, 0, (void*)Consumer);
-    CoXlTestNearResetTick();
-    CHECK(g_G[PROBE_ALL] == 0); /* once */
-
-    Setup("a second finalize's jobs run while the capture is owed: the capture, then the first part again", 1);
-    CoXlTestNearReset(2, 1);
-    CoXlTestNearResetTick();
-    CoXlTestNearConsume(queue, 0, (void*)Consumer);
-    CoXlTestNearReset(2, 1);
-    SetFrames(0); g_G[PROBE_ALL] = 0;
-    CoXlTestNearResetTick();
-    CHECK(g_G[PROBE_ALL] == 1 && Frames() == 8 && CoXlTestNearResetProbeOwed() == 1);
-    g_G[PROBE_ALL] = 0;
-    CoXlTestNearResetTick();
-    CHECK(g_G[PROBE_ALL] == 0 && CoXlTestNearResetProbeOwed() == 1);
-    CoXlTestNearConsume(queue, 0, (void*)Consumer);
-    CoXlTestNearResetTick();
-    CHECK(g_G[PROBE_ALL] == 1 && CoXlTestNearResetProbeOwed() == 0);
-    g_G[PROBE_ALL] = 0;
+    CoXlTestNearResetTick(); /* once: later level updates and consumer calls write nothing */
+    CHECK(Frames() == 0 && g_G[PROBE_ALL] == 0 && g_G[PROBE_SKIP] == 0 && g_G[CUT] == 0);
 
     Setup("the sky LUTs kept by their stand-ins: the game's own three frames", 1);
     CoXlTestNearAtmosMaps(SKY0, SKY1);
     CoXlTestNearReset(2, 1);
     SetFrames(0);
     CoXlTestNearResetTick();
-    CHECK(Frames() == 3 && g_G[PROBE_ALL] == 0 && g_G[CUT] == 1);
-    CHECK(fake_host_logged("3 frames of history invalidation from this frame, camera cut, probe weight 1, the six-face light probe capture after "
-        "the next view; the sky LUTs were kept by their stand-ins"));
+    CHECK(Frames() == 3 && g_G[PROBE_ALL] == 1 && g_G[PROBE_SKIP] == 1 && g_G[CUT] == 1);
+    CHECK(fake_host_logged("3 frames of history invalidation from this frame, camera cut, probe capture skipped for one frame, then six faces "
+        "at weight 1; the sky LUTs were kept by their stand-ins"));
     CoXlTestNearReset(2, 1);
     SetFrames(2);
     CoXlTestNearResetTick();
@@ -544,11 +511,11 @@ int main(void)
 
     Setup("the reset's code not the reviewed one: nothing written", 1);
     CoXlTestNearReset(2, -1);
-    SetFrames(0); g_G[PROBE_ALL] = 0; g_G[CUT] = 0;
+    SetFrames(0); g_G[PROBE_ALL] = 0; g_G[CUT] = 0; g_G[PROBE_SKIP] = 0;
     { float w0 = 0.5f; memcpy(g_G + PROBE_WEIGHT, &w0, 4); }
     CoXlTestNearResetTick();
     { float w1 = 0; memcpy(&w1, g_G + PROBE_WEIGHT, 4); CHECK(w1 == 0.5f); }
-    CHECK(Frames() == 0 && g_G[PROBE_ALL] == 0 && g_G[CUT] == 0 && CoXlTestNearResetState() == 2);
+    CHECK(Frames() == 0 && g_G[PROBE_ALL] == 0 && g_G[PROBE_SKIP] == 0 && g_G[CUT] == 0 && CoXlTestNearResetState() == 2);
 
     CoXlTestNearReset(0, 1);
     CoXlTestNearReplaying(0);

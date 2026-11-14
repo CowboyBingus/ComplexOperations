@@ -1619,13 +1619,12 @@ static void NearNamesClose(int opened)
 
 /* A replayed op 0x64 (terrain_generator_finalize) still clears play's fog, cloud and TAA histories and its clear_buffers
  * zeroes atmospheric_lookup, a buffer no stand-in can take; the sky LUTs have stand-ins. The game's reset after its own
- * finalize (0x102F329) follows once its jobs ran. A frame is the update (0xAB7D90: the level update, the probe update
- * 0xFF9C70) and then the render (0xAB7680: probe capture, view, consumer), and only the view refills the lookup:
- *  - in the consumer: the probe's weight alone at 1. The next probe update sends it as the view's
- *    cubemap_frame_history_invalidation (0xFF9DC2) whichever side of the level update it runs, so the lookup's
- *    surrounding luminance, which bounds the exposure, is taken whole;
- *  - next level update: G+0x10C4 frames of frame_history_invalidation (set each frame at 0xAB9369), the camera cut;
- *  - after that frame's view: the six-face capture. Asked for at once it lit all six faces from the zeroed lookup. */
+ * finalize (0x102F322) follows on the first level update after its jobs ran, all in one tick as the game writes it:
+ *  - G+0x10C4 frames of frame_history_invalidation (set each frame at 0xAB9369) and the camera cut;
+ *  - the probe's weight at 1 and its six-face flag. The probe update (0xACD7A1) runs after the level update (0xAB519E)
+ *    in the frame's update, so this frame's view takes the lookup's surrounding luminance, which bounds the exposure, whole;
+ *  - G+0x79384A2: this frame's render skips its probe capture (0xAB7704) and keeps the flag, so the six faces are
+ *    captured a frame later, after the view refilled the lookup, and no face is lit from the zeroed one. */
 #define NEAR_RESET_FRAMES 3     /* the game's own count after a finalize; its temporal filters are off meanwhile */
 #define NEAR_RESET_FRAMES_LUT 8 /* the LUTs cleared: atmospheric_scattering_calculate (CS f8dae03a) renews one of six faces a frame */
 #define NEAR_RESET_NOTES 256    /* resets logged a session, two a tile build */
@@ -1635,8 +1634,6 @@ static struct
     int pins;
     LONG done, level;    /* resets applied; g_world.levels when the 0x64 was queued */
     int bare;            /* its jobs ran with no bracket open: the real LUTs took the clear */
-    int probe;           /* the six-face capture is owed */
-    uint32_t drains, at; /* consumer calls; their count when the first part was applied */
 } g_nearReset;
 typedef void (*NearConsumeFn)(uint64_t queue);
 static NearConsumeFn g_nearConsume;
@@ -1649,43 +1646,32 @@ static void NearConsume(uint64_t queue)
     if (opened) { g_nearNames.consumers++; g_nearNames.consumerThread = GetCurrentThreadId(); }
     g_nearConsume(queue);
     NearNamesClose(opened);
-    g_nearReset.drains++;
     if (!mine) return;
     /* a finalize left queued by a failed replay runs here under the level's names, or never if its level ended */
     LONG was = g_nearReset.level == g_world.levels ? InterlockedCompareExchange(&g_nearReset.state, 2, 1) : InterlockedCompareExchange(&g_nearReset.state, 0, 1);
     if (was != 1) return;
     g_nearReset.bare = !opened;
     if (!g_nearActive) g_nearNames.queue = 0;
-    uintptr_t G = 0;
-    if (g_nearReset.pins > 0 && !SafeRead(g_world.game + 0x3326340u, &G, 8) && G != 0)
-        *(volatile uint32_t*)(G + 0x7938498u) = 0x3F800000u; /* no flag: one face, and the weight falls 3 a second */
 }
 
-/* On the game thread after the level update's start (MoveLevelUpdate): the reset asked for, each part applied once. The
- * six-face part waits for a consumer call, which the frame's render makes after its view. */
+/* On the game thread after the level update's start (MoveLevelUpdate): the reset asked for, applied once. */
 static void NearResetTick(void)
 {
-    if (g_nearReset.pins <= 0 || (g_nearReset.state != 2 && !g_nearReset.probe)) return;
+    if (g_nearReset.pins <= 0 || g_nearReset.state != 2) return;
     uintptr_t G = 0;
     if (SafeRead(g_world.game + 0x3326340u, &G, 8) || G == 0) return;
-    if (g_nearReset.probe && g_nearReset.drains != g_nearReset.at)
-    {
-        *(volatile uint64_t*)(G + 0x7938498u) = 0x3F800000u; /* weight 1.0, and the face counter that picks six faces at 0 */
-        *(volatile uint8_t*)(G + 0x7938494u) = 1;
-        g_nearReset.probe = 0;
-    }
-    if (g_nearReset.state != 2) return;
     volatile int32_t* frames = (volatile int32_t*)(G + 0x10C4u);
     int kept = NearAtmosKept() && !g_nearReset.bare;
     int want = kept ? NEAR_RESET_FRAMES : NEAR_RESET_FRAMES_LUT;
     if (*frames < want) *frames = want;
     *(volatile uint8_t*)(G + 0x78AC014u) = 1; /* the camera cut: the view copies it and clears it (0xAB5B04, 0xAB5B21) */
-    *(volatile uint32_t*)(G + 0x7938498u) = 0x3F800000u; /* again: the probe update may have run since the consumer */
-    g_nearReset.probe = 1; g_nearReset.at = g_nearReset.drains;
+    *(volatile uint8_t*)(G + 0x79384A2u) = 1;            /* no probe capture in this frame's render */
+    *(volatile uint64_t*)(G + 0x7938498u) = 0x3F800000u; /* weight 1.0, and the face counter that picks six faces at 0 */
+    *(volatile uint8_t*)(G + 0x7938494u) = 1;
     InterlockedExchange(&g_nearReset.state, 0);
     if (++g_nearReset.done > NEAR_RESET_NOTES) return;
     Note("difficulty: near terrain: history reset %ld after a replayed finalize: %d frames of history invalidation from this frame, camera cut, "
-        "probe weight 1, the six-face light probe capture after the next view; the sky LUTs were %s%s", (long)g_nearReset.done, (int)*frames,
+        "probe capture skipped for one frame, then six faces at weight 1; the sky LUTs were %s%s", (long)g_nearReset.done, (int)*frames,
         kept ? "kept by their stand-ins" : g_nearReset.bare ? "cleared: its jobs ran outside the replay" : "cleared",
         g_nearReset.done == NEAR_RESET_NOTES ? "; later resets are not logged" : "");
 }
@@ -1726,7 +1712,7 @@ static uint64_t NearProbe(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64
 
 static const char kNearConsumePin[] = "4C 8B DC 55 53 49 8D AB B8 FE FF FF 48 81 EC 38 02 00 00";
 static const char kNearProbePin[] = "48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 4C 89 64 24 20 55 41 56 41 57 48 8D AC 24 40 FF FF FF 48 81 EC C0 01 00 00";
-static const char kNearResetPin[] = "C7 83 C4 10 00 00 03 00 00 00 C6 83 14 C0 8A 07 01 48 C7 83 98 84 93 07 00 00 80 3F C6 83 94 84 93 07 01";
+static const char kNearResetPin[] = "C6 83 A2 84 93 07 01 C7 83 C4 10 00 00 03 00 00 00 C6 83 14 C0 8A 07 01 48 C7 83 98 84 93 07 00 00 80 3F C6 83 94 84 93 07 01";
 
 /* At install: without the consumer's bracket a replay cannot run (NEAR_START checks g_nearConsume). */
 static void NearNamesInstall(uintptr_t game)
@@ -1739,8 +1725,9 @@ static void NearNamesInstall(uintptr_t game)
         LoaderHook("extra large maps' light probe watch", exe + 0x110C40u, (void*)NearProbe, (void**)&g_nearProbe)))
     { g_nearProbe = NULL; Note("difficulty: near terrain: the light probe capture is not the reviewed code; its captures are not counted"); }
     if (g_nearReset.pins == 0)
-        g_nearReset.pins = ApiCodeMatches(game + 0x102F329u, kNearResetPin) == 1 && ApiCodeMatches(game + 0xAB9369u, "83 BF C4 10 00 00 00 0F 8E") == 1 &&
+        g_nearReset.pins = ApiCodeMatches(game + 0x102F322u, kNearResetPin) == 1 && ApiCodeMatches(game + 0xAB9369u, "83 BF C4 10 00 00 00 0F 8E") == 1 &&
             ApiCodeMatches(game + 0xAB5B1Au, "0F 10 8A 08 C0 8A 07 44 88 BA 14 C0 8A 07") == 1 &&
+            ApiCodeMatches(game + 0xAB7704u, "40 38 B3 A2 84 93 07 74 0C 40 88 B3 A2 84 93 07 E9 70 01 00 00") == 1 &&
             ApiCodeMatches(game + 0xAB771Eu, "40 38 B3 94 84 93 07 74 0E 39 B3 9C 84 93 07 B8 06 00 00 00 0F 44 E8") == 1 ? 1 : -1;
     if (g_nearReset.pins < 0) Note("difficulty: near terrain: the game's history reset is not the reviewed code; a tile's finalize leaves the ambient to refill");
 }
