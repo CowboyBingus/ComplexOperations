@@ -2534,6 +2534,11 @@ static void LwTestCommands(void)
         else if (sscanf(cmds[c], "teleport! %f %f", &d, &deg) == 2) { g_lwTeleportForce = 1; LwTestTeleport(seq, d, deg); g_lwTeleportForce = 0; }
         else if (sscanf(cmds[c], "teleport %f %f", &d, &deg) == 2) LwTestTeleport(seq, d, deg);
         else if (strcmp(cmds[c], "vantage") == 0) LwTestVantage(seq);
+#ifdef CO_RESEARCH
+        /* the face cutter's limits (co_navcut.h), so one session cuts at the release limits and at low ones */
+        else if (sscanf(cmds[c], "navcut %d %d", &ia, &ib) == 2 && ia > 0 && ib > 0)
+        { co_navcut_limits((uint32_t)ia, (uint32_t)ib); Note("navmesh cuts: research limits from now: %d half-edges, %d segments a face", ia, ib); }
+#endif
         else if (sscanf(cmds[c], "noise %d %f %f", &idx, &d, &deg) >= 1) LwTestNoise(seq, idx, d, deg);
         else if (strcmp(cmds[c], "garrisons") == 0) LwTestGarrisons(seq);
         else if (sscanf(cmds[c], "stage %f", &d) == 1 && d > LW_R_ON && d < 2000.0f) LwTestStage(seq, d);

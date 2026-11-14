@@ -6,6 +6,7 @@
 #include "co_shim.h"
 
 typedef void (*FaceFn)(void* state, void* instance, const void* up, uint8_t flip, uint32_t key, void* vertices);
+typedef void (*KeyFn)(void* state, uint32_t key);
 typedef uint32_t (*AddFn)(void* state, const void* points, int32_t count, int32_t material);
 typedef uint8_t (*StepFn)(void* state);
 typedef void (*HeapFn)(void* queue);
@@ -18,25 +19,29 @@ typedef struct Slot
 {
     volatile LONG thread;
     void* state; void* instance; void* vertices;
-    uint32_t key; uint8_t flip, redone, partial;
+    uint32_t key, adds; /* adds: the silhouettes this face took */
+    uint8_t flip, redone, partial;
     _Alignas(16) uint8_t up[16]; /* the face add reads it with movaps (0x133C695) */
 } Slot;
 
 static struct
 {
     FaceFn face;
+    KeyFn key;
     AddFn add;
     StepFn step;
     HeapFn heap;
     ResetFn reset;
     uint32_t maxEdges, maxSegments;
-    volatile LONG64 uncut, hidden, partial, leftOut;
-    volatile LONG largest, worstEdges, worstSegments, worstX, worstY;
+    volatile LONG64 uncut, hidden, partial, leftOut, againEnded, againOdd, aloneEnded, aloneOdd;
+    volatile LONG largest, worstEdges, worstSegments, worstX, worstY, oddFaces, oddEdges;
     Slot slots[NAVCUT_SLOTS];
 } g_nc = {.maxEdges = CO_NAVCUT_MAX, .maxSegments = CO_NAVCUT_BUDGET};
 
-/* The three entries, the two engine calls made by address, the loop that re-reads the queue after each step, the
- * 14-bit writer and its two signed readers, the segment count the add indexes by, and the extraction's counts. */
+/* The four entries, the two engine calls made by address, the loop that re-reads the queue after each step, the
+ * 14-bit writer and its two signed readers, the segment count the add indexes by, and the extraction's counts. Then
+ * the status list's three sites (constructor, first read, link), the add's one answer and its two callers, and one
+ * masked writer in each other function that appends half-edges. */
 static const struct { uint32_t rva; const char* pin; } kNavCutPins[] = {
     {CO_NAVCUT_FACE, "48 89 5C 24 08 48 89 6C 24 10 56 57 41 54 41 56 41 57 48 83 EC 50"},
     {0x133C67Au, "E8 D1 0D 00 00 8B 84 24 A0 00 00 00 41 83 CF FF 89 9D D0 01 00 00"},
@@ -51,6 +56,17 @@ static const struct { uint32_t rva; const char* pin; } kNavCutPins[] = {
     {0x1341D3Bu, "C1 E1 10 C1 F9 12 48 0F BF C9 89 44 CA 04"},
     {0x1341F3Cu, "48 C1 E9 20 44 8B C1 C1 E1 10 C1 F9 12"},
     {0x133E460u, "44 0F B7 96 D8 00 00 00"},
+    {CO_NAVCUT_KEY, "89 54 24 10 53 48 83 EC 20 48 8B D9 E8 1F 0E 00 00 8B 44 24 38"},
+    {0x133D135u, "66 89 83 A0 00 00 00 66 89 83 A2 00 00 00"},
+    {0x13405DBu, "44 0F B7 8B A0 00 00 00"},
+    {0x13419A3u, "66 89 B3 A0 00 00 00"},
+    {0x133BA21u, "E8 EA 22 00 00 B8 01 00 00 00 48 83 C4 30 5B C3"},
+    {0xCB20B1u, "E8 EA 98 68 00 03 F7 48 FF C3"},
+    {0xC244B9u, "E8 E2 74 71 00 FF C3 48 83 C7 04 48 83 C6 10"},
+    {0x134303Bu, "41 0F BF CE 81 E1 FF 3F 00 00 C1 E1 02 83 C9 02"},
+    {0x134327Cu, "0F BF C5 25 FF 3F 00 00 C1 E0 02 83 C8 02"},
+    {0x1343476u, "81 E1 FF 3F 00 00 C1 E1 02 83 C9 02"},
+    {0x13436A0u, "81 E1 FF 3F 00 00 C1 E1 02 83 C9 02"},
 };
 
 static uint32_t Count(const void* state, uint32_t at)
@@ -82,10 +98,19 @@ static void Face(void* state, void* instance, const void* up, uint8_t flip, uint
     if (s != NULL)
     {
         s->state = state; s->instance = instance; s->vertices = vertices; s->key = key; s->flip = flip;
-        s->redone = 0; s->partial = 0;
+        s->redone = 0; s->partial = 0; s->adds = 0;
         memcpy(s->up, up, 16);
     }
     g_nc.face(state, instance, up, flip, key, vertices);
+}
+
+/* A cut that starts with no face (0x133C620) must not find the face this thread cut before: the callers' states are
+ * stack frames, so the address comes back. */
+static void Key(void* state, uint32_t key)
+{
+    Slot* s = SlotOf(0);
+    if (s != NULL) s->state = NULL;
+    g_nc.key(state, key);
 }
 
 /* A silhouette of n points adds n segments (0x133E420: one record a point), and the add indexes them as i16: past
@@ -93,23 +118,28 @@ static void Face(void* state, void* instance, const void* up, uint8_t flip, uint
 static uint32_t Add(void* state, const void* points, int32_t count, int32_t material)
 {
     const uint32_t segments = Count(state, CO_NAVCUT_SEGMENTS), n = count > 0 ? (uint32_t)count : 0;
+    Slot* s = SlotOf(0);
     if (n > g_nc.maxSegments || segments > g_nc.maxSegments - n)
     {
-        Slot* s = SlotOf(0);
         InterlockedIncrement64(&g_nc.leftOut);
         if (s != NULL && s->state == state && !s->partial) { s->partial = 1; InterlockedIncrement64(&g_nc.partial); }
         return 1;
     }
+    if (s != NULL && s->state == state) s->adds++;
     return g_nc.add(state, points, count, material);
 }
 
 /* The sweep only writes the 14-bit indexes; the first signed read is after it (0x1341BF0). So a cut is stopped
  * between two steps, before any read: the face is added again alone and its events put in heap order, and the loop
- * goes on with that. A second stop of one face, or no face to add, leaves the engine's own empty state. */
+ * goes on with that. A second stop of one face, or no face to add, leaves the engine's own empty state.
+ * A sweep stopped half way still lists its segments in the status, which neither the reset nor the face add
+ * clears: the next sweep's first event (0x13405DB) would walk them. It is emptied as the constructor does. */
 static void Over(void* state, uint32_t edges, uint32_t segments)
 {
+    static const uint16_t kNone[2] = {0xFFFFu, 0xFFFFu};
     float origin[2];
     Slot* s = SlotOf(0);
+    memcpy((uint8_t*)state + CO_NAVCUT_STATUS, kNone, sizeof kNone);
     memcpy(origin, (const uint8_t*)state + CO_NAVCUT_ORIGIN, 8);
     InterlockedExchange(&g_nc.worstEdges, (LONG)edges);
     InterlockedExchange(&g_nc.worstSegments, (LONG)segments);
@@ -127,6 +157,29 @@ static void Over(void* state, uint32_t edges, uint32_t segments)
     g_nc.reset(state);
 }
 
+/* The sweep is over (the loop 0x133BB42 leaves at a queue of 1): the face's arguments are not kept past it, and
+ * what a face alone came to is counted. */
+static void Ended(void* state)
+{
+    Slot* s = SlotOf(0);
+    if (s == NULL || s->state != state) return;
+    const uint32_t faces = Count(state, CO_NAVCUT_FACES);
+    s->state = NULL;
+    if (s->redone)
+    {
+        InterlockedIncrement64(&g_nc.againEnded);
+        if (faces == 1) return;
+        InterlockedIncrement64(&g_nc.againOdd);
+        InterlockedExchange(&g_nc.oddFaces, (LONG)faces);
+        InterlockedExchange(&g_nc.oddEdges, (LONG)Count(state, CO_NAVCUT_EDGES));
+    }
+    else if (s->adds == 0)
+    {
+        InterlockedIncrement64(&g_nc.aloneEnded);
+        if (faces != 1) InterlockedIncrement64(&g_nc.aloneOdd);
+    }
+}
+
 static uint8_t Step(void* state)
 {
     const uint8_t answer = g_nc.step(state);
@@ -140,6 +193,7 @@ static uint8_t Step(void* state)
     }
     if (edges > g_nc.maxEdges || segments > CO_NAVCUT_MAX || Count(state, CO_NAVCUT_FACES) > CO_NAVCUT_MAX ||
         Count(state, CO_NAVCUT_VERTICES) > CO_NAVCUT_MAX) Over(state, edges, segments);
+    if (Count(state, CO_NAVCUT_QUEUE + 8) == 1) Ended(state);
     return answer;
 }
 
@@ -155,6 +209,8 @@ const char* co_navcut_install(uintptr_t exe)
     /* the step last: with it alone a stopped cut is reset (the face cut away), which is still in range */
     if (co_loader_hook("navmesh cuts: the face's arguments are kept", exe + CO_NAVCUT_FACE, (void*)Face, (void**)&g_nc.face) || g_nc.face == NULL)
     { g_nc.face = NULL; return "the engine's navmesh face add could not be hooked"; }
+    if (co_loader_hook("navmesh cuts: a cut with no face forgets the last one", exe + CO_NAVCUT_KEY, (void*)Key, (void**)&g_nc.key) || g_nc.key == NULL)
+    { g_nc.key = NULL; return "the engine's navmesh cut start without a face could not be hooked"; }
     if (co_loader_hook("navmesh cuts: a face's segment budget", exe + CO_NAVCUT_ADD, (void*)Add, (void**)&g_nc.add) || g_nc.add == NULL)
     { g_nc.add = NULL; return "the engine's navmesh silhouette add could not be hooked"; }
     if (co_loader_hook("navmesh cuts: a cut over the edge limit is done again uncut", exe + CO_NAVCUT_STEP, (void*)Step, (void**)&g_nc.step) ||
@@ -170,13 +226,18 @@ void co_navcut_seen(CoNavCutSeen* out)
     out->largest = (uint32_t)g_nc.largest;
     out->worstEdges = (uint32_t)g_nc.worstEdges; out->worstSegments = (uint32_t)g_nc.worstSegments;
     out->worstAt[0] = (float)g_nc.worstX; out->worstAt[1] = (float)g_nc.worstY;
+    out->againEnded = (uint64_t)g_nc.againEnded; out->againOdd = (uint64_t)g_nc.againOdd;
+    out->aloneEnded = (uint64_t)g_nc.aloneEnded; out->aloneOdd = (uint64_t)g_nc.aloneOdd;
+    out->oddFaces = (uint32_t)g_nc.oddFaces; out->oddEdges = (uint32_t)g_nc.oddEdges;
 }
 
+#if defined(CO_RESEARCH) || defined(CO_TEST)
 void co_navcut_limits(uint32_t edges, uint32_t segments)
 {
     g_nc.maxEdges = edges < 16 ? 16 : edges > CO_NAVCUT_MAX ? CO_NAVCUT_MAX : edges;
     g_nc.maxSegments = segments < 16 ? 16 : segments > CO_NAVCUT_MAX ? CO_NAVCUT_MAX : segments;
 }
+#endif
 
 #ifdef CO_TEST
 void co_navcut_test_reset(void)

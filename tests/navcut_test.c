@@ -1,6 +1,10 @@
 /* The navmesh face cutter's guard (co_navcut.h) on a fake exe. The engine's stand-in keeps the cutter state's counts
  * where the game has them and runs the game's order: face add, silhouette adds, heap build, steps until the queue is
- * 1, then the first signed 14-bit read (0x1341BF0), which is where a cut over 8192 half-edges goes wrong. */
+ * 1, then the first signed 14-bit read (0x1341BF0), which is where a cut over 8192 half-edges goes wrong.
+ * It also keeps the sweep's status where the game has it (first and last segment at +0xA0, +0xA2): only the
+ * constructor and the steps write it, a step leaves it holding a segment until the sweep's last event, and the first
+ * step after a face add finds an old one as the game's 0x13405DB would. The list's records and the geometry are not
+ * modelled: that nothing else outlives a stopped sweep is the static analysis's claim, not this test's. */
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -31,7 +35,17 @@ static struct
     uint32_t perStepAlone; /* half-edges a step once more than 1 + aloneLater faces were added (0: perStep) */
     uint32_t aloneLater;
     uint32_t unsorted;     /* events queued since the last heap build */
+    uint32_t keyCalls, keyKey;
+    uint32_t facesOnFirst; /* polygons the first step after a face add makes (the sweep opens them at its first event) */
+    uint32_t fresh;        /* a face or key call since the last step: the next step is a sweep's first */
+    uint32_t staleStatus;  /* sweeps whose first step found the status of an earlier, stopped sweep */
 } E;
+
+#define STATUS CO_NAVCUT_STATUS
+static uint16_t Get16(const State* s, uint32_t at) { uint16_t v; memcpy(&v, s->b + at, 2); return v; }
+static void Set16(State* s, uint32_t at, uint16_t v) { memcpy(s->b + at, &v, 2); }
+/* The constructor 0x133D080: zero counts, an empty status. */
+static void Construct(State* s) { memset(s, 0, sizeof *s); Set16(s, STATUS, 0xFFFFu); Set16(s, STATUS + 2, 0xFFFFu); }
 
 static void EngineReset(void* state)
 {
@@ -51,6 +65,13 @@ static void EngineFace(void* state, void* instance, const void* up, uint8_t flip
     Set(s, CO_NAVCUT_SEGMENTS, E.faceSegments);
     Set(s, QUEUE_SIZE, 1 + E.faceEvents);
     E.unsorted = E.faceEvents;
+    E.fresh = 1;
+}
+
+static void EngineKey(void* state, uint32_t key)
+{
+    E.keyCalls++; E.keyKey = key; E.fresh = 1;
+    EngineReset(state); E.resetCalls--;
 }
 
 static uint32_t EngineAdd(void* state, const void* points, int32_t count, int32_t material)
@@ -70,7 +91,15 @@ static uint8_t EngineStep(void* state)
     State* s = (State*)state;
     E.stepCalls++;
     const uint32_t per = E.faceCalls > 1 + E.aloneLater && E.perStepAlone ? E.perStepAlone : E.perStep;
+    if (E.fresh)
+    {
+        if (Get16(s, STATUS) != 0xFFFFu || Get16(s, STATUS + 2) != 0xFFFFu) E.staleStatus++;
+        Set(s, CO_NAVCUT_FACES, Get(s, CO_NAVCUT_FACES) + E.facesOnFirst);
+        E.fresh = 0;
+    }
     Set(s, QUEUE_SIZE, Get(s, QUEUE_SIZE) - 1);
+    const uint16_t held = Get(s, QUEUE_SIZE) == 1 ? 0xFFFFu : (uint16_t)(E.stepCalls & 0x1FFFu);
+    Set16(s, STATUS, held); Set16(s, STATUS + 2, held);
     Set(s, CO_NAVCUT_EDGES, Get(s, CO_NAVCUT_EDGES) + per);
     Set(s, CO_NAVCUT_VERTICES, Get(s, CO_NAVCUT_VERTICES) + E.vertsPerStep);
     Set(s, CO_NAVCUT_FACES, Get(s, CO_NAVCUT_FACES) + E.facesPerStep);
@@ -105,6 +134,17 @@ static void Pins(uint8_t* exe)
     Hex(exe + 0x1341D3Bu, "C1 E1 10 C1 F9 12 48 0F BF C9 89 44 CA 04");
     Hex(exe + 0x1341F3Cu, "48 C1 E9 20 44 8B C1 C1 E1 10 C1 F9 12");
     Hex(exe + 0x133E460u, "44 0F B7 96 D8 00 00 00");
+    Hex(exe + CO_NAVCUT_KEY, "89 54 24 10 53 48 83 EC 20 48 8B D9 E8 1F 0E 00 00 8B 44 24 38");
+    Hex(exe + 0x133D135u, "66 89 83 A0 00 00 00 66 89 83 A2 00 00 00");
+    Hex(exe + 0x13405DBu, "44 0F B7 8B A0 00 00 00");
+    Hex(exe + 0x13419A3u, "66 89 B3 A0 00 00 00");
+    Hex(exe + 0x133BA21u, "E8 EA 22 00 00 B8 01 00 00 00 48 83 C4 30 5B C3");
+    Hex(exe + 0xCB20B1u, "E8 EA 98 68 00 03 F7 48 FF C3");
+    Hex(exe + 0xC244B9u, "E8 E2 74 71 00 FF C3 48 83 C7 04 48 83 C6 10");
+    Hex(exe + 0x134303Bu, "41 0F BF CE 81 E1 FF 3F 00 00 C1 E1 02 83 C9 02");
+    Hex(exe + 0x134327Cu, "0F BF C5 25 FF 3F 00 00 C1 E0 02 83 C8 02");
+    Hex(exe + 0x1343476u, "81 E1 FF 3F 00 00 C1 E1 02 83 C9 02");
+    Hex(exe + 0x13436A0u, "81 E1 FF 3F 00 00 C1 E1 02 83 C9 02");
 }
 
 static void Reset(const char* name)
@@ -119,6 +159,7 @@ static void Reset(const char* name)
     g_fake.originals[0].target = (uintptr_t)g_exe + CO_NAVCUT_FACE; g_fake.originals[0].original = (void*)EngineFace;
     g_fake.originals[1].target = (uintptr_t)g_exe + CO_NAVCUT_ADD; g_fake.originals[1].original = (void*)EngineAdd;
     g_fake.originals[2].target = (uintptr_t)g_exe + CO_NAVCUT_STEP; g_fake.originals[2].original = (void*)EngineStep;
+    g_fake.originals[3].target = (uintptr_t)g_exe + CO_NAVCUT_KEY; g_fake.originals[3].original = (void*)EngineKey;
     memset(&E, 0, sizeof E);
     co_navcut_test_calls(EngineHeap, EngineReset);
 }
@@ -126,11 +167,12 @@ static void Reset(const char* name)
 typedef void (*FaceFn)(void*, void*, const void*, uint8_t, uint32_t, void*);
 typedef uint32_t (*AddFn)(void*, const void*, int32_t, int32_t);
 typedef uint8_t (*StepFn)(void*);
+typedef void (*KeyFn)(void*, uint32_t);
 static void* Detour(uint32_t rva) { return fake_host_detour((uintptr_t)g_exe + rva - (uintptr_t)g_fake.image); }
 
 /* The cut as 0x133BA40 runs it once the face and the silhouettes are in. Returns 1 when the state that reaches the
- * first signed read fits 14 bits and the events were in heap order at every step; 0 when not, or when the loop
- * does not end. */
+ * first signed read fits 14 bits, the events were in heap order at every step and no sweep began on an old status;
+ * 0 when not, or when the loop does not end. */
 static int Sweep(State* s)
 {
     StepFn step = (StepFn)Detour(CO_NAVCUT_STEP);
@@ -142,7 +184,7 @@ static int Sweep(State* s)
         if (E.unsorted) ordered = 0;
         step(s);
     }
-    return ordered && Get(s, CO_NAVCUT_EDGES) <= 8192 && Get(s, CO_NAVCUT_VERTICES) <= 8192 && Get(s, CO_NAVCUT_FACES) <= 8192;
+    return ordered && E.staleStatus == 0 && Get(s, CO_NAVCUT_EDGES) <= 8192 && Get(s, CO_NAVCUT_VERTICES) <= 8192 && Get(s, CO_NAVCUT_FACES) <= 8192;
 }
 
 static _Alignas(16) const uint8_t kUp[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
@@ -169,7 +211,7 @@ int main(void)
     CHECK(face != NULL && add != NULL && Detour(CO_NAVCUT_STEP) != NULL);
     if (face != NULL && add != NULL && Detour(CO_NAVCUT_STEP) != NULL)
     {
-        memset(&s, 0, sizeof s);
+        Construct(&s);
         E.faceSegments = 5; E.faceEvents = 5; E.perStep = 4;
         face(&s, &g_instance, kUp, 1, 0x1234u, &g_vertices);
         CHECK(E.faceCalls == 1 && E.faceState == &s && E.faceInstance == &g_instance && E.faceVertices == &g_vertices && E.faceKey == 0x1234u &&
@@ -187,7 +229,7 @@ int main(void)
     face = (FaceFn)Detour(CO_NAVCUT_FACE); add = (AddFn)Detour(CO_NAVCUT_ADD);
     if (face != NULL && add != NULL)
     {
-        memset(&s, 0, sizeof s);
+        Construct(&s);
         E.faceSegments = 4; E.faceEvents = 4; E.perStep = 2;
         face(&s, &g_instance, kUp, 0, 1, &g_vertices);
         CHECK(add(&s, points, (int32_t)CO_NAVCUT_BUDGET - 4 - 8, 0) == 1);
@@ -215,9 +257,9 @@ int main(void)
     face = (FaceFn)Detour(CO_NAVCUT_FACE); add = (AddFn)Detour(CO_NAVCUT_ADD);
     if (face != NULL && add != NULL)
     {
-        memset(&s, 0, sizeof s);
+        Construct(&s);
         const float origin[2] = {2440.0f, 3259.0f};
-        E.faceSegments = 11; E.faceEvents = 11; E.perStep = 2; E.perStepAlone = 2;
+        E.faceSegments = 11; E.faceEvents = 11; E.perStep = 2; E.perStepAlone = 2; E.facesOnFirst = 1;
         face(&s, &g_instance, kUp, 1, 0x00B502D4u, &g_vertices);
         memcpy(s.b + CO_NAVCUT_ORIGIN, origin, 8);
         for (int i = 0; i < 635; i++) add(&s, points, 8, 1);
@@ -233,6 +275,27 @@ int main(void)
         co_navcut_seen(&seen);
         CHECK(seen.uncut == 1 && seen.hidden == 0 && seen.largest == 8194 && seen.worstEdges == 8194 && seen.worstSegments == 5599);
         CHECK(seen.worstAt[0] == 2440.0f && seen.worstAt[1] == 3259.0f);
+        /* the stopped sweep held a segment in the status; the face's own sweep began on an empty one and left 1 polygon */
+        CHECK(E.staleStatus == 0 && Get16(&s, STATUS) == 0xFFFFu && Get16(&s, STATUS + 2) == 0xFFFFu && Get(&s, CO_NAVCUT_FACES) == 1);
+        CHECK(seen.againEnded == 1 && seen.againOdd == 0 && seen.aloneEnded == 0 && seen.aloneOdd == 0);
+        /* the same face cut again and ending as 2 polygons is told apart */
+        E.facesOnFirst = 2;
+        face(&s, &g_instance, kUp, 1, 0x00B502D4u, &g_vertices);
+        add(&s, points, 5000, 1);
+        CHECK(Sweep(&s) == 1);
+        co_navcut_seen(&seen);
+        CHECK(seen.uncut == 2 && seen.againEnded == 2 && seen.againOdd == 1 && seen.oddFaces == 2 && seen.oddEdges == 22);
+        /* faces with no silhouette are the engine's own measure; one that took a silhouette and fitted is neither */
+        face(&s, &g_instance, kUp, 1, 1, &g_vertices);
+        CHECK(Sweep(&s) == 1);
+        E.facesOnFirst = 1;
+        face(&s, &g_instance, kUp, 1, 2, &g_vertices);
+        CHECK(Sweep(&s) == 1);
+        face(&s, &g_instance, kUp, 1, 3, &g_vertices);
+        add(&s, points, 8, 1);
+        CHECK(Sweep(&s) == 1);
+        co_navcut_seen(&seen);
+        CHECK(seen.uncut == 2 && seen.againEnded == 2 && seen.againOdd == 1 && seen.aloneEnded == 2 && seen.aloneOdd == 1);
     }
 
     Reset("exactly 8192 half-edges is a whole cut");
@@ -241,7 +304,7 @@ int main(void)
     face = (FaceFn)Detour(CO_NAVCUT_FACE); add = (AddFn)Detour(CO_NAVCUT_ADD);
     if (face != NULL && add != NULL)
     {
-        memset(&s, 0, sizeof s);
+        Construct(&s);
         E.faceSegments = 4; E.faceEvents = 4; E.perStep = 2;
         face(&s, &g_instance, kUp, 0, 1, &g_vertices);
         add(&s, points, 4092, 0);
@@ -261,13 +324,14 @@ int main(void)
     face = (FaceFn)Detour(CO_NAVCUT_FACE); add = (AddFn)Detour(CO_NAVCUT_ADD);
     if (face != NULL && add != NULL)
     {
-        memset(&s, 0, sizeof s);
+        Construct(&s);
         E.faceSegments = 3; E.faceEvents = 3; E.perStep = 5000; E.perStepAlone = 5000;
         face(&s, &g_instance, kUp, 0, 9, &g_vertices);
         CHECK(Sweep(&s) == 1);
         CHECK(E.faceCalls == 2 && E.resetCalls == 1 && Get(&s, CO_NAVCUT_EDGES) == 0 && Get(&s, QUEUE_SIZE) == 1);
         co_navcut_seen(&seen);
-        CHECK(seen.uncut == 1 && seen.hidden == 1);
+        CHECK(seen.uncut == 1 && seen.hidden == 1 && seen.againEnded == 1 && seen.againOdd == 1 && seen.oddFaces == 0);
+        CHECK(Get16(&s, STATUS) == 0xFFFFu && Get16(&s, STATUS + 2) == 0xFFFFu); /* the second stop empties it too */
         E.perStepAlone = 1; E.aloneLater = 2; /* the next face has its own second chance */
         face(&s, &g_instance, kUp, 0, 10, &g_vertices);
         CHECK(Sweep(&s) == 1 && E.faceCalls == 4 && E.resetCalls == 1);
@@ -282,7 +346,7 @@ int main(void)
     if (face != NULL)
     {
         State other;
-        memset(&s, 0, sizeof s); memset(&other, 0, sizeof other);
+        Construct(&s); Construct(&other);
         E.faceSegments = 3; E.faceEvents = 3; E.perStep = 5000;
         face(&other, &g_instance, kUp, 0, 9, &g_vertices);
         Set(&s, QUEUE_SIZE, 4);
@@ -291,11 +355,40 @@ int main(void)
         CHECK(seen.uncut == 0 && seen.hidden == 1);
     }
 
+    Reset("a cut that starts with no face is never given the face cut before in the same state");
+    CHECK(co_navcut_install((uintptr_t)g_exe) == NULL);
+    co_navcut_limits(CO_NAVCUT_MAX, CO_NAVCUT_MAX);
+    face = (FaceFn)Detour(CO_NAVCUT_FACE);
+    KeyFn key = (KeyFn)Detour(CO_NAVCUT_KEY);
+    CHECK(key != NULL);
+    if (face != NULL && key != NULL)
+    {
+        Construct(&s);
+        E.faceSegments = 3; E.faceEvents = 3; E.perStep = 1;
+        face(&s, &g_instance, kUp, 0, 9, &g_vertices);
+        CHECK(Sweep(&s) == 1 && E.faceCalls == 1);
+        /* the sweep ended: the face is forgotten even when the next cut's start is not seen */
+        EngineReset(&s); E.fresh = 1;
+        Set(&s, QUEUE_SIZE, 4); E.perStep = 5000;
+        CHECK(Sweep(&s) == 1 && E.faceCalls == 1 && E.resetCalls == 2);
+        co_navcut_seen(&seen);
+        CHECK(seen.uncut == 0 && seen.hidden == 1);
+        /* a face whose sweep never ran, then the start with no face (0x133C620) and silhouettes over the limit */
+        E.perStep = 1;
+        face(&s, &g_instance, kUp, 0, 10, &g_vertices);
+        key(&s, 0x55u);
+        CHECK(E.keyCalls == 1 && E.keyKey == 0x55u && Get(&s, QUEUE_SIZE) == 1);
+        Set(&s, QUEUE_SIZE, 4); E.perStep = 5000;
+        CHECK(Sweep(&s) == 1 && E.faceCalls == 2 && E.resetCalls == 3);
+        co_navcut_seen(&seen);
+        CHECK(seen.uncut == 0 && seen.hidden == 2 && seen.againEnded == 0);
+    }
+
     Reset("no face added on this thread at all: reset");
     CHECK(co_navcut_install((uintptr_t)g_exe) == NULL);
     co_navcut_limits(CO_NAVCUT_MAX, CO_NAVCUT_MAX);
     {
-        memset(&s, 0, sizeof s);
+        Construct(&s);
         E.perStep = 9000;
         Set(&s, QUEUE_SIZE, 3);
         CHECK(Sweep(&s) == 1 && E.faceCalls == 0 && E.resetCalls == 1);
@@ -309,7 +402,7 @@ int main(void)
     {
         for (int which = 0; which < 3; which++)
         {
-            memset(&s, 0, sizeof s);
+            Construct(&s);
             memset(&E, 0, sizeof E);
             E.faceSegments = 3; E.faceEvents = 3; E.perStep = 1; E.perStepAlone = 1;
             face(&s, &g_instance, kUp, 0, 9, &g_vertices);
@@ -332,7 +425,7 @@ int main(void)
     face = (FaceFn)Detour(CO_NAVCUT_FACE);
     if (face != NULL)
     {
-        memset(&s, 0, sizeof s);
+        Construct(&s);
         E.faceSegments = 3; E.faceEvents = 3; E.perStep = 5000; E.perStepAlone = 1; E.aloneLater = 1;
         face(&s, &g_instance, kUp, 1, 0x42u, &g_vertices);
         HANDLE t = CreateThread(NULL, 0, OtherThread, NULL, 0, NULL);
@@ -352,7 +445,7 @@ int main(void)
     if (face != NULL && add != NULL)
     {
         co_navcut_limits(64, 40);
-        memset(&s, 0, sizeof s);
+        Construct(&s);
         E.faceSegments = 4; E.faceEvents = 4; E.perStep = 2; E.perStepAlone = 2;
         face(&s, &g_instance, kUp, 0, 1, &g_vertices);
         CHECK(add(&s, points, 36, 0) == 1 && add(&s, points, 1, 0) == 1 && E.addCalls == 1);
@@ -370,17 +463,24 @@ int main(void)
     }
 
     static const uint32_t kPinned[] = {CO_NAVCUT_FACE + 3, 0x133C67Au + 1, CO_NAVCUT_ADD + 2, CO_NAVCUT_STEP + 12, CO_NAVCUT_HEAP + 7,
-        CO_NAVCUT_RESET + 4, 0x133CA40u + 12, 0x133BB30u + 20, 0x133BB6Fu + 2, 0x13408B8u + 2, 0x1341D3Bu + 5, 0x1341F3Cu + 12, 0x133E460u + 4};
+        CO_NAVCUT_RESET + 4, 0x133CA40u + 12, 0x133BB30u + 20, 0x133BB6Fu + 2, 0x13408B8u + 2, 0x1341D3Bu + 5, 0x1341F3Cu + 12, 0x133E460u + 4,
+        CO_NAVCUT_KEY + 13, 0x133D135u + 10, 0x13405DBu + 4, 0x13419A3u + 3, 0x133BA21u + 6, 0xCB20B1u + 5, 0xC244B9u + 6, 0x134303Bu + 6,
+        0x134327Cu + 4, 0x1343476u + 2, 0x13436A0u + 2};
     for (size_t i = 0; i < sizeof kPinned / sizeof kPinned[0]; i++)
     {
         Reset("a changed byte in the cutter's code: nothing hooked");
         g_exe[kPinned[i]] ^= 0xFF;
         CHECK(co_navcut_install((uintptr_t)g_exe) != NULL);
-        CHECK(Detour(CO_NAVCUT_FACE) == NULL && Detour(CO_NAVCUT_ADD) == NULL && Detour(CO_NAVCUT_STEP) == NULL);
+        CHECK(Detour(CO_NAVCUT_FACE) == NULL && Detour(CO_NAVCUT_KEY) == NULL && Detour(CO_NAVCUT_ADD) == NULL && Detour(CO_NAVCUT_STEP) == NULL);
     }
 
     Reset("the face add's hook refused: nothing else hooked");
     g_fake.noHook = (uintptr_t)g_exe + CO_NAVCUT_FACE - (uintptr_t)g_fake.image;
+    CHECK(co_navcut_install((uintptr_t)g_exe) != NULL);
+    CHECK(Detour(CO_NAVCUT_KEY) == NULL && Detour(CO_NAVCUT_ADD) == NULL && Detour(CO_NAVCUT_STEP) == NULL);
+
+    Reset("the hook of the start with no face refused: no add or step hook");
+    g_fake.noHook = (uintptr_t)g_exe + CO_NAVCUT_KEY - (uintptr_t)g_fake.image;
     CHECK(co_navcut_install((uintptr_t)g_exe) != NULL);
     CHECK(Detour(CO_NAVCUT_ADD) == NULL && Detour(CO_NAVCUT_STEP) == NULL);
 

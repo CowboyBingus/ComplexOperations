@@ -436,6 +436,9 @@ static void WindowNoteLocked(void)
     Note("difficulty: extra large maps: navmesh cuts: the largest %u half-edges of %u; %llu left uncut and %llu cut away over the limit (the last %u half-edges of %u segments at (%.0f, %.0f)); %llu faces over the segment budget, %llu silhouettes left out",
         cuts.largest, CO_NAVCUT_MAX, (unsigned long long)cuts.uncut, (unsigned long long)cuts.hidden, cuts.worstEdges, cuts.worstSegments,
         (double)cuts.worstAt[0], (double)cuts.worstAt[1], (unsigned long long)cuts.partial, (unsigned long long)cuts.leftOut);
+    Note("difficulty: extra large maps: navmesh cuts done again: %llu ended, %llu of them not as 1 polygon (the last %u polygons of %u half-edges); faces with no silhouette: %llu ended, %llu not as 1 polygon",
+        (unsigned long long)cuts.againEnded, (unsigned long long)cuts.againOdd, cuts.oddFaces, cuts.oddEdges, (unsigned long long)cuts.aloneEnded,
+        (unsigned long long)cuts.aloneOdd);
     uint32_t trees = 0, treeRoom = 0;
     const int counted = WorldStreamTrees(&trees, &treeRoom);
     Note("difficulty: extra large maps: SpeedTree forest: %u trees of %u%s; %u scans over its budget; %u streamer calls held, the most one call added %u",
