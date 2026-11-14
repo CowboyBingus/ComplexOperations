@@ -400,6 +400,7 @@ int CoXlTestLwNavTick(uintptr_t game)
  * update sets; 0 as when their code is not the reviewed one. */
 void CoXlTestLwNavSwapFakes(uintptr_t table, void* const* fn, uintptr_t jobs, uintptr_t inl)
 {
+    g_lwFp.joinTicks = 0;
     memset(&g_lwSwap, 0, sizeof g_lwSwap); memset(&g_lwNavHold, 0, sizeof g_lwNavHold); g_lwNav.watching = 0;
     g_lwSwap.unload = (LwNavUnloadFn)fn[0]; g_lwSwap.load = (LwNavLoadFn)fn[1];
     g_lwSwap.asyncMode = (uint8_t (*)(uintptr_t))fn[2]; g_lwSwap.inFlight = (uint8_t (*)(uintptr_t))fn[3]; g_lwSwap.stepDone = (uint8_t (*)(uintptr_t))fn[4];
@@ -428,9 +429,11 @@ int CoXlTestLwNavHoldBusy(void) { return LwNavHoldBusy(); }
 void CoXlTestLwNavHoldCounts(uint32_t* v)
 {
     v[0] = g_lwNavHold.held; v[1] = g_lwNavHold.longest; v[2] = g_lwNavHold.sumRaise; v[3] = g_lwNavHold.drains; v[4] = g_lwNavHold.marked;
-    v[5] = g_lwNavHold.sumRaise2; v[6] = g_lwNavHold.drainLines; v[7] = g_lwNavHold.longNoted[0] + g_lwNavHold.longNoted[1] + g_lwNavHold.longNoted[2] + g_lwNavHold.longNoted[3];
+    v[5] = g_lwNavHold.sumRaise2; v[6] = g_lwNavHold.sumBreaks; v[7] = g_lwNavHold.longNoted[0] + g_lwNavHold.longNoted[1] + g_lwNavHold.longNoted[2] + g_lwNavHold.longNoted[3];
 }
 int CoXlTestLwNavLeft(int read, uint32_t state) { return LwNavLeftAt(read, state); }
+/* An AI join of `ms` on this thread, as the hook counts it. */
+void CoXlTestLwFpJoin(double ms) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); g_lwFp.joinTicks += (int64_t)(ms * (double)f.QuadPart / 1000.0 + 0.5); }
 /* The lever on the AI world `w` at `now`: on, with requests `lat` s old, or off; the budget it leaves at w+0x47C. */
 float CoXlTestLwAibWorld(uintptr_t w, float stock, float lat, int on, ULONGLONG now)
 {

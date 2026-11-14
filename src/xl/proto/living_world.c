@@ -517,7 +517,7 @@ static void LwBbFrame(void); /* living_world_bpbuild.c, test instrument */
 static void LwInstallNavTime(void); /* living_world_navtime.c, test instrument */
 static void LwInstallNavJob(void); static void LwNavJobCmd(int mode); static void LwNjFrame(void); /* living_world_navjob.c */
 static void LwAibFrame(void); static void LwAibInit(void); static void LwAibCmd(int us, int raiseMs); /* living_world_aibudget.c */
-static void LwInstallFrameParts(void); /* living_world_fparts.c */
+static void LwInstallFrameParts(void); static double LwFpJoinTake(void); /* living_world_fparts.c */
 static void LwSemFrame(void); static void LwInstallSemCap(void); static void LwSemCapCmd(int on); /* living_world_semcap.c */
 static void LwRhFrame(void); static void LwInstallRenderHelp(void); static void LwRenderHelpCmd(int on); /* living_world_renderhelp.c */
 static void LwAllocStatsCmd(int mode); /* living_world_allocstats.c */
@@ -3241,6 +3241,7 @@ static void LwNavSwapLevel(void);
 #define LW_NAV_LONG_MS 30000   /* a hold this long is noted once a world and level; it goes on */
 #define LW_NAV_QUEUE_LONG 1024 /* more commands queued than this: the run that takes them needs the stock budget */
 #define LW_NAV_DRAIN_LINES 64  /* drain lines a level */
+#define LW_NAV_BREAK_LINES 16  /* lines a level for a tick with no game frame before it */
 #define LW_NAV_HOLD_WALK 4096  /* more records than the nav's jobs can make: the game's order */
 #define LW_NAV_HOLD_SEEN 64
 static struct
@@ -3261,6 +3262,9 @@ static struct
     uint32_t held, longest, drains, marked;        /* this level's; marked: built cells asked to rebuild */
     uint32_t drainLines; long slotLevel;           /* this level's drain lines; the level + 1 of the slot line */
     uint32_t sumHeld, sumLongest, sumDrains, sumRelaxed, sumRaise, sumRaise2;
+    uint32_t heldFrame, breakFrame;                /* the mod's tick + 1 of the last pop that left records; of the last break */
+    uint32_t breaks, sumBreaks;                    /* ticks given the game's order with no game frame before them */
+    uint8_t wasRaised; uint32_t joins; double joinSum, joinWorst; /* the AI joins of the frames after a raised budget */
 } g_lwNavHold;
 
 /* Between steps: no AI update runs (table +0x54, set and cleared around it at 0x7D8618 / 0x7D8726 and read first and
@@ -3316,13 +3320,17 @@ static int LwNavQueueLong(uintptr_t w) { return g_lwSwap.queued != NULL && LwNav
  * run is in flight. Asked once a frame by the budget lever, which counts for the summary. */
 static int LwNavHoldRaiseUs(uintptr_t h, ULONGLONG now)
 {
+    /* the step a raised budget ran in is joined before the next frame's call: its wait is what the raise costs */
+    double join = LwFpJoinTake();
+    if (g_lwNavHold.wasRaised) { g_lwNavHold.joins++; g_lwNavHold.joinSum += join; if (join > g_lwNavHold.joinWorst) g_lwNavHold.joinWorst = join; }
+    g_lwNavHold.wasRaised = 0;
     for (int i = 0; i < 4 && g_lwSwap.table && h; i++)
     {
         if (*(volatile uintptr_t*)(g_lwSwap.table + 0x80u * i) != h) continue;
         if (!g_lwNavHold.waiting[i] || !g_lwNavHold.oldAt[i] || !*(volatile uintptr_t*)(h + 0x4B0)) return 0;
         ULONGLONG age = now - g_lwNavHold.oldAt[i];
         if (age < LW_NAV_RAISE_MS) return 0;
-        g_lwNavHold.sumRaise++;
+        g_lwNavHold.sumRaise++; g_lwNavHold.wasRaised = 1;
         if (age < LW_NAV_RAISE2_MS) return LW_NAV_RAISE_US;
         g_lwNavHold.sumRaise2++;
         return LW_NAV_RAISE2_US;
@@ -3441,6 +3449,20 @@ static uintptr_t LwNavPopAt(uintptr_t list, uint32_t flush, ULONGLONG now)
         memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting);
         return LwNavPopHead(list, off);
     }
+    /* A tick ends at the pop that takes nothing. One that starts with no game frame since is a caller looping on the
+     * tick (it is also in the function table exe+0x27CD4E0, slot +0x50): a held record would never leave for it. */
+    if (g_lwNavHold.heldFrame == g_lwNavHold.frame + 1)
+    {
+        if (g_lwNavHold.breakFrame != g_lwNavHold.frame + 1)
+        {
+            g_lwNavHold.breakFrame = g_lwNavHold.frame + 1; g_lwNavHold.sumBreaks++;
+            if (g_lwNavHold.breaks++ < LW_NAV_BREAK_LINES)
+                Note("living world: nav: the cell tick ran again with no game frame between and completions held: the game's order for this tick "
+                    "(%u this level)", g_lwNavHold.breaks);
+        }
+        memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting);
+        return LwNavPopHead(list, off);
+    }
     for (int pass = 0; pass < 2; pass++)
     {
         uintptr_t plain = 0, plainPrev = 0, old[4] = {0, 0, 0, 0}, oldPrev[4], cell[4], prev = 0, c = 0;
@@ -3501,6 +3523,7 @@ static uintptr_t LwNavPopAt(uintptr_t list, uint32_t flush, ULONGLONG now)
             g_lwNavHold.oldAt[i] = old[i] ? LwNavSeenAt(old[i], g_lwNavHold.stuckAt[i]) : 0;
             if (old[i]) LwNavLongHold(i, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * i), now);
         }
+        g_lwNavHold.heldFrame = g_lwNavHold.frame + 1;
         return 0;
     }
     return 0;
@@ -3560,13 +3583,17 @@ static void LwNavSwapNote(const char* span)
     if (g_lwSwap.sumSwaps > 0 || g_lwSwap.sumNoLoad > 0 || g_lwNavHold.sumHeld > 0 || g_lwNavHold.sumDrains > 0)
         Note("living world: nav swaps (%s): %u on the frame thread, %.0f ms in all (worst %.1f ms): in-flight steps waited %.0f ms, synchronous steps %.0f ms "
             "(the last on %d thread(s); %u of %u steps on the AI update's runner this level); %u unload(s) with no load; %u completion(s) held, the longest "
-            "%u tick(s); %u drain(s) on the frame thread; %u swap(s) let through with other changes queued; AI budget raised on %u frame(s) (%u at %d us); "
+            "%u tick(s); %u drain(s) on the frame thread; %u swap(s) let through with other changes queued; "
             "this level %u swap(s) and %u unload(s) with no load for %u built cell(s) marked; %d of 1024 section slots", span, g_lwSwap.sumSwaps, g_lwSwap.sumMs, g_lwSwap.sumWorst, g_lwSwap.sumWait, g_lwSwap.sumStep, g_lwSwap.threads, g_lwSwap.parallel,
-            g_lwSwap.steps, g_lwSwap.sumNoLoad, g_lwNavHold.sumHeld, g_lwNavHold.sumLongest, g_lwNavHold.sumDrains, g_lwNavHold.sumRelaxed, g_lwNavHold.sumRaise,
-            g_lwNavHold.sumRaise2, LW_NAV_RAISE2_US, g_lwSwap.swaps,
+            g_lwSwap.steps, g_lwSwap.sumNoLoad, g_lwNavHold.sumHeld, g_lwNavHold.sumLongest, g_lwNavHold.sumDrains, g_lwNavHold.sumRelaxed, g_lwSwap.swaps,
             g_lwSwap.noLoad, g_lwNavHold.marked, LwNavSections());
     g_lwSwap.sumSwaps = g_lwSwap.sumNoLoad = 0; g_lwSwap.sumMs = g_lwSwap.sumWorst = g_lwSwap.sumStep = g_lwSwap.sumWait = 0;
+    if (g_lwNavHold.sumRaise > 0 || g_lwNavHold.sumBreaks > 0)
+        Note("living world: nav hold (%s): AI budget raised on %u frame(s) (%u at %d us); the AI joins after them %.2f ms on average, %.2f ms at worst "
+            "(%u frame(s)); %u tick(s) given the game's order with no game frame before them", span, g_lwNavHold.sumRaise, g_lwNavHold.sumRaise2,
+            LW_NAV_RAISE2_US, g_lwNavHold.joins ? g_lwNavHold.joinSum / g_lwNavHold.joins : 0.0, g_lwNavHold.joinWorst, g_lwNavHold.joins, g_lwNavHold.sumBreaks);
     g_lwNavHold.sumHeld = g_lwNavHold.sumLongest = g_lwNavHold.sumDrains = g_lwNavHold.sumRelaxed = g_lwNavHold.sumRaise = g_lwNavHold.sumRaise2 = 0;
+    g_lwNavHold.sumBreaks = g_lwNavHold.joins = 0; g_lwNavHold.joinSum = g_lwNavHold.joinWorst = 0;
     LwNavSlotGuard();
 }
 /* A new level: the last one's summary, then its counts start again. */
@@ -3577,7 +3604,7 @@ static void LwNavSwapLevel(void)
     g_lwSwap.level = g_world.levels;
     g_lwSwap.swaps = g_lwSwap.steps = g_lwSwap.parallel = g_lwSwap.lines = g_lwSwap.noLoad = 0;
     g_lwSwap.threads = 0; g_lwSwap.worstMs = 0;
-    g_lwNavHold.held = g_lwNavHold.longest = g_lwNavHold.drains = g_lwNavHold.marked = g_lwNavHold.drainLines = 0;
+    g_lwNavHold.held = g_lwNavHold.longest = g_lwNavHold.drains = g_lwNavHold.marked = g_lwNavHold.drainLines = g_lwNavHold.breaks = 0;
     memset(g_lwNavHold.stuckAt, 0, sizeof g_lwNavHold.stuckAt); memset(g_lwNavHold.seen, 0, sizeof g_lwNavHold.seen);
     memset(g_lwNavHold.oldAt, 0, sizeof g_lwNavHold.oldAt); memset(g_lwNavHold.longNoted, 0, sizeof g_lwNavHold.longNoted);
 }

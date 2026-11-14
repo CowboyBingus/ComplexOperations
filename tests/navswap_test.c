@@ -30,6 +30,7 @@ int CoXlTestLwNavWatch(uint16_t cx, uint16_t cy, uint32_t flags, uint32_t sectio
 float CoXlTestLwAibSteer(float stock, float cur, float lat);
 float CoXlTestLwAibWorld(uintptr_t w, float stock, float lat, int on, ULONGLONG now);
 int CoXlTestLwNavLeft(int read, uint32_t state);
+void CoXlTestLwFpJoin(double ms);
 
 static int g_failed;
 static const char* g_case;
@@ -492,7 +493,7 @@ static void TestHoldWaits(void)
     static uint8_t sections[0x48]; int32_t slots = 77;
     memcpy(sections + 0x40, &slots, 4); Put(g_aiw + 0x130, (uintptr_t)sections);
     CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
-    CHECK(fake_host_logged("1 completion(s) held, the longest 3 tick(s); 0 drain(s) on the frame thread; 0 swap(s) let through with other changes queued; AI budget raised on 0 frame(s) (0 at 8000 us); this level 1 swap(s) and 0 "
+    CHECK(fake_host_logged("1 completion(s) held, the longest 3 tick(s); 0 drain(s) on the frame thread; 0 swap(s) let through with other changes queued; this level 1 swap(s) and 0 "
         "unload(s) with no load for 0 built cell(s) marked; 77 of 1024 section slots"));
     ResetHold("other changes queued (cutters): it waits for the step that takes them, then goes with nothing queued");
     Section(IDX, 3, 40); g_queued = 1;
@@ -790,6 +791,31 @@ static void TestHoldRaise(void)
     ResetHold("a first build held behind an unapplied swap raises too; with nothing held, nothing");
     Flight(1); Budget(0.002f);
     CHECK(Tick(0, 1000) == 0 && Aib(1, 9000) == 0.0005f);
+    ResetHold("the AI joins after a raised budget, for the summary");
+    Section(IDX, 3, 40); Flight(1); Budget(0.002f);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 1000) == 0 && Aib(1, 1050) == 0.002f);
+    CoXlTestLwFpJoin(9.0);                 /* the join of a frame with the game's own budget: not counted */
+    CHECK(Aib(1, 1100) == 0.004f);
+    CoXlTestLwFpJoin(3.0);
+    CHECK(Aib(1, 1200) == 0.004f);
+    CoXlTestLwFpJoin(1.0); CoXlTestLwFpJoin(4.0); /* two joins in one frame */
+    Flight(0);
+    CHECK(Aib(1, 1300) == 0.002f);
+    CoXlTestLwFpJoin(7.0);
+    CHECK(Aib(1, 1400) == 0.002f);
+    CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
+    CHECK(fake_host_logged("living world: nav hold (30 s): AI budget raised on 2 frame(s) (0 at 8000 us); the AI joins after them 4.00 ms on average, 5.00 ms at worst "
+        "(2 frame(s)); 0 tick(s) given the game's order with no game frame before them"));
+    g_fake.log[0] = 0;
+    CoXlTestLwNavSwapSummary(61000);
+    CHECK(!fake_host_logged("nav hold (")); /* nothing raised since */
+    Flight(1);
+    CHECK(Aib(1, 2000) == 0.008f);
+    CoXlTestLwFpJoin(2.0);
+    CHECK(Aib(1, 2016) == 0.008f);
+    CoXlTestLwNavSwapSummary(91000);
+    CHECK(fake_host_logged("AI budget raised on 2 frame(s) (2 at 8000 us); the AI joins after them 2.00 ms on average, 2.00 ms at worst (1 frame(s)); 0 tick(s)"));
     ResetHold("records the flush tick took are not held any more");
     Section(IDX, 3, 40); Flight(1); Budget(0.002f);
     Push(0, IDX, 3, 0);
@@ -855,6 +881,65 @@ static void TestHoldOwnWait(void)
     NavState(IDX, 3); StepAtOnce(); Flight(1); g_joins = 0;
     Section(IDX, 4, 41); Push(1, IDX, 4, 0);
     CHECK(Tick(0, 5000) == 0 && Aib(1, 5099) == 0.002f && Aib(1, 5100) == 0.004f); /* waits from here, not from 1000 */
+}
+
+/* A caller that runs the tick again with no game frame between would wait for a held record for ever. */
+static void TestBreaker(void)
+{
+    uint32_t v[8];
+    ResetHold("a second tick with no game frame between: the game's order, with the drain");
+    Section(IDX, 3, 40); Flight(1);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 1000) == 0 && Tick(0, 1016) == 0 && g_waits == 0); /* one tick a frame: held */
+    uintptr_t rec = CoXlTestLwNavPop((uintptr_t)g_list, 0, 1032);     /* held, then again before the mod's tick */
+    CHECK(rec == 0);
+    rec = CoXlTestLwNavPop((uintptr_t)g_list, 0, 1032);
+    CHECK(rec == (uintptr_t)g_rec[0]);
+    CHECK(fake_host_logged("living world: nav: the cell tick ran again with no game frame between and completions held: the game's order for this tick (1 this level)"));
+    Process(rec, 0);
+    CHECK(g_waits == 1 && g_commits == 1 && fake_host_logged("a step finished on the frame thread (before an unload the pop did not let through; flush 0, "));
+    g_fake.log[0] = 0;
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 1032) == 0 && !fake_host_logged("ran again")); /* the same tick: one line */
+    HoldCounts(v);
+    CHECK(v[6] == 1);
+    CoXlTestLwNavSwapFrame();
+    StepAtOnce(); Flight(1);
+    Section(IDX, 4, 41); Push(1, IDX, 4, 0);
+    CHECK(Tick(0, 1048) == 0 && Tick(0, 1064) == 0 && !fake_host_logged("ran again")); /* a frame between: held again */
+    CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
+    CHECK(fake_host_logged("nav hold (30 s): AI budget raised on 0 frame(s) (0 at 8000 us); the AI joins after them 0.00 ms on average, 0.00 ms at worst (0 frame(s)); "
+        "1 tick(s) given the game's order"));
+    g_fake.log[0] = 0;
+    CoXlTestLwNavSwapSummary(61000);
+    CHECK(!fake_host_logged("nav hold ("));
+    ResetHold("ticks that left nothing held may repeat in a frame");
+    Push(0, IDX, 3, 0x80);
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 1000) == (uintptr_t)g_rec[0] && CoXlTestLwNavPop((uintptr_t)g_list, 0, 1000) == 0);
+    Section(IDX, 3, 40); Flight(1);
+    Push(1, IDX, 3, 0);
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 1000) == 0 && !fake_host_logged("ran again")); /* held from here */
+    ResetHold("its lines a level");
+    for (int n = 0; n < 17; n++)
+    {
+        Section(IDX, 3, 40); Flight(1);
+        Push(0, IDX, 3, 0);
+        g_fake.log[0] = 0;
+        CHECK(Tick(0, 1000 + 100 * n) == 0);
+        CoXlTestLwNavPop((uintptr_t)g_list, 0, 1000 + 100 * n); /* the mod's tick ran in Tick: this one holds */
+        rec = CoXlTestLwNavPop((uintptr_t)g_list, 0, 1000 + 100 * n);
+        CHECK(rec != 0 && (fake_host_logged("ran again") != 0) == (n < 16));
+        if (rec) Process(rec, 0);
+        CoXlTestLwNavSwapFrame(); StepAtOnce();
+    }
+    HoldCounts(v);
+    CHECK(v[6] == 17);
+    CoXlTestLwNavLevel(2);
+    Section(IDX, 3, 40); Flight(1);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 9000) == 0);
+    CoXlTestLwNavPop((uintptr_t)g_list, 0, 9000);
+    rec = CoXlTestLwNavPop((uintptr_t)g_list, 0, 9000);
+    CHECK(rec != 0 && fake_host_logged("for this tick (1 this level)"));
 }
 
 static void TestLeft(void)
@@ -959,6 +1044,7 @@ int main(void)
     TestHoldLong();
     TestHoldRaise();
     TestHoldOwnWait();
+    TestBreaker();
     TestLeft();
     TestSlots();
     TestHoldNoStarve();

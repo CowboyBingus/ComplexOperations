@@ -4,13 +4,14 @@
  * no timed part explains is told apart by these. Both hooks only time the game's call. */
 typedef uintptr_t (*LwFpJoinFn)(uintptr_t a);
 typedef uintptr_t (*LwFpWorldFn)(uintptr_t w, float a, float b);
-static struct { void *join, *world; } g_lwFp;
+static struct { void *join, *world; int64_t joinTicks; DWORD taker; } g_lwFp;
 
 static uintptr_t LwFpJoin(uintptr_t a)
 {
     int64_t t = co_framecost_now();
     uintptr_t out = ((LwFpJoinFn)g_lwFp.join)(a);
     co_framecost_extra(CO_FX_JOIN, t);
+    if (GetCurrentThreadId() == g_lwFp.taker) g_lwFp.joinTicks += co_framecost_now() - t;
     return out;
 }
 static uintptr_t LwFpWorld(uintptr_t w, float a, float b)
@@ -19,6 +20,13 @@ static uintptr_t LwFpWorld(uintptr_t w, float a, float b)
     uintptr_t out = ((LwFpWorldFn)g_lwFp.world)(w, a, b);
     co_framecost_extra(CO_FX_WORLD, t);
     return out;
+}
+/* The joins' time on the calling thread since its last call, in ms: the budget lever asks once a frame. */
+static double LwFpJoinTake(void)
+{
+    int64_t ticks = g_lwFp.joinTicks;
+    g_lwFp.joinTicks = 0; g_lwFp.taker = GetCurrentThreadId();
+    return LwNavMs(0, ticks);
 }
 static void LwInstallFrameParts(void)
 {
