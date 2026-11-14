@@ -447,11 +447,11 @@ void CoXlTestLwFight(int f, float x, float y, uint32_t age, uint32_t seenAgo, in
 }
 void CoXlTestLwFightsClear(void) { memset(g_lwFights, 0, sizeof g_lwFights); g_lwWorld.count = 0; }
 int CoXlTestLwFightNearest(float x, float y, float within, int skip) { float at[2] = {x, y}; return LwFightNearest(at, within, skip); }
-/* Squad i reinforcing fight f (intent 0 ends it: a patrol again). */
+/* Squad i reinforcing fight f (0: a patrol again, its fight cleared; 2: a patrol that still names the fight). */
 void CoXlTestLwFightSquad(int i, int f, int reinforcing)
 {
     LwSquad* q = &g_lwSquads[i]; memset(q, 0, sizeof *q);
-    q->state = LW_OFFLINE; q->intent = reinforcing ? LW_REINFORCE : LW_PATROL; q->fight = (int8_t)(reinforcing ? f : -1); q->fightBorn = reinforcing ? g_lwFights[f].born : 0;
+    q->state = LW_OFFLINE; q->intent = reinforcing == 1 ? LW_REINFORCE : LW_PATROL; q->fight = (int8_t)(reinforcing ? f : -1); q->fightBorn = reinforcing ? g_lwFights[f].born : 0;
     if (g_lwWorld.count <= i) g_lwWorld.count = i + 1;
 }
 int CoXlTestLwFightSends(int f, uint64_t now, uint64_t sentAgo) { g_lwFights[f].sentAt = sentAgo ? now - sentAgo : 0; return LwFightSends(f, now); }

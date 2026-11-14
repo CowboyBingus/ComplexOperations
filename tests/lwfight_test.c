@@ -38,7 +38,7 @@ static int Count(const char* text)
 /* A network config in the fake image, laid out as the engine's (exe 0x34C27E..0x34C2BC): descriptors of 24 bytes
  * (+0 name, +0xC kind, +0xD bits, +0x10 min, +0x14 max) at [cfg+0x18] x [cfg+0x10]; object types of 0x50 bytes at
  * [cfg+0x78] x [cfg+0x70], each +0x18 field count, +0x20 type indices, +0x38 field hashes. */
-enum { T_POS = 0, T_JOB, T_VEL, T_FAR, T_WAVE, T_INT, T_CLOUD, T_ODD, T_COUNT };
+enum { T_POS = 0, T_JOB, T_VEL, T_FAR, T_WAVE, T_INT, T_CLOUD, T_ODD, T_ASYM, T_COUNT };
 static uint8_t* g_cfg;
 static float* Range(int type) { return (float*)(g_cfg + 0x1000 + 24 * type + 0x10); }
 static void Desc(int type, uint32_t name, uint8_t kind, uint8_t bits, float lo, float hi)
@@ -67,13 +67,15 @@ static void Config(void)
     Desc(T_INT, 0x11111111u, 1, 12, 0.0f, 0.0f);
     Desc(T_CLOUD, 0xE5B502BFu, 3, 20, 0.0f, 1.0f);
     Desc(T_ODD, 0x22222222u, 3, 20, -100.0f, 100.0f);
+    Desc(T_ASYM, 0x44444444u, 3, 17, -2000.0f, 1000.0f);
     /* a unit: its job point first met through target_position, then job_position; a velocity; an int */
     const uint32_t h0[] = {0x7A4BDBBEu, 0xA4C332A8u, 0x8BBEB160u, 0xA5D1F45Bu, 0x33333333u}, t0[] = {T_JOB, T_JOB, T_POS, T_VEL, T_INT};
     /* a ragdoll: the far type first met through another field, then a position field; a cloud offset; a local offset */
     const uint32_t h1[] = {0xA5F83FA0u, 0x8BBEB160u, 0xB3048954u, 0x3C01F356u}, t1[] = {T_FAR, T_FAR, T_CLOUD, T_ODD};
     /* a wave: a +-2000 vector3 no known position field uses; a type index past the table */
-    const uint32_t h2[] = {0xFCB39823u, 0x8BBEB160u, 0x8BBEB160u}, t2[] = {T_WAVE, 999, T_POS};
-    Object(0, 5, h0, t0); Object(1, 4, h1, t1); Object(2, 3, h2, t2);
+    /* and a position field whose type's range is not symmetric: left, with a line */
+    const uint32_t h2[] = {0xFCB39823u, 0x8BBEB160u, 0x8BBEB160u, 0x8BBEB160u}, t2[] = {T_WAVE, 999, T_POS, T_ASYM};
+    Object(0, 5, h0, t0); Object(1, 4, h1, t1); Object(2, 4, h2, t2);
 }
 static void NetRanges(void)
 {
@@ -95,6 +97,7 @@ static void NetRanges(void)
         if (types[k] == T_WAVE) { seen |= 16; CHECK(widen[k] == 0); }
     }
     CHECK(seen == 31);
+    CHECK(Count("network position type 8 is not a symmetric vector3 (-2000.0 .. 1000.0, 17 bits); left as it is") == 1);
     g_case = "a vanilla level leaves vanilla's ranges";
     CHECK(Range(T_JOB)[0] == -2000.0f && Range(T_JOB)[1] == 2000.0f && Range(T_POS)[1] == 2000.0f);
     g_case = "an extra large level widens the position types only, to +-1024 (scale + 1)";
@@ -105,6 +108,7 @@ static void NetRanges(void)
     CHECK(Range(T_FAR)[0] == -10000.0f && Range(T_FAR)[1] == 10000.0f); /* already wider: kept */
     CHECK(Range(T_VEL)[0] == -2000.0f && Range(T_VEL)[1] == 2000.0f);   /* a velocity is not widened */
     CHECK(Range(T_WAVE)[1] == 2000.0f && Range(T_ODD)[1] == 100.0f && Range(T_CLOUD)[1] == 1.0f);
+    CHECK(Range(T_ASYM)[0] == -2000.0f && Range(T_ASYM)[1] == 1000.0f);
     CHECK(g_cfg[0x1000 + 24 * T_JOB + 0xD] == 12 && g_cfg[0x1000 + 24 * T_POS + 0xD] == 17); /* the bits stay: the wire layout is the same */
     g_case = "the next vanilla level gets vanilla's ranges back";
     r = CoXlTestNetVec((uintptr_t)g_cfg, 1.0f, types, widen, fields, 16, &pos, &jobs);
@@ -193,6 +197,12 @@ static void Fights(void)
     CHECK(CoXlTestLwFightSends(0, now, 10000) == 1);
     CoXlTestLwFightSquad(0, 0, 0); CoXlTestLwFightSquad(2, 0, 0);
     CHECK(CoXlTestLwFightSends(0, now, 60000) == 3);
+    CoXlTestLwFightSquad(1, 0, 2); /* its intent is over though it still names the fight: not counted */
+    CHECK(CoXlTestLwFightSends(0, now, 60000) == 3);
+    g_case = "a fight never wants more than three squads";
+    CoXlTestLwFightsClear();
+    CoXlTestLwFight(0, 0, 0, 60000, 0, 76, now); /* run 2's fight: at most 76 engaged */
+    CHECK(CoXlTestLwFightSends(0, now, 0) == 3);
     g_case = "a small fight wants one squad, and none before it has lasted 5 s";
     CoXlTestLwFightsClear();
     CoXlTestLwFight(0, 0, 0, 4000, 0, 2, now);
