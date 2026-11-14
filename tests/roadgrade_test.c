@@ -1513,6 +1513,18 @@ static void Meet(void)
         printf("  a spur between arterials 30 m apart in height: the arterials move %.3f m, the spur's top stands at %.1f m\n", (double)moved3, (double)spurTop);
         CHECK(moved3 < 0.02f && spurTop > 100.0f && spurTop < 129.0f);
     }
+    g_case = "two spurs that leave one junction 20 degrees apart run side by side: tied, not levelled";
+    {
+        static float fan[2 * 115]; uint32_t untied = 0;
+        static const uint32_t three[3] = {68, 31, 16};
+        static const uint32_t six[6] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+        g_meetAlong = 0.0f; g_meetSpur = 0.2f;
+        for (uint32_t i = 0; i < 68; i++) { fan[2 * i] = 999.0f + 6.0f * (float)i; fan[2 * i + 1] = 2000.0f; }
+        for (uint32_t i = 0; i < 31; i++) { fan[2 * (68 + i)] = 1200.0f; fan[2 * (68 + i) + 1] = 2300.0f - 10.0f * (float)i; }
+        for (uint32_t i = 0; i < 16; i++) { fan[2 * (99 + i)] = 1200.0f + 3.64f * (float)(15 - i); fan[2 * (99 + i) + 1] = 2000.0f + 10.0f * (float)(15 - i); }
+        CHECK(CoXlTestGradeRoads(fan, three, six, 3, 2, GroundMeet, 4096.0f, 4000.0f, out) >= 0 && out[0] == 0.0 && out[1] == 0.0);
+        CHECK(CoXlTestGradeTies(&untied) >= 1 && untied == 0);
+    }
     g_meetAlong = 0.06f; g_meetSpur = 0.11f;
 
     g_case = "junction: a road that only bends gently has no landing";
