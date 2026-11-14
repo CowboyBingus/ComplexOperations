@@ -14,6 +14,7 @@ uint32_t CoXlTestRoadsLeftOut(const uint8_t* recs, uint32_t n, const uint8_t* ta
 float CoXlTestRoadsSpacing(const uint8_t* recs, uint32_t n, const uint8_t* taken, uint32_t used, uint32_t capacity, uint32_t* total, uint32_t* left);
 void CoXlTestRoadSpacingBuild(uint8_t* stub, uintptr_t constant, uintptr_t back);
 void CoXlTestRoadSpacingAt(uint8_t* stub);
+const char* CoXlTestInstallRoadSpacing(uintptr_t game, uint8_t** stub);
 void CoXlTestRoadsSpacingBegin(uintptr_t block, uint64_t record);
 void CoXlTestRoadsSpacingEnd(void);
 uint32_t CoXlTestRoadsArterials(const uint8_t* recs, uint32_t edges, const uint32_t* ends, const float* nodeXY, uint32_t nodes, const float* termXY, uint32_t terms,
@@ -232,6 +233,29 @@ static void Layout(void)
     CoXlTestGame((uintptr_t)g_fake.image);
 }
 static void Edges(uint32_t n) { Put32(g_block + 0x11A71CCu, n); memcpy(g_block + EDGES_AT, g_recs, n * 0x48u); }
+
+/* The install on the fake image: op 0x0E's site jumps into the stub, and the stub's page is code (the game faulted
+ * executing a data page there). */
+static void Install(void)
+{
+    static const uint8_t keep[5] = {0x48, 0x89, 0x4C, 0x24, 0x78};
+    static const uint8_t site[31] = {0x41, 0x0F, 0x28, 0xC4, 0xF3, 0x0F, 0x5E, 0x05, 0x77, 0xE7, 0x48, 0x01, 0xF3, 0x44, 0x0F, 0x58, 0xF1, 0xF3, 0x41, 0x0F, 0x58,
+        0xC5, 0xF3, 0x48, 0x0F, 0x2C, 0xF0, 0x8D, 0x46, 0x02, 0x3B};
+    const float five = 5.0f;
+    uint8_t* stub = NULL;
+    g_case = "install: the stub is code and op 0x0E's division jumps to it";
+    memcpy(g_fake.image + 0xF386AFu, keep, sizeof keep); memcpy(g_fake.image + 0xF38D21u, site, sizeof site); g_fake.image[0xF38D21u + 31] = 0xC8;
+    CHECK(CoXlTestInstallRoadSpacing((uintptr_t)g_fake.image, &stub) != NULL); /* not the game's 5.0 there */
+    memcpy(g_fake.image + 0x23C74A4u, &five, 4);
+    const char* why = CoXlTestInstallRoadSpacing((uintptr_t)g_fake.image, &stub);
+    CHECK(why == NULL);
+    if (why != NULL || stub == NULL) return;
+    MEMORY_BASIC_INFORMATION page;
+    CHECK(VirtualQuery(stub, &page, sizeof page) == sizeof page && page.State == MEM_COMMIT && page.Protect == PAGE_EXECUTE_READWRITE);
+    int32_t rel; memcpy(&rel, g_fake.image + 0xF38D26u, 4);
+    CHECK(g_fake.image[0xF38D25u] == 0xE9 && g_fake.image + 0xF38D2Au + rel == stub && g_fake.image[0xF38D2Au] == 0x90 && g_fake.image[0xF38D2Cu] == 0x90);
+    CHECK(stub[0] == 0x48 && stub[0x3F] == 0xCC ? 1 : stub[0] == 0x48); /* the stub's first instruction is there */
+}
 
 static void SpacingGlue(void)
 {
@@ -651,6 +675,7 @@ int main(void)
     g_block = (uint8_t*)VirtualAlloc(NULL, BLOCK_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (g_block == NULL) { printf("roadbuild: no memory\n"); return 1; }
     Layout();
+    Install();
     SpacingGlue();
     ArterialsGlue();
     VirtualFree(g_block, 0, MEM_RELEASE);

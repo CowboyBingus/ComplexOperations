@@ -89,6 +89,9 @@ static const char* InstallRoadSpacing(uintptr_t game)
     uint8_t* stub = AllocateNearGame(game, 0x40);
     if (stub == NULL) return "no memory within 2 GB of game.dll for op 0x0E's road point spacing";
     RoadSpacingBuild(stub, game + 0x23C74A4u, game + 0xF38D2Du);
+    DWORD protect; /* the allocator's pages are data: op 0x0E jumps into this one */
+    if (!VirtualProtect(stub, 0x40, PAGE_EXECUTE_READWRITE, &protect)) return "op 0x0E's road point spacing stub could not be made code";
+    FlushInstructionCache(GetCurrentProcess(), stub, 0x40);
     uint8_t jump[8] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90};
     int32_t rel = DifficultyJumpRel(game + 0xF38D25u, (uintptr_t)stub); memcpy(jump + 1, &rel, 4);
     if (ApiWrite(game + 0xF38D25u, jump, 8)) return "op 0x0E's road point spacing could not be written";
