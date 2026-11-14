@@ -59,7 +59,7 @@ static struct
     volatile LONG armed, live, switching, alive, tickAt;
     SwitchFn sw;
     volatile LONG tickThread;
-    uint64_t held, atOnce, stock, sentOn, sentOff, skips, makesOff, destroysOff;
+    uint64_t held, atOnce, noWorld, stock, sentOn, sentOff, skips, makesOff, destroysOff;
     SRWLOCK lock;
     CoCutSet set;
     void* memory;
@@ -67,25 +67,35 @@ static struct
     uint64_t trees, others, unbound, destroyed;
 } g_rec;
 
+/* The mission world's AI world and pool as they read now; 1 when there are both. The engine's switch reads the
+ * pool and hands the AI world on with no test of either (0x812B3F, 0x812BB4), so it is called only with both. */
+static int Worlds(uintptr_t* world, uintptr_t* pool)
+{
+    *world = *(const uintptr_t*)(g_cut.exe + CO_CUTTERS_AI_WORLDS + 0x80u * CO_CUTTERS_WORLD);
+    *pool = *(const uintptr_t*)(g_cut.exe + CO_CUTTERS_POOLS + 8u * CO_CUTTERS_WORLD);
+    return *world != 0 && *pool != 0;
+}
+
 /* The AI world and the pool the set's handles are of, read anew: either one changed or gone drops every record. */
 static int Bound(void)
 {
-    const uintptr_t world = *(const uintptr_t*)(g_cut.exe + CO_CUTTERS_AI_WORLDS + 0x80u * CO_CUTTERS_WORLD);
-    const uintptr_t pool = *(const uintptr_t*)(g_cut.exe + CO_CUTTERS_POOLS + 8u * CO_CUTTERS_WORLD);
+    uintptr_t world, pool;
     uint32_t mask = g_rec.set.mask;
-    if (world == 0 || pool == 0) return co_cutset_bind(&g_rec.set, 0, 0, 0);
+    if (!Worlds(&world, &pool)) return co_cutset_bind(&g_rec.set, 0, 0, 0);
     /* a mask that does not read keeps the binding as it is: dropping the records would strand held-back cutters */
     if (pool != g_rec.set.pool && co_safe_read(pool + CO_CUTTERS_MASK, &mask, 4)) return g_rec.set.world != 0;
     return co_cutset_bind(&g_rec.set, world, pool, mask);
 }
 
 /* A cutter of the mission's world was made: a tree's is recorded, any other only frees its slot of an old record.
- * `lit`: the game added it itself. `held`: the mod held its add back, so with no record it is added here, at once.
+ * `lit`: the game added it itself. `held`: the mod held its add back, so with no record it is added here, at once,
+ * unless the AI world or the pool went during the make: then nothing can add it, and it is counted.
  * The engine's switch reads the cutter before it takes any lock (0x812B90): it is called only under the set's lock,
  * where a destroy on another thread still waits in its hook, and for a handle of a pool that exists. */
 static void Recorded(uint32_t handle, int tree, float x, float y, int wanted, int lit, int held)
 {
     int made = 0;
+    uintptr_t world, pool;
     AcquireSRWLockExclusive(&g_rec.lock);
     if (g_rec.tickThread != 0 && (LONG)GetCurrentThreadId() != g_rec.tickThread) g_rec.makesOff++;
     if (!g_rec.live || !Bound()) g_rec.unbound++;
@@ -96,7 +106,8 @@ static void Recorded(uint32_t handle, int tree, float x, float y, int wanted, in
         if (lit) { co_cutset_on(&g_rec.set, handle); g_rec.stock++; }
     }
     if (held && made) g_rec.held++;
-    else if (held) { g_rec.sw(&handle, 1, 1); g_rec.atOnce++; }
+    else if (held && Worlds(&world, &pool)) { g_rec.sw(&handle, 1, 1); g_rec.atOnce++; }
+    else if (held) g_rec.noWorld++;
     ReleaseSRWLockExclusive(&g_rec.lock);
 }
 
@@ -283,7 +294,7 @@ int co_cutters_tick(const CoCutCentre* centres, uint32_t count, uint32_t nowMs, 
         g_rec.sentOn += g_rec.tick.adds; g_rec.sentOff += g_rec.tick.removes;
         if (out->bound && out->hooked) { InterlockedExchange(&g_rec.tickAt, (LONG)nowMs); InterlockedExchange(&g_rec.alive, 1); }
     }
-    out->held = g_rec.held; out->stock = g_rec.stock; out->atOnce = g_rec.atOnce; out->makesOff = g_rec.makesOff; out->destroysOff = g_rec.destroysOff; out->stranded = s->stranded; out->sentOn = g_rec.sentOn; out->sentOff = g_rec.sentOff; out->skips = g_rec.skips;
+    out->held = g_rec.held; out->stock = g_rec.stock; out->atOnce = g_rec.atOnce; out->noWorld = g_rec.noWorld; out->makesOff = g_rec.makesOff; out->destroysOff = g_rec.destroysOff; out->stranded = s->stranded; out->sentOn = g_rec.sentOn; out->sentOff = g_rec.sentOff; out->skips = g_rec.skips;
     out->capped = g_rec.tick.capped; out->adds = g_rec.tick.adds; out->removes = g_rec.tick.removes; out->shed = g_rec.tick.shed;
     out->waiting = g_rec.tick.waiting; out->over = g_rec.tick.over;
     out->records = s->records; out->wanted = s->wanted; out->on = s->on; out->cap = s->cap; out->world = s->world;

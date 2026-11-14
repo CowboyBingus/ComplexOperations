@@ -65,9 +65,10 @@ typedef struct CoCuttersTick
     double us, holdUs; /* the tick, and the part of it under the set's lock (the engine's adds are inside it) */
     uint64_t makesOff, destroysOff, stranded; /* makes and destroys on a thread other than the tick's; records dropped while they waited */
     /* switching: the tick was skipped with the AI step in flight; makes held back, added by the game with no tick
-     * alive, added at once because the record was refused; handles sent to the switch */
+     * alive, added at once because the record was refused, or not added (the AI world or the pool had gone); handles
+     * sent to the switch */
     int skipped;
-    uint64_t held, stock, atOnce, sentOn, sentOff, skips;
+    uint64_t held, stock, atOnce, noWorld, sentOn, sentOff, skips;
 } CoCuttersTick;
 /* One tick of the set over these centres, game thread: what it would add and remove, counted as done. Record only:
  * nothing is sent to the engine. Switching: sent to CO_CUTTERS_SWITCH in batches, unless the AI step is in flight

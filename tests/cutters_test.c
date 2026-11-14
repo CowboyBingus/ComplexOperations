@@ -32,11 +32,21 @@ static void EngineDestroy(const uint32_t* handles, uint32_t count)
 }
 
 static uint32_t g_makeAnswer, g_makes, g_addSeen;
-static int g_makeDropsWorld; /* the AI world goes while the engine makes the cutter */
+/* While the engine makes the cutter: 1 the AI world goes, 2 the pool goes, 3 another pool takes its place whose
+ * mask the set cannot hold, 4 the level ends. */
+static int g_makeDropsWorld;
+static uint8_t g_poolWide[0x40];
 static uint32_t EngineMake(const void* description)
 {
     g_makes++; g_addSeen = ((const uint32_t*)description)[3];
-    if (g_makeDropsWorld) memset(g_exe + CO_CUTTERS_AI_WORLDS + 0x80u * CO_CUTTERS_WORLD, 0, 8);
+    if (g_makeDropsWorld == 1) memset(g_exe + CO_CUTTERS_AI_WORLDS + 0x80u * CO_CUTTERS_WORLD, 0, 8);
+    if (g_makeDropsWorld == 2) memset(g_exe + CO_CUTTERS_POOLS + 8u * CO_CUTTERS_WORLD, 0, 8);
+    if (g_makeDropsWorld == 3)
+    {
+        const uint32_t mask = 0x1FFFFF; const uint64_t at = (uint64_t)(uintptr_t)g_poolWide;
+        memcpy(g_poolWide + CO_CUTTERS_MASK, &mask, 4); memcpy(g_exe + CO_CUTTERS_POOLS + 8u * CO_CUTTERS_WORLD, &at, 8);
+    }
+    if (g_makeDropsWorld == 4) co_cutters_live(0);
     return g_makeAnswer;
 }
 
@@ -412,12 +422,29 @@ int main(void)
         g_makeAnswer = 0x8101000Bu;
         CHECK(co_cutters_test_make(&d, forest) == 0x8101000Bu && g_addSeen == 1 && s->on == 1);
         CHECK(co_cutters_tick(&away, 1, GetTickCount(), 0, &t) == 1 && t.stock == 2 && t.atOnce == 0);
-        /* held back, and the AI world went during the make: no record, so the cutter is added at once */
-        g_makeDropsWorld = 1; g_makeAnswer = 0x8101000Cu; g_swCalls = g_swOnCount = 0;
+        /* held back, and a pool the set cannot hold came during the make: no record, so the cutter is added at once */
+        g_makeDropsWorld = 3; g_makeAnswer = 0x8101000Cu; g_swCalls = g_swOnCount = 0;
         CHECK(co_cutters_test_make(&d, forest) == 0x8101000Cu && g_addSeen == 0 && memcmp(&d, &was, sizeof d) == 0);
         CHECK(g_swCalls == 1 && g_swOnCount == 1 && g_swOn[0] == 0x8101000Cu);
+        g_makeDropsWorld = 0; Pool(100, 65536);
+        CHECK(co_cutters_tick(&away, 1, GetTickCount(), 0, &t) == 1 && t.atOnce == 1 && t.noWorld == 0 && t.records == 0);
+        /* held back, and the AI world went during the make: the engine's switch would read through a null, so it
+         * is not called and the cutter is counted */
+        g_makeDropsWorld = 1; g_makeAnswer = 0x8101000Eu; g_swCalls = g_swOnCount = 0;
+        CHECK(co_cutters_test_make(&d, forest) == 0x8101000Eu && g_addSeen == 0 && memcmp(&d, &was, sizeof d) == 0);
+        CHECK(g_swCalls == 0);
         g_makeDropsWorld = 0; AiWorld(0x5000);
-        CHECK(co_cutters_tick(&away, 1, GetTickCount(), 0, &t) == 1 && t.atOnce == 1 && t.records == 0);
+        CHECK(co_cutters_tick(&away, 1, GetTickCount(), 0, &t) == 1 && t.atOnce == 1 && t.noWorld == 1 && t.records == 0);
+        /* the same with the pool gone */
+        g_makeDropsWorld = 2; g_makeAnswer = 0x8101000Fu;
+        CHECK(co_cutters_test_make(&d, forest) == 0x8101000Fu && g_addSeen == 0 && g_swCalls == 0);
+        g_makeDropsWorld = 0; Pool(100, 65536);
+        CHECK(co_cutters_tick(&away, 1, GetTickCount(), 0, &t) == 1 && t.atOnce == 1 && t.noWorld == 2);
+        /* the level ended during the make, the world and the pool still there: added at once */
+        g_makeDropsWorld = 4; g_makeAnswer = 0x81010010u;
+        CHECK(co_cutters_test_make(&d, forest) == 0x81010010u && g_addSeen == 0 && g_swCalls == 1 && g_swOn[0] == 0x81010010u);
+        g_makeDropsWorld = 0; co_cutters_live(1);
+        CHECK(co_cutters_tick(&away, 1, GetTickCount(), 0, &t) == 1 && t.atOnce == 2 && t.noWorld == 2);
         /* more adds than a batch: 64 a call */
         for (uint32_t i = 0; i < 150; i++) { g_makeAnswer = 0x81010100u + i; co_cutters_test_make(&d, forest); }
         g_swCalls = g_swOnCount = g_swBiggest = 0;
