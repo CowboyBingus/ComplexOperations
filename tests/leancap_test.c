@@ -46,9 +46,11 @@ typedef float* (*LimitFn)(uintptr_t mgr, float* out, float* up);
 
 /* The game's limit as the fake: what it was handed; its answer is the up it was given, written to out and returned. */
 static struct { int calls; uintptr_t mgr; float *out, *up; } g_limit;
+static float g_during = -1.0f; /* degrees set while the game's call runs, as the research switch may; under 0: none */
 static float* FakeLimit(uintptr_t mgr, float* out, float* up)
 {
     g_limit.calls++; g_limit.mgr = mgr; g_limit.out = out; g_limit.up = up;
+    if (g_during >= 0.0f) CoXlTestLeanSet(g_during);
     memcpy(out, up, 12);
     return out;
 }
@@ -333,6 +335,17 @@ int main(void)
     CoXlTestLeanSet(15.0f);
     CHECK(Through(four, 20.0f, 15.0f));
     CHECK(Is(g_out, 15.0f, 15.0f));
+    CoXlTestLeanCounts(c);
+
+    g_case = "the degrees change while a pose is under way: the pose keeps the ones it began with";
+    CoXlTestLeanSet(25.0f);
+    g_during = 0.0f;
+    CHECK(Through(four, 40.0f, 15.0f) && Is(g_out, 25.0f, 15.0f) && CoXlTestLeanDeg() == 0.0f);
+    g_during = 10.0f;
+    CHECK(Through(four, 40.0f, 15.0f) && Is(g_out, 40.0f, 15.0f) && CoXlTestLeanDeg() == 10.0f); /* began with none */
+    g_during = 25.0f;
+    CHECK(Through(four, 40.0f, 15.0f) && Is(g_out, 10.0f, 15.0f));
+    g_during = -1.0f;
     CoXlTestLeanCounts(c);
 
     g_case = "the 30 s line";

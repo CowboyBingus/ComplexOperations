@@ -91,9 +91,9 @@ static float* LwLeanLimit(uintptr_t mgr, float* out, float* up)
         InterlockedIncrement(&g_lwLean.poses);
         if (LwLeanDot(up, g_lwLean.world) < LW_LEAN_GAME) InterlockedIncrement(&g_lwLean.game);
     }
+    const float deg = LwLeanDeg(); /* read once: a change while this pose is under way never gives it two values */
     float* held = g_lwLean.orig(mgr, out, up);
     float slope;
-    const float deg = LwLeanDeg(); /* read once: the pose keeps one value */
     if (!four || deg == 0.0f || !LwLive()) return held;
     if (!set || !LwLeanSlope(t_lwLean.x, t_lwLean.y, &slope)) { InterlockedIncrement(&g_lwLean.blind); return held; }
     /* the game writes its answer to both, and its caller reads the one returned (0x622D7A) */
