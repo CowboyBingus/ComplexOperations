@@ -38,6 +38,10 @@ void CoXlTestGradeMeasures(float (*height)(void*, float, float), float (*base)(v
 float CoXlTestGradeDetail(float world, float playable, float wx, float wy);
 float CoXlTestNearFine(const float* heights, int side, int c, int r);
 
+int CoXlTestGradeRoads(const float* pts, const uint32_t* counts, const uint32_t* ends, uint32_t chains, int spur, float (*ground)(float, float), float world,
+    float playable, double out[6]);
+int CoXlTestGradeStationPin(uint32_t i, float* xy, float* target, float* ground);
+
 static int g_failed, g_checked;
 static const char* g_case = "";
 #define CHECK(what) do { g_checked++; if (!(what)) { printf("FAILED %s: %s\n", g_case, #what); g_failed++; } } while (0)
@@ -1271,8 +1275,104 @@ static void InPlace(void)
     CHECK(CoXlTestGradeInPlace(world, playable, mid + 10.0f, mid, &open) == 0 && open == 7.0f);
 }
 
+/* ---- where roads meet ---- */
+static float g_meetAlong, g_meetSpur;
+/* a hillside that falls along the arterial (x) and, north of it, towards it along the spur (y) */
+static float GroundMeet(float x, float y) { return 100.0f + g_meetAlong * (x - 1200.0f) + (y > 2000.0f ? g_meetSpur * (y - 2000.0f) : 0.0f); }
+static float FieldAt(void* c, float x, float y) { float z = NAN, d; (void)c; return CoXlTestGradeFieldAt(x, y, &z, &d) > 0.0f ? z : NAN; }
+static void Meet(void)
+{
+    static float pts[2 * 128];
+    static const uint32_t counts[2] = {68, 31}, ends[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    double out[6], m[8];
+    /* an arterial west to east, a point every 6 m; a spur from the north, every 10 m, onto its middle */
+    for (uint32_t i = 0; i < 68; i++) { pts[2 * i] = 999.0f + 6.0f * (float)i; pts[2 * i + 1] = 2000.0f; }
+    for (uint32_t i = 0; i < 31; i++) { pts[2 * (68 + i)] = 1200.0f; pts[2 * (68 + i) + 1] = 2300.0f - 10.0f * (float)i; }
+    CoXlTestGradePads(NULL, 0);
+
+    g_case = "junction: the roads about it are held near level, so neither bed takes the other's grade as a cross slope";
+    g_meetAlong = 0.06f; g_meetSpur = 0.11f; /* 3.4 degrees along the arterial, 6.3 down the spur: no link needs the steep rule */
+    CHECK(CoXlTestGradeRoads(pts, counts, ends, 2, 1, GroundMeet, 4096.0f, 4000.0f, out) >= 0);
+    CHECK(out[0] == 1.0 && out[1] >= 8.0 && out[1] <= 12.0); /* one landing: 20 m of each of the three arms */
+    uint32_t node = 0xFFFFFFFFu, near_ = 0; float worst = 0.0f, beyond = 0.0f;
+    for (uint32_t i = 0; i < 68 + 31; i++)
+    {
+        float xy[2], t, g;
+        CoXlTestGradeStationPin(i, xy, &t, &g);
+        if (fabsf(xy[0] - 1200.0f) < 0.5f && fabsf(xy[1] - 2000.0f) < 0.5f) node = i;
+    }
+    CHECK(node != 0xFFFFFFFFu);
+    if (node != 0xFFFFFFFFu)
+    {
+        float at[2], top, g;
+        CoXlTestGradeStationPin(node, at, &top, &g);
+        for (uint32_t i = 0; i < 68 + 31; i++)
+        {
+            float xy[2], t;
+            CoXlTestGradeStationPin(i, xy, &t, &g);
+            const float away = fabsf(xy[0] - at[0]) + fabsf(xy[1] - at[1]);
+            if (i == node || away < 0.5f) continue;
+            if (away <= 20.5f) { near_++; if (fabsf(t - top) / away > worst) worst = fabsf(t - top) / away; }
+            else if (away < 60.0f && fabsf(t - top) / away > beyond) beyond = fabsf(t - top) / away;
+        }
+    }
+    CHECK(near_ >= 7 && worst <= 0.0350f); /* tan 2 degrees */
+    CHECK(beyond > 0.045f && out[5] <= 0.1228);                 /* past the landing the roads take the hill again */
+    CoXlTestGradeMeasures(FieldAt, NULL, pts, 68, m);
+    CHECK(m[5] <= 4.5 && m[2] <= 7.5); /* the arterial: across its bed (the two roads' 2 degrees add up), and its 2 m step */
+    CoXlTestGradeMeasures(FieldAt, NULL, pts + 2 * 68, 31, m);
+    CHECK(m[5] <= 4.5 && m[2] <= 7.5); /* the spur */
+
+    g_case = "junction on a hillside the hard limit cannot follow: the landing still holds, the steep rule takes the rest";
+    g_meetAlong = 0.11f; g_meetSpur = 0.2f; /* 6.3 degrees along the arterial, 11.3 down the spur */
+    CHECK(CoXlTestGradeRoads(pts, counts, ends, 2, 1, GroundMeet, 4096.0f, 4000.0f, out) >= 0 && out[0] == 1.0 && out[4] > 0.0 && out[5] <= 0.3250);
+    CoXlTestGradeMeasures(FieldAt, NULL, pts, 68, m);
+    CHECK(m[5] <= 4.5 && m[2] <= 19.0);
+    CoXlTestGradeMeasures(FieldAt, NULL, pts + 2 * 68, 31, m);
+    CHECK(m[5] <= 4.5 && m[2] <= 19.0);
+
+    g_case = "junction: a road that only bends gently has no landing";
+    { static const uint32_t one[1] = {68}; CHECK(CoXlTestGradeRoads(pts, one, ends, 1, 0, GroundMeet, 4096.0f, 4000.0f, out) >= 0 && out[0] == 0.0 && out[1] == 0.0); }
+
+    g_case = "junction: a corner of over 30 degrees is one";
+    for (uint32_t i = 34; i < 68; i++) { pts[2 * i] = pts[2 * 33] + 4.0f * (float)(i - 33); pts[2 * i + 1] = 2000.0f + 4.5f * (float)(i - 33); }
+    { static const uint32_t one[1] = {68}; CHECK(CoXlTestGradeRoads(pts, one, ends, 1, 0, GroundMeet, 4096.0f, 4000.0f, out) >= 0 && out[0] == 1.0 && out[1] >= 6.0); }
+}
+
+/* ---- pads the hard limit cannot join ---- */
+static void PadsApart(void)
+{
+    enum { K = 24 };
+    static float target[K]; double out[7];
+    const uint32_t count = Chain(K);
+    for (uint32_t i = 0; i < K; i++) g_gaps[i] = 6.0f;
+
+    g_case = "two pads 96 m apart and 14 m in height: the road between them climbs more than 7 degrees and meets both";
+    for (uint32_t i = 0; i < K; i++)
+    {
+        g_pinned[i] = i < 4 || i >= 20;
+        g_ground[i] = i < 4 ? 10.0f : i >= 20 ? 24.0f : 10.0f + 14.0f * (float)(i - 3) / 17.0f;
+    }
+    CHECK(CoXlTestGradeSteep(g_ground, g_pinned, NULL, K, g_links, g_gaps, count, 0.0787017f, 0.1227846f, 0.3249197f, 4.0f, 16, target, out) == 0);
+    CHECK(fabsf(target[3] - 10.0f) < 0.01f && fabsf(target[20] - 24.0f) < 0.01f && fabsf(target[0] - 10.0f) < 0.01f);
+    CHECK(out[0] >= 16.0 && out[4] > 8.3 && out[4] < 12.5); /* the 16 links between them may; 14 m in 96 m is 8.3 degrees, steeper at the pads where the worn path eases in */
+    for (uint32_t i = 4; i < 20; i++) CHECK(fabsf(target[i] - g_ground[i]) < 1.1f);
+
+    g_case = "the same pads with the hard limit alone: both are missed, as before";
+    CHECK(CoXlTestGradeSteep(g_ground, g_pinned, NULL, K, g_links, g_gaps, count, 0.0787017f, 0.1227846f, 0.1227846f, 4.0f, 16, target, out) > 0);
+    CHECK(target[3] - 10.0f > 0.5f && 24.0f - target[20] > 0.5f);
+
+    g_case = "pads further apart in height than 18 degrees joins stay missed and counted";
+    for (uint32_t i = 20; i < K; i++) g_ground[i] = 60.0f;
+    CHECK(CoXlTestGradeSteep(g_ground, g_pinned, NULL, K, g_links, g_gaps, count, 0.0787017f, 0.1227846f, 0.3249197f, 4.0f, 16, target, out) > 0);
+    CHECK(target[3] - 10.0f > 1.0f && out[4] <= 18.05);
+    memset(g_pinned, 0, sizeof g_pinned);
+}
+
 int main(void)
 {
+    Meet();
+    PadsApart();
     Pins();
     Banks();
     Flat();

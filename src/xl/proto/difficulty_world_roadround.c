@@ -11,6 +11,24 @@
 #define ROUND_FINE 4.0f   /* metres between the samples a line is rounded at */
 #define ROUND_REACH 400.0f /* a disc further from the straight line than this never takes part */
 typedef struct RoundDisc { float x, y, r; } RoundDisc;
+static uint32_t g_roundCrowded; /* discs a line had no room for (past ROUND_NEAR): it may cross them; logged */
+
+/* Sine and cosine by their series in double precision: add, multiply and floor only, so every machine gets the same
+ * bits (a library sine may use the processor's own). Good to 1e-9 for any angle a float holds near a turn. */
+static void RoundSinCos(float angle, float* sine, float* cosine)
+{
+    const double turn = 6.283185307179586;
+    double x = (double)angle;
+    x -= turn * floor(x / turn + 0.5);
+    double s = x, c = 1.0, ts = x, tc = 1.0;
+    for (int k = 1; k <= 12; k++)
+    {
+        tc = -tc * x * x / (double)((2 * k - 1) * (2 * k));
+        ts = -ts * x * x / (double)((2 * k) * (2 * k + 1));
+        c += tc; s += ts;
+    }
+    *sine = (float)s; *cosine = (float)c;
+}
 
 /* p moved out of every disc it lies in, to that disc's edge (from a centre: along nx, ny). Discs that overlap are
  * left one after the other, in order, a fixed count of rounds. */
@@ -102,12 +120,13 @@ static uint32_t RoundLine(const float a[2], const float b[2], const RoundDisc* a
     if (!(length > 1.0e-3f)) return 2;
     const float ux = lx / length, uy = ly / length;
     uint32_t beside = 0;
-    for (uint32_t i = 0; i < discs && beside < ROUND_NEAR; i++)
+    for (uint32_t i = 0; i < discs; i++)
     {
         float s = (all[i].x - a[0]) * ux + (all[i].y - a[1]) * uy;
         s = s < 0.0f ? 0.0f : s > length ? length : s;
         const float dx = all[i].x - (a[0] + ux * s), dy = all[i].y - (a[1] + uy * s);
-        if (all[i].r > 0.0f && sqrtf(dx * dx + dy * dy) < all[i].r + ROUND_REACH) d[beside++] = all[i];
+        if (!(all[i].r > 0.0f && sqrtf(dx * dx + dy * dy) < all[i].r + ROUND_REACH)) continue;
+        if (beside < ROUND_NEAR) d[beside++] = all[i]; else g_roundCrowded++;
     }
     uint32_t m = (uint32_t)ceilf(length / ROUND_FINE) + 1;
     m = m < 2 ? 2 : m > ROUND_POINTS ? ROUND_POINTS : m;

@@ -13,11 +13,16 @@
  * - Steep ground: where the hard limit would stand the road further off the ground than the cap again (a causeway
  *   down a hillside), the links there may climb more, up to `steep` (GradeRelax), and the profile is solved once
  *   more. A link between two pins has no limit: the pad's own ground holds there and no road is drawn.
+ * - Pads that disagree: where two pins stand further apart in height than the limit joins, the links between them
+ *   may climb more too (GradeRelax), so the road meets both pads and no step is left at a pad's edge.
+ * - Landings: a link may carry a slope of its own it never exceeds (`most`), relaxed or not. The roads about a
+ *   junction are held near level with it, so one road's grade is not the other's cross slope where their beds meet.
  * - Bends: crests and dips are eased by a fixed count of averaging passes, the cap and the grade enforced after
  *   each, so easing rounds a crest only within the cap. */
 #define GRADE_LINKS 8
 #define GRADE_FAR 1.0e30f
 #define GRADE_ROUNDS 4096u
+#define GRADE_FREE 1.0e6f /* a link's own limit: none (between two pins) */
 typedef struct GradeStation
 {
     float ground, target, low, high;
@@ -26,6 +31,7 @@ typedef struct GradeStation
     float earth; /* GradeSolveCapped: the cut or fill the gentle profile may keep here; GRADE_FAR: any */
     float gap[GRADE_LINKS];
     float lim[GRADE_LINKS]; /* the slope this link may take where it is over the limit asked for (0: the limit) */
+    float most[GRADE_LINKS]; /* the slope this link never exceeds (0: none): a junction's landing */
     uint32_t link[GRADE_LINKS];
     uint8_t links, pinned;
     uint8_t flat; /* it stands on a pad's flat part */
@@ -52,7 +58,8 @@ static int GradeBound(float* v, const GradeStation* s, uint32_t n, float slope, 
             const uint32_t i = pass < n ? pass : 2 * n - 1 - pass;
             for (uint32_t k = 0; k < s[i].links; k++)
             {
-                const float most = relaxed && s[i].lim[k] > slope ? s[i].lim[k] : slope;
+                float most = relaxed && s[i].lim[k] > slope ? s[i].lim[k] : slope;
+                if (s[i].most[k] > 0.0f && most > s[i].most[k] && !(relaxed && s[i].lim[k] >= GRADE_FREE)) most = s[i].most[k];
                 const float reach = v[s[i].link[k]] - (float)side * most * s[i].gap[k];
                 if (side < 0 ? reach < v[i] : reach > v[i]) { v[i] = reach; changed = 1; }
             }
@@ -173,13 +180,10 @@ static uint32_t GradeSolve(GradeStation* s, uint32_t n, float slope, uint32_t pa
     return torn;
 }
 
-/* The worn path: the profile within `soft` wherever that keeps each station within its `earth` of the ground, and
- * within `hard` everywhere. The gentle profile is pulled into the cap and the hard limit then starts from that, so
- * it cuts deeper than the cap only where `hard` or a pin cannot be held without. */
-#define GRADE_FREE 1.0e6f
 /* The links' own limits after a solve within `hard`: none between two pins; `hard` rising to `steep` as the worse
- * of a link's ends stands further than `cap` off its ground, whole at twice the cap. Eased, and a function of the
- * heights without a branch on them. */
+ * of a link's ends stands further than `cap` off its ground, whole at twice the cap, or as the pins about an end
+ * disagree (low over high), whole at GRADE_TORN. Eased, and a function of the heights without a branch on them. */
+#define GRADE_TORN 1.0f
 static void GradeRelax(GradeStation* s, uint32_t n, float hard, float steep, float cap)
 {
     for (uint32_t i = 0; i < n; i++)
@@ -188,11 +192,16 @@ static void GradeRelax(GradeStation* s, uint32_t n, float hard, float steep, flo
             const uint32_t j = s[i].link[k];
             if (s[i].pinned && s[j].pinned) { s[i].lim[k] = GRADE_FREE; continue; }
             const float a = s[i].pinned ? 0.0f : fabsf(s[i].target - s[i].ground) - cap, b = s[j].pinned ? 0.0f : fabsf(s[j].target - s[j].ground) - cap;
-            float w = (a > b ? a : b) / cap;
+            const float ta = s[i].low - s[i].high, tb = s[j].low - s[j].high;
+            float w = (a > b ? a : b) / cap, torn = (ta > tb ? ta : tb) / GRADE_TORN;
+            w = w > torn ? w : torn;
             w = w < 0.0f ? 0.0f : w > 1.0f ? 1.0f : w;
             s[i].lim[k] = hard + (steep - hard) * w * w * (3.0f - 2.0f * w);
         }
 }
+/* The worn path: the profile within `soft` wherever that keeps each station within its `earth` of the ground, and
+ * within `hard` everywhere. The gentle profile is pulled into the cap and the hard limit then starts from that, so
+ * it cuts deeper than the cap only where `hard` or a pin cannot be held without. */
 static uint32_t GradeSolveCapped(GradeStation* s, uint32_t n, float soft, float hard, float steep, float cap, uint32_t passes)
 {
     float* under = (float*)malloc(sizeof(float) * 3 * (n ? n : 1));

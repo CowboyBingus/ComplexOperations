@@ -4983,6 +4983,7 @@ static void RoadsSpacingEnd(void);
 static void RoadsToleranceBegin(void);
 static void RoadsToleranceEnd(void);
 static void RoadsArterialsApply(uintptr_t block, const uint8_t* ops, uint32_t total);
+static void RoadsRimRead(uint64_t context);
 static void RoadsArterialsPoints(uintptr_t block);
 static void RoadsSpursBuild(uintptr_t block, uint64_t context);
 static void RoadsCorridorNote(uintptr_t block, const uint8_t* ops, uint32_t before, uint32_t total);
@@ -5196,7 +5197,7 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
     const int objCaps = watch && op == 0x16 && g_world.current > 1.0f && g_difficulty.missions > 1 && g_world.values != NULL;
     if (objCaps) { AcquireSRWLockExclusive(&g_explorationLock); g_world.values->capMul = g_difficulty.missions; }
     /* the arterials are chosen on the edges op 0x0E reads: the zone passes after op 0x86 close some (flag 2) */
-    if (watch && op == 0x0E) { uint32_t placed = 0; SafeRead(block + 0x11A7108, &placed, 4); RoadsArterialsApply(block, g_locationOp, placed < DIF_LOCATIONS ? placed : DIF_LOCATIONS); }
+    if (watch && op == 0x0E) { uint32_t placed = 0; SafeRead(block + 0x11A7108, &placed, 4); RoadsRimRead(b); RoadsArterialsApply(block, g_locationOp, placed < DIF_LOCATIONS ? placed : DIF_LOCATIONS); }
     if (watch && op == 0x0E) RoadsSpacingBegin(block, records + (uint64_t)at * 0x19B0u); /* the level's own op 0x0E only */
     if (watch && op == 0x2B) RoadsToleranceBegin();
     uint64_t r = g_worldDispatch(records, b, index, d, e, f, g, h);

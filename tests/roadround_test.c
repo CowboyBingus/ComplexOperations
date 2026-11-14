@@ -102,7 +102,7 @@ static void Lines(void)
     g_case = "a spur's own place is no obstacle, and one that holds an end is left at that end";
     { static const float d[6] = {1000.0f, 5000.0f, 40.0f, 1990.0f, 5000.0f, 30.0f}; CoXlTestRoadsKeep(d, 2); }
     n = CoXlTestRoadsKeepLine(a, b, 0, 0, 10.0f, 128, g_line, &length, &state);
-    CHECK(n == 101 && state == 0 && g_line[200] == 2000.0f);
+    CHECK(n == 101 && state == 3 && g_line[200] == 2000.0f); /* it ends inside that place: counted as through one */
 
     g_case = "no fair way round at 58 m: the narrower margin";
     /* two places 150 m apart: 34 m from each footprint leaves a way between them, 58 m does not, and the way round
@@ -121,6 +121,32 @@ static void Lines(void)
         static const float c[2] = {1300.0f, 5000.0f}, e[2] = {1700.0f, 5000.0f};
         n = CoXlTestRoadsKeepLine(c, e, NONE, 28, 0.0f, 28, g_line, &length, &state);
         CHECK(n == 28 && state == 2 && Clear(g_line, n, 1500.0f, 5000.0f) > 63.4f && Clear(g_line, n, 1500.0f, 5000.0f) < 70.0f);
+    }
+
+    g_case = "a way round that is over 2.5 times the chord and 100 m is not taken, though its points and corners are fair";
+    /* a row of places 100 m apart across the line: at 58 and 34 m their margins close it, at 10 m they leave gaps */
+    {
+        static float wall[3 * 7]; static const float c[2] = {1400.0f, 5000.0f}, e[2] = {1600.0f, 5000.0f};
+        for (int k = 0; k < 7; k++) { wall[3 * k] = 1500.0f; wall[3 * k + 1] = 5000.0f + 100.0f * (float)(k - 3); wall[3 * k + 2] = 30.0f; }
+        CoXlTestRoadsKeep(wall, 7);
+        n = CoXlTestRoadsKeepLine(c, e, NONE, 0, 10.0f, 128, g_line, &length, &state);
+        CHECK(state == 2 && length < 300.0f && Clear(g_line, n, 1500.0f, 5000.0f) > 39.0f && Longest(g_line, n) < 10.01f);
+    }
+
+    g_case = "an end inside a place: the line still goes round the others at 58 m, and is counted as through one";
+    { static const float d[6] = {1500.0f, 5000.0f, 42.0f, 1990.0f, 5000.0f, 30.0f}; CoXlTestRoadsKeep(d, 2); }
+    n = CoXlTestRoadsKeepLine(a, b, NONE, 0, 10.0f, 128, g_line, &length, &state);
+    CHECK(state == 3 && Clear(g_line, n, 1500.0f, 5000.0f) > 42.0f + KEEP - 0.6f && g_line[2 * n - 2] == 2000.0f);
+
+    g_case = "a line with no room for a place (over 64 near it) lies in it at every margin: straight, and counted";
+    {
+        static float many[3 * 65];
+        for (int k = 0; k < 65; k++) { many[3 * k] = 1100.0f + 12.0f * (float)k; many[3 * k + 1] = 5350.0f; many[3 * k + 2] = 1.0f; }
+        many[0] = 1300.0f; many[1] = 5000.0f; many[2] = 30.0f;                   /* the first: on the line */
+        many[3 * 64] = 1700.0f; many[3 * 64 + 1] = 5000.0f; many[3 * 64 + 2] = 30.0f; /* the 65th: on the line, not kept */
+        CoXlTestRoadsKeep(many, 65);
+        n = CoXlTestRoadsKeepLine(a, b, NONE, 0, 10.0f, 128, g_line, &length, &state);
+        CHECK(n == 101 && state == 3 && fabsf(length - 1000.0f) < 0.01f && Clear(g_line, n, 1300.0f, 5000.0f) < 1.0f);
     }
 
     g_case = "no fair way round at any margin: the straight line, counted";

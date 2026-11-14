@@ -47,6 +47,13 @@ void CoXlTestRoadsPointsWatch(uintptr_t block, uint32_t op);
 
 void CoXlTestRoadsKeep(const float* discs, uint32_t n);
 uint32_t CoXlTestRoadsKeepCount(const float** discs);
+void CoXlTestRoadsKeepNode(float* p);
+int CoXlTestGradeStations(uintptr_t block, float (*ground)(float, float), float world, float playable, uint32_t* past);
+int CoXlTestGradeStationPin(uint32_t i, float* xy, float* target, float* ground);
+void CoXlTestRoadsRim(float playable);
+int CoXlTestRoadsSpurPad(uint32_t own, float* at, float* away);
+void CoXlTestRoadsKeepPlace(uint32_t i, uint64_t place);
+void CoXlTestRoundSinCos(float angle, float* sine, float* cosine);
 
 static int g_failed;
 static const char* g_case;
@@ -923,6 +930,7 @@ static void ArterialsGlue(void)
 
 /* The glue of the places' keep-out: an arterial's points go round a footprint in place and its end leaves one, the
  * spur ends at its place's edge and goes round another place, and the footprints are read from the important list. */
+static float GroundHill(float x, float y) { (void)x; return y > 5080.0f ? 0.5f * (y - 5080.0f) : 0.0f; }
 static void Far(uint32_t first, uint32_t end, float x, float y, float* least)
 {
     *least = 1.0e9f;
@@ -968,7 +976,7 @@ static void ArterialsRound(void)
     CHECK(CoXlTestRoadsKeepCount(&discs) == 1 && discs[0] == 4550 && discs[1] == 5200 && discs[2] == 30);
     CHECK(CoXlTestRoadsArterial(0));
     uint32_t reserve = 0; const float* table = NULL;
-    CHECK(CoXlTestRoadsSpurs(&reserve, &table) == 0 && reserve == 41); /* (200 + 40 + 160) / 10 + 1: the way round is kept free too */
+    CHECK(CoXlTestRoadsSpurs(&reserve, &table) == 0 && reserve == 101); /* (2.5 x (200 + 160) + 100) / 10 + 1: the longest way round the test lets through */
 
     g_case = "keep-out: an arterial's points go round a footprint, the same count in the same places, and an end inside one moves to its edge";
     /* the place, a footprint on the chord, one between the place and the road, one over the edge's far node */
@@ -1017,8 +1025,167 @@ static void ArterialsRound(void)
     Far(0, 51, table[2], table[3], &least);
     CHECK(least < 10.0f && fabsf(table[3] - 5000.0f) < 15.0f); /* it meets the arterial's rounded path */
     CHECK(Lines("spurs round the places: 1 end at their place's edge, 1 go round other places at 58 m, 0 at a narrower margin, 0 stay straight through one") == 1);
+    CHECK(Lines("spur ends: 0 on a flat pad of their place (within 20 m of its footprint's edge), 1 at the footprint's edge of a place with no flat pad in reach") == 1);
+
+    g_case = "grading: the spur's station at its place's edge keeps the ground, and no other station is held";
+    /* a hillside of 27 degrees from 80 m north of the arterial: neither limit follows it, so only a pin stands on it */
+    uint32_t past = 99, edges = 0, pins = 0; float off = 0.0f;
+    const int stations = CoXlTestGradeStations(block, GroundHill, 16384.0f, 9000.0f, &past);
+    CHECK(stations > 51 && past == 0);
+    for (int i = 0; i < stations; i++)
+    {
+        float xy[2], t, g; const int marks = CoXlTestGradeStationPin((uint32_t)i, xy, &t, &g);
+        pins += (uint32_t)(marks & 1);
+        if (!(marks & 2)) continue;
+        edges++; off = fabsf(t - g);
+        CHECK((marks & 1) && fabsf(xy[0] - table[0]) < 0.01f && fabsf(xy[1] - table[1]) < 0.01f && g > 40.0f);
+    }
+    CHECK(edges == 1 && pins == 1 && off < 0.001f);
+
+    g_case = "grading: stations at the rim of a level whose roads stay inside keep their ground; where a road had to cross, none does";
+    /* the roads lie 4,730 to 5,110 m from the middle of this world */
+    CHECK(CoXlTestGradeStations(block, GroundHill, 16384.0f, 4700.0f, &past) == stations && past == (uint32_t)stations);
+    pins = 0;
+    for (int i = 0; i < stations; i++) { float xy[2], t, g; pins += (uint32_t)(CoXlTestGradeStationPin((uint32_t)i, xy, &t, &g) & 1); }
+    CHECK(pins == 1);
     CoXlTestRoadsKeep(NULL, 0);
     Put32(g_block + 0x11A715Cu, 0);
+}
+
+/* The rim: an edge within 96 m of the playable radius is no arterial unless a place cannot be joined without it. */
+static void ArterialsRim(void)
+{
+    const uintptr_t block = (uintptr_t)g_block;
+    /* the world's middle is (8192, 8192); nodes 0, 1, 3, 4 lie inside a radius of 1,000 m, node 2 on it */
+    static const float nodes[2 * 5] = {8192, 8192, 8692, 8192, 9192, 8192, 8692, 8492, 8900, 8492};
+    static const uint32_t ends[2 * 5] = {0, 1, 1, 2, 1, 3, 3, 4, 2, 4};
+    static const uint16_t flags[5] = {0, 8, 0, 0, 0};
+    static const uint8_t ops[2] = {0x82, 0x82};
+    CoXlTestGenLevel(8.0f);
+    for (uint32_t i = 0; i < 5; i++)
+    {
+        Edge(i, nodes[2 * ends[2 * i]], nodes[2 * ends[2 * i] + 1], nodes[2 * ends[2 * i + 1]], nodes[2 * ends[2 * i + 1] + 1], 2, 3, 0, 0, flags[i]);
+        for (int q = 0; q < 2; q++) { const uint64_t p = block + NODES_AT + 0x98ull * ends[2 * i + (uint32_t)q]; memcpy(g_recs + 0x48u * i + 0x10 + 8 * q, &p, 8); }
+    }
+    Edges(5);
+    Put32(g_block + 0x11A71B4u, 5);
+    for (uint32_t v = 0; v < 5; v++) memcpy(g_block + NODES_AT + 0x98u * v, &nodes[2 * v], 8);
+    memset(g_block + LOCATIONS_AT, 0, 0xE0u * 4);
+    memcpy(g_block + LOCATIONS_AT, &nodes[0], 8);
+    memcpy(g_block + LOCATIONS_AT + 0xE0u, &nodes[2 * 4], 8);
+    Put32(g_block + 0x11A715Cu, 0);
+    Put32(g_block + 0x11A7108u, 2);
+
+    g_case = "rim: the radius not readable: the flag-8 edge to the rim is an arterial as before";
+    CoXlTestRoadsRim(0.0f);
+    g_fake.log[0] = 0;
+    CoXlTestRoadsArterialsApply(block, ops, 2);
+    CHECK(CoXlTestRoadsArterial(1) && Lines("arterials at the rim: the playable radius is not readable; no edge is left out") == 1);
+
+    g_case = "rim: the places inside are joined inside; the edges to the rim are no arterial, flag 8 or not";
+    CoXlTestRoadsRim(1000.0f);
+    g_fake.log[0] = 0;
+    CoXlTestRoadsArterialsApply(block, ops, 2);
+    CHECK(CoXlTestRoadsArterial(0) && !CoXlTestRoadsArterial(1) && CoXlTestRoadsArterial(2) && CoXlTestRoadsArterial(3) && !CoXlTestRoadsArterial(4));
+    CHECK(Lines("arterials at the rim: the playable radius is 1000 m; 2 open edges reach within 96 m of it or past it and are no arterial; "
+        "0 arterial edges cross it all the same (0 wanted nodes were not joined without them)") == 1);
+
+    g_case = "a node at a place's middle leaves toward its arterials, not always east";
+    {
+        static uint8_t item[0x200]; const float radius = 30.0f;
+        const uint64_t P = block + LOCATIONS_AT + 0xE0ull * 2, it = (uint64_t)(uintptr_t)item;
+        memcpy(item + 0xD8, &radius, 4);
+        memset(g_block + IMPORTANT_AT, 0, 0x108u);
+        memcpy(g_block + LOCATIONS_AT + 0xE0u * 2, &nodes[2 * 3], 8); memcpy(g_block + LOCATIONS_AT + 0xE0u * 2 + 0x90, &it, 8);
+        memcpy(g_block + IMPORTANT_AT + 0x98, &P, 8);
+        Put32(g_block + 0x11A715Cu, 1);
+        CoXlTestRoadsArterialsApply(block, ops, 2);
+        float p[2] = {nodes[2 * 3], nodes[2 * 3 + 1]}; /* node 3: its arterials leave south and east */
+        CoXlTestRoadsKeepNode(p);
+        CHECK(fabsf(p[0] - (8692.0f + 88.0f * 0.7071068f)) < 0.05f && fabsf(p[1] - (8492.0f - 88.0f * 0.7071068f)) < 0.05f);
+        memcpy(g_block + LOCATIONS_AT + 0xE0u * 2, &nodes[2 * 0], 8); /* the place on node 0 instead: one arterial, east */
+        CoXlTestRoadsArterialsApply(block, ops, 2);
+        float q[2] = {8692.0f, 8492.0f};
+        CoXlTestRoadsKeepNode(q);
+        CHECK(q[0] == 8692.0f && q[1] == 8492.0f); /* in no place now */
+        Put32(g_block + 0x11A715Cu, 0);
+        CoXlTestRoadsKeep(NULL, 0);
+    }
+
+    g_case = "rim: 97 m inside the radius is inside";
+    { const float in[2] = {8192.0f + 903.0f, 8192.0f}; memcpy(g_block + NODES_AT + 0x98u * 2, in, 8); }
+    g_fake.log[0] = 0;
+    CoXlTestRoadsArterialsApply(block, ops, 2);
+    CHECK(CoXlTestRoadsArterial(1) && Lines("0 open edges reach within 96 m of it") == 1);
+    memcpy(g_block + NODES_AT + 0x98u * 2, &nodes[2 * 2], 8);
+
+    g_case = "rim: a place on the rim is joined all the same, by the shorter way of the two that cross";
+    memcpy(g_block + LOCATIONS_AT + 0xE0u, &nodes[2 * 2], 8);
+    g_fake.log[0] = 0;
+    CoXlTestRoadsArterialsApply(block, ops, 2);
+    CHECK(CoXlTestRoadsArterial(0) && CoXlTestRoadsArterial(1) && !CoXlTestRoadsArterial(4));
+    CHECK(Lines("1 arterial edges cross it all the same (1 wanted nodes were not joined without them)") == 1);
+    CoXlTestRoadsRim(0.0f);
+    Put32(g_block + 0x11A7108u, 0);
+}
+
+/* A spur's end on its place's flat ground: the shapes as op 0x3F reads them. */
+static void SpurPad(void)
+{
+    static uint8_t place[2][0xE0], item[0x200], shape[0x20];
+    static float circle[5], rect[7];
+    static const float keep[3 * 2] = {1000, 1000, 30, 1100, 1100, 20};
+    const uint64_t it = (uint64_t)(uintptr_t)item, sh = (uint64_t)(uintptr_t)shape, cs = (uint64_t)(uintptr_t)circle, rs = (uint64_t)(uintptr_t)rect;
+    const float pos[3] = {1000.0f, 1000.0f, 1.5707963f}, one = 1.0f; float at[2], away = 0.0f;
+    const uint32_t flag = 0x400, on = 1;
+    memcpy(place[0], pos, 12); memcpy(place[0] + 0x90, &it, 8);
+    memcpy(item, &sh, 8); memcpy(item + 0x58, &one, 4); memcpy(item + 0x160, &flag, 4);
+    memcpy(shape, &cs, 8); Put32(shape + 8, 1);
+    circle[0] = 40.0f; circle[1] = 0.0f; circle[2] = 15.0f; circle[3] = 1.0f; memcpy(&circle[4], &on, 4);
+    CoXlTestRoadsKeep(keep, 2);
+    CoXlTestRoadsKeepPlace(0, (uint64_t)(uintptr_t)place[0]);
+
+    g_case = "spur end: the sine and cosine are the library's to a millionth, from arithmetic alone";
+    for (int k = -64; k <= 64; k++)
+    {
+        float sn, c; const float a = 0.1f * (float)k;
+        CoXlTestRoundSinCos(a, &sn, &c);
+        CHECK(fabsf(sn - sinf(a)) < 1.0e-6f && fabsf(c - cosf(a)) < 1.0e-6f);
+    }
+
+    g_case = "spur end: onto the nearest point half a metre inside its place's flat circle, when that is within 20 m";
+    at[0] = 1021.2f; at[1] = 1021.2f; /* 28.3 m from the circle's middle at (1040, 1000) */
+    CHECK(CoXlTestRoadsSpurPad(0, at, &away) == 1 && fabsf(away - 13.83f) < 0.05f);
+    CHECK(fabsf(sqrtf((at[0] - 1040.0f) * (at[0] - 1040.0f) + (at[1] - 1000.0f) * (at[1] - 1000.0f)) - 14.5f) < 0.01f && at[1] > 1010.0f);
+    at[0] = 1000.0f; at[1] = 1030.0f; /* 50 m from it */
+    CHECK(CoXlTestRoadsSpurPad(0, at, &away) == 0 && at[0] == 1000.0f && at[1] == 1030.0f);
+    at[0] = 1030.0f; at[1] = 1000.0f; /* on it */
+    CHECK(CoXlTestRoadsSpurPad(0, at, &away) == 2 && away == 0.0f && at[0] == 1030.0f && at[1] == 1000.0f);
+
+    g_case = "spur end: a part that is not level ground, is switched off, or belongs to an item that flattens nothing is none";
+    at[0] = 1021.2f; at[1] = 1021.2f;
+    circle[3] = 0.9f; CHECK(CoXlTestRoadsSpurPad(0, at, &away) == 0); circle[3] = 1.0f;
+    Put32((uint8_t*)&circle[4], 0); CHECK(CoXlTestRoadsSpurPad(0, at, &away) == 0); Put32((uint8_t*)&circle[4], 1);
+    Put32(item + 0x160, 0); CHECK(CoXlTestRoadsSpurPad(0, at, &away) == 0); Put32(item + 0x160, 0x400);
+    CHECK(CoXlTestRoadsSpurPad(1, at, &away) == 0 && at[0] == 1021.2f); /* a place with no record */
+
+    g_case = "spur end: never onto a point inside another place's footprint";
+    { static const float over[3 * 2] = {1000, 1000, 30, 1035, 1012, 8}; CoXlTestRoadsKeep(over, 2); CoXlTestRoadsKeepPlace(0, (uint64_t)(uintptr_t)place[0]); }
+    at[0] = 1021.2f; at[1] = 1021.2f;
+    CHECK(CoXlTestRoadsSpurPad(0, at, &away) == 0 && at[0] == 1021.2f);
+    CoXlTestRoadsKeep(keep, 2); CoXlTestRoadsKeepPlace(0, (uint64_t)(uintptr_t)place[0]);
+
+    g_case = "spur end: a rectangle is placed and turned as the game does (offset through the rotation, axes a quarter turn back)";
+    Put32(shape + 8, 0); memcpy(shape + 0x10, &rs, 8); Put32(shape + 0x18, 1);
+    rect[0] = 0.0f; rect[1] = 50.0f; rect[2] = 20.0f; rect[3] = 5.0f; rect[4] = 0.0f; rect[5] = 1.0f; memcpy(&rect[6], &on, 4);
+    at[0] = 1000.0f; at[1] = 1030.0f; /* rotation a quarter turn: the middle at (1000, 1050), the long side east-west */
+    CHECK(CoXlTestRoadsSpurPad(0, at, &away) == 1 && fabsf(away - 15.5f) < 0.01f && fabsf(at[0] - 1000.0f) < 0.01f && fabsf(at[1] - 1045.5f) < 0.01f);
+    { const float zero = 0.0f; memcpy(place[0] + 8, &zero, 4); }
+    at[0] = 1030.0f; at[1] = 1000.0f; /* rotation 0: the middle at (1050, 1000), the long side north-south */
+    CHECK(CoXlTestRoadsSpurPad(0, at, &away) == 1 && fabsf(away - 15.5f) < 0.01f && fabsf(at[0] - 1045.5f) < 0.01f && fabsf(at[1] - 1000.0f) < 0.01f);
+    at[0] = 1045.0f; at[1] = 1040.0f; /* 20.5 m past the long side's end */
+    CHECK(CoXlTestRoadsSpurPad(0, at, &away) == 0);
+    CoXlTestRoadsKeep(NULL, 0);
 }
 
 int main(void)
@@ -1037,6 +1204,8 @@ int main(void)
     SpacingGlue();
     ArterialsGlue();
     ArterialsRound();
+    ArterialsRim();
+    SpurPad();
     VirtualFree(g_block, 0, MEM_RELEASE);
     if (g_failed) { printf("roadbuild: %d check(s) failed\n", g_failed); return 1; }
     printf("roadbuild: all checks passed\n");
