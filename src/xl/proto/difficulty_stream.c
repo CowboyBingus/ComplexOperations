@@ -176,6 +176,7 @@ static float g_streamDistance[kStreamMaxLocations];      /* its squared distance
 static uint32_t g_streamOrder[kStreamMaxLocations];      /* the due locations, nearest first */
 static uint64_t g_streamChunk[(kStreamScanChunk * kStreamRecord) / 8];   /* records read while deciding */
 static uint64_t g_streamStage[(kStreamBatch * kStreamRecord) / 8];       /* records of one streamed call */
+static uint64_t g_streamPlayerPeer[EVT_MAX_PLAYERS + 1]; /* whose place each is: the tree cutters' centres are these same places */
 static float g_streamPlayerAt[EVT_MAX_PLAYERS + 1][2];   /* the players' Helldivers' x, y; the last slot can be the observer */
 static uint64_t g_streamResource[kStreamMaxLocations];   /* [[loc+0x90]+8] at capture */
 static float g_streamPose[kStreamMaxLocations][16];      /* its stamp unit's pose (unit+0x20) at capture */
@@ -344,6 +345,7 @@ static void WorldStreamPlayersLocked(void)
             if (!ActHealthOf(g_stream.game, players[i].avatar, &h) || h.unit == 0 || !EvpUnitPosition(h.unit, at)) continue;
             co_settle_at(&g_streamSettle, (uint32_t)i, at, now, g_streamPlayerAt[g_stream.playerCount]);
             if (g_stream.playerCount == 0) NearReportPlayer(at);
+            g_streamPlayerPeer[g_stream.playerCount] = players[i].peer;
             g_stream.playerCount++;
         }
     }
