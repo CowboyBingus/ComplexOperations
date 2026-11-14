@@ -8051,6 +8051,7 @@ static void ScatterSetBuild(uint8_t* stub, uintptr_t count, uintptr_t back)
 
 static void ScatterOwnerNote(void)
 {
+    TreeClearNote();
     if (g_scatOwner.on != 1) return;
     LONG r = *g_scatOwner.missRemove, o = *g_scatOwner.missReown;
     if (r != g_scatOwner.notedRemove || o != g_scatOwner.notedReown)

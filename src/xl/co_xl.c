@@ -401,6 +401,9 @@ void CoXlTestRenderShrink(uintptr_t map, void (*rehash)(uintptr_t, uint32_t)) { 
 void CoXlTestRenderCopies(uintptr_t dev, void (*resize)(uintptr_t, uint32_t)) { g_lwRender.resize = (uintptr_t)resize; LwRenderCopiesFree(dev); }
 /* The route width's and the scatter set's stubs built at `stub`, and the notes of the guards that act on every level. */
 void CoXlTestRouteWidthBuild(uint8_t* stub, uintptr_t flag, uintptr_t back) { RouteWidthBuild(stub, flag, back); }
+void CoXlTestTreeClearBuild(uint8_t* stub, uintptr_t count, uintptr_t back) { TreeClearBuild(stub, count, back); }
+void CoXlTestLeafClearBuild(uint8_t* stub, uintptr_t count) { LeafClearBuild(stub, count); }
+void CoXlTestTreeClearNote(volatile LONG* a, volatile LONG* b, volatile LONG* c) { g_treeSkip[0] = a; g_treeSkip[1] = b; g_treeSkip[2] = c; TreeClearNote(); }
 void CoXlTestScatterSetBuild(uint8_t* stub, uintptr_t count, uintptr_t back) { ScatterSetBuild(stub, count, back); }
 void CoXlTestScatterSetNote(volatile LONG* count)
 {
