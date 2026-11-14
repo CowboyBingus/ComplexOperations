@@ -88,7 +88,7 @@ static float* LwLeanLimit(uintptr_t mgr, float* out, float* up)
 {
     const uintptr_t back = (uintptr_t)__builtin_return_address(0);
     const int four = back == g_lwLean.four, set = t_lwLean.set, prop = t_lwLean.prop;
-    t_lwLean.set = t_lwLean.prop = 0; /* one pose, one reading: never another unit's */
+    t_lwLean.set = 0; /* one pose, one reading: never another unit's (the prop flag is read only with it) */
     if (!four) InterlockedIncrement(back == g_lwLean.bone ? &g_lwLean.boneCalls : &g_lwLean.otherCalls);
     else
     {
