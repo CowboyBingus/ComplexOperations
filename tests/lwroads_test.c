@@ -229,6 +229,13 @@ int main(void)
         g_case = "after 90 s of refusals it walks on into the band, and stands no second time";
         CoXlTestLwSeenWalk(0, 30, start, one, 1, 1, 0, 0, 250, -1, 0, s);
         CHECK(P - s[0] < B - 10.0f && P - s[0] > B - 60.0f && s[14] == 1);
+        g_case = "refused for the spacing from a squad just requested, or for the bubble's room, it stands there as well; only the far share's refusals are counted as such";
+        CoXlTestLwSeenFarNo(2);
+        CoXlTestLwSeenWalk(0, 30, start, one, 1, 1, 0, 0, 180, -1, 0, s);
+        CHECK(s[1] == 3 && P - s[0] >= B && P - s[0] < B + 100.0f && s[13] == 0 && s[14] == 0 && s[6] == 1);
+        CoXlTestLwSeenFarNo(3);
+        CoXlTestLwSeenWalk(0, 30, start, one, 1, 1, 0, 0, 180, -1, 0, s);
+        CHECK(s[1] == 3 && P - s[0] >= B && P - s[0] < B + 100.0f && s[13] == 0 && s[14] == 0 && s[6] == 1);
         CoXlTestLwSeenFarNo(0);
         g_case = "with room in the far share it never stands: it comes online at its first request";
         CoXlTestLwSeenWalk(0, 30, start, one, 1, 1, 0, 0, 180, -1, 1, s);

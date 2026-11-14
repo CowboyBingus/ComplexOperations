@@ -693,12 +693,15 @@ static int LwMeetApproach(LwSquad* q, ULONGLONG now, int busy)
     else if (!hidden && d < LW_R_ON) q->retry = now + (onRoad ? CO_LW_MEET_LOOK_MS : CO_LW_MEET_LOOK_SLOW_MS);
     return act;
 }
-/* The squads' tick, a request beyond the band refused for the far share: counted, and the patrol stands where it is
- * (LwMeetHold) while the refusals last, CO_LW_MEET_ZONE_WAIT_MS at most. */
-static void LwMeetFarNo(const LwSquad* q, ULONGLONG now)
+/* The squads' tick, a request beyond the band refused, whatever for (the far share, the spacing from a squad just
+ * requested, the bubble's room, a waiting squad's points): the patrol stands where it is (LwMeetHold) while the
+ * refusals last, CO_LW_MEET_ZONE_WAIT_MS at most. Walking on, it would enter the band offline behind the squad
+ * that was served. The far share's refusals are counted. */
+static void LwMeetRefused(const LwSquad* q, int meet, const char* why, ULONGLONG now)
 {
     const int idx = (int)(q - g_lwSquads);
-    g_lwMeet.farNo++;
+    if (meet != CO_LW_MEET_ASK_BEYOND || q->state != LW_OFFLINE) return;
+    if (strncmp(why, "the far share", 13) == 0) g_lwMeet.farNo++;
     if (!g_lwZoneSince[idx]) g_lwZoneSince[idx] = now;
     if (now < g_lwZoneSince[idx] + CO_LW_MEET_ZONE_WAIT_MS) g_lwZoneNo[idx] = now; /* waited out: it walks on, by the rules for cover */
 }
@@ -1371,8 +1374,18 @@ float CoXlTestLwMeetWalk(int index, int n, int at, float px, float px2, int move
 static float g_lwTestHid[2], g_lwTestSpeed; static int g_lwTestAhead, g_lwTestFiller = -1, g_lwTestMeetOff, g_lwTestBusy, g_lwTestRays[2];
 static int g_lwTestGroup = 1, g_lwTestViewOf = 1, g_lwTestLocal = 0, g_lwTestBlind;
 static int g_lwTestFarNo;
-/* 1: the walks that follow have every request beyond the band refused for the far share. */
+/* The walks that follow have every request beyond the band refused: 1 for the far share, 2 for the spacing (the
+ * text the spacing rule itself writes for a request `1 m` away a second ago), 3 for the bubble's room. 0: none. */
 void CoXlTestLwSeenFarNo(int refuse) { g_lwTestFarNo = refuse; }
+static const char* LwTestRefusal(const LwSquad* q)
+{
+    static char text[160];
+    if (g_lwTestFarNo == 2) { LwSpacedText(text, sizeof text, -1, 1.0f, 1000); return text; }
+    if (g_lwTestFarNo == 3) { LwDensityRoom(q->pos, 1000, 0, text, sizeof text); return text; }
+    return "the far share: a test";
+}
+/* The far-share refusals counted in this 30 s line so far. */
+int CoXlTestLwSeenFarNoCount(void) { return (int)g_lwMeet.farNo; }
 static int LwTestSeenRay(int i, const float* point)
 {
     if (i < 2) g_lwTestRays[i]++;
@@ -1469,7 +1482,7 @@ void CoXlTestLwSeenWalk(int index, int n, float from, const float (*pl)[2], int 
         for (int i = 0; i < np; i++) { const float d = sqrtf(LwDist2(q->pos, pl[i][0], pl[i][1])); if (d < least) least = d; }
         if (!meet) continue;
         if (out[1] == 0) { out[1] = (float)meet; out[2] = q->pos[0]; }
-        if (g_lwTestFarNo && meet == CO_LW_MEET_ASK_BEYOND) { LwMeetFarNo(q, now); q->retry = now + 3000; continue; } /* as the squads' tick refuses it */
+        if (g_lwTestFarNo && meet == CO_LW_MEET_ASK_BEYOND) { LwMeetRefused(q, meet, LwTestRefusal(q), now); q->retry = now + 3000; continue; } /* as the squads' tick refuses it */
         if (comes) { q->state = LW_PENDING; q->since = now; LwMeetAsked(q, meet, 1); break; }
     }
     out[0] = q->pos[0]; out[3] = least; out[4] = (float)LwMeetWaits(q); out[5] = (float)g_lwMeet.covered; out[6] = (float)g_lwMeetMark[index];
@@ -1661,7 +1674,7 @@ int CoXlTestLwCallZone(float x, int to, float x2, int turn)
         for (int k = back ? a : a + 1; back ? k >= 1 : k <= to; k += back ? -1 : 1) if (q->pathLen < LW_PATH_MAX) q->path[q->pathLen++] = (uint16_t)k;
         g_lwMeetTestNow = now + 1000u * (ULONGLONG)pass;
         LwMeetApproach(q, g_lwMeetTestNow, 1);
-        if (!pass) LwMeetFarNo(q, now);
+        if (!pass) LwMeetRefused(q, CO_LW_MEET_ASK_BEYOND, "the far share: a test", now);
         bits |= LwMeetHold(q, at + (back ? -1.0f : 1.0f), 0) << pass;
     }
     LwZoneClear(0); g_lwMeetMark[0] = 0; g_lwMeetSince[0] = 0; g_lwMeetTestNow = 1000000u;
