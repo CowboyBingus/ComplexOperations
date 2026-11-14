@@ -32,10 +32,18 @@ typedef struct CoFrvAim
 /* Where the vehicle is on the leg and where to steer. *segment is the search's start and is moved on, never back, so
  * a leg that passes itself is followed in order. heading: a unit vector across the ground. */
 void co_frv_aim(const CoFrvPath* p, uint32_t* segment, const float* pos, const float* heading, float ahead, CoFrvAim* out);
+/* The point `along` metres down the leg, clamped to its ends (a leg of under 2 points: untouched). */
+void co_frv_point(const CoFrvPath* p, float along, float* xy);
 /* The steering input for an aim error: the game's sign (-1 turns left, +1 right), full lock at `full` radians. */
 float co_frv_steer(float error, float full);
 /* The throttle for a wanted speed: full below it, none 1 m/s over it; the wanted speed falls with the aim error. */
 float co_frv_throttle(float speed, float want, float error);
+
+/* Whether shift-up is pressed this frame: the game's gears are 0 reverse, 1 neutral, 2 and up forwards, and with the
+ * player's gears set to manual nothing shifts for the throttle. One press a frame is one gear, so a press waits
+ * CO_FRV_SHIFT_SECONDS for the last one to show in the gear read. */
+#define CO_FRV_SHIFT_SECONDS 0.5f
+int co_frv_shift(int gear, float throttle, float sincePress);
 
 /* Whether the steering input's sign is the game's, learnt from the drive itself: each frame's input times the turn it
  * got (radians, counter-clockwise positive) is added up while the vehicle moves. 0 undecided, 1 as assumed (a positive

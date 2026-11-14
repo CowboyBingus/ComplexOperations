@@ -1,5 +1,6 @@
 /* The FRV drive's game-free part: a leg is cut from a road in either direction and ends at its length or the road's
  * end; the aim follows the leg in order, reads the side and the turn with the right signs and steers the game's way;
+ * a point is read off the leg by its metres; shift-up is pressed only out of neutral or reverse under throttle;
  * the tilt reads pitch and roll about the travel; a drive's sums count stops and stuck events once each; the lines
  * read as the harness script expects. */
 #include <math.h>
@@ -78,6 +79,29 @@ int main(void)
         CHECK(a.along == 0.0f && a.error == 0.0f);
     }
 
+    g_case = "point";
+    {
+        float xy[2] = {-1.0f, -1.0f};
+        co_frv_point(&g_path, 20.0f, xy);   /* on a point */
+        CHECK(NEAR(xy[0], 20.0f, 1e-3f) && NEAR(xy[1], 100.0f, 1e-3f));
+        co_frv_point(&g_path, 122.0f, xy);  /* between two */
+        CHECK(NEAR(xy[0], 122.0f, 1e-3f));
+        co_frv_point(&g_path, -5.0f, xy);   /* before the start: the start */
+        CHECK(NEAR(xy[0], 0.0f, 1e-3f));
+        co_frv_point(&g_path, 9000.0f, xy); /* past the end: the end */
+        CHECK(NEAR(xy[0], 504.0f, 1e-2f));
+        CoFrvPath one = {.count = 1}; xy[0] = 7.0f;
+        co_frv_point(&one, 3.0f, xy);       /* no leg: untouched */
+        CHECK(xy[0] == 7.0f);
+    }
+
+    g_case = "shift";
+    CHECK(co_frv_shift(1, 1.0f, 0.5f) == 1 && co_frv_shift(0, 1.0f, 2.0f) == 1);  /* neutral or reverse under throttle */
+    CHECK(co_frv_shift(2, 1.0f, 9.0f) == 0 && co_frv_shift(4, 1.0f, 9.0f) == 0);  /* a forward gear is left alone */
+    CHECK(co_frv_shift(1, 0.5f, 9.0f) == 0);                                      /* no throttle, no press */
+    CHECK(co_frv_shift(1, 1.0f, 0.49f) == 0);                                     /* the last press has not shown yet */
+    CHECK(co_frv_shift(-1, 1.0f, 9.0f) == 0);                                     /* the gear did not read */
+
     g_case = "steer and throttle";
     CHECK(co_frv_steer(0.0f, 0.5f) == 0.0f && co_frv_steer(0.25f, 0.5f) == -0.5f && co_frv_steer(-2.0f, 0.5f) == 1.0f && co_frv_steer(1.0f, 0.0f) == 0.0f);
     CHECK(co_frv_throttle(0.0f, 8.0f, 0.0f) == 1.0f && co_frv_throttle(8.5f, 8.0f, 0.0f) == 0.5f && co_frv_throttle(9.5f, 8.0f, 0.0f) == 0.0f);
@@ -150,6 +174,8 @@ int main(void)
         a.throttle = 0.0f;
         for (int i = 1; i <= 80; i++) { a.t = 24.0f + 0.1f * (float)i; began += co_frv_stats_add(&s, &a); }
         CHECK(s.stops == 2 && s.stuck == 1 && began == 1);
+        a.pitch = 60.0f; a.t += 0.1f; co_frv_stats_add(&s, &a); /* a steep climb is not a roll-over */
+        CHECK(s.upsideDown == 0);
         a.pitch = 120.0f; a.t += 0.1f; co_frv_stats_add(&s, &a);
         CHECK(s.upsideDown == 1);
         a.wheels = -1; a.t += 0.1f; co_frv_stats_add(&s, &a); /* contact not read: not counted as airborne */

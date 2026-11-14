@@ -45,10 +45,10 @@ uint32_t co_frv_leg(const float (*pts)[2], uint32_t first, uint32_t end, uint32_
     return out->count;
 }
 
-/* The point `along` metres down the leg, clamped to its ends. */
-static void FrvPoint(const CoFrvPath* p, float along, float* xy)
+void co_frv_point(const CoFrvPath* p, float along, float* xy)
 {
     uint32_t i = 0;
+    if (p->count < 2) return;
     while (i + 2 < p->count && p->at[i + 1] < along) i++;
     const float len = p->at[i + 1] - p->at[i];
     float t = len > 0.0f ? (along - p->at[i]) / len : 0.0f;
@@ -77,7 +77,7 @@ void co_frv_aim(const CoFrvPath* p, uint32_t* segment, const float* pos, const f
     out->along = p->at[best] + len * bt;
     /* left of the line: the line's direction turned a quarter counter-clockwise points at the vehicle */
     out->cross = len > 0.0f ? ((pos[1] - p->xy[best][1]) * ux - (pos[0] - p->xy[best][0]) * uy) / len : 0.0f;
-    FrvPoint(p, out->along + ahead, out->target);
+    co_frv_point(p, out->along + ahead, out->target);
     const float tx = out->target[0] - pos[0], ty = out->target[1] - pos[1];
     if (tx * tx + ty * ty > 1.0e-6f && heading[0] * heading[0] + heading[1] * heading[1] > 1.0e-6f)
         out->error = atan2f(heading[0] * ty - heading[1] * tx, heading[0] * tx + heading[1] * ty);
@@ -95,6 +95,11 @@ float co_frv_throttle(float speed, float want, float error)
     if (slow < 0.4f) slow = 0.4f;
     const float t = want * slow + 1.0f - speed;
     return t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+}
+
+int co_frv_shift(int gear, float throttle, float sincePress)
+{
+    return gear >= 0 && gear < 2 && throttle > 0.5f && sincePress >= CO_FRV_SHIFT_SECONDS;
 }
 
 int co_frv_sign(CoFrvSign* v, float steer, float turned, float speed)
