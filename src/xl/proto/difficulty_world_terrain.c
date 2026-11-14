@@ -5839,7 +5839,7 @@ static int TerrainNearReplay(uint64_t records, uint32_t end, uint32_t at, uint64
     {
         MoveLevelGone();
         g_near.level = g_world.levels; g_near.state = NEAR_IDLE; g_near.ready = 0; g_near.handle = 0;
-        /* the previous level's tile textures: its world is gone */
+        /* the previous level's tile textures: its terrains went at its end, or NearTilesLeft took these away */
         NearReleaseFn release = (NearReleaseFn)NearApi(0x10, 0x198);
         for (int k = 0; k < 2; k++) if (g_near.tex[k] != 0 && release != NULL) release(g_near.tex[k]);
         g_near.tex[0] = g_near.tex[1] = 0;
@@ -8120,6 +8120,7 @@ static void ScatterSetBuild(uint8_t* stub, uintptr_t count, uintptr_t back)
 
 static void ScatterOwnerNote(void)
 {
+    TreeClearNote();
     if (g_scatOwner.on != 1) return;
     LONG r = *g_scatOwner.missRemove, o = *g_scatOwner.missReown;
     if (r != g_scatOwner.notedRemove || o != g_scatOwner.notedReown)

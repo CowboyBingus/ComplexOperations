@@ -9,6 +9,9 @@
 
 void CoXlTestRouteWidthBuild(uint8_t* stub, uintptr_t flag, uintptr_t back);
 void CoXlTestScatterSetBuild(uint8_t* stub, uintptr_t count, uintptr_t back);
+void CoXlTestTreeClearBuild(uint8_t* stub, uintptr_t count, uintptr_t back);
+void CoXlTestLeafClearBuild(uint8_t* stub, uintptr_t count);
+void CoXlTestTreeClearNote(volatile LONG* a, volatile LONG* b, volatile LONG* c);
 void CoXlTestScatterSetNote(volatile LONG* count);
 void CoXlTestTaskNote(volatile LONG* count);
 void CoXlTestWorldCurrent(float current);
@@ -53,6 +56,30 @@ static void RunScatterSet(uintptr_t stub, uint64_t owner, int32_t x, int32_t y, 
             : [in] "=&r" (in), [out] "=&r" (out), "+a" (rax), "+c" (rcx), "+d" (rdx), "+r" (r8) : [stub] "r" (stub) : "r9", "cc", "memory");
     run->rax = rax; run->rcx = rcx; run->rdx = rdx; run->r8 = r8; run->flagsIn = in; run->flagsOut = out;
 }
+
+/* The cell clear stub as exe 0x215B59 / 0x215F5D enter it: r10 the owner, ecx its width, rdx its bitset, r9d the bit's
+ * index, eax 1. The way back is a `ret`. */
+static void RunTreeClear(uintptr_t stub, const uint8_t* owner, uint32_t index)
+{
+    uint64_t rax = 1, rcx = 0, rdx = 0;
+    memcpy(&rcx, owner + 0xA4, 4); memcpy(&rdx, owner + 0x28, 8);
+    register uint64_t r8 __asm__("r8") = 0x5555555555555555ull;
+    register uint64_t r9 __asm__("r9") = index;
+    register uint64_t r10 __asm__("r10") = (uint64_t)(uintptr_t)owner;
+    __asm__ volatile("call *%[stub]" : "+a" (rax), "+c" (rcx), "+d" (rdx), "+r" (r8), "+r" (r9), "+r" (r10) : [stub] "r" (stub) : "cc", "memory");
+}
+/* A scatter owner: width at +0xA4, the bitset's dwords at +0x20 and the bitset at +0x28 (all bits set, a guard dword
+ * on each side); `destroyed` as exe 0x1D4150 leaves one: no dwords, no bitset, the width as it was. */
+static uint32_t g_bits[2 + 8192];
+static void Owner(uint8_t* owner, uint32_t width, uint32_t dwords, int destroyed)
+{
+    const uint64_t at = destroyed ? 0 : (uint64_t)(uintptr_t)(g_bits + 1);
+    if (destroyed) dwords = 0;
+    memset(owner, 0, 0xB0); memset(g_bits, 0xFF, sizeof g_bits);
+    memcpy(owner + 0xA4, &width, 4); memcpy(owner + 0x20, &dwords, 4); memcpy(owner + 0x28, &at, 8);
+}
+static int Bit(uint32_t index) { return (int)((g_bits[1 + index / 32] >> (index % 32)) & 1u); }
+static uint32_t BitsLeft(uint32_t dwords) { uint32_t n = 0; for (uint32_t i = 0; i < dwords * 32; i++) n += (uint32_t)Bit(i); return n; }
 
 static uint32_t g_jobCount;
 static float g_currentDuring;
@@ -144,6 +171,62 @@ int main(void)
                 CHECK(run.rdx == (((uint64_t)(uint32_t)cells[i].y << 32) | (uint32_t)cells[i].x));
                 CHECK((run.flagsIn & 0x8D5u) == (run.flagsOut & 0x8D5u) && (run.flagsIn & 1u) == (uint64_t)carry);
             }
+    }
+
+    Reset("the cell clear stubs: a clear inside the owner's bitset is made, one outside it or of a destroyed owner is skipped and counted");
+    {
+        uint8_t* stub = page + 0x400, *back = page + 0x500, *leaf = page + 0x440;
+        volatile LONG* counts = (volatile LONG*)(page + 0x600);
+        #define count counts[0]
+        #define leafCount counts[1]
+        uint8_t owner[0xB0];
+        memset(page + 0x400, 0xCC, 0x300);
+        *back = 0xC3;
+        count = leafCount = 0;
+        CoXlTestTreeClearBuild(stub, (uintptr_t)&count, (uintptr_t)back);
+        CoXlTestLeafClearBuild(leaf, (uintptr_t)&leafCount);
+        CHECK(stub[36] == 0xE9 && stub + 41 + Rel(stub + 37) == back && stub[41] == 0xF0 && stub + 48 + Rel(stub + 44) == (uint8_t*)&count &&
+            stub[48] == 0xE9 && stub + 53 + Rel(stub + 49) == back && stub[53] == 0xCC);
+        CHECK(leaf[79] == 0xC3 && leaf[80] == 0xF0 && leaf + 87 + Rel(leaf + 83) == (uint8_t*)&leafCount && leaf[87] == 0xC3 && leaf[88] == 0xCC);
+        Owner(owner, 512, 8192, 0); /* the game's own size: w x w bits */
+        RunTreeClear((uintptr_t)stub, owner, 0); RunTreeClear((uintptr_t)stub, owner, 37); RunTreeClear((uintptr_t)stub, owner, 262143);
+        CHECK(!Bit(0) && !Bit(37) && !Bit(262143) && Bit(1) && Bit(36) && Bit(262142) && BitsLeft(8192) == 262144 - 3 && count == 0);
+        RunTreeClear((uintptr_t)stub, owner, 262144); RunTreeClear((uintptr_t)stub, owner, 0xFFFFFFFFu); RunTreeClear((uintptr_t)stub, owner, 0x80000000u);
+        CHECK(count == 3 && BitsLeft(8192) == 262144 - 3 && g_bits[0] == 0xFFFFFFFFu && g_bits[8193] == 0xFFFFFFFFu);
+        Owner(owner, 512, 4, 0); /* fewer dwords than the width asks for: the dwords bound, not w x w */
+        RunTreeClear((uintptr_t)stub, owner, 127); RunTreeClear((uintptr_t)stub, owner, 128); RunTreeClear((uintptr_t)stub, owner, 5000);
+        CHECK(count == 5 && !Bit(127) && Bit(128) && Bit(5000) && BitsLeft(8192) == 262144 - 1);
+        Owner(owner, 512, 8192, 1); /* destroyed: a null bitset, which the game's code wrote through */
+        RunTreeClear((uintptr_t)stub, owner, 0); RunTreeClear((uintptr_t)stub, owner, 0x36B8u * 8); RunTreeClear((uintptr_t)stub, owner, 262143);
+        CHECK(count == 8);
+
+        typedef void (*LeafFn)(const uint8_t* owner, uint64_t cell);
+        #define CELL(x, y) (((uint64_t)(uint32_t)(y) << 32) | (uint32_t)(x))
+        Owner(owner, 8, 2, 0); /* 8 x 8 cells: bit (x + 4) * 8 + y */
+        ((LeafFn)leaf)(owner, CELL(-4, 0)); ((LeafFn)leaf)(owner, CELL(3, 7)); ((LeafFn)leaf)(owner, CELL(0, 3));
+        CHECK(!Bit(0) && !Bit(63) && !Bit(35) && BitsLeft(2) == 61 && leafCount == 0);
+        ((LeafFn)leaf)(owner, CELL(4, 0)); ((LeafFn)leaf)(owner, CELL(-5, 0)); ((LeafFn)leaf)(owner, CELL(-100000, 7));
+        CHECK(leafCount == 3 && BitsLeft(2) == 61 && Bit(64) && g_bits[0] == 0xFFFFFFFFu);
+        Owner(owner, 8, 2, 1);
+        ((LeafFn)leaf)(owner, CELL(0, 0)); ((LeafFn)leaf)(owner, CELL(-4, 0));
+        CHECK(leafCount == 5);
+        #undef CELL
+        #undef count
+        #undef leafCount
+
+        static volatile LONG a, b, c;
+        CoXlTestTreeClearNote(&a, &b, &c);
+        CHECK(!fake_host_logged("cell clears outside the owner's bitset"));
+        a = 2; c = 1;
+        CoXlTestTreeClearNote(&a, &b, &c);
+        CHECK(fake_host_logged("difficulty: scatter: cell clears outside the owner's bitset skipped (a destroyed owner's has no cells; the write would go through null): "
+            "2 removes, 0 re-owns, 1 leaf clears so far"));
+        Reset("the cell clears' note, unchanged");
+        CoXlTestTreeClearNote(&a, &b, &c);
+        CHECK(!fake_host_logged("cell clears outside"));
+        b = 4;
+        CoXlTestTreeClearNote(&a, &b, &c);
+        CHECK(fake_host_logged("2 removes, 4 re-owns, 1 leaf clears so far"));
     }
 
     Reset("the scatter set's note");
