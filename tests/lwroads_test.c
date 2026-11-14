@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "xl/co_lw_roads.h"
+#include "xl/co_lw_meet.h"
 
 static int g_failed;
 static const char* g_case;
@@ -16,6 +17,9 @@ int CoXlTestLwRoadPatrolsOn(void);
 float CoXlTestLwMeetWalk(int index, int n, int at, float px, float px2, int moveAt, int seconds, int old, float* out);
 int CoXlTestLwPlansRoads(float radius, float step, float x, float y, int plans, int* failed);
 float CoXlTestLwSeenBand(void);
+float CoXlTestLwSeenBandNoGroup(void);
+void CoXlTestLwSeenSetup(int group, int viewOf, int local, float speed, int blind);
+float CoXlTestLwSeenRange(int player, int np);
 void CoXlTestLwSeenWalk(int index, int n, float from, const float (*pl)[2], int np, float hid0, float hid1, int ahead, int seconds, int errand, int comes, float* out);
 void CoXlTestLwSeenWorld(const float (*pl)[2], int np, int budget);
 void CoXlTestLwSeenSquad(int idx, float x, float y, int state, int units, int mark);
@@ -33,6 +37,15 @@ int CoXlTestLwSeenFarRoom(int idx, int meet, int farUnits, int roadFar);
 int CoXlTestLwSeenStays(int idx, float d, uint64_t sinceMs, uint64_t nowMs);
 int CoXlTestLwSeenCapText(void);
 void CoXlTestLwSeenEnd(void);
+void CoXlTestLwSeenFarNo(int refuse);
+int CoXlTestLwRoadTail(int base, int count, int probe, int* out, int max, int* members, int* more);
+void CoXlTestLwCallWorld(int n, int fork, const float (*pl)[2], int np, const float* sx, const int* dir, const int* mk, int squads);
+int CoXlTestLwCallOne(int i, int turn, int* out);
+int CoXlTestLwCallTick(uint64_t nowMs);
+int CoXlTestLwCallOver(int idx, int how);
+int CoXlTestLwCallOf(int idx);
+int CoXlTestLwCallZone(float x, int to, float x2, int turn);
+void CoXlTestLwCallEnd(void);
 
 int main(void)
 {
@@ -154,7 +167,7 @@ int main(void)
 
     /* The seen rules. A player at x 2500 on the line; the squad starts 300 m beyond the draw band and walks toward it. */
     {
-        const float B = CoXlTestLwSeenBand(), P = 2500.0f, start = P - B - 300.0f; float s[12];
+        const float B = CoXlTestLwSeenBand(), P = 2500.0f, start = P - B - 300.0f; float s[16];
         const float one[1][2] = {{P, 0}};
         const int walkIn = (int)((B + 145.0f) / 2.0f); /* seconds to the ring's edge */
         g_case = "the band the rules read is the drawn distance and its margin";
@@ -162,6 +175,62 @@ int main(void)
         g_case = "an open road: a patrol on the player's road comes online beyond the band, and holds the kept far share";
         CoXlTestLwSeenWalk(0, 30, start, one, 1, 1, 0, 0, walkIn, -1, 1, s);
         CHECK(s[1] == 3 && P - s[2] >= B && P - s[2] < B + 100.0f && P - s[2] > B + 90.0f && s[6] == 6 && s[5] == 0);
+        g_case = "beyond the band the look asks every player with a line, the host too";
+        CHECK(s[11] > 0);
+        g_case = "who may refuse a patrol's point: the host within its band, a player on another machine within the band through a 4x scope";
+        const float S = CoXlTestLwSeenRange(1, 2);
+        CHECK(CoXlTestLwSeenRange(0, 2) == B && S > B + 150.0f && S < 900.0f);
+        g_case = "a squad with no group, or of a group never measured: every player's full sight";
+        CoXlTestLwSeenSetup(-1, 1, 0, 0, 0); CHECK(CoXlTestLwSeenRange(0, 2) == 1700.0f && CoXlTestLwSeenRange(1, 2) == 1700.0f);
+        CoXlTestLwSeenSetup(0, 1, 0, 0, 0); CHECK(CoXlTestLwSeenRange(0, 2) == 1700.0f && CoXlTestLwSeenRange(1, 2) == 1700.0f);
+        g_case = "a squad with no group has the default band, not an empty slot's";
+        CHECK(CoXlTestLwSeenBandNoGroup() == B - 50.0f);
+        g_case = "the host's short range is for this machine's player while its own view is read: not for a player its camera follows";
+        CoXlTestLwSeenSetup(1, 2, 0, 0, 0); CHECK(CoXlTestLwSeenRange(0, 2) == S && CoXlTestLwSeenRange(1, 2) == S);
+        CoXlTestLwSeenSetup(1, 0, 0, 0, 0); CHECK(CoXlTestLwSeenRange(0, 1) == S);
+        CoXlTestLwSeenSetup(1, 1, 1, 0, 0); CHECK(CoXlTestLwSeenRange(0, 2) == S); /* the view on a player who is not this machine's */
+        g_case = "the view not read: the patrol comes online beyond the scoped band, not the host's";
+        CoXlTestLwSeenWalk(0, 30, P - S - 300.0f, one, 1, 1, 0, 0, 200, -1, 1, s);
+        CHECK(s[1] == 3 && P - s[2] >= S && P - s[2] < S + 100.0f);
+        CoXlTestLwSeenSetup(1, 1, 0, 0, 0);
+        g_case = "a second player beside the host: the zone starts beyond that player's scoped band, and its line counts in the look";
+        { const float two[2][2] = {{P, 0}, {P, 30.0f}}, away[2][2] = {{P, 0}, {P + 1200.0f, 0}};
+          CoXlTestLwSeenSetup(1, 1, 0, 0, 1); /* the host has no line: the other player's decides */
+          CoXlTestLwSeenWalk(0, 30, P - S - 300.0f, two, 2, 1, 0, 0, 200, -1, 1, s);
+          CHECK(s[1] == 3 && hypotf(P - s[2], 30.0f) >= S && P - s[2] < S + 100.0f && s[12] > 0);
+          g_case = "inside the host's band a player 1300 m or more away, beyond its scoped band, is not asked";
+          CoXlTestLwSeenWalk(0, 30, start, away, 2, 1, 0, 0, walkIn - 10, -1, 0, s);
+          CHECK(s[12] == 0 && s[11] > 100 && s[1] == 0);
+          CoXlTestLwSeenSetup(1, 1, 0, 0, 0); }
+        g_case = "ahead of a vehicle at 20 m/s it asks 200 m farther out";
+        CoXlTestLwSeenSetup(1, 1, 0, 20.0f, 0);
+        CoXlTestLwSeenWalk(0, 30, start - 300.0f, one, 1, 1, 0, 0, 200, -1, 1, s);
+        CHECK(s[1] == 3 && P - s[2] >= B + 200.0f && P - s[2] < B + 300.0f);
+        CoXlTestLwSeenSetup(1, 1, 0, 0, 0);
+        g_case = "a group never measured: no request in clear sight beyond a guessed band; it waits at the ring";
+        CoXlTestLwSeenSetup(0, 1, 0, 0, 0);
+        CoXlTestLwSeenWalk(0, 30, start, one, 1, 1, 0, 0, walkIn + 20, -1, 1, s);
+        CHECK(s[1] == 0 && s[4] == 1 && s[3] >= 155.0f);
+        CoXlTestLwSeenSetup(1, 1, 0, 0, 0);
+        g_case = "hidden beyond the band, open inside it: the point beyond is no cover to step back to";
+        CoXlTestLwSeenWalk(0, 30, start, one, 1, 0, P - B - 1.0f, 0, walkIn + 20, -1, 0, s);
+        CHECK(s[5] == 0 && s[4] == 1);
+        g_case = "still 300 m out, its way leading to the player: known for the far share, no priority, no look";
+        CoXlTestLwSeenWalk(0, 30, start, one, 1, 1, 0, 0, 5, -1, 0, s);
+        CHECK(s[6] == 8 && s[9] == 0 && s[8] == 0);
+        { const float off[1][2] = {{P, 90.0f}}; CoXlTestLwSeenWalk(0, 30, start, off, 1, 1, 0, 0, 5, -1, 0, s); CHECK(s[6] == 0); }
+        CoXlTestLwSeenWalk(0, 30, start - 400.0f, one, 1, 1, 0, 0, 5, -1, 0, s); CHECK(s[6] == 0);
+        g_case = "refused the far share beyond the band, the patrol stands there, where nobody draws it, and asks on";
+        CoXlTestLwSeenFarNo(1);
+        CoXlTestLwSeenWalk(0, 30, start, one, 1, 1, 0, 0, 180, -1, 0, s);
+        CHECK(s[1] == 3 && P - s[0] >= B && P - s[0] < B + 100.0f && s[13] >= 20 && s[14] == 0 && s[6] == 1);
+        g_case = "after 90 s of refusals it walks on into the band, and stands no second time";
+        CoXlTestLwSeenWalk(0, 30, start, one, 1, 1, 0, 0, 250, -1, 0, s);
+        CHECK(P - s[0] < B - 10.0f && P - s[0] > B - 60.0f && s[14] == 1);
+        CoXlTestLwSeenFarNo(0);
+        g_case = "with room in the far share it never stands: it comes online at its first request";
+        CoXlTestLwSeenWalk(0, 30, start, one, 1, 1, 0, 0, 180, -1, 1, s);
+        CHECK(s[1] == 3 && s[13] == 0 && s[0] == s[2]);
         g_case = "an open road: a squad that is no road patrol has no such rule and walks in as before";
         CoXlTestLwSeenWalk(1, 30, start, one, 1, 1, 0, 0, walkIn + 100, -1, 1, s);
         CHECK(s[1] == 0 && s[3] < 60.0f && s[8] > 50 && s[6] == 0);
@@ -182,7 +251,7 @@ int main(void)
         g_case = "a squad off the roads steps back to cover too, in the near band, at half the looks";
         CoXlTestLwSeenWalk(1, 30, start, one, 1, 2260, 2280, 1, walkIn, -1, 1, s);
         CHECK(s[1] == 2 && s[2] <= 2280.0f && s[2] > 2275.0f && s[6] == 2);
-        { float r[12]; CoXlTestLwSeenWalk(0, 30, start, one, 1, 1, 0, 0, 150, -1, 0, r); CoXlTestLwSeenWalk(1, 30, start, one, 1, 1, 0, 0, 150, -1, 0, s);
+        { float r[16]; CoXlTestLwSeenWalk(0, 30, start, one, 1, 1, 0, 0, 150, -1, 0, r); CoXlTestLwSeenWalk(1, 30, start, one, 1, 1, 0, 0, 150, -1, 0, s);
           CHECK(r[8] >= 49.0f && r[8] <= 51.0f && s[8] >= 24.0f && s[8] <= 26.0f); }
         g_case = "never online: it keeps asking by the rules, never walks into the ring, and waits at its edge with priority";
         CoXlTestLwSeenWalk(0, 30, start, one, 1, 1, 0, 0, walkIn + 20, -1, 0, s);
@@ -268,6 +337,13 @@ int main(void)
         CHECK(CoXlTestLwSeenFarRoom(3, 0, 2, 0) == 1 && CoXlTestLwSeenFarRoom(3, 0, 3, 0) == 0 && CoXlTestLwSeenFarRoom(3, 2, 3, 0) == 0);
         CHECK(CoXlTestLwSeenFarRoom(20, 3, 10, 0) == 1 && CoXlTestLwSeenFarRoom(20, 3, 11, 0) == 0 && CoXlTestLwSeenFarRoom(3, 0, 10, 8) == 1);
         CHECK(CoXlTestLwSeenFarRoom(20, 0, 3, 0) == 0); /* on a player's road but asking by the far band's own rule: no kept share */
+        g_case = "no road patrol on its way to a player: the other far squads have the whole share; one still out keeps the half";
+        CoXlTestLwSeenSquad(20, 250, 0, 1, 8, 0);
+        CHECK(CoXlTestLwSeenFarRoom(3, 0, 3, 0) == 1 && CoXlTestLwSeenFarRoom(3, 0, 11, 0) == 1 && CoXlTestLwSeenFarRoom(3, 0, 12, 0) == 0);
+        CoXlTestLwSeenSquad(20, 250, 0, 1, 8, 8); CHECK(CoXlTestLwSeenFarRoom(3, 0, 3, 0) == 0);
+        CoXlTestLwSeenSquad(20, 250, 0, 3, 8, 1); CHECK(CoXlTestLwSeenFarRoom(3, 0, 3, 0) == 1); /* online: its mark is no wish */
+        CoXlTestLwSeenSquad(3, 100, 0, 1, 7, 1); CHECK(CoXlTestLwSeenFarRoom(3, 0, 3, 0) == 1); /* squad 3 is no road patrol */
+        CoXlTestLwSeenSquad(3, 100, 0, 1, 7, 0); CoXlTestLwSeenSquad(20, 250, 0, 1, 8, 1);
         g_case = "meet 0: a road patrol near a player is filler like any";
         CoXlTestLwSeenSwitch(0); CHECK(CoXlTestLwSeenKeeps(0) == 0);
         CoXlTestLwSeenSwitch(1); CHECK(CoXlTestLwSeenKeeps(0) == 1);
@@ -288,13 +364,103 @@ int main(void)
           CHECK(CoXlTestLwSeenGates(0, 1, &places, &rooms) == 0 && places == 1 && rooms == 0);
           CHECK(CoXlTestLwSeenGates(1, 0, &places, &rooms) == 0 && places == 1 && rooms == 1);
           CHECK(CoXlTestLwSeenGates(1, 1, &places, &rooms) == 1 && places == 1 && rooms == 1); }
-        g_case = "a squad that came online on its way in stays 300 s while within reach of a player";
+        g_case = "a squad that came online on its way in stays for its walk in, within the widest band in play and its zone";
         { const float B = CoXlTestLwSeenBand();
-          CoXlTestLwSeenSquad(0, 700, 0, 3, 8, 2);
-          CHECK(CoXlTestLwSeenStays(0, 600.0f, 1000, 1000 + 299999) == 1 && CoXlTestLwSeenStays(0, 600.0f, 1000, 1000 + 300000) == 0);
-          CHECK(CoXlTestLwSeenStays(0, B + 149.0f, 1000, 2000) == 1 && CoXlTestLwSeenStays(0, B + 151.0f, 1000, 2000) == 0);
-          CoXlTestLwSeenSquad(0, 700, 0, 3, 8, 0); CHECK(CoXlTestLwSeenStays(0, 600.0f, 1000, 2000) == 0); }
+          CoXlTestLwSeenWorld(solo, 1, 72); CoXlTestLwSeenSquad(0, 700, 0, 3, 8, 2);
+          const uint64_t stay = (uint64_t)((B + 150.0f - 350.0f) / 1.5f * 1000.0f);
+          CHECK(stay > 250000u && stay < 350000u);
+          CHECK(CoXlTestLwSeenStays(0, 600.0f, 1000, 1000 + stay - 1) == 1 && CoXlTestLwSeenStays(0, 600.0f, 1000, 1000 + stay) == 0);
+          /* asked for ahead of a vehicle it stands up to the lead's 200 m farther out, and a vehicle that stops keeps it */
+          CHECK(CoXlTestLwSeenStays(0, B + 349.0f, 1000, 2000) == 1 && CoXlTestLwSeenStays(0, B + 351.0f, 1000, 2000) == 0);
+          CoXlTestLwSeenSquad(0, 700, 0, 3, 8, 0); CHECK(CoXlTestLwSeenStays(0, 600.0f, 1000, 2000) == 0);
+          CoXlTestLwSeenWorld(apart, 2, 23); CoXlTestLwSeenSquad(0, 700, 0, 3, 8, 2); /* a second player: its scoped band */
+          const float S = CoXlTestLwSeenRange(1, 2);
+          CoXlTestLwSeenWorld(apart, 2, 23); CoXlTestLwSeenSquad(0, 700, 0, 3, 8, 2);
+          CHECK(CoXlTestLwSeenStays(0, S + 349.0f, 1000, 2000) == 1 && CoXlTestLwSeenStays(0, S + 351.0f, 1000, 2000) == 0);
+          CHECK(CoXlTestLwSeenStays(0, 600.0f, 1000, 1000 + 430000) == 1 && CoXlTestLwSeenStays(0, 600.0f, 1000, 1000 + 450000) == 0); }
         CoXlTestLwSeenEnd();
+    }
+
+    {
+        int out[16], members = 0, more = 0;
+        g_case = "road patrols are added after the world's squads, as many again, each of 4 units at most";
+        CHECK(CoXlTestLwRoadTail(40, 51, 41, out, 16, &members, &more) == 9 && more == 4 && members == 431);
+        CHECK(out[0] == 2 && out[1] == 101 && out[2] == 202 && out[3] == 301 && out[4] == 402 && out[5] == 411 && out[6] == 422 && out[7] == 431 && out[8] == 501);
+        CHECK(CoXlTestLwRoadTail(40, 51, 39, out, 16, &members, &more) == 9 && members == 930);
+        CHECK(CoXlTestLwRoadTail(40, 51, 30, out, 16, &members, &more) == 9 && members == 431);
+        g_case = "a world whose squads are no multiple of ten: the added ones follow its last";
+        CHECK(CoXlTestLwRoadTail(45, 52, 44, out, 16, &members, &more) == 11 && more == 5 && members == 930 && out[4] == 402 && out[5] == 452 && out[9] == 492 && out[10] == 501);
+        g_case = "none added: one squad in ten, as before";
+        CHECK(CoXlTestLwRoadTail(0, 51, 41, out, 16, &members, &more) == 6 && more == 0 && members == 930 && out[5] == 501);
+    }
+    {
+        const float B = CoXlTestLwSeenBand(); int o[5];
+        const float by[1][2] = {{1500, 20}}, sx[4] = {250, 2350, 1950, 650}; const int dir[4] = {1, 1, 1, -1}, none[4] = {0, 0, 0, 0};
+        CoXlTestLwSeenSetup(1, 1, 0, 0, 0);
+        g_case = "a 2 m unit's band through a 4x scope is 861 m, whatever the host's view";
+        { const float S = CoXlTestLwSeenRange(1, 2); CHECK(S > 840.0f && S < 880.0f && S > B + 150.0f); }
+        g_case = "a patrol is called to a player's road: the nearest one beyond the zone on the side whose turn it is, about turn";
+        CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
+        CHECK(CoXlTestLwCallOne(0, 0, o) == 30 && o[0] == 7 && o[1] == 13 && o[2] == 19 && o[3] == 6 && o[4] == 1);
+        g_case = "a called patrol is not called again: the next one out on that side, walking on as it was";
+        CHECK(CoXlTestLwCallOne(0, 0, o) == 0 && o[0] == 3 && o[1] == 17 && o[2] == 19 && o[3] == 2);
+        g_case = "none left on the side whose turn it is: one from the other side, and its way goes on past the player";
+        CHECK(CoXlTestLwCallOne(0, 0, o) == 10 && o[0] == 23 && o[1] == 13 && o[2] == 11 && o[3] == 24);
+        g_case = "a patrol inside a player's band is not called: it would be offline in clear view";
+        CHECK(CoXlTestLwCallOne(0, 0, o) == -1);
+        g_case = "a called patrol's next plan, or an errand, ends its call";
+        CHECK(CoXlTestLwCallOf(30) == 1 && CoXlTestLwCallOf(0) == 1 && CoXlTestLwCallOf(10) == 1 && CoXlTestLwCallOf(20) == 0);
+        CHECK(CoXlTestLwCallOver(30, 1) == 0 && CoXlTestLwCallOver(0, 0) == 0);
+        g_case = "a called patrol that turns back is free again; one that comes online is counted and free";
+        CHECK(CoXlTestLwCallOver(10, 2) == 0);
+        CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
+        CHECK(CoXlTestLwCallOne(0, 0, o) == 30 && CoXlTestLwCallOver(30, 3) == 0);
+        g_case = "a patrol standing in the zone it comes online in is left there: only one beyond it is called";
+        { const float zx[2] = {250, 800}; const int zd[2] = {1, 1};
+          CoXlTestLwCallWorld(30, 0, by, 1, zx, zd, none, 2); CHECK(CoXlTestLwCallOne(0, 0, o) == 0); }
+        g_case = "a patrol refused the far share stands in the zone; once the players' bands have moved, or its way no longer leads to one, it stands no more";
+        CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
+        CHECK(CoXlTestLwCallZone(1500.0f - B - 50.0f, 19, 1500.0f - B - 60.0f, 0) == 3);
+        CHECK(CoXlTestLwCallZone(1500.0f - B - 50.0f, 19, 1500.0f - B + 30.0f, 0) == 1);
+        CHECK(CoXlTestLwCallZone(1500.0f - B - 50.0f, 19, 1500.0f - B - 150.0f, 0) == 1);
+        CHECK(CoXlTestLwCallZone(1500.0f - B - 50.0f, 19, 1500.0f - B - 60.0f, 1) == 1);
+        g_case = "the other side's turn";
+        CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
+        CHECK(CoXlTestLwCallOne(0, 1, o) == 10);
+        g_case = "a patrol already on its way to a player, or waiting at a ring, is left to it";
+        { const int mk[4] = {0, 0, 0, 8};
+          CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, mk, 4); CHECK(CoXlTestLwCallOne(0, 0, o) == 0); }
+        g_case = "a player 79 m from the road is on it; one 81 m off, or with no road node within 150 m, is not";
+        { const float near[1][2] = {{1500, 79}}, off[1][2] = {{1500, 81}}, far[1][2] = {{1550, 145}};
+          CoXlTestLwCallWorld(30, 0, near, 1, sx, dir, none, 4); CHECK(CoXlTestLwCallOne(0, 0, o) == 30);
+          CoXlTestLwCallWorld(30, 0, off, 1, sx, dir, none, 4); CHECK(CoXlTestLwCallOne(0, 0, o) == -2);
+          CoXlTestLwCallWorld(30, 0, far, 1, sx, dir, none, 4); CHECK(CoXlTestLwCallOne(0, 0, o) == -2); }
+        g_case = "the way past the player ends at a junction; a patrol more than 26 road nodes out is not called";
+        { const float at9[1][2] = {{900, 20}}, at2[1][2] = {{200, 20}}, one[1] = {1850}, last[1] = {2950}; const int back[1] = {-1};
+          CoXlTestLwCallWorld(30, 7, at9, 1, one, back, none, 1);
+          CHECK(CoXlTestLwCallOne(0, 1, o) == 0 && o[0] == 18 && o[1] == 12 && o[2] == 7);
+          CoXlTestLwCallWorld(30, 0, at2, 1, last, back, none, 1); CHECK(CoXlTestLwCallOne(0, 1, o) == -1); /* 27 nodes out, 2750 m */
+          const float at3[1][2] = {{300, 20}};
+          CoXlTestLwCallWorld(30, 0, at3, 1, last, back, none, 1); CHECK(CoXlTestLwCallOne(0, 1, o) == 0 && o[0] == 29 && o[1] == 29 && o[2] == 1); }
+        g_case = "one call a second at most, and a player's next call a far walk's time on: 103 s solo on a far share of 18";
+        { const uint32_t period = co_lw_meet_call_ms(18.0f, 4, 1, B + 50.0f - 250.0f);
+          CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
+          CHECK(period > 100000u && period < 107000u);
+          CHECK(CoXlTestLwCallTick(1000000u) == 1 && CoXlTestLwCallTick(1000500u) == 1 && CoXlTestLwCallTick(1002000u) == 1);
+          CHECK(CoXlTestLwCallTick(1000000u + period - 1500u) == 1 && CoXlTestLwCallTick(1000000u + period + 500u) == 2);
+          CHECK(CoXlTestLwCallOf(30) == 1 && CoXlTestLwCallOf(10) == 1 && CoXlTestLwCallOf(0) == 0); /* the second from the other side */ }
+        g_case = "two players on a road: each has its call in turn, and twice the time to its next";
+        { const float pair[2][2] = {{1500, 20}, {1600, -20}}, wide[4] = {250, 450, 550, 2750}; const int d4[4] = {1, 1, -1, -1};
+          const uint32_t period = co_lw_meet_call_ms(18.0f, 4, 1, B + 50.0f - 250.0f);
+          CoXlTestLwCallWorld(30, 0, pair, 2, wide, d4, none, 4);
+          CHECK(CoXlTestLwCallTick(1000000u) == 1 && CoXlTestLwCallTick(1000500u) == 1 && CoXlTestLwCallTick(1001000u) == 2 && CoXlTestLwCallTick(1002000u) == 2);
+          CHECK(CoXlTestLwCallOf(20) == 1 && CoXlTestLwCallOf(10) == 2);
+          CHECK(CoXlTestLwCallTick(1000000u + period + 2000u) == 2 && CoXlTestLwCallTick(1000000u + 2u * period + 2000u) == 3); }
+        g_case = "meet 0: no patrol is called";
+        CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
+        CoXlTestLwSeenSwitch(0); CHECK(CoXlTestLwCallTick(1000000u) == 0); CoXlTestLwSeenSwitch(1);
+        CHECK(CoXlTestLwCallTick(1002000u) == 1);
+        CoXlTestLwCallEnd();
     }
 
     g_case = "a squad off the roads never draws a road node as its destination";

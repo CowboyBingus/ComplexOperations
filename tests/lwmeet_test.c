@@ -56,6 +56,23 @@ int main(void)
     g_case = "a filler squad leaves for a road patrol only within that half";
     CHECK(co_lw_meet_road_room(0, 8, 23) == 1 && co_lw_meet_road_room(8, 8, 23) == 0 && co_lw_meet_road_room(28, 8, 72) == 1 && co_lw_meet_road_room(29, 8, 72) == 0);
 
+    g_case = "the time between two calls: a far walk over the squads the kept half of the far share holds, for each player on a road";
+    CHECK(co_lw_meet_call_ms(18.0f, 4, 1, 465.0f) == 103333u && co_lw_meet_call_ms(46.0f, 4, 8, 661.0f) > 459000u && co_lw_meet_call_ms(46.0f, 4, 8, 661.0f) < 460500u);
+    CHECK(co_lw_meet_call_ms(18.0f, 8, 1, 465.0f) > 206000u && co_lw_meet_call_ms(18.0f, 4, 0, 465.0f) == 103333u);
+    g_case = "never under a minute or over ten; a share too small for one squad still passes one at a time";
+    CHECK(co_lw_meet_call_ms(72.0f, 4, 1, 100.0f) == CO_LW_MEET_CALL_MIN_MS && co_lw_meet_call_ms(18.0f, 4, 8, 3000.0f) == CO_LW_MEET_CALL_MAX_MS);
+    CHECK(co_lw_meet_call_ms(4.0f, 4, 1, 465.0f) == 232500u);
+    g_case = "the patrol to call: the wanted side first, then the nearer";
+    CHECK(co_lw_meet_call_better(5, 1, -1, 0) == 1 && co_lw_meet_call_better(5, 0, -1, 1) == 1);
+    CHECK(co_lw_meet_call_better(9, 1, 3, 0) == 1 && co_lw_meet_call_better(3, 0, 9, 1) == 0);
+    CHECK(co_lw_meet_call_better(3, 1, 9, 1) == 1 && co_lw_meet_call_better(9, 1, 3, 1) == 0 && co_lw_meet_call_better(3, 0, 3, 0) == 0 && co_lw_meet_call_better(3, 0, 9, 0) == 1);
+    g_case = "a patrol refused the far share stands while its refusal is fresh, 90 s at most";
+    CHECK(co_lw_meet_zone_waits(1000, 5000, 6000) == 1 && co_lw_meet_zone_waits(1000, 5000, 5000 + CO_LW_MEET_ZONE_ASK_MS - 1) == 1);
+    CHECK(co_lw_meet_zone_waits(1000, 5000, 5000 + CO_LW_MEET_ZONE_ASK_MS) == 0 && co_lw_meet_zone_waits(1000, 0, 1500) == 0);
+    CHECK(co_lw_meet_zone_waits(1000, 90500, 1000 + CO_LW_MEET_ZONE_WAIT_MS - 1) == 1 && co_lw_meet_zone_waits(1000, 90500, 1000 + CO_LW_MEET_ZONE_WAIT_MS) == 0);
+    g_case = "a road patrol has 4 units of a larger group, and a small group's own";
+    CHECK(co_lw_meet_road_members(9) == 4 && co_lw_meet_road_members(4) == 4 && co_lw_meet_road_members(3) == 3 && co_lw_meet_road_members(1) == 1);
+
     g_case = "a player on a road patrol's way: within the width of a stretch, its ends and a single point";
     { const float way[3][2] = {{0, 0}, {100, 0}, {100, 200}}, on[2] = {10, 79}, off[2] = {10, 81}, corner[2] = {150, 250}, past[2] = {-60, -60}, by[2] = {160, 100};
       CHECK(co_lw_meet_on_way(way, 3, on, 80.0f) == 1 && co_lw_meet_on_way(way, 3, off, 80.0f) == 0);
@@ -64,18 +81,38 @@ int main(void)
       CHECK(co_lw_meet_on_way(way, 1, past, 90.0f) == 1 && co_lw_meet_on_way(way, 1, by, 80.0f) == 0 && co_lw_meet_on_way(way, 0, on, 80.0f) == 0); }
 
     g_case = "inside the ring and beyond the outer zone a patrol has no rule";
-    CHECK(co_lw_meet_act(1, 149.0f, 150.0f, 250.0f, 600.0f, 0, 0, 1) == CO_LW_MEET_WALK && co_lw_meet_act(1, 700.0f, 150.0f, 250.0f, 600.0f, 0, 0, 1) == CO_LW_MEET_WALK);
+    CHECK(co_lw_meet_act(1, 149.0f, 150.0f, 250.0f, -451.0f, 0, 0, 1, 1) == CO_LW_MEET_WALK && co_lw_meet_act(1, 700.0f, 150.0f, 250.0f, 100.0f, 0, 0, 1, 1) == CO_LW_MEET_WALK);
     g_case = "beyond the band: a patrol on a player's road that is seen asks there; hidden, or off the roads, it walks on";
-    CHECK(co_lw_meet_act(1, 699.0f, 150.0f, 250.0f, 600.0f, 0, 0, 0) == CO_LW_MEET_ASK_BEYOND && co_lw_meet_act(1, 600.0f, 150.0f, 250.0f, 600.0f, 0, 0, 1) == CO_LW_MEET_ASK_BEYOND);
-    CHECK(co_lw_meet_act(1, 650.0f, 150.0f, 250.0f, 600.0f, 1, 1, 0) == CO_LW_MEET_WALK && co_lw_meet_act(0, 650.0f, 150.0f, 250.0f, 600.0f, 0, 0, 1) == CO_LW_MEET_WALK);
+    CHECK(co_lw_meet_act(1, 699.0f, 150.0f, 250.0f, 99.0f, 0, 0, 0, 1) == CO_LW_MEET_ASK_BEYOND && co_lw_meet_act(1, 600.0f, 150.0f, 250.0f, 0.0f, 0, 0, 1, 1) == CO_LW_MEET_ASK_BEYOND);
+    CHECK(co_lw_meet_act(1, 650.0f, 150.0f, 250.0f, 50.0f, 1, 1, 0, 1) == CO_LW_MEET_WALK && co_lw_meet_act(0, 650.0f, 150.0f, 250.0f, 50.0f, 0, 0, 1, 1) == CO_LW_MEET_WALK);
+    g_case = "beyond the band a group never measured does not ask: its band is a guess";
+    CHECK(co_lw_meet_act(1, 650.0f, 150.0f, 250.0f, 50.0f, 0, 0, 0, 0) == CO_LW_MEET_WALK && co_lw_meet_act(1, 400.0f, 150.0f, 250.0f, -200.0f, 0, 0, 1, 0) == CO_LW_MEET_ASK_COVER);
+    g_case = "the bands decide the zone, not the nearest player's distance: 900 m out inside a scoped player's band is inside";
+    CHECK(co_lw_meet_act(1, 700.0f, 150.0f, 250.0f, -1.0f, 0, 0, 0, 1) == CO_LW_MEET_WALK && co_lw_meet_act(1, 900.0f, 150.0f, 250.0f, 0.0f, 0, 0, 0, 1) == CO_LW_MEET_ASK_BEYOND);
+    CHECK(co_lw_meet_act(1, 900.0f, 150.0f, 250.0f, 99.0f, 0, 0, 0, 1) == CO_LW_MEET_ASK_BEYOND && co_lw_meet_act(1, 900.0f, 150.0f, 250.0f, 100.0f, 0, 0, 0, 1) == CO_LW_MEET_WALK);
+    g_case = "it stays for its walk in from where it came online to the offline radius";
+    CHECK(co_lw_meet_stay_ms(794.0f, 350.0f) == 296000u && co_lw_meet_stay_ms(1011.0f, 350.0f) > 440000u && co_lw_meet_stay_ms(1011.0f, 350.0f) < 441000u && co_lw_meet_stay_ms(300.0f, 350.0f) == 0);
+    g_case = "beside the road: the first point with a clear line and no enemy near; with none, the clear one with the fewest";
+    { const uint8_t clear[4] = {0, 1, 1, 1}; const uint16_t crowd[4] = {0, 41, 0, 0}, all[4] = {0, 41, 7, 9}, none[4] = {0, 0, 0, 0}; const uint8_t blocked[4] = {0, 0, 0, 0}; int least = 9;
+      CHECK(co_lw_meet_beside(clear, crowd, 4, &least) == 2 && co_lw_meet_beside(clear, none, 4, &least) == 1);
+      CHECK(co_lw_meet_beside(clear, all, 4, &least) == -1 && least == 2);
+      CHECK(co_lw_meet_beside(blocked, none, 4, &least) == -1 && least == -1 && co_lw_meet_beside(clear, none, 0, &least) == -1 && least == -1); }
+    g_case = "a sighting a player noticed: 5 s of watching it walk without a break, told once";
+    { uint8_t run = 0; int told = 0;
+      for (int k = 0; k < 4; k++) told += co_lw_meet_watched(&run, 1);
+      CHECK(told == 0 && co_lw_meet_watched(&run, 0) == 0 && run == 0);
+      for (int k = 0; k < 4; k++) told += co_lw_meet_watched(&run, 1);
+      CHECK(told == 0 && co_lw_meet_watched(&run, 1) == 1 && co_lw_meet_watched(&run, 1) == 0 && co_lw_meet_watched(&run, 0) == 0 && co_lw_meet_watched(&run, 1) == 0);
+      run = 0; for (int k = 0; k < 5; k++) told += co_lw_meet_watched(&run, 1);
+      CHECK(told == 1); }
     g_case = "inside the band: seen with a remembered point it steps back, road patrol or not; seen without one it walks";
-    CHECK(co_lw_meet_act(1, 599.0f, 150.0f, 250.0f, 600.0f, 0, 0, 1) == CO_LW_MEET_ASK_COVER && co_lw_meet_act(0, 200.0f, 150.0f, 250.0f, 600.0f, 0, 0, 1) == CO_LW_MEET_ASK_COVER);
-    CHECK(co_lw_meet_act(1, 150.0f, 150.0f, 250.0f, 600.0f, 0, 1, 1) == CO_LW_MEET_ASK_COVER && co_lw_meet_act(1, 400.0f, 150.0f, 250.0f, 600.0f, 0, 1, 0) == CO_LW_MEET_WALK);
+    CHECK(co_lw_meet_act(1, 599.0f, 150.0f, 250.0f, -1.0f, 0, 0, 1, 1) == CO_LW_MEET_ASK_COVER && co_lw_meet_act(0, 200.0f, 150.0f, 250.0f, -400.0f, 0, 0, 1, 1) == CO_LW_MEET_ASK_COVER);
+    CHECK(co_lw_meet_act(1, 150.0f, 150.0f, 250.0f, -450.0f, 0, 1, 1, 1) == CO_LW_MEET_ASK_COVER && co_lw_meet_act(1, 400.0f, 150.0f, 250.0f, -200.0f, 0, 1, 0, 1) == CO_LW_MEET_WALK);
     g_case = "hidden beyond the online radius: only a patrol on a player's road whose next stretch is seen asks";
-    CHECK(co_lw_meet_act(1, 400.0f, 150.0f, 250.0f, 600.0f, 1, 1, 0) == CO_LW_MEET_ASK && co_lw_meet_act(1, 400.0f, 150.0f, 250.0f, 600.0f, 1, 0, 0) == CO_LW_MEET_WALK);
-    CHECK(co_lw_meet_act(0, 400.0f, 150.0f, 250.0f, 600.0f, 1, 1, 0) == CO_LW_MEET_WALK && co_lw_meet_act(1, 250.0f, 150.0f, 250.0f, 600.0f, 1, 1, 1) == CO_LW_MEET_ASK);
+    CHECK(co_lw_meet_act(1, 400.0f, 150.0f, 250.0f, -200.0f, 1, 1, 0, 1) == CO_LW_MEET_ASK && co_lw_meet_act(1, 400.0f, 150.0f, 250.0f, -200.0f, 1, 0, 0, 1) == CO_LW_MEET_WALK);
+    CHECK(co_lw_meet_act(0, 400.0f, 150.0f, 250.0f, -200.0f, 1, 1, 0, 1) == CO_LW_MEET_WALK && co_lw_meet_act(1, 250.0f, 150.0f, 250.0f, -350.0f, 1, 1, 1, 1) == CO_LW_MEET_ASK);
     g_case = "hidden inside the online radius: the near band's own request asks";
-    CHECK(co_lw_meet_act(1, 249.0f, 150.0f, 250.0f, 600.0f, 1, 1, 1) == CO_LW_MEET_WALK);
+    CHECK(co_lw_meet_act(1, 249.0f, 150.0f, 250.0f, -351.0f, 1, 1, 1, 1) == CO_LW_MEET_WALK);
 
     g_case = "a remembered point: on the same plan, fresh, the edge from every player, behind the squad";
     { CoLwMeetCover c; memset(&c, 0, sizeof c); const uint16_t path[4] = {7, 8, 9, 10}; const float here[2] = {500, 0}, mem[2] = {480, 0};

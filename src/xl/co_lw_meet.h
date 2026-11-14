@@ -16,16 +16,34 @@
 #define CO_LW_MEET_STEP 4.0f        /* m between the points tried on the way back out */
 #define CO_LW_MEET_WAY 80.0f         /* m: a player this near a road patrol's way stands on its road (D) */
 #define CO_LW_MEET_OUTER 100.0f      /* m beyond the draw band: where a patrol on an open road comes online */
+#define CO_LW_MEET_NOTICE 300.0f     /* m beyond that: a road patrol on its way to a player is known, and the far share keeps its room */
+/* 1: a player on another machine may look through a 4x scope, so a squad comes online beyond that band (861 m for a
+ * 2 m unit) and never where such a player could draw it. 0: such a player is taken to look unscoped beyond the
+ * host's band: squads come online nearer and use less of the far share, and a scoped one may see one appear. */
+#define CO_LW_MEET_PEER_SCOPED 1
+#define CO_LW_MEET_STAY_PACE 1.5f    /* m/s: the walk in from where it came online, for how long it stays */
+#define CO_LW_MEET_WATCH_M 300.0f    /* m: a patrol watched walking within this ... */
+#define CO_LW_MEET_WATCH_S 5         /* ... for this many seconds running is a sighting a player noticed */
 #define CO_LW_MEET_LOOK_MS 1000u     /* a patrol on a player's road: its sight test where it stands */
 #define CO_LW_MEET_LOOK_SLOW_MS 2000u /* any other patrol walking toward a player */
 #define CO_LW_MEET_COVER_MS 120000u  /* a remembered point this old is forgotten: the players have moved */
 #define CO_LW_MEET_COVER_STEPS 6     /* steps back to cover in one approach; then it walks on */
-#define CO_LW_MEET_STAY_MS 300000u   /* a squad that came online on its way in is not taken offline for distance this long */
 #define CO_LW_MEET_ROAD_SHARE 2      /* road patrols take a bubble's budget / this by swap, and are kept up to it */
 #define CO_LW_MEET_FAR_RESERVE 2     /* the far share / this is kept for patrols on a player's road */
 #define CO_LW_MEET_HOLDS 8           /* one hold a bubble at most */
 #define CO_LW_MEET_SEEN_GAP 5        /* samples (seconds) out of view before the next sight of a squad is a new sighting */
 #define CO_LW_MEET_PLAYERS 8
+/* More patrols on a player's road at no unit cost: road patrols are small, and the nearest one out of sight is
+ * called along the road to each player there, as often as the far share's kept half lets one walk in. */
+#define CO_LW_MEET_ROAD_MEMBERS 4    /* a road patrol's units: two squads walk in on the kept half of a solo far share (9 of 18) */
+#define CO_LW_MEET_PACE 2.0f         /* m/s: a patrol's walk (the squads' default speed; 1.97 measured online) */
+#define CO_LW_MEET_CALL_NEAR 150.0f  /* m: a player this near a road node is on or by that road */
+#define CO_LW_MEET_CALL_HOPS 26      /* road nodes out from the player a called patrol may stand: 2.6 km, 31 of a plan's 32 nodes with the way past */
+#define CO_LW_MEET_CALL_PAST 4       /* nodes of road past the player a called patrol walks on, so it passes by */
+#define CO_LW_MEET_CALL_MIN_MS 60000u  /* never more than a patrol a minute for one player */
+#define CO_LW_MEET_CALL_MAX_MS 600000u /* and one in ten minutes at least, however small that player's part of the share */
+#define CO_LW_MEET_ZONE_WAIT_MS 90000u /* a patrol refused the far share stands beyond the band this long at most, then walks on */
+#define CO_LW_MEET_ZONE_ASK_MS 4000u   /* its refusal is this fresh: it asks every 3 s */
 #define CO_LW_MEET_RINGS 3          /* 50, 100 and 150 m */
 
 enum { CO_LW_MEET_WAITS, CO_LW_MEET_BACK, CO_LW_MEET_TURNS };
@@ -47,10 +65,17 @@ int co_lw_meet_next(uint64_t sinceMs, uint64_t nowMs, float nearest2, float ring
 int co_lw_meet_keeps(int road, float near2, float rOn, int roadUnits, int budget);
 /* 1 when `player` (x, y) lies within `width` of the way through the `n` points. */
 int co_lw_meet_on_way(const float (*way)[2], int n, const float* player, float width);
-/* What a patrol does `d` from its nearest player, after a look where it stands: `onRoad` on a player's road,
- * `hidden` the look's result, `aheadSeen` its next stretch in a player's view, `cover` a remembered point it may
- * step back to. Inside `rMin` and beyond `band` + CO_LW_MEET_OUTER it has no rule here. */
-int co_lw_meet_act(int onRoad, float d, float rMin, float rOn, float band, int hidden, int aheadSeen, int cover);
+/* What a patrol does `d` from its nearest player and `over` beyond what any player could draw of it (negative
+ * inside a band), after a look where it stands: `onRoad` on a player's road, `hidden` the look's result, `aheadSeen`
+ * its next stretch in a player's view, `cover` a remembered point it may step back to, `measured` its group's size
+ * known (a guessed band is no ground to come online in clear sight). Inside `rMin` and from CO_LW_MEET_OUTER
+ * beyond the bands it has no rule here. */
+int co_lw_meet_act(int onRoad, float d, float rMin, float rOn, float over, int hidden, int aheadSeen, int cover, int measured);
+/* How long a squad that came online on its way in is not taken offline for distance: its walk from `keep` to `rOff`. */
+uint64_t co_lw_meet_stay_ms(float keep, float rOff);
+/* 1 once, when a squad has been watched walking for CO_LW_MEET_WATCH_S samples running: `run` counts them, 255 once
+ * told, 0 again when it next comes online. */
+int co_lw_meet_watched(uint8_t* run, int seen);
 
 /* The last point of a patrol's way where the near sight test passed, and where in its plan that was. */
 typedef struct CoLwMeetCover { float at[2]; uint64_t ms; uint16_t node, next; uint8_t pathAt, known, steps; } CoLwMeetCover;
@@ -65,6 +90,21 @@ int co_lw_meet_road_room(int roadUnits, int members, int budget);
 /* 1 when a far squad of `members` fits the far share `limit`: `farUnits` far units now, `roadFar` of them patrols on
  * a player's road. With `reserve` the others leave limit / CO_LW_MEET_FAR_RESERVE to those patrols. */
 int co_lw_meet_far_room(int farUnits, int roadFar, int members, int limit, int onRoad, int reserve);
+/* The time between two patrols called to one player's road: the walk `walk` m from where a patrol comes online to
+ * the online radius, over the squads of `members` the far share's kept half (`farLimit` / CO_LW_MEET_FAR_RESERVE)
+ * holds at once, for each of the `roadPlayers` players on a road. Faster, the share would refuse them. */
+uint32_t co_lw_meet_call_ms(float farLimit, int members, int roadPlayers, float walk);
+/* 1 when a patrol `hops` road nodes from the player, on the wanted side of them or not, is the better one to call
+ * than the best so far (`bestHops` < 0: none): the wanted side first, then the nearer. */
+int co_lw_meet_call_better(int hops, int onSide, int bestHops, int bestOnSide);
+/* 1 while a patrol beyond the band, refused for the far share at `refusedMs`, stands where it is: its refusal is
+ * fresh and it has stood less than CO_LW_MEET_ZONE_WAIT_MS since `sinceMs`. */
+int co_lw_meet_zone_waits(uint64_t sinceMs, uint64_t refusedMs, uint64_t nowMs);
+/* A road patrol's units of a group of `size`. */
+int co_lw_meet_road_members(int size);
+/* The beside command's point: the first of the `n` candidates (nearest first) with a clear line to the road and no
+ * enemy near. -1 with none; `least` then gets the clear one with the fewest enemies, -1 when none is clear. */
+int co_lw_meet_beside(const uint8_t* clear, const uint16_t* foes, int n, int* least);
 /* The travel command's step for `dt` seconds at `v` m/s: a tick of 0.1 s at most, 2 m at most, so the hellpod rule
  * (co_settle.h) reads it as the speed it stands for. */
 float co_lw_meet_travel_step(float v, float dt);
