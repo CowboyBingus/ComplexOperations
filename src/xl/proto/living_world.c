@@ -24,6 +24,8 @@ typedef void (*LwRemoveFn)(uintptr_t state, uint32_t id);
 typedef void (*LwUnseatFn)(uintptr_t unused, uint32_t entity);
 typedef void (*LwSetJobFn)(uintptr_t jobs, uint32_t entity, uint32_t job);
 typedef void (*LwGoalFn)(uint32_t squad, const float* pos);
+typedef void (*LwRepathFn)(void* nav, uint32_t squad, const float* pos); /* 0x5B36C0 */
+typedef void (*LwResumeFn)(void* squads, uint32_t squad);                /* 0x8050E0 */
 
 /* The functions the loader calls and the instructions its rules rest on, as reviewed. */
 static const ActPin kLwPins[] = {
@@ -47,7 +49,7 @@ static struct
     int state;              /* 0 not decided, 1 on, -1 off */
     int pinsOk;
     uintptr_t game;
-    LwSpawnFn spawn; LwRemoveFn remove; LwUnseatFn unseat; LwSetJobFn setJob; LwGoalFn goal;
+    LwSpawnFn spawn; LwRemoveFn remove; LwUnseatFn unseat; LwSetJobFn setJob; LwGoalFn goal; LwRepathFn repath; LwResumeFn resume;
     uint32_t saved[DIF_VANILLA + 1][3]; /* each level's patrol caps before they were zeroed (factions 2 / 8 / 4) */
     int savedOk[DIF_VANILLA + 1];
     uint32_t rowsZeroed;
@@ -72,7 +74,7 @@ static int LwEnabled(void)
     }
     g_lw.game = game;
     g_lw.spawn = (LwSpawnFn)(game + 0x953580u); g_lw.remove = (LwRemoveFn)(game + 0xFDC310u);
-    g_lw.unseat = (LwUnseatFn)(game + 0x636240u); g_lw.setJob = (LwSetJobFn)(game + 0x7F5120u); g_lw.goal = (LwGoalFn)(game + 0xA13520u);
+    g_lw.unseat = (LwUnseatFn)(game + 0x636240u); g_lw.setJob = (LwSetJobFn)(game + 0x7F5120u); g_lw.goal = (LwGoalFn)(game + 0xA13520u); g_lw.repath = (LwRepathFn)(game + 0x5B36C0u); g_lw.resume = (LwResumeFn)(game + 0x8050E0u);
     g_lw.pinsOk = 1;
     Note("living world: on for complex operations: their missions' director patrols are replaced by the loader's squads (host only)");
     return 1;
@@ -495,7 +497,7 @@ typedef struct LwSquad
     int16_t garrison; /* RETAKE: its g_lwGarrisons index */
     uint16_t home1; /* 2d: its home region + 1 (0 = none yet) */
     int8_t fight; uint8_t rushed, rushedN, tells; ULONGLONG retargetAt, tellAt; /* REINFORCE: its fight (g_lwFights index); members sped up (0x7EFFC0), how many; fight target tells; next goal refresh, next tell */
-    float goalTo[3], stillFrom[2], stillWay; ULONGLONG goalAt, stillSince, pendSince, jobAt; uint8_t goalSends, stallNoted, stallTries; int16_t goalNode; /* jobAt: its job asked for; goalNode: the route node goalTo was sent for, -1 none */ /* the last goal sent online and when; the leader still since; the nav's request pending since (the stall note) */
+    float goalTo[3], stillFrom[2], stillWay; ULONGLONG goalAt, stillSince, pendSince, jobAt; uint8_t goalSends, stallNoted, stallTries, stallWaits, goalLines, goalLineHit; int16_t goalNode; float stallDist, goalRaw[3]; ULONGLONG goalLineAt; /* jobAt: its job asked for; goalNode: the route node goalTo was sent for, -1 none */ /* the last goal sent online and when; the leader still since; the nav's request pending since (the stall note) */
     uint16_t prevNode; uint8_t prevValid, goalPending, alerted; ULONGLONG calmSince; /* the node it walked from (no route starts back to it); a patrol goal held while members are alert; alert since it came online, calm since */
 } LwSquad;
 static int LwIntentArrived(LwSquad* q); static int LwIntentGoal(LwSquad* q); static void LwIntentOnline(LwSquad* q, const uint32_t* members, int n, const float* at);
@@ -556,7 +558,7 @@ static struct
     uint32_t crowded; /* points where a member's slot cast would not reach its slot (30 s) */
     uint32_t seenSlot, spaced; /* points refused: a member's slot in sight; within LW_SPACING of a squad or recent request (30 s) */
     uint32_t swapWaits, swapWaitLines; /* far swaps that waited for an event squad's hold (30 s); their lines this mission */
-    uint32_t stallResent, stallSnapped, stallNewGoal, stallResumed, stallAction, stallBusy, stallNoGoal, stallFixLines; /* stall recoveries (30 s); their lines this mission */
+    uint32_t stallResent, stallSnapped, stallNewGoal, stallResumed, stallAction, stallBusy, stallNoGoal, stallFixLines, goalSendsAll, goalTypeMiss, goalOwnDest, goalLines; /* stall recoveries (30 s); their lines this mission */
     uint32_t stalled, stalledOther, stallLines, stallOtherLines; /* online squads still 30 s: calm with a goal, other (30 s); their lines this mission */
     uint32_t goals, goalNoFace, goalReplans, goalStuck; /* goals sent, next nodes without a face within 25 m, replans, none found (30 s) */
     uint32_t heights, underGround, overGround; float worstUnder, worstOver; /* members against the drawn ground (30 s) */
@@ -1575,7 +1577,7 @@ static void LwSendGoal(LwSquad* q)
     float goal[3] = {g_lwNodes[q->path[q->pathAt]].x, g_lwNodes[q->path[q->pathAt]].y, 0};
     /* The job position alone leaves the destination to state 10's scatter (0x7ED200), which falls back to the squad's
      * own position on a miss; the point snapped here and pathed directly (0x5B36C0) is the destination itself. */
-    if (!LwSquadGoTo(q, goal)) { q->goalAt = 0; return; } /* goal-less: the stall check asks again */
+    if (!LwSquadGoTo(q, goal)) { q->goalAt = 0; q->pathLen = q->pathAt = 0; return; } /* goal-less: the stall check asks again, for another route */
     g_lwWorld.goals++; q->goalNode = (int16_t)q->path[q->pathAt];
 }
 
@@ -1895,7 +1897,7 @@ static void LwPendingTick(LwSquad* q)
     if (used == 1 && id != none && id != 0)
     {
         Note("living world: squad %d is online as %08X after %.1f s", (int)(q - g_lwSquads), id, (double)(GetTickCount64() - q->since) / 1000.0);
-        q->squad = id; q->state = LW_ONLINE; q->rec = 0; q->moved = 0; q->goalAt = q->stillSince = q->pendSince = 0; q->goalSends = q->stallNoted = q->stallTries = 0;
+        q->squad = id; q->state = LW_ONLINE; q->rec = 0; q->moved = 0; q->goalAt = q->stillSince = q->pendSince = 0; q->goalSends = q->stallNoted = q->stallTries = q->stallWaits = q->goalLines = 0; q->goalLineAt = 0;
         /* keep at once (audit 1, criterion 6): the dispatch wrote rec+8 inside the director (0x954F4C), and the members
          * that exist by now must not meet the next despawner pass (0x572C69) with keep 0 */
         uint32_t members[32];
@@ -2958,10 +2960,10 @@ static void LwSquadsTick(void)
         if (g_lwWorld.goals || g_lwWorld.goalNoFace || g_lwWorld.stalled || g_lwWorld.stalledOther)
             Note("living world: goals (30 s): %u sent, %u next nodes with no navmesh within 25 m, %u replans, %u squads left without a reachable goal; "
                 "%u online squads without way for 30 s calm with a goal, %u more alert, rushing or without a goal; stalls: %u goals sent again, %u moved onto the "
-                "leader's layer, %u new goals, %u held squads resumed, %u left to a brain action, %u waited for a path request, %u goal-less asked again",
+                "leader's layer, %u new goals, %u held squads resumed, %u left to a brain action, %u waited for a path request, %u goal-less asked again; of %u goal sends %u had no face for the leader's type where layer 0 has one, %u destinations were the squad's own position 5 s on",
                 g_lwWorld.goals, g_lwWorld.goalNoFace, g_lwWorld.goalReplans, g_lwWorld.goalStuck, g_lwWorld.stalled, g_lwWorld.stalledOther, g_lwWorld.stallResent,
-                g_lwWorld.stallSnapped, g_lwWorld.stallNewGoal, g_lwWorld.stallResumed, g_lwWorld.stallAction, g_lwWorld.stallBusy, g_lwWorld.stallNoGoal);
-        g_lwWorld.stallResent = g_lwWorld.stallSnapped = g_lwWorld.stallNewGoal = g_lwWorld.stallResumed = g_lwWorld.stallAction = g_lwWorld.stallBusy = g_lwWorld.stallNoGoal = 0;
+                g_lwWorld.stallSnapped, g_lwWorld.stallNewGoal, g_lwWorld.stallResumed, g_lwWorld.stallAction, g_lwWorld.stallBusy, g_lwWorld.stallNoGoal, g_lwWorld.goalSendsAll, g_lwWorld.goalTypeMiss, g_lwWorld.goalOwnDest);
+        g_lwWorld.stallResent = g_lwWorld.stallSnapped = g_lwWorld.stallNewGoal = g_lwWorld.stallResumed = g_lwWorld.stallAction = g_lwWorld.stallBusy = g_lwWorld.stallNoGoal = g_lwWorld.goalSendsAll = g_lwWorld.goalTypeMiss = g_lwWorld.goalOwnDest = 0;
         g_lwWorld.goals = g_lwWorld.goalNoFace = g_lwWorld.goalReplans = g_lwWorld.goalStuck = g_lwWorld.stalled = g_lwWorld.stalledOther = 0;
         LwNavTypeDump(); /* test (HELLFORGE_LW_TEST_NAV=1): agent types and obstacle areas, twice a level */
         LwHearNote(); LwRushNote();

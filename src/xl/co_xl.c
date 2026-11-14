@@ -445,8 +445,10 @@ uint32_t CoXlTestLwStall(int fresh, const float* at, const float* goal, uint64_t
     if (fresh == 2) q->goalAt = 0; /* no goal sent */
     if (fresh == 3) q->rushed = 1;
     if (fresh) q->pathLen = 1; /* a route: a goal send plans none here */
-    if (fresh == 4 || fresh == 5) { q->goalAt = 0; q->jobSet = 1; } /* a goal send that found nothing */
+    if (fresh == 4 || fresh == 5 || fresh == 8) { q->goalAt = 0; q->jobSet = 1; } /* a goal send that found nothing */
+    if (fresh == 8) q->intent = LW_INVESTIGATE; /* on its way, goal-less */
     if (fresh == 5) { q->intent = LW_RETAKE; q->intentStage = 1; }
+    if (fresh == 6 || fresh == 7) { q->intent = LW_REINFORCE; q->intentStage = fresh == 6; } /* at its point; on its way */
     LwStallCheck(q, NULL, 0, at, now);
     return g_lwWorld.stalled;
 }
@@ -490,6 +492,30 @@ int CoXlTestLwNodeReached(int intent, float nodeX, float goalX, int goalNode, fl
     if (goalNode != -2) { LwGoalSent(q, g); q->goalNode = (int16_t)goalNode; }
     return LwNodeReached(q, at);
 }
+/* A calm stalled squad's recovery (LwStallApply) with the game's calls counted: squad 0 at (atX, 0) with its goal at
+ * (goalX, 0); read[] = {ok, action, busy, held, nav record, leader-layer hit}, the snap at (snapX, 0). calls[] = goal
+ * sends, path requests, resumes; to[] = the last goal's and the last path request's x. */
+static int g_stallCalls[3]; static float g_stallTo[2];
+static void StallGoalStub(uint32_t squad, const float* pos) { (void)squad; g_stallCalls[0]++; g_stallTo[0] = pos[0]; }
+static void StallRepathStub(void* nav, uint32_t squad, const float* pos) { (void)nav; (void)squad; g_stallCalls[1]++; g_stallTo[1] = pos[0]; }
+static void StallResumeStub(void* squads, uint32_t squad) { (void)squads; (void)squad; g_stallCalls[2]++; }
+void CoXlTestLwStallApply(int intent, int tries, const int* read, float atX, float goalX, float snapX, int* calls, float* to, float* goalNow)
+{
+    LwSquad* q = &g_lwSquads[0]; float at[2] = {atX, 0};
+    LwStallRead r = {read[0], read[1], read[2], read[3], read[4], read[5], {snapX, 0, 0}};
+    q->intent = (uint8_t)intent; q->stallTries = (uint8_t)tries; q->goalTo[0] = goalX; q->goalTo[1] = 0; q->goalAt = 1; q->state = LW_ONLINE;
+    memset(g_stallCalls, 0, sizeof g_stallCalls); g_stallTo[0] = g_stallTo[1] = -1;
+    g_lw.goal = StallGoalStub; g_lw.repath = StallRepathStub; g_lw.resume = StallResumeStub;
+    LwStallApply(q, at, &r);
+    memcpy(calls, g_stallCalls, sizeof g_stallCalls); memcpy(to, g_stallTo, sizeof g_stallTo); *goalNow = q->goalTo[0];
+}
+uint32_t CoXlTestLwStallCount(int what) { return what == 0 ? g_lwWorld.stallResent : what == 1 ? g_lwWorld.stallSnapped : what == 2 ? g_lwWorld.stallNewGoal : what == 3 ? g_lwWorld.stallResumed : what == 4 ? g_lwWorld.stallAction : g_lwWorld.stallBusy; }
+int CoXlTestLwStallWaits(int set) { if (set >= 0) g_lwSquads[0].stallWaits = (uint8_t)set; return g_lwSquads[0].stallWaits; }
+/* The band-edge wait's clocks moved back by ms: 0 the intent's start, 1 the time at this point; 2: the fight ends. */
+void CoXlTestLwHoldAge(int what, uint32_t ms) { LwSquad* q = &g_lwSquads[0]; if (what == 0) { q->intentAt -= ms; g_lwFights[0].born -= ms; } else if (what == 1) q->heldAt -= ms; else if (what == 2) g_lwFights[0].live = 0; else { memset(&g_lwNodes[0], 0, sizeof g_lwNodes[0]); g_lwNodeCount = 1; } } /* 3: one route node, for an intent's end */
+void CoXlTestLwStallSet(int rushed, float dist) { g_lwSquads[0].rushed = (uint8_t)rushed; g_lwSquads[0].stallDist = dist; }
+/* An intent's end with no patrol goal set: whether the squad still has a goal. */
+int CoXlTestLwIntentEndGoal(void) { LwSquad* q = &g_lwSquads[0]; q->goalAt = 5; q->intent = LW_INVESTIGATE; LwIntentEnd(q, "test"); return q->goalAt != 0; }
 int CoXlTestLwGoalNode(void) { float g[3] = {1, 2, 3}; g_lwSquads[0].goalNode = 7; LwGoalSent(&g_lwSquads[0], g); return g_lwSquads[0].goalNode; }
 /* A refusal counted, then a new mission's clear: the first 30 s list is empty. */
 void CoXlTestLwMissionClear(void) { LwMissionClear(); }
