@@ -173,7 +173,7 @@ static uint32_t FakeRay(uint32_t type, const float* origin, const float* dir, fl
     {
         g_in.calls++; g_in.type = type; g_in.max = max; g_in.length = length; memcpy(g_in.from[(g_in.calls - 1) & 1], origin, 12);
         if (isnan(g_in.top) || !(origin[2] > g_in.bot) || g_in.calls == g_in.miss) return 0;
-        const uint32_t inside = origin[2] < g_in.top; const float z = inside ? origin[2] : g_in.top;
+        const uint32_t inside = origin[2] < g_in.top; const float z = inside ? g_in.bot : g_in.top; /* a start inside has no place worth reading */
         memcpy((uint8_t*)hits + 8, &z, 4); memcpy((uint8_t*)hits + 0x28, &inside, 4);
         return 1;
     }
@@ -655,6 +655,13 @@ int main(void)
     CHECK(CoXlTestTiltFootFlat(3, 1000) == 0.0f);
     FACES(3, nUp, nUp, nUp, nShort); /* not a normal */
     CHECK(CoXlTestTiltFootFlat(3, 1000) == 0.0f);
+    FACES(3, nShort, nShort, nShort, nShort); /* four alike that are no normals */
+    CHECK(CoXlTestTiltFootFlat(3, 1000) == 0.0f);
+    const float n38[3] = {sinf(38.0f / RADN), 0, cosf(38.0f / RADN)}, nP9[3] = {sinf(9.0f / RADN), 0, cosf(9.0f / RADN)}, nM9[3] = {-sinf(9.0f / RADN), 0, cosf(9.0f / RADN)};
+    FACES(3, n38, n38, n38, n30); /* the steepest face counts, whichever corner it is under */
+    CHECK(CoXlTestTiltFootFlat(3, 1000) > 0.2f && CoXlTestTiltFootFlat(3, 1000) < 0.5f);
+    FACES(3, nUp, nP9, nUp, nM9); /* each 9 deg from the first, 18 from each other */
+    CHECK(CoXlTestTiltFootFlat(3, 1000) == 0.0f);
     FACES(3, nUp, nUp, nUp, nUp);
     CoXlTestTiltFootFace(3, 6, 4, nUp, o0, 1000); /* a kept hit is a face too */
     CHECK(CoXlTestTiltFootFlat(3, 1000) == 1.0f);
@@ -701,6 +708,7 @@ int main(void)
     Level(5000.0f, 5000.0f, 20.0f, slope[0], slope[1], slope[2]);
     CHECK(CoXlTestTiltLevelHit((uintptr_t)g_rays, 3, level, offTile, zn) == 1 && zn[0] == 20.0f && zn[1] == slope[0] && zn[2] == 0 && zn[3] == slope[2]);
     CHECK(CoXlTestTiltLevelHit((uintptr_t)g_rays, 0, level, offTile, zn) == 0); /* no second ray asked */
+    CHECK(CoXlTestTiltLevelHit((uintptr_t)g_rays[3], 0, level, offTile, zn) == 0); /* whatever lies before the first record */
     CHECK(CoXlTestTiltLevelHit((uintptr_t)g_rays, 2, level, offTile, zn) == 0); /* another record */
     CHECK(CoXlTestTiltLevelHit((uintptr_t)g_rays, 3, level + 1, offTile, zn) == 0); /* a ray at another body */
     CHECK(CoXlTestTiltLevelHit(0x10, 3, level, offTile, zn) == 0); /* no record to read */
@@ -1006,9 +1014,13 @@ int main(void)
     g_ray.owner = 0x1188B; g_ray.body = 0x801122A3u; g_ray.n[2] = 0.0f; g_ray.n[0] = 1.0f; g_ray.z = 28.0f;
     CoXlTestTiltPropSample(mp, Rp, 0x755, q0, at, 2.0f); /* 2 m over what is under it, in nothing, on faces that are no footing */
     CHECK(fake_host_logged("sunk: unit 00000755") && fake_host_logged("(1.00 0.00 0.00), by normals a share of 0.00; a corner inside a body by -1.00 m (-1: none)"));
-    g_ray.n[0] = 0.0f; g_ray.z = 30.0f;
+    g_ray.n[0] = 0.0f; g_ray.n[2] = 1.0f; g_ray.seq = 2;
+    for (int k = 0; k < 5; k++) { g_ray.zs[k] = 28.0f; g_ray.owners[k] = k == 4 ? 0 : 0x1188B; }
+    CoXlTestTiltPropSample(mp, Rp, 0x756, q0, at, 2.0f); /* level faces, one corner on the ground: no footing by normals */
+    CHECK(fake_host_logged("sunk: unit 00000756") && fake_host_logged("(0.00 0.00 1.00), by normals a share of 0.00; a corner inside a body by -1.00 m (-1: none)"));
+    g_ray.seq = 0; g_ray.n[2] = 0.0f; g_ray.z = 30.0f;
     CoXlTestTiltPropNote();
-    CHECK(fake_host_logged("living world: tilt inside (30 s): of 6 four-corner samples 4 with a corner inside a body, 3 over 0.5 m under its top, 1 over 1.0 m; of the 4 on a prop: 3, 2, 1"));
+    CHECK(fake_host_logged("living world: tilt inside (30 s): of 7 four-corner samples 4 with a corner inside a body, 3 over 0.5 m under its top, 1 over 1.0 m; of the 5 on a prop: 3, 2, 1"));
     CoXlTestTiltPropNote();
     CHECK(!fake_host_logged("tilt inside (30 s): of 0")); /* no sample: no line */
     CoXlTestTiltPropSample(mp, Rp, 0x754, q0, at, 2.0f);
@@ -1023,8 +1035,8 @@ int main(void)
     CoXlTestTiltTurnScan(); CoXlTestTiltPropSample(mp, Rp, 0x760, qx, at, 20.0f); /* the limit lost its slope: 20 deg since */
     CoXlTestTiltPropSample(mp, Rp, 0x761, q0, at, 0.0f); /* changed, not turned */
     CoXlTestTiltTurnScan(); CoXlTestTiltPropSample(mp, Rp, 0x760, q0, at, 0.0f); /* turned back, the limit the same: not counted */
-    CoXlTestTiltFeetClear();
     CoXlTestTiltTurnScan(); CoXlTestTiltTurnScan(); CoXlTestTiltPropSample(mp, Rp, 0x762, qx, at, 20.0f); /* changed over a scan missed: no pair */
+    CoXlTestTiltFeetClear();
     CoXlTestTiltPropNote();
     CHECK(fake_host_logged("0 with corners that span no plane; 2 changed between a lean limit with their ground's slope and one without since the scan before: up turned 10.0 deg on average, 20.0 at most, 1 over 10 deg"));
     CoXlTestTiltPropSample(mp, Rp, 0x763, q0, at, 0.0f);

@@ -355,8 +355,9 @@ int main(void)
     CHECK(CoXlTestLeanLevelNow() == -1.0f);
     Lean(g_up, 40.0f, 15.0f);
     CHECK(four(0x1234, g_out, g_up) == g_out && Is(g_out, 40.0f, 15.0f));
-    CoXlTestLeanLevel(10.0f); /* on a tile the tile's own slope: flat here */
-    CHECK(Through(four, 40.0f, 15.0f) && Is(g_out, 25.0f, 15.0f) && CoXlTestLeanLevelNow() == -1.0f);
+    CoXlTestLeanAt(g_at); CoXlTestLeanLevel(10.0f); /* on a tile the tile's own slope, flat here, whatever was told */
+    Lean(g_up, 40.0f, 15.0f);
+    CHECK(four(0x1234, g_out, g_up) == g_out && Is(g_out, 25.0f, 15.0f));
     CoXlTestLeanCounts(c);
     CHECK(c[0] == 4 && c[2] == 3 && c[3] == 1 && CoXlTestLeanLevelCount() == 1);
 
