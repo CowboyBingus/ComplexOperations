@@ -491,6 +491,24 @@ int CoXlTestNetVec(uintptr_t cfg, float scale, uint32_t* types, uint8_t* widen, 
 }
 float CoXlTestLwFaceReach(int tilesOn, int keeper, float top, float drawn, float wall) { return LwFaceReach(tilesOn, keeper, top, drawn, wall); }
 float CoXlTestLwRequestZ(float top, float face) { return LwRequestZ(top, face); }
+/* The tree cutters' glue (living_world_cutters.c): the switch's text, and a tick's centres from players (their
+ * peers; `peer` and `place` the streamer's list) and the squads set here (state as the LW_ enum: 3 online). */
+int CoXlTestLwCutParse(const char* text, unsigned* v) { return LwCutParse(text, v); }
+int CoXlTestLwCutClient(const char* text) { return LwCutClient(text); }
+void CoXlTestLwCutSquad(int i, int state, int every, float x, float y)
+{
+    if (i < 0) { g_lwWorld.count = 0; memset(g_lwCut.held, 0, sizeof g_lwCut.held); return; }
+    memset(&g_lwSquads[i], 0, sizeof g_lwSquads[i]);
+    g_lwSquads[i].state = (uint8_t)state; g_lwSquads[i].pos[0] = x; g_lwSquads[i].pos[1] = y; g_lwEvery[i] = (uint8_t)every;
+    if (g_lwWorld.count <= i) g_lwWorld.count = i + 1;
+}
+uint32_t CoXlTestLwCutCentres(const uint64_t* players, int count, const uint64_t* peer, float (*place)[2], int streamed, int host, int none, uint32_t now, CoCutCentre* c, uint32_t* out)
+{
+    EvpPlayer list[EVT_MAX_PLAYERS + 2];
+    memset(list, 0, sizeof list);
+    for (int i = 0; i < count && i < EVT_MAX_PLAYERS + 2; i++) list[i].peer = players[i];
+    return LwCutCentres(list, count, peer, place, streamed, host, none, now, c, out);
+}
 /* A square grid of route nodes `step` apart over a disc of `radius`, no home regions. */
 static void LwTestGrid(float radius, float step)
 {

@@ -11,16 +11,59 @@ static struct
     CoCutHeld held[EVT_MAX_PLAYERS];
 } g_lwCut;
 
+/* The switch's text into v = {mode, cap, adds, removes}: 1 on, 0 off (empty or a leading 0), -1 not valid. */
+static int LwCutParse(const char* t, unsigned* v)
+{
+    v[0] = 0; v[1] = CO_CUTSET_CAP; v[2] = CO_CUTSET_ADDS; v[3] = CO_CUTSET_REMOVES;
+    if (t[0] == 0 || t[0] == '0') return 0;
+    sscanf(t, "%u%*[ ,]%u%*[ ,]%u%*[ ,]%u", &v[0], &v[1], &v[2], &v[3]);
+    if (v[0] < 1 || v[0] > 3 || v[1] > CO_CUTSET_SLOTS || v[2] > CO_CUTSET_ADDS || v[3] > CO_CUTSET_BATCH) return -1;
+    if (v[0] == 2) { v[1] = CO_CUTSET_SLOTS; v[3] = 0; } /* adds only: a cutter left on is what the game does */
+    return 1;
+}
+/* A client's part from HELLFORGE_LW_CUTTERS_CLIENT: 0 left to the game, 1 adds around its players, 2 adds none. */
+static int LwCutClient(const char* t) { return t[0] >= '0' && t[0] <= '2' ? t[0] - '0' : 1; }
+
+/* The tick's centres into `c` (room for CO_CUTSET_CENTRES); returns how many, the first out[0] of them players.
+ * `peer` and `place` are the streamer's list. out = {players, at the last place, squads, beside a player, left out}. */
+static uint32_t LwCutCentres(const EvpPlayer* list, int count, const uint64_t* peer, float (*place)[2], int streamed, int host, int none, uint32_t now, CoCutCentre* c, uint32_t* out)
+{
+    uint32_t n = 0;
+    out[1] = out[2] = out[3] = out[4] = 0;
+    for (int i = 0; i < count && i < EVT_MAX_PLAYERS && !none; i++)
+    {
+        float at[2] = {0, 0}, use[2];
+        int reads = 0;
+        for (int p = 0; p < streamed && !reads; p++)
+            if (peer[p] == list[i].peer) { at[0] = place[p][0]; at[1] = place[p][1]; reads = 1; }
+        const int kind = co_cutset_player(g_lwCut.held, EVT_MAX_PLAYERS, list[i].peer, reads, at[0], at[1], now, use);
+        if (kind == 0) continue;
+        c[n++] = (CoCutCentre){use[0], use[1], CO_CUTSET_PLAYER_IN, CO_CUTSET_PLAYER_OUT};
+        out[1] += (uint32_t)(kind == 2);
+    }
+    out[0] = n;
+    for (int i = 0; host && i < g_lwWorld.count; i++)
+    {
+        if (!g_lwEvery[i] || g_lwSquads[i].state != LW_ONLINE) continue;
+        const CoCutCentre q = {g_lwSquads[i].pos[0], g_lwSquads[i].pos[1], CO_CUTSET_SQUAD_IN, CO_CUTSET_SQUAD_OUT};
+        if (co_cutset_covered(c, out[0], &q)) out[3]++;
+        else if (n < CO_CUTSET_CENTRES) { c[n++] = q; out[2]++; }
+        else out[4]++;
+    }
+    return n;
+}
+
 static void LwCutInit(void)
 {
-    char t[64] = "", cl[8] = ""; unsigned mode = 0, cap = CO_CUTSET_CAP, adds = CO_CUTSET_ADDS, removes = CO_CUTSET_REMOVES;
-    if (!GetEnvironmentVariableA("HELLFORGE_LW_CUTTERS", t, sizeof t) || t[0] == 0 || t[0] == '0') return;
-    sscanf(t, "%u%*[ ,]%u%*[ ,]%u%*[ ,]%u", &mode, &cap, &adds, &removes);
-    if (mode < 1 || mode > 3 || cap > CO_CUTSET_SLOTS || adds > CO_CUTSET_ADDS || removes > CO_CUTSET_BATCH)
+    char t[64] = "", cl[8] = ""; unsigned v[4];
+    if (!GetEnvironmentVariableA("HELLFORGE_LW_CUTTERS", t, sizeof t)) return;
+    const int valid = LwCutParse(t, v);
+    if (valid == 0) return;
+    if (valid < 0)
     { Note("living world: tree cutters: HELLFORGE_LW_CUTTERS=MODE[,CAP[,ADDS[,REMOVES]]]: mode 1 to 3, cap up to %u, adds up to %u, removes up to %u a tick; not recorded", CO_CUTSET_SLOTS, CO_CUTSET_ADDS, CO_CUTSET_BATCH); return; }
-    if (mode == 2) { cap = CO_CUTSET_SLOTS; removes = 0; } /* adds only: a cutter left on is what the game does */
-    g_lwCut.client = 1;
-    if (GetEnvironmentVariableA("HELLFORGE_LW_CUTTERS_CLIENT", cl, sizeof cl) && cl[0] >= '0' && cl[0] <= '2') g_lwCut.client = cl[0] - '0';
+    const unsigned mode = v[0], cap = v[1], adds = v[2], removes = v[3];
+    GetEnvironmentVariableA("HELLFORGE_LW_CUTTERS_CLIENT", cl, sizeof cl);
+    g_lwCut.client = LwCutClient(cl);
     const char* why = co_cutters_record_arm(ApiModuleBase("helldivers2.exe", NULL), cap, adds);
     if (why != NULL) { Note("living world: tree cutters: %s; not recorded", why); return; }
     g_lwCut.on = 1; g_lwCut.mode = (int)mode; g_lwCut.removes = removes; g_lwCut.notedAt = GetTickCount64();
@@ -60,7 +103,7 @@ static void LwCutFrame(int mission, int host)
     if (!host && g_lwCut.mode >= 2 && g_lwCut.client == 0) return; /* no tick: this client's makes are the game's */
     ULONGLONG now = GetTickCount64();
     if (now - g_lwCut.tickAt < CO_CUTSET_TICK_MS) return;
-    CoCutCentre c[CO_CUTSET_CENTRES]; uint32_t n = 0, last = 0, squads = 0, beside = 0, left = 0;
+    CoCutCentre c[CO_CUTSET_CENTRES]; uint32_t counts[5];
     EvpPlayer list[EVT_MAX_PLAYERS];
     int count = EvpPlayers(g_lw.game, list);
     /* The places the streamer streams trees around (a hellpod's flight held still, co_settle.h), so a tree streamed
@@ -76,32 +119,13 @@ static void LwCutFrame(int mission, int host)
     ReleaseSRWLockShared(&g_streamLock);
     g_lwCut.tickAt = now;
     const int none = !host && g_lwCut.mode >= 2 && g_lwCut.client == 2; /* a client that adds none: no centre */
-    for (int i = 0; i < count && i < EVT_MAX_PLAYERS && !none; i++)
-    {
-        float at[2] = {0, 0}, use[2];
-        int reads = 0;
-        for (int p = 0; p < streamed && !reads; p++)
-            if (peer[p] == list[i].peer) { at[0] = place[p][0]; at[1] = place[p][1]; reads = 1; }
-        const int kind = co_cutset_player(g_lwCut.held, EVT_MAX_PLAYERS, list[i].peer, reads, at[0], at[1], (uint32_t)now, use);
-        if (kind == 0) continue;
-        c[n++] = (CoCutCentre){use[0], use[1], CO_CUTSET_PLAYER_IN, CO_CUTSET_PLAYER_OUT};
-        last += (uint32_t)(kind == 2);
-    }
-    const uint32_t players = n;
-    for (int i = 0; host && i < g_lwWorld.count; i++)
-    {
-        if (!g_lwEvery[i] || g_lwSquads[i].state != LW_ONLINE) continue;
-        const CoCutCentre q = {g_lwSquads[i].pos[0], g_lwSquads[i].pos[1], CO_CUTSET_SQUAD_IN, CO_CUTSET_SQUAD_OUT};
-        if (co_cutset_covered(c, players, &q)) beside++;
-        else if (n < CO_CUTSET_CENTRES) { c[n++] = q; squads++; }
-        else left++;
-    }
+    const uint32_t n = LwCutCentres(list, count, peer, place, streamed, host, none, (uint32_t)now, c, counts);
     CoCuttersTick t;
     if (!co_cutters_tick(c, n, (uint32_t)now, g_lwCut.removes, &t)) return;
     g_lwCut.ticks++; g_lwCut.adds += t.adds; g_lwCut.removed += t.removes; g_lwCut.shed += t.shed; g_lwCut.capped += (uint32_t)(t.capped != 0);
     if (t.waiting > g_lwCut.waiting) g_lwCut.waiting = t.waiting;
     if (t.over > g_lwCut.over) g_lwCut.over = t.over;
-    g_lwCut.players = players; g_lwCut.last = last; g_lwCut.squads = squads; g_lwCut.beside = beside; g_lwCut.left = left;
+    g_lwCut.players = counts[0]; g_lwCut.last = counts[1]; g_lwCut.squads = counts[2]; g_lwCut.beside = counts[3]; g_lwCut.left = counts[4];
     g_lwCut.usSum += t.us; if (t.us > g_lwCut.usWorst) g_lwCut.usWorst = t.us;
     g_lwCut.holdSum += t.holdUs; if (t.holdUs > g_lwCut.holdWorst) g_lwCut.holdWorst = t.holdUs;
     LwCutNote(now, &t);
