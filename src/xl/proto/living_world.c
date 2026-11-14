@@ -501,7 +501,8 @@ typedef struct LwSquad
     uint16_t home1; /* 2d: its home region + 1 (0 = none yet) */
     int8_t fight; uint8_t rushed, rushedN, tells; ULONGLONG retargetAt, tellAt; /* REINFORCE: its fight (g_lwFights index); members sped up (0x7EFFC0), how many; fight target tells; next goal refresh, next tell */
     ULONGLONG intentOnAt; uint8_t moves; /* online with this intent since (the limits to reach its point count from here); REINFORCE: times it left a point it had reached for the fight's new place */
-    ULONGLONG onFrom; uint32_t onSum, stageSum; float aimOff[2]; uint8_t aimMiss, holds; /* REINFORCE: this online stretch's start and the ms of the earlier ones; ms at the fight before its moves; where its fight's aim had no navmesh (it goes to the fight's point while the aim stays there); waits at the band's edge in this intent */
+    ULONGLONG onFrom; uint32_t onSum, stageSum; float aimOff[2]; uint8_t aimMiss, holds; /* REINFORCE: this online stretch's start and the ms of the earlier ones; ms at the fight before its moves; where its fight's aim had no navmesh (it goes to the fight's point while the aim stays there; 2: nor had the point, it keeps its own until retargetAt); waits at the band's edge in this intent */
+    ULONGLONG heardFrom; /* REINFORCE: members at alert 1 or 2 since (0 none): they keep it from a new point for LW_HEARD_HOLD */
     float goalTo[3], stillFrom[2], stillWay, stillPath; ULONGLONG goalAt, stillSince, pendSince, jobAt; uint8_t goalSends, stallNoted, stallTries, stallWaits, goalLines, goalLineHit; int16_t goalNode; float stallDist, goalRaw[3]; ULONGLONG goalLineAt; /* jobAt: its job asked for; goalNode: the route node goalTo was sent for, -1 none */ /* the last goal sent online and when; the leader still since; the nav's request pending since (the stall note) */
     uint8_t planKind; float planDist; /* the last plan's home rule + 1 and distance to its destination, until its goal is sent (LwRouteNote) */
     uint16_t prevNode; uint8_t prevValid, goalPending, alerted; ULONGLONG calmSince; /* the node it walked from (no route starts back to it); a patrol goal held while members are alert; alert since it came online, calm since */
@@ -564,7 +565,7 @@ static struct
     uint32_t crowded; /* points where a member's slot cast would not reach its slot (30 s) */
     uint32_t seenSlot, spaced; /* points refused: a member's slot in sight; within LW_SPACING of a squad or recent request (30 s) */
     uint32_t swapWaits, swapWaitLines; /* far swaps that waited for an event squad's hold (30 s); their lines this mission */
-    uint32_t stallResent, stallSnapped, stallNewGoal, stallResumed, stallAction, stallBusy, stallNoGoal, stallFixLines, goalSendsAll, goalTypeMiss, goalOwnDest, goalLines, holdRefuseLines, routeLines, routeFailLines; /* stall recoveries (30 s); their lines this mission */
+    uint32_t stallResent, stallSnapped, stallNewGoal, stallResumed, stallAction, stallBusy, stallNoGoal, stallFixLines, goalSendsAll, goalTypeMiss, goalOwnDest, goalLines, holdRefuseLines, routeLines, routeFailLines; uint8_t goalFailLines[6]; /* stall recoveries (30 s); their lines this mission */
     uint32_t stalled, stalledOther, stallLines, stallOtherLines; /* online squads still 30 s: calm with a goal, other (30 s); their lines this mission */
     uint32_t goals, goalNoFace, goalReplans, goalStuck; /* goals sent, next nodes without a face within 25 m, replans, none found (30 s) */
     uint32_t heights, underGround, overGround; float worstUnder, worstOver; /* members against the drawn ground (30 s) */
