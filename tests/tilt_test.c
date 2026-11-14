@@ -378,7 +378,7 @@ int main(void)
     CHECK(fabsf(CoXlTestTiltFootHigh(3, 4.0f, 1000) - 0.5f) < 0.001f); /* length 4: from 2 m to its reach, 3.5 m */
     FEET(3, 2.0f, 2.0f, 2.0f, 2.0f, 0.5f, 0.5f, 0.5f, 0.5f, 7, 7, 7, 7);
     CHECK(fabsf(CoXlTestTiltFootHigh(3, 3.0f, 1000) - 0.5f) < 0.001f && CoXlTestTiltFootHigh(3, 4.0f, 1000) == 0.0f); /* length 3: from 1.5 m to 2.5 m */
-    CHECK(CoXlTestTiltFootHigh(3, 0.4f, 1000) == 0.0f && CoXlTestTiltFootHigh(2000, 4.0f, 1000) == 0.0f); /* no reach, no slot: the rule alone */
+    CHECK(CoXlTestTiltFootHigh(3, 0.4f, 1000) == 0.0f && CoXlTestTiltFootHigh(3, 0.5f, 1000) == 0.0f && CoXlTestTiltFootHigh(2000, 4.0f, 1000) == 0.0f); /* no reach, no slot: the rule alone */
     FEET(3, 6.0f, 6.0f, 6.0f, 6.0f, 0.5f, 0.5f, 0.5f, 0.5f, 7, 7, 7, 7);
     CHECK(CoXlTestTiltFootHigh(3, 4.0f, 1400) == 1.0f && CoXlTestTiltFootHigh(3, 4.0f, 1501) == 0.0f); /* hits older than 0.5 s say nothing */
     CoXlTestTiltFootNote(3, 5, 3, 0, 4.0f, 0, o0, 1000); /* one corner over a hole: three of four at 6 m */
@@ -397,8 +397,8 @@ int main(void)
     CoXlTestTiltFootNote(3, 4, 2, 6.0f, 0.5f, 9, far0, 1000); CoXlTestTiltFootNote(3, 5, 2, 6.0f, 0.5f, 9, far0, 1000);
     CoXlTestTiltFootNote(3, 6, 2, 0.2f, 0.5f, 9, far1, 1000); /* 10.5 m north of it: the same */
     CHECK(CoXlTestTiltFootHigh(3, 4.0f, 1000) == 0.0f);
-    CoXlTestTiltFootNote(3, 7, 2, 9.0f, 0.5f, 9, near1, 1000); /* 9.5 m on: the same unit's far corner */
-    CHECK(CoXlTestTiltFootHigh(3, 4.0f, 1000) == 1.0f);
+    CoXlTestTiltFootNote(3, 7, 2, 5.0f, 0.5f, 9, near1, 1000); /* 9.5 m on: the same unit's far corner, its 0.2 m corner kept */
+    CHECK(fabsf(CoXlTestTiltFootHigh(3, 4.0f, 1000) - 0.352f) < 0.002f); /* (0.2 + 5.0) / 2 = 2.6 m */
     CoXlTestTiltFootNote(3, 4, 2, 0.2f, 0.5f, 9, far0, 1000);
     CoXlTestTiltFootNote(3, 5, 2, -3.0f, 0.5f, 9, far0, 1000); /* a hit under the drawn ground counts 0, not less */
     CoXlTestTiltFootNote(3, 6, 2, 9.4f, 0.5f, 9, far0, 1000);
@@ -447,6 +447,15 @@ int main(void)
     CHECK(fabsf(PropCall(read, 7, 0.175f) - (4.0f + (0.175f - 4.0f) * 0.5f)) < 0.01f); /* ...and half-way at 0.375 m: no step between */
     CoXlTestTiltFooted(&footed, &part); CoXlTestTiltPropCounts(&pg, &pk);
     CHECK(footed == 3 && part == 1 && pg == 5 && pk == 0);
+    Frame(0); CoXlTestTiltFeetClear();
+    for (uint32_t k = 0; k < 4; k++) /* one unit's two bodies, a corner a frame: not one footing */
+    {
+        Frame(k);
+        PropRay(104.0f, -200.0f, 18.2f, 0, 0, -1.0f, rock, k == 2 ? rockBody + 1 : rockBody); HitAt(104.0f, -200.0f, 17.7f);
+        CHECK(PropCall(read, 7, -0.2f) == 4.0f);
+    }
+    CoXlTestTiltFooted(&footed, &part); CoXlTestTiltPropCounts(&pg, &pk);
+    CHECK(footed == 0 && part == 0 && pg == 4 && pk == 0);
     Frame(0); CoXlTestTiltFeetClear(); CoXlTestTiltFooting(2);
     PropRay(104.0f, -200.0f, 15.25f, 0, 0, -1.0f, rock, rockBody); /* a rock top 2.75 m up, the corner 0.5 m over it */
     HitAt(104.0f, -200.0f, 14.75f);
@@ -549,6 +558,14 @@ int main(void)
     CoXlTestTiltPropNote();
     CHECK(fake_host_logged("tilt props (30 s): 1 four-corner samples with a hit under them, 0 on a prop")); /* the counts start again */
     CHECK(!fake_host_logged("sunk: unit")); /* level on level rock: no unit line */
+    g_ray.seq = 2; g_ray.calls = 0; g_ray.body = 0x801122A3u; /* the centre alone on a rock 2.5 m up, the corners on the ground beside it: on a prop */
+    for (int k = 0; k < 5; k++) { g_ray.zs[k] = k == 0 ? 30.5f : 28.0f; g_ray.owners[k] = k == 0 ? 0x1188B : 0; }
+    CoXlTestTiltPropSample(mp, Rp, 0x706, q0, at, 2.0f);
+    g_ray.seq = 0; g_ray.owner = 0; g_ray.body = terrain;
+    CoXlTestTiltPropNote();
+    CHECK(fake_host_logged("tilt props (30 s): 1 four-corner samples with a hit under them, 1 on a prop (100.00 %)"));
+    CHECK(fake_host_logged("tilt footing (30 s): footing 2.5 to 3.5 m over the drawn ground: 1 samples, 0 of them")); /* by the centre's height when no corner is on it */
+    CHECK(!fake_host_logged(": 0 samples, 0 of them")); /* a height with no sample has no line */
 
     g_case = "research: a unit against its footing";
     g_ray.owner = 0x1188B; g_ray.body = 0x801122A3u; g_ray.seq = 1; g_ray.calls = 0;

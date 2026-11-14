@@ -448,7 +448,7 @@ int main(void)
     CHECK(CoXlTestLeanWatch(file) && CoXlTestTiltFootingNow() == 1); /* two numbers: the footing stays */
     Put(file, "25 0 2");
     CHECK(CoXlTestLeanWatch(file) && !CoXlTestTiltPropsOn() && CoXlTestTiltFootingNow() == 2);
-    Put(file, "25 1 7");
+    Put(file, "25 1 3");
     CHECK(CoXlTestLeanWatch(file) && CoXlTestTiltPropsOn() && CoXlTestTiltFootingNow() == 2); /* not a way to keep a footing: the default */
     Put(file, "25 1 1");
     CHECK(CoXlTestLeanWatch(file) && CoXlTestTiltFootingNow() == 1);
