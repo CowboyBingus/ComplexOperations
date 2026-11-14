@@ -468,6 +468,21 @@ void CoXlTestLwNavHoldCounts(uint32_t* v)
     v[5] = g_lwNavHold.sumBack; v[6] = g_lwNavHold.sumBreaks; v[7] = g_lwNavHold.longNoted[0] + g_lwNavHold.longNoted[1] + g_lwNavHold.longNoted[2] + g_lwNavHold.longNoted[3];
 }
 int CoXlTestLwNavLeft(int read, uint32_t state) { return LwNavLeftAt(read, state); }
+/* The scheduler's call on a fake scheduler, list variable and nav count; the first builds' budget and the time this
+ * tick's have taken; the tick summary's counts (paused ticks, pauses, budget waits, lag ms, queue most, the oldest
+ * waiting built cell's ms and ring distance, one call's starts). */
+void CoXlTestLwNavSchedFakes(void (*sched)(void), volatile uintptr_t* listVar, volatile uint32_t* navCount, int pauseOff)
+{ g_lwNavHold.sched = sched; g_lwNavHold.listVar = listVar; g_lwNavHold.navCount = navCount; g_lwNavHold.pauseOff = (uint8_t)pauseOff; }
+void CoXlTestLwNavSched(uint32_t flush, ULONGLONG now) { LwNavSchedAt(flush, now); }
+void CoXlTestLwNavDrive(void (*drive)(uintptr_t, float)) { g_lwSwap.drive = drive; }
+uint32_t CoXlTestLwNavBounded(void) { return g_lwSwap.bounded; }
+void CoXlTestLwNavFirstBudget(uint32_t us, uint32_t spentUs) { g_lwNavHold.budgetUs = us; g_lwNavHold.tickFirstUs += spentUs; }
+void CoXlTestLwNavTickCounts(uint32_t* v)
+{
+    v[0] = g_lwNavHold.sum.paused; v[1] = g_lwNavHold.sum.pauses; v[2] = g_lwNavHold.sum.over; v[3] = g_lwNavHold.sum.lag; v[4] = g_lwNavHold.sum.queueMost;
+    v[5] = g_lwNavHold.builtAge; v[6] = g_lwNavHold.builtLeft; v[7] = g_lwNavHold.can; v[8] = g_lwNavHold.sum.first; v[9] = g_lwNavHold.sum.built;
+    v[10] = g_lwNavHold.sum.ticks; v[11] = g_lwNavHold.sum.mostFirst;
+}
 /* An AI join of `ms` on this thread, as the hook counts it. */
 void CoXlTestLwFpJoin(double ms) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); g_lwFp.joinTicks += (int64_t)(ms * (double)f.QuadPart / 1000.0 + 0.5); }
 /* The lever on the AI world `w` at `now`: on, with requests `lat` s old, or off; the budget it leaves at w+0x47C. */
