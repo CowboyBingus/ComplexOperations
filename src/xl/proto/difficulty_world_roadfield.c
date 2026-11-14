@@ -135,19 +135,60 @@ static void GradeFieldLinks(GradeField* f)
         const GradeSeg* g = &f->seg[k];
         f->unlinked += !GradeLink(f->s, g->a, g->b, sqrtf((g->bx - g->ax) * (g->bx - g->ax) + (g->by - g->ay) * (g->by - g->ay)));
     }
+    for (uint32_t i = 0; i < f->stations; i++) f->s[i].roads = f->s[i].links;
 }
 
-/* Roads that cross or run side by side without sharing a station (two spurs into one place, a spur along an
- * arterial) would each take their own height, and the field's mean between them tilts both. So after the links: any
- * two stations within GRADE_TIE that no piece joins are tied by a link of GRADE_TIE_RATIO times their distance, which
- * holds their heights within 3 degrees of each other across the gap (the ratio of tan 3 to the solver's tan 4.5).
- * Stations one or two links apart are a road's own and are left alone. It reads positions only. ties counts them,
- * untied the pairs a full station had no room for. */
-#define GRADE_TIE 8.0f
+/* Roads side by side that share no station (a fan of spurs into one junction, a spur along an arterial) would each
+ * take their own height, and the field's hand-over between two lines is up to 2.6 times as steep as their heights'
+ * difference over their distance, in the middle of both beds. So after the links, two stations within GRADE_TIE are
+ * tied when each is the other's nearest along its road and the way between them along the roads is over
+ * GRADE_TIE_PATH times their distance (not a road's own next stations, not arms that meet at 60 degrees or more: a
+ * landing holds those). A tie holds the two within GRADE_TIE_SLOPE across their distance, whatever a link may
+ * climb; past GRADE_TIE_BED apart, where the hand-over leaves the beds, it loosens fast. A pair with a pinned end
+ * is tied only within GRADE_TIE_NEAR and by a link like any other: a pad's height is not the road's to choose. It
+ * reads positions and pins only. ties counts them, untied the pairs a full station had no room for. */
+#define GRADE_TIE 24.0f
+#define GRADE_TIE_NEAR 8.0f
 #define GRADE_TIE_RATIO 0.66f
 #define GRADE_TIE_LEAST 0.5f
+#define GRADE_TIE_SLOPE 0.0174551f /* tan 1 degree: read across a bed through the hand-over, 2.6 degrees at most */
+#define GRADE_TIE_BED 12.0f        /* two beds' cores side by side */
+#define GRADE_TIE_PATH 2.0f
+#define GRADE_TIE_SEEN 128u
 #define GRADE_TIE_HASH 16384u
 static uint32_t GradeTieCell(int cx, int cy) { return ((uint32_t)cx * 73856093u ^ (uint32_t)cy * 19349663u) % GRADE_TIE_HASH; }
+/* The stations within `most` metres of `from` along the roads, nearest first, and how far (id and len: room for
+ * GRADE_TIE_SEEN). */
+static uint32_t GradeTieReach(const GradeField* f, uint32_t from, float most, uint32_t* id, float* len)
+{
+    uint32_t n = 1, done = 0;
+    id[0] = from; len[0] = 0.0f;
+    while (done < n)
+    {
+        uint32_t best = done;
+        for (uint32_t q = done + 1; q < n; q++) if (len[q] < len[best]) best = q;
+        const uint32_t at = id[best]; const float gone = len[best];
+        id[best] = id[done]; len[best] = len[done]; id[done] = at; len[done++] = gone;
+        const GradeStation* s = &f->s[at];
+        for (uint32_t k = 0; k < s->roads; k++)
+        {
+            const float far_ = gone + s->gap[k];
+            uint32_t q = 0;
+            if (!(far_ < most)) continue;
+            while (q < n && id[q] != s->link[k]) q++;
+            if (q < n) { if (q >= done && far_ < len[q]) len[q] = far_; }
+            else if (n < GRADE_TIE_SEEN) { id[n] = s->link[k]; len[n++] = far_; }
+        }
+    }
+    return n;
+}
+/* 1 when no station next to `of` along its road is as near `to` as `of` is. */
+static int GradeTieFoot(const GradeField* f, uint32_t of, uint32_t to, float far_)
+{
+    for (uint32_t k = 0; k < f->s[of].roads; k++)
+        if (f->s[of].link[k] != to && GradeFar(f, f->s[of].link[k], f->xy[2 * to], f->xy[2 * to + 1]) <= far_) return 0;
+    return 1;
+}
 static void GradeFieldTies(GradeField* f)
 {
     f->ties = f->untied = 0;
@@ -162,22 +203,26 @@ static void GradeFieldTies(GradeField* f)
     }
     for (uint32_t i = 0; i < f->stations; i++)
     {
+        static uint32_t id[GRADE_TIE_SEEN]; static float len[GRADE_TIE_SEEN];
         const int cx = (int)floorf(f->xy[2 * i] / GRADE_TIE), cy = (int)floorf(f->xy[2 * i + 1] / GRADE_TIE);
+        uint32_t seen = 0;
         for (int q = 0; q < 9; q++)
             for (uint32_t j = head[GradeTieCell(cx + q % 3 - 1, cy + q / 3 - 1)]; j != GRADE_NONE; j = next[j])
             {
                 const float far_ = GradeFar(f, j, f->xy[2 * i], f->xy[2 * i + 1]);
-                if (j <= i || !(far_ < GRADE_TIE)) continue;
-                /* not its own road's next stations: a link, or a link's link, joins them already */
-                int joined = 0;
-                for (uint32_t k = 0; k < f->s[i].links && !joined; k++)
-                {
-                    const GradeStation* via = &f->s[f->s[i].link[k]];
-                    joined = f->s[i].link[k] == j;
-                    for (uint32_t m = 0; m < via->links && !joined; m++) joined = via->link[m] == j;
-                }
-                if (joined) continue;
-                if (GradeLink(f->s, i, j, far_ * GRADE_TIE_RATIO > GRADE_TIE_LEAST ? far_ * GRADE_TIE_RATIO : GRADE_TIE_LEAST)) f->ties++; else f->untied++;
+                const int pin = f->s[i].pinned || f->s[j].pinned;
+                if (j <= i || !(far_ < (pin ? GRADE_TIE_NEAR : GRADE_TIE))) continue;
+                if (!GradeTieFoot(f, i, j, far_) || !GradeTieFoot(f, j, i, far_)) continue;
+                if (seen == 0) seen = GradeTieReach(f, i, GRADE_TIE_PATH * GRADE_TIE, id, len);
+                uint32_t q2 = 0;
+                while (q2 < seen && id[q2] != j) q2++;
+                if (q2 < seen && len[q2] <= GRADE_TIE_PATH * far_) continue;
+                /* the difference a tie allows is its slope times this length */
+                const float wide = far_ > GRADE_TIE_BED ? (far_ - GRADE_TIE_BED) / 4.0f : 0.0f;
+                const float gap = pin ? far_ * GRADE_TIE_RATIO : far_ * (1.0f + wide * wide * wide);
+                if (!GradeLink(f->s, i, j, gap > GRADE_TIE_LEAST ? gap : GRADE_TIE_LEAST)) { f->untied++; continue; }
+                f->ties++;
+                if (!pin) f->s[i].most[f->s[i].links - 1] = f->s[j].most[f->s[j].links - 1] = GRADE_TIE_SLOPE;
             }
     }
     free(head);
@@ -186,11 +231,19 @@ static void GradeFieldTies(GradeField* f)
 /* Landings. Where roads meet (a station with three or more pieces) or a line turns sharply (GRADE_LAND_TURN), the
  * beds overlap and each takes the other's height by nearness: one road's grade becomes the other's cross slope. So
  * every link within GRADE_LAND along the roads from such a station takes GRADE_LAND_SLOPE at most, and the meeting
- * place is near level. A link with a pinned end is left alone: a pad's height is not the road's to choose. Before
+ * place is near level. At a spur's junction only the spur's own links are landed: the arterial is as it would be
+ * without the spur. A link with a pinned end is left alone: a pad's height is not the road's to choose. Before
  * the ties: it reads the pieces' links and positions only. landings counts the stations, landed the links. */
 #define GRADE_LAND 20.0f
-#define GRADE_LAND_SLOPE 0.0349208f /* tan 2 degrees: two roads at it read 4 across each other, under the 5 a bed may have */
+#define GRADE_LAND_SLOPE 0.0305530f /* tan 1.75 degrees: read across the other bed through the hand-over, 4 degrees */
 #define GRADE_LAND_TURN 0.8660254f  /* the cosine of 30 degrees */
+static int GradeLandTurn(const GradeField* f, uint32_t i, uint32_t from, uint32_t to)
+{
+    const float ax = f->xy[2 * i] - f->xy[2 * from], ay = f->xy[2 * i + 1] - f->xy[2 * from + 1];
+    const float bx = f->xy[2 * to] - f->xy[2 * i], by = f->xy[2 * to + 1] - f->xy[2 * i + 1];
+    const float la = sqrtf(ax * ax + ay * ay), lb = sqrtf(bx * bx + by * by);
+    return la > 0.0f && lb > 0.0f && ax * bx + ay * by < GRADE_LAND_TURN * la * lb;
+}
 static uint32_t GradeFieldLand(GradeField* f, uint32_t* landed)
 {
     uint32_t landings = 0;
@@ -198,19 +251,18 @@ static uint32_t GradeFieldLand(GradeField* f, uint32_t* landed)
     for (uint32_t i = 0; i < f->stations; i++)
     {
         const GradeStation* s = &f->s[i];
-        int meet = s->links >= 3;
-        if (s->links == 2)
-        {
-            const float ax = f->xy[2 * i] - f->xy[2 * s->link[0]], ay = f->xy[2 * i + 1] - f->xy[2 * s->link[0] + 1];
-            const float bx = f->xy[2 * s->link[1]] - f->xy[2 * i], by = f->xy[2 * s->link[1] + 1] - f->xy[2 * i + 1];
-            const float la = sqrtf(ax * ax + ay * ay), lb = sqrtf(bx * bx + by * by);
-            meet = la > 0.0f && lb > 0.0f && ax * bx + ay * by < GRADE_LAND_TURN * la * lb;
-        }
+        /* the arterials' arms are judged without the spurs, so no spur decides where an arterial is level */
+        uint32_t own[2] = {0, 0}, arms = 0;
+        for (uint32_t k = 0; k < s->links; k++) if (!f->s[s->link[k]].later) { if (arms < 2) own[arms] = s->link[k]; arms++; }
+        const int first = s->later ? 0 : arms >= 3 || (arms == 2 && GradeLandTurn(f, i, own[0], own[1]));
+        const int meet = s->links >= 3 || (s->links == 2 && GradeLandTurn(f, i, s->link[0], s->link[1]));
         if (!meet) continue;
         landings++;
         for (uint32_t k = 0; k < s->links; k++)
         {
             uint32_t from = i, slot = k; float gone = 0.0f;
+            const int arterial = !f->s[s->link[k]].later && !s->later;
+            if (arterial && !first) continue;
             /* along the road until GRADE_LAND is behind or the road meets another */
             for (uint32_t step = 0; step < 64 && gone < GRADE_LAND; step++)
             {
@@ -222,8 +274,12 @@ static uint32_t GradeFieldLand(GradeField* f, uint32_t* landed)
                     a->most[slot] = GRADE_LAND_SLOPE;
                     for (uint32_t m = 0; m < b->links; m++) if (b->link[m] == from) b->most[m] = GRADE_LAND_SLOPE;
                 }
-                if (b->links != 2) break;
-                slot = b->link[0] == from ? 1 : 0; from = to;
+                /* on: an arterial's arm passes a spur's junction as if the spur were not there */
+                uint32_t on = GRADE_LINKS, ways = 0;
+                for (uint32_t m = 0; m < b->links; m++)
+                    if (!(arterial && f->s[b->link[m]].later)) { ways++; if (b->link[m] != from) on = m; }
+                if (ways != 2 || on == GRADE_LINKS) break;
+                slot = on; from = to;
             }
         }
     }
@@ -260,12 +316,12 @@ static float GradeBandWeight(float u, float ramp, float move, float cross)
     eased = eased < 0.0 ? 0.0 : eased > 1.0 ? 1.0 : eased;
     return (float)(0.5 - sin(asin(1.0 - 2.0 * eased) / 3.0)); /* GradeSmooth's inverse */
 }
-/* The ground's slope across the road at station i (a tangent): the steepest over its links, between the two points
+/* The ground's slope across the road at station i (a tangent): the steepest over its pieces of road, between the two points
  * GRADE_FULL to either side. 0 where the ground cannot be read. */
 static float GradeFieldCross(const GradeField* f, uint32_t i, float (*ground)(void*, float, float), void* ctx)
 {
     float most = 0.0f;
-    for (uint32_t k = 0; k < f->s[i].links; k++)
+    for (uint32_t k = 0; k < f->s[i].roads; k++) /* a tie points across the road, not along it */
     {
         const uint32_t j = f->s[i].link[k];
         float dx = f->xy[2 * j] - f->xy[2 * i], dy = f->xy[2 * j + 1] - f->xy[2 * i + 1];
