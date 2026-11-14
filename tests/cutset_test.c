@@ -267,6 +267,46 @@ static void AddsInReach(void)
     CHECK(g_out.adds == 2 && g_out.add[0] == H(32) && g_out.add[1] == H(33) && g_out.over == 1);
     Sound();
 
+    Fresh("adds: a cutter the game added itself");
+    c = Player(0, 0);
+    g_set.cap = 1;
+    co_cutset_made(&g_set, H(1), 10.0f, 0.0f, 1);
+    co_cutset_made(&g_set, H(2), 20.0f, 0.0f, 1);
+    co_cutset_made(&g_set, H(3), 30.0f, 0.0f, 0);
+    CHECK(co_cutset_on(&g_set, H(1)) == 1 && g_set.on == 1 && g_set.added == 0);
+    CHECK(co_cutset_on(&g_set, H(1)) == 0 && g_set.on == 1);  /* on already */
+    CHECK(co_cutset_on(&g_set, G(2)) == 0 && g_set.on == 1);  /* the slot's other handle is another cutter */
+    CHECK(co_cutset_on(&g_set, H(2)) == 1 && g_set.on == 2);  /* past the cap: the game did it */
+    CHECK(co_cutset_on(&g_set, H(3)) == 0 && g_set.on == 2);  /* a tree the game never adds */
+    CHECK(co_cutset_on(&g_set, G(2)) == 0 && co_cutset_on(&g_set, H(9)) == 0 && co_cutset_on(&g_set, 0) == 0 && g_set.on == 2);
+    Sound();
+    g_set.cap = 10;
+    Tick(&c, 1, 1000, 16);
+    CHECK(g_out.adds == 0 && g_out.removes == 0); /* nothing left to add */
+    c = Player(3000.0f, 0.0f);
+    Tick(&c, 1, 7000, 16);
+    CHECK(g_out.removes == 2 && Removes(H(1)) && Removes(H(2)) && g_set.on == 0); /* and they leave as the others do */
+    Sound();
+
+    Fresh("binding: records dropped while they wait are counted");
+    c = Player(0, 0);
+    co_cutset_made(&g_set, H(1), 10.0f, 0.0f, 1);
+    co_cutset_made(&g_set, H(2), 20.0f, 0.0f, 1);
+    co_cutset_made(&g_set, H(3), 30.0f, 0.0f, 0);
+    co_cutset_made(&g_set, H(4), 900.0f, 0.0f, 1);
+    Tick(&c, 1, 1000, 16); /* two on, one waiting out of reach, one the game never adds */
+    CHECK(g_set.on == 2 && g_set.stranded == 0);
+    co_cutset_clear(&g_set); /* a level's end strands nothing: its trees go too */
+    CHECK(g_set.stranded == 0);
+    co_cutset_made(&g_set, H(4), 900.0f, 0.0f, 1);
+    co_cutset_made(&g_set, H(5), 10.0f, 0.0f, 1);
+    Tick(&c, 1, 2000, 16);
+    CHECK(co_cutset_bind(&g_set, 0x1008, 0x2000, MASK) == 1 && g_set.stranded == 1);
+    co_cutset_made(&g_set, H(6), 900.0f, 0.0f, 1);
+    co_cutset_made(&g_set, H(7), 901.0f, 0.0f, 1);
+    CHECK(co_cutset_bind(&g_set, 0, 0, 0) == 0 && g_set.stranded == 3);
+    co_cutset_bind(&g_set, 0x1000, 0x2000, MASK);
+
     Fresh("adds: two centres");
     CoCutCentre two[2] = {Player(0, 0), {200.0f, 0.0f, CO_CUTSET_SQUAD_IN, CO_CUTSET_SQUAD_OUT}};
     co_cutset_made(&g_set, H(1), 150.0f, 0.0f, 1);  /* 150 m from the player, 50 m from the squad: once, as the nearer */

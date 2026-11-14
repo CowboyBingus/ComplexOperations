@@ -6,6 +6,7 @@
 
 typedef void (*DestroyFn)(const uint32_t* handles, uint32_t count);
 typedef uint32_t (*MakeFn)(const void* description);
+typedef void (*SwitchFn)(const uint32_t* handles, uint32_t count, int on);
 
 static struct
 {
@@ -55,7 +56,10 @@ static const Pin kRecordPins[] = {
  * own lock; the tick holds it for well under a millisecond. */
 static struct
 {
-    volatile LONG armed, live;
+    volatile LONG armed, live, switching, alive, tickAt;
+    SwitchFn sw;
+    volatile LONG tickThread;
+    uint64_t held, atOnce, stock, sentOn, sentOff, skips, makesOff, destroysOff;
     SRWLOCK lock;
     CoCutSet set;
     void* memory;
@@ -70,18 +74,41 @@ static int Bound(void)
     const uintptr_t pool = *(const uintptr_t*)(g_cut.exe + CO_CUTTERS_POOLS + 8u * CO_CUTTERS_WORLD);
     uint32_t mask = g_rec.set.mask;
     if (world == 0 || pool == 0) return co_cutset_bind(&g_rec.set, 0, 0, 0);
-    if (pool != g_rec.set.pool && co_safe_read(pool + CO_CUTTERS_MASK, &mask, 4)) mask = 0;
+    /* a mask that does not read keeps the binding as it is: dropping the records would strand held-back cutters */
+    if (pool != g_rec.set.pool && co_safe_read(pool + CO_CUTTERS_MASK, &mask, 4)) return g_rec.set.world != 0;
     return co_cutset_bind(&g_rec.set, world, pool, mask);
 }
 
-/* A cutter of the mission's world was made: a tree's is recorded, any other only frees its slot of an old record. */
-static void Recorded(uint32_t handle, int tree, float x, float y, int wanted)
+/* A cutter of the mission's world was made: a tree's is recorded, any other only frees its slot of an old record.
+ * `lit`: the game added it itself. `held`: the mod held its add back, so with no record it is added here, at once.
+ * The engine's switch reads the cutter before it takes any lock (0x812B90): it is called only under the set's lock,
+ * where a destroy on another thread still waits in its hook, and for a handle of a pool that exists. */
+static void Recorded(uint32_t handle, int tree, float x, float y, int wanted, int lit, int held)
 {
+    int made = 0;
     AcquireSRWLockExclusive(&g_rec.lock);
+    if (g_rec.tickThread != 0 && (LONG)GetCurrentThreadId() != g_rec.tickThread) g_rec.makesOff++;
     if (!g_rec.live || !Bound()) g_rec.unbound++;
     else if (!tree) { co_cutset_taken(&g_rec.set, handle); g_rec.others++; }
-    else if (co_cutset_made(&g_rec.set, handle, x, y, wanted)) g_rec.trees++;
+    else if ((made = co_cutset_made(&g_rec.set, handle, x, y, wanted)) != 0)
+    {
+        g_rec.trees++;
+        if (lit) { co_cutset_on(&g_rec.set, handle); g_rec.stock++; }
+    }
+    if (held && made) g_rec.held++;
+    else if (held) { g_rec.sw(&handle, 1, 1); g_rec.atOnce++; }
     ReleaseSRWLockExclusive(&g_rec.lock);
+}
+
+/* A make is held back only while a tick is due to add it: with the tick gone (a paused mission, a level still
+ * loading) the game adds the cutter itself, so no tree is ever left without one for long. */
+static int Holds(float x, float y)
+{
+    if (!g_rec.switching || !g_rec.alive || (uint32_t)GetTickCount() - (uint32_t)g_rec.tickAt > CO_CUTTERS_ALIVE_MS) return 0;
+    AcquireSRWLockExclusive(&g_rec.lock);
+    const int holds = g_rec.live && Bound() && co_cutset_takes(&g_rec.set, x, y);
+    ReleaseSRWLockExclusive(&g_rec.lock);
+    return holds;
 }
 
 uint32_t co_cutters_keep(const uint32_t* handles, uint32_t count, uint32_t* kept)
@@ -117,6 +144,7 @@ static void Destroy(const uint32_t* handles, uint32_t count)
     if (g_rec.armed) /* before the engine frees the slots: a make on another thread can take one at once */
     {
         AcquireSRWLockExclusive(&g_rec.lock);
+        if (g_rec.tickThread != 0 && (LONG)GetCurrentThreadId() != g_rec.tickThread) g_rec.destroysOff++;
         g_rec.destroyed += co_cutset_gone(&g_rec.set, handles, count);
         ReleaseSRWLockExclusive(&g_rec.lock);
     }
@@ -133,7 +161,7 @@ static void Destroy(const uint32_t* handles, uint32_t count)
 }
 
 /* The description's +4 is the world (0x812CDF). The forest's description and its matrix are in the caller's frame
- * (0x8155D5..0x8155F3): read here, never written. */
+ * (0x8155D5..0x8155F3): switching clears its "add now" for the call and puts it back. */
 static uint32_t MakeFrom(const void* description, uintptr_t from)
 {
     const uint8_t* d = description;
@@ -150,8 +178,12 @@ static uint32_t MakeFrom(const void* description, uintptr_t from)
             x = matrix[12]; y = matrix[13]; tree = 1;
         }
     }
+    const int held = tree && add != 0 && madeIn == CO_CUTTERS_WORLD && Holds(x, y);
+    const uint32_t none = 0;
+    if (held) memcpy((uint8_t*)(uintptr_t)d + CO_CUTTERS_DESC_ADD, &none, 4);
     const uint32_t handle = g_cut.make(description);
-    if (handle != 0 && madeIn == CO_CUTTERS_WORLD) Recorded(handle, tree, x, y, add != 0);
+    if (held) memcpy((uint8_t*)(uintptr_t)d + CO_CUTTERS_DESC_ADD, &add, 4);
+    if (handle != 0 && madeIn == CO_CUTTERS_WORLD) Recorded(handle, tree, x, y, add != 0, g_rec.switching && tree && add != 0 && !held, held);
     if (handle == 0)
     {
         InterlockedIncrement64(&g_cut.failed);
@@ -201,15 +233,23 @@ const char* co_cutters_record_arm(uintptr_t exe, uint32_t cap, uint32_t adds)
     g_rec.memory = memory;
     co_cutset_init(&g_rec.set, memory);
     g_rec.set.cap = cap; g_rec.set.adds = adds;
+    g_rec.sw = (SwitchFn)(exe + CO_CUTTERS_SWITCH);
     ReleaseSRWLockExclusive(&g_rec.lock);
     InterlockedExchange(&g_rec.armed, 1);
     return NULL;
+}
+
+void co_cutters_switch(int on)
+{
+    if (!on) InterlockedExchange(&g_rec.alive, 0);
+    InterlockedExchange(&g_rec.switching, on != 0);
 }
 
 uint32_t co_cutters_live(int complex)
 {
     uint32_t dropped = 0;
     InterlockedExchange(&g_rec.live, complex != 0);
+    InterlockedExchange(&g_rec.alive, 0); /* a level's first trees are the game's until its first tick */
     if (complex || !g_rec.armed) return 0;
     AcquireSRWLockExclusive(&g_rec.lock);
     dropped = g_rec.set.records;
@@ -220,14 +260,30 @@ uint32_t co_cutters_live(int complex)
 
 int co_cutters_tick(const CoCutCentre* centres, uint32_t count, uint32_t nowMs, uint32_t removes, CoCuttersTick* out)
 {
-    LARGE_INTEGER a, b, f;
+    LARGE_INTEGER a, b, f, h;
     if (!g_rec.armed || !g_rec.live) return 0;
     QueryPerformanceCounter(&a);
+    /* the step's threads read the AI world's cutters without its lock: they run only while a step task is out */
+    const int skipped = g_rec.switching && *(const uintptr_t*)(g_cut.exe + CO_CUTTERS_AI_WORLDS + 0x80u * CO_CUTTERS_WORLD + CO_CUTTERS_STEP_TASK) != 0;
     AcquireSRWLockExclusive(&g_rec.lock);
+    QueryPerformanceCounter(&h);
+    InterlockedExchange(&g_rec.tickThread, (LONG)GetCurrentThreadId());
     const CoCutSet* s = &g_rec.set;
     out->hooked = g_cut.make != NULL && g_cut.destroy != NULL;
     out->bound = g_cut.exe != 0 && Bound();
-    co_cutset_tick(&g_rec.set, centres, count, nowMs, removes, &g_rec.tick);
+    out->skipped = skipped;
+    if (skipped) { g_rec.skips++; g_rec.tick.adds = g_rec.tick.removes = g_rec.tick.shed = g_rec.tick.waiting = g_rec.tick.over = 0; g_rec.tick.capped = 0; }
+    else co_cutset_tick(&g_rec.set, centres, count, nowMs, removes, &g_rec.tick);
+    if (g_rec.switching && !skipped)
+    {
+        /* under the set's lock: a destroy on another thread waits in its hook, so no handle here is stale */
+        for (uint32_t k = 0; k < g_rec.tick.adds; k += CO_CUTSET_BATCH)
+            g_rec.sw(g_rec.tick.add + k, g_rec.tick.adds - k < CO_CUTSET_BATCH ? g_rec.tick.adds - k : CO_CUTSET_BATCH, 1);
+        if (g_rec.tick.removes != 0) g_rec.sw(g_rec.tick.remove, g_rec.tick.removes, 0);
+        g_rec.sentOn += g_rec.tick.adds; g_rec.sentOff += g_rec.tick.removes;
+        if (out->bound && out->hooked) { InterlockedExchange(&g_rec.tickAt, (LONG)nowMs); InterlockedExchange(&g_rec.alive, 1); }
+    }
+    out->held = g_rec.held; out->stock = g_rec.stock; out->atOnce = g_rec.atOnce; out->makesOff = g_rec.makesOff; out->destroysOff = g_rec.destroysOff; out->stranded = s->stranded; out->sentOn = g_rec.sentOn; out->sentOff = g_rec.sentOff; out->skips = g_rec.skips;
     out->capped = g_rec.tick.capped; out->adds = g_rec.tick.adds; out->removes = g_rec.tick.removes; out->shed = g_rec.tick.shed;
     out->waiting = g_rec.tick.waiting; out->over = g_rec.tick.over;
     out->records = s->records; out->wanted = s->wanted; out->on = s->on; out->cap = s->cap; out->world = s->world;
@@ -236,6 +292,7 @@ int co_cutters_tick(const CoCutCentre* centres, uint32_t count, uint32_t nowMs, 
     ReleaseSRWLockExclusive(&g_rec.lock);
     QueryPerformanceCounter(&b); QueryPerformanceFrequency(&f);
     out->us = (double)(b.QuadPart - a.QuadPart) * 1e6 / (double)f.QuadPart;
+    out->holdUs = (double)(b.QuadPart - h.QuadPart) * 1e6 / (double)f.QuadPart;
     return 1;
 }
 
@@ -255,4 +312,5 @@ const CoCuttersPin* co_cutters_test_record_pins(size_t* count)
     return pins;
 }
 const CoCutSet* co_cutters_test_set(void) { return &g_rec.set; }
+void co_cutters_test_switch(void (*fn)(const uint32_t* handles, uint32_t count, int on)) { g_rec.sw = fn; }
 #endif

@@ -43,21 +43,35 @@ void co_cutters_seen(CoCuttersSeen* out);
 #define CO_CUTTERS_DESC_ADD 0xCu           /* "add to the AI world now" (0x8132F8; the forest's store 0x815508) */
 #define CO_CUTTERS_DESC_MATRIX 0x10u       /* pointer to a 4x4 matrix; the place is its +0x30, +0x34 (0x8154AB, 0x815521) */
 
+/* Switching (co_cutters_switch): the hook clears the forest's "add now" for the call, so the game makes the cutter
+ * and does not add it, and the tick adds the ones in reach through the engine's own switch. */
+#define CO_CUTTERS_SWITCH 0x812AE0u   /* exe: (rcx handles, edx count, r8d on); skips 0, a stale handle, one added already */
+#define CO_CUTTERS_STEP_TASK 0x20u    /* AI world record: the step task's handle, 0 from the join to the kick (0x7D79F4, 0x7D865A) */
+#define CO_CUTTERS_ALIVE_MS 1000u     /* with no tick this long the game adds a new cutter itself, as it always did */
+
 /* Arms the record with `cap` cutters on and `adds` a tick at most. NULL, or why not: the engine's code at the
  * sites above and at the switch 0x812AE0 is not the code this was made for, or no memory. */
 const char* co_cutters_record_arm(uintptr_t exe, uint32_t cap, uint32_t adds);
 /* A complex level is live, or no longer: leaving drops every record. Returns the records dropped. */
 uint32_t co_cutters_live(int complex);
+/* 1: makes are held back and the tick switches cutters on (and off, when it is given removes). 0: record only. */
+void co_cutters_switch(int on);
 typedef struct CoCuttersTick
 {
     int bound, hooked, capped;
     uint32_t records, wanted, on, cap, adds, removes, shed, waiting, over;
     uint64_t trees, others, unbound, refused, replaced, stale, destroyed, binds;
     uintptr_t world;
-    double us;
+    double us, holdUs; /* the tick, and the part of it under the set's lock (the engine's adds are inside it) */
+    uint64_t makesOff, destroysOff, stranded; /* makes and destroys on a thread other than the tick's; records dropped while they waited */
+    /* switching: the tick was skipped with the AI step in flight; makes held back, added by the game with no tick
+     * alive, added at once because the record was refused; handles sent to the switch */
+    int skipped;
+    uint64_t held, stock, atOnce, sentOn, sentOff, skips;
 } CoCuttersTick;
-/* One tick of the set over these centres, game thread: what it would add and remove, counted as done and not sent
- * to the engine. 0 when not armed or no complex level is live. */
+/* One tick of the set over these centres, game thread: what it would add and remove, counted as done. Record only:
+ * nothing is sent to the engine. Switching: sent to CO_CUTTERS_SWITCH in batches, unless the AI step is in flight
+ * (then nothing is chosen). 0 when not armed or no complex level is live. */
 int co_cutters_tick(const CoCutCentre* centres, uint32_t count, uint32_t nowMs, uint32_t removes, CoCuttersTick* out);
 
 #ifdef CO_TEST
@@ -67,6 +81,7 @@ uint32_t co_cutters_test_make(const void* description, uintptr_t from);
 typedef struct CoCuttersPin { uint32_t rva; const char* pin; } CoCuttersPin;
 const CoCuttersPin* co_cutters_test_record_pins(size_t* count);
 const CoCutSet* co_cutters_test_set(void);
+void co_cutters_test_switch(void (*fn)(const uint32_t* handles, uint32_t count, int on));
 #endif
 
 #endif

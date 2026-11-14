@@ -37,7 +37,7 @@ typedef struct CoCutSet
     uint32_t made, freeHead, records, wanted, on, onCells, now; int dirty;
     uintptr_t world, pool; uint32_t mask;
     uint32_t cap, adds, leaveMs;
-    uint64_t added, removed, shed, replaced, stale, refused, binds;
+    uint64_t added, removed, shed, replaced, stale, refused, binds, stranded;
     CoCutCand heap[CO_CUTSET_ADDS];
 } CoCutSet;
 
@@ -54,7 +54,8 @@ size_t co_cutset_bytes(void);
 /* `memory` of co_cutset_bytes(), zeroed, for the set's life. */
 void co_cutset_init(CoCutSet* s, void* memory);
 /* The AI world and the pool the handles belong to, and the pool's index mask ([pool+0x28]). A change drops every
- * record: a handle's generation is one bit at 2^20 slots, so an old record could name a new cutter. 1 when bound;
+ * record: a handle's generation is one bit at 2^20 slots, so an old record could name a new cutter. The wanted
+ * ones not on are counted as stranded: held back by the mod, nothing adds them now. 1 when bound;
  * 0 (nothing recorded) with a null pointer or a mask that is not 2^k - 1 below CO_CUTSET_SLOTS. */
 int co_cutset_bind(CoCutSet* s, uintptr_t world, uintptr_t pool, uint32_t mask);
 /* Drops every record; the binding stays. */
@@ -63,6 +64,9 @@ void co_cutset_clear(CoCutSet* s);
 int co_cutset_takes(const CoCutSet* s, float x, float y);
 /* A tree's cutter was made: `wanted` is the game's own "add now". A record its slot still held is dropped. */
 int co_cutset_made(CoCutSet* s, uint32_t handle, float x, float y, int wanted);
+/* The game itself added this record's cutter (the mod did not hold the make back): it counts as on, past the cap
+ * too. 1 when a waiting record was marked. */
+int co_cutset_on(CoCutSet* s, uint32_t handle);
 /* Another cutter took this handle's slot: a record still there is of a dead cutter. */
 void co_cutset_taken(CoCutSet* s, uint32_t handle);
 /* The engine destroys these handles: their records go. A record under another handle of the same slot stays, as the

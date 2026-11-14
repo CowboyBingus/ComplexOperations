@@ -49,12 +49,14 @@ int co_cutset_bind(CoCutSet* s, uintptr_t world, uintptr_t pool, uint32_t mask)
 {
     if (world == 0 || pool == 0 || mask == 0 || (mask & (mask + 1)) != 0 || mask >= CO_CUTSET_SLOTS)
     {
+        s->stranded += s->wanted - s->on;
         co_cutset_clear(s);
         s->world = s->pool = 0;
         return 0;
     }
     if (world != s->world || pool != s->pool || mask != s->mask)
     {
+        s->stranded += s->wanted - s->on;
         co_cutset_clear(s); /* with the old mask: the slots that were in use */
         s->world = world; s->pool = pool; s->mask = mask; s->binds++;
     }
@@ -202,13 +204,26 @@ static uint32_t Pick(CoCutSet* s, uint32_t age, float beyond)
     return best;
 }
 
-static void On(CoCutSet* s, uint32_t r, CoCutTick* out)
+static void Lit(CoCutSet* s, uint32_t r)
 {
     const uint32_t ci = CellOf(s->rec[r].x, s->rec[r].y);
     CoCutCell* c = &s->cell[ci];
-    s->flag[r] |= F_ON; c->pending--; c->on++; s->on++; s->added++;
+    s->flag[r] |= F_ON; c->pending--; c->on++; s->on++;
     if (!c->listed) { c->listed = 1; s->onCell[s->onCells++] = ci; }
+}
+
+static void On(CoCutSet* s, uint32_t r, CoCutTick* out)
+{
+    Lit(s, r); s->added++;
     out->add[out->adds++] = s->rec[r].handle;
+}
+
+int co_cutset_on(CoCutSet* s, uint32_t handle)
+{
+    const uint32_t r = handle != 0 ? s->slot[handle & s->mask] : 0;
+    if (r == 0 || s->rec[r - 1].handle != handle || (s->flag[r - 1] & (F_WANTED | F_ON)) != F_WANTED) return 0;
+    Lit(s, r - 1);
+    return 1;
 }
 
 /* One of the cell's cutters goes off; the caller saw c->on != 0. */
