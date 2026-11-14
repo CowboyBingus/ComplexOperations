@@ -4,8 +4,9 @@
  * the world's up (0x6247CA) gives that up turned 45.57 deg toward it (0x6248CE). The limit is hooked, first in the
  * chain so its return address is the game's caller, and what it leaves is tightened for the four-corner call (back to
  * 0x622D70) only; the bone-ray modes' call (0x621EAF) and every other level keep the game's. The pose reads one corner
- * ray on the same thread just before (0x6227A8): its start is where the unit stands. On the rotation's job threads
- * (0x571100): the slot is the thread's own, the counts atomic, the tiles tried for and never waited on.
+ * ray on the same thread just before (0x6227A8): its start is where the unit stands. The world update calls the
+ * rotation update on the game thread (0x573E16); the slot is still the thread's own, the counts atomic and the tiles
+ * tried for, never waited on, so a build that hands the update to its jobs (0x571100) stays safe.
  * Research builds: HELLFORGE_XL_LEAN_CAP=<degrees> over the slope, 0 none; xl-lean.txt in the logs changes it in play. */
 #define LW_LEAN_LIMIT 0x624750u
 #define LW_LEAN_FOUR 0x622D70u    /* where the four-corner pose's call returns */
@@ -19,7 +20,7 @@ typedef float* (*LwLeanFn)(uintptr_t mgr, float* out, float* up);
 static struct
 {
     LwLeanFn orig; uintptr_t four, bone; const float* world;
-    volatile LONG deg; /* a float's bits: research builds change it while the job threads pose */
+    volatile LONG deg; /* a float's bits: research builds change it in play */
     volatile LONG poses, game, ours, blind, boneCalls, otherCalls;
 } g_lwLean;
 static _Thread_local struct { float x, y; int set; } t_lwLean;
@@ -231,12 +232,14 @@ static int LwLeanWatch(const wchar_t* path)
     const float deg = strtof(text, &end);
     if (end == text || !(deg >= 0.0f)) { Note("living world: lean: xl-lean.txt \"%.20s\" is not degrees; still %.0f", text, (double)LwLeanDeg()); return 0; }
     char* rest = end; const long props = strtol(end, &rest, 10); /* a second number: 0 leaves prop hits the game's */
+    char* more = rest; const long footing = strtol(rest, &more, 10); /* a third: how a footing on a prop is kept (0 to 2) */
     LwTiltNote(); LwLeanNote();
     LwLeanSet(deg);
     if (rest != end) InterlockedExchange(&g_lwTiltPropsOn, props != 0);
+    if (more != rest) InterlockedExchange(&g_lwTiltFooting, footing >= 0 && footing <= 2 ? footing : LW_TILT_FOOTING);
     g_lwLp.lines = g_lwLp.steepLines = 0; g_lwTiltSunkLines = 0;
-    Note("living world: lean: now %.0f deg over the slope (0: none), prop hits read %s, from xl-lean.txt", (double)LwLeanDeg(),
-        g_lwTiltPropsOn ? "the drawn ground" : "as the game reads them");
+    Note("living world: lean: now %.0f deg over the slope (0: none), prop hits read %s, footing %ld (0: the ground under any prop, 1: one balanced body keeps the game's, "
+        "2: by height), from xl-lean.txt", (double)LwLeanDeg(), g_lwTiltPropsOn ? "the drawn ground" : "as the game reads them", (long)g_lwTiltFooting);
     return 1;
 }
 #endif
