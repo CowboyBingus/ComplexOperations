@@ -490,6 +490,7 @@ void CoXlTestLwNavHoldCounts(uint32_t* v)
     v[5] = g_lwNavHold.sumBack; v[6] = g_lwNavHold.sumBreaks; v[7] = g_lwNavHold.longNoted[0] + g_lwNavHold.longNoted[1] + g_lwNavHold.longNoted[2] + g_lwNavHold.longNoted[3];
 }
 int CoXlTestLwNavLeft(int read, uint32_t state) { return LwNavLeftAt(read, state); }
+int CoXlTestLwPeerParts(int mission, int host) { return LwPeerParts(mission, host); }
 /* The scheduler's call on a fake scheduler, list variable and nav count; the first builds' budget and the time this
  * tick's have taken; the tick summary's counts (paused ticks, pauses, budget waits, lag ms, queue most, the oldest
  * waiting built cell's ms and ring distance, one call's starts). */

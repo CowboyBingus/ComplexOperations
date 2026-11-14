@@ -33,6 +33,7 @@ int CoXlTestLwNavWatch(uint16_t cx, uint16_t cy, uint32_t flags, uint32_t sectio
 float CoXlTestLwAibSteer(float stock, float cur, float lat);
 float CoXlTestLwAibWorld(uintptr_t w, float stock, float lat, int on, ULONGLONG now);
 int CoXlTestLwNavLeft(int read, uint32_t state);
+int CoXlTestLwPeerParts(int mission, int host);
 void CoXlTestLwFpJoin(double ms);
 void CoXlTestLwAibReset(void);
 void CoXlTestLwAibUnread(void);
@@ -1950,6 +1951,8 @@ static void TestLeft(void)
 {
     ResetHold("a level that left play marks no more cells");
     CoXlTestLwNavLevel(5);
+    /* a client in a mission runs the hold's budget help and the play mark; the squads stay the host's */
+    CHECK(CoXlTestLwPeerParts(1, 0) == 1 && CoXlTestLwPeerParts(1, 1) == 2 && CoXlTestLwPeerParts(0, 0) == 0 && CoXlTestLwPeerParts(0, 1) == 0);
     CHECK(CoXlTestLwNavLeft(1, 1) == 0 && CoXlTestLwNavLeft(0, 0) == 0); /* still generating: not left */
     CHECK(CoXlTestLwNavLeft(1, 3) == 0 && CoXlTestLwNavLeft(1, 3) == 0 && !fake_host_logged("left play"));
     CHECK(CoXlTestLwNavLeft(1, 0) == 1 && fake_host_logged("living world: nav: the level left play (state 0); no more cells are marked, 0 rebuild(s) still watched"));

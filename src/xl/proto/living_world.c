@@ -6104,6 +6104,10 @@ static void LivingTick(void)
     }
 }
 
+/* What a peer's tick runs: 0 nothing, 1 a client's parts, 2 the host's. A client steps its own AI world and nav cells
+ * (game.dll 0xAB1B0B creates the game world with AI settings on every peer; the step 0x78EAE0 and the cell tick
+ * 0x7B8A10 ask no role), so the hold acts there and gets the same budget help and the queue's line. */
+static int LwPeerParts(int mission, int host) { return !mission ? 0 : host ? 2 : 1; }
 static void LivingTickBody(void)
 {
     LwNjFrame(); /* the nav job cache's flushes while no nav tick runs */
@@ -6111,7 +6115,9 @@ static void LivingTickBody(void)
     int host = 0, mission = ActMission(g_lw.game, &host, NULL);
     LwPfFrame(mission); /* every peer, before this frame's physics step */
     LwNavSwapSummary(GetTickCount64()); /* every peer: the swap hooks act wherever the game rebuilds a cell */
-    if (!mission || !host) return;
+    int parts = LwPeerParts(mission, host);
+    if (parts == 1) { LwNavLeft(); LwAibFrame(); }
+    if (parts != 2) return;
     LwTraceTick();
     uintptr_t dir;
     if (EvpPtr(g_lw.game + LW_DIRECTOR, &dir) && !LwNavLeft()) LwNavTick(dir);
