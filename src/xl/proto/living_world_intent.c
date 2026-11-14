@@ -409,7 +409,11 @@ static void LwStallCheckAt(LwSquad* q, const uint32_t* members, int n, const flo
 #define LW_FIGHT_NEAR 100.0f   /* fights this close are one battle: a new one waits before it sends, an ended one's squads go on to the other (D) */
 #define LW_FIGHT_NEAR_HOLD 3000 /* ms a new fight beside an older one is seen before it sends: a cluster that split off for a scan sends nothing (D) */
 #define LW_FIGHT_RESEND 10000  /* ms between a fight's sends once it has sent: a squad that fails at once is not replaced every scan (D) */
-typedef struct { float pos[3], tpos[3]; int engaged, peak, placedN; uint32_t target, sent; ULONGLONG born, seen, sentAt, placed; uint8_t call, live; } LwFight; /* placed, placedN: the scan that last set pos, and from how many units */
+#define LW_FIGHT_AIM 150.0f    /* a fight's target is its squads' aim within this of the fight's point: a target that left is not followed across the map (D) */
+#define LW_FIGHT_CHASE 60000   /* ms units that lost sight of their target (level 7) keep a fight seen after its last placing unit: one that stays there keeps no fight for good (D) */
+#define LW_FIGHT_STAY 180000u  /* ms a reinforcement stays at its fight, summed over its moves (D) */
+#define LW_FIGHT_ONLINE 600000u /* ms a reinforcement is online in all: four legs of 240 s and the stay would be 19 min of a fight's squad that draws no replacement (D) */
+typedef struct { float pos[3], tpos[3]; int engaged, peak, placedN; uint32_t target, sent; ULONGLONG born, seen, sentAt, placed, hotAt; uint8_t call, live; } LwFight; /* placed, placedN: the scan that last set pos, and from how many units; hotAt: the last scan with a placing unit or a call */
 static LwFight g_lwFights[16];
 static struct { uint32_t fights, calls, sent, joined, ended; } g_lwRush; /* 30 s counters */
 /* a target that still lives, and where it is now (the Behavior position +0x1C is only where it was last seen or heard) */
@@ -465,7 +469,31 @@ static int (*g_lwTargetLive)(uint32_t target, float* pos) = LwLiveTarget;
 static const float* LwFightAim(LwFight* fi)
 {
     if (fi->target && !g_lwTargetLive(fi->target, fi->tpos)) fi->target = 0; /* dead or gone: the next scan picks another */
-    return fi->target ? fi->tpos : fi->pos;
+    return fi->target && LwDist2(fi->tpos, fi->pos[0], fi->pos[1]) <= LW_FIGHT_AIM * LW_FIGHT_AIM ? fi->tpos : fi->pos;
+}
+/* The aim one squad can walk to: the fight's aim, or the fight's point while its goal at the aim found no navmesh (a
+ * Helldiver on a rock or a roof) and the aim stays within 30 m of where that was. Enemies stand at the point. */
+static const float* LwSquadAim(LwSquad* q, LwFight* fi)
+{
+    const float* aim = LwFightAim(fi);
+    if (q->aimMiss && LwDist2(aim, q->aimOff[0], q->aimOff[1]) > 30.0f * 30.0f) q->aimMiss = 0;
+    return q->aimMiss ? fi->pos : aim;
+}
+/* A reinforcement's goal at its point; on a miss there, once, at its fight's point, which then is its point. 0: neither
+ * has navmesh within the goal's snap. The test swaps the goal call. */
+static int (*g_lwGoTo)(LwSquad* q, const float* target) = LwSquadGoTo;
+static int LwReinforceGoal(LwSquad* q)
+{
+    if (g_lwGoTo(q, q->target)) return 1;
+    if (!LwFightOf(q) || q->aimMiss) return 0;
+    const LwFight* fi = &g_lwFights[q->fight];
+    float off = sqrtf(LwDist2(fi->pos, q->target[0], q->target[1]));
+    if (off < 1.0f) return 0; /* its point is the fight's already */
+    Note("living world: squad %d: no navmesh at its fight's target at (%.0f, %.0f): it goes to fight %d's point at (%.0f, %.0f), %.0f m from there", (int)(q - g_lwSquads),
+        (double)q->target[0], (double)q->target[1], q->fight, (double)fi->pos[0], (double)fi->pos[1], (double)off);
+    q->aimMiss = 1; q->aimOff[0] = q->target[0]; q->aimOff[1] = q->target[1];
+    memcpy(q->target, fi->pos, sizeof q->target);
+    return g_lwGoTo(q, q->target);
 }
 /* The ms an intent has been online: the limits to reach its point count from the first online tick, not from the send.
  * The offline walk and the wait at the band's edge have ends of their own; counted from the send, a squad sent from
@@ -475,6 +503,17 @@ static ULONGLONG LwIntentOnlineMs(LwSquad* q, ULONGLONG now)
     if (q->intentOnAt < q->intentAt) q->intentOnAt = now;
     return now - q->intentOnAt;
 }
+/* The ms a reinforcement has been online since it was sent, its offline stretches left out (LwOnlineStop). */
+static ULONGLONG LwOnlineTotal(LwSquad* q, ULONGLONG now)
+{
+    if (!q->onFrom) q->onFrom = now;
+    return q->onSum + (now - q->onFrom);
+}
+static void LwOnlineStop(LwSquad* q, ULONGLONG now)
+{
+    if (q->onFrom && now > q->onFrom) q->onSum += (uint32_t)(now - q->onFrom);
+    q->onFrom = 0;
+}
 /* An online squad not at its point in time: 240 s online reinforcing, 180 s investigating. */
 static int LwIntentLate(LwSquad* q, ULONGLONG now) { return LwIntentOnlineMs(q, now) > (q->intent == LW_REINFORCE ? 240000u : 180000u); }
 /* A squad that has waited its limit at the band's edge in this intent (its first wait started heldFrom): as long as
@@ -483,19 +522,27 @@ static int LwHoldLate(const LwSquad* q, ULONGLONG now)
 {
     return q->heldFrom != 0 && q->heldFrom >= q->intentAt && now - q->heldFrom > (q->intent == LW_REINFORCE ? 240000u : 180000u);
 }
+/* Why LwHoldLate ends it: the limit counts from the intent's first wait, so a squad back at the band's edge after
+ * that has not waited the whole time, and its reason says so. */
+static const char* LwHoldLateWhy(const LwSquad* q)
+{
+    int again = !q->held || q->holds > 1;
+    if (q->intent == LW_REINFORCE) return again ? "240 s since its first wait at the spawn band" : "240 s, waiting at the spawn band";
+    return again ? "180 s since its first wait at the spawn band" : "180 s, waiting at the spawn band";
+}
 /* An online reinforcement with nobody engaged against where its fight is now (`aim`), at most every 10 s: 1 = on its
- * way, its point moved over 30 m; 2 = at its point, the fight over LW_FIGHT_JOIN from its leader (it moved, or the
- * squad was handed to another fight): on its way again with the time to get there counted anew, LW_FIGHT_MOVES times
- * an intent at most; 0 = it keeps its point. */
+ * way, its point moved over 20 m (it arrives within LW_FIGHT_JOIN of the aim, and its goal is scattered 10 m); 2 = at
+ * its point, the fight over LW_FIGHT_JOIN from its leader (it moved, or the squad was handed to another fight): on its
+ * way again with the time to get there counted anew, LW_FIGHT_MOVES times an intent at most; 0 = it keeps its point. */
 #define LW_FIGHT_MOVES 3
 static int LwReinforceAim(LwSquad* q, const float* at, const float* aim, int engaged, ULONGLONG now)
 {
     if (engaged || now < q->retargetAt) return 0;
-    if (q->intentStage == 0 ? LwDist2(aim, q->target[0], q->target[1]) <= 30.0f * 30.0f
+    if (q->intentStage == 0 ? LwDist2(aim, q->target[0], q->target[1]) <= 20.0f * 20.0f
                             : q->moves >= LW_FIGHT_MOVES || LwDist2(at, aim[0], aim[1]) <= LW_FIGHT_JOIN * LW_FIGHT_JOIN) return 0;
     int back = q->intentStage != 0;
     memcpy(q->target, aim, sizeof q->target); q->retargetAt = now + 10000;
-    if (back) { q->intentStage = 0; q->intentOnAt = now; q->moves++; }
+    if (back) { q->intentStage = 0; q->intentOnAt = now; q->moves++; q->stageSum += (uint32_t)(now - q->intentStageAt); }
     return back ? 2 : 1;
 }
 /* The nearest live fight within `within` of a point, `skip` left out; -1 when none. */
@@ -656,7 +703,7 @@ static int LwIntentArrived(LwSquad* q)
 static int LwIntentGoal(LwSquad* q)
 {
     if (q->intent != LW_INVESTIGATE && q->intent != LW_REINFORCE && q->intent != LW_RETAKE) return 0;
-    if (q->intentStage == 0) { q->intentSent = 1; if (!LwSquadGoTo(q, q->target)) LwIntentEnd(q, "no navmesh at the point"); }
+    if (q->intentStage == 0) { q->intentSent = 1; if (!(q->intent == LW_REINFORCE ? LwReinforceGoal(q) : LwSquadGoTo(q, q->target))) LwIntentEnd(q, "no navmesh at the point"); }
     return 1;
 }
 /* A unit's AI settings (0x511CC0's table, as LwObstacleAbilities): the hearing threshold +0x2BC (0x7EB1DD, compared at
@@ -728,20 +775,31 @@ static void LwHearReadBack(const LwSquad* q, uint32_t member, uint32_t source) /
         inHash ? "in the detector hash" : "NOT in the detector hash", owned, source, tagged ? "read" : "not read", tagged ? ((tag >> 25) & 1 ? "set" : "clear") : "-", entry, bdet, local, synced);
 }
 /* an online squad with an intent, each tick after its members were read */
-static void LwReinforceTick(LwSquad* q, const uint32_t* members, int n, int engaged, const float* at, ULONGLONG now)
+/* `heard`: members at alert 1 or 2. A goal pulls them out of their own walk to what they heard (LwSteerOk), so the
+ * squad gets no new point then, unless it was told of the fight's target in the last 15 s (the tell puts them there). */
+static void LwReinforceTick(LwSquad* q, const uint32_t* members, int n, int engaged, int heard, const float* at, ULONGLONG now)
 {
     LwIntentOnlineMs(q, now);
-    int moved = LwFightOf(q) ? LwReinforceAim(q, at, LwFightAim(&g_lwFights[q->fight]), engaged, now) : 0;
+    LwFight* fi = LwFightOf(q) ? &g_lwFights[q->fight] : NULL;
+    const float* aim = fi ? LwSquadAim(q, fi) : q->target;
+    int told = q->tells > 0 && now < q->tellAt + 5000;
+    int moved = fi && (!heard || told) ? LwReinforceAim(q, at, aim, engaged, now) : 0;
     if (moved == 2)
         Note("living world: squad %d at its point with nobody engaged: its fight %d is at (%.0f, %.0f) now, %.0f m away; it goes there (move %d of %d)", (int)(q - g_lwSquads), q->fight,
             (double)q->target[0], (double)q->target[1], (double)sqrtf(LwDist2(at, q->target[0], q->target[1])), q->moves, LW_FIGHT_MOVES);
     if (q->intentStage == 0)
     {
-        if (!q->intentSent && q->jobSet) { q->intentSent = 1; if (!LwSquadGoTo(q, q->target)) { LwIntentEnd(q, "no navmesh at the point"); return; } }
-        else if (moved && q->jobSet) LwSquadGoTo(q, q->target);
+        if ((!q->intentSent || moved) && q->jobSet && fi) /* a fight that is over gets no goal: the squad ends below */
+        {
+            q->intentSent = 1;
+            if (!LwReinforceGoal(q)) { LwIntentEnd(q, "no navmesh at the point"); return; }
+            aim = LwSquadAim(q, fi); /* the fight's point, when the goal went there */
+        }
+        else if (moved) q->intentSent = 0; /* no job yet: the goal at the new point goes out when it is set */
         /* members come online over several ticks (lw113f: 2 of 9 listed on the first): the newly listed run too */
         if (q->intentSent && !engaged && (!q->rushed || n > q->rushedN)) LwRushMembers(q, members, n, 1);
-        int there = LwDist2(at, q->target[0], q->target[1]) <= LW_FIGHT_JOIN * LW_FIGHT_JOIN;
+        /* against the aim, not its stored point: the point may be 20 m behind, and a squad arrived there would move at once */
+        int there = LwDist2(at, aim[0], aim[1]) <= LW_FIGHT_JOIN * LW_FIGHT_JOIN;
         if (engaged || there)
         {
             if (q->rushed) LwRushMembers(q, members, n, 0);
@@ -752,8 +810,9 @@ static void LwReinforceTick(LwSquad* q, const uint32_t* members, int n, int enga
         }
         else
         {
-            if (!LwFightOf(q)) { LwIntentEnd(q, "the fight ended before it got there"); return; }
-            if (LwIntentLate(q, now)) LwIntentEnd(q, "not there in 240 s");
+            if (!fi) LwIntentEnd(q, "the fight ended before it got there");
+            else if (LwIntentLate(q, now)) LwIntentEnd(q, "not there in 240 s");
+            else if (LwOnlineTotal(q, now) > LW_FIGHT_ONLINE) LwIntentEnd(q, "600 s online");
             return;
         }
     }
@@ -764,25 +823,24 @@ static void LwReinforceTick(LwSquad* q, const uint32_t* members, int n, int enga
     }
     if ((uint32_t)engaged > q->intentPeak) q->intentPeak = (uint32_t)engaged;
     /* nobody engaged at the fight: every 10 s, up to 3 times, the members hear the fight's target where it is */
-    if (!engaged && q->tells < 3 && now >= q->tellAt && LwFightOf(q) && g_lwFights[q->fight].target)
+    if (!engaged && q->tells < 3 && now >= q->tellAt && fi && fi->target && LwFightAim(fi) == fi->tpos)
     {
         typedef void (*HearFn)(void*, uint32_t, uint32_t, const float*, float);
-        LwFight* fi = &g_lwFights[q->fight]; int told = 0;
-        LwFightAim(fi);
-        if (!fi->target) goto untold;
-        for (int k = 0; k < n; k++) { uint32_t det = LwAwareDetector(members[k]); if (det) { ((HearFn)(g_lw.game + 0x888E50u))(NULL, det, fi->target, fi->tpos, 40.0f); told++; } }
+        int toldN = 0;
+        for (int k = 0; k < n; k++) { uint32_t det = LwAwareDetector(members[k]); if (det) { ((HearFn)(g_lw.game + 0x888E50u))(NULL, det, fi->target, fi->tpos, 40.0f); toldN++; } }
         q->tells++; q->tellAt = now + 10000;
-        Note("living world: squad %d at the fight: %d of %d members told of its target %08X at (%.0f, %.0f), %.0f m away (tell %d)", (int)(q - g_lwSquads), told, n, fi->target,
+        Note("living world: squad %d at the fight: %d of %d members told of its target %08X at (%.0f, %.0f), %.0f m away (tell %d)", (int)(q - g_lwSquads), toldN, n, fi->target,
             (double)fi->tpos[0], (double)fi->tpos[1], (double)sqrtf(LwDist2(at, fi->tpos[0], fi->tpos[1])), q->tells);
     }
-untold:
-    if ((!LwFightOf(q) && !engaged) || now - q->intentStageAt > 180000) LwIntentEnd(q, LwFightOf(q) ? "180 s at the fight" : "the fight is over");
+    if (!fi && !engaged) LwIntentEnd(q, "the fight is over");
+    else if (q->stageSum + (now - q->intentStageAt) > LW_FIGHT_STAY) LwIntentEnd(q, fi ? "180 s at the fight" : "the fight is over");
+    else if (LwOnlineTotal(q, now) > LW_FIGHT_ONLINE) LwIntentEnd(q, "600 s online");
 }
 static void LwReinforceOnline(LwSquad* q, const uint32_t* members, int n, const float* at, ULONGLONG now)
 {
-    int engaged = 0;
-    for (int k = 0; k < n; k++) engaged += LwAlert(members[k]) >= 3;
-    LwReinforceTick(q, members, n, engaged, at, now);
+    int engaged = 0, heard = 0;
+    for (int k = 0; k < n; k++) { uint32_t lv = LwAlert(members[k]); engaged += lv >= 3; heard += lv == 1 || lv == 2; }
+    LwReinforceTick(q, members, n, engaged, heard, at, now);
 }
 static void LwIntentOnline(LwSquad* q, const uint32_t* members, int n, const float* at)
 {
@@ -850,15 +908,17 @@ static void LwIntentOnline(LwSquad* q, const uint32_t* members, int n, const flo
     if ((calm && now - q->intentStageAt > 10000) || now - q->intentStageAt > 90000) LwIntentEnd(q, calm ? "members calm again" : "90 s");
 }
 /* an online squad going offline with an intent: the route from where it stands */
-static void LwIntentOffline(LwSquad* q)
+static void LwIntentOfflineAt(LwSquad* q, ULONGLONG now)
 {
     if (q->intent != LW_INVESTIGATE && q->intent != LW_REINFORCE && q->intent != LW_RETAKE) return;
     q->intentSent = 0; q->rushed = 0; /* its units are gone, and their speed with them */
     q->intentOnAt = 0; /* online again, its time to get there counts anew */
+    LwOnlineStop(q, now); /* its online time in all goes on from here when it is online again */
     if (q->intent == LW_RETAKE && q->intentStage != 0) { q->pathLen = q->pathAt = 0; return; } /* at the garrison: LwWalk applies the retake (LwRetakeArrived) */
     if (q->intentStage != 0) LwIntentEnd(q, q->intent == LW_REINFORCE ? "it went offline at the fight" : "it went offline while investigating");
     else if (!LwIntentRoute(q)) LwIntentEnd(q, "no route to the point");
 }
+static void LwIntentOffline(LwSquad* q) { LwIntentOfflineAt(q, GetTickCount64()); }
 
 /* pass 0 at the event: offline squads; pass 1, LW_HEAR_ONLINE_MS later: online squads still calm. The noise is caught in
  * the frame of the shot (0x573F81), before its hit raises the target's alert, so an online squad picked then would be the
@@ -920,19 +980,23 @@ static int LwNoiseSource(uint32_t source)
     for (int i = 0; i < 16; i++) if (g_lwNoiseSent[i].source == source && g_lwNoiseSent[i].at) return i;
     return -1;
 }
-/* The gate for one noise: its skip reason (LwNoiseSkip), noted once per source and LW_NOISE_SOURCE_MS. */
+/* The gate for one noise: its skip reason (LwNoiseSkip), noted once per source, reason and LW_NOISE_SOURCE_MS. A
+ * noise's source is an entity id (0x64A890's r8d), so a player's body is told by the avatar entity, not the unit
+ * handle. g_lwNoiseFixed: the test's noise from the avatar that counts as a source in place. */
+static uint32_t g_lwNoiseFixed;
 static int LwNoiseGate(const LwNoise* n, float reach, ULONGLONG now)
 {
     int body = 0, k = LwNoiseSource(n->source);
-    for (int i = 0; i < g_lwWorld.playersAt; i++) if (g_lwWorld.units[i] == n->source) body = 1;
+    for (int i = 0; i < g_lwWorld.playersAt; i++) if (g_lwWorld.avatars[i] == n->source) body = 1;
+    if (g_lwNoiseFixed && g_lwNoiseFixed == n->source) body = 0;
     ULONGLONG since = k >= 0 && !body ? now - g_lwNoiseSent[k].at : ~0ull;
     float moved = k >= 0 ? sqrtf(LwDist2(g_lwNoiseSent[k].pos, n->pos[0], n->pos[1])) : 0, away = sqrtf(LwNearestPlayer2(n->pos[0], n->pos[1]));
     int skip = LwNoiseSkip(away, reach, since, moved);
     if (!skip) return 0;
     g_lwNoiseSkips[skip]++;
-    static struct { uint32_t source; ULONGLONG at; } noted[8]; static int next;
-    for (int i = 0; i < 8; i++) if (noted[i].source == n->source && noted[i].at && now - noted[i].at < LW_NOISE_SOURCE_MS) return skip;
-    noted[next].source = n->source; noted[next].at = now; next = (next + 1) % 8;
+    static struct { uint32_t source; int skip; ULONGLONG at; } noted[8]; static int next;
+    for (int i = 0; i < 8; i++) if (noted[i].source == n->source && noted[i].skip == skip && noted[i].at && now - noted[i].at < LW_NOISE_SOURCE_MS) return skip;
+    noted[next].source = n->source; noted[next].skip = skip; noted[next].at = now; next = (next + 1) % 8;
     if (skip == 1) Note("living world: noise type %u at (%.0f, %.0f) from %08X draws no squad: the nearest player is %.0f m away (reach %.0f m, limit %.0f m)", n->type,
         (double)n->pos[0], (double)n->pos[1], n->source, (double)away, (double)reach, (double)(reach > LW_NOISE_PLAYER ? reach : LW_NOISE_PLAYER));
     else Note("living world: noise type %u at (%.0f, %.0f) from %08X draws no squad: this source drew squads %.0f s ago, %.0f m from here (one send per %.0f s for a source that stays in place)",
@@ -1019,13 +1083,21 @@ static void LwReinforce(int f, int want)
     {
         LwSquad* q = &g_lwSquads[pick[j]];
         uint8_t was = q->intent;
+        const LwSquad before = *q; /* a squad that is not sent keeps what it was doing */
         q->intent = LW_REINFORCE; q->intentStage = 0; q->intentSent = 0; q->intentAt = now; q->intentFrom = sqrtf(d2s[j]); q->fight = (int8_t)f; q->fightBorn = fi->born; q->retargetAt = now + 10000; q->moves = 0;
+        q->onFrom = 0; q->onSum = 0; q->stageSum = 0; q->aimMiss = 0;
         memcpy(q->target, LwFightAim(fi), sizeof q->target);
         if (q->state == LW_OFFLINE) { if (!LwIntentRoute(q)) { q->intent = was; q->fight = -1; continue; } }
         else if (q->jobSet)
         {
             q->intentSent = 1;
-            if (!LwSquadGoTo(q, q->target)) { q->intent = was; q->fight = -1; continue; }
+            if (!LwReinforceGoal(q))
+            {
+                /* the fight sends again after LW_FIGHT_RESEND, and not this squad for LW_INTENT_REST */
+                *q = before; q->intentFree = now + LW_INTENT_REST; fi->sentAt = now;
+                Note("living world: fight %d: squad %d (online, %.0f m) is not sent: no navmesh at the fight's target or at its point (%.0f, %.0f)", f, pick[j], (double)sqrtf(d2s[j]), (double)fi->pos[0], (double)fi->pos[1]);
+                continue;
+            }
             uint32_t ms[32]; int mn = LwMembers(q->squad, ms);
             if (mn > 0) LwRushMembers(q, ms, mn, 1);
         }
@@ -1056,7 +1128,13 @@ static void LwClusterAdd(LwCluster* c, const float* p, int places)
 }
 /* A cluster into the fights: the nearest fight within LW_FIGHT_MATCH, else a new one. Only units at a placing level
  * (and a call) start a fight or move its point; a cluster of level 7 alone keeps a fight seen while it is within
- * LW_FIGHT_MATCH of the point, which stays, so units walking off take no fight with them. The fight's slot, -1 none. */
+ * LW_FIGHT_MATCH of the point, which stays, and for LW_FIGHT_CHASE after the last placing unit: level 7 has no end
+ * of its own. A target that lives within LW_FIGHT_AIM of the point is kept, so the aim does not change player with
+ * every scan. The fight's slot, -1 none. */
+static int LwFightTargetHolds(LwFight* fi)
+{
+    return fi->target && g_lwTargetLive(fi->target, fi->tpos) && LwDist2(fi->tpos, fi->pos[0], fi->pos[1]) <= LW_FIGHT_AIM * LW_FIGHT_AIM;
+}
 static int LwFightTake(const LwCluster* c, ULONGLONG now)
 {
     const float* at = c->hotN > 0 ? c->hot : c->pos;
@@ -1071,6 +1149,8 @@ static int LwFightTake(const LwCluster* c, ULONGLONG now)
             c->call ? " (a call for reinforcements)" : "", (double)sqrtf(LwNearestPlayer2(at[0], at[1])));
     }
     LwFight* fi = &g_lwFights[f];
+    if (c->hotN > 0 || c->call) fi->hotAt = now;
+    else if (now - fi->hotAt > LW_FIGHT_CHASE) return -1;
     if (c->call) { if (fi->seen != now) memcpy(fi->pos, c->pos, sizeof fi->pos); if (c->n > fi->engaged) fi->engaged = c->n; }
     else
     {
@@ -1083,7 +1163,7 @@ static int LwFightTake(const LwCluster* c, ULONGLONG now)
         else if (c->hotN > 0) { memcpy(fi->pos, c->hot, sizeof fi->pos); fi->placedN = c->hotN; fi->placed = now; }
         fi->engaged = fi->seen == now ? fi->engaged + c->n : c->n;
     }
-    if (c->target) { fi->target = c->target; memcpy(fi->tpos, c->tpos, sizeof fi->tpos); }
+    if (c->target && !LwFightTargetHolds(fi)) { fi->target = c->target; memcpy(fi->tpos, c->tpos, sizeof fi->tpos); }
     if (fi->engaged > fi->peak) fi->peak = fi->engaged;
     fi->seen = now; fi->call |= c->call;
     return f;
@@ -1175,9 +1255,10 @@ static void LwRushNote(void)
 }
 /* test command "noise <type> [dx dy]" (HELLFORGE_LW_TEST_TRACE=1): a noise through the game's dispatch (and so the hook)
  * at the local player's feet plus (dx, dy), from the local Helldiver, mode 0, loudness 1, as a shot of that template.
+ * "noise!" counts the Helldiver as a source in place from then on (the 120 s rule; a player's body is exempt), "noise" as a body again.
  * The late tick runs on the main thread right after the frame's own post-update noise calls (explosions 0xAB5FBF,
  * beams 0xAB5FCB, impacts 0xAB5FEF; the late tick 0xAB612D), so the call has their context. */
-static void LwTestNoise(int seq, int type, float dx, float dy)
+static void LwTestNoise(int seq, int type, float dx, float dy, int fixed)
 {
     typedef void (*NoiseFn)(void*, uint8_t, uint32_t, const float*, uint32_t, float, uint32_t);
     uint32_t avatar = 0; float p[3] = {0, 0, 0};
@@ -1186,8 +1267,10 @@ static void LwTestNoise(int seq, int type, float dx, float dy)
     p[0] += dx; p[1] += dy;
     LwGround(p[0], p[1], &p[2]);
     uint32_t none = EvpU32(g_lw.game + 0x3483C34u, 0);
+    g_lwNoiseFixed = fixed ? avatar : 0;
     ((NoiseFn)(g_lw.game + 0x64A890u))(NULL, (uint8_t)type, avatar, p, 0, 1.0f, none);
-    Note("living world: test command %d: noise type %d (range %.0f m) at (%.0f, %.0f, %.1f) from %08X", seq, type, (double)LwNoiseRange((uint8_t)type), (double)p[0], (double)p[1], (double)p[2], avatar);
+    Note("living world: test command %d: noise type %d (range %.0f m) at (%.0f, %.0f, %.1f) from %08X%s", seq, type, (double)LwNoiseRange((uint8_t)type), (double)p[0], (double)p[1], (double)p[2], avatar,
+        fixed ? ", counted as a source in place" : "");
 }
 
 /* Phase 2c (KB living-world-p2-retake, "Refill recipe"): a squad re-occupies a cleared plain guard post. Cleared stays 1
@@ -1998,11 +2081,12 @@ static int LwIntentHoldAt(LwSquad* q, float nx, float ny, int keep)
     if (d0 >= rMin && !(d1 < edge && d1 < d0) && !(keep && q->held && d0 <= edge + 20.0f)) { if (d0 > edge + 20.0f) q->held = 0; return 0; } /* outside and not crossing inward; still waiting while near the edge */
     ULONGLONG now = GetTickCount64();
     if (q->intent == LW_REINFORCE && !LwFightOf(q)) { LwIntentEnd(q, "the fight ended while it waited at the spawn band"); return 1; }
-    if (LwHoldLate(q, now)) { LwIntentEnd(q, q->intent == LW_REINFORCE ? "240 s, waiting at the spawn band" : "180 s, waiting at the spawn band"); return 1; }
+    if (LwHoldLate(q, now)) { LwIntentEnd(q, LwHoldLateWhy(q)); return 1; }
     if (!q->held)
     {
         q->heldAt = now; q->holdA = atan2f(q->pos[1] - pl[1], q->pos[0] - pl[0]); q->holdTry = 0; q->holdShift = 0; q->holdLane = (int8_t)LwHoldFreeLane(q);
-        if (q->heldFrom < q->intentAt) q->heldFrom = now; /* once per intent: a push in and out does not start it again */
+        if (q->heldFrom < q->intentAt) { q->heldFrom = now; q->holds = 0; } /* once per intent: a push in and out does not start it again */
+        if (q->holds < 255) q->holds++;
         Note("living world: squad %d (%s) waits at the spawn band's edge at (%.0f, %.0f), %.0f m from the nearest player, to come online there", (int)(q - g_lwSquads),
             q->intent == LW_REINFORCE ? "reinforcing" : "investigating", (double)q->pos[0], (double)q->pos[1], (double)d0);
     }
