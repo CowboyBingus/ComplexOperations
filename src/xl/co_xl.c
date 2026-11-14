@@ -400,7 +400,7 @@ int CoXlTestLwNavTick(uintptr_t game)
  * update sets; 0 as when their code is not the reviewed one. */
 void CoXlTestLwNavSwapFakes(uintptr_t table, void* const* fn, uintptr_t jobs, uintptr_t inl)
 {
-    memset(&g_lwSwap, 0, sizeof g_lwSwap);
+    memset(&g_lwSwap, 0, sizeof g_lwSwap); memset(&g_lwNavHold, 0, sizeof g_lwNavHold); g_lwNav.watching = 0;
     g_lwSwap.unload = (LwNavUnloadFn)fn[0]; g_lwSwap.load = (LwNavLoadFn)fn[1];
     g_lwSwap.asyncMode = (uint8_t (*)(uintptr_t))fn[2]; g_lwSwap.inFlight = (uint8_t (*)(uintptr_t))fn[3]; g_lwSwap.stepDone = (uint8_t (*)(uintptr_t))fn[4];
     g_lwSwap.wait = (void (*)(uintptr_t))fn[5]; g_lwSwap.commit = (void (*)(uintptr_t, void*, int))fn[6];
@@ -419,6 +419,23 @@ int CoXlTestLwNavStepThreads(uintptr_t jobs, uintptr_t inl, uintptr_t runner, ui
 { return LwNavStepThreads(jobs, inl, runner, tasks, count); }
 void CoXlTestLwNavSwapCounts(uint32_t* swaps, uint32_t* steps, uint32_t* parallel, uint32_t* refused, uint32_t* noLoad)
 { *swaps = g_lwSwap.swaps; *steps = g_lwSwap.steps; *parallel = g_lwSwap.parallel; *refused = g_lwSwap.refused; *noLoad = g_lwSwap.noLoad; }
+/* The hold on fake memory: the variable holding the nav world pointers and the list's lock calls; the tick's pop at
+ * `now` ms; its counts (held, longest, uses, drains, marked); a marked cell's watch entry (the entries after it). */
+void CoXlTestLwNavHold(uintptr_t worlds, void (*enter)(uintptr_t), void (*leave)(uintptr_t))
+{ g_lwNavHold.worlds = worlds; g_lwNavHold.enter = enter; g_lwNavHold.leave = leave; }
+uintptr_t CoXlTestLwNavPop(uintptr_t list, uint32_t flush, ULONGLONG now) { return LwNavPopAt(list, flush, now); }
+int CoXlTestLwNavHoldBusy(void) { return LwNavHoldBusy(); }
+void CoXlTestLwNavHoldCounts(uint32_t* v)
+{ v[0] = g_lwNavHold.held; v[1] = g_lwNavHold.longest; v[2] = g_lwNavHold.uses; v[3] = g_lwNavHold.drains; v[4] = g_lwNavHold.marked; }
+int CoXlTestLwNavWatch(uint16_t cx, uint16_t cy, uint32_t flags, uint32_t section) { LwNavWatch(cx, cy, flags, section, 1); return g_lwNav.watching; }
+/* The AI budget lever's choice for a step: the budget it leaves at H+0x47C from `cur`, with requests `lat` s old. */
+float CoXlTestLwAibSteer(float stock, float cur, float lat)
+{
+    float h[0x120]; memset(h, 0, sizeof h);
+    g_lwAib.stock = stock; g_lwAib.raised = 0; h[0x47C / 4] = cur;
+    LwAibSteer((uintptr_t)h, cur, lat);
+    return h[0x47C / 4];
+}
 LONG CoXlTestNoiseHead(void) { return g_lwNoiseHead; }
 const char* CoXlTestGuards(uintptr_t game) { return CoXlGuards(game); }
 void CoXlTestRenderShrink(uintptr_t map, void (*rehash)(uintptr_t, uint32_t)) { g_lwRender.rehash = (uintptr_t)rehash; LwRenderShrink(map); }

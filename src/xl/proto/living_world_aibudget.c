@@ -39,12 +39,14 @@ static void LwAibNote(ULONGLONG now)
     g_lwAib.frames = g_lwAib.raisedFrames = 0; g_lwAib.worst = 0; g_lwAib.latSum = 0; g_lwAib.notedAt = now;
 }
 
-/* The budget for this step: the low one, or the stock one from a wait over RAISE_MS until it is under half that. */
+/* The budget for this step: the low one, or the stock one from a wait over RAISE_MS until it is under half that. The
+ * stock one too while a nav completion waits for the world's step or a swap is not applied yet (LwNavHoldBusy): the
+ * low budget makes that step, and so the wait, several times longer. */
 static void LwAibSteer(uintptr_t h, float cur, float lat)
 {
     if (lat * 1000.0f > (float)g_lwAib.raiseMs) g_lwAib.raised = 1;
     else if (lat * 1000.0f < 0.5f * (float)g_lwAib.raiseMs) g_lwAib.raised = 0;
-    float want = g_lwAib.raised ? g_lwAib.stock : (float)g_lwAib.lowUs / 1000000.0f;
+    float want = g_lwAib.raised || LwNavHoldBusy() ? g_lwAib.stock : (float)g_lwAib.lowUs / 1000000.0f;
     if (want > g_lwAib.stock) want = g_lwAib.stock; /* never more than the game's own */
     if (cur != want) *(volatile float*)(h + 0x47C) = want;
 }

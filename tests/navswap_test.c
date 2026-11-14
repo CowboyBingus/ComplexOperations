@@ -1,7 +1,11 @@
 /* A rebuilt nav cell's section swap on fake game calls (living_world.c LwNavUnload / LwNavLoad): the synchronous step
  * runs on the AI update's runner with its thread count (table +0x28, +0x38) when the AI update set one of the two
  * reviewed task runners, and on a local serial runner otherwise. A load is the swap's only for the cell unloaded in the
- * same tick; each swap's line and the summaries name its parts, and the counts start again each level. */
+ * same tick; each swap's line and the summaries name its parts, and the counts start again each level.
+ *
+ * The hold (LwNavPop): the tick's pop on a fake list. A built cell's completion is taken only with its AI world idle
+ * and then swaps with no drain; a world's later completions wait until that swap is applied and committed; a level's
+ * end keeps the game's order and the drain; records that wait 2000 ms get the world's step finished once, noted. */
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -17,6 +21,12 @@ void CoXlTestLwNavLevel(long level);
 void CoXlTestLwNavSwapSummary(ULONGLONG now);
 int CoXlTestLwNavStepThreads(uintptr_t jobs, uintptr_t inl, uintptr_t runner, uintptr_t tasks, int32_t count);
 void CoXlTestLwNavSwapCounts(uint32_t* swaps, uint32_t* steps, uint32_t* parallel, uint32_t* refused, uint32_t* noLoad);
+void CoXlTestLwNavHold(uintptr_t worlds, void (*enter)(uintptr_t), void (*leave)(uintptr_t));
+uintptr_t CoXlTestLwNavPop(uintptr_t list, uint32_t flush, ULONGLONG now);
+int CoXlTestLwNavHoldBusy(void);
+void CoXlTestLwNavHoldCounts(uint32_t* v);
+int CoXlTestLwNavWatch(uint16_t cx, uint16_t cy, uint32_t flags, uint32_t section);
+float CoXlTestLwAibSteer(float stock, float cur, float lat);
 
 static int g_failed;
 static const char* g_case;
@@ -33,31 +43,45 @@ static uint8_t g_table[4 * 0x80] __attribute__((aligned(16)));
 static uint8_t g_aiw[0x500] __attribute__((aligned(16)));
 static uint8_t g_stepper[0x40] __attribute__((aligned(16)));
 static int g_permits, g_joins, g_unloads, g_loads, g_makes, g_frees, g_steps, g_waits, g_commits, g_queued, g_inFlight, g_grant;
+/* the hold's cases: a second AI world, queues that the unload / load fill and a step empties, and the list's lock */
+#define IDX2 2
+#define Q2 0x6000u
+static uint8_t g_aiw2[0x500] __attribute__((aligned(16)));
+static int g_model, g_queued2, g_locked, g_enters, g_leaves, g_lockedCalls;
+static int g_unapplied[4]; /* a world's swap is queued or in the step in flight */
+static void Flight(int on);
 static void* g_made;
 static struct { uintptr_t w; void* runner; int threads; } g_step[8];
 
 static uint8_t FakeAsync(uintptr_t w) { (void)w; return 1; }
-static uint8_t FakeInFlight(uintptr_t w) { (void)w; return (uint8_t)g_inFlight; }
+static uint8_t FakeInFlight(uintptr_t w) { (void)w; if (g_locked) g_lockedCalls++; return (uint8_t)g_inFlight; }
 static uint8_t FakeStepDone(uintptr_t w) { (void)w; return 1; }
-static void FakeWait(uintptr_t w) { (void)w; g_waits++; }
-static void FakeCommit(uintptr_t w, void* p, int n) { (void)w; (void)p; (void)n; g_commits++; g_inFlight = 0; }
+static void FakeWait(uintptr_t w) { (void)w; g_waits++; if (g_locked) g_lockedCalls++; }
+static void FakeCommit(uintptr_t w, void* p, int n) { (void)w; (void)p; (void)n; g_commits++; Flight(0); g_unapplied[IDX] = 0; if (g_locked) g_lockedCalls++; }
 static uintptr_t FakeStep(uintptr_t w, void* block, void* runner, int threads)
 {
     (void)block;
     if (g_steps < 8) { g_step[g_steps].w = w; g_step[g_steps].runner = runner; g_step[g_steps].threads = threads; }
     g_steps++;
+    if (g_model) { if (w == (uintptr_t)g_aiw2) g_queued2 = g_unapplied[IDX2] = 0; else g_queued = g_unapplied[IDX] = 0; }
+    if (g_locked) g_lockedCalls++;
     return 0;
 }
 static void FakeMake(void* r) { g_makes++; g_made = r; }
 static void FakeFree(void* r) { if (r == g_made) g_frees++; }
-static int FakeQueued(uintptr_t q) { (void)q; return g_queued; }
-static int FakePermit(int idx) { g_permits++; if (g_grant && idx == IDX) g_aiw[0x478] = 1; return 0; }
-static void FakeJoin(int idx) { (void)idx; g_joins++; }
-static uintptr_t FakeUnload(uintptr_t w, uint32_t* id, uint8_t graph) { (void)w; (void)id; (void)graph; g_unloads++; return 7; }
+static int FakeQueued(uintptr_t q) { return q == Q2 ? g_queued2 : g_queued; }
+static int FakePermit(int idx) { g_permits++; if (g_locked) g_lockedCalls++; if (g_grant && idx == IDX) g_aiw[0x478] = 1; return 0; }
+static void FakeJoin(int idx) { (void)idx; g_joins++; if (g_locked) g_lockedCalls++; }
+static void Queue(uintptr_t w) { if (g_model) { if (w == (uintptr_t)g_aiw2) g_queued2++; else g_queued++; } }
+static uintptr_t FakeUnload(uintptr_t w, uint32_t* id, uint8_t graph) { (void)id; (void)graph; g_unloads++; Queue(w); return 7; }
 static uintptr_t FakeLoad(uintptr_t w, uint32_t* out, uintptr_t inst, void* p4, uintptr_t graph, void* p6)
-{ (void)w; (void)out; (void)inst; (void)p4; (void)graph; (void)p6; g_loads++; return 9; }
+{ (void)out; (void)inst; (void)p4; (void)graph; (void)p6; g_loads++; Queue(w); return 9; }
+static void FakeEnter(uintptr_t list) { (void)list; g_enters++; g_locked = 1; }
+static void FakeLeave(uintptr_t list) { (void)list; g_leaves++; g_locked = 0; }
 
 static void Put(uint8_t* at, uintptr_t v) { memcpy(at, &v, 8); }
+/* the step in flight as the hooks' calls and the hold's read of [W+0x4B0] see it */
+static void Flight(int on) { g_inFlight = on; Put(g_aiw + 0x4B0, (uintptr_t)on); }
 
 /* A complex level's AI world at IDX with a running AI job, 3 queued changes, the AI update's count `threads`, a stepper
  * count of 2 the step must not take, and [W+0x4C8] `tasks`. */
@@ -69,6 +93,7 @@ static void Reset(const char* name, int32_t threads, uintptr_t tasks, uintptr_t 
     memset(g_table, 0, sizeof g_table); memset(g_aiw, 0, sizeof g_aiw); memset(g_stepper, 0, sizeof g_stepper);
     memset(g_step, 0, sizeof g_step);
     g_permits = g_joins = g_unloads = g_loads = g_makes = g_frees = g_steps = g_waits = g_commits = g_inFlight = 0;
+    g_model = g_queued2 = g_locked = g_enters = g_leaves = g_lockedCalls = 0;
     g_queued = 3; g_grant = 1; g_made = NULL;
     Put(g_table + 0x80 * IDX, (uintptr_t)g_aiw);
     Put(g_table + 0x80 * IDX + 0x20, 1);
@@ -127,7 +152,7 @@ static void TestParallel(void)
     Counts(&swaps, &steps, &parallel, &refused, &noLoad);
     CHECK(swaps == 1 && steps == 2 && parallel == 2 && refused == 0);
     CHECK(fake_host_logged("living world: nav: section 5 swapped in at once (world 1): "));
-    CHECK(fake_host_logged("1 step(s) on 12 thread(s); 1 swaps this level, worst "));
+    CHECK(fake_host_logged("1 step(s) on 12 thread(s); held 0 tick(s); 1 swaps this level, worst "));
     Reset("the inline AI update's runner", 6, INLINE, JOBS, INLINE);
     Swap(6);
     CHECK(g_steps == 2 && g_step[1].runner == (void*)(uintptr_t)RUNNER && g_step[1].threads == 6 && g_makes == 0);
@@ -269,8 +294,475 @@ static void TestLinesAndSummary(void)
     CHECK(swaps == 401);
 }
 
+/* ---- the hold ---- */
+#define NEXT 0x10        /* the list's link offset ([list+0x38]) */
+#define RECS 16
+#define CELLS 16
+#define STRIDE 0x70
+static uint8_t g_list[0x40] __attribute__((aligned(16)));
+static uint8_t g_rec[RECS][0x20] __attribute__((aligned(16)));
+static uint8_t g_nav[2][0x6800] __attribute__((aligned(16)));
+static uint8_t g_cells[2][CELLS * STRIDE] __attribute__((aligned(16)));
+static uintptr_t g_navs[4], g_navsVar;
+static int g_done[64], g_dones, g_broken;
+
+static uintptr_t Get(const uint8_t* at) { uintptr_t v; memcpy(&v, at, 8); return v; }
+static void Section(int world, int cell, int32_t id) { memcpy(g_cells[world == IDX2] + cell * STRIDE + 0x60, &id, 4); }
+static void NavState(int world, uint32_t state) { memcpy(g_nav[world == IDX2] + 0x20, &state, 4); }
+static void AiUpdate(int on) { int32_t v = on; memcpy(g_table + 0x80 * IDX + 0x54, &v, 4); }
+/* A completion pushed as the build threads push it: to the head (0x7B2690). */
+static uintptr_t Push(int r, int world, int cell, uint32_t flags)
+{
+    uint8_t* rec = g_rec[r];
+    memset(rec, 0, sizeof g_rec[r]);
+    uint32_t c = (uint32_t)cell, f = flags | (uint32_t)world;
+    memcpy(rec + 8, &c, 4); memcpy(rec + 0xC, &f, 4);
+    Put(rec + NEXT, Get(g_list + 0x28));
+    if (!Get(g_list + 0x30)) Put(g_list + 0x30, (uintptr_t)rec);
+    Put(g_list + 0x28, (uintptr_t)rec);
+    return (uintptr_t)rec;
+}
+/* A complex level in play with two AI worlds, both idle, their navs running, every cell never built, an empty list. */
+static void ResetHold(const char* name)
+{
+    Reset(name, 12, JOBS, JOBS, INLINE);
+    g_model = 1; g_queued = 0; g_locked = 1; g_dones = g_broken = 0;
+    memset(g_unapplied, 0, sizeof g_unapplied); memset(g_done, 0, sizeof g_done);
+    memset(g_list, 0, sizeof g_list); memset(g_rec, 0, sizeof g_rec); memset(g_nav, 0, sizeof g_nav); memset(g_aiw2, 0, sizeof g_aiw2);
+    uint32_t off = NEXT; memcpy(g_list + 0x38, &off, 4);
+    Put(g_table + 0x80 * IDX2, (uintptr_t)g_aiw2);
+    Put(g_aiw2 + 0x4A0, Q2); Put(g_aiw2 + 0x4A8, (uintptr_t)g_stepper);
+    memset(g_navs, 0, sizeof g_navs);
+    for (int n = 0; n < 2; n++)
+    {
+        uint16_t stride = STRIDE;
+        memcpy(g_nav[n] + 0x6736, &stride, 2); Put(g_nav[n] + 0x6748, (uintptr_t)g_cells[n]);
+        g_navs[n ? IDX2 : IDX] = (uintptr_t)g_nav[n];
+        NavState(n ? IDX2 : IDX, 3);
+        for (int c = 0; c < CELLS; c++) Section(n ? IDX2 : IDX, c, -1);
+    }
+    g_navsVar = (uintptr_t)g_navs;
+    CoXlTestLwNavHold((uintptr_t)&g_navsVar, FakeEnter, FakeLeave);
+}
+/* The game's work on a popped record: a built cell's unload, then every cell's load. In play it must never meet a swap
+ * of its world that is not applied yet, and a built cell's must find nothing in flight or queued (g_broken). */
+static void Process(uintptr_t rec, int play)
+{
+    uint32_t cell, flags, id, out;
+    memcpy(&cell, (uint8_t*)rec + 8, 4); memcpy(&flags, (uint8_t*)rec + 0xC, 4);
+    g_locked = 0;
+    if (g_dones < 64) g_done[g_dones++] = (int)((rec - (uintptr_t)g_rec) / sizeof g_rec[0]);
+    if (!(flags & 0x80))
+    {
+        int world = (int)(flags & 0x7F), two = world == IDX2;
+        uintptr_t w = two ? (uintptr_t)g_aiw2 : (uintptr_t)g_aiw, at = (uintptr_t)g_cells[two] + cell * STRIDE;
+        int32_t section; memcpy(&section, (uint8_t*)at + 0x60, 4);
+        id = (uint32_t)section; out = 100 + cell;
+        if (play && g_unapplied[world]) g_broken++;
+        if (section != -1)
+        {
+            if (play && ((two ? 0 : g_inFlight) || (two ? g_queued2 : g_queued))) g_broken++;
+            CoXlTestLwNavUnload(w, &id, at);
+            g_unapplied[world] = 1;
+        }
+        CoXlTestLwNavLoad(w, &out, at);
+        Section(world, (int)cell, (int32_t)out);
+    }
+    g_locked = 1;
+}
+/* One tick of the game at `now` ms: every record the pop gives, then the mod's tick. How many it took. */
+static int Tick(uint32_t flush, ULONGLONG now)
+{
+    int n = 0;
+    for (uintptr_t rec; (rec = CoXlTestLwNavPop((uintptr_t)g_list, flush, now)) != 0; n++) Process(rec, !flush);
+    CoXlTestLwNavSwapFrame();
+    return n;
+}
+/* The AI update's driver for world IDX (0xBD1890): a step starts when something is queued and commits a frame later. */
+static void Driver(void)
+{
+    if (g_inFlight) { Flight(0); g_unapplied[IDX] = 0; }
+    else if (g_queued) { g_queued = 0; Flight(1); }
+}
+static void HoldCounts(uint32_t* v) { CoXlTestLwNavHoldCounts(v); }
+
+static void TestPopOrder(void)
+{
+    ResetHold("records of no world's rules leave oldest first, the list kept whole");
+    uintptr_t a = Push(0, IDX, 0, 0x80), b = Push(1, IDX, 1, 0x80), c = Push(2, 9, 2, 0); /* c: a world the table has not */
+    CHECK(Get(g_list + 0x28) == c && Get(g_list + 0x30) == a);
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 0) == a);
+    CHECK(Get(g_list + 0x28) == c && Get(g_list + 0x30) == b && Get(g_rec[1] + NEXT) == 0 && Get(g_rec[0] + NEXT) == 0);
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 0) == b);
+    CHECK(Get(g_list + 0x28) == c && Get(g_list + 0x30) == c);
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 0) == c);
+    CHECK(Get(g_list + 0x28) == 0 && Get(g_list + 0x30) == 0 && Get(g_rec[2] + NEXT) == 0);
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 0) == 0);
+    ResetHold("a record from the middle");
+    Section(IDX, 0, 40); Flight(1);
+    a = Push(0, IDX, 0, 0); b = Push(1, IDX, 1, 0x80); c = Push(2, IDX, 2, 0); /* a waits for the step, c behind it */
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 0) == b);
+    CHECK(Get(g_list + 0x28) == c && Get(g_rec[2] + NEXT) == a && Get(g_list + 0x30) == a && Get(g_rec[1] + NEXT) == 0);
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 0) == 0);
+    CHECK(Get(g_list + 0x28) == c && Get(g_list + 0x30) == a);
+    ResetHold("the head taken with others left");
+    Flight(1);
+    Section(IDX, 0, 40);
+    a = Push(0, IDX, 0, 0); b = Push(1, IDX2, 1, 0);
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 0) == b); /* world 2's first build; world 1's built cell waits */
+    CHECK(Get(g_list + 0x28) == a && Get(g_list + 0x30) == a);
+    ResetHold("a list longer than the nav's jobs make keeps the game's order");
+    static uint8_t many[4100][0x20];
+    memset(many, 0, sizeof many);
+    for (int i = 0; i < 4100; i++)
+    {
+        uint32_t f = IDX; memcpy(many[i] + 0xC, &f, 4);
+        Put(many[i] + NEXT, Get(g_list + 0x28));
+        if (!Get(g_list + 0x30)) Put(g_list + 0x30, (uintptr_t)many[i]);
+        Put(g_list + 0x28, (uintptr_t)many[i]);
+    }
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 0) == (uintptr_t)many[4099]);
+}
+
+static void TestHoldIdle(void)
+{
+    uint32_t v[5], swaps, steps, parallel, refused, noLoad;
+    ResetHold("a built cell's completion with the world idle: taken at once, no drain");
+    Section(IDX, 3, 40);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 1 && g_done[0] == 0 && g_broken == 0);
+    CHECK(g_joins == 0 && g_permits == 0 && g_waits == 0 && g_commits == 0 && g_steps == 0 && g_enters == 0 && g_leaves == 0);
+    CHECK(g_unloads == 1 && g_loads == 1 && g_queued == 2); /* the swap is left for the game's next async step */
+    CHECK(fake_host_logged("living world: nav: section 103 swapped in with the world idle, for its next step (world 1): "));
+    CHECK(fake_host_logged("before the unload 0.0 (AI update 0.0, permit 0.0, step in flight 0.0, its commit 0.0, queued 0.0), the game's unload "));
+    CHECK(fake_host_logged("after the load 0.0 (AI update 0.0, step in flight 0.0, the swap's step 0.0); 0 step(s) on 0 thread(s); held 0 tick(s); 1 swaps this level"));
+    CHECK(!fake_host_logged("swapped in at once"));
+    HoldCounts(v); Counts(&swaps, &steps, &parallel, &refused, &noLoad);
+    CHECK(v[0] == 0 && v[2] == 0 && v[3] == 0 && swaps == 1 && steps == 0 && refused == 0);
+    ResetHold("a first build is the game's own: taken with a step in flight, no drain");
+    Flight(1);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 1 && g_joins == 0 && g_steps == 0 && g_loads == 1 && g_broken == 0);
+    ResetHold("no cell work (flag 0x80): taken at once whatever the world does");
+    Flight(1); Section(IDX, 3, 40);
+    Push(0, IDX, 3, 0x80);
+    CHECK(Tick(0, 0) == 1 && g_unloads == 0 && g_loads == 0);
+}
+
+static void TestHoldWaits(void)
+{
+    uint32_t v[5];
+    ResetHold("a step in flight: the built cell's completion waits for its commit");
+    Section(IDX, 3, 40); Flight(1);
+    Push(0, IDX, 3, 0);
+    for (int t = 0; t < 3; t++) { CHECK(Tick(0, 10 * t) == 0); CHECK(CoXlTestLwNavHoldBusy()); }
+    CHECK(g_unloads == 0 && g_joins == 0 && g_waits == 0);
+    Driver(); /* the commit */
+    CHECK(Tick(0, 40) == 1 && g_broken == 0 && g_joins == 0 && g_waits == 0 && g_commits == 0 && g_steps == 0);
+    CHECK(fake_host_logged("swapped in with the world idle, for its next step") && fake_host_logged("held 3 tick(s); 1 swaps this level"));
+    HoldCounts(v);
+    CHECK(v[0] == 1 && v[1] == 3 && v[2] == 0 && v[3] == 0);
+    static uint8_t sections[0x48]; int32_t slots = 77;
+    memcpy(sections + 0x40, &slots, 4); Put(g_aiw + 0x130, (uintptr_t)sections);
+    CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
+    CHECK(fake_host_logged("1 completion(s) held, the longest 3 tick(s); 0 drain(s) on the frame thread (0 after 2000 ms held); this level 1 swap(s) and 0 "
+        "unload(s) with no load for 0 built cell(s) marked; 77 of 1024 section slots"));
+    ResetHold("something queued: it waits for the step that takes it and that step's commit");
+    Section(IDX, 3, 40); g_queued = 1;
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 0);
+    Driver(); CHECK(g_inFlight == 1 && Tick(0, 10) == 0);
+    Driver(); CHECK(Tick(0, 20) == 1 && g_broken == 0 && g_steps == 0);
+    ResetHold("the AI update still runs: it waits");
+    Section(IDX, 3, 40); AiUpdate(1);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 0 && g_unloads == 0);
+    AiUpdate(0);
+    CHECK(Tick(0, 10) == 1 && g_joins == 0);
+    ResetHold("an older first build's load in the same tick: the built cell behind it waits for the step");
+    Section(IDX, 4, 41);
+    Push(0, IDX, 3, 0); Push(1, IDX, 4, 0);
+    CHECK(Tick(0, 0) == 1 && g_done[0] == 0 && g_queued == 1);
+    Driver(); CHECK(Tick(0, 10) == 0);
+    Driver(); CHECK(Tick(0, 20) == 1 && g_done[1] == 1 && g_broken == 0 && g_steps == 0 && g_joins == 0);
+}
+
+static void TestHoldOnePerRun(void)
+{
+    uint32_t v[5];
+    ResetHold("one swap a step: the next completion waits until the swap is applied and committed");
+    Section(IDX, 3, 40); Section(IDX, 4, 41);
+    Push(0, IDX, 3, 0); Push(1, IDX, 4, 0); Push(2, IDX, 5, 0); /* two built cells, then a first build */
+    CHECK(Tick(0, 0) == 1 && g_done[0] == 0 && g_queued == 2);
+    for (int t = 1; t < 50; t++) CHECK(Tick(0, 10 * t) == 0); /* no step yet: time alone frees nothing */
+    CHECK(CoXlTestLwNavHoldBusy());
+    Driver(); CHECK(Tick(0, 600) == 0);       /* the step that took the swap is in flight */
+    Driver(); CHECK(Tick(0, 610) == 1 && g_done[1] == 1); /* committed: the second built cell, and only it */
+    Driver(); CHECK(Tick(0, 620) == 0);
+    Driver(); CHECK(Tick(0, 630) == 1 && g_done[2] == 2);
+    CHECK(g_broken == 0 && g_joins == 0 && g_permits == 0 && g_waits == 0 && g_commits == 0 && g_steps == 0 && g_dones == 3);
+    HoldCounts(v);
+    CHECK(v[0] == 2 && v[3] == 0);
+    ResetHold("a step that starts and commits inside one driver call: seen from the state, not from time");
+    Section(IDX, 3, 40); Section(IDX, 4, 41);
+    Push(0, IDX, 3, 0); Push(1, IDX, 4, 0);
+    CHECK(Tick(0, 0) == 1);
+    g_queued = 0; g_unapplied[IDX] = 0; /* started and committed before the next tick: never seen in flight */
+    CHECK(Tick(0, 10) == 1 && g_broken == 0 && g_steps == 0);
+    ResetHold("a first build behind a swap waits for it");
+    Section(IDX, 3, 40);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 1);
+    Push(1, IDX, 5, 0);
+    CHECK(Tick(0, 10) == 0 && g_loads == 1);
+    Driver(); CHECK(Tick(0, 20) == 0);
+    Driver(); CHECK(Tick(0, 30) == 1 && g_loads == 2 && g_broken == 0);
+    ResetHold("a waiting record is counted once, whatever leaves before it");
+    Section(IDX, 3, 40); Flight(1);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 0);
+    Push(1, IDX, 5, 0);
+    CHECK(Tick(0, 10) == 0);
+    Driver();
+    CHECK(Tick(0, 20) == 1 && g_done[0] == 0);
+    CHECK(Tick(0, 30) == 0 && Tick(0, 40) == 0);
+    HoldCounts(v);
+    CHECK(v[0] == 2 && v[1] == 2);
+    ResetHold("the pop's leave for a cell is used once, by that cell's unload");
+    Section(IDX, 3, 40); Section(IDX, 4, 41);
+    Push(0, IDX, 3, 0);
+    uintptr_t rec = CoXlTestLwNavPop((uintptr_t)g_list, 0, 0);
+    CHECK(rec == (uintptr_t)g_rec[0]);
+    uint32_t id = 41;
+    g_locked = 0;
+    CoXlTestLwNavUnload((uintptr_t)g_aiw, &id, (uintptr_t)g_cells[0] + 4 * STRIDE); /* another cell: the drain, as before the hold */
+    CHECK(g_joins == 1 && g_permits == 1);
+    ResetHold("the leave does not outlive its pop");
+    Section(IDX, 3, 40);
+    Push(0, IDX, 3, 0);
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 0) == (uintptr_t)g_rec[0]);
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 0) == 0);
+    id = 40; g_locked = 0; g_queued = 0;
+    CoXlTestLwNavUnload((uintptr_t)g_aiw, &id, (uintptr_t)g_cells[0] + 3 * STRIDE);
+    CHECK(g_joins == 1);
+}
+
+static void TestHoldTwoWorlds(void)
+{
+    ResetHold("a busy world holds its own completions only");
+    Section(IDX, 3, 40); Section(IDX2, 3, 50); Flight(1);
+    Push(0, IDX, 3, 0); Push(1, IDX2, 3, 0);
+    CHECK(Tick(0, 0) == 1 && g_done[0] == 1 && g_queued2 == 2 && g_queued == 0 && g_joins == 0);
+    Push(2, IDX2, 4, 0); /* world 2's swap is unapplied: its first build waits; world 1 still in flight */
+    CHECK(Tick(0, 10) == 0);
+    g_queued2 = 0; g_unapplied[IDX2] = 0;
+    CHECK(Tick(0, 20) == 1 && g_done[1] == 2);
+    Driver();
+    CHECK(Tick(0, 30) == 1 && g_done[2] == 0 && g_broken == 0 && g_steps == 0);
+}
+
+/* A level's end: the tick's flush argument or a stopped nav. The game's order, and each swap's step finished on the
+ * frame thread as before the hold; a swap the hold left to the next step is finished before any other completion. */
+static void TestHoldLevelEnd(void)
+{
+    uint32_t v[5];
+    ResetHold("the flush tick: the game's order and the drain");
+    Section(IDX, 3, 40); Flight(1);
+    Push(0, IDX, 3, 0); Push(1, IDX, 5, 0);
+    CHECK(Tick(1, 0) == 2 && g_done[0] == 1 && g_done[1] == 0); /* newest first, as the game pops */
+    CHECK(g_joins == 2 && g_waits == 1 && g_commits == 1 && g_steps == 2 && fake_host_logged("swapped in at once"));
+    CHECK(!CoXlTestLwNavHoldBusy());
+    ResetHold("a swap left to the next step, then the flush tick: finished before the next completion's connect");
+    Section(IDX, 3, 40);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 1 && g_queued == 2 && g_steps == 0);
+    Push(1, IDX, 5, 0);
+    CHECK(Tick(0, 10) == 0);
+    g_fake.log[0] = 0;
+    CHECK(Tick(1, 20) == 1 && g_done[1] == 1);
+    CHECK(g_steps == 1 && g_queued == 1 && g_joins == 1 && g_leaves == 1 && g_enters == 1 && g_lockedCalls == 0); /* queued: the first build's own load */
+    HoldCounts(v);
+    CHECK(v[3] == 1 && v[2] == 0);
+    ResetHold("the same with a step in flight that took the swap");
+    Section(IDX, 3, 40);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 1);
+    Driver();
+    Push(1, IDX, 5, 0);
+    CHECK(Tick(1, 10) == 1 && g_waits == 1 && g_commits == 1 && g_leaves == 1 && g_enters == 1 && g_lockedCalls == 0);
+    ResetHold("a stopped nav (bit 2 off, bit 4 on): the game's record, the unapplied swap finished first");
+    Section(IDX, 3, 40);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 1);
+    NavState(IDX, 5);
+    Push(1, IDX, 5, 0);
+    CHECK(Tick(0, 10) == 1 && g_steps == 1 && g_leaves == 1 && g_enters == 1 && g_lockedCalls == 0 && g_broken == 0);
+    ResetHold("a stopped nav: a built cell's completion drains as before the hold");
+    Section(IDX, 3, 40); Flight(1); NavState(IDX, 5);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 1 && g_waits == 1 && g_commits == 1 && fake_host_logged("swapped in at once"));
+    ResetHold("a nav with bit 4 only: the game's record too");
+    Section(IDX, 3, 40); Flight(1); NavState(IDX, 7);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 1 && g_waits == 1);
+    ResetHold("a nav that does not run");
+    Section(IDX, 3, 40); Flight(1); NavState(IDX, 1);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 1 && g_waits == 1);
+    ResetHold("a normal mission: the game's pop, nothing held, nothing drained");
+    CoXlTestLive(0);
+    Section(IDX, 3, 40); Flight(1);
+    Push(0, IDX, 3, 0); Push(1, IDX, 5, 0);
+    CHECK(Tick(0, 0) == 2 && g_done[0] == 1 && g_joins == 0 && g_waits == 0 && g_steps == 0 && !CoXlTestLwNavHoldBusy());
+    ResetHold("the swap's permit refused at the flush: the completion goes on, the marks are held");
+    Section(IDX, 3, 40);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 1);
+    g_grant = 0;
+    Push(1, IDX, 5, 0);
+    uint32_t swaps, steps, parallel, refused, noLoad;
+    CHECK(Tick(1, 10) == 1);
+    Counts(&swaps, &steps, &parallel, &refused, &noLoad);
+    CHECK(refused == 1 && g_steps == 0 && g_leaves == 1 && g_enters == 1);
+}
+
+/* Records that wait LW_NAV_HOLD_MS with none taken: the world's step is finished on the frame thread, once, noted. */
+static void TestHoldGiveWay(void)
+{
+    uint32_t v[5];
+    ResetHold("a world that is never idle: after 2000 ms its step is finished here");
+    Section(IDX, 3, 40); Flight(1);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 5000) == 0);
+    CHECK(Tick(0, 6999) == 0 && g_waits == 0 && g_leaves == 0);
+    CHECK(Tick(0, 7000) == 1 && g_broken == 0);
+    CHECK(g_joins == 1 && g_waits == 1 && g_commits == 1 && g_leaves == 1 && g_enters == 1 && g_lockedCalls == 0);
+    CHECK(fake_host_logged("living world: nav: 1 completion(s) of world 1 waited 2000 ms and it was never idle (step in flight 1, 0 queued, AI update 0): "
+        "its step is finished here, "));
+    CHECK(fake_host_logged("ms on the frame thread (use 1 of 30 this level)"));
+    CHECK(fake_host_logged("swapped in with the world idle, for its next step")); /* the swap itself: no second drain */
+    HoldCounts(v);
+    CHECK(v[2] == 1 && v[3] == 1);
+    CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
+    CHECK(fake_host_logged("1 drain(s) on the frame thread (1 after 2000 ms held)"));
+    ResetHold("a taken record starts the wait again");
+    Section(IDX, 3, 40); Section(IDX, 4, 41); Section(IDX, 5, 42);
+    Push(0, IDX, 3, 0); Push(1, IDX, 4, 0); Push(2, IDX, 5, 0);
+    CHECK(Tick(0, 1000) == 1);       /* the first; the others wait from here */
+    CHECK(Tick(0, 2800) == 0 && g_joins == 0);
+    Driver(); Driver();
+    CHECK(Tick(0, 2900) == 1 && g_joins == 0); /* the second, by the step; the third waits from here */
+    CHECK(Tick(0, 3100) == 0 && g_joins == 0); /* 2100 ms after the first wait began: not the limit */
+    CHECK(Tick(0, 4899) == 0 && g_joins == 0);
+    CHECK(Tick(0, 4900) == 1 && g_joins == 1 && g_steps == 1 && g_broken == 0);
+    ResetHold("no permit: they wait on, and the next try is 2000 ms later");
+    Section(IDX, 3, 40); Flight(1); g_grant = 0;
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 1000) == 0);
+    CHECK(Tick(0, 3000) == 0 && g_joins == 1 && g_waits == 0 && g_unloads == 0);
+    CHECK(fake_host_logged("no permit for its step, they wait on, "));
+    CHECK(Tick(0, 4999) == 0 && g_joins == 1);
+    g_grant = 1;
+    CHECK(Tick(0, 5000) == 1 && g_joins == 2 && g_waits == 1);
+    HoldCounts(v);
+    CHECK(v[2] == 2 && v[0] == 1);
+    ResetHold("30 uses in a level: the hold is off for the rest of it, and on again in the next");
+    ULONGLONG now = 1000;
+    for (int n = 0; n < 30; n++)
+    {
+        Section(IDX, 3, 40); Flight(1);
+        Push(0, IDX, 3, 0);
+        CHECK(Tick(0, now) == 0);
+        now += 2000;
+        g_fake.log[0] = 0;
+        CHECK(Tick(0, now) == 1);
+        g_queued = 0; g_unapplied[IDX] = 0;
+        now += 10;
+    }
+    CHECK(fake_host_logged("(use 30 of 30 this level)") && fake_host_logged("living world: nav: the hold is off for the rest of this level"));
+    g_joins = g_waits = 0;
+    Section(IDX, 3, 40); Flight(1);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, now) == 1 && g_waits == 1 && fake_host_logged("swapped in at once")); /* as before the hold */
+    CoXlTestLwNavLevel(2);
+    g_waits = 0; g_queued = 0; Flight(1);
+    Section(IDX, 3, 40);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, now + 10) == 0 && g_waits == 0);
+    HoldCounts(v);
+    CHECK(v[2] == 0);
+}
+
+/* Marks wait for the nav's jobs in flight, which a held completion still counts in: every completion must leave. */
+static void TestHoldNoStarve(void)
+{
+    uint32_t v[5];
+    ResetHold("built cells and first builds mixed, the driver stepping: all leave in their order, nothing drained");
+    for (int c = 0; c < 12; c++) { if (c % 3 != 2) Section(IDX, c, 40 + c); Push(c, IDX, c, 0); }
+    int ticks = 0;
+    for (; g_dones < 12 && ticks < 200; ticks++) { Tick(0, 16 * ticks); Driver(); }
+    CHECK(g_dones == 12 && ticks <= 40 && g_broken == 0);
+    for (int c = 0; c < 12; c++) CHECK(g_done[c] == c);
+    CHECK(g_joins == 0 && g_permits == 0 && g_waits == 0 && g_commits == 0 && g_steps == 0 && g_leaves == 0);
+    HoldCounts(v);
+    CHECK(v[2] == 0 && v[3] == 0 && v[0] == 11);
+    CHECK(Get(g_list + 0x28) == 0 && Get(g_list + 0x30) == 0);
+    Driver(); Driver(); Tick(0, 5000);
+    CHECK(!CoXlTestLwNavHoldBusy());
+}
+
+/* The AI budget lever's low budget makes the step several times longer: not while a completion waits for that step. */
+static void TestHoldBudget(void)
+{
+    ResetHold("the AI budget: low when nothing waits, the game's own while a completion waits or a swap is unapplied");
+    CHECK(CoXlTestLwAibSteer(0.002f, 0.002f, 0.0f) == 0.0005f);
+    Section(IDX, 3, 40); Flight(1);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 0 && CoXlTestLwNavHoldBusy());
+    CHECK(CoXlTestLwAibSteer(0.002f, 0.002f, 0.0f) == 0.002f);
+    CHECK(CoXlTestLwAibSteer(0.002f, 0.0005f, 0.0f) == 0.002f); /* lowered before: raised again */
+    Driver();
+    CHECK(Tick(0, 10) == 1 && CoXlTestLwNavHoldBusy()); /* taken; its swap is queued */
+    CHECK(CoXlTestLwAibSteer(0.002f, 0.0005f, 0.0f) == 0.002f);
+    Driver(); CHECK(Tick(0, 20) == 0 && CoXlTestLwNavHoldBusy());
+    Driver(); CHECK(Tick(0, 30) == 0 && !CoXlTestLwNavHoldBusy()); /* applied and committed */
+    CHECK(CoXlTestLwAibSteer(0.002f, 0.002f, 0.0f) == 0.0005f);
+}
+
+/* A cell marked again before it completes is watched once; the built cells marked are the swaps to come. */
+static void TestWatch(void)
+{
+    uint32_t v[5];
+    ResetHold("the watch list and the marked built cells");
+    CHECK(CoXlTestLwNavWatch(3, 4, 0xC, 40) == 1);
+    CHECK(CoXlTestLwNavWatch(3, 4, 0x1C, 40) == 1);  /* marked again before its job started: one entry, one swap to come */
+    CHECK(CoXlTestLwNavWatch(4, 3, 0xC, 41) == 2);   /* (4, 3) is not (3, 4) */
+    CHECK(CoXlTestLwNavWatch(5, 5, 0, 0xFFFFFFFFu) == 3); /* never built: watched, no swap */
+    CHECK(CoXlTestLwNavWatch(6, 6, 0xFFFFFFFFu, 0) == 4); /* unreadable: watched, not counted */
+    HoldCounts(v);
+    CHECK(v[4] == 2);
+    CHECK(CoXlTestLwNavWatch(3, 9, 0xC, 43) == 5);   /* the same column, another row */
+    for (int c = 0; c < 200; c++) CoXlTestLwNavWatch((uint16_t)(100 + c), 7, 0xC, (uint32_t)c);
+    CHECK(CoXlTestLwNavWatch(3, 4, 0x1C, 40) == 205); /* five tile changes of 36 cells fit */
+    HoldCounts(v);
+    CHECK(v[4] == 203);
+    CoXlTestLwNavLevel(2); CoXlTestLwNavSwapSummary(1000);
+    HoldCounts(v);
+    CHECK(v[4] == 0);
+}
+
 int main(void)
 {
+    TestPopOrder();
+    TestHoldIdle();
+    TestHoldWaits();
+    TestHoldOnePerRun();
+    TestHoldTwoWorlds();
+    TestHoldLevelEnd();
+    TestHoldGiveWay();
+    TestHoldNoStarve();
+    TestHoldBudget();
+    TestWatch();
     TestThreads();
     TestParallel();
     TestSerial();
