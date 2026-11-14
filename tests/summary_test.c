@@ -1,7 +1,7 @@
 /* The mission summary's row for eight: the rule (the game's four cards while no player is on cards 5 to 8, else only
  * the cards with a player), the scale and the row's place at 16:9, 21:9 and 32:9 for five to eight players, the
  * player lookup against the game's probe, and the callback on a stand-in screen: the shown bits, the scales, the
- * container's x, the layout node's mark only on a change, and a research build's fill of cards 5 to 8. */
+ * container's x, the layout node's mark only on a change, and a research build's fill of the cards without a player. */
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -244,39 +244,111 @@ static void CheckCallback(void)
     CHECK(Shown(1.0f) == 0x0Fu && Field(g_screen + BOX, 0x4) == 56.0f);
 
 #ifdef CO_RESEARCH
-    /* The fill: one player in the session, on card 2; cards 5 to 7 take that row, each refreshed with its own figure
-     * position, and the peer's position is its own again behind each. The stand-in for the card's refresh keeps the
-     * session's position at the figure's +0x8E4: mov rax,position; mov eax,[rax]; mov [rcx+0x1222C],eax; ret. */
-    uint8_t refresh[] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0x8B, 0x00, 0x89, 0x81, 0x2C, 0x22, 0x01, 0x00, 0xC3};
-    Put(refresh + 2, (uint64_t)(uintptr_t)(g_session + 0x163AC));
-    Code(0x19901B0u, refresh, sizeof refresh);
+    /* The fill: one player in the session, on card 2; cards 1 and 3 to 7 take that row once the named file is there,
+     * each figure set up under its own position (the peer's own, 0, is card 2's: card 1 takes 1) and the
+     * peer's position its own again behind each. The stand-in for the figure's player keeps the id at +0x8DC and the
+     * session's position at +0x8E4: mov [rcx+0x8DC],edx; mov rax,position; mov eax,[rax]; mov [rcx+0x8E4],eax; ret. */
+    uint8_t player[] = {0x89, 0x91, 0xDC, 0x08, 0x00, 0x00, 0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0x8B, 0x00,
+        0x89, 0x81, 0xE4, 0x08, 0x00, 0x00, 0xC3};
+    Put(player + 8, (uint64_t)(uintptr_t)(g_session + 0x163AC));
+    Code(0x18A1600u, player, sizeof player);
     /* the listener's removal keeps its entity and key at the figure's +0x8E8 and +0x8EC: mov [rdx+0x8E8],ecx; mov [rdx+0x8EC],r8d; ret */
     static const uint8_t kUnlisten[] = {0x89, 0x8A, 0xE8, 0x08, 0x00, 0x00, 0x44, 0x89, 0x82, 0xEC, 0x08, 0x00, 0x00, 0xC3};
     Code(0xB0B020u, kUnlisten, sizeof kUnlisten);
+    char file[MAX_PATH];
+    GetTempPathA(sizeof file - 32, file);
+    strcat(file, "co-summary-fill-test");
+    DeleteFileA(file);
     SetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL", "7");
+    SetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL_FILE", file);
     Screen(1920.0f);
     Player(0x77);
     Put32(Row(1), 0x77);
     Put32(Row(1) + 0x248, 0xABCD);
     Put32(g_session + 0x16390, 2);
-    Put32(g_session + 0x163AC, 1);
+    Put32(g_session + 0x163AC, 0);
+    for (uint32_t i = 0; i < 8; i++)
+    {
+        Card(i)[0x11948 + 0x8D8] = 1;
+        Put32(Card(i) + 0x12538, 1);
+        Put32(Card(i) + 0x12544, 1);
+    }
+    Put32(Card(1) + 0x12538, 2);
+    Put32(Card(1) + 0x12544, 2);
+    HANDLE made = CreateFileA(file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    CHECK(made != INVALID_HANDLE_VALUE);
+    CloseHandle(made);
     co_summary_layout(&regs);
     CHECK(Shown(1.0f) == 0x0Fu && Word(Row(4)) == 0);      /* two peers: no fill */
     Put32(g_session + 0x16390, 1);
-    /* 900 updates show the game's row; the fill comes with the next. */
-    for (int i = 0; i < 900; i++) co_summary_layout(&regs);
-    CHECK(Shown(1.0f) == 0x0Fu && Word(Row(4)) == 0 && Field(g_screen + BOX, 0x4) == 56.0f);
-    CHECK(fake_host_logged("mission summary: no player on cards 5 to 8: the game's four cards"));
+    DeleteFileA(file);
+    g_now += 300;
     co_summary_layout(&regs);
-    CHECK(Shown(1.0f) == 0x72u && Word(g_session + 0x163AC) == 1);
-    for (uint32_t i = 4; i < 8; i++)
+    CHECK(Shown(1.0f) == 0x0Fu && Word(Row(4)) == 0 && Word(Row(0)) == 0);      /* no file: the game's row */
+    CHECK(fake_host_logged("mission summary: no player on cards 5 to 8: the game's four cards"));
+    made = CreateFileA(file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    CloseHandle(made);
+    g_now += 100;
+    co_summary_layout(&regs);
+    CHECK(Word(Row(4)) == 0);                              /* asked again only a quarter of a second later */
+    g_now += 200;
+    co_summary_layout(&regs);
+    CHECK(Shown(1808.0f / 3180.0f) == 0x7Fu && Word(g_session + 0x163AC) == 0);
+    for (uint32_t i = 0; i < 8; i++)
     {
+        const uint8_t* figure = Card(i) + 0x11948;
+        const int filled = i < 7 && i != 1;
         CHECK(Word(Row(i)) == (i < 7 ? 0x77u : 0u) && Word(Row(i) + 0x248) == (i < 7 ? 0xABCDu : 0u));
-        CHECK(Word(Card(i) + 0x11948 + 0x8E4) == (i < 7 ? i : 0u));
-        CHECK(Word(Card(i) + 0x11948 + 0x8E8) == (i < 7 ? 0x77u : 0u) && Word(Card(i) + 0x11948 + 0x8EC) == (i < 7 ? 0xFFFFFFFFu : 0u));
+        CHECK(Word(figure + 0x8E4) == (filled ? (i == 0 ? 1u : i) : 0u) && figure[0x8D8] == (filled ? 0 : 1));
+        CHECK(Word(figure + 0x8DC) == (filled ? 0x77u : 0u));
+        CHECK(Word(figure + 0x8E8) == (filled ? 0x77u : 0u) && Word(figure + 0x8EC) == (filled ? 0xFFFFFFFFu : 0u));
     }
     CHECK(fake_host_logged("mission summary: research fill: card 7 shows the player of card 2 (figure position 6, record -1)"));
+    CHECK(fake_host_logged("mission summary: research fill: card 1 shows the player of card 2 (figure position 1, record -1)"));
+    /* Behind the fill: a figure loses its player once it is live, and not before; a collapsed card takes the local
+     * card's target once that is raised or on its stats, never while the card has no player. */
+    Card(4)[0x11948 + 0x8D9] = 1;
+    Card(1)[0x11948 + 0x8D9] = 1;                          /* the local card's figure keeps its player */
+    Put32(Card(4) + 0x12538, 2);
+    Put32(Card(4) + 0x12544, 2);
+    Put32(Card(5) + 0x12544, 2);
+    co_summary_layout(&regs);
+    CHECK(Word(Card(4) + 0x11948 + 0x8DC) == 0xFFFFFFFDu && Word(Card(5) + 0x11948 + 0x8DC) == 0x77u);
+    CHECK(Word(Card(4) + 0x12544) == 2u);                  /* the local card is not raised yet */
+    Put32(Card(1) + 0x12544, 3);
+    co_summary_layout(&regs);
+    CHECK(Word(Card(4) + 0x12544) == 3u && Word(Card(5) + 0x12544) == 2u && Word(Card(7) + 0x12544) == 1u);
+    CHECK(Word(Card(1) + 0x11948 + 0x8DC) == 0u);
+    Put32(Card(4) + 0x12538, 3);
+    Put32(Card(5) + 0x12538, 2);
+    Put32(Card(1) + 0x12544, 4);
+    co_summary_layout(&regs);
+    CHECK(Word(Card(4) + 0x12544) == 3u && Word(Card(5) + 0x12544) == 4u);
+    Put32(Card(4) + 0x12538, 2);                           /* collapsed on its way up: the game's target stays */
+    co_summary_layout(&regs);
+    CHECK(Word(Card(4) + 0x12544) == 3u);
+    Put32(Card(1) + 0x12544, 5);
+    Put32(Card(6) + 0x12538, 2);
+    Put32(Card(6) + 0x12544, 2);
+    co_summary_layout(&regs);
+    CHECK(Word(Card(6) + 0x12544) == 2u);
+    /* A new summary (a second without an update) is filled again. */
+    for (uint32_t i = 0; i < 8; i++)
+        if (i != 1) Put32(Row(i), 0);
+    g_now += 2000;
+    co_summary_layout(&regs);
+    CHECK(Word(Row(0)) == 0x77u && Word(Row(6)) == 0x77u && Word(Row(7)) == 0u);
+    /* The unset id as a player: no fill. */
+    Screen(1920.0f);
+    Player(0x77);
+    Player(0xFFFFFFFDu);
+    Put32(Row(1), 0x77);
+    Put32(g_session + 0x16390, 1);
+    co_summary_layout(&regs);
+    CHECK(Word(Row(0)) == 0 && fake_host_logged("mission summary: research fill: refused, the unset id is a player"));
+    DeleteFileA(file);
     SetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL", NULL);
+    SetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL_FILE", NULL);
 #endif
     co_summary_install(0);
 }
