@@ -14,6 +14,10 @@ void CoXlTestTiltTile(float cx, float cy, float z);
 float CoXlTestTiltUnder(float d, uint32_t count, float originZ, float ground);
 void CoXlTestTiltHold(int on);
 void CoXlTestTiltCounts(long* reads, long* under);
+int CoXlTestTiltIsProp(uint32_t owner, uint32_t body, uint32_t terrain);
+int CoXlTestTiltOnProp(uintptr_t game, uintptr_t mgr, const float* p, float* z);
+void CoXlTestTiltPropSample(uintptr_t mgr, const float* p, float fromUpright);
+void CoXlTestTiltPropNote(void);
 
 static int g_failed;
 static const char* g_case;
@@ -68,6 +72,16 @@ static int Passed(float got, float answer, uint32_t request, uint32_t coarse)
 {
     return got == answer && g_read.calls == 1 && g_read.mgr == 0x1234 && g_read.i == 7 && g_read.rays == (uintptr_t)g_rays &&
         g_read.request == request && g_read.coarse == coarse;
+}
+
+/* The physics ray as the fake: what it was asked, and one hit (owner +0x1C, body +0x20) or none. */
+static struct { int calls, hits; uint32_t type, filter, max, owner, body; float origin[3], dir[3], length, z; } g_ray;
+static uint32_t FakeRay(uint32_t type, const float* origin, const float* dir, float length, uint32_t filter, void* hits, uint32_t max)
+{
+    g_ray.calls++; g_ray.type = type; g_ray.length = length; g_ray.filter = filter; g_ray.max = max;
+    memcpy(g_ray.origin, origin, 12); memcpy(g_ray.dir, dir, 12);
+    if (g_ray.hits) { memcpy((uint8_t*)hits + 8, &g_ray.z, 4); memcpy((uint8_t*)hits + 0x1C, &g_ray.owner, 4); memcpy((uint8_t*)hits + 0x20, &g_ray.body, 4); }
+    return (uint32_t)g_ray.hits;
 }
 
 int main(void)
@@ -146,6 +160,44 @@ int main(void)
 
     g_case = "no request: the game's call";
     CHECK(Passed(Call(read, 0, 3, 4.0f), 4.0f, 0, 3));
+
+    g_case = "research: a prop under a unit";
+    CHECK(CoXlTestTiltIsProp(0x1188B, 0x801122A3u, 0x80300067u) == 1);
+    CHECK(CoXlTestTiltIsProp(0, 0x80300067u, 0x80300067u) == 0);     /* the level terrain */
+    CHECK(CoXlTestTiltIsProp(0, 0x80300099u, 0x80300067u) == 0);     /* a body with no owner: a tile's ground */
+    CHECK(CoXlTestTiltIsProp(0x1188B, 0x80300067u, 0x80300067u) == 0);
+    static uintptr_t phys[0x70 / 8]; static uint8_t settings[0xE0], mgr[0x20];
+    const uint32_t type = 0x80000014u, terrain = 0x80300067u; const uintptr_t sp = (uintptr_t)settings, pp = (uintptr_t)phys;
+    const float at[3] = {10.0f, -20.0f, 30.0f};
+    phys[0x68 / 8] = (uintptr_t)FakeRay;
+    memcpy(g_fake.image + 0x3326328u, &pp, 8);
+    memcpy(mgr + 8, &sp, 8); memcpy(mgr + 0x18, &terrain, 4); memcpy(settings + 0xD4, &type, 4);
+    float hz = 0;
+    g_ray.hits = 1; g_ray.owner = 0x1188B; g_ray.body = 0x801122A3u; g_ray.z = 31.25f;
+    CHECK(CoXlTestTiltOnProp((uintptr_t)g_fake.image, (uintptr_t)mgr, at, &hz) == 1 && hz == 31.25f);
+    CHECK(g_ray.calls == 1 && g_ray.type == type && g_ray.filter == 0 && g_ray.max == 8 && g_ray.length == 12.0f);
+    CHECK(g_ray.origin[0] == 10.0f && g_ray.origin[1] == -20.0f && g_ray.origin[2] == 34.0f && g_ray.dir[0] == 0 && g_ray.dir[1] == 0 && g_ray.dir[2] == -1.0f);
+    g_ray.owner = 0; g_ray.body = terrain;
+    CHECK(CoXlTestTiltOnProp((uintptr_t)g_fake.image, (uintptr_t)mgr, at, &hz) == 0);
+    g_ray.hits = 0;
+    CHECK(CoXlTestTiltOnProp((uintptr_t)g_fake.image, (uintptr_t)mgr, at, &hz) == -1);
+
+    g_case = "research: the share on a prop";
+    CoXlTestTiltPropNote();
+    CHECK(!fake_host_logged("tilt props (30 s)")); /* no sample: no line */
+    CoXlTestTiltPropSample((uintptr_t)mgr, at, 40.0f); /* no hit: not a sample */
+    g_ray.hits = 1; g_ray.owner = 0x1188B; g_ray.body = 0x801122A3u;
+    CoXlTestTiltPropSample((uintptr_t)mgr, at, 40.0f);
+    CoXlTestTiltPropSample((uintptr_t)mgr, at, 29.0f);
+    CoXlTestTiltPropSample((uintptr_t)mgr, at, 30.0f);
+    g_ray.owner = 0; g_ray.body = terrain;
+    CoXlTestTiltPropSample((uintptr_t)mgr, at, 31.0f);
+    for (int k = 0; k < 3; k++) CoXlTestTiltPropSample((uintptr_t)mgr, at, 2.0f);
+    CoXlTestTiltPropNote();
+    CHECK(fake_host_logged("tilt props (30 s): 7 four-corner samples with a hit under them, 3 on a prop (42.86 %); 30 deg or more from upright: 2 of those on a prop, 1 of the others"));
+    CoXlTestTiltPropSample((uintptr_t)mgr, at, 2.0f);
+    CoXlTestTiltPropNote();
+    CHECK(fake_host_logged("tilt props (30 s): 1 four-corner samples with a hit under them, 0 on a prop")); /* the counts start again */
 
     if (g_failed) { printf("%d check(s) failed\n", g_failed); return 1; }
     printf("tilt: all checks passed\n");
