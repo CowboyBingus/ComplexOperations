@@ -57,11 +57,11 @@ int main(void)
     CHECK(co_lw_meet_road_room(0, 8, 23) == 1 && co_lw_meet_road_room(8, 8, 23) == 0 && co_lw_meet_road_room(28, 8, 72) == 1 && co_lw_meet_road_room(29, 8, 72) == 0);
 
     g_case = "a player on a road patrol's way: within the width of a stretch, its ends and a single point";
-    { const float way[3][2] = {{0, 0}, {100, 0}, {100, 200}}, on[2] = {50, 79}, off[2] = {10, 81}, corner[2] = {150, 250}, past[2] = {-60, -60}, by[2] = {160, 100};
+    { const float way[3][2] = {{0, 0}, {100, 0}, {100, 200}}, on[2] = {10, 79}, off[2] = {10, 81}, corner[2] = {150, 250}, past[2] = {-60, -60}, by[2] = {160, 100};
       CHECK(co_lw_meet_on_way(way, 3, on, 80.0f) == 1 && co_lw_meet_on_way(way, 3, off, 80.0f) == 0);
       CHECK(co_lw_meet_on_way(way, 3, corner, 80.0f) == 1 && co_lw_meet_on_way(way, 3, past, 80.0f) == 0);
       CHECK(co_lw_meet_on_way(way, 3, by, 80.0f) == 1 && co_lw_meet_on_way(way, 2, by, 80.0f) == 0); /* the second stretch only */
-      CHECK(co_lw_meet_on_way(way, 1, past, 90.0f) == 1 && co_lw_meet_on_way(way, 1, on, 80.0f) == 0 && co_lw_meet_on_way(way, 0, on, 80.0f) == 0); }
+      CHECK(co_lw_meet_on_way(way, 1, past, 90.0f) == 1 && co_lw_meet_on_way(way, 1, by, 80.0f) == 0 && co_lw_meet_on_way(way, 0, on, 80.0f) == 0); }
 
     g_case = "inside the ring and beyond the outer zone a patrol has no rule";
     CHECK(co_lw_meet_act(1, 149.0f, 150.0f, 250.0f, 600.0f, 0, 0, 1) == CO_LW_MEET_WALK && co_lw_meet_act(1, 700.0f, 150.0f, 250.0f, 600.0f, 0, 0, 1) == CO_LW_MEET_WALK);
@@ -90,7 +90,8 @@ int main(void)
       CHECK(co_lw_meet_cover_ok(&c, here, path, 1, 4, near2, 2, 155.0f, 5000) == 0 && co_lw_meet_cover_ok(&c, here, path, 1, 4, near2, 1, 155.0f, 5000) == 1);
       CHECK(co_lw_meet_cover_ok(&c, mem, path, 1, 4, far1, 1, 155.0f, 5000) == 0); /* it stands there */
       c.steps = CO_LW_MEET_COVER_STEPS - 1; CHECK(co_lw_meet_cover_ok(&c, here, path, 1, 4, far1, 1, 155.0f, 5000) == 1);
-      c.steps = CO_LW_MEET_COVER_STEPS; CHECK(co_lw_meet_cover_ok(&c, here, path, 1, 4, far1, 1, 155.0f, 5000) == 0); }
+      c.steps = CO_LW_MEET_COVER_STEPS; CHECK(co_lw_meet_cover_ok(&c, here, path, 1, 4, far1, 1, 155.0f, 5000) == 0);
+      c.steps = 0; c.known = 0; CHECK(co_lw_meet_cover_ok(&c, here, path, 1, 4, far1, 1, 155.0f, 5000) == 0); } /* used once: forgotten */
 
     g_case = "the far share: half is kept for patrols on a player's road, and the whole is never passed";
     CHECK(co_lw_meet_far_room(0, 0, 8, 18, 0, 1) == 1 && co_lw_meet_far_room(2, 0, 8, 18, 0, 1) == 0 && co_lw_meet_far_room(2, 0, 8, 18, 0, 0) == 1);

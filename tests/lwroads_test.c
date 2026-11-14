@@ -25,6 +25,7 @@ int CoXlTestLwSeenStands(int idx, uint64_t nowMs);
 int CoXlTestLwSeenErrand(int idx, uint64_t nowMs);
 int CoXlTestLwSeenGates(int placeOk, int roomOk, int* places, int* rooms);
 void CoXlTestLwSeenSwitch(int on);
+void CoXlTestLwSeenBusy(int busy);
 void CoXlTestLwSeenEventHold(int idx, uint32_t units);
 uint32_t CoXlTestLwSeenEventHeld(int requester);
 int CoXlTestLwSeenKeeps(int idx);
@@ -167,6 +168,14 @@ int main(void)
         g_case = "a road in cover to 400 m: the patrol steps back to the last hidden point when it is seen";
         CoXlTestLwSeenWalk(0, 30, start, one, 1, 0, 2100, 0, walkIn, -1, 1, s);
         CHECK(s[1] == 2 && s[2] <= 2100.0f && s[2] > 2097.0f && s[5] == 1 && s[0] == s[2] && s[6] == 6);
+        g_case = "refused each time, it steps back to cover 6 times an approach, then walks on";
+        CoXlTestLwSeenWalk(0, 30, start, one, 1, 0, -20, 0, walkIn, -1, 0, s); /* 10 m of cover every 20 m */
+        CHECK(s[5] == 6 && P - s[0] < 250.0f);
+        g_case = "with a request out it takes no look";
+        CoXlTestLwSeenBusy(1);
+        CoXlTestLwSeenWalk(0, 30, start, one, 1, 1, 0, 0, 150, -1, 0, s);
+        CHECK(s[8] == 0 && s[1] == 0 && s[6] == 1);
+        CoXlTestLwSeenBusy(0);
         g_case = "hidden with its next stretch in view: it asks at the band's edge of cover, not before the band";
         CoXlTestLwSeenWalk(0, 30, start, one, 1, 0, 2400, 1, walkIn, -1, 1, s);
         CHECK(s[1] == 1 && P - s[2] < B && P - s[2] > B - 3.0f && s[5] == 0);
@@ -258,6 +267,10 @@ int main(void)
         g_case = "the far share of 18: 9 for other far squads, the whole for a patrol on a player's road";
         CHECK(CoXlTestLwSeenFarRoom(3, 0, 2, 0) == 1 && CoXlTestLwSeenFarRoom(3, 0, 3, 0) == 0 && CoXlTestLwSeenFarRoom(3, 2, 3, 0) == 0);
         CHECK(CoXlTestLwSeenFarRoom(20, 3, 10, 0) == 1 && CoXlTestLwSeenFarRoom(20, 3, 11, 0) == 0 && CoXlTestLwSeenFarRoom(3, 0, 10, 8) == 1);
+        CHECK(CoXlTestLwSeenFarRoom(20, 0, 3, 0) == 0); /* on a player's road but asking by the far band's own rule: no kept share */
+        g_case = "meet 0: a road patrol near a player is filler like any";
+        CoXlTestLwSeenSwitch(0); CHECK(CoXlTestLwSeenKeeps(0) == 0);
+        CoXlTestLwSeenSwitch(1); CHECK(CoXlTestLwSeenKeeps(0) == 1);
         g_case = "an event squad's hold counts in its own bubble only, and a patrol does not swap beside it there";
         CoXlTestLwSeenWorld(apart, 2, 23);
         CoXlTestLwSeenSquad(0, 200, 0, 1, 8, 1); CoXlTestLwSeenSquad(10, 3200, 0, 1, 8, 1); CoXlTestLwSeenSquad(7, 3100, 0, 1, 9, 0); CoXlTestLwSeenSquad(3, 100, 0, 1, 7, 0);

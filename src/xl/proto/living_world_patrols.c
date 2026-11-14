@@ -1118,9 +1118,13 @@ float CoXlTestLwMeetWalk(int index, int n, int at, float px, float px2, int move
     return least;
 }
 /* The seen rules without the game: the look and the way ahead are stubs. A squad is hidden where its x lies in
- * [g_lwTestHid[0], g_lwTestHid[1]]; its way ahead is seen as g_lwTestAhead says. */
-static float g_lwTestHid[2]; static int g_lwTestAhead, g_lwTestFiller = -1, g_lwTestMeetOff;
-static int LwTestSeenLook(LwSquad* q) { return q->pos[0] >= g_lwTestHid[0] && q->pos[0] <= g_lwTestHid[1]; }
+ * [g_lwTestHid[0], g_lwTestHid[1]], or in the first half of every -g_lwTestHid[1] m; its way ahead is seen as g_lwTestAhead says. */
+static float g_lwTestHid[2]; static int g_lwTestAhead, g_lwTestFiller = -1, g_lwTestMeetOff, g_lwTestBusy;
+static int LwTestSeenLook(LwSquad* q)
+{
+    if (g_lwTestHid[1] < 0) return fmodf(q->pos[0], -g_lwTestHid[1]) < -0.5f * g_lwTestHid[1]; /* cover and open ground in turn */
+    return q->pos[0] >= g_lwTestHid[0] && q->pos[0] <= g_lwTestHid[1];
+}
 static int LwTestAheadSeen(LwSquad* q) { (void)q; return g_lwTestAhead; }
 static LwSquad* LwTestFillerPick(const LwSquad* except, float* d2) { (void)except; *d2 = 0; return g_lwTestFiller >= 0 ? &g_lwSquads[g_lwTestFiller] : NULL; }
 /* The draw band with its margin for a squad of the default radius, as the rules read it. */
@@ -1162,7 +1166,7 @@ void CoXlTestLwSeenWalk(int index, int n, float from, const float (*pl)[2], int 
         g_lwMeetTestNow = now; g_lwMeet.looksTick = 0;
         if (errand >= 0 && tick == errand * 8) q->intent = LW_REINFORCE;
         if (q->intent == LW_PATROL) LwWalk(q, 0.125f);
-        const int meet = LwMeetApproach(q, now, 0);
+        const int meet = LwMeetApproach(q, now, g_lwTestBusy);
         for (int i = 0; i < np; i++) { const float d = sqrtf(LwDist2(q->pos, pl[i][0], pl[i][1])); if (d < least) least = d; }
         if (!meet) continue;
         if (out[1] == 0) { out[1] = (float)meet; out[2] = q->pos[0]; }
@@ -1242,7 +1246,9 @@ int CoXlTestLwSeenGates(int placeOk, int roomOk, int* places, int* rooms)
     return r;
 }
 /* The seen rules off or on for the walks that follow, as the test command "meet" sets them. */
-void CoXlTestLwSeenSwitch(int on) { g_lwTestMeetOff = !on; }
+void CoXlTestLwSeenSwitch(int on) { g_lwTestMeetOff = g_lwMeetOff = !on; }
+/* 1: the walks that follow have a request out every tick, so they take no look. */
+void CoXlTestLwSeenBusy(int busy) { g_lwTestBusy = busy; }
 int CoXlTestLwSeenKeeps(int idx) { return LwMeetKeeps(&g_lwSquads[idx]); }
 int CoXlTestLwSeenFarRoom(int idx, int meet, int farUnits, int roadFar) { g_lwMeet.roadFar = roadFar; return LwMeetFarRoom(&g_lwSquads[idx], meet, farUnits); }
 /* 1 while squad `idx`, online since `sinceMs`, `d` m from the nearest player, is kept by the stay rule at `nowMs`. */
