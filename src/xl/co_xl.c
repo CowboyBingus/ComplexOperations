@@ -1099,9 +1099,9 @@ int CoXlTestOneMipArmed(void) { return g_oneMip.armed; }
 uint64_t CoXlTestOneMipTex(void) { return g_oneMip.tex; }
 uint64_t CoXlTestOneMipSpawn(uint32_t type, uint32_t name) { return NearOneMipSpawn(NULL, NULL, 0, type, name, 0, 0, NULL, NULL, 0); }
 /* The next extra large level's op 0x38 and its first replay's drop, the last level's material map being `matTex`. */
-void CoXlTestMapsNextLevel(uint64_t matTex)
+void CoXlTestMapsNextLevel(uint64_t matTex, uint64_t matMark)
 {
-    g_coarseMat.tex = matTex; g_coarseMat.terrain = g_oneMip.terrain;
+    g_coarseMat.tex = matTex; g_coarseMat.terrain = g_oneMip.terrain; g_coarseMat.mark = matMark; /* as a spawn with the material map leaves them */
     g_world.levels++;
     NearOneMipLevel();
     NearCoarseMatDrop();
@@ -1419,6 +1419,9 @@ void CoXlTestStreamTick(void)
 }
 /* The look before a removal: slots given up, searches of the world's unit list, the session's destroy calls. */
 void CoXlTestStreamBelt(uint32_t* gone, uint32_t* looks, long* destroys) { *gone = g_stream.gone; *looks = g_stream.looks; *destroys = g_streamDestroys; }
+/* The looks that did not read: in a row now and in all, and whether removal went off for the level. */
+void CoXlTestStreamLooks(uint32_t* bad, uint32_t* fails, int* off) { *bad = g_stream.lookBad; *fails = g_stream.lookFails; *off = g_stream.destroyBad; }
+uint32_t CoXlTestWindowEvictedFar(void) { return g_win.evictedFar; }
 void CoXlTestStreamOutSince(uint32_t i, ULONGLONG since) { g_streamOutSince[i] = since; }
 void co_capacity_test_places(int region, uint32_t places);
 /* Slots [base, high) as live far window stamps, then one eviction over the bodies' budget: the far removals queued. */

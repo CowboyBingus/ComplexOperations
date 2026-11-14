@@ -28,7 +28,7 @@ void CoXlTestHide(uint64_t handle);
 uint64_t CoXlTestHideHandle(void);
 void CoXlTestMoveHold(int on);
 LONG64 CoXlTestMoveHoldSince(void);
-void CoXlTestMapsNextLevel(uint64_t matTex);
+void CoXlTestMapsNextLevel(uint64_t matTex, uint64_t matMark);
 
 static int g_failed;
 static const char* g_case;
@@ -68,6 +68,9 @@ static uint8_t* g_mainWorld;
 static uint8_t g_terrainEntry[0x170];
 static void FakeRelease(uint64_t tex) { g_releases++; g_released = tex; }
 static void FakeMatGone(uint64_t tex) { g_matGones++; g_matGone = tex; }
+#define ENTRY_HEIGHT 0x7001000ull /* what the fake entry holds as its terrain's heightmap (+0x40) and material map (+0x48) */
+#define ENTRY_MAT 0x7002000ull
+static void EntryMaps(uint64_t height, uint64_t mat) { memcpy(g_terrainEntry + 0x40, &height, 8); memcpy(g_terrainEntry + 0x48, &mat, 8); }
 static void MapsGame(uint64_t listed, int worldReads)
 {
     const uintptr_t game = (uintptr_t)g_fake.image, t10 = game + TABLE10, engine = game + ENGINE, release = (uintptr_t)FakeRelease, gone = (uintptr_t)FakeMatGone;
@@ -163,25 +166,83 @@ int main(void)
     Start("the last level's terrain is still in the world at the next level: its maps stay allocated");
     CoXlTestWorldLevel(lg, 0);
     NearSetUp();
+    MapsGame(0x99, 1); EntryMaps(ENTRY_HEIGHT, ENTRY_MAT); /* the world lists the terrain when its spawn returns */
     CHECK(CoXlTestOneMipSpawn(HEIGHTMAP, MATERIALS) == 0x99);
+    CHECK(fake_host_logged("the level's terrain 0x99: its entry holds the heightmap 0x7001000"));
     MapsGame(0x99, 1);
-    CoXlTestMapsNextLevel(MAT_TEX);
+    CoXlTestMapsNextLevel(MAT_TEX, ENTRY_MAT);
     CHECK(g_releases == 0 && g_matGones == 0 && CoXlTestOneMipTex() == 0);
     CHECK(fake_host_logged("terrain 0x99 is still in the world: its one-mip heightmap stays allocated") && fake_host_logged("terrain 0x99 is still in the world: its material map stays allocated"));
+
+    /* A handle is the terrain's address (exe 0x1ABF49..0x1AC198), which the world gives to a later terrain; the entry
+     * then holds that terrain's maps (copied from its spawn's descriptor, 0x1ABFAA..0x1AC038), not this level's. */
+    Start("another terrain got the last level's handle: the entry holds other maps, and this level's are released");
+    CoXlTestWorldLevel(lg, 0);
+    NearSetUp();
+    MapsGame(0x99, 1); EntryMaps(ENTRY_HEIGHT, ENTRY_MAT);
+    CHECK(CoXlTestOneMipSpawn(HEIGHTMAP, MATERIALS) == 0x99);
+    MapsGame(0x99, 1); EntryMaps(ENTRY_HEIGHT + 0x100, ENTRY_MAT + 0x100);
+    CoXlTestMapsNextLevel(MAT_TEX, ENTRY_MAT);
+    CHECK(g_releases == 1 && g_released == TEX && g_matGones == 1 && g_matGone == MAT_TEX && !fake_host_logged("stays allocated"));
+
+    Start("each map is judged by its own field of the entry: the heightmap's");
+    CoXlTestWorldLevel(lg, 0);
+    NearSetUp();
+    MapsGame(0x99, 1); EntryMaps(ENTRY_HEIGHT, ENTRY_MAT);
+    CHECK(CoXlTestOneMipSpawn(HEIGHTMAP, MATERIALS) == 0x99);
+    MapsGame(0x99, 1); EntryMaps(ENTRY_HEIGHT + 0x100, ENTRY_MAT);
+    CoXlTestMapsNextLevel(MAT_TEX, ENTRY_MAT);
+    CHECK(g_releases == 1 && g_released == TEX && g_matGones == 0 && fake_host_logged("its material map stays allocated") && !fake_host_logged("its one-mip heightmap stays"));
+    Start("each map is judged by its own field of the entry: the material map's");
+    CoXlTestWorldLevel(lg, 0);
+    NearSetUp();
+    MapsGame(0x99, 1); EntryMaps(ENTRY_HEIGHT, ENTRY_MAT);
+    CHECK(CoXlTestOneMipSpawn(HEIGHTMAP, MATERIALS) == 0x99);
+    MapsGame(0x99, 1); EntryMaps(ENTRY_HEIGHT, ENTRY_MAT + 0x100);
+    CoXlTestMapsNextLevel(MAT_TEX, ENTRY_MAT);
+    CHECK(g_releases == 0 && g_matGones == 1 && g_matGone == MAT_TEX && fake_host_logged("its one-mip heightmap stays allocated") && !fake_host_logged("its material map stays"));
+
+    Start("the terrain is the second of its bucket's chain: its own entry's maps are the ones compared");
+    CoXlTestWorldLevel(lg, 0);
+    NearSetUp();
+    MapsGame(0x99, 1); EntryMaps(ENTRY_HEIGHT, ENTRY_MAT);
+    CHECK(CoXlTestOneMipSpawn(HEIGHTMAP, MATERIALS) == 0x99);
+    {
+        static uint8_t chain[2 * 0x170];
+        const uint64_t entries = (uint64_t)(uintptr_t)chain, first = 0x77, second = 0x99, otherHeight = ENTRY_HEIGHT + 0x100, otherMat = ENTRY_MAT + 0x100,
+            height = ENTRY_HEIGHT, mat = ENTRY_MAT;
+        const uint32_t count = 2, next = 1, last = 0x7FFFFFFFu;
+        MapsGame(0x99, 1);
+        memcpy(chain, &first, 8); memcpy(chain + 0x40, &otherHeight, 8); memcpy(chain + 0x48, &otherMat, 8); memcpy(chain + 0x168, &next, 4);
+        memcpy(chain + 0x170, &second, 8); memcpy(chain + 0x170 + 0x40, &height, 8); memcpy(chain + 0x170 + 0x48, &mat, 8); memcpy(chain + 0x170 + 0x168, &last, 4);
+        memcpy(g_mainWorld + 0x230550u + 8, &entries, 8); memcpy(g_mainWorld + 0x230550u + 0x18, &count, 4);
+    }
+    CoXlTestMapsNextLevel(MAT_TEX, ENTRY_MAT);
+    CHECK(g_releases == 0 && g_matGones == 0 && fake_host_logged("its one-mip heightmap stays allocated") && fake_host_logged("its material map stays allocated"));
+
+    Start("the entry did not read when the terrain spawned: the handle alone decides, and listed maps stay");
+    CoXlTestWorldLevel(lg, 0);
+    NearSetUp();
+    MapsGame(0, 0); /* no main world at the spawn */
+    CHECK(CoXlTestOneMipSpawn(HEIGHTMAP, MATERIALS) == 0x99);
+    MapsGame(0x99, 1); EntryMaps(ENTRY_HEIGHT, ENTRY_MAT);
+    CoXlTestMapsNextLevel(MAT_TEX, 0);
+    CHECK(g_releases == 0 && g_matGones == 0 && fake_host_logged("its one-mip heightmap stays allocated") && fake_host_logged("its material map stays allocated"));
 
     Start("the last level's terrain is gone at the next level (or another terrain is listed): its maps are released");
     CoXlTestWorldLevel(lg, 0);
     NearSetUp();
+    MapsGame(0x99, 1); EntryMaps(ENTRY_HEIGHT, ENTRY_MAT);
     CHECK(CoXlTestOneMipSpawn(HEIGHTMAP, MATERIALS) == 0x99);
     MapsGame(0x77, 1);
-    CoXlTestMapsNextLevel(MAT_TEX);
+    CoXlTestMapsNextLevel(MAT_TEX, 0);
     CHECK(g_releases == 1 && g_released == TEX && g_matGones == 1 && g_matGone == MAT_TEX && !fake_host_logged("stays allocated"));
 
     Start("no terrain was spawned with the maps: released as before");
     CoXlTestWorldLevel(lg, 0);
     NearSetUp();
     MapsGame(0, 1); /* the level never reached its spawn; a terrain with handle 0 is no terrain */
-    CoXlTestMapsNextLevel(MAT_TEX);
+    CoXlTestMapsNextLevel(MAT_TEX, 0);
     CHECK(g_releases == 1 && g_matGones == 1);
 
     Start("the main world does not read at the next level: released as before");
@@ -189,7 +250,7 @@ int main(void)
     NearSetUp();
     CHECK(CoXlTestOneMipSpawn(HEIGHTMAP, MATERIALS) == 0x99);
     MapsGame(0x99, 0);
-    CoXlTestMapsNextLevel(MAT_TEX);
+    CoXlTestMapsNextLevel(MAT_TEX, 0);
     CHECK(g_releases == 1 && g_released == TEX && g_matGones == 1 && !fake_host_logged("stays allocated"));
 
     if (g_failed) { printf("nearleft: %d checks failed\n", g_failed); return 1; }

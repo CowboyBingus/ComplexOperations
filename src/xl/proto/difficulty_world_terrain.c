@@ -1383,15 +1383,23 @@ static uintptr_t NearApi(uint32_t table, uint32_t slot)
  * render-config layer and generator resolves names through the published overlay (0x52C690). The terrain spawn (exe
  * 0x1AABE0) reads the config table (0xA6E30 on renderer+0x1600) directly, so its slot holds the copy for the level's own
  * spawn call (op 0x69). Unpublished when the next level starts (a leftover publish would be the next level's map). */
-static struct { LONG level; uint64_t tex, config, terrain; uint64_t* slot; void* original; volatile LONG armed; DWORD thread; int spawned; } g_oneMip = {.level = -1};
+static struct { LONG level; uint64_t tex, config, terrain, mark; uint64_t* slot; void* original; volatile LONG armed; DWORD thread; int spawned; } g_oneMip = {.level = -1};
 /* The coarse terrain's interpolated material map (NearCoarseMatBuild, below): its texture, pixels, the spawn's slot. */
-static struct { LONG level; uint64_t tex, terrain; uint32_t* pixels; ULONGLONG made; int holds, served, scatter; uint64_t* slot; } g_coarseMat = {.level = -1};
+static struct { LONG level; uint64_t tex, terrain, mark; uint32_t* pixels; ULONGLONG made; int holds, served, scatter; uint64_t* slot; } g_coarseMat = {.level = -1};
 /* The terrain spawned with these maps keeps their addresses uncounted (exe 0x1AB0A7, 0x1AB0B5), and one whose
  * generation was cancelled before its ready call (its handle reaches the level's cell only at 0xF45193) is never
- * destroyed by the level. 1 while the main world still lists `terrain`: its maps are then leaked, not released. */
+ * destroyed by the level. 1 while the main world still lists `terrain` with the map field it had at its spawn
+ * (`mark`): its maps are then leaked, not released. A later terrain at the same address holds its own maps there and
+ * does not count. A mark that did not read at the spawn (0) leaves the handle alone to decide. */
 static uint64_t NearMainWorld(void);
 static int NearTerrainInLocked(uint64_t world, uint64_t handle);
-static int NearMapTerrainStays(uint64_t terrain) { return terrain != 0 && NearTerrainInLocked(NearMainWorld(), terrain) == 1; }
+static uint64_t NearTerrainMapLocked(uint64_t world, uint64_t handle, int material);
+static int NearMapTerrainStays(uint64_t terrain, uint64_t mark, int material)
+{
+    const uint64_t world = NearMainWorld();
+    if (terrain == 0 || NearTerrainInLocked(world, terrain) != 1) return 0;
+    return mark == 0 || NearTerrainMapLocked(world, terrain, material) == mark;
+}
 
 static void NearOneMipPublish(void)
 {
@@ -1420,11 +1428,11 @@ static void NearOneMipLevel(void)
     if (g_oneMip.tex != 0 && release != NULL)
     {
         if (g_oneMip.level != -2) NearOneMipDrop();
-        if (!NearMapTerrainStays(g_oneMip.terrain)) release(g_oneMip.tex);
+        if (!NearMapTerrainStays(g_oneMip.terrain, g_oneMip.mark, 0)) release(g_oneMip.tex);
         else Note("difficulty: near terrain: the last level's terrain 0x%llX is still in the world: its one-mip heightmap stays allocated (leaked) so that it never draws a freed one",
             (unsigned long long)g_oneMip.terrain);
     }
-    g_oneMip.tex = 0; g_oneMip.config = 0; g_oneMip.terrain = 0; g_oneMip.level = g_world.levels; g_oneMip.spawned = 0;
+    g_oneMip.tex = 0; g_oneMip.config = 0; g_oneMip.terrain = g_oneMip.mark = 0; g_oneMip.level = g_world.levels; g_oneMip.spawned = 0;
     char t[4] = "";
     if (GetEnvironmentVariableA("HELLFORGE_XL_ONEMIP", t, sizeof t) > 0 && t[0] == '0') { Note("difficulty: near terrain: the level's heightmap keeps its mips (HELLFORGE_XL_ONEMIP=0)"); return; }
     uint64_t config = find != NULL ? find(0x2A9E3232u) : 0;
@@ -4053,13 +4061,13 @@ static void NearMatTexture(ULONGLONG t0)
 /* The coarse map's texture and pixels gone (a new level, or it was not made). */
 static void NearCoarseMatDrop(void)
 {
-    if (g_coarseMat.tex != 0 && NearMapTerrainStays(g_coarseMat.terrain))
+    if (g_coarseMat.tex != 0 && NearMapTerrainStays(g_coarseMat.terrain, g_coarseMat.mark, 1))
     {
         Note("difficulty: near terrain: the last level's terrain 0x%llX is still in the world: its material map stays allocated (leaked) so that it never draws a freed one",
             (unsigned long long)g_coarseMat.terrain);
         g_coarseMat.tex = 0; g_coarseMat.pixels = NULL;
     }
-    g_coarseMat.terrain = 0;
+    g_coarseMat.terrain = g_coarseMat.mark = 0;
     if (g_coarseMat.tex != 0)
     {
         typedef void (*DestroyFn)(uint64_t tex);
@@ -6168,14 +6176,19 @@ static uint64_t NearOneMipSpawn(void* world, float* pose, uint32_t a, uint32_t t
     int mat = g_coarseMat.slot != NULL && g_coarseMat.tex != 0 && NearMatRedirect(1);
     if (mat) *g_coarseMat.slot = g_coarseMat.tex;
     uint64_t r = original(world, pose, a, type, name, resource, hash, size, range, flag);
-    if (mat) { *g_coarseMat.slot = keepMat; NearMatRedirect(0); g_coarseMat.terrain = r; }
+    const uint64_t mainWorld = NearMainWorld();
+    if (mat) { *g_coarseMat.slot = keepMat; NearMatRedirect(0); g_coarseMat.terrain = r; g_coarseMat.mark = NearTerrainMapLocked(mainWorld, r, 1); }
     *g_oneMip.slot = keep;
     NearSpawnMaterialNote(r);
-    g_oneMip.terrain = r;
+    g_oneMip.terrain = r; g_oneMip.mark = NearTerrainMapLocked(mainWorld, r, 0);
     if (!g_oneMip.spawned++)
         Note("difficulty: near terrain: the level's terrain spawned with the one-mip heightmap%s", !mat ? "" : g_coarseMat.served == 1 ?
             " and the interpolated material map (its physics materials from its pixels)" : g_coarseMat.served == 2 ?
             " and the interpolated material map (its physics materials read back from the level's map)" : " and the interpolated material map (no physics readback asked)");
+    /* each spawn (a generation's retry spawns again): what the next level compares before it releases the maps */
+    Note("difficulty: near terrain: the level's terrain 0x%llX: its entry holds the heightmap 0x%llX (the copy is 0x%llX) and the material map 0x%llX (ours is 0x%llX)",
+        (unsigned long long)r, (unsigned long long)g_oneMip.mark, (unsigned long long)g_oneMip.tex, (unsigned long long)(mat ? g_coarseMat.mark : 0),
+        (unsigned long long)(mat ? g_coarseMat.tex : 0));
     return r;
 }
 

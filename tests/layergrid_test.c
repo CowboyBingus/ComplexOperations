@@ -53,6 +53,8 @@ uint32_t CoXlTestStreamScanFrames(int frames);
 uint32_t CoXlTestStreamDrain(double ms, uint32_t* waiting);
 void CoXlTestStreamTick(void);
 void CoXlTestStreamBelt(uint32_t* gone, uint32_t* looks, long* destroys);
+void CoXlTestStreamLooks(uint32_t* bad, uint32_t* fails, int* off);
+uint32_t CoXlTestWindowEvictedFar(void);
 void co_shim_install(void);
 int co_safe_find(uintptr_t list, size_t count, uint64_t value);
 void CoXlTestMission(uintptr_t level, int complex);
@@ -197,8 +199,8 @@ static void Start(const char* name)
  * the reviewed exe 0x3340A0, here a `ret`). */
 static int g_destroys;
 static uint64_t g_destroyed;
-/* The fake world: its unit list (count +0x230588, array [+0x230590]) and its queued destroys (+0x30, count +0x10030),
- * as DestroyUnit (exe 0x338960) and the enqueue (0x12D2D0) keep them. A test's unit id is an address in g_unitMem. */
+/* The fake world: its unit list (count +0x230588, array [+0x230590]) as DestroyUnit (exe 0x338960) keeps it. A test's
+ * unit id is an address in g_unitMem. */
 static uint8_t* g_worldMem;
 static uint8_t* g_unitMem;
 static uint64_t g_listed[512];
@@ -209,11 +211,12 @@ static void ListAdd(uint64_t unit) { const uint32_t n = ListCount(); g_listed[n]
 static int ListTake(uint64_t unit)
 {
     const uint32_t n = ListCount();
+    uint64_t* list; /* the world's own array: a case may hang another one in */
+    memcpy(&list, g_worldMem + 0x230590u, 8);
     for (uint32_t k = 0; k < n; k++)
-        if (g_listed[k] == unit) { g_listed[k] = g_listed[n - 1]; ListSet(n - 1); return 1; }
+        if (list[k] == unit) { list[k] = list[n - 1]; ListSet(n - 1); return 1; }
     return 0;
 }
-static void Queued(uint32_t k, uint64_t unit) { const uint32_t n = k + 1; memcpy(g_worldMem + 0x30u + 8u * k, &unit, 8); memcpy(g_worldMem + 0x10030u, &n, 4); }
 static int g_unlisted; /* destroys of a unit the list did not hold: the engine would free it all the same */
 static void FakeDestroy(uint64_t world, uint64_t unit, uint64_t a, uint64_t b)
 {
@@ -246,8 +249,7 @@ static void Stream(uint32_t count)
         g_unitMem = (uint8_t*)VirtualAlloc(NULL, 0x100000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     }
     const uint64_t world = (uint64_t)(uintptr_t)g_worldMem, list = (uint64_t)(uintptr_t)g_listed;
-    const uint32_t none = 0;
-    memcpy(g_worldMem + 0x230590u, &list, 8); ListSet(0); memcpy(g_worldMem + 0x10030u, &none, 4);
+    memcpy(g_worldMem + 0x230590u, &list, 8); ListSet(0);
     memcpy(g_context + 0x40, &world, 8);
     memset(g_array, 0, sizeof g_array);
     CoXlTestStreamSetup((uintptr_t)g_fake.image, g_context, g_array, count);
@@ -863,7 +865,7 @@ int main(void)
     CoXlTestStreamTick();
     CoXlTestStreamBelt(&gone, &looks, &calls);
     CHECK(g_destroys == 1 && g_destroyed == U(0x3000) && g_unlisted == 0 && gone == 1 && looks == 2);
-    CHECK(Lines("slot 0's stamp unit") == 1 && fake_host_logged("is not in the world's unit list any more (or its destroy is queued): the slot is given up with no destroy call"));
+    CHECK(Lines("slot 0's stamp unit") == 1 && fake_host_logged("is not in the world's unit list any more: the slot is given up with no destroy call"));
     int spawned = 0;
     CoXlTestStreamSlotState(0, &goneLive, &goneDue, &goneUnit);
     CoXlTestStreamSpawned(0, &spawned, &goneDue);
@@ -880,13 +882,12 @@ int main(void)
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
     CoXlTestMission(0, 0);
 
-    Start("a stamp unit whose destroy the engine has queued, or that is another world's, is given up too");
+    Start("a stamp unit whose address is another world's unit now is given up too");
     Flagged();
-    Queued(0, 0x7777); Queued(1, U(0x1000)); /* listed still, and waiting in the world's destroy queue */
-    { const uint64_t other = 0xABC0; memcpy((void*)(uintptr_t)(U(0x3000) + 0x18), &other, 8); } /* its address is another world's unit now */
+    { const uint64_t other = 0xABC0; memcpy((void*)(uintptr_t)(U(0x3000) + 0x18), &other, 8); }
     CoXlTestStreamTick();
     CoXlTestStreamBelt(&gone, &looks, &calls);
-    CHECK(g_destroys == 0 && gone == 2 && looks == 2 && Lines("the slot is given up with no destroy call") == 1 && ListCount() == 3);
+    CHECK(g_destroys == 1 && g_destroyed == U(0x1000) && gone == 1 && looks == 2 && Lines("the slot is given up with no destroy call") == 1 && ListCount() == 2);
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
     CoXlTestMission(0, 0);
 
@@ -898,17 +899,98 @@ int main(void)
     CHECK(g_destroys == 0 && gone == 2 && looks == 2);
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
     CoXlTestMission(0, 0);
-    Start("a unit list that does not read turns the removal off and keeps the slots");
+
+    /* One look that does not read (a torn count, a fault in the scan) says nothing about the unit: its removal waits
+     * at the queue's head for the next frame, and removal goes off for the level only after eight such looks in a row. */
+    uint32_t lookBad = 9, lookFails = 9; int lookOff = 9;
+    const uint64_t listGood = (uint64_t)(uintptr_t)g_listed, listBad = 0x10;
+    Start("a unit list that does not read once: the removal is asked again the next frame and goes then");
     Flagged();
-    { const uint64_t bad = 0x10; memcpy(g_worldMem + 0x230590u, &bad, 8); }
-    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 0 && g_destroys == 0);
+    memcpy(g_worldMem + 0x230590u, &listBad, 8);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 2 && g_destroys == 0);
     CoXlTestStreamBelt(&gone, &looks, &calls);
-    CHECK(gone == 0 && fake_host_logged("removal off: the world's unit list does not read"));
+    CoXlTestStreamLooks(&lookBad, &lookFails, &lookOff);
+    CHECK(gone == 0 && lookBad == 1 && lookFails == 1 && !lookOff && !fake_host_logged("removal off"));
+    CHECK(CoXlTestStreamQueued(0) && CoXlTestStreamQueued(2));
+    memcpy(g_worldMem + 0x230590u, &listGood, 8);
+    CHECK(CoXlTestStreamDrain(1.0e9, &left) == 2 && left == 0 && g_destroys == 2 && g_unlisted == 0);
+    CoXlTestStreamLooks(&lookBad, &lookFails, &lookOff);
+    CHECK(lookBad == 0 && lookFails == 1 && !lookOff);
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestMission(0, 0);
+
+    Start("a unit list that does not read eight frames in a row turns the removal off and keeps the slots");
+    Flagged();
+    memcpy(g_worldMem + 0x230590u, &listBad, 8);
+    CHECK(CoXlTestStreamScanFrames(0) == 0);
+    for (int f = 0; f < 7; f++) CHECK(CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 2);
+    CoXlTestStreamLooks(&lookBad, &lookFails, &lookOff);
+    CHECK(lookBad == 7 && lookFails == 7 && !lookOff && !fake_host_logged("removal off"));
+    memcpy(g_worldMem + 0x230590u, &listGood, 8);
+    CHECK(CoXlTestStreamDrain(1.0e9, &left) == 2 && left == 0 && g_destroys == 2); /* a look that reads: the row starts again */
+    CoXlTestMission(0, 0);
+    Flagged();
+    memcpy(g_worldMem + 0x230590u, &listBad, 8);
+    CHECK(CoXlTestStreamScanFrames(0) == 0);
+    for (int f = 0; f < 7; f++) CHECK(CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 2);
+    CHECK(!fake_host_logged("removal off"));
+    CHECK(CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 2);
+    CoXlTestStreamLooks(&lookBad, &lookFails, &lookOff);
+    CoXlTestStreamBelt(&gone, &looks, &calls);
+    CHECK(lookOff && lookFails == 8 && gone == 0 && g_destroys == 0 && fake_host_logged("removal off: the world's unit list did not read 8 times in a row"));
+    memcpy(g_worldMem + 0x230590u, &listGood, 8);
+    CHECK(CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 0 && g_destroys == 0); /* off for the level: the queue empties, nothing goes */
     for (uint32_t k = 0; k < 3; k += 2)
     {
         CoXlTestStreamSlotState(k, &goneLive, &goneDue, &goneUnit);
         CHECK(goneLive && goneUnit == U(0x1000u * (k + 1)));
     }
+    Generator(0);
+    CoXlTestStreamTick();
+    CHECK(fake_host_logged("the world's unit list searched 8 times") && fake_host_logged("units at the last); 8 looks did not read"));
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestMission(0, 0);
+
+    /* The search is bounded at 4194304 units: a count past that is taken for a torn or wrong read, never searched. */
+    Start("a unit count past the search's bound is no list: nothing is searched or destroyed, and the removal waits");
+    {
+        static uint64_t* big;
+        const uint32_t most = 1u << 22;
+        if (big == NULL) big = (uint64_t*)VirtualAlloc(NULL, ((size_t)most + 1) * 8, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        const uint64_t listBig = (uint64_t)(uintptr_t)big;
+        Flagged();
+        memset(big, 0, ((size_t)most + 1) * 8);
+        big[0] = U(0x1000); big[1] = U(0x2000); big[2] = U(0x3000);
+        memcpy(g_worldMem + 0x230590u, &listBig, 8);
+        ListSet(most + 1);
+        CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 2 && g_destroys == 0);
+        CoXlTestStreamBelt(&gone, &looks, &calls);
+        CoXlTestStreamLooks(&lookBad, &lookFails, &lookOff);
+        CHECK(gone == 0 && looks == 0 && lookFails == 1);
+        ListSet(most); /* the bound itself: searched */
+        CHECK(CoXlTestStreamDrain(1.0e9, &left) == 2 && left == 0 && g_destroys == 2 && g_unlisted == 0 && ListCount() == most - 2);
+        memcpy(g_worldMem + 0x230590u, &listGood, 8);
+    }
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestMission(0, 0);
+
+    /* The generator's state is read through a guarded read: one that fails says neither "in play" nor "left". */
+    Start("a generator state that does not read holds the level as it is; only a state that reads ends it");
+    Flagged();
+    {
+        DWORD was = 0;
+        VirtualProtect(g_lg, 0x1000, PAGE_NOACCESS, &was);
+        CoXlTestStreamTick();
+        CoXlTestStreamTick();
+        VirtualProtect(g_lg, 0x1000, was, &was);
+    }
+    CoXlTestStreamSlotState(0, &goneLive, &goneDue, &goneUnit);
+    CHECK(g_destroys == 0 && goneLive && goneUnit == U(0x1000) && CoXlTestStreamFlag(0) && Lines("the level left play") == 0);
+    CoXlTestStreamTick(); /* it reads 3 again: the level goes on */
+    CHECK(g_destroys == 2 && g_unlisted == 0 && Lines("the level left play") == 0);
+    Generator(4);
+    CoXlTestStreamTick();
+    CHECK(Lines("the level left play (generator state 4)") == 1);
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
     CoXlTestMission(0, 0);
 
@@ -949,6 +1031,46 @@ int main(void)
     CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 2);
     CoXlTestStreamBelt(&gone, &looks, &calls);
     CHECK(gone == 4 && looks == 4 && g_destroys == 0);
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestMission(0, 0);
+
+    Start("a slot given up ends the frame's removals once their time is used, as a removal does");
+    CoXlTestMission((uintptr_t)g_lg, 1);
+    StreamGame();
+    InMission();
+    Stream(8);
+    g_tileOfB = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTile(g_tileOfB, 1, BX, AY);
+    for (uint32_t k = 0; k < 6; k++) Slot(k, BX + 300.0f + 40.0f * (float)k, AY, 20.0f, 0x1000u * (k + 1), 0);
+    Generator(3);
+    CoXlTestStreamTick();
+    CHECK(CoXlTestStampsReplace(g_tileOfB, BX, AY) == 6);
+    ListSet(0);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamDrain(0.0, &left) == 0 && left == 5); /* past the frame's time: one at least */
+    CoXlTestStreamBelt(&gone, &looks, &calls);
+    CHECK(gone == 1 && looks == 1 && g_destroys == 0);
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestMission(0, 0);
+
+    Start("far stamps given up count as evicted, and one whose look did not read still holds the next eviction back");
+    CoXlTestMission((uintptr_t)g_lg, 1);
+    StreamGame();
+    InMission();
+    Stream(100);
+    for (uint32_t k = 0; k < 100; k++) Slot(k, AX + 3000.0f, AY + 4.0f * (float)k, 2.0f, 0x1000u * (k + 1), 0);
+    Generator(3);
+    CoXlTestStreamObserver(1, AX, AY);
+    const uint32_t farBefore = CoXlTestWindowEvictedFar();
+    CHECK(CoXlTestWindowEvictFar(0, 100) == 64);
+    ListSet(0); /* the engine took them */
+    CHECK(CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 60 && g_destroys == 0 && CoXlTestWindowEvictedFar() == farBefore + 4);
+    memcpy(g_worldMem + 0x230590u, &listBad, 8); ListSet(1); /* a list of one that does not read */
+    for (int f = 0; f < 3; f++) CHECK(CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 60);
+    memcpy(g_worldMem + 0x230590u, &listGood, 8); ListSet(0);
+    for (int f = 0; f < 20 && left > 0; f++) CoXlTestStreamDrain(1.0e9, &left);
+    CHECK(left == 0 && CoXlTestWindowEvictedFar() == farBefore + 64);
+    CHECK(CoXlTestWindowEvictFar(0, 100) == 36); /* the far count came back to 0 with the queue: the rest may go */
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
     CoXlTestMission(0, 0);
 
