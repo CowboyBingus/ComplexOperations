@@ -2759,6 +2759,8 @@ static void TerrainNearPads(uint64_t record, uint64_t context)
 
 /* W over the tile at NEAR_PAD_STEP, the largest pad weight at each point (made once per tile: a mid-mission tile has
  * its own centre, and W is laid out around it). */
+static float RoadGradeTileWeight(float wx, float wy); /* difficulty_world_roadlevel.c */
+static void RoadGradeTileNote(void);
 static void NearPadRaster(void)
 {
     if (g_pads.wLevel == g_world.levels && g_pads.wCentre[0] == g_near.centre[0] && g_pads.wCentre[1] == g_near.centre[1]) return;
@@ -2799,6 +2801,17 @@ static void NearPadRaster(void)
                 if (w > *at) *at = w;
             }
     }
+    /* a graded road's band is the level's surface too (difficulty_world_roadlevel.c) */
+    size_t road = 0;
+    for (int r = 0; r < NEAR_PAD_N; r++)
+        for (int c = 0; c < NEAR_PAD_N; c++)
+        {
+            const float w = RoadGradeTileWeight(x0 + ((float)c + 0.5f) * NEAR_PAD_STEP, y0 - ((float)r + 0.5f) * NEAR_PAD_STEP);
+            float* at = g_pads.w + (size_t)r * NEAR_PAD_N + c;
+            if (w > 0.0f) road++;
+            if (w > *at) *at = w;
+        }
+    if (road != 0) Note("difficulty: near terrain: the tile takes the level's surface in the graded roads' bands: %.2f km2", (double)road * NEAR_PAD_STEP * NEAR_PAD_STEP / 1e6);
     size_t full = 0, some = 0;
     for (size_t i = 0; i < (size_t)NEAR_PAD_N * NEAR_PAD_N; i++) { if (g_pads.w[i] >= 0.999f) full++; else if (g_pads.w[i] > 0.0f) some++; }
     Note("difficulty: near terrain: the tile takes the level's surface under %d of its pads: %.2f km2 at full weight, %.2f km2 in their bands", used,
@@ -2826,11 +2839,14 @@ static float NearTileShare(float wx, float wy, float e)
     return (1.0f - NearPadWeight(wx, wy)) * u * u * (3 - 2 * u); /* under the level's pads: the level's surface */
 }
 
+static float RoadGradeSharpen(float wx, float wy, float coarse); /* difficulty_world_roadlevel.c */
 static float NearTarget(float wx, float wy, float t, float low, float coarse)
 {
     float e = NearOutside(wx, wy);
     if (e > 0) return NearCoarseTri(wx, wy) - NearBand(e); /* the drawn triangles (equal to the bilinear on the edge line) */
-    return coarse + NearTileShare(wx, wy, e) * (t + low - coarse);
+    const float share = NearTileShare(wx, wy, e);
+    if (share < 1.0f) coarse = RoadGradeSharpen(wx, wy, coarse); /* a graded road's core at the tile's own detail */
+    return coarse + share * (t + low - coarse);
 }
 
 /* A cell's change as the draw's two triangles give it at texel (c, r): (i, j), (i + 1, j), (i + 1, j + 1) where
@@ -4292,6 +4308,7 @@ static int NearConformStep(uint64_t records, uint32_t end, uint64_t context, uin
         for (size_t i = 0; i < (size_t)4096 * 4096; i++) g_near.heights[i] = got[i] / 65535.0f;
         Note("difficulty: near terrain: conform: the tile now follows the coarse terrain: at the grid's vertices |result - target| mean %.3f m, max %.3f m; "
             "at the hidden square's edge |tile - coarse| mean %.3f m, max %.3f m", n ? miss / n : 0.0, worst, ne ? edge / ne : 0.0, (double)edgeMax);
+        RoadGradeTileNote();
         g_conform.phase = 8; g_peaksAfter.started = 0;
     }
     if (g_conform.phase == 8) /* the cones after the conform, on a thread of their own (27-40 ms of work) */

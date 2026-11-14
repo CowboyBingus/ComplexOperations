@@ -74,6 +74,9 @@ static double HitchNow(void)
 #include "proto/difficulty_world_macro.c"
 #include "proto/difficulty_world_roads.c"
 #include "proto/difficulty_world_roadbuild.c"
+#include "proto/difficulty_world_roadgrade.c"
+#include "proto/difficulty_world_roadfield.c"
+#include "proto/difficulty_world_roadlevel.c"
 #include "proto/difficulty_status.c"
 #include "proto/difficulty_map_hud.c"
 #include "proto/difficulty_world_arcs.c"
@@ -965,6 +968,76 @@ uint8_t CoXlTestLocationOp(uint32_t i) { return g_locationOp[i]; }
 float CoXlTestStampSegmentBox(const float* s, const float* lo, const float* hi) { return StampSegmentBox(s, lo, hi); }
 void CoXlTestRoadsAfterOp(uintptr_t block, uint64_t context, uint64_t record, uint32_t op, uint32_t before, int counted)
 { RoadsAfterOp(block, context, record, op, before, counted); }
+/* The roads' graded profile (proto/difficulty_world_roadgrade.c): links are station pairs, out the GradeStats fields
+ * as doubles (steepest, bend, cut, fill, metres, over 5, over 8, moved over 8, over 15). Returns the torn stations. */
+uint32_t CoXlTestGradeSolve(const float* ground, const uint8_t* pinned, uint32_t n, const uint32_t* links, const float* gaps, uint32_t count, float slope,
+    uint32_t passes, float* target, double out[9])
+{
+    GradeStation* s = (GradeStation*)calloc(n ? n : 1, sizeof *s);
+    if (s == NULL) return n;
+    for (uint32_t i = 0; i < n; i++) { s[i].ground = ground[i]; s[i].pinned = pinned != NULL && pinned[i]; s[i].floor = -GRADE_FAR; }
+    for (uint32_t k = 0; k < count; k++) GradeLink(s, links[2 * k], links[2 * k + 1], gaps[k]);
+    const uint32_t torn = GradeSolve(s, n, slope, passes);
+    GradeStats g; GradeMeasure(s, n, &g);
+    for (uint32_t i = 0; i < n; i++) target[i] = s[i].target;
+    out[0] = g.steepest; out[1] = g.bend; out[2] = g.cut; out[3] = g.fill; out[4] = g.metres; out[5] = g.over5; out[6] = g.over8; out[7] = g.cut8; out[8] = g.cut15;
+    free(s);
+    return torn;
+}
+/* The graded field (proto/difficulty_world_roadfield.c). chains: `counts[c]` points each, in `pts`; ends[2c], ends[2c+1]
+ * name the shared stations of chain c's ends (a number the test chooses; 0xFFFFFFFF: its own). spur: 1 when the last
+ * chain meets the others as a spur does. ground(x, y) and floor are given to every station. Returns the stations. */
+static GradeField g_testField;
+uint32_t CoXlTestGradeField(const float* pts, const uint32_t* counts, const uint32_t* ends, uint32_t chains, int spur, float (*ground)(float, float), float floor,
+    float slope, uint32_t passes, float world, uint32_t* torn)
+{
+    static uint32_t shared[64];
+    GradeField* f = &g_testField;
+    GradeFieldFree(f);
+    memset(shared, 0xFF, sizeof shared);
+    for (uint32_t c = 0; c < chains; c++)
+    {
+        uint32_t own[2] = {GRADE_NONE, GRADE_NONE};
+        uint32_t* a = ends[2 * c] < 64 ? &shared[ends[2 * c]] : &own[0];
+        uint32_t* b = ends[2 * c + 1] < 64 ? &shared[ends[2 * c + 1]] : &own[1];
+        if (spur && c + 1 == chains) own[1] = GradeFieldAttach(f, pts[2 * (counts[c] - 1)], pts[2 * (counts[c] - 1) + 1], f->segs);
+        GradeFieldChain(f, pts, counts[c], a, b);
+        pts += 2 * (size_t)counts[c];
+    }
+    for (uint32_t i = 0; i < f->stations; i++) { f->s[i].ground = ground(f->xy[2 * i], f->xy[2 * i + 1]); f->s[i].floor = floor; }
+    GradeFieldLinks(f);
+    *torn = GradeSolve(f->s, f->stations, slope, passes);
+    GradeFieldIndex(f, world);
+    return f->stations;
+}
+float CoXlTestGradeFieldAt(float x, float y, float* z, float* d) { return GradeFieldAt(&g_testField, x, y, z, d); }
+float CoXlTestGradeStation(uint32_t i, float* xy, float* band, uint32_t* links)
+{ xy[0] = g_testField.xy[2 * i]; xy[1] = g_testField.xy[2 * i + 1]; *band = g_testField.band[i]; *links = g_testField.s[i].links; return g_testField.s[i].target; }
+uint32_t CoXlTestGradeFieldPieces(uint32_t* unlinked, uint32_t* capped) { *unlinked = g_testField.unlinked; *capped = g_testField.capped; return g_testField.segs; }
+/* A road's slopes on a surface: out = metres, over 5, 8, 12, 18, rise, steepest, 95th percentile, cross. */
+void CoXlTestGradeRoad(float (*height)(void*, float, float), const float* pts, uint32_t n, double out[9])
+{
+    static GradeRoad g;
+    memset(&g, 0, sizeof g);
+    GradeRoadAlong(height, NULL, pts, n, &g);
+    out[0] = g.metres; for (int k = 0; k < 4; k++) out[1 + k] = g.over[k];
+    out[5] = g.rise; out[6] = g.steepest; out[7] = GradeRoad95(&g); out[8] = g.cross;
+}
+/* The level's draw over the test field: the playable radius, then every cell through `tri`. Returns the triangles. */
+uint32_t CoXlTestGradeDraw(float world, float playable, GradeTriFn tri, float px, uint32_t most, uint32_t* cells)
+{
+    GradeFieldFree(&g_grade.f);
+    g_grade.f = g_testField; /* lent: the test's callback reads the field through g_testField meanwhile */
+    g_grade.world = world; g_grade.playable = playable; g_grade.next = 0; g_grade.drawn = 0;
+    RoadGradePadIndex();
+    RoadGradeCells();
+    static const float colour[4] = {255.0f, 0.0f, 0.0f, 0.0f};
+    uint32_t given = 0, batch;
+    while ((batch = RoadGradeBatch(tri, 1, 2, colour, px, most)) != 0) given += batch;
+    *cells = g_grade.drawn;
+    memset(&g_grade.f, 0, sizeof g_grade.f);
+    return given;
+}
 /* The roads' build (proto/difficulty_world_roadbuild.c): the point spacing, its stub and the arterial choice. */
 uint32_t CoXlTestRoadsLeftOut(const uint8_t* recs, uint32_t n, const uint8_t* taken, uint32_t used, uint32_t capacity, float spacing, uint32_t* total)
 { RoadEdge e[64]; n = RoadsTestEdges(recs, n, e); return RoadsSpacingLeftOut(e, n, taken, used, capacity, spacing, total); }

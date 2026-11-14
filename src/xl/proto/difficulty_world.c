@@ -4860,6 +4860,9 @@ static void RoadsArterialsPoints(uintptr_t block);
 static void RoadsSpursBuild(uintptr_t block, uint64_t context);
 static void RoadsCorridorNote(uintptr_t block, const uint8_t* ops, uint32_t before, uint32_t total);
 static void RoadsSlopeNote(uintptr_t block);
+static int RoadGradeStep(uint64_t context); /* difficulty_world_roadlevel.c */
+static void RoadGradeEmbankNote(uint64_t record);
+static void RoadGradeAfterNote(uintptr_t block);
 static void RoadsIndexNote(uint64_t context, const char* when);
 static void RoadsPointsWatch(uintptr_t block, uint32_t op);
 static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
@@ -4908,6 +4911,9 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
         if (o == 0x38 && g_world.current == 8.0f && WorldTileStep(records, (uint32_t)d, i, b, e, f, g, h)) { TerrainDiagAfter(records, index, diagAt, diagOp); return 0; }
         /* the map's terrain at vanilla density: the level waits at its SmoothHeightmap while the tiles are drawn */
         if (o == 0x40 && TerrainStep(records, (uint32_t)d, i, b, g, h)) { TerrainDiagAfter(records, index, diagAt, diagOp); return 0; }
+        /* the roads' ground: the level waits at its LevelRoutes while the graded field is drawn */
+        if (o == 0xB8 && g_world.current == 8.0f) RoadGradeEmbankNote(records + (uint64_t)i * 0x19B0u);
+        if (o == 0xB7 && RoadGradeStep(b)) { TerrainDiagAfter(records, index, diagAt, diagOp); return 0; }
         if (o == 0x0A && g_world.current == 8.0f) TerrainNearWater(records + (uint64_t)i * 0x19B0u);
         if (o == 0x6C && g_world.current == 8.0f) MacroStamps(); /* once a level, before its first call */
         if ((o == 0x4B || o == 0x67) && g_world.current == 8.0f) FarGrassKeep(records + (uint64_t)i * 0x19B0u, o);
@@ -5108,6 +5114,7 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
             if (watch && op == 0x0E) RoadsArterialsPoints(block);
             if (watch && op == 0x0F) RoadsSpursBuild(block, b); /* before op 0x2B places a stamp */
             if (watch) RoadsSlopeNote(block); /* once the level's height capture is kept */
+            if (watch) RoadGradeAfterNote(block);
             if (watch) RoadsPointsWatch(block, op);
             if (watch && op == 0x2B) RoadsIndexNote(b, "after op 0x2B");
             if (watch && op == 0x2B) { uint32_t placed = 0; SafeRead(block + 0x11A7108, &placed, 4); RoadsCorridorNote(block, g_locationOp, before, placed); }
