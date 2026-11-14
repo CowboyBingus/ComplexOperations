@@ -128,6 +128,7 @@ int co_lw_meet_call_ahead(const float* v, const float (*dirs)[2], int n, int* on
         const float len = sqrtf(dirs[k][0] * dirs[k][0] + dirs[k][1] * dirs[k][1]), along = len > 0.0f ? (v[0] * dirs[k][0] + v[1] * dirs[k][1]) / len : 0.0f;
         if (along > most) { most = along; best = k; }
     }
+    if (most < CO_LW_MEET_CALL_ALONG * speed) return -1; /* crossing the road: no side is where they are going */
     if (best >= 0) *only = speed >= CO_LW_MEET_PACE;
     return best;
 }

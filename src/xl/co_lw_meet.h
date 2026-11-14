@@ -49,6 +49,7 @@
 #define CO_LW_MEET_CALL_PAST 4
 #define CO_LW_MEET_CALL_PAST_MAX 8
 #define CO_LW_MEET_CALL_MOVING 1.0f  /* m/s: a player this fast has patrols called from ahead of them */
+#define CO_LW_MEET_CALL_ALONG 0.5f   /* of their speed along a side of the road (60 degrees off it at most): that side is ahead */
 #define CO_LW_MEET_CALL_LOST 150.0f  /* m farther from its player than it has been: a called patrol is let go */
 #define CO_LW_MEET_CALL_MIN_MS 120000u /* a patrol in two minutes for one player at most: one a minute read as a conveyor, not as traffic */
 /* Each call is off its even time by up to this many percent of the period, either way, so the time between two
@@ -121,8 +122,8 @@ int co_lw_meet_far_room(int farUnits, int roadFar, int members, int limit, int o
  * bubble on a road. Faster, the bubble would refuse them. */
 uint32_t co_lw_meet_call_ms(int cap, int members, int sharers, float way, float speed);
 /* The side of the road a moving player's patrol is called from: of the `n` directions `dirs` out of the player's
- * road node, the one most along the velocity `v` (m/s). -1 for a player slower than CO_LW_MEET_CALL_MOVING (the
- * sides then take turns). `only` is set when the player is as fast as a patrol walks: one called from another side
+ * road node, the one most along the velocity `v` (m/s). -1 for a player slower than CO_LW_MEET_CALL_MOVING, or
+ * one who crosses the road (under CO_LW_MEET_CALL_ALONG of the speed along any side): the sides then take turns. `only` is set when the player is as fast as a patrol walks: one called from another side
  * would never catch up. */
 int co_lw_meet_call_ahead(const float* v, const float (*dirs)[2], int n, int* only);
 /* 1 while a called patrol's way goes on beyond the `past` nodes it has past its player: `fork` when the road ahead

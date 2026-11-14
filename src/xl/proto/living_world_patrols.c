@@ -71,7 +71,7 @@ static struct
 } g_lwMeet;
 /* A patrol called along the road to a player on it (co_lw_meet.h): each player's next call and side in turn; the
  * player + 1 a patrol was called to; the road nodes around the player; a patrol's stand beyond the band. */
-static struct { ULONGLONG at[CO_LW_MEET_PLAYERS], slot[CO_LW_MEET_PLAYERS], tickAt; uint8_t turn[CO_LW_MEET_PLAYERS], begun[CO_LW_MEET_PLAYERS]; uint32_t called, none, came, start, lost; } g_lwCall;
+static struct { ULONGLONG at[CO_LW_MEET_PLAYERS], slot[CO_LW_MEET_PLAYERS], tickAt; uint8_t turn[CO_LW_MEET_PLAYERS], begun[CO_LW_MEET_PLAYERS]; uint32_t called, none, came, cameOther, start, lost, notes; } g_lwCall;
 static float g_lwCallLeast[LW_SQUADS_MAX]; /* a called patrol's nearest to its player since the call */
 static uint8_t g_lwCallOf[LW_SQUADS_MAX], g_lwCallHops[LW_NODES_MAX], g_lwCallSide[LW_NODES_MAX];
 static uint16_t g_lwCallUp[LW_NODES_MAX], g_lwCallQueue[LW_NODES_MAX];
@@ -540,6 +540,9 @@ static int LwMeetPriority(const LwSquad* q)
     return q->state == LW_OFFLINE && q->intent == LW_PATROL && (g_lwMeetSince[q - g_lwSquads] != 0 || (g_lwMeetMark[q - g_lwSquads] & LW_MEET_ON_ROAD));
 }
 static int LwMeetNote(void) { return g_lwMeet.notes < LW_MEET_NOTES ? (int)++g_lwMeet.notes : 0; }
+/* The call lines have their own count: the other meet lines of a busy mission would use theirs up, and a run is
+ * read by the calls. */
+static int LwCallNote(void) { return g_lwCall.notes < LW_MEET_NOTES ? (int)++g_lwCall.notes : 0; }
 /* Test command "meet 0|1": these rules alone, off or on, for a before value under the same patrol rules. */
 static void LwMeetCmd(int on)
 {
@@ -816,9 +819,9 @@ static int LwCallFor(int i, int root)
     LwSquad* q = &g_lwSquads[best];
     LwCallSend(q, bestToward, root);
     g_lwCallOf[best] = (uint8_t)(i + 1); g_lwCallLeast[best] = 0; g_lwCall.turn[i]++; g_lwCall.called++;
-    if (LwMeetNote()) Note("living world: road patrol %d is called to player %d's road: %d road nodes out at (%.0f, %.0f), %.0f m from them, to walk in %s%s", best, i + 1, bestHops,
+    if (LwCallNote()) Note("living world: road patrol %d is called to player %d's road: %d road nodes out at (%.0f, %.0f), %.0f m from them, to walk in %s%s", best, i + 1, bestHops,
         (double)q->pos[0], (double)q->pos[1], (double)sqrtf(LwDist2(g_lwWorld.players[i], q->pos[0], q->pos[1])), bestOn ? "from the side whose turn it is" : "from another side (none stood on the one whose turn it is)",
-        g_lwMeet.notes == LW_MEET_NOTES ? " (the last such line this mission)" : "");
+        g_lwCall.notes == LW_MEET_NOTES ? " (the last such line this mission)" : "");
     return best;
 }
 /* The time to player i's next call after squad q was called: q's way online for that player (from where it comes
@@ -942,7 +945,14 @@ static void LwMeetAsked(LwSquad* q, int meet, int farAsk)
     const int idx = (int)(q - g_lwSquads);
     if (q->state == LW_OFFLINE) return;
     co_lw_meet_hold_end(&g_lwMeetHolds, idx);
-    if (g_lwCallOf[idx]) { g_lwCallOf[idx] = 0; g_lwCall.came++; }
+    if (g_lwCallOf[idx])
+    {
+        /* players in line on one road: a patrol called to an inner one comes online by the outer one, who meets it */
+        int nearest = 0;
+        for (int i = 1; i < g_lwWorld.playersAt; i++) if (LwDist2(g_lwWorld.players[i], q->pos[0], q->pos[1]) < LwDist2(g_lwWorld.players[nearest], q->pos[0], q->pos[1])) nearest = i;
+        if (nearest != g_lwCallOf[idx] - 1) g_lwCall.cameOther++;
+        g_lwCallOf[idx] = 0; g_lwCall.came++;
+    }
     LwZoneClear(idx);
     memset(g_lwMeetGap[idx], 255, sizeof g_lwMeetGap[idx]); memset(g_lwMeetWatch[idx], 0, sizeof g_lwMeetWatch[idx]); g_lwMeetCame[idx] = (uint8_t)meet;
     const uint8_t onRoad = g_lwMeetMark[idx] & LW_MEET_ON_ROAD;
@@ -1108,10 +1118,10 @@ static void LwMeetNotes(void)
         "%u asked beyond the band; came online on their way in: %u from cover, %u at its edge, %u beyond the band, %u from the ring's edge; %u began to wait, %u turned back, "
         "%u steps back from a player, %u sent on an errand; %u squads gave way to them (%u times no calm hidden squad to leave, %u times the road patrols' share was full), %d holds now; "
         "their requests refused: sight %u, room %u, spacing %u, other %u (%u of them beyond the band, for the far share; %u such patrols walked on after %u s); "
-        "%u called to a player's road, %u of the called came online, %u times none to call, %u of the called let go (their player moved away); far units of patrols on a player's road %d; "
+        "%u called to a player's road, %u of the called came online (%u of them nearest another player than their own), %u times none to call, %u of the called let go (their player moved away); far units of patrols on a player's road %d; "
         "%u road patrols offline within %.0f m of a player (nearest %.0f m)%s", onRoad, waiting, g_lwMeet.looks, g_lwMeet.covered, g_lwMeet.edge, g_lwMeet.beyond, g_lwMeet.cameCover,
         g_lwMeet.cameEdge, g_lwMeet.cameBeyond, g_lwMeet.online, g_lwMeet.held, g_lwMeet.turned, g_lwMeet.back, g_lwMeet.dispatched, g_lwMeet.gaveWay, g_lwMeet.noFiller, g_lwMeet.shareNo, holds,
-        g_lwMeet.sight, g_lwMeet.room, g_lwMeet.spaced, g_lwMeet.other, g_lwMeet.farNo, g_lwMeet.zoneLeft, CO_LW_MEET_ZONE_WAIT_MS / 1000u, g_lwCall.called, g_lwCall.came, g_lwCall.none, g_lwCall.lost, g_lwMeet.roadFar, g_lwMeet.close, (double)CO_LW_MEET_CLOSE, (double)g_lwMeet.closeLeast,
+        g_lwMeet.sight, g_lwMeet.room, g_lwMeet.spaced, g_lwMeet.other, g_lwMeet.farNo, g_lwMeet.zoneLeft, CO_LW_MEET_ZONE_WAIT_MS / 1000u, g_lwCall.called, g_lwCall.came, g_lwCall.cameOther, g_lwCall.none, g_lwCall.lost, g_lwMeet.roadFar, g_lwMeet.close, (double)CO_LW_MEET_CLOSE, (double)g_lwMeet.closeLeast,
         g_lwPatrolsOld ? "; the old rules (test): no such rule" : g_lwMeetOff ? "; meet 0 (test): no such rule" : "");
     /* what the road patrols take of each bubble is the landscape's cost: a run is read by this line first */
     for (int b = 0; g_lwDensity.on == 1 && b < g_lwDensity.count; b++)
@@ -1128,7 +1138,7 @@ static void LwMeetNotes(void)
     co_lw_meet_restart(&g_lwMeetNear);
     g_lwMeet.held = g_lwMeet.online = g_lwMeet.turned = g_lwMeet.back = g_lwMeet.gaveWay = g_lwMeet.noFiller = g_lwMeet.sight = g_lwMeet.room = g_lwMeet.spaced = g_lwMeet.other = g_lwMeet.close = 0;
     g_lwMeet.looks = g_lwMeet.covered = g_lwMeet.edge = g_lwMeet.beyond = g_lwMeet.cameCover = g_lwMeet.cameEdge = g_lwMeet.cameBeyond = g_lwMeet.dispatched = g_lwMeet.shareNo = 0;
-    g_lwMeet.closeLeast = 0; g_lwMeet.farNo = g_lwMeet.zoneLeft = 0; g_lwCall.called = g_lwCall.came = g_lwCall.none = g_lwCall.lost = 0;
+    g_lwMeet.closeLeast = 0; g_lwMeet.farNo = g_lwMeet.zoneLeft = 0; g_lwCall.called = g_lwCall.came = g_lwCall.cameOther = g_lwCall.none = g_lwCall.lost = 0;
 }
 /* The squad whose next node had no navmesh within 25 m (the 30 s line only counts them). */
 static void LwNoFaceNote(const LwSquad* q)
@@ -1714,6 +1724,8 @@ void CoXlTestLwCallPlayer(int i, float x, float vx)
 }
 /* Player `i`'s even time for its next call. */
 uint64_t CoXlTestLwCallSlot(int i) { return g_lwCall.slot[i]; }
+/* The called patrols that came online nearest another player than their own, since the world was made. */
+int CoXlTestLwCallCameOther(void) { return (int)g_lwCall.cameOther; }
 /* The called patrols let go since the world was made. */
 int CoXlTestLwCallLost(void) { return (int)g_lwCall.lost; }
 /* The player + 1 squad `idx` is called to, 0 for none. */

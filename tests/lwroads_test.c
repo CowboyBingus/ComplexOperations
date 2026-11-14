@@ -49,6 +49,7 @@ void CoXlTestLwCallEnd(void);
 void CoXlTestLwCallGroup(int idx, int group);
 void CoXlTestLwCallPlayer(int i, float x, float vx);
 int CoXlTestLwCallLost(void);
+int CoXlTestLwCallCameOther(void);
 uint64_t CoXlTestLwCallSlot(int i);
 float CoXlTestLwSeenScopedOf(float radius);
 
@@ -527,6 +528,12 @@ int main(void)
           CHECK(CoXlTestLwCallTick(late) == 1 && CoXlTestLwCallTick(late + 1000u) == 2);
           CHECK((CoXlTestLwCallSlot(0) - t0) % p0 == 0 && (CoXlTestLwCallSlot(1) - t0 - p1 / 2u) % p1 == 0 && CoXlTestLwCallSlot(0) > late && CoXlTestLwCallSlot(1) > late);
           CHECK(CoXlTestLwCallTick(late + (uint64_t)p0 * 45u / 100u) == 2); /* neither again inside 6/10 of a period less the jitter */ }
+        g_case = "two players in line on one road: a patrol called to the inner one that comes online by the outer one is counted as such";
+        { const float line[2][2] = {{2400, 20}, {1400, 20}}, west[1] = {350}, east[1] = {3650}; const int in[1] = {1}, back[1] = {-1};
+          CoXlTestLwCallWorld(40, 0, line, 2, west, in, none, 1);
+          CHECK(CoXlTestLwCallOne(0, 0, o) == 0 && o[4] == 1 && CoXlTestLwCallOver(0, 3) == 0 && CoXlTestLwCallCameOther() == 1);
+          CoXlTestLwCallWorld(40, 0, line, 2, east, back, none, 1);
+          CHECK(CoXlTestLwCallOne(0, 1, o) == 0 && o[4] == 1 && CoXlTestLwCallOver(0, 3) == 0 && CoXlTestLwCallCameOther() == 0); }
         g_case = "meet 0: no patrol is called";
         CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
         CoXlTestLwSeenSwitch(0); CHECK(CoXlTestLwCallTick(1000000u) == 0); CoXlTestLwSeenSwitch(1);

@@ -80,7 +80,10 @@ int main(void)
       CHECK(co_lw_meet_call_ahead(walk, dirs, 2, &only) == 1 && only == 0);
       CHECK(co_lw_meet_call_ahead(run, dirs, 2, &only) == 1 && only == 1 && co_lw_meet_call_ahead(back, dirs, 2, &only) == 0 && only == 1);
       CHECK(co_lw_meet_call_ahead(north, cross, 3, &only) == 2 && only == 1);
-      CHECK(co_lw_meet_call_ahead(off, dirs, 2, &only) == -1 && only == 0); /* across the road: no side is ahead */ }
+      CHECK(co_lw_meet_call_ahead(off, dirs, 2, &only) == -1 && only == 0); /* across the road: no side is ahead */
+      { const float skew[2] = {1.5f, 3}, along[2] = {2, 3}, edge[2] = {1.5f, 2.598f};
+        CHECK(co_lw_meet_call_ahead(skew, dirs, 2, &only) == -1 && only == 0); /* 63 degrees off the road: crossing it */
+        CHECK(co_lw_meet_call_ahead(along, dirs, 2, &only) == 1 && only == 1 && co_lw_meet_call_ahead(edge, dirs, 2, &only) == 1); /* 56 and 60 degrees off: along it */ } }
     g_case = "a called patrol's way goes on 400 m past its player whatever the road does, then to the next junction, 800 m at most";
     CHECK(co_lw_meet_call_on(0, 0) == 1 && co_lw_meet_call_on(0, 1) == 1 && co_lw_meet_call_on(3, 1) == 1 && co_lw_meet_call_on(4, 1) == 0);
     CHECK(co_lw_meet_call_on(4, 0) == 1 && co_lw_meet_call_on(7, 0) == 1 && co_lw_meet_call_on(8, 0) == 0);
