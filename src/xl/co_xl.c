@@ -888,20 +888,42 @@ static uint32_t RoadsTestEdges(const uint8_t* recs, uint32_t n, RoadEdge* e)
     return n;
 }
 void CoXlTestRoadsWidths(const uint8_t* recs, uint32_t n, char* out, size_t size) { RoadEdge e[64]; n = RoadsTestEdges(recs, n, e); RoadsWidths(e, n, out, size); }
-void CoXlTestRoadsPoints(const uint8_t* recs, uint32_t n, uint32_t points, uint32_t counts[4], double km[2])
+void CoXlTestRoadsPoints(const uint8_t* recs, uint32_t n, uint32_t points, uint32_t counts[8], double km[2])
 {
     RoadEdge e[64]; RoadsPoints c;
     n = RoadsTestEdges(recs, n, e);
     RoadsPointsCount(e, n, points, &c);
     counts[0] = c.edges; counts[1] = c.drawable; counts[2] = c.empty; counts[3] = c.emptySkeleton; km[0] = c.drawableKm; km[1] = c.emptyKm;
+    counts[4] = c.none; counts[5] = c.one; counts[6] = c.bad; counts[7] = c.demand;
 }
-void CoXlTestRoadsReach(const float* xy, uint32_t n, const uint8_t* recs, uint32_t edges, const float* pts, uint32_t points, float out[7])
+/* out: edges with points, their points; m: metres along the points and along the chords */
+void CoXlTestRoadsPaths(const uint8_t* recs, uint32_t n, const float* pts, uint32_t points, uint32_t out[2], double m[2])
 {
-    RoadEdge e[64]; RoadsReach r;
-    edges = RoadsTestEdges(recs, edges, e);
-    RoadsReachOf(xy, n, e, edges, pts, points, &r);
-    out[0] = (float)r.n; out[1] = r.pathMedian; out[2] = r.pathMax; out[3] = r.skelMedian; out[4] = r.skelMax; out[5] = r.lineMedian; out[6] = r.lineMax;
+    RoadEdge e[64]; RoadsPaths p;
+    n = RoadsTestEdges(recs, n, e);
+    RoadsPathsCount(e, n, pts, points, &p);
+    out[0] = p.edges; out[1] = p.points; m[0] = p.metres; m[1] = p.chords;
 }
+/* comp: each edge's part; largest: the largest part's id, its edges and its metres along the points. Returns the parts. */
+uint32_t CoXlTestRoadsParts(const uint8_t* recs, uint32_t n, const float* pts, uint32_t points, uint32_t comp[64], uint32_t largest[2], double* metres)
+{
+    RoadEdge e[64];
+    n = RoadsTestEdges(recs, n, e);
+    const uint32_t parts = RoadsComponents(e, n, points, comp);
+    largest[0] = RoadsLargest(e, n, pts, comp, parts, &largest[1], metres);
+    return parts;
+}
+/* out[7]: how many parts hold the places' nearest paths; part (or NULL): each place's */
+void CoXlTestRoadsReach(const float* xy, uint32_t n, const uint8_t* recs, uint32_t edges, const float* pts, uint32_t points, uint32_t* part, float out[8])
+{
+    RoadEdge e[64]; RoadsReach r; uint32_t comp[64];
+    edges = RoadsTestEdges(recs, edges, e);
+    RoadsComponents(e, edges, points, comp);
+    RoadsReachOf(xy, n, e, edges, pts, points, comp, part, &r);
+    out[0] = (float)r.n; out[1] = r.pathMedian; out[2] = r.pathMax; out[3] = r.skelMedian; out[4] = r.skelMax; out[5] = r.lineMedian; out[6] = r.lineMax;
+    out[7] = (float)r.components;
+}
+DWORD CoXlTestTsvLength(char* line, size_t size, int len) { return TsvLength(line, size, len); }
 double CoXlTestRoadsDisc(uint32_t world, float fraction, double* radius) { return RoadsDiscKm2(world, fraction, radius); }
 /* The locations' ops as the dispatcher records them, and the stamp plan's count, for the level set up last. */
 void CoXlTestRoadsLevel(const uint8_t* ops, uint32_t n, uint32_t planned)

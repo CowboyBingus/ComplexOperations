@@ -4317,6 +4317,14 @@ static void WorldMemoryTick(void)
  * keeps its op), and locations-<level>.tsv after op 0x2B: index, op, position in world metres (the generator's less half
  * the world; x east, y north), type (+0xD8) and flags (+0xD4) of each 0xE0 record. */
 static uint8_t g_locationOp[CO_LOCATIONS_MAX];
+/* What WriteFile may take of a line: snprintf returns the length it wanted, so a line of wild values is cut to its
+ * buffer and still ends in a newline; 0 when snprintf failed. */
+static DWORD TsvLength(char* line, size_t size, int len)
+{
+    if (len < 0) return 0;
+    if ((size_t)len >= size) { len = (int)size - 1; line[len - 1] = '\n'; }
+    return (DWORD)len;
+}
 static void WorldLocationsNote(uintptr_t block, uint32_t total)
 {
     uint32_t offset = 0;
@@ -4343,7 +4351,7 @@ static void WorldLocationsNote(uintptr_t block, uint32_t total)
             SafeRead(block + g_importantList + 0x108ull * i + 0xD8, &objective, 4);
         int len = snprintf(line, sizeof line, "%u\t0x%X\t%.1f\t%.1f\t%u\t0x%X\t%08x\n", i, g_locationOp[i], (double)(xy[0] - half), (double)(xy[1] - half),
             type, flags, objective);
-        WriteFile(file, line, (DWORD)len, &wrote, NULL);
+        WriteFile(file, line, TsvLength(line, sizeof line, len), &wrote, NULL);
         written++;
     }
     CloseHandle(file);
@@ -4381,7 +4389,7 @@ static void WorldLocationsNote(uintptr_t block, uint32_t total)
         memcpy(range, rec + 0x38, 8);
         int len = snprintf(line, sizeof line, "%u\t%.1f\t%.1f\t%.1f\t%.1f\t%.2f\t%u\t0x%X\t%d\t%d\t%u\t%u\n", e, (double)(a[0] - half), (double)(a[1] - half),
             (double)(b[0] - half), (double)(b[1] - half), (double)width, rec[0x34], flags, t0, t1, range[0], range[1]);
-        WriteFile(file, line, (DWORD)len, &wrote, NULL);
+        WriteFile(file, line, TsvLength(line, sizeof line, len), &wrote, NULL);
     }
     CloseHandle(file);
     for (uint32_t i = 0; i < subs; i++) if (typeOf[i] >= 0 && typeOf[i] < 256) used[typeOf[i]] = 1;
