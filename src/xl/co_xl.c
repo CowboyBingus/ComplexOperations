@@ -873,6 +873,13 @@ uint32_t CoXlTestStreamDrain(double ms, uint32_t* waiting)
     ReleaseSRWLockExclusive(&g_streamLock);
     return done;
 }
+/* A frame's WorldStreamTick with its scan due, the slots set up counted as deferred. */
+void CoXlTestStreamTick(void)
+{
+    g_stream.nextScan = 0;
+    if (g_stream.deferred == 0) g_stream.deferred = g_stream.count;
+    WorldStreamTick(0.016f);
+}
 void CoXlTestStreamOutSince(uint32_t i, ULONGLONG since) { g_streamOutSince[i] = since; }
 void co_capacity_test_places(int region, uint32_t places);
 /* Slots [base, high) as live far window stamps, then one eviction over the bodies' budget: the far removals queued. */

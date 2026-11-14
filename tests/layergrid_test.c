@@ -38,6 +38,8 @@ int CoXlTestStreamQueued(uint32_t i);
 void CoXlTestStreamScan(void);
 uint32_t CoXlTestStreamScanFrames(int frames);
 uint32_t CoXlTestStreamDrain(double ms, uint32_t* waiting);
+void CoXlTestStreamTick(void);
+void CoXlTestMission(uintptr_t level, int complex);
 void CoXlTestStreamOutSince(uint32_t i, unsigned long long since);
 uint32_t CoXlTestWindowEvictFar(uint32_t base, uint32_t high);
 void CoXlTestStreamSlotState(uint32_t i, int* live, int* due, uint64_t* unit);
@@ -159,6 +161,7 @@ static void Start(const char* name)
     g_coMod = (HfMod*)&g_fake;
     CoXlTestGame((uintptr_t)g_fake.image);
     CoXlTestWorldLevel((uintptr_t)g_lg, 0);
+    { const uint32_t play = 3; memcpy(g_lg + 0x1E4, &play, 4); } /* the level generator's state: finished, in play */
     CoXlTestGenLevel(8.0f);
     for (int k = 0; k < 4; k++) { g_coarse[k] = U16(40.0f); g_tileA[k] = U16(45.0f); g_tileB[k] = U16(30.0f); g_tileC[k] = U16(20.0f); }
     CoXlTestCoarse(g_coarse, 2, 16383.5f);
@@ -203,6 +206,23 @@ static void Slot(uint32_t i, float x, float y, float side, uint64_t unit, int mi
     float box[4] = {x - side / 2, y - side / 2, x + side / 2, y + side / 2};
     memcpy(g_array + (size_t)i * 0xE0 + 0xB0, box, sizeof box);
     CoXlTestStreamSlot(i, x, y, unit, mission);
+}
+
+static int Lines(const char* text)
+{
+    int n = 0;
+    for (const char* at = g_fake.log; (at = strstr(at, text)) != NULL; at++) n++;
+    return n;
+}
+static void Generator(uint32_t state) { memcpy(g_lg + 0x1E4, &state, 4); }
+/* The game's state as WorldStreamTick asks it: [game+0x3326340]+0xAC21C, 4 in a mission (and through its unload). */
+static void InMission(void)
+{
+    static uint8_t* object;
+    if (object == NULL) object = (uint8_t*)VirtualAlloc(NULL, 0xAD000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    const uint64_t at = (uint64_t)(uintptr_t)object; const uint32_t mission = 4;
+    memcpy(g_fake.image + 0x3326340u, &at, 8);
+    memcpy(object + 0xAC21Cu, &mission, 4);
 }
 
 /* The mission world's physics bodies in use of 1048576 and its navmesh cutters of 1000 (the readers'
@@ -553,6 +573,45 @@ int main(void)
     CHECK(CoXlTestLayerSnap(SpawnUnit(2100.0f, AY, 0, 0), level) == Field(2100.0f, AY)); /* a placed-unit call on its own still gets the grid */
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
     CoXlTestProbePlayer(0, 0.0f, 0.0f);
+
+    /* The mission's unload (game 0xAB36F0) steps the generator to 0 and destroys every unit of the world itself while
+     * the game state still says mission: from then on the streamer destroys nothing and scans nothing. */
+    Start("the level leaves play: the streamer's tick does nothing and no removal destroys a unit");
+    CoXlTestMission((uintptr_t)g_lg, 1);
+    StreamGame();
+    InMission();
+    Stream(4); /* the fourth holds no unit */
+    a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);
+    CoXlTestLayerTile(a, 1, AX, AY);
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTile(b, 1, BX, AY);
+    Slot(0, BX + 500.0f, AY, 20.0f, 0x1000, 0);
+    Slot(1, BX + 1600.0f, AY, 20.0f, 0x2000, 0);
+    Slot(2, BX + 400.0f, AY, 20.0f, 0x3000, 0);
+    CoXlTestStreamTick(); /* in play, nothing to take out */
+    CHECK(g_destroys == 0 && Lines("the level is no longer in play") == 0);
+    CHECK(CoXlTestStampsReplace(b, BX, AY) == 2 && CoXlTestStreamFlag(0) && CoXlTestStreamFlag(2));
+    Generator(0); /* the unload's reset */
+    CoXlTestStreamTick();
+    CHECK(g_destroys == 0 && !CoXlTestStreamQueued(0) && !CoXlTestStreamQueued(2)); /* no scan either */
+    CHECK(fake_host_logged("the level is no longer in play (generator state 0): streaming stops with 3 stamp units held and 0 removals queued; none is destroyed here"));
+    CoXlTestStreamTick();
+    CHECK(g_destroys == 0 && Lines("the level is no longer in play") == 1);
+    uint32_t left = 9;
+    CHECK(CoXlTestStreamScanFrames(1) == 0 && g_destroys == 0); /* a removal reached past the tick's test: its own */
+    Generator(4); /* cancelling */
+    CoXlTestStreamTick();
+    CHECK(CoXlTestStreamScanFrames(1) == 0 && CoXlTestStreamDrain(1.0e9, &left) == 0 && g_destroys == 0);
+    int goneLive = 0, goneDue = 0; uint64_t goneUnit = 0;
+    CoXlTestStreamSlotState(0, &goneLive, &goneDue, &goneUnit);
+    CHECK(goneLive && goneUnit == 0x1000 && CoXlTestStreamFlag(0)); /* held as it was */
+    Generator(3); /* the same level in play: the removals go as before */
+    CoXlTestStreamTick();
+    CHECK(g_destroys == 2);
+    CoXlTestStreamSlotState(0, &goneLive, &goneDue, &goneUnit);
+    CHECK(!goneLive && goneUnit == 0);
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestMission(0, 0);
 
     Start("the layer spawn's two callers with a heightfield go through it, only on the reviewed code");
     uint8_t* exe = fake_host_exe();

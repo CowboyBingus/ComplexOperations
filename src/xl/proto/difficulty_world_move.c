@@ -519,6 +519,17 @@ static uintptr_t MoveMergeObject(void)
     return level + 0x2B30u;
 }
 
+/* `object` is one of the pointers of a world list. R+0x108's destroy ([api+8]+0x478, exe 0x1B3F90) looks for it in
+ * [world+0x230910] (count +0x230908) and reads the object all the same when it is not there (0x1B3FDE). */
+static int MoveListed(uint64_t countAt, uint64_t listAt, uint64_t object)
+{
+    uint32_t count = 0;
+    uint64_t list = 0, entry = 0;
+    if (SafeRead(countAt, &count, 4) || SafeRead(listAt, &list, 8) || count > 4096 || list == 0) return 0;
+    for (uint32_t i = 0; i < count; i++) if (!SafeRead(list + 8ull * i, &entry, 8) && entry == object) return 1;
+    return 0;
+}
+
 /* The merge as the level's 0x66 and 0x67 leave it (the parts this build re-created); 1 when torn down. `left`: the
  * level has ended and its own teardown (0xF6FF60) has run: that released the 0x94 lookup and ended the environment's
  * slot 5 (0xF708AB), the records may be the next generation's, and the saved environment pointer may be gone. */
@@ -548,7 +559,8 @@ static int MoveTeardown(int left)
     if (n0 != 0) destroyNode(world, n0);
     if (n1 != 0 && n1 != g_move.nodeOld) destroyNode(world, n1);
     g_move.nodeOld = n1;
-    if (r108 != 0) destroyUnit(world, r108);
+    /* after the level only one the world still lists is its to destroy; 0xFCF2F0 below skips a zero */
+    if (r108 != 0 && (!left || MoveListed(world + 0x230908u, world + 0x230910u, r108))) destroyUnit(world, r108);
     *(volatile uint32_t*)(R + 8) = 0; *(volatile uint64_t*)(R + 0x108) = 0;
     /* 0x66: 0x94's lookup ([record+0x18]: its readback +0x10, its texture +0x18 under 0xDBCD240D) */
     uint64_t lookup = 0, rd = 0, tex = 0;

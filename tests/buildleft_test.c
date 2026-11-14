@@ -34,6 +34,7 @@ static const char* g_case;
 #define ENGINE 0x3700000u  /* [game+0x3326340]; +0x10E8 the main world */
 #define UNITS 0x230588u    /* world: the unit count, the array's address 8 bytes on */
 #define TERRAINS 0x230550u /* world: the terrains' map (empty here but for one tile) */
+#define WORLD_SIZE 0x231000u
 #define MERGE 0x2B30u      /* level: the merge object R */
 #define STEP_REPLAY 6      /* MV_REPLAY */
 #define STEP_STAMPS 2      /* MV_STAMPS */
@@ -76,6 +77,17 @@ static int Lines(const char* text)
     int n = 0;
     for (const char* at = g_fake.log; (at = strstr(at, text)) != NULL; at++) n++;
     return n;
+}
+
+/* The list R+0x108's destroy looks its object up in ([world+0x230910], count +0x230908): the merge's 0xCA00 last of
+ * three, or not in it. */
+static void Cameras(int listed)
+{
+    static uint64_t list[3];
+    const uint64_t at = (uint64_t)(uintptr_t)list; const uint32_t n = 3;
+    list[0] = 0xC100; list[1] = 0xC200; list[2] = listed ? 0xCA00 : 0xC300;
+    memcpy(g_world + 0x230908u, &n, 4); memcpy(g_world + 0x230910u, &at, 8);
+    if (listed < 0) memset(g_world + 0x230908u, 0, 16); /* an empty world: no list */
 }
 
 static uint32_t ListCount(void) { uint32_t n; memcpy(&n, g_world + UNITS, 4); return n; }
@@ -156,7 +168,8 @@ static void Start(const char* name)
     Jump(image + 0xFCF2F0u, FakeMerged); Jump(image + 0x1009890u, FakeEnv);
     VirtualProtect(image + 0xFCF000u, 0x1000, PAGE_EXECUTE_READWRITE, &old);
     VirtualProtect(image + 0x1009000u, 0x1000, PAGE_EXECUTE_READWRITE, &old);
-    memset(g_world, 0, TERRAINS + 0x100); memset(g_other, 0, TERRAINS + 0x100);
+    memset(g_world, 0, WORLD_SIZE); memset(g_other, 0, WORLD_SIZE);
+    Cameras(1);
     memset(g_level, 0, 0x10000); memset(g_gen, 0, 0x1000); memset(g_records, 0, 0x4000);
     { const uint64_t manager = 0xA5A5ull, gen = (uint64_t)(uintptr_t)g_gen; memcpy(g_world + 0x230050u, &manager, 8); memcpy(g_level + 0x2C8, &gen, 8); }
     CoXlTestGame((uintptr_t)image);
@@ -189,8 +202,8 @@ static void Lookup(void)
 
 int main(void)
 {
-    g_world = (uint8_t*)VirtualAlloc(NULL, TERRAINS + 0x100, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    g_other = (uint8_t*)VirtualAlloc(NULL, TERRAINS + 0x100, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    g_world = (uint8_t*)VirtualAlloc(NULL, WORLD_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    g_other = (uint8_t*)VirtualAlloc(NULL, WORLD_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     g_level = (uint8_t*)VirtualAlloc(NULL, 0x10000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     g_gen = (uint8_t*)VirtualAlloc(NULL, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     g_records = (uint8_t*)VirtualAlloc(NULL, 0x4000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -402,6 +415,27 @@ int main(void)
     CoXlTestWorldShip();
     CoXlTestWorldLevel((uintptr_t)lg, 0);
     CHECK(Lines("was cut short") == 1);
+
+    Start("R+0x108 the unload took out of the world's list is not handed to the destroy; the rest goes on");
+    Merge(1);
+    Cameras(0);
+    CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 1, 1, 0, (uint64_t)(uintptr_t)g_records, 1);
+    CoXlTestWorldShip();
+    CHECK(Count(C_CAMERA, 0) == 0 && Read(g_level + MERGE, 0x108, 8) == 0 && Count(C_MERGED, 0) == 1 && Count(C_NODE, 0x222) == 1 && CoXlTestBuildLeft(1) == 0);
+    CHECK(fake_host_logged("the merge torn down"));
+
+    Start("a world with no such list: R+0x108 is not handed to the destroy either");
+    Merge(1);
+    Cameras(-1);
+    CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 1, 1, 0, (uint64_t)(uintptr_t)g_records, 1);
+    CoXlTestWorldShip();
+    CHECK(Count(C_CAMERA, 0) == 0 && Read(g_level + MERGE, 0x108, 8) == 0 && Count(C_MERGED, 0) == 1);
+
+    Start("in play R+0x108 goes to the destroy as the game's own teardown hands it, listed or not");
+    Merge(0);
+    Cameras(0);
+    CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 1, 1, 0, (uint64_t)(uintptr_t)g_records, 1);
+    CHECK(CoXlTestTeardown() == 1 && Count(C_CAMERA, 0xCA00) == 1 && Read(g_level + MERGE, 0x108, 8) == 0);
 
     Start("the generation block names another merge object: the merge is left alone");
     Merge(0);
