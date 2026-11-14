@@ -113,6 +113,18 @@ int main(void)
     s = At(2, 40000, 0, 0, CO_LW_VIEW_UNSEEN); s.fighting = 1; s.patrol = 0; co_lw_view_sample(&g_v, &s);
     CHECK(g_v.sums.fights == 1);
 
+    Fresh("a fight after the squad was hurt is told from one it began unhurt");
+    s = At(3, 1000, 0, 0, CO_LW_VIEW_UNSEEN); s.harm = 40; co_lw_view_sample(&g_v, &s);       /* online with old wounds */
+    s = At(3, 12000, 0, 0, CO_LW_VIEW_UNSEEN); s.harm = 40; s.fighting = 1; co_lw_view_sample(&g_v, &s);
+    CHECK(g_v.sums.fights == 1 && g_v.sums.fightsHit == 0);
+    s = At(3, 13000, 0, 0, CO_LW_VIEW_UNSEEN); s.harm = 90; co_lw_view_sample(&g_v, &s);       /* hurt in the fight: no new one */
+    s = At(3, 24000, 0, 0, CO_LW_VIEW_UNSEEN); s.harm = 90; co_lw_view_sample(&g_v, &s);
+    s = At(3, 25000, 0, 0, CO_LW_VIEW_UNSEEN); s.harm = 91; s.fighting = 1; co_lw_view_sample(&g_v, &s);
+    CHECK(g_v.sums.fights == 2 && g_v.sums.fightsHit == 1);
+    s = At(4, 1000, 0, 0, CO_LW_VIEW_UNSEEN); s.harm = 5; co_lw_view_sample(&g_v, &s);
+    s = At(4, 12000, 0, 0, CO_LW_VIEW_UNSEEN); s.harm = 4; s.fighting = 1; co_lw_view_sample(&g_v, &s); /* less harm (a member left the list) is no hit */
+    CHECK(g_v.sums.fights == 3 && g_v.sums.fightsHit == 1);
+
     Fresh("far units and their standing share");
     s = At(1, 1000, 0, 0, CO_LW_VIEW_UNSEEN); s.sightline = 1; co_lw_view_sample(&g_v, &s);
     s = At(1, 2000, 0, 0, CO_LW_VIEW_UNSEEN); s.sightline = 1; co_lw_view_sample(&g_v, &s);
@@ -123,12 +135,38 @@ int main(void)
     s = At(1, 7000, 22, 0, CO_LW_VIEW_UNSEEN); s.sightline = 1; co_lw_view_sample(&g_v, &s);
     CHECK(g_v.sums.farUnitMs == 8000 + 24000 + 8000 && g_v.sums.farStandMs == 8000);
 
-    g_case = "the far share: by sightline, beyond R_on, and walking";
-    CHECK(co_lw_view_far(1, 251.0f * 251.0f, 250.0f, 0) == 1);
-    CHECK(co_lw_view_far(1, 250.0f * 250.0f, 250.0f, CO_LW_VIEW_STAND_MS - 1) == 1);
-    CHECK(co_lw_view_far(0, 251.0f * 251.0f, 250.0f, 0) == 0);
-    CHECK(co_lw_view_far(1, 249.0f * 249.0f, 250.0f, 0) == 0);
-    CHECK(co_lw_view_far(1, 600.0f * 600.0f, 250.0f, CO_LW_VIEW_STAND_MS) == 0);
+    g_case = "a far squad: by sightline and beyond R_on; walking, or standing once it has stood 30 s";
+    CHECK(co_lw_view_far(1, 251.0f * 251.0f, 250.0f, 0) == CO_LW_VIEW_FAR_WALKS);
+    CHECK(co_lw_view_far(1, 250.0f * 250.0f, 250.0f, CO_LW_VIEW_STAND_MS - 1) == CO_LW_VIEW_FAR_WALKS);
+    CHECK(co_lw_view_far(0, 251.0f * 251.0f, 250.0f, 0) == CO_LW_VIEW_FAR_NONE);
+    CHECK(co_lw_view_far(1, 249.0f * 249.0f, 250.0f, 0) == CO_LW_VIEW_FAR_NONE);
+    CHECK(co_lw_view_far(1, 249.0f * 249.0f, 250.0f, CO_LW_VIEW_STAND_MS) == CO_LW_VIEW_FAR_NONE);
+    CHECK(co_lw_view_far(1, 600.0f * 600.0f, 250.0f, CO_LW_VIEW_STAND_MS) == CO_LW_VIEW_FAR_STANDS);
+    g_case = "standing far squads have a share of their own and count against the walking ones' only past it";
+    CHECK(co_lw_view_far_sum(10, 0, 18) == 10 && co_lw_view_far_sum(10, 18, 18) == 10);
+    CHECK(co_lw_view_far_sum(10, 19, 18) == 11 && co_lw_view_far_sum(0, 36, 18) == 18 && co_lw_view_far_sum(8, 40, 18) == 30);
+    {   /* squads of 8 come online while the sum leaves room, and every one then stands: never more than two shares */
+        int walking = 0, standing = 0;
+        for (int turn = 0; turn < 20; turn++)
+        {
+            for (int k = 0; k < 8 && co_lw_view_far_sum(walking, standing, 18) + 8 <= 18; k++) walking += 8;
+            standing += walking; walking = 0;
+        }
+        CHECK(standing == 32 && standing <= 2 * 18);
+    }
+
+    g_case = "a scan of three a turn starts where the last one stopped: every squad gets its turn";
+    {
+        uint32_t start = 0, tested = 0;
+        for (int turn = 0; turn < 4; turn++)
+        {
+            for (uint32_t k = 0; k < 3; k++) tested |= 1u << co_lw_view_scan_at(start, k, 10);
+            start = co_lw_view_scan_at(start, 3, 10);
+        }
+        CHECK(tested == 0x3FFu && start == 2);
+        CHECK(co_lw_view_scan_at(7, 0, 10) == 7 && co_lw_view_scan_at(7, 3, 10) == 0 && co_lw_view_scan_at(9, 10, 10) == 9);
+        CHECK(co_lw_view_scan_at(12, 1, 10) == 3 && co_lw_view_scan_at(5, 2, 0) == 0);
+    }
 
     Fresh("a player's speed and way; a jump is no speed");
     co_lw_view_player(&g_v, 0, origin, 1000);
@@ -167,7 +205,7 @@ int main(void)
     CHECK(co_lw_view_player_note(&g_v, 1, 7000, line, sizeof line) == 0 && co_lw_view_player_note(&g_v, CO_LW_VIEW_PLAYERS, 7000, line, sizeof line) == 0);
     CHECK(co_lw_view_note(&g_v, 7000, line, sizeof line) == 1);
     CHECK(strcmp(line, "patrols (6 s): 0.5 squads online on average (4.0 units), 0.0 of them moving, 0.0 by a road; far units 4.0, "
-        "100% of them standing; 0 fights started by patrol squads") == 0);
+        "100% of them standing; 0 fights began for patrol squads (0 after the squad was hurt first)") == 0);
     CHECK(co_lw_view_player_note(&g_v, 0, 7000, line, sizeof line) == 1);
     CHECK(strcmp(line, "view of player 1 (6 s, 5.0 m/s): patrol squads in a clear line from the eye 0.5 within 300 m (4.0 units), "
         "0.0 from there to the draw limit (0.0 units); 0.0 of them moving, 0.0 by a road; 1 sightings began (0 of a moving squad)") == 0);

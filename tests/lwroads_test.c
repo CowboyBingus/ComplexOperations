@@ -68,6 +68,20 @@ int main(void)
     for (int i = 0; i <= 40; i++) { zig[i][0] = 6.0f * (float)i; zig[i][1] = (i & 1) ? 8.0f : 0.0f; }   /* 10 m a step, 6 m of it forward */
     CHECK(co_lw_roads_cut((const float (*)[2])zig, 0, 41, 100.0f, out, 16) == 3 && out[0] == 10 && out[2] == 30);
 
+    g_case = "a road patrol's next node lies on a road and is not the one it came from";
+    {
+        const uint8_t kind[8] = {1, 2, 0, 2, 0, 2, 1, 0};
+        const uint16_t next[5] = {2, 1, 4, 3, 5};   /* two grid nodes among three road nodes */
+        uint32_t got = 0;
+        for (uint32_t rnd = 0; rnd < 6; rnd++) got |= 1u << co_lw_roads_step(next, 5, kind, -1, rnd);
+        CHECK(got == ((1u << 1) | (1u << 3) | (1u << 5)));
+        CHECK(co_lw_roads_step(next, 5, kind, 3, 0) == 1 && co_lw_roads_step(next, 5, kind, 3, 1) == 5 && co_lw_roads_step(next, 5, kind, 3, 2) == 1);
+        CHECK(co_lw_roads_step(next, 5, kind, 1, 0) == 3);
+        g_case = "a road's end: no way on but back, or only grid nodes";
+        CHECK(co_lw_roads_step(next, 2, kind, 1, 7) == -1 && co_lw_roads_step(next, 1, kind, -1, 0) == -1 && co_lw_roads_step(next, 0, kind, -1, 0) == -1);
+        CHECK(co_lw_roads_step(next + 1, 1, kind, -1, 9) == 1);
+    }
+
     if (g_failed) { printf("%d check(s) failed\n", g_failed); return 1; }
     return 0;
 }

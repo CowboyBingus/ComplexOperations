@@ -505,7 +505,7 @@ typedef struct LwSquad
 static int LwIntentArrived(LwSquad* q); static int LwIntentGoal(LwSquad* q); static void LwIntentOnline(LwSquad* q, const uint32_t* members, int n, const float* at);
 static int LwSteerOk(const LwSquad* q); static uint32_t LwAwareDetector(uint32_t unit); static void LwIntentOffline(LwSquad* q); static int LwIntentHold(LwSquad* q, float nx, float ny); static int LwIntentInside(LwSquad* q); static int LwIntentLeg(LwSquad* q, float dt); static int LwTerritoryGoalOk(const LwSquad* q, int node); static void LwTerritoryTick(void); static void LwIntentTrace(void); static void LwAggroTrace(void); static void LwRetakeScan(void); static void LwTestClear(int seq, uint32_t entity); static void LwRetakeWait(int seq, float s); static void LwRetakeUnfit(int seq); static void LwRetakeTakenCmd(int seq); static int64_t LwFillMasks(uintptr_t desc, float* budget, char* trace, size_t traceLen); static void LwNoiseDrain(void); static void LwHearNote(void); static void LwFightScan(void); static void LwRushNote(void); static void LwTestNoise(int seq, int type, float dx, float dy);
 static void LwDensityOnline(const float* pos, uint32_t members); static int LwDensityOn(void); static int LwDensityRoom(const float* pos, uint32_t members, uint32_t held, char* why, size_t whyLen); static float LwDensityPopulateUnits(int eff); static float LwFarShareLimit(void); static int LwDensitySameBubble(const LwSquad* a, const LwSquad* b); static void LwDensityTick(float dt); static void LwDensityNote(void); static void LwDensityBudgetCmd(int n); static void LwSyncCensus(int seq); /* living_world_density.c */
-static int LwPatrolFar(const LwSquad* q); static float LwLeadNear2(const float* pos); static void LwPatrolsTick(void); /* living_world_patrols.c */
+static int LwPatrolFar(const LwSquad* q); static int LwPatrolFarSum(int walking, int standing); static float LwLeadNear2(const LwSquad* q); static void LwPatrolAsked(const LwSquad* q); static int LwRoadPlan(LwSquad* q, int home); static void LwPatrolsOldCmd(int on); static void LwPatrolsTick(void); /* living_world_patrols.c */
 static void LwLodTick(void); static void LwLodNote(void); static void LwLodCmd(int on); static int LwLodFullUnits(void); /* living_world_lod.c */
 static void LwDeferTick(uintptr_t lg, uint32_t seed); static void LwDeferNote(void); static void LwSpawnSourcesNote(int seq); /* living_world_defer.c */
 static void LwSyncDump(int seq); /* living_world_density.c */
@@ -651,10 +651,10 @@ static void LwPlan(LwSquad* q)
     int local = g_lwWorld.radius > LW_ROAM;
     int home = LwTerritoryGoalOk(q, -1) && LwUnit() < 0.7f; /* 2d: most goals stay in the home region or a neighbour (D) */
     int most = (local ? 24 : 8) * (home ? 2 : 1), road = LwRoadSquad((int)(q - g_lwSquads));
+    if (road && LwRoadPlan(q, home)) return; /* along the roads from where it stands */
     for (int tries = 0; tries < most; tries++)
     {
-        int goal = (int)(LwRand() % (uint32_t)g_lwNodeCount);
-        if (tries < most / 2 && (road ? !g_lwNodeKind[goal] : g_lwNodeKind[goal] == 2)) continue; /* a road patrol's goals lie on roads, the others' off them */
+        int goal = (int)(LwRand() % (uint32_t)(g_lwNodeCount - g_lwRoadNodes)); /* the roads' own nodes, the table's last, are the road patrols' */
         if (home && tries < (local ? 24 : 8) && !LwTerritoryGoalOk(q, goal)) continue; /* then any goal, so the squad never stands still */
         float r = g_lwWorld.radius;
         if (g_lwNodes[goal].x * g_lwNodes[goal].x + g_lwNodes[goal].y * g_lwNodes[goal].y > r * r) continue;
@@ -2538,6 +2538,7 @@ static void LwTestCommands(void)
         else if (strncmp(cmds[c], "profile sites ", 14) == 0) LwFlatSitesCmd(cmds[c] + 14);
         else if (strcmp(cmds[c], "profile repick") == 0) InterlockedExchange(&g_lwFlatRepick, 1);
         else if (sscanf(cmds[c], "spawn %15s %f %f %d", mode, &d, &deg, &idx) >= 2) LwTestSpawn(seq, mode, d, deg, idx);
+        else if (sscanf(cmds[c], "patrols old %d", &idx) == 1) LwPatrolsOldCmd(idx);
         else if (sscanf(cmds[c], "offline %d", &idx) == 1 && idx >= 0 && idx < g_lwWorld.count && g_lwSquads[idx].state == LW_ONLINE) g_lwSquads[idx].forceOff = 1;
         else if (strncmp(cmds[c], "kill garrison", 13) == 0) LwKillArm();
         else if (strncmp(cmds[c], "clear garrison", 14) == 0) { unsigned id = 0; sscanf(cmds[c], "clear garrison %x", &id); LwTestClear(seq, id); }
@@ -2620,15 +2621,17 @@ static void LwTickScans(void)
 /* The budget: living members of online squads, the request of pending ones; the far ones' share is returned. */
 static int LwTickSums(int* units, int* waiting)
 {
-    int farSum = 0;
+    int farSum = 0, farStand = 0;
     for (int i = 0; i < g_lwWorld.count; i++)
     {
         const LwSquad* q = &g_lwSquads[i];
         if (!g_lwEvery[i]) continue;
         int n = q->state == LW_PENDING ? q->cap : q->state == LW_ONLINE ? q->alive : 0;
-        *units += n; if (LwPatrolFar(q)) farSum += n;
+        *units += n;
+        if (n) { int place = LwPatrolFar(q); if (place == CO_LW_VIEW_FAR_WALKS) farSum += n; else if (place == CO_LW_VIEW_FAR_STANDS) farStand += n; }
         *waiting |= q->state == LW_OFFLINE && q->cycled == 1;
     }
+    farSum = LwPatrolFarSum(farSum, farStand); /* standing far squads count past their own share (living_world_patrols.c) */
     g_lwWorld.onlineUnits = *units; g_lwWorld.farUnits = farSum;
     return farSum;
 }
@@ -2696,7 +2699,7 @@ static void LwSquadsTick(void)
             const char* why = NULL; char whyBuf[128]; /* test notes for a staged squad (pulled 2): the gate it fails */
             LwWalk(q, dt);
             if (q->state != LW_OFFLINE) continue; /* it became a garrison (2c) */
-            float near2 = LwLeadNear2(q->pos); /* the band looks ahead of a vehicle (living_world_patrols.c) */
+            float near2 = LwLeadNear2(q); /* the band looks ahead of a vehicle (living_world_patrols.c) */
             float rMin = g_lwWorld.rMin > 0 ? g_lwWorld.rMin : LW_R_MIN;
             int back = q->cycled == 1 && near2 >= rMin * rMin; /* test cycle: back at once (the budget still applies) */
             if (waiting && !back) { why = "a test-cycle squad is served first"; goto offlineDone; }
@@ -2738,6 +2741,7 @@ static void LwSquadsTick(void)
                 }
                 if (back && requested) { q->cycled = 2; Note("living world: test: squad %d comes back with its %u survivors", (int)(q - g_lwSquads), q->cap); }
                 if (q->state == LW_OFFLINE) why = g_lwOnlineWhy ? g_lwOnlineWhy : "the request was not taken";
+                LwPatrolAsked(q); /* living_world_patrols.c: its notes count a sight refusal at the edge of cover */
                 if (q->state == LW_OFFLINE && farBand && !back && g_lwOnlineWhy == g_lwRoomWhy &&
                     (strncmp(g_lwRoomWhy, "the game's 70 room", 18) == 0 || strncmp(g_lwRoomWhy, "the cap", 7) == 0))
                     LwSwapForFar(q);

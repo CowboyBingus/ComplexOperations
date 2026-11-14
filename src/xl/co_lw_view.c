@@ -74,7 +74,12 @@ void co_lw_view_sample(CoLwView* v, const CoLwViewSample* s)
         a->farUnitMs += (double)dt * s->units;
         if (!q->walking) a->farStandMs += (double)dt * s->units;
     }
-    if (s->fighting && !q->fighting && s->patrol && s->nowMs - q->calmMs >= CO_LW_VIEW_CALM_MS) a->fights++;
+    if (s->fighting && !q->fighting && s->patrol && s->nowMs - q->calmMs >= CO_LW_VIEW_CALM_MS)
+    {
+        a->fights++;
+        if (s->harm > q->harm) a->fightsHit++; /* hurt since its last calm sample: it was shot at first */
+    }
+    q->harm = s->harm;
     if (!s->fighting) { if (q->fighting) q->calmMs = s->nowMs; }
     q->fighting = (uint8_t)(s->fighting != 0);
     for (uint32_t i = 0; i < s->players && i < CO_LW_VIEW_PLAYERS; i++)
@@ -113,8 +118,20 @@ uint64_t co_lw_view_stood(const CoLwView* v, uint32_t index, uint64_t nowMs)
 
 int co_lw_view_far(int farOn, float dist2, float rOn, uint64_t stoodMs)
 {
-    return farOn && dist2 >= rOn * rOn && stoodMs < CO_LW_VIEW_STAND_MS;
+    if (!farOn || !(dist2 >= rOn * rOn)) return CO_LW_VIEW_FAR_NONE;
+    return stoodMs < CO_LW_VIEW_STAND_MS ? CO_LW_VIEW_FAR_WALKS : CO_LW_VIEW_FAR_STANDS;
 }
+
+int co_lw_view_far_sum(int walking, int standing, int limit)
+{
+    return walking + (standing > limit ? standing - limit : 0);
+}
+
+uint32_t co_lw_view_scan_at(uint32_t start, uint32_t k, uint32_t count)
+{
+    return count ? (uint32_t)(((uint64_t)start + k) % count) : 0;
+}
+
 
 int co_lw_view_note(const CoLwView* v, uint64_t nowMs, char* out, size_t size)
 {
@@ -122,9 +139,9 @@ int co_lw_view_note(const CoLwView* v, uint64_t nowMs, char* out, size_t size)
     const double ms = (double)(nowMs - v->sinceMs);
     const CoLwViewSums* a = &v->sums;
     snprintf(out, size, "patrols (%.0f s): %.1f squads online on average (%.1f units), %.1f of them moving, %.1f by a road; "
-        "far units %.1f, %.0f%% of them standing; %u fights started by patrol squads",
+        "far units %.1f, %.0f%% of them standing; %u fights began for patrol squads (%u after the squad was hurt first)",
         ms / 1000.0, a->onlineMs / ms, a->unitMs / ms, a->movingMs / ms, a->roadMs / ms, a->farUnitMs / ms,
-        a->farUnitMs > 0 ? 100.0 * a->farStandMs / a->farUnitMs : 0.0, a->fights);
+        a->farUnitMs > 0 ? 100.0 * a->farStandMs / a->farUnitMs : 0.0, a->fights, a->fightsHit);
     return 1;
 }
 

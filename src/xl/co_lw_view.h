@@ -24,10 +24,12 @@
 
 enum { CO_LW_VIEW_UNSEEN, CO_LW_VIEW_SEEN_NEAR, CO_LW_VIEW_SEEN_FAR };
 
+enum { CO_LW_VIEW_FAR_NONE, CO_LW_VIEW_FAR_WALKS, CO_LW_VIEW_FAR_STANDS };
+
 typedef struct CoLwViewSquad
 {
     uint64_t lastMs, refMs, walkedMs, calmMs, unseenMs[CO_LW_VIEW_PLAYERS];
-    float ref[2];
+    float ref[2]; uint32_t harm;
     uint8_t known, walking, fighting, seen, ever; /* seen, ever: a bit per player */
 } CoLwViewSquad;
 typedef struct CoLwViewPlayer
@@ -36,17 +38,18 @@ typedef struct CoLwViewPlayer
     uint32_t sightings, movingSightings;
     uint64_t lastMs; float last[2], v[2]; uint8_t known;
 } CoLwViewPlayer;
-typedef struct CoLwViewSums { double onlineMs, unitMs, movingMs, roadMs, farUnitMs, farStandMs; uint32_t fights; } CoLwViewSums;
+typedef struct CoLwViewSums { double onlineMs, unitMs, movingMs, roadMs, farUnitMs, farStandMs; uint32_t fights, fightsHit; } CoLwViewSums;
 typedef struct CoLwView
 {
     CoLwViewSquad squad[CO_LW_VIEW_SQUADS]; CoLwViewPlayer player[CO_LW_VIEW_PLAYERS]; CoLwViewSums sums;
     uint64_t sinceMs; long level;
 } CoLwView;
-/* sightline: came online by sightline; patrol: on no errand; fighting: a member at alert 3 or more; seen: per player, one of
- * CO_LW_VIEW_UNSEEN / SEEN_NEAR / SEEN_FAR (a clear line within CO_LW_VIEW_NEAR, or from there to the draw limit). */
+/* sightline: came online by sightline; patrol: on no errand; fighting: a member at alert 3 or more; harm: its members
+ * lost and the health the others miss, which only grows; seen: per player, one of CO_LW_VIEW_UNSEEN / SEEN_NEAR /
+ * SEEN_FAR (a clear line within CO_LW_VIEW_NEAR, or from there to the draw limit). */
 typedef struct CoLwViewSample
 {
-    uint32_t index, units; uint64_t nowMs; float pos[2];
+    uint32_t index, units, harm; uint64_t nowMs; float pos[2];
     uint8_t road, sightline, patrol, fighting, players, seen[CO_LW_VIEW_PLAYERS];
 } CoLwViewSample;
 
@@ -65,9 +68,15 @@ void co_lw_view_sample(CoLwView* v, const CoLwViewSample* s);
 void co_lw_view_gone(CoLwView* v, uint32_t index);
 /* How long the squad has stood (not walked CO_LW_VIEW_WALK), in ms; 0 for a squad not sampled yet. */
 uint64_t co_lw_view_stood(const CoLwView* v, uint32_t index, uint64_t nowMs);
-/* Whether an online squad counts against the far share: it came online by sightline, still stands beyond R_on and
- * walks. One a player has walked up to is a near squad; one that stands has lost its place to a squad that walks. */
+/* An online squad's place among the far ones: none (not by sightline, or a player has walked up to it: a near squad
+ * now), one that walks, or one that has stood CO_LW_VIEW_STAND_MS. */
 int co_lw_view_far(int farOn, float dist2, float rOn, uint64_t stoodMs);
+/* The units a new far squad is measured against. The walking ones hold the far share; the standing ones have a share
+ * of the same size of their own and count here only past it, so far squads never hold more than two shares. */
+int co_lw_view_far_sum(int walking, int standing, int limit);
+/* A scan that tests a few squads a turn starts where the last one stopped, or the first few are all it ever tests:
+ * the k-th squad of a turn that starts at `start` (the next turn's start, for k the squads this one looked at). */
+uint32_t co_lw_view_scan_at(uint32_t start, uint32_t k, uint32_t count);
 /* The host's line for the time since the last note, into `out`. 0 with nothing to say (no time passed). */
 int co_lw_view_note(const CoLwView* v, uint64_t nowMs, char* out, size_t size);
 /* Player `slot`'s line for the same time. 0 for a player not read in it. */
