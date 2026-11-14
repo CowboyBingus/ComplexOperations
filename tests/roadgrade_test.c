@@ -16,6 +16,9 @@ uint32_t CoXlTestGradeFieldPieces(uint32_t* unlinked, uint32_t* capped);
 void CoXlTestGradeRoad(float (*height)(void*, float, float), const float* pts, uint32_t n, double out[9]);
 typedef void (*TriFn)(uint64_t gui, const float* p0, const float* p1, const float* p2, uint32_t layer, const float* colour, uint64_t material, const float* uv0,
     const float* uv1, const float* uv2);
+float CoXlTestGradeBandRamp(float move, float cross);
+void CoXlTestGradePads(const float* pads, uint32_t n);
+float CoXlTestGradeFree(float world, float playable, float x, float y, int all);
 uint32_t CoXlTestGradeDraw(float world, float playable, TriFn tri, float px, uint32_t most, uint32_t* cells);
 
 static int g_failed;
@@ -422,8 +425,71 @@ static void Draw(void)
     CHECK(CoXlTestGradeDraw(WORLD, 700.0f, Tri, g_px, 2, &cells) == first && g_twice == 0 && g_bad == 0);
 }
 
+/* F1: only flat ground pins a road. A stamp's footprint and a pad's skirt under half its weight leave the level's
+ * road whole; a near tile gives way under every pad, as it takes the level's surface there. */
+static void Pins(void)
+{
+    const float world = 2048.0f, playable = 1000.0f, mid = 1024.0f;
+    float pad[6] = {0.0f, 0.0f, 20.0f, 40.0f, 1.0f, 0.0f};
+    g_case = "a flatten pad: no road on its flat ground, the whole road on the outer half of its skirt";
+    CoXlTestGradePads(pad, 1);
+    CHECK(CoXlTestGradeFree(world, playable, mid + 10.0f, mid, 0) == 0.0f && CoXlTestGradeFree(world, playable, mid + 10.0f, mid, 1) == 0.0f);
+    CHECK(CoXlTestGradeFree(world, playable, mid + 40.0f, mid, 0) == 1.0f && fabsf(CoXlTestGradeFree(world, playable, mid + 40.0f, mid, 1) - 0.5f) < 1.0e-5f);
+    CHECK(fabsf(CoXlTestGradeFree(world, playable, mid, mid + 30.0f, 0) - 0.23193f) < 1.0e-4f); /* weight 0.84375: eased between a half and the whole */
+    CHECK(fabsf(CoXlTestGradeFree(world, playable, mid, mid + 30.0f, 1) - 0.15625f) < 1.0e-5f);
+    CHECK(CoXlTestGradeFree(world, playable, mid + 61.0f, mid, 0) == 1.0f && CoXlTestGradeFree(world, playable, mid + 61.0f, mid, 1) == 1.0f);
+    g_case = "a stamp's footprint: the level's road is whole on it, a near tile's is not";
+    pad[5] = 1.0f;
+    CoXlTestGradePads(pad, 1);
+    CHECK(CoXlTestGradeFree(world, playable, mid + 10.0f, mid, 0) == 1.0f && CoXlTestGradeFree(world, playable, mid + 10.0f, mid, 1) == 0.0f);
+    g_case = "a weak pad never pins; the rim does";
+    pad[4] = 0.4f; pad[5] = 0.0f;
+    CoXlTestGradePads(pad, 1);
+    CHECK(CoXlTestGradeFree(world, playable, mid, mid, 0) == 1.0f && fabsf(CoXlTestGradeFree(world, playable, mid, mid, 1) - 0.6f) < 1.0e-5f);
+    CHECK(fabsf(CoXlTestGradeFree(world, playable, mid + playable - 32.0f, mid, 0) - 0.5f) < 1.0e-4f && CoXlTestGradeFree(world, playable, mid + playable, mid, 0) == 0.0f);
+    CoXlTestGradePads(pad, 0);
+}
+
+/* F3: the side band grows with the ground's slope across the road, so a bank on a side-hill stays under 25 degrees. */
+static float GroundSide(float x, float y) { (void)x; return 0.2f * y; }
+static float Ease(float w) { return w * w * (3.0f - 2.0f * w); }
+static void Banks(void)
+{
+    uint32_t torn = 0, counts[1], ends[2] = {~0u, ~0u}, links;
+    float z = 0, d = 0, xy[2], band, steepest = 0.0f, before = 0.0f;
+    g_case = "the ramp: the move alone on level ground, wider across a slope, the widest past what 25 degrees allows";
+    CHECK(CoXlTestGradeBandRamp(0.0f, 0.0f) == 0.0f && fabsf(CoXlTestGradeBandRamp(4.0f, 0.0f) - 12.867f) < 0.01f);
+    CHECK(fabsf(CoXlTestGradeBandRamp(0.0f, 0.1f) - 6.179f) < 0.01f && fabsf(CoXlTestGradeBandRamp(4.0f, 0.1f) - 26.777f) < 0.01f);
+    CHECK(CoXlTestGradeBandRamp(1.0f, 0.3f) > 160.0f);
+    g_case = "a road along a side-hill of 11.3 degrees: the band is 43 m and no bank is steeper than 25 degrees";
+    counts[0] = Line(g_road, 200.0f, 1000.0f, 1800.0f, 1000.0f, 201);
+    CHECK(CoXlTestGradeField(g_road, counts, ends, 1, 0, GroundSide, FAR_BACK, SLOPE, 4, WORLD, &torn) == 201 && torn == 0);
+    CoXlTestGradeStation(100, xy, &band, &links);
+    CHECK(fabsf(band - 42.95f) < 0.05f);
+    for (float y = 940.0f; y < 1060.0f; y += 0.25f)
+    {
+        float h[2];
+        for (int q = 0; q < 2; q++)
+        {
+            const float at = y + 0.25f * (float)q, w = CoXlTestGradeFieldAt(1003.0f, at, &z, &d);
+            h[q] = GroundSide(1003.0f, at) + (w > 0.0f ? Ease(w) * (z - GroundSide(1003.0f, at)) : 0.0f);
+            if (q == 0 && fabsf(at - 1000.0f) <= 12.0f) CHECK(w == 1.0f && fabsf(h[0] - 200.0f) < 0.02f); /* level across its full width */
+        }
+        if (fabsf(h[1] - h[0]) / 0.25f > steepest) steepest = fabsf(h[1] - h[0]) / 0.25f;
+        /* the same bank with the band the move alone gives (12 m): what the cross slope's share prevents */
+        const float dist = fabsf(y - 1000.0f), dist1 = fabsf(y + 0.25f - 1000.0f);
+        const float w0 = dist <= 12.0f ? 1.0f : dist >= 24.0f ? 0.0f : (24.0f - dist) / 12.0f, w1 = dist1 <= 12.0f ? 1.0f : dist1 >= 24.0f ? 0.0f : (24.0f - dist1) / 12.0f;
+        const float a = 0.2f * y + Ease(w0) * (200.0f - 0.2f * y), b = 0.2f * (y + 0.25f) + Ease(w1) * (200.0f - 0.2f * (y + 0.25f));
+        if (fabsf(b - a) / 0.25f > before) before = fabsf(b - a) / 0.25f;
+    }
+    CHECK(steepest <= 0.4663f + 0.005f && steepest > 0.3f);
+    CHECK(before > 0.5f); /* about 29 degrees with the narrow band */
+}
+
 int main(void)
 {
+    Pins();
+    Banks();
     Flat();
     Cliff();
     Pads();

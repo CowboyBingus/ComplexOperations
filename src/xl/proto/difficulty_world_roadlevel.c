@@ -92,8 +92,13 @@ static void RoadGradePadIndex(void)
     g_grade.padStart = start; g_grade.padItem = item;
 }
 
-/* How much of the road's height a point may take (corner metres): none under a pad's full weight or past the rim. */
-static float RoadGradeFree(float x, float y)
+/* How much of the road's height a point may take (corner metres): none past the rim or under a pad.
+ * all = 1 (a near tile): every pad at its own weight, footprints too, as the tile takes the level's surface there.
+ * all = 0 (the level's heights, the pins): only the pads op 0x3F flattened; a stamp's footprint is no flat ground, its
+ * stamp takes its pose on the graded level. A pad's skirt under GRADE_PIN leaves the road whole, and the share eases
+ * to none at the pad's full weight, so a road only gives way where the flat ground itself begins. */
+#define GRADE_PIN 0.5f
+static float RoadGradeFreeOf(float x, float y, int all)
 {
     const float half = g_grade.world / 2, r = sqrtf((x - half) * (x - half) + (y - half) * (y - half));
     float rim = (g_grade.playable - r) / GRADE_RIM, pad = 0.0f;
@@ -104,12 +109,17 @@ static float RoadGradeFree(float x, float y)
         for (uint32_t q = g_grade.padStart[cell]; q < g_grade.padStart[cell + 1]; q++)
         {
             const NearPad* p = &g_pads.pad[g_grade.padItem[q]];
+            if (!all && p->foot) continue;
             const float w = RoadGradePadWeight(p, x - half - p->cx, y - half - p->cy);
             if (w > pad) pad = w;
         }
     }
-    return rim * (1.0f - (pad > 1.0f ? 1.0f : pad));
+    if (pad > 1.0f) pad = 1.0f;
+    if (!all) pad = GradeSmooth((pad - GRADE_PIN) / (1.0f - GRADE_PIN));
+    return rim * (1.0f - pad);
 }
+static float RoadGradeFree(float x, float y) { return RoadGradeFreeOf(x, y, 1); }
+static float RoadGradeGround(void* unused, float x, float y);
 
 /* The capture's ground at a point (corner metres); not finite when it cannot be read. */
 static float RoadGradeGround(void* unused, float x, float y)
@@ -203,11 +213,12 @@ static int RoadGradeSolve(void)
         const float x = f->xy[2 * i], y = f->xy[2 * i + 1], h = RoadGradeGround(NULL, x, y);
         if (!isfinite(h)) return 0;
         f->s[i].ground = h;
-        f->s[i].pinned = RoadGradeFree(x, y) < 1.0f || sqrtf((x - half) * (x - half) + (y - half) * (y - half)) > g_grade.playable - GRADE_RIM;
+        f->s[i].pinned = RoadGradeFreeOf(x, y, 0) < 1.0f || sqrtf((x - half) * (x - half) + (y - half) * (y - half)) > g_grade.playable - GRADE_RIM;
         f->s[i].floor = water ? g_nearWater.high + GRADE_WATER : -GRADE_FAR;
         g_grade.pinned += f->s[i].pinned;
     }
     GradeFieldLinks(f);
+    for (uint32_t i = 0; i < f->stations; i++) f->s[i].cross = GradeFieldCross(f, i, RoadGradeGround, NULL);
     g_grade.torn = GradeSolve(f->s, f->stations, GRADE_SLOPE, GRADE_PASSES);
     return GradeFieldIndex(f, g_grade.world);
 }
@@ -246,7 +257,7 @@ static uint32_t RoadGradeBatch(GradeTriFn tri, uint64_t gui, uint64_t material, 
         {
             const float x = (float)(k % g_grade.cells + (q == 1 || q == 2)) * GRADE_STEP, y = (float)(k / g_grade.cells + (q >= 2)) * GRADE_STEP;
             float z = NAN, d;
-            const float w = GradeFieldAt(&g_grade.f, x, y, &z, &d) * RoadGradeFree(x, y);
+            const float w = GradeFieldAt(&g_grade.f, x, y, &z, &d) * RoadGradeFreeOf(x, y, 0);
             v[q][0] = x * px; v[q][1] = y * px; v[q][2] = z; uv[q][0] = w; uv[q][1] = 0.0f;
             if (w > most_) most_ = w;
             if (isfinite(z)) seen = z;

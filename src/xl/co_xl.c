@@ -988,6 +988,7 @@ uint32_t CoXlTestGradeSolve(const float* ground, const uint8_t* pinned, uint32_t
  * name the shared stations of chain c's ends (a number the test chooses; 0xFFFFFFFF: its own). spur: 1 when the last
  * chain meets the others as a spur does. ground(x, y) and floor are given to every station. Returns the stations. */
 static GradeField g_testField;
+static float TestGradeGround(void* ground, float x, float y) { return ((float (*)(float, float))ground)(x, y); }
 uint32_t CoXlTestGradeField(const float* pts, const uint32_t* counts, const uint32_t* ends, uint32_t chains, int spur, float (*ground)(float, float), float floor,
     float slope, uint32_t passes, float world, uint32_t* torn)
 {
@@ -1006,9 +1007,25 @@ uint32_t CoXlTestGradeField(const float* pts, const uint32_t* counts, const uint
     }
     for (uint32_t i = 0; i < f->stations; i++) { f->s[i].ground = ground(f->xy[2 * i], f->xy[2 * i + 1]); f->s[i].floor = floor; }
     GradeFieldLinks(f);
+    for (uint32_t i = 0; i < f->stations; i++) f->s[i].cross = GradeFieldCross(f, i, TestGradeGround, (void*)ground);
     *torn = GradeSolve(f->s, f->stations, slope, passes);
     GradeFieldIndex(f, world);
     return f->stations;
+}
+float CoXlTestGradeBandRamp(float move, float cross) { return GradeBandRamp(move, cross); }
+/* The level's pads for the grading: n circles of (x, y from the world's centre, radius, band, strength, footprint). */
+void CoXlTestGradePads(const float* pads, uint32_t n)
+{
+    g_pads.level = g_world.levels; g_pads.count = 0;
+    for (uint32_t i = 0; i < n && i < NEAR_PADS; i++, pads += 6)
+        g_pads.pad[g_pads.count++] = (NearPad){.cx = pads[0], .cy = pads[1], .c = 1.0f, .a = pads[2], .ba = pads[3], .k = pads[4], .foot = pads[5] != 0.0f};
+}
+/* The road's share at a point (corner metres): all = 1 as a near tile takes it, 0 as the level's heights and the pins do. */
+float CoXlTestGradeFree(float world, float playable, float x, float y, int all)
+{
+    g_grade.world = world; g_grade.playable = playable;
+    RoadGradePadIndex();
+    return RoadGradeFreeOf(x, y, all);
 }
 float CoXlTestGradeFieldAt(float x, float y, float* z, float* d) { return GradeFieldAt(&g_testField, x, y, z, d); }
 float CoXlTestGradeStation(uint32_t i, float* xy, float* band, uint32_t* links)

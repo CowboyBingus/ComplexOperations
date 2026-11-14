@@ -16,6 +16,7 @@ typedef struct GradeStation
 {
     float ground, target, low, high;
     float floor; /* the target never lies under it (water); -GRADE_FAR: none */
+    float cross; /* the ground's slope across the road here, as a tangent (sizes the side band) */
     float gap[GRADE_LINKS];
     uint32_t link[GRADE_LINKS];
     uint8_t links, pinned;

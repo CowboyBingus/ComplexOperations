@@ -136,6 +136,38 @@ static void GradeFieldLinks(GradeField* f)
 
 /* After the solve: each station's band from what it cuts or fills, and the pieces in a grid of GRADE_CELL cells, each
  * in every cell its box, grown by its band and GRADE_REACH, touches. world: the map's side in metres. 0: no memory. */
+/* The side band's ramp for a road moved `move` metres at its middle on ground that slopes `cross` (a tangent) across
+ * it. The eased weight falls fastest at 1.5 / ramp, and on the uphill side the move has grown by the cross slope times
+ * the distance out (GRADE_FULL + ramp / 2 where the weight falls fastest), so the bank stays under 25 degrees with
+ * ramp >= 1.5 (move + GRADE_FULL cross) / (tan 25 - 1.75 cross). Ground steeper across than that allows takes the
+ * widest band. */
+static float GradeBandRamp(float move, float cross)
+{
+    if (!(cross >= 0.0f)) cross = 0.0f;
+    const float room = GRADE_SIDE - 1.75f * cross;
+    if (!(room > 0.0f)) return move > 0.0f || cross > 0.0f ? GRADE_BAND_MOST + 1.0f : GRADE_BAND_LEAST;
+    return 1.5f * (move + GRADE_FULL * cross) / room;
+}
+/* The ground's slope across the road at station i (a tangent): the steepest over its links, between the two points
+ * GRADE_FULL to either side. 0 where the ground cannot be read. */
+static float GradeFieldCross(const GradeField* f, uint32_t i, float (*ground)(void*, float, float), void* ctx)
+{
+    float most = 0.0f;
+    for (uint32_t k = 0; k < f->s[i].links; k++)
+    {
+        const uint32_t j = f->s[i].link[k];
+        float dx = f->xy[2 * j] - f->xy[2 * i], dy = f->xy[2 * j + 1] - f->xy[2 * i + 1];
+        const float n = sqrtf(dx * dx + dy * dy);
+        if (!(n > 0.0f)) continue;
+        dx /= n; dy /= n;
+        const float a = ground(ctx, f->xy[2 * i] - dy * GRADE_FULL, f->xy[2 * i + 1] + dx * GRADE_FULL);
+        const float b = ground(ctx, f->xy[2 * i] + dy * GRADE_FULL, f->xy[2 * i + 1] - dx * GRADE_FULL);
+        if (!isfinite(a) || !isfinite(b)) continue;
+        const float t = fabsf(a - b) / (2.0f * GRADE_FULL);
+        if (t > most) most = t;
+    }
+    return most;
+}
 static int GradeFieldIndex(GradeField* f, float world)
 {
     free(f->band); free(f->start); free(f->item); f->start = f->item = NULL;
@@ -148,7 +180,7 @@ static int GradeFieldIndex(GradeField* f, float world)
     f->capped = 0;
     for (uint32_t i = 0; i < f->stations; i++)
     {
-        float ramp = 1.5f * fabsf(f->s[i].target - f->s[i].ground) / GRADE_SIDE;
+        float ramp = GradeBandRamp(fabsf(f->s[i].target - f->s[i].ground), f->s[i].cross);
         if (ramp < GRADE_BAND_LEAST) ramp = GRADE_BAND_LEAST;
         if (ramp > GRADE_BAND_MOST) { ramp = GRADE_BAND_MOST; f->capped++; }
         f->band[i] = GRADE_FULL + ramp;
@@ -202,6 +234,8 @@ static float GradeFieldAt(const GradeField* f, float x, float y, float* z, float
         const float qx = g->ax + t * dx - x, qy = g->ay + t * dy - y, dist = sqrtf(qx * qx + qy * qy);
         const float band = f->band[g->a] + t * (f->band[g->b] - f->band[g->a]);
         const float w = dist <= GRADE_FULL ? 1.0f : dist >= band ? 0.0f : 1.0f - (dist - GRADE_FULL) / (band - GRADE_FULL);
+        /* a listed road whose band ends short of here still counts a thousandth, so a lattice cell's outer corner
+         * (weight 0) has a height to draw with; against a road that does reach, that moves *z by millimetres */
         const double close = (double)dist * dist + 1.0, share = (w > 1.0e-3f ? w : 1.0e-3f) / (close * close);
         sum += share; heights += share * (f->s[g->a].target + t * (f->s[g->b].target - f->s[g->a].target));
         if (w > weight) weight = w;
