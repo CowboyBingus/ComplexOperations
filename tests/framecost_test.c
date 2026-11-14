@@ -78,7 +78,7 @@ static void TestNoParts(void)
     Reset("a slow frame with no part timed");
     Frame(10.0, 0.0, 1);
     co_framecost_test_begin(g_now, 1, g_mission); g_now += 30000; /* no mark */
-    Frame(10.0, 0.0, 1);
+    for (int i = 0; i < 1000; i++) Frame(10.0, 0.0, 1);
     CHECK(fake_host_logged("a 30.0 ms frame (QPC; the game's window in front): timed parts (CoXlTick, the level update) 0.00 ms (the most: status 0.00 ms)"));
 }
 
@@ -142,9 +142,9 @@ static void TestBudgets(void)
 {
     Reset("slow lines a window");
     for (int i = 0; i < 100; i++) Frame(30.0, 0.0, 1);
-    CHECK(co_framecost_test_detail_lines() == CO_FC_SLOW_LINES_WINDOW);
-    for (int i = 0; i < 300; i++) Frame(30.0, 0.0, 1); /* past 10 s: one window line, then two slow lines again */
-    CHECK(co_framecost_test_detail_lines() == 2 * CO_FC_SLOW_LINES_WINDOW && co_framecost_test_window_lines() == 1);
+    CHECK(co_framecost_test_detail_lines() == 0); /* kept for the window's close */
+    for (int i = 0; i < 300; i++) Frame(30.0, 0.0, 1); /* past 10 s: the window's slow lines and its line */
+    CHECK(co_framecost_test_detail_lines() == CO_FC_SLOW_LINES_WINDOW && co_framecost_test_window_lines() == 1);
     Reset("budgets: slow-frame lines a session, window lines a mission");
     for (int i = 0; i < (CO_FC_WINDOW_LINES_MISSION + 5) * 10 + 1; i++) { g_fake.log[0] = 0; Frame(1000.0, 0.0, 1); } /* 10 frames a window; the fake log holds 64 KiB */
     CHECK(co_framecost_test_detail_lines() == CO_FC_DETAIL_LINES_SESSION);
@@ -154,6 +154,31 @@ static void TestBudgets(void)
     for (int i = 0; i < 12; i++) Frame(1000.0, 0.0, 1);
     CHECK(co_framecost_test_window_lines() == 1);
     CHECK(fake_host_logged("frame times (1"));
+}
+
+/* A slow frame's line names the game thread's AI joins, the engine's world update and a far-grass job out. */
+static void TestExtras(void)
+{
+    double join, world; int grass;
+    Reset("a slow frame's extras");
+    Frame(10.0, 0.0, 1);
+    co_framecost_test_begin(g_now, 1, g_mission);
+    co_framecost_test_mark(CO_FC_STREAM, g_now + 10);
+    co_framecost_test_extra(CO_FX_JOIN, g_now + 100, g_now + 3100);
+    co_framecost_test_extra(CO_FX_JOIN, g_now + 4000, g_now + 6000);
+    co_framecost_test_extra(CO_FX_WORLD, g_now + 7000, g_now + 27000);
+    co_framecost_test_extra(CO_FX_WORLD, 0, g_now + 27000);          /* no start: not counted */
+    co_framecost_grass(0); co_framecost_grass(1); co_framecost_grass(0); /* out at any time in the frame */
+    g_now += 40000;
+    Frame(30.0, 0.0, 1);             /* closes the 40 ms frame; this one has no extras */
+    co_framecost_test_extra(CO_FX_COUNT, g_now - 20000, g_now - 10000); /* not an extra: counted nowhere */
+    co_framecost_test_extra(-1, g_now - 20000, g_now - 10000);
+    CHECK(co_framecost_test_slow(0, &join, &world, &grass) == 40.0 && join == 5.0 && world == 20.0 && grass == 1);
+    Frame(10.0, 0.0, 1);
+    CHECK(co_framecost_test_slow(1, &join, &world, &grass) == 30.0 && join == 0.0 && world == 0.0 && grass == 0);
+    for (int i = 0; i < 400; i++) Frame(26.0, 0.0, 1);
+    CHECK(fake_host_logged("frame times: a 40.0 ms frame") && fake_host_logged("into the window; AI joins 5.0 ms, world update 20.0 ms, far-grass job out"));
+    CHECK(fake_host_logged("frame times: a 30.0 ms frame") && fake_host_logged("into the window; AI joins 0.0 ms, world update 0.0 ms, far-grass job not out"));
 }
 
 static void TestNotes(void)
@@ -183,8 +208,32 @@ static void TestHookParts(void)
     co_framecost_test_nested(CO_FC_GROUNDKEEP, CO_FC_MOVE, t + 200, t + 5200);
     CHECK(co_framecost_test_add(CO_FC_MOVE, t + 100, t + 30100) == 30000);
     g_now = t + 40000;
-    Frame(10.0, 0.0, 1);
+    for (int i = 0; i < 1000; i++) Frame(10.0, 0.0, 1);
     CHECK(fake_host_logged("a 40.0 ms frame (QPC; the game's window in front): timed parts (CoXlTick, the level update) 30.00 ms (the most: moving tiles 25.00 ms), untimed 10.0 ms"));
+}
+
+/* The lines name the window's slowest frames, not its first: a 1.3 s stall after two 26 ms frames was missed. */
+static void TestSlowest(void)
+{
+    Reset("the window's slowest frames");
+    for (int i = 0; i < 100; i++) Frame(i == 10 ? 26.0 : i == 20 ? 27.0 : i == 30 ? 1269.4 : i == 40 ? 26.5 : i == 50 ? 140.0 : 9.0, 0.0, 1);
+    for (int i = 0; i < 1000; i++) Frame(9.0, 0.0, 1);
+    CHECK(fake_host_logged("a 1269.4 ms frame") && fake_host_logged("a 140.0 ms frame"));
+    CHECK(!fake_host_logged("a 26.0 ms frame") && !fake_host_logged("a 27.0 ms frame") && !fake_host_logged("a 26.5 ms frame"));
+    CHECK(fake_host_logged("untimed 1269.4 ms; 0.3 s into the window")); /* 30 frames of 9 ms in, at 0.27 s */
+    CHECK(co_framecost_test_detail_lines() == CO_FC_SLOW_LINES_WINDOW);
+    Reset("a window cut short by the ship still names its stalls");
+    for (int i = 0; i < 100; i++) Frame(i == 50 ? 333.0 : 9.0, 0.0, 1);
+    CHECK(!fake_host_logged("a 333.0 ms frame"));
+    Frame(50.0, 0.0, 0);
+    CHECK(fake_host_logged("a 333.0 ms frame") && co_framecost_test_detail_lines() == 1);
+    for (int i = 0; i < 1200; i++) Frame(9.0, 0.0, 1); /* the next window has none */
+    CHECK(co_framecost_test_detail_lines() == 1);
+    Reset("a new mission flushes the last one's");
+    for (int i = 0; i < 100; i++) Frame(i == 50 ? 333.0 : 9.0, 0.0, 1);
+    g_mission = 2;
+    Frame(9.0, 0.0, 1);
+    CHECK(fake_host_logged("a 333.0 ms frame") && co_framecost_test_detail_lines() == 1);
 }
 
 static DWORD WINAPI OffThread(LPVOID unused) { (void)unused; co_framecost_test_add(CO_FC_FARGRASS, 1, 1 + 50000); return 0; }
@@ -243,8 +292,10 @@ int main(void)
     TestOnlyPlay();
     TestGate();
     TestBudgets();
+    TestExtras();
     TestNotes();
     TestHookParts();
+    TestSlowest();
     TestOffThread();
     TestCpuAndContext();
     if (g_failed) { printf("%d check(s) failed\n", g_failed); return 1; }

@@ -71,6 +71,7 @@ static void FgFrame(int live)
     LARGE_INTEGER t;
     if (!live) { g_fgFrames.last = 0; return; }
     QueryPerformanceCounter(&t);
+    co_framecost_grass(g_fg.published);
     if (g_fgFrames.hz == 0) { LARGE_INTEGER hz; QueryPerformanceFrequency(&hz); g_fgFrames.hz = hz.QuadPart; }
     if (g_fgFrames.last != 0 && g_fgFrames.hz > 0)
     {

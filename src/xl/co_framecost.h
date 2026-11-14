@@ -8,11 +8,12 @@
 
 #include <stdint.h>
 
-/* The timed parts: CoXlTick's, in its order, then the level update hook's (difficulty_world_move.c MoveLevelUpdate). */
+/* The timed parts: CoXlTick's, in its order, then the level update hook's (difficulty_world_move.c MoveLevelUpdate), then
+ * the nav section swaps the game's cell tick runs through the living world's hooks (living_world.c LwNavUnload / LwNavLoad). */
 enum
 {
     CO_FC_STATUS, CO_FC_STREAM, CO_FC_SPANS, CO_FC_NET, CO_FC_TDIAG, CO_FC_TPROBE, CO_FC_LIVING, CO_FC_DAYLIGHT,
-    CO_FC_TAC, CO_FC_DENSITY, CO_FC_SCATTER, CO_FC_MOVE, CO_FC_GROUNDKEEP, CO_FC_FARGRASS, CO_FC_PARTS
+    CO_FC_TAC, CO_FC_DENSITY, CO_FC_SCATTER, CO_FC_MOVE, CO_FC_GROUNDKEEP, CO_FC_FARGRASS, CO_FC_NAVSWAP, CO_FC_PARTS
 };
 
 #define CO_FC_WINDOW_MS 10000.0
@@ -21,7 +22,7 @@ enum
 #define CO_FC_HITCH_MS 33.3
 #define CO_FC_LONG_MS 1000.0             /* a frame of a second or more in play: a build or a stall */
 #define CO_FC_STARVED_IDLE 1.0           /* cores left idle under which the game had to wait for one */
-#define CO_FC_SLOW_LINES_WINDOW 2        /* detailed slow-frame lines a window */
+#define CO_FC_SLOW_LINES_WINDOW 2        /* detailed slow-frame lines a window: its slowest, at its close */
 #define CO_FC_DETAIL_LINES_SESSION 600   /* detailed slow-frame lines a session */
 #define CO_FC_WINDOW_LINES_MISSION 1080  /* window lines a mission: three hours of play */
 
@@ -41,6 +42,11 @@ int64_t co_framecost_now(void);
 int64_t co_framecost_add(int part, int64_t since);
 /* A part timed inside another: its ticks go to `inner` and come off `outer`. */
 void co_framecost_nested(int inner, int outer, int64_t since);
+/* What a slow frame's line says beside its parts, so a frame the parts do not explain can be told apart: the game
+ * thread's waits for the AI step, the engine's world update, and whether a far-grass bake job was out. */
+enum { CO_FX_JOIN, CO_FX_WORLD, CO_FX_COUNT };
+void co_framecost_extra(int which, int64_t since);
+void co_framecost_grass(int out);
 
 #ifdef CO_TEST
 /* The same on a given clock (ticks of `freq` a second) and given CPU times (100 ns units). */
@@ -50,6 +56,9 @@ void co_framecost_test_begin(int64_t now, int play, long mission);
 void co_framecost_test_mark(int part, int64_t now);
 int64_t co_framecost_test_add(int part, int64_t since, int64_t now);
 void co_framecost_test_nested(int inner, int outer, int64_t since, int64_t now);
+void co_framecost_test_extra(int which, int64_t since, int64_t now);
+/* The window being filled, its slow frame `k` (0 the slowest): its ms beside the AI joins, the world update and the far-grass flag. */
+double co_framecost_test_slow(int k, double* join, double* world, int* grass);
 int co_framecost_test_window_lines(void);
 int co_framecost_test_detail_lines(void);
 /* The last closed window: 1% and 0.1% lows (fps), frames over 25 ms, 33 ms and 1 s, the CPU verdict. */

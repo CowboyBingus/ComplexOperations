@@ -39,27 +39,42 @@ static void LwAibNote(ULONGLONG now)
     g_lwAib.frames = g_lwAib.raisedFrames = 0; g_lwAib.worst = 0; g_lwAib.latSum = 0; g_lwAib.notedAt = now;
 }
 
-/* The budget for this step: the low one, or the stock one from a wait over RAISE_MS until it is under half that. */
-static void LwAibSteer(uintptr_t h, float cur, float lat)
+/* The budget for this step: the low one, or the stock one from a wait over RAISE_MS until it is under half that. The
+ * stock one too while a nav completion waits for the world's step, a swap is not applied yet (LwNavHoldBusy) or the
+ * queue is long (LwNavQueueLong): the low budget makes that run, and so the wait, several times longer. Only a
+ * run in flight with a completion held or a backlog behind it gets more than the game's own (LwNavHoldRaiseUs). */
+static float LwAibWant(uintptr_t h, int low, ULONGLONG now)
+{
+    float want = low ? (float)g_lwAib.lowUs / 1000000.0f : g_lwAib.stock;
+    if (want > g_lwAib.stock) want = g_lwAib.stock;
+    float up = (float)LwNavHoldRaiseUs(h, now) / 1000000.0f;
+    return up > want ? up : want;
+}
+static void LwAibSteer(uintptr_t h, float cur, float lat, ULONGLONG now)
 {
     if (lat * 1000.0f > (float)g_lwAib.raiseMs) g_lwAib.raised = 1;
     else if (lat * 1000.0f < 0.5f * (float)g_lwAib.raiseMs) g_lwAib.raised = 0;
-    float want = g_lwAib.raised ? g_lwAib.stock : (float)g_lwAib.lowUs / 1000000.0f;
-    if (want > g_lwAib.stock) want = g_lwAib.stock; /* never more than the game's own */
+    float want = LwAibWant(h, !(g_lwAib.raised || LwNavHoldBusy() || LwNavQueueLong(h)), now);
     if (cur != want) *(volatile float*)(h + 0x47C) = want;
 }
 
 /* Game thread, once a frame. A new level makes a new AI world, whose stock value is read before the first write.
- * Off, it still measures when the command asked for notes, for the A/B. */
+ * Off, the held completion's raise still applies, and it still measures when the command asked for notes, for the A/B. */
 static void LwAibFrame(void)
 {
-    if (g_lwAib.failed || (!g_lwAib.on && !g_lwAib.verbose)) return;
+    if (g_lwAib.failed) return;
     uintptr_t h = LwAibWorld(); float cur = 0;
     if (!h || SafeRead(h + 0x47C, &cur, 4) || !(cur > 0.00001f && cur < 0.1f)) return;
     if (h != g_lwAib.h) { g_lwAib.h = h; g_lwAib.stock = cur; g_lwAib.raised = 0; }
+    if (!g_lwAib.on)
+    {
+        float want = LwAibWant(h, 0, GetTickCount64());
+        if (cur != want) *(volatile float*)(h + 0x47C) = want;
+        if (!g_lwAib.verbose) return;
+    }
     float lat = LwAibLatency(h);
     if (lat < 0) return;
-    if (g_lwAib.on) LwAibSteer(h, cur, lat);
+    if (g_lwAib.on) LwAibSteer(h, cur, lat, GetTickCount64());
     g_lwAib.frames++; g_lwAib.raisedFrames += (uint32_t)(g_lwAib.raised || !g_lwAib.on);
     if (lat > g_lwAib.worst) g_lwAib.worst = lat;
     g_lwAib.latSum += lat;

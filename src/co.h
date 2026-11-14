@@ -200,6 +200,8 @@ void co_capacity_game(uintptr_t game);
  * every site is as it was. */
 #define CO_EARLY_WORLD 16384.0f
 #define CO_EARLY_CELLS 32u
+/* Havok names a face's navmesh section in 10 bits of its key (exe 0xBAA746, 0xBAC619), one section slot a cell. */
+_Static_assert(CO_EARLY_CELLS * CO_EARLY_CELLS <= 1024u, "a nav grid of more cells than a face key can name sections");
 const char* co_early_check(uintptr_t game, uintptr_t exe);
 const char* co_early_install(uintptr_t game, uintptr_t exe);
 int co_early_in(void);
