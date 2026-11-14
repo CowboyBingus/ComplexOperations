@@ -91,11 +91,11 @@ static int Bound(void)
     return co_cutset_bind(&g_rec.set, world, pool, mask);
 }
 
-/* Called under the set's lock. */
+/* Called under the set's lock. Entry 0 is kept for the tick's thread, so that one always has a place. */
 static void Counted(int destroy)
 {
     const LONG id = (LONG)GetCurrentThreadId();
-    uint32_t i = 0;
+    uint32_t i = g_rec.thread[0].id == id ? 0 : 1;
     while (i < THREADS && g_rec.thread[i].id != id && g_rec.thread[i].id != 0) i++;
     if (i == THREADS) { if (destroy) g_rec.destroysPast++; else g_rec.makesPast++; return; }
     g_rec.thread[i].id = id;
@@ -294,6 +294,7 @@ int co_cutters_tick(const CoCutCentre* centres, uint32_t count, uint32_t nowMs, 
     AcquireSRWLockExclusive(&g_rec.lock);
     QueryPerformanceCounter(&h);
     InterlockedExchange(&g_rec.tickThread, (LONG)GetCurrentThreadId());
+    g_rec.thread[0].id = g_rec.tickThread;
     const CoCutSet* s = &g_rec.set;
     out->hooked = g_cut.make != NULL && g_cut.destroy != NULL;
     out->bound = g_cut.exe != 0 && Bound();
@@ -311,7 +312,7 @@ int co_cutters_tick(const CoCutCentre* centres, uint32_t count, uint32_t nowMs, 
     }
     out->held = g_rec.held; out->stock = g_rec.stock; out->atOnce = g_rec.atOnce; out->noWorld = g_rec.noWorld; out->stranded = s->stranded; out->sentOn = g_rec.sentOn; out->sentOff = g_rec.sentOff; out->skips = g_rec.skips;
     out->makesOff = g_rec.makesPast; out->destroysOff = g_rec.destroysPast; out->threadsOff = 0;
-    for (uint32_t i = 0; i < THREADS && g_rec.thread[i].id != 0; i++)
+    for (uint32_t i = 1; i < THREADS && g_rec.thread[i].id != 0; i++)
     {
         if (g_rec.thread[i].id == g_rec.tickThread) continue;
         out->makesOff += g_rec.thread[i].makes; out->destroysOff += g_rec.thread[i].destroys; out->threadsOff++;

@@ -3,6 +3,7 @@
  * of the batch's first handle as 0x8127A0 does (crash exe+0x812807 when that pool is empty). Also the pins, the pool's
  * reader and the failed makes' count; and the trees' record: armed, a forest make on a complex level is recorded and
  * its description left as it was, a destroy drops it, and nothing else reaches the engine. */
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -64,17 +65,22 @@ static void EngineSwitch(const uint32_t* handles, uint32_t count, int on)
 }
 /* A make and a destroy on a thread of their own, as a generator thread's would be. */
 typedef struct OffThread { const void* description; uintptr_t from; void (*destroy)(const uint32_t*, uint32_t); uint32_t handle; } OffThread;
+/* Each thread lives until the test ends, so no two of them share a thread id. */
+static HANDLE g_offDid, g_offEnd;
 static DWORD WINAPI OffThreadRun(void* arg)
 {
     const OffThread* o = arg;
     if (o->description != NULL) co_cutters_test_make(o->description, o->from);
     if (o->destroy != NULL) o->destroy(&o->handle, 1);
+    SetEvent(g_offDid);
+    WaitForSingleObject(g_offEnd, INFINITE);
     return 0;
 }
 static void OnOtherThread(OffThread o)
 {
-    HANDLE t = CreateThread(NULL, 0, OffThreadRun, &o, 0, NULL);
-    if (t != NULL) { WaitForSingleObject(t, INFINITE); CloseHandle(t); }
+    if (g_offDid == NULL) { g_offDid = CreateEventA(NULL, FALSE, FALSE, NULL); g_offEnd = CreateEventA(NULL, TRUE, FALSE, NULL); }
+    HANDLE t = CreateThread(NULL, 0x10000, OffThreadRun, &o, 0, NULL);
+    if (t != NULL) { WaitForSingleObject(g_offDid, INFINITE); CloseHandle(t); }
 }
 static void StepTask(uint64_t handle) { memcpy(g_exe + CO_CUTTERS_AI_WORLDS + 0x80u * CO_CUTTERS_WORLD + CO_CUTTERS_STEP_TASK, &handle, 8); }
 
@@ -340,7 +346,9 @@ int main(void)
         /* the tick counts what it would switch on, capped at 3 here; the engine hears nothing */
         const uint32_t makes = g_makes;
         CoCutCentre c = {40.0f, -60.0f, CO_CUTSET_PLAYER_IN, CO_CUTSET_PLAYER_OUT};
-        CHECK(co_cutters_tick(&c, 1, 1000, 16, &t) == 1);
+        StepTask(0x1234); /* record only sends nothing, so the AI step in flight skips no tick */
+        CHECK(co_cutters_tick(&c, 1, 1000, 16, &t) == 1 && t.skipped == 0 && t.skips == 0);
+        StepTask(0);
         CHECK(t.bound == 1 && t.hooked == 1 && t.records == 2 && t.wanted == 1 && t.on == 1 && t.adds == 1 && t.removes == 0 && t.cap == 3);
         CHECK(t.trees == 4 && t.others == 2 && t.unbound == 0 && t.destroyed == 2 && t.world == 0x5000 && t.binds == 1);
         CHECK(g_makes == makes && g_calls == 0);
@@ -482,6 +490,89 @@ int main(void)
         CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1 && t.adds == 1 && g_swCalls == 0);
     }
 
+    Reset("switching: what holds a make back, and what a tick leaves alone");
+    RecordPins(g_exe); AiWorld(0x5000); Mask(g_pool, 0xFFFF);
+    g_swCalls = g_swOnCount = g_swOffCount = g_swBiggest = 0;
+    CHECK(co_cutters_install((uintptr_t)g_exe) == NULL);
+    CHECK(co_cutters_record_arm((uintptr_t)g_exe, CO_CUTSET_SLOTS, 2) == NULL); /* two adds a tick */
+    co_cutters_test_switch(EngineSwitch);
+    co_cutters_switch(1);
+    {
+        const CoCutSet* s = co_cutters_test_set();
+        const uintptr_t forest = (uintptr_t)g_exe + CO_CUTTERS_FOREST_RETURN;
+        Desc d = {3, 2, 0xFFFFFFFFu, 1, kMatrix, 0, 0, 77};
+        CoCuttersTick t;
+        CoCutCentre c = {40.0f, -60.0f, CO_CUTSET_PLAYER_IN, CO_CUTSET_PLAYER_OUT};
+        co_cutters_live(1);
+        CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1);
+        /* the arm's adds a tick */
+        for (uint32_t i = 1; i <= 5; i++) { g_makeAnswer = 0x81010200u + i; CHECK(co_cutters_test_make(&d, forest) == g_makeAnswer && g_addSeen == 0); }
+        CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1 && t.adds == 2 && t.sentOn == 2 && g_swOnCount == 2);
+        /* a skipped tick reports none of the tick before it */
+        StepTask(0x1234);
+        CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1 && t.skipped == 1 && t.adds == 0 && t.sentOn == 2 && g_swOnCount == 2);
+        StepTask(0);
+        CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1 && t.adds == 2 && t.sentOn == 4);
+        CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1 && t.adds == 1 && t.sentOn == 5 && t.on == 5);
+        /* ticks that are only skipped keep no make held: after a second of them the game adds again */
+        CHECK(co_cutters_tick(&c, 1, GetTickCount() - 1500u, 0, &t) == 1);
+        StepTask(0x1234);
+        CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1 && t.skipped == 1);
+        g_makeAnswer = 0x81010206u;
+        CHECK(co_cutters_test_make(&d, forest) == 0x81010206u && g_addSeen == 1);
+        StepTask(0);
+        CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1 && t.stock == 1 && t.held == 5);
+        /* no AI world: the make is not held, the game adds as it always did, and it is counted as unbound */
+        AiWorld(0); g_makeAnswer = 0x81010207u; g_swCalls = 0;
+        CHECK(co_cutters_test_make(&d, forest) == 0x81010207u && g_addSeen == 1 && g_swCalls == 0);
+        AiWorld(0x5000);
+        CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1 && t.unbound == 1 && t.atOnce == 0 && t.noWorld == 0 && t.held == 5 && t.records == 0);
+        /* a place that is no number: not held either */
+        float nowhere[16];
+        memcpy(nowhere, kMatrix, sizeof nowhere); nowhere[12] = NAN;
+        d.matrix = nowhere; g_makeAnswer = 0x81010208u;
+        CHECK(co_cutters_test_make(&d, forest) == 0x81010208u && g_addSeen == 1);
+        d.matrix = kMatrix;
+        CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1 && t.refused == 1 && t.atOnce == 0 && t.held == 5 && g_swCalls == 0);
+        /* a complex level said again while one is live drops nothing */
+        g_makeAnswer = 0x81010209u;
+        CHECK(co_cutters_test_make(&d, forest) == 0x81010209u && g_addSeen == 0 && s->records == 1);
+        CHECK(co_cutters_live(1) == 0 && s->records == 1);
+        /* the same pool with another mask: the mask is a pool's for its life, so it is not read again */
+        Mask(g_pool, 0xFFFFF); g_makeAnswer = 0x8101020Au;
+        CHECK(co_cutters_test_make(&d, forest) == 0x8101020Au && s->records == 2 && s->mask == 0xFFFF && s->binds == 2);
+        Mask(g_pool, 0xFFFF);
+        /* a pool whose mask does not read: the binding and its records stay; with no binding, none is made */
+        void* page = VirtualAlloc(NULL, 4096, MEM_RESERVE, PAGE_NOACCESS);
+        uint64_t at = (uint64_t)(uintptr_t)page;
+        CHECK(page != NULL);
+        memcpy(g_exe + CO_CUTTERS_POOLS + 8u * CO_CUTTERS_WORLD, &at, 8); g_makeAnswer = 0x8101020Bu;
+        CHECK(co_cutters_test_make(&d, forest) == 0x8101020Bu && s->records == 3 && s->pool == (uintptr_t)g_pool && s->world == 0x5000 && s->binds == 2);
+        AiWorld(0);
+        CHECK(co_cutters_test_make(&d, forest) == 0x8101020Bu && s->records == 0 && s->world == 0);
+        AiWorld(0x5000);
+        CHECK(co_cutters_test_make(&d, forest) == 0x8101020Bu && s->records == 0 && s->world == 0 && s->binds == 2);
+        CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1 && t.bound == 0);
+        Pool(100, 65536);
+        CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1 && t.bound == 1 && t.binds == 3);
+        VirtualFree(page, 0, MEM_RELEASE);
+    }
+
+    Reset("more threads than the table holds: the rest count as off the tick's too");
+    RecordPins(g_exe); AiWorld(0x5000); Mask(g_pool, 0xFFFF);
+    CHECK(co_cutters_install((uintptr_t)g_exe) == NULL);
+    CHECK(co_cutters_record_arm((uintptr_t)g_exe, CO_CUTSET_CAP, CO_CUTSET_ADDS) == NULL);
+    {
+        Desc d = {0, 2, 0xFFFFFFFFu, 1, kMatrix, 0, 0, 77};
+        CoCuttersTick t;
+        co_cutters_live(1);
+        g_makeAnswer = 0x81010300u;
+        CHECK(co_cutters_tick(NULL, 0, 900, 0, &t) == 1 && t.makesOff == 0 && t.threadsOff == 0);
+        for (uint32_t i = 0; i < 70; i++) OnOtherThread((OffThread){&d, 0, i < 3 || i == 69 ? Detour() : NULL, 0x81010300u});
+        co_cutters_test_make(&d, 0);
+        CHECK(co_cutters_tick(NULL, 0, 1000, 0, &t) == 1 && t.makesOff == 70 && t.destroysOff == 4 && t.threadsOff == 63 && t.others == 71);
+    }
+
     {
         size_t pins = 0;
         co_cutters_test_record_pins(&pins);
@@ -504,6 +595,7 @@ int main(void)
         CHECK(co_cutters_record_arm(0, CO_CUTSET_CAP, CO_CUTSET_ADDS) != NULL);
     }
 
+    if (g_offEnd != NULL) SetEvent(g_offEnd);
     if (g_failed) { printf("cutters: %d check(s) failed\n", g_failed); return 1; }
     printf("cutters: all checks passed\n");
     return 0;
