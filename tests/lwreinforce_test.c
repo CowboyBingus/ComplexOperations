@@ -42,6 +42,7 @@ float CoXlTestLwHoldTurns(int lane, int n, float other, int waiting);
 void CoXlTestLwHoldTarget(float x, float y);
 void CoXlTestLwHoldPoint(float a, int k, float* out);
 void CoXlTestLwHoldTwo(int idx, float* pos);
+int CoXlTestLwPlans(float radius, float step, float x, float y, int plans, int* beyond, int* turned);
 void CoXlTestLwHoldNext(float* pos);
 uint64_t CoXlTestLwHeldFrom(void);
 int CoXlTestLwStallTries(int set);
@@ -534,6 +535,25 @@ static void Stall(void)
     CHECK(Count("(the last such line this mission)") == 3); /* the held-why's, the other stalls' and this one */
 }
 
+/* A squad at its route's end gets a new destination on an extra large disc: 200 m nodes over 7782 m (the walking grid
+ * of a real mission), from the middle and from 400 m inside the rim; and on a vanilla disc. */
+static void Plans(void)
+{
+    int beyond = 0, turned = 0;
+    g_case = "a new destination on the extra large disc";
+    CHECK(CoXlTestLwPlans(7782.0f, 200.0f, 3000.0f, 3000.0f, 300, &beyond, &turned) == 0);
+    CHECK(beyond == 0);         /* every destination within the roam range of where the squad stood */
+    CHECK(turned < 300 / 10);  /* an about-turn only when the tries run low */
+    g_case = "a new destination near the disc's rim";
+    CHECK(CoXlTestLwPlans(7782.0f, 200.0f, 5200.0f, 5200.0f, 300, &beyond, &turned) == 0);
+    CHECK(beyond == 0);
+    g_case = "a new destination on a vanilla disc";
+    CHECK(CoXlTestLwPlans(1000.0f, 100.0f, 0.0f, 0.0f, 300, &beyond, &turned) == 0);
+    /* three nodes in an L: from either end the only way starts back where it came from, and it is taken */
+    g_case = "a new destination from a dead end";
+    CHECK(CoXlTestLwPlans(1000.0f, 900.0f, 800.0f, -100.0f, 300, &beyond, &turned) < 300 / 20);
+    CHECK(turned > 300 / 4);
+}
 int main(void)
 {
     g_case = "set-up";
@@ -551,6 +571,7 @@ int main(void)
     StallApply();
     StallStep();
     Stall();
+    Plans();
     if (g_failed) { printf("lwreinforce: %d checks failed\n", g_failed); return 1; }
     printf("lwreinforce: all cases passed\n");
     return 0;
