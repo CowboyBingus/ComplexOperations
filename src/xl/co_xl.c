@@ -426,6 +426,9 @@ void CoXlTestLwNavHold(uintptr_t worlds, void (*enter)(uintptr_t), void (*leave)
 { g_lwNavHold.worlds = worlds; g_lwNavHold.enter = enter; g_lwNavHold.leave = leave; }
 uintptr_t CoXlTestLwNavPop(uintptr_t list, uint32_t flush, ULONGLONG now) { return LwNavPopAt(list, flush, now); }
 int CoXlTestLwNavHoldBusy(void) { return LwNavHoldBusy(); }
+int CoXlTestLwCutNote(uintptr_t exe, uintptr_t at, uintptr_t bad, const CONTEXT* c) { return LwCutNote(exe, at, bad, c); }
+void CoXlTestLwCutReset(void) { g_lwCutNotes = 0; }
+void CoXlTestLwNavRing(uintptr_t ring, volatile uint32_t* next) { g_lwNavHold.ring = ring; g_lwNavHold.ringNext = next; }
 void CoXlTestLwNavHoldCounts(uint32_t* v)
 {
     v[0] = g_lwNavHold.held; v[1] = g_lwNavHold.longest; v[2] = g_lwNavHold.sumRaise; v[3] = g_lwNavHold.drains; v[4] = g_lwNavHold.marked;

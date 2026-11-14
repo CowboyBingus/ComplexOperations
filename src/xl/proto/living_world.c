@@ -3243,9 +3243,16 @@ static void LwNavSwapLevel(void);
 #define LW_NAV_BREAK_LINES 16  /* lines a level for a tick with no game frame before it */
 #define LW_NAV_HOLD_WALK 4096  /* more records than the nav's jobs can make: the game's order */
 #define LW_NAV_HOLD_SEEN 64
+/* The tick's records are a ring of 512, handed to new jobs in order and zeroed with no in-use test (0x7B8556), so
+ * one still on the list when its turn comes again would be cut out of the list and built over. It leaves before. */
+#define LW_NAV_RING 512u
+#define LW_NAV_RING_LEFT 64u   /* job starts left before a waiting record is handed out again: it leaves now */
+#define LW_NAV_RING_LINES 8
 static struct
 {
     uintptr_t worlds;                              /* exe 0x27C30B8: the nav world pointers */
+    uintptr_t ring; volatile uint32_t* ringNext;   /* exe 0x1B1C200: the job records; 0x1B1C148: the next one's number */
+    uint32_t ringOuts;                             /* this level's records taken at the ring's bound */
     void (*enter)(uintptr_t), (*leave)(uintptr_t); /* the list's lock, as the tick takes it (0x7B8B05, 0x7B8B39) */
     /* A world's section commands (unloads, loads) not yet seen applied and committed, and whether a swap is among
      * them: the queue's buffer [W+0x498] when the last one was queued, and whether a step has taken it since. */
@@ -3395,6 +3402,12 @@ static ULONGLONG LwNavSeenAt(uintptr_t rec, ULONGLONG other)
     for (int k = 0; k < LW_NAV_HOLD_SEEN; k++) if (g_lwNavHold.seen[k].rec == rec) return g_lwNavHold.seen[k].at;
     return other;
 }
+/* Job starts left before the ring hands `rec` out again (0 = the next start takes it); the ring's size when unknown. */
+static uint32_t LwNavRingLeft(uintptr_t rec)
+{
+    if (!g_lwNavHold.ring || !g_lwNavHold.ringNext || rec < g_lwNavHold.ring || rec >= g_lwNavHold.ring + LW_NAV_RING * 0x210u) return LW_NAV_RING;
+    return ((uint32_t)((rec - g_lwNavHold.ring) / 0x210u) - *g_lwNavHold.ringNext) & (LW_NAV_RING - 1);
+}
 /* The world's step finished on the frame thread, with the list's lock released: the nav's build threads push to it. */
 static int LwNavHoldDrain(uintptr_t list, int idx, uintptr_t w, const char* path)
 {
@@ -3476,6 +3489,7 @@ static uintptr_t LwNavPopAt(uintptr_t list, uint32_t flush, ULONGLONG now)
     {
         /* per world the oldest first build [0] and the oldest built cell's [1]; `old` the older of the two, for the wait */
         uintptr_t plain = 0, plainPrev = 0, rec2[4][2] = {{0}}, prev2[4][2], cell[4], old[4] = {0, 0, 0, 0}, prev = 0, c = 0;
+        uintptr_t due = 0, duePrev = 0; int dueWorld = 0;
         int r = 0; uint32_t walked = 0;
         memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting);
         for (uintptr_t rec = *(uintptr_t*)(list + 0x28); rec; prev = rec, rec = *(uintptr_t*)(rec + off))
@@ -3485,6 +3499,7 @@ static uintptr_t LwNavPopAt(uintptr_t list, uint32_t flush, ULONGLONG now)
             if (!k) { plain = rec; plainPrev = prev; continue; }
             rec2[k - 1][r] = rec; prev2[k - 1][r] = prev; old[k - 1] = rec; g_lwNavHold.waiting[k - 1]++;
             if (r) cell[k - 1] = c;
+            if (LwNavRingLeft(rec) < LW_NAV_RING_LEFT) { due = rec; duePrev = prev; dueWorld = k - 1; }
         }
         if (plain)
         {
@@ -3493,6 +3508,17 @@ static uintptr_t LwNavPopAt(uintptr_t list, uint32_t flush, ULONGLONG now)
             if (!pass && !(flags & 0x80) && idx < 4 && g_lwNavHold.swapUnapplied[idx])
             { LwNavHoldDrain(list, (int)idx, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx), "a stopped nav's record, behind a swap not applied yet"); continue; }
             return LwNavTake(list, off, plainPrev, plain, -1);
+        }
+        if (due)
+        {
+            /* no step may be in flight for it either: the world's is finished here, once, and the list is read again */
+            uintptr_t w = *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * dueWorld);
+            if (!pass && !LwNavIdle(dueWorld, w)) { LwNavHoldDrain(list, dueWorld, w, "a waiting record is due in the job ring"); continue; }
+            if (g_lwNavHold.ringOuts++ < LW_NAV_RING_LINES)
+                Note("living world: nav: a waiting record left at the job ring's bound (world %d, %u job start(s) before its turn, waited %u tick(s))",
+                    dueWorld, LwNavRingLeft(due), LwNavWaited(due));
+            g_lwNavHold.waiting[dueWorld]--;
+            return LwNavTake(list, off, duePrev, due, dueWorld);
         }
         for (int i = 0; i < 4; i++)
         {
@@ -3640,7 +3666,7 @@ static void LwNavSwapLevel(void)
     g_lwSwap.level = g_world.levels;
     g_lwSwap.swaps = g_lwSwap.steps = g_lwSwap.parallel = g_lwSwap.lines = g_lwSwap.noLoad = 0;
     g_lwSwap.threads = 0; g_lwSwap.worstMs = 0;
-    g_lwNavHold.held = g_lwNavHold.longest = g_lwNavHold.drains = g_lwNavHold.marked = g_lwNavHold.drainLines = g_lwNavHold.breaks = g_lwNavHold.resLines = 0;
+    g_lwNavHold.held = g_lwNavHold.longest = g_lwNavHold.drains = g_lwNavHold.marked = g_lwNavHold.drainLines = g_lwNavHold.breaks = g_lwNavHold.resLines = g_lwNavHold.ringOuts = 0;
     memset(g_lwNavHold.stuckAt, 0, sizeof g_lwNavHold.stuckAt); memset(g_lwNavHold.seen, 0, sizeof g_lwNavHold.seen);
     memset(g_lwNavHold.oldAt, 0, sizeof g_lwNavHold.oldAt); memset(g_lwNavHold.longNoted, 0, sizeof g_lwNavHold.longNoted);
 }
@@ -3749,6 +3775,7 @@ static const struct { uint32_t rva; const char* bytes; } kLwHoldPins[] = {
     {0x7B8CAAu, "48 03 5F 38 4B 8B 34 31"}, {0x7B8C22u, "49 8D BD 10 67 00 00"},          /* the cells; the AI world */
     {0x7B9026u, "44 8B 43 60 41 83 F8 FF 74 36"},                                          /* a section: the unload */
     {0x7B26A6u, "48 8B 43 28 44 8B 43 38 49 89 04 38"},                                    /* a push goes to the head */
+    {0x7B8556u, "F0 0F C1 05 EA 3B 36 01 25 FF 01 00 00 48 8D 2D 96 3C 36 01 48 69 F0 10 02 00 00"}, /* the job ring */
     {0x7B7EECu, "83 E0 FD 83 C8 04 89 42 20"},                                             /* a stop: bit 2 off, bit 4 on */
     {0x7D8618u, "C7 43 54 01 00 00 00"}, {0x7D8726u, "42 C7 44 33 54 00 00 00 00"},       /* the AI update's flag */
     {0xBD1963u, "E8 18 FA FF FF"}, {0xBD19C9u, "E8 12 EC FF FF"},                         /* the driver's start and commit */
@@ -3773,10 +3800,86 @@ static void LwInstallNavHold(uintptr_t exe, uintptr_t stub)
     memset(code, 0xCC, sizeof code);
     memcpy(code, head, sizeof head); code[13] = 0xE8; memcpy(code + 14, &r32, 4); memcpy(code + 18, tail, sizeof tail);
     g_lwNavHold.worlds = exe + LW_NAV_WORLDS;
+    g_lwNavHold.ring = exe + 0x1B1C200u; g_lwNavHold.ringNext = (volatile uint32_t*)(exe + 0x1B1C148u);
     g_lwNavHold.enter = (void (*)(uintptr_t))*(uintptr_t*)(exe + 0x13F66B8u); g_lwNavHold.leave = (void (*)(uintptr_t))*(uintptr_t*)(exe + 0x13F66C0u);
     if (!g_lwNavHold.enter || !g_lwNavHold.leave || ApiWrite(exe + 0x7B8B0Bu, code, sizeof code))
     { Note("living world: nav: the tick's pop could not be written; each swap's step is finished on the frame thread"); return; }
     Note("living world: nav: a built cell's completion waits for an idle AI world (the pop at 0x7B8B0B); no step is finished on the frame thread in play");
+}
+/* A crash in the cutter leaves a small dump with no heap in it. A fault in 0xC87A40 (the recut), 0xC8B310 (a face's
+ * old pieces) or 0xCB1110 (their edges), or under one of them, first logs what the dump lacks: the registers, the
+ * item being cut in (0xC87A40 keeps it at [rbp+0x40]), its edge records and each world's section array. */
+#define LW_CUT_NOTES 2
+static const struct { uint32_t from, to; const char* name; } kLwCutFns[] = {
+    {0xC87A40u, 0xC88451u, "0xC87A40"}, {0xC8B310u, 0xC8B3AEu, "0xC8B310"}, {0xCB1110u, 0xCB12CCu, "0xCB1110"}};
+static volatile LONG g_lwCutNotes;
+static int LwCutFn(uintptr_t exe, uintptr_t at)
+{
+    for (int i = 0; i < 3; i++) if (at >= exe + kLwCutFns[i].from && at < exe + kLwCutFns[i].to) return i;
+    return -1;
+}
+static int LwCutRead(uintptr_t at, void* to, size_t n)
+{
+    SIZE_T got = 0;
+    return ReadProcessMemory(GetCurrentProcess(), (const void*)at, to, n, &got) && got == n;
+}
+static void LwCutHex(uintptr_t at, size_t n, char* out, size_t cap)
+{
+    uint8_t b[0x48]; size_t o = 0;
+    if (n > sizeof b) n = sizeof b;
+    if (!LwCutRead(at, b, n)) { snprintf(out, cap, "unreadable"); return; }
+    out[0] = 0;
+    for (size_t i = 0; i < n && o + 4 < cap; i++) o += (size_t)snprintf(out + o, cap - o, i && !(i & 7) ? " %02X" : "%02X", b[i]);
+}
+/* 1 when the fault at `at` (touching `bad`) is the cutter's and was written out. */
+static int LwCutNote(uintptr_t exe, uintptr_t at, uintptr_t bad, const CONTEXT* c)
+{
+    int fn = LwCutFn(exe, at), slot = -1;
+    for (int k = 0; fn < 0 && k < 96; k++)
+    {
+        uintptr_t v = 0;
+        if (!LwCutRead((uintptr_t)c->Rsp + 8u * (unsigned)k, &v, 8)) break;
+        if ((fn = LwCutFn(exe, v)) >= 0) slot = k;
+    }
+    if (fn < 0 || InterlockedIncrement(&g_lwCutNotes) > LW_CUT_NOTES) return 0;
+    char where[48] = "", text[400]; size_t o = 0;
+    if (slot >= 0) snprintf(where, sizeof where, " (its return address at rsp+0x%X)", 8 * slot);
+    Note("living world: nav: a fault at exe+0x%llX on address %p, in or under the cutter's %s%s, thread %lu: rax %llX rcx %llX rdx %llX rbx %llX rsp %llX "
+        "rbp %llX rsi %llX rdi %llX r8 %llX r9 %llX r10 %llX r11 %llX r12 %llX r13 %llX r14 %llX r15 %llX", (unsigned long long)(at - exe), (void*)bad,
+        kLwCutFns[fn].name, where, (unsigned long)GetCurrentThreadId(), (unsigned long long)c->Rax, (unsigned long long)c->Rcx, (unsigned long long)c->Rdx,
+        (unsigned long long)c->Rbx, (unsigned long long)c->Rsp, (unsigned long long)c->Rbp, (unsigned long long)c->Rsi, (unsigned long long)c->Rdi,
+        (unsigned long long)c->R8, (unsigned long long)c->R9, (unsigned long long)c->R10, (unsigned long long)c->R11, (unsigned long long)c->R12,
+        (unsigned long long)c->R13, (unsigned long long)c->R14, (unsigned long long)c->R15);
+    if (fn == 0 && slot < 0)
+    {
+        uintptr_t item = 0, edges = 0; char hex[200], recs[120];
+        if (LwCutRead((uintptr_t)c->Rbp + 0x40, &item, 8) && LwCutRead(item + 0x18, &edges, 8))
+        {
+            uint64_t first = c->R13 >= 2 ? c->R13 - 2 : 0;
+            LwCutHex(item, 0x48, hex, sizeof hex); LwCutHex(edges + 8 * (uintptr_t)first, 40, recs, sizeof recs);
+            Note("living world: nav: the item %p: %s; its edge records %p, five from record %llu (r13 %llu): %s", (void*)item, hex, (void*)edges,
+                (unsigned long long)first, (unsigned long long)c->R13, recs);
+        }
+        else Note("living world: nav: the item at [rbp+0x40] could not be read");
+    }
+    for (int i = 0; i < 4; i++)
+    {
+        uintptr_t w = 0, all = 0, array = 0; int32_t n[2] = {0, 0};
+        if (!LwCutRead(g_lwSwap.table + 0x80u * (unsigned)i, &w, 8) || !w) continue;
+        if (!LwCutRead(w + 0x130, &all, 8) || !LwCutRead(all + 0x38, &array, 8) || !LwCutRead(all + 0x40, n, 8))
+        { o += (size_t)snprintf(text + o, sizeof text - o, "%sworld %d unreadable", o ? "; " : "", i); continue; }
+        o += (size_t)snprintf(text + o, sizeof text - o, "%sworld %d: %p, %d of %d", o ? "; " : "", i, (void*)array, n[0], n[1] & 0x3FFFFFFF);
+    }
+    Note("living world: nav: the section arrays then: %s", o ? text : "no AI world");
+    return 1;
+}
+static LONG CALLBACK LwCutFault(EXCEPTION_POINTERS* info)
+{
+    const EXCEPTION_RECORD* r = info->ExceptionRecord;
+    uintptr_t exe = g_lwSwap.exe, at = (uintptr_t)r->ExceptionAddress;
+    if (r->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || !exe || at < exe || at - exe >= 0x13F0000u) return EXCEPTION_CONTINUE_SEARCH;
+    LwCutNote(exe, at, r->NumberParameters > 1 ? (uintptr_t)r->ExceptionInformation[1] : 0, info->ContextRecord);
+    return EXCEPTION_CONTINUE_SEARCH;
 }
 static void LwInstallNavSwapSync(void)
 {
@@ -3803,6 +3906,10 @@ static void LwInstallNavSwapSync(void)
     g_lwSwap.runnerMake = (void (*)(void*))(exe + 0xA0F4D0u); g_lwSwap.runnerFree = (void (*)(void*))(exe + 0xA0F4F0u);
     g_lwSwap.queued = (int (*)(uintptr_t))(exe + 0xAD4740u); g_lwSwap.permit = (int (*)(int))(exe + 0x7D7740u);
     g_lwSwap.join = (void (*)(int))(exe + 0x7D7930u); g_lwSwap.table = exe + LW_AIW_TABLE; g_lwSwap.exe = exe;
+    if (ApiCodeMatches(exe + 0xC87A40u, "48 8B C4 4C 89 40 18 48 89 50 10 55 48 8D 68 D8") && ApiCodeMatches(exe + 0xC87F50u, "48 8B 45 40 4C 8B F3 48 83 C3 28 48 8B 50 18") &&
+        ApiCodeMatches(exe + 0xC8B310u, "4C 8B DC 53 55 56 41 56 48 83 EC 48") && ApiCodeMatches(exe + 0xCB1110u, "45 85 C9 0F 8E B2 01 00 00 55 56 41 55 41 56"))
+        AddVectoredExceptionHandler(1, LwCutFault);
+    else Note("living world: nav: the cutter is not the reviewed code; a fault in it is not written out");
     /* the parallel step's pins: 0xBD0BB0's dispatch by thread count, the async step's count, the AI update's runner and
      * its two task runners; any other code keeps every step on the frame thread */
     if (ApiCodeMatches(exe + 0xBD0C22u, "41 83 FE 01 7E 0F 4C 8D 05") && ApiCodeMatches(exe + 0xBD0C2Fu, "FF 96 C8 04 00 00 EB 0C 48 8B 07") &&

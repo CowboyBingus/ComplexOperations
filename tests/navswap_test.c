@@ -25,6 +25,9 @@ void CoXlTestLwNavSwapCounts(uint32_t* swaps, uint32_t* steps, uint32_t* paralle
 void CoXlTestLwNavHold(uintptr_t worlds, void (*enter)(uintptr_t), void (*leave)(uintptr_t));
 uintptr_t CoXlTestLwNavPop(uintptr_t list, uint32_t flush, ULONGLONG now);
 int CoXlTestLwNavHoldBusy(void);
+int CoXlTestLwCutNote(uintptr_t exe, uintptr_t at, uintptr_t bad, const CONTEXT* c);
+void CoXlTestLwCutReset(void);
+void CoXlTestLwNavRing(uintptr_t ring, volatile uint32_t* next);
 void CoXlTestLwNavHoldCounts(uint32_t* v);
 int CoXlTestLwNavWatch(uint16_t cx, uint16_t cy, uint32_t flags, uint32_t section);
 float CoXlTestLwAibSteer(float stock, float cur, float lat);
@@ -371,6 +374,7 @@ static void ResetHold(const char* name)
     }
     g_navsVar = (uintptr_t)g_navs;
     CoXlTestLwNavHold((uintptr_t)&g_navsVar, FakeEnter, FakeLeave);
+    CoXlTestLwNavRing(0, 0);
 }
 /* The game's work on a popped record: a built cell's unload, then every cell's load. In play it must never meet a swap
  * of its world that is not applied yet, and a built cell's must find no step in flight and no section command of its
@@ -492,6 +496,116 @@ static void TestHoldIdle(void)
     Flight(1); Section(IDX, 3, 40);
     Push(0, IDX, 3, 0x80);
     CHECK(Tick(0, 0) == 1 && g_unloads == 0 && g_loads == 0);
+}
+
+/* The job ring as the game lays it out, with the test's records in its slot `slot`; `next` is the game's counter. */
+static volatile uint32_t g_ringNext;
+static void Ring(uint32_t slot, uint32_t next) { g_ringNext = next; CoXlTestLwNavRing((uintptr_t)g_rec - slot * 0x210u, &g_ringNext); }
+static void TestHoldRing(void)
+{
+    uint32_t v[8];
+    ResetHold("a waiting first build 64 job starts from its ring slot's turn waits on; at 63 the step is finished here and it leaves");
+    Flight(1); Ring(100, 36);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 0 && g_loads == 0 && g_waits == 0);
+    g_ringNext = 37;
+    CHECK(Tick(0, 10) == 1 && g_loads == 1 && g_waits == 1 && g_commits == 1 && g_broken == 0 && g_lockedCalls == 0);
+    CHECK(fake_host_logged("a step finished on the frame thread (a waiting record is due in the job ring; flush 0, living world live, world 1, "));
+    CHECK(fake_host_logged("a waiting record left at the job ring's bound (world 1, 63 job start(s) before its turn, waited 1 tick(s))"));
+    HoldCounts(v); CHECK(v[3] == 1);
+    ResetHold("the ring's count wraps: slot 5 with the counter at 512 + 500 is 17 starts away");
+    Flight(1); Ring(5, 512 + 500);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 1 && g_waits == 1 && fake_host_logged("17 job start(s) before its turn, waited 0 tick(s))"));
+    ResetHold("the slot the next job start takes: 0 left");
+    Flight(1); Ring(7, 7);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 1 && fake_host_logged("0 job start(s) before its turn"));
+    ResetHold("a slot just handed out is 511 starts away: it waits");
+    Flight(1); Ring(7, 8);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 0 && Tick(0, 10) == 0 && g_waits == 0);
+    ResetHold("a due built cell's record: the step is finished here, its swap goes with nothing in flight");
+    Section(IDX, 3, 40); Flight(1); Ring(100, 90);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 1 && g_unloads == 1 && g_loads == 1 && g_broken == 0 && g_waits == 1);
+    ResetHold("a due record of an idle world leaves with no step finished here");
+    Section(IDX, 3, 40); g_grant = 0; Ring(100, 30);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 0); /* a query job reads the world: the built cell waits */
+    g_ringNext = 90;
+    CHECK(Tick(0, 10) == 1 && g_waits == 0 && g_steps == 0 && g_commits == 0);
+    CHECK(!fake_host_logged("a waiting record is due in the job ring") && fake_host_logged("a waiting record left at the job ring's bound (world 1, 10 job start(s)"));
+    g_grant = 1;
+    ResetHold("a record outside the ring, or below it, is never due");
+    Flight(1); g_ringNext = 0; CoXlTestLwNavRing((uintptr_t)g_rec + 0x20, &g_ringNext);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 0);
+    CoXlTestLwNavRing((uintptr_t)g_rec - 512 * 0x210u, &g_ringNext);
+    CHECK(Tick(0, 10) == 0);
+    CoXlTestLwNavRing((uintptr_t)g_rec - 511 * 0x210u, &g_ringNext); g_ringNext = 511 - 63;
+    CHECK(Tick(0, 20) == 1); /* the ring's last slot */
+    ResetHold("eight lines a level");
+    Ring(100, 90);
+    for (int k = 0; k < 7; k++) { Flight(1); Push(0, IDX, 3 + k, 0); CHECK(Tick(0, 10 * k) == 1); }
+    g_fake.log[0] = 0;
+    Flight(1); Push(0, IDX, 10, 0); CHECK(Tick(0, 70) == 1 && fake_host_logged("a waiting record left at the job ring's bound"));
+    g_fake.log[0] = 0;
+    Flight(1); Push(0, IDX, 11, 0); CHECK(Tick(0, 80) == 1 && !fake_host_logged("a waiting record left at the job ring's bound"));
+}
+
+/* A fault in the cutter: what the note holds, and which faults it is written for. */
+static void TestCutFault(void)
+{
+    static uint8_t stack[0x400] __attribute__((aligned(16))), item[0x48], edges[0x100], all[0x48];
+    const uintptr_t exe = 0x140000000u;
+    CONTEXT c;
+    ResetHold("a fault in the recut: the registers, the item, five edge records around r13 and the section arrays");
+    CoXlTestLwCutReset();
+    memset(&c, 0, sizeof c); memset(stack, 0, sizeof stack);
+    for (int k = 0; k < 0x48; k++) item[k] = (uint8_t)k;
+    for (int k = 0; k < 0x100; k++) edges[k] = (uint8_t)(0xA0 + k / 8);
+    Put(item + 0x18, (uintptr_t)edges);
+    c.Rsp = (uintptr_t)stack; c.Rbp = (uintptr_t)stack + 0x100; c.R13 = 9; c.Rax = 0x1234;
+    Put(stack + 0x140, (uintptr_t)item);
+    memset(all, 0, sizeof all); Put(all + 0x38, 0x5000); { int32_t n[2] = {295, (int32_t)0x80000200u}; memcpy(all + 0x40, n, 8); }
+    Put(g_aiw + 0x130, (uintptr_t)all);
+    CHECK(CoXlTestLwCutNote(exe, exe + 0xC87FB6u, 0x77, &c) == 1);
+    CHECK(fake_host_logged("a fault at exe+0xC87FB6 on address 0000000000000077, in or under the cutter's 0xC87A40, thread "));
+    CHECK(fake_host_logged(": rax 1234 rcx 0 ") && fake_host_logged(" r13 9 r14 0 r15 0"));
+    CHECK(fake_host_logged(": 0001020304050607 08090A0B0C0D0E0F 1011121314151617 "));
+    CHECK(fake_host_logged(" 4041424344454647; its edge records "));
+    CHECK(fake_host_logged(", five from record 7 (r13 9): A7A7A7A7A7A7A7A7 A8A8A8A8A8A8A8A8 A9A9A9A9A9A9A9A9 AAAAAAAAAAAAAAAA ABABABABABABABAB"));
+    CHECK(fake_host_logged("the section arrays then: world 1: 0000000000005000, 295 of 512"));
+    ResetHold("r13 below 2: from record 0; an item that cannot be read says so");
+    CoXlTestLwCutReset(); c.R13 = 1;
+    CHECK(CoXlTestLwCutNote(exe, exe + 0xC87A40u, 0, &c) == 1 && fake_host_logged("five from record 0 (r13 1): A0A0A0A0A0A0A0A0 "));
+    g_fake.log[0] = 0; c.Rbp = 0x10;
+    CHECK(CoXlTestLwCutNote(exe, exe + 0xC88450u, 0, &c) == 1 && fake_host_logged("the item at [rbp+0x40] could not be read"));
+    g_fake.log[0] = 0;
+    CHECK(CoXlTestLwCutNote(exe, exe + 0xC87FB6u, 0, &c) == 0 && g_fake.log[0] == 0); /* two notes a session */
+    ResetHold("the functions' bounds; a fault elsewhere with no cutter frame on the stack is not the cutter's");
+    c.Rbp = (uintptr_t)stack + 0x100;
+    const uint32_t out[] = {0xC87A3Fu, 0xC88451u, 0xC8B30Fu, 0xC8B3AEu, 0xCB110Fu, 0xCB12CCu, 0x7B8A10u};
+    for (int k = 0; k < 7; k++) { CoXlTestLwCutReset(); CHECK(CoXlTestLwCutNote(exe, exe + out[k], 0, &c) == 0); }
+    const uint32_t in[] = {0xC8B310u, 0xC8B3ADu, 0xCB1110u, 0xCB12CBu};
+    for (int k = 0; k < 4; k++)
+    {
+        CoXlTestLwCutReset(); g_fake.log[0] = 0;
+        CHECK(CoXlTestLwCutNote(exe, exe + in[k], 0, &c) == 1 && fake_host_logged(k < 2 ? "the cutter's 0xC8B310, thread" : "the cutter's 0xCB1110, thread"));
+        CHECK(!fake_host_logged("the item"));
+    }
+    ResetHold("a fault under the cutter: found by its return address, with no item");
+    CoXlTestLwCutReset(); Put(stack + 8 * 95, exe + 0xC8B3A4u);
+    CHECK(CoXlTestLwCutNote(exe, exe + 0xC2F662u, 0, &c) == 1 && fake_host_logged("in or under the cutter's 0xC8B310 (its return address at rsp+0x2F8), thread"));
+    CoXlTestLwCutReset(); Put(stack + 8 * 95, 0); Put(stack + 8 * 96, exe + 0xC8B3A4u);
+    CHECK(CoXlTestLwCutNote(exe, exe + 0xC2F662u, 0, &c) == 0); /* 96 stack words are read */
+    CoXlTestLwCutReset(); Put(stack + 8 * 3, exe + 0xC87FB6u); g_fake.log[0] = 0;
+    CHECK(CoXlTestLwCutNote(exe, exe + 0xC2F662u, 0, &c) == 1 && !fake_host_logged("the item")); /* the recut's frame is not this one */
+    ResetHold("no AI world: the note says so; an unreadable collection too");
+    CoXlTestLwCutReset(); Put(g_aiw + 0x130, 0x10);
+    CHECK(CoXlTestLwCutNote(exe, exe + 0xCB1223u, 0, &c) == 1 && fake_host_logged("the section arrays then: world 1 unreadable"));
+    CoXlTestLwCutReset();
 }
 
 static void TestHoldWaits(void)
@@ -1150,6 +1264,8 @@ int main(void)
 {
     TestPopOrder();
     TestHoldIdle();
+    TestHoldRing();
+    TestCutFault();
     TestHoldWaits();
     TestHoldOnePerRun();
     TestHoldTwoWorlds();
