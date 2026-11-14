@@ -486,7 +486,7 @@ static int MoveStampUnitMine(uint64_t world, uint64_t unit)
         fabsf(y - (g_move.centre[1] + MOVE_STAMP_OFFSET)) <= NEAR_SIDE / 2 + 2 * MOVE_STAMP_MARGIN;
 }
 
-static int MoveStampUnitsLeft(uint64_t world, uint32_t* absent, uint32_t* other)
+static int MoveStampUnitsLeft(uint64_t world, uint32_t* absent, uint32_t* other, int destroyThem)
 {
     uintptr_t wi = 0, table = 0, destroy = 0;
     uint64_t list = 0, *copy = NULL;
@@ -507,8 +507,11 @@ static int MoveStampUnitsLeft(uint64_t world, uint32_t* absent, uint32_t* other)
         if (unit == 0) continue;
         if (count == 0 || bsearch(&unit, copy, count, 8, MoveU64Cmp) == NULL) { (*absent)++; continue; }
         if (!MoveStampUnitMine(world, unit)) { (*other)++; continue; }
-        if (gone == 0) ((WorldStreamAnimWaitFn)wait)(world); /* as every game destroy */
-        ((WorldStreamDestroyUnitFn)destroy)(world, unit, 0, 0);
+        if (destroyThem)
+        {
+            if (gone == 0) ((WorldStreamAnimWaitFn)wait)(world); /* as every game destroy */
+            ((WorldStreamDestroyUnitFn)destroy)(world, unit, 0, 0);
+        }
         gone++;
     }
     if (copy != NULL) VirtualFree(copy, 0, MEM_RELEASE);
@@ -545,6 +548,7 @@ static void MoveBuildLeft(int ship)
     }
     uint32_t generator = 0, absent = 0, other = 0;
     int job = 0;
+    if (ship) g_move.shipSeen = 1; /* kept for a level init that takes this build over */
     if (!MoveGeneratorIdle(ship, &generator, &job))
     {
         Note("difficulty: moving tiles: %s: the build of cell (%d, %d) was cut short in step '%s', and the level generator is not idle (state %u, its job %s): "
@@ -552,22 +556,33 @@ static void MoveBuildLeft(int ship)
             generator, job ? "runs" : "is gone", units, merge ? "up" : "not up", held ? "held" : "not held");
         return;
     }
+    /* Once the ship is reached the mission's unload has destroyed every unit of the world (game 0xAB3CD9..0xAB3DEE: it
+     * starts at generator state 0 and goes on until none is left), and the ship's units live in the same world: an
+     * address of the build's that is listed again is another unit's. So the units are forgotten, never destroyed; only
+     * a level init straight from play still destroys what it finds. */
+    const int destroyThem = !g_move.shipSeen;
     const int ring = MoveSpawnRingEmpty(MoveWorld());
     LARGE_INTEGER t0, t1, hz;
     QueryPerformanceCounter(&t0);
-    const int gone = units != 0 ? MoveStampUnitsLeft(MoveWorld(), &absent, &other) : 0;
+    const int gone = units != 0 ? MoveStampUnitsLeft(MoveWorld(), &absent, &other, destroyThem) : 0;
     g_move.stTemp = g_move.stGone = 0; g_move.stamped = 0; /* gone or not: the next build's list takes their place */
     g_nearStampOffset[0] = g_nearStampOffset[1] = 0.0f;    /* else the next level's own 0x63 would look 20 km off */
     const int torn = MoveTeardown(1);
     MovePackageLater();
     g_move.cutNoted = 1;
     QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
-    char others[96] = "";
-    if (other != 0) snprintf(others, sizeof others, ", %u at their addresses are not this build's units (left alone)", other);
+    char others[224] = "", ringText[40] = "";
+    int at = 0;
+    if (other != 0) at = snprintf(others, sizeof others, ", %u at their addresses are not this build's units (left alone)", other);
+    if (!destroyThem && gone > 0)
+        snprintf(others + at, sizeof others - (size_t)at, ", WARNING: %d still listed at the build's place are left in the world (nothing is destroyed after the ship)", gone);
+    if (destroyThem) snprintf(ringText, sizeof ringText, "; the spawn ring %s", ring == 1 ? "empty" : ring == 0 ? "not empty" : "did not read");
     Note("difficulty: moving tiles: %s: the build of cell (%d, %d) was cut short in step '%s': %d of its %u stamp units destroyed, %u already gone%s%s; "
-        "the merge %s; the merge package %s (generator state %u; %.1f ms on the game thread; the spawn ring %s)", why, g_move.cell[0], g_move.cell[1],
-        MoveStateName(state), gone < 0 ? 0 : gone, units, absent, others, gone < 0 ? ", the rest KEPT in the world (its unit list or the destroy did not read)" : "",
+        "the merge %s; the merge package %s (generator state %u; R+0x108 %s; %.1f ms on the game thread%s)", why, g_move.cell[0], g_move.cell[1],
+        MoveStateName(state), gone < 0 || !destroyThem ? 0 : gone, units, absent, others,
+        gone >= 0 ? "" : destroyThem ? ", the rest KEPT in the world (its unit list or the destroy did not read)" : ", the rest not looked up (the unit list did not read)",
         torn ? "torn down" : merge ? "NOT torn down" : "was not up",
         !held ? "was not held" : ship ? "is left to the next level init, which takes it over" : "is this level init's now",
-        generator, (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart, ring == 1 ? "empty" : ring == 0 ? "NOT empty" : "did not read");
+        generator, !torn ? "not looked at" : g_move.r108Out == 1 ? "destroyed" : g_move.r108Out == 2 ? "already gone" : "none",
+        (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart, ringText);
 }

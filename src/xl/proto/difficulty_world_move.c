@@ -79,6 +79,8 @@ static struct
     int pkgPending; uint32_t pkgFrames;
     uint32_t nodeOld; /* [R+0x18] when the merge began: a camera node destroyed before, never this build's */
     int cutNoted;     /* MoveBuildLeft has ended or noted this build */
+    int shipSeen;     /* the ship was reached with this build left: its stamp units are never destroyed after that */
+    int r108Out;      /* MoveTeardown's R+0x108: 0 none, 1 destroyed, 2 not in the world's list any more */
     uint32_t ringWaits; /* frames the stamp units' destroy waited for the async spawn ring */
     int failState; /* the state a build failed in (MoveFailRest destroys the new tile's terrain from MV_SPAWN on) */ /* the merge package's release, MOVE_PKG_FRAMES after the teardown that gave it up */
     /* the stamp terrains of the tile's locations (0x2F spawns them for 0x63 to draw, 0x65 takes them away): staging
@@ -560,7 +562,9 @@ static int MoveTeardown(int left)
     if (n1 != 0 && n1 != g_move.nodeOld) destroyNode(world, n1);
     g_move.nodeOld = n1;
     /* after the level only one the world still lists is its to destroy; 0xFCF2F0 below skips a zero */
-    if (r108 != 0 && (!left || MoveListed(world + 0x230908u, world + 0x230910u, r108))) destroyUnit(world, r108);
+    const int listed = r108 != 0 && (!left || MoveListed(world + 0x230908u, world + 0x230910u, r108));
+    if (listed) destroyUnit(world, r108);
+    g_move.r108Out = r108 == 0 ? 0 : listed ? 1 : 2; /* for the level end's line */
     *(volatile uint32_t*)(R + 8) = 0; *(volatile uint64_t*)(R + 0x108) = 0;
     /* 0x66: 0x94's lookup ([record+0x18]: its readback +0x10, its texture +0x18 under 0xDBCD240D) */
     uint64_t lookup = 0, rd = 0, tex = 0;
@@ -841,7 +845,7 @@ static int MoveStart(void)
     g_move.stashed = 1;
     g_near.tex[0] = g_near.tex[1] = 0; g_matband.tex = 0; g_matband.pixels = NULL;
     InterlockedExchange(&g_moveBuilding, 1);
-    g_move.acquired = 0; g_move.merge = 0; g_move.cutNoted = 0; g_move.waits = 0; g_move.frames = 0; g_move.started = GetTickCount64();
+    g_move.acquired = 0; g_move.merge = 0; g_move.cutNoted = 0; g_move.shipSeen = 0; g_move.waits = 0; g_move.frames = 0; g_move.started = GetTickCount64();
     g_move.state = MV_PACKAGE;
     Note("difficulty: moving tiles: building cell (%d, %d) at (%.0f, %.0f) for a player %.0f m from it; %d tiles live", g_move.cell[0], g_move.cell[1],
         (double)g_move.centre[0], (double)g_move.centre[1], (double)MoveCellDistance(g_move.cell[0], g_move.cell[1], g_move.player[0][0], g_move.player[0][1]),

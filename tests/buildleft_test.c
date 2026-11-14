@@ -215,21 +215,20 @@ int main(void)
     static uint64_t units[6];
     const uint64_t kUnits[6] = {U(4) /* destroyed in an earlier frame */, U(5), U(6) /* not in the world */, 0, U(3), U(9)};
 
-    Start("the ship ends a build cut short in its replay: its stamp units still in the world go, once each, after one wait");
+    Start("the ship ends a build cut short in its replay: its stamp units are forgotten and none is destroyed, listed at its place or not");
     ListSet(kWorld, 7);
     memcpy(units, kUnits, sizeof units);
     CoXlTestStampUnits(units, 6);
     CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 0, 0, 1, (uint64_t)(uintptr_t)g_records, 1);
     CHECK(CoXlTestBuildLeft(0) == 5 && CoXlTestBuildLeft(4) == 1);
     CoXlTestWorldShip();
-    CHECK(Count(C_UNIT, 0) == 3 && Count(C_UNIT, U(5)) == 1 && Count(C_UNIT, U(3)) == 1 && Count(C_UNIT, U(9)) == 1);
-    CHECK(Count(C_UNIT, U(6)) == 0 && Count(C_UNIT, U(4)) == 0); /* neither the one not in the list nor the one that went before */
-    CHECK(Count(C_WAIT, 0) == 1 && Count(C_WAIT, 0xA5A5) == 1 && First(C_WAIT, 0) < First(C_UNIT, 0));
-    CHECK(g_calls[First(C_UNIT, 0) - 1].b == world && ListCount() == 4);
+    CHECK(Count(C_UNIT, 0) == 0 && Count(C_WAIT, 0) == 0 && ListCount() == 7); /* the unload took the build's; these are the ship's */
     CHECK(CoXlTestBuildLeft(0) == 0 && CoXlTestBuildLeft(4) == 0); /* and the next level's 0x63 looks where its stamps are */
     CHECK(Count(C_NODE, 0) == 0 && Count(C_MERGED, 0) == 0 && Count(C_PACKAGE_OUT, 0) == 0);
-    CHECK(fake_host_logged("the ship: the build of cell (0, 0) was cut short in step 'replay': 3 of its 5 stamp units destroyed, 1 already gone; the merge was not up; "
-        "the merge package was not held"));
+    CHECK(fake_host_logged("the ship: the build of cell (0, 0) was cut short in step 'replay': 0 of its 5 stamp units destroyed, 1 already gone, "
+        "WARNING: 3 still listed at the build's place are left in the world (nothing is destroyed after the ship); the merge was not up; "
+        "the merge package was not held (generator state 0; R+0x108 not looked at;"));
+    CHECK(!fake_host_logged("spawn ring"));
     g_callCount = 0;
     CoXlTestWorldShip();
     CoXlTestWorldLevel((uintptr_t)lg, 0);
@@ -243,6 +242,9 @@ int main(void)
     Generator(1, 0);
     CoXlTestWorldLevel((uintptr_t)lg, 0);
     CHECK(Count(C_UNIT, 0) == 3 && Count(C_UNIT, U(4)) == 0 && CoXlTestBuildLeft(0) == 0); /* 0x4000 is not in the world either */
+    CHECK(Count(C_UNIT, U(5)) == 1 && Count(C_UNIT, U(3)) == 1 && Count(C_UNIT, U(9)) == 1 && Count(C_UNIT, U(6)) == 0); /* once each, the listed ones */
+    CHECK(Count(C_WAIT, 0) == 1 && Count(C_WAIT, 0xA5A5) == 1 && First(C_WAIT, 0) < First(C_UNIT, 0));
+    CHECK(g_calls[First(C_UNIT, 0) - 1].b == world && ListCount() == 4 && fake_host_logged("; the spawn ring "));
     CHECK(fake_host_logged("a level init: the build of cell (0, 0) was cut short in step 'stamps': 3 of its 6 stamp units destroyed, 2 already gone"));
 
     Start("no unit of the build in the world: nothing destroyed, no wait");
@@ -259,7 +261,8 @@ int main(void)
     CoXlTestStampUnits(units, 6);
     CoXlTestMoverWorld((uint64_t)(uintptr_t)g_other);
     CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 0, 0, 0, (uint64_t)(uintptr_t)g_records, 1);
-    CoXlTestWorldShip();
+    Generator(1, 0);
+    CoXlTestWorldLevel((uintptr_t)lg, 0); /* straight from play */
     CHECK(Count(C_UNIT, 0) == 0 && Count(C_WAIT, 0) == 0 && CoXlTestBuildLeft(0) == 0 && CoXlTestBuildLeft(4) == 0);
     CHECK(fake_host_logged("0 of its 6 stamp units destroyed, 0 already gone, the rest KEPT in the world"));
 
@@ -270,7 +273,8 @@ int main(void)
     CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 0, 0, 0, (uint64_t)(uintptr_t)g_records, 1);
     g_fake.strictCode = 1;
     g_fake.exe[0x3340A0u] ^= 0x40;
-    CoXlTestWorldShip();
+    Generator(1, 0);
+    CoXlTestWorldLevel((uintptr_t)lg, 0);
     CHECK(Count(C_UNIT, 0) == 0 && fake_host_logged("the rest KEPT in the world"));
     g_fake.strictCode = 0;
 
@@ -300,7 +304,7 @@ int main(void)
     CHECK(CoXlTestBuildLeft(1) == 0 && CoXlTestBuildLeft(2) == 0);
     CHECK(Count(C_PACKAGE_OUT, 0) == 0 && CoXlTestBuildLeft(3) == 1); /* never in the call that destroyed the merge */
     CHECK(fake_host_logged("0 of its 0 stamp units destroyed, 0 already gone; the merge torn down; the merge package is left to the next level init, "
-        "which takes it over (generator state 0;"));
+        "which takes it over (generator state 0; R+0x108 destroyed;"));
     g_callCount = 0;
     CoXlTestWorldShip();
     CHECK(g_callCount == 0 && CoXlTestBuildLeft(3) == 1); /* no ship step sends it */
@@ -353,8 +357,10 @@ int main(void)
     CHECK(g_callCount == 0 && CoXlTestBuildLeft(0) == 5);
     Generator(1, 0);
     CoXlTestWorldLevel((uintptr_t)lg, 0);
-    CHECK(Count(C_UNIT, 0) == 3 && Count(C_NODE, 0) == 2 && Count(C_MERGED, 0) == 1 && CoXlTestBuildLeft(0) == 0 && CoXlTestBuildLeft(1) == 0);
-    CHECK(fake_host_logged("a level init: the build of cell (0, 0) was cut short in step 'replay': 3 of its 5 stamp units destroyed, 1 already gone; the merge torn down"));
+    CHECK(Count(C_UNIT, 0) == 0 && Count(C_WAIT, 0) == 0 && Count(C_NODE, 0) == 2 && Count(C_MERGED, 0) == 1 && CoXlTestBuildLeft(0) == 0 && CoXlTestBuildLeft(1) == 0);
+    CHECK(fake_host_logged("a level init: the build of cell (0, 0) was cut short in step 'replay': 0 of its 5 stamp units destroyed, 1 already gone, "
+        "WARNING: 3 still listed at the build's place are left in the world (nothing is destroyed after the ship); the merge torn down")); /* the ship was between */
+    CHECK(fake_host_logged("R+0x108 destroyed;") && !fake_host_logged("spawn ring"));
 
     Start("an address in the list that is no longer the build's unit is left alone");
     ListSet(kWorld, 7);
@@ -364,7 +370,8 @@ int main(void)
     Unit(3, g_other, CENTRE + 20000.0f);         /* at the offset, in another world */
     Unit(9, g_world, CENTRE + 20000.0f + 2176.0f); /* the farthest a stamp of the tile can stand */
     CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 0, 0, 0, (uint64_t)(uintptr_t)g_records, 1);
-    CoXlTestWorldShip();
+    Generator(1, 0);
+    CoXlTestWorldLevel((uintptr_t)lg, 0);
     CHECK(Count(C_UNIT, 0) == 1 && Count(C_UNIT, U(9)) == 1 && Count(C_UNIT, U(5)) == 0 && Count(C_UNIT, U(3)) == 0 && ListCount() == 6);
     CHECK(fake_host_logged("1 of its 6 stamp units destroyed, 2 already gone, 2 at their addresses are not this build's units (left alone); the merge was not up"));
     Start("a unit past the tile's reach at the offset is not the build's either");
@@ -374,7 +381,8 @@ int main(void)
     Unit(5, g_world, CENTRE + 20000.0f + 2200.0f);
     Unit(3, g_world, CENTRE + 20000.0f - 2200.0f);
     CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 0, 0, 0, (uint64_t)(uintptr_t)g_records, 1);
-    CoXlTestWorldShip();
+    Generator(1, 0);
+    CoXlTestWorldLevel((uintptr_t)lg, 0);
     CHECK(Count(C_UNIT, 0) == 1 && Count(C_UNIT, U(9)) == 1 && fake_host_logged("2 at their addresses are not this build's units"));
 
     Start("the second camera's node a teardown before destroyed is not queued again");
@@ -422,7 +430,7 @@ int main(void)
     CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 1, 1, 0, (uint64_t)(uintptr_t)g_records, 1);
     CoXlTestWorldShip();
     CHECK(Count(C_CAMERA, 0) == 0 && Read(g_level + MERGE, 0x108, 8) == 0 && Count(C_MERGED, 0) == 1 && Count(C_NODE, 0x222) == 1 && CoXlTestBuildLeft(1) == 0);
-    CHECK(fake_host_logged("the merge torn down"));
+    CHECK(fake_host_logged("the merge torn down") && fake_host_logged("(generator state 0; R+0x108 already gone;"));
 
     Start("a world with no such list: R+0x108 is not handed to the destroy either");
     Merge(1);

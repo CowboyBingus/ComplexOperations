@@ -641,7 +641,7 @@ void CoXlTestTileReset(void)
     g_near.handle = 0; g_near.tex[0] = g_near.tex[1] = 0; g_near.state = NEAR_IN; g_near.world = 0; g_matband.tex = 0; g_matband.pixels = NULL;
     g_move.state = MV_IDLE; g_move.stashed = 0; g_move.dropHandle = 0; g_move.dropTex[0] = g_move.dropTex[1] = g_move.dropBand = 0; g_move.dropBandPixels = NULL;
     memset(g_move.freeing, 0, sizeof g_move.freeing); memset(g_nearLeft, 0, sizeof g_nearLeft);
-    g_move.stTemp = g_move.stGone = 0; g_move.merge = g_move.acquired = g_move.pkgPending = 0; g_move.cutNoted = 0; g_move.nodeOld = 0; g_nearStampOffset[0] = g_nearStampOffset[1] = 0.0f;
+    g_move.stTemp = g_move.stGone = 0; g_move.merge = g_move.acquired = g_move.pkgPending = 0; g_move.cutNoted = 0; g_move.shipSeen = 0; g_move.nodeOld = 0; g_nearStampOffset[0] = g_nearStampOffset[1] = 0.0f;
 }
 void CoXlTestTileTerrain(int k, uint64_t handle, uint64_t tex0, uint64_t tex1, uint64_t band)
 {
@@ -662,7 +662,7 @@ uint64_t CoXlTestTileLeft(int i) { return g_nearLeft[i]; } /* a terrain the last
  * build's own teardown, the merge's start, and the tile's centre in y. */
 void CoXlTestBuildCut(uintptr_t level, int state, int merge, int held, uint32_t gone, uint64_t records, uint32_t at66)
 {
-    g_move.levelPtr = level; g_move.state = state; g_move.cutNoted = 0; g_move.merge = merge; g_move.acquired = held; g_move.pkgPending = 0; g_move.stGone = gone;
+    g_move.levelPtr = level; g_move.state = state; g_move.cutNoted = 0; g_move.shipSeen = 0; g_move.merge = merge; g_move.acquired = held; g_move.pkgPending = 0; g_move.stGone = gone;
     g_move.stamped = g_move.stTemp != 0; g_near.records = records; g_move.at66 = at66;
     g_nearStampOffset[0] = 0.0f; g_nearStampOffset[1] = g_move.stTemp != 0 ? MOVE_STAMP_OFFSET : 0.0f;
     memset(g_move.ctx, 0, 8); /* no arena to reset */
