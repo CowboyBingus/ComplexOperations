@@ -1314,10 +1314,65 @@ uint32_t CoXlTestGradeSteep(const float* ground, const uint8_t* pinned, const fl
     free(s);
     return torn;
 }
+/* Several roads through the level's own solve (RoadGradeSolve: pins, landings, ties, the capped and relaxed profile),
+ * chains as CoXlTestGradeField takes them. out: landings, their links, pins missed, the furthest miss, the links that
+ * may climb over the hard limit, the steepest slope taken on one. Returns the stations torn; -1 not solved. */
+static float (*g_testGradeGround)(float, float);
+static uint64_t TestGradeSample(void* descriptor, float* uv, void* out, uint64_t unused);
+int CoXlTestGradeRoads(const float* pts, const uint32_t* counts, const uint32_t* ends, uint32_t chains, int spur, float (*ground)(float, float), float world,
+    float playable, double out[6])
+{
+    static uint32_t shared[64];
+    GradeField* f = &g_testField;
+    GradeFieldFree(f);
+    memset(shared, 0xFF, sizeof shared);
+    for (uint32_t c = 0; c < chains; c++)
+    {
+        uint32_t own[2] = {GRADE_NONE, GRADE_NONE};
+        uint32_t* a = ends[2 * c] < 64 ? &shared[ends[2 * c]] : &own[0];
+        uint32_t* b = ends[2 * c + 1] < 64 ? &shared[ends[2 * c + 1]] : &own[1];
+        if (spur && c + 1 == chains) own[1] = GradeFieldAttach(f, pts[2 * (counts[c] - 1)], pts[2 * (counts[c] - 1) + 1], f->segs);
+        GradeFieldChain(f, pts, counts[c], a, b);
+        pts += 2 * (size_t)counts[c];
+    }
+    GradeFieldFree(&g_grade.f);
+    g_grade.f = g_testField;
+    g_grade.world = world; g_grade.playable = playable; g_grade.past = 0; g_grade.sample = TestGradeSample; g_grade.capture = 1; g_testGradeGround = ground;
+    RoadGradePadIndex();
+    const int solved = RoadGradeSolve();
+    g_testField = g_grade.f;
+    memset(&g_grade.f, 0, sizeof g_grade.f); g_grade.sample = NULL; g_grade.capture = 0;
+    out[0] = g_grade.landings; out[1] = g_grade.landed; out[2] = g_grade.missed; out[3] = g_grade.miss; out[4] = g_grade.steep; out[5] = g_grade.steepest;
+    return solved ? (int)g_grade.torn : -1;
+}
+/* The level's stations from a generation block (RoadGradeStations: the arterials, the spurs, a spur's end at its
+ * place's edge, the rim) and their solve. Returns the stations; -1 not made. *past: the stations at or past the rim. */
+int CoXlTestGradeStations(uintptr_t block, float (*ground)(float, float), float world, float playable, uint32_t* past)
+{
+    GradeFieldFree(&g_testField);
+    g_grade.world = world; g_grade.playable = playable; g_grade.sample = TestGradeSample; g_grade.capture = 1; g_testGradeGround = ground;
+    RoadGradePadIndex();
+    const int made = RoadGradeStations(block) && RoadGradeSolve();
+    *past = g_grade.past;
+    g_testField = g_grade.f;
+    memset(&g_grade.f, 0, sizeof g_grade.f); g_grade.sample = NULL; g_grade.capture = 0;
+    return made ? (int)g_testField.stations : -1;
+}
+/* A station's marks: bit 0 pinned, bit 1 a spur's end at its place's edge; *target and *ground its heights. */
+int CoXlTestGradeStationPin(uint32_t i, float* xy, float* target, float* ground)
+{
+    xy[0] = g_testField.xy[2 * i]; xy[1] = g_testField.xy[2 * i + 1]; *target = g_testField.s[i].target; *ground = g_testField.s[i].ground;
+    return g_testField.s[i].pinned | g_testField.s[i].edge << 1;
+}
+void CoXlTestRoadsRim(float playable) { g_roadsPlayable = playable; }
+int CoXlTestRoadsSpurPad(uint32_t own, float* at, float* away) { return RoadsSpurPad(own, at, away); }
+void CoXlTestRoadsKeepPlace(uint32_t i, uint64_t place) { g_roadKeep.place[i] = place; }
+void CoXlTestRoundSinCos(float angle, float* sine, float* cosine) { RoundSinCos(angle, sine, cosine); }
 /* The places' keep-out (proto/difficulty_world_roadround.c and RoadsKeep*): n footprints of x, y, r for this level. */
 void CoXlTestRoadsKeep(const float* discs, uint32_t n)
 {
     g_roadKeep.level = g_world.levels; g_roadKeep.count = n < ROUND_DISCS ? n : ROUND_DISCS;
+    memset(g_roadKeep.place, 0, sizeof g_roadKeep.place); memset(g_roadKeep.toward, 0, sizeof g_roadKeep.toward);
     for (uint32_t i = 0; i < g_roadKeep.count; i++) { const RoundDisc d = {discs[3 * i], discs[3 * i + 1], discs[3 * i + 2]}; g_roadKeep.d[i] = d; }
 }
 uint32_t CoXlTestRoadsKeepCount(const float** discs) { *discs = &g_roadKeep.d[0].x; return RoadsKeepCount(); }
@@ -1409,7 +1464,7 @@ uint32_t CoXlTestRoadsArterials(const uint8_t* recs, uint32_t edges, const uint3
 {
     RoadEdge e[64];
     edges = RoadsTestEdges(recs, edges, e);
-    const RoadsGraph g = {e, ends, nodeXY, edges, nodes};
+    const RoadsGraph g = {e, ends, nodeXY, edges, nodes, NULL, 0};
     return RoadsArterials(&g, termXY, terms, chosen, unreached);
 }
 void CoXlTestRoadsArterialsApply(uintptr_t block, const uint8_t* ops, uint32_t total) { RoadsArterialsApply(block, ops, total); }

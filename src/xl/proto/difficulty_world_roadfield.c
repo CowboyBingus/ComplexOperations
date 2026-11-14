@@ -183,6 +183,53 @@ static void GradeFieldTies(GradeField* f)
     free(head);
 }
 
+/* Landings. Where roads meet (a station with three or more pieces) or a line turns sharply (GRADE_LAND_TURN), the
+ * beds overlap and each takes the other's height by nearness: one road's grade becomes the other's cross slope. So
+ * every link within GRADE_LAND along the roads from such a station takes GRADE_LAND_SLOPE at most, and the meeting
+ * place is near level. A link with a pinned end is left alone: a pad's height is not the road's to choose. Before
+ * the ties: it reads the pieces' links and positions only. landings counts the stations, landed the links. */
+#define GRADE_LAND 20.0f
+#define GRADE_LAND_SLOPE 0.0349208f /* tan 2 degrees: two roads at it read 4 across each other, under the 5 a bed may have */
+#define GRADE_LAND_TURN 0.8660254f  /* the cosine of 30 degrees */
+static uint32_t GradeFieldLand(GradeField* f, uint32_t* landed)
+{
+    uint32_t landings = 0;
+    *landed = 0;
+    for (uint32_t i = 0; i < f->stations; i++)
+    {
+        const GradeStation* s = &f->s[i];
+        int meet = s->links >= 3;
+        if (s->links == 2)
+        {
+            const float ax = f->xy[2 * i] - f->xy[2 * s->link[0]], ay = f->xy[2 * i + 1] - f->xy[2 * s->link[0] + 1];
+            const float bx = f->xy[2 * s->link[1]] - f->xy[2 * i], by = f->xy[2 * s->link[1] + 1] - f->xy[2 * i + 1];
+            const float la = sqrtf(ax * ax + ay * ay), lb = sqrtf(bx * bx + by * by);
+            meet = la > 0.0f && lb > 0.0f && ax * bx + ay * by < GRADE_LAND_TURN * la * lb;
+        }
+        if (!meet) continue;
+        landings++;
+        for (uint32_t k = 0; k < s->links; k++)
+        {
+            uint32_t from = i, slot = k; float gone = 0.0f;
+            /* along the road until GRADE_LAND is behind or the road meets another */
+            for (uint32_t step = 0; step < 64 && gone < GRADE_LAND; step++)
+            {
+                GradeStation* a = &f->s[from]; const uint32_t to = a->link[slot]; GradeStation* b = &f->s[to];
+                gone += a->gap[slot];
+                if (!a->pinned && !b->pinned)
+                {
+                    if (!(a->most[slot] > 0.0f)) (*landed)++;
+                    a->most[slot] = GRADE_LAND_SLOPE;
+                    for (uint32_t m = 0; m < b->links; m++) if (b->link[m] == from) b->most[m] = GRADE_LAND_SLOPE;
+                }
+                if (b->links != 2) break;
+                slot = b->link[0] == from ? 1 : 0; from = to;
+            }
+        }
+    }
+    return landings;
+}
+
 /* The side band's ramp for a road moved `move` metres at its middle on ground that slopes `cross` (a tangent) across
  * it. On the side where the move grows outwards (a cut's uphill side, a fill's downhill side) what the blend adds
  * falls from bank = move + GRADE_FULL cross, still growing by `cross` a metre at the bed's edge, to nothing as a
