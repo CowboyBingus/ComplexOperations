@@ -3230,7 +3230,8 @@ static void LwNavSwapLevel(void);
  * needs no step, the game's next async step applies it, and that world's later completions wait until it has. The
  * tick's pop (0x7B8B0B..0x7B8B35, inside the list's lock) is LwNavPop. A level's end keeps the game's order and the
  * drain: the tick's flush argument, a nav that stopped (0x7B7ED0 clears bit 2 of [nav+0x20] and sets bit 4). */
-#define LW_NAV_HOLD_MS 2000    /* records wait this long with none taken: the step is finished on the frame thread */
+#define LW_NAV_HOLD_RELAX_MS 100 /* a world's records wait this long: a built cell goes with other changes queued */
+#define LW_NAV_HOLD_MS 2000    /* and this long with none of them taken: the step is finished on the frame thread */
 #define LW_NAV_HOLD_USES 30    /* that many times in a level: the hold is off until the next level */
 #define LW_NAV_HOLD_WALK 4096  /* more records than the nav's jobs can make: the game's order */
 #define LW_NAV_HOLD_SEEN 64
@@ -3238,33 +3239,66 @@ static struct
 {
     uintptr_t worlds;                              /* exe 0x27C30B8: the nav world pointers */
     void (*enter)(uintptr_t), (*leave)(uintptr_t); /* the list's lock, as the tick takes it (0x7B8B05, 0x7B8B39) */
-    uint8_t pending[4];                            /* a swap is queued and not yet seen applied and committed */
-    uintptr_t grant[4]; uint32_t grantTicks[4];    /* the cell let through with its world idle; the ticks it waited */
+    /* A world's section commands (unloads, loads) not yet seen applied and committed, and whether a swap is among
+     * them: the queue's buffer [W+0x498] when the last one was queued, and whether a step has taken it since. */
+    uint8_t unapplied[4], swapUnapplied[4], taken[4]; uintptr_t buffer[4];
+    uintptr_t grant[4]; uint32_t grantTicks[4];    /* the cell let through between steps; the ticks it waited */
+    int grantQueued[4];                            /* the other changes queued then */
     uint8_t granted[4];                            /* that cell's unload ran with no drain: so does its load */
     uint32_t waiting[4];                           /* the world's records the last pop left on the list */
-    uint32_t frame; ULONGLONG stuckAt;             /* the mod's ticks; since when records wait with none taken */
+    uint32_t frame; ULONGLONG stuckAt[4];          /* the mod's ticks; since when a world's records wait, none taken */
     long offLevel;                                 /* the level + 1 the hold gave up on */
     struct { uintptr_t rec; uint32_t frame; } seen[LW_NAV_HOLD_SEEN]; /* the waiting records and their first tick */
     uint32_t held, longest, uses, drains, marked;  /* this level's; marked: built cells asked to rebuild */
-    uint32_t sumHeld, sumLongest, sumUses, sumDrains;
+    uint32_t sumHeld, sumLongest, sumUses, sumDrains, sumRelaxed;
 } g_lwNavHold;
 
-/* No AI update runs (table +0x54, set and cleared around it at 0x7D8618 / 0x7D8726 and read first and last), no async
- * step is in flight ([W+0x4B0], cleared only by the commit 0xBD05E0) and nothing is queued. Queued changes leave the
- * queue only at a step's start (0xBB1430), so an idle world has applied and committed every earlier swap. */
-static int LwNavIdle(int idx, uintptr_t w)
+/* Between steps: no AI update runs (table +0x54, set and cleared around it at 0x7D8618 / 0x7D8726 and read first and
+ * last) and no async step is in flight ([W+0x4B0], cleared only by the commit 0xBD05E0). */
+static int LwNavBetween(int idx, uintptr_t w)
 {
-    uintptr_t t = g_lwSwap.table + 0x80u * idx, q;
+    uintptr_t t = g_lwSwap.table + 0x80u * idx;
     if (*(volatile int32_t*)(t + 0x54)) return 0;
     if (*(volatile uintptr_t*)(w + 0x4B0)) return 0;
-    q = *(volatile uintptr_t*)(w + 0x4A0);
-    if (q && g_lwSwap.queued(q) > 0) return 0;
     return *(volatile int32_t*)(t + 0x54) == 0;
+}
+static int LwNavQueue(uintptr_t w) { uintptr_t q = *(volatile uintptr_t*)(w + 0x4A0); return q ? g_lwSwap.queued(q) : 0; }
+/* Idle: between steps with nothing queued. */
+static int LwNavIdle(int idx, uintptr_t w) { return LwNavBetween(idx, w) && LwNavQueue(w) <= 0; }
+/* No query job reads the world: the permit's own test (0x7D7740 sets [W+0x478] and blocks nothing), handed back at
+ * once. The drain took that permit before each swap's connect; a swap with no drain asks the same. */
+static int LwNavQuiet(int idx, uintptr_t w)
+{
+    g_lwSwap.permit(idx);
+    int quiet = *(volatile uint8_t*)(w + 0x478) != 0;
+    *(volatile uint8_t*)(w + 0x478) = 0;
+    return quiet;
+}
+/* An unload or a load went into the world's queue. A step's start takes the queue only when it holds something and
+ * then gives it a new buffer (0xBB1430, [W+0x498] at 0xBB14C9); the old one is the step's until its commit, and one
+ * step starts between two ticks at most. So the command is applied once the buffer has changed and no step is in
+ * flight; cutter changes share the queue, which is why an empty queue is not the test. */
+static void LwNavQueued(int idx, uintptr_t w, int swap)
+{
+    g_lwNavHold.buffer[idx] = *(volatile uintptr_t*)(w + 0x498);
+    g_lwNavHold.taken[idx] = 0; g_lwNavHold.unapplied[idx] = 1;
+    if (swap) g_lwNavHold.swapUnapplied[idx] = 1;
+}
+static void LwNavApplied(int idx)
+{
+    uintptr_t w = *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx);
+    if (!g_lwNavHold.unapplied[idx]) return;
+    if (w && g_lwSwap.asyncMode(w))
+    {
+        if (*(volatile uintptr_t*)(w + 0x498) != g_lwNavHold.buffer[idx]) g_lwNavHold.taken[idx] = 1;
+        if (!LwNavBetween(idx, w) || (!g_lwNavHold.taken[idx] && LwNavQueue(w) > 0)) return;
+    }
+    g_lwNavHold.unapplied[idx] = g_lwNavHold.swapUnapplied[idx] = 0;
 }
 /* A completion waits or a swap is not applied yet: the AI budget lever keeps the step's stock budget meanwhile. */
 static int LwNavHoldBusy(void)
 {
-    for (int i = 0; i < 4; i++) if (g_lwNavHold.pending[i] || g_lwNavHold.waiting[i]) return 1;
+    for (int i = 0; i < 4; i++) if (g_lwNavHold.swapUnapplied[i] || g_lwNavHold.waiting[i]) return 1;
     return 0;
 }
 /* A record's world index + 1 when the hold's rules are its, 0 when the game's: no cell work (flag 0x80), a nav that is
@@ -3283,15 +3317,16 @@ static int LwNavRecWorld(uintptr_t rec, uintptr_t* cell, int* rebuild)
     *rebuild = *(volatile int32_t*)(*cell + 0x60) != -1;
     return (int)idx + 1;
 }
-/* Unlinks `rec` (after `prev`, 0 = the head) as the game's pop does: head [list+0x28], tail +0x30, the link at `off`. */
-static uintptr_t LwNavTake(uintptr_t list, uint32_t off, uintptr_t prev, uintptr_t rec)
+/* Unlinks `rec` (after `prev`, 0 = the head) as the game's pop does: head [list+0x28], tail +0x30, the link at `off`.
+ * `world`: the one whose wait starts again, -1 when the record is of no world's rules. */
+static uintptr_t LwNavTake(uintptr_t list, uint32_t off, uintptr_t prev, uintptr_t rec, int world)
 {
     uintptr_t next = *(uintptr_t*)(rec + off);
     if (prev) *(uintptr_t*)(prev + off) = next; else *(uintptr_t*)(list + 0x28) = next;
     if (*(uintptr_t*)(list + 0x30) == rec) *(uintptr_t*)(list + 0x30) = prev ? prev : next;
     *(uintptr_t*)(rec + off) = 0;
     for (int k = 0; k < LW_NAV_HOLD_SEEN; k++) if (g_lwNavHold.seen[k].rec == rec) g_lwNavHold.seen[k].rec = 0;
-    g_lwNavHold.stuckAt = 0;
+    if (world >= 0) g_lwNavHold.stuckAt[world] = 0;
     return rec;
 }
 /* The ticks `rec` waited, from the tick a pop first left it on the list. */
@@ -3312,7 +3347,7 @@ static int LwNavHoldDrain(uintptr_t list, int idx, uintptr_t w, double* ms)
     co_framecost_add(CO_FC_NAVSWAP, t);
     g_lwNavHold.drains++; g_lwNavHold.sumDrains++;
     if (!ok) { g_lwSwap.refused++; InterlockedExchange(&g_lwSwap.unsafe, 1); }
-    else g_lwNavHold.pending[idx] = 0;
+    else g_lwNavHold.unapplied[idx] = g_lwNavHold.swapUnapplied[idx] = 0; /* committed, and the queue applied */
     *ms = LwNavMs(a, LwNavNow());
     return ok;
 }
@@ -3325,49 +3360,53 @@ static uintptr_t LwNavPopHead(uintptr_t list, uint32_t off)
         uintptr_t head = *(uintptr_t*)(list + 0x28);
         if (!head) return 0;
         uint32_t flags = *(volatile uint32_t*)(head + 0xC), idx = flags & 0x7F;
-        if ((flags & 0x80) || idx >= 4 || !g_lwNavHold.pending[idx]) break;
+        if ((flags & 0x80) || idx >= 4 || !g_lwNavHold.swapUnapplied[idx]) break;
         double ms;
         if (!LwNavHoldDrain(list, (int)idx, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx), &ms)) break;
     }
     uintptr_t head = *(uintptr_t*)(list + 0x28);
-    return head ? LwNavTake(list, off, 0, head) : 0;
+    return head ? LwNavTake(list, off, 0, head, -1) : 0;
 }
-/* Records waited LW_NAV_HOLD_MS with none taken (a world that never idles between its steps): each such world's step
- * is finished here, once, and noted; LW_NAV_HOLD_USES times in a level and the hold is off for the rest of it. */
-static void LwNavHoldGiveWay(uintptr_t list, ULONGLONG now)
+/* A world's records waited LW_NAV_HOLD_MS with none taken (it was never found between steps with its swap applied and
+ * no query job): its step is finished here, once, and noted; LW_NAV_HOLD_USES times in a level and the hold is off for
+ * the rest of it. 1 when a world was due. */
+static int LwNavHoldGiveWay(uintptr_t list, ULONGLONG now)
 {
+    int due = 0;
     for (int i = 0; i < 4; i++)
     {
         uintptr_t w = *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * i);
-        if (!g_lwNavHold.waiting[i] || !w || LwNavIdle(i, w)) continue;
-        uintptr_t q = *(volatile uintptr_t*)(w + 0x4A0);
-        int flight = *(volatile uintptr_t*)(w + 0x4B0) != 0, queued = q ? g_lwSwap.queued(q) : 0, update = *(volatile int32_t*)(g_lwSwap.table + 0x80u * i + 0x54);
+        if (!g_lwNavHold.waiting[i] || !w || !g_lwNavHold.stuckAt[i] || now - g_lwNavHold.stuckAt[i] < LW_NAV_HOLD_MS) continue;
+        int flight = *(volatile uintptr_t*)(w + 0x4B0) != 0, queued = LwNavQueue(w), update = *(volatile int32_t*)(g_lwSwap.table + 0x80u * i + 0x54);
         double ms;
         int ok = LwNavHoldDrain(list, i, w, &ms);
-        g_lwNavHold.uses++; g_lwNavHold.sumUses++;
-        Note("living world: nav: %u completion(s) of world %d waited %llu ms and it was never idle (step in flight %d, %d queued, AI update %d): %s, "
-            "%.1f ms on the frame thread (use %u of %d this level)", g_lwNavHold.waiting[i], i, (unsigned long long)(now - g_lwNavHold.stuckAt), flight, queued, update,
-            ok ? "its step is finished here" : "no permit for its step, they wait on", ms, g_lwNavHold.uses, LW_NAV_HOLD_USES);
+        g_lwNavHold.uses++; g_lwNavHold.sumUses++; due = 1;
+        Note("living world: nav: %u completion(s) of world %d waited %llu ms and it was never idle (step in flight %d, %d queued, AI update %d, swap "
+            "unapplied %d): %s, %.1f ms on the frame thread (use %u of %d this level)", g_lwNavHold.waiting[i], i, (unsigned long long)(now - g_lwNavHold.stuckAt[i]),
+            flight, queued, update, g_lwNavHold.unapplied[i], ok ? "its step is finished here" : "no permit for its step, they wait on", ms, g_lwNavHold.uses,
+            LW_NAV_HOLD_USES);
+        g_lwNavHold.stuckAt[i] = now;
     }
-    g_lwNavHold.stuckAt = now;
     if (g_lwNavHold.uses >= LW_NAV_HOLD_USES && g_lwNavHold.offLevel != g_world.levels + 1)
     {
         g_lwNavHold.offLevel = g_world.levels + 1;
         Note("living world: nav: the hold is off for the rest of this level; each swap's step is finished on the frame thread as before");
     }
+    return due;
 }
 /* The tick's pop, inside the list's lock; `flush` is the tick's argument (not 0 at a level's end). Per world the oldest
- * record goes first (the list is newest first, 0x7B2690): a built cell's only with the world idle, and none while a
- * swap is unapplied. A record of no world's rules goes at once. 0 = nothing to take this tick. */
+ * record goes first (the list is newest first, 0x7B2690). A built cell's goes between steps with no section command
+ * unapplied and no query job, and with nothing else queued until the world's records have waited LW_NAV_HOLD_RELAX_MS
+ * (cutter changes keep the queue full while tiles come in). A first build waits only for an unapplied swap. A record
+ * of no world's rules goes at once. 0 = nothing to take this tick. */
 static uintptr_t LwNavPopAt(uintptr_t list, uint32_t flush, ULONGLONG now)
 {
     uint32_t off = *(uint32_t*)(list + 0x38);
     LwNavSwapLevel();
     for (int i = 0; i < 4; i++)
     {
-        uintptr_t w = *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * i);
         g_lwNavHold.grant[i] = 0;
-        if (g_lwNavHold.pending[i] && (!w || !g_lwSwap.asyncMode(w) || LwNavIdle(i, w))) g_lwNavHold.pending[i] = 0;
+        LwNavApplied(i);
     }
     if (flush || !LwLive() || g_lwNavHold.offLevel == g_world.levels + 1)
     {
@@ -3390,25 +3429,35 @@ static uintptr_t LwNavPopAt(uintptr_t list, uint32_t flush, ULONGLONG now)
         {
             /* the game's record of a world whose swap is not applied yet (its nav stopped): that swap first, then again */
             uint32_t flags = *(volatile uint32_t*)(plain + 0xC), idx = flags & 0x7F; double ms;
-            if (!pass && !(flags & 0x80) && idx < 4 && g_lwNavHold.pending[idx])
+            if (!pass && !(flags & 0x80) && idx < 4 && g_lwNavHold.swapUnapplied[idx])
             { LwNavHoldDrain(list, (int)idx, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx), &ms); continue; }
-            return LwNavTake(list, off, plainPrev, plain);
+            return LwNavTake(list, off, plainPrev, plain, -1);
         }
         for (int i = 0; i < 4; i++)
         {
-            if (!old[i] || g_lwNavHold.pending[i]) continue;
+            if (!old[i]) continue;
             if (rebuild[i])
             {
-                if (!LwNavIdle(i, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * i))) continue;
-                g_lwNavHold.pending[i] = 1; g_lwNavHold.grant[i] = cell[i]; g_lwNavHold.grantTicks[i] = LwNavWaited(old[i]);
+                uintptr_t w = *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * i);
+                if (g_lwNavHold.unapplied[i] || !LwNavBetween(i, w)) continue;
+                int queued = LwNavQueue(w);
+                if (queued > 0 && (!g_lwNavHold.stuckAt[i] || now - g_lwNavHold.stuckAt[i] < LW_NAV_HOLD_RELAX_MS)) continue;
+                if (!LwNavQuiet(i, w)) continue;
+                g_lwNavHold.grant[i] = cell[i]; g_lwNavHold.grantTicks[i] = LwNavWaited(old[i]); g_lwNavHold.grantQueued[i] = queued > 0 ? queued : 0;
             }
+            else if (g_lwNavHold.swapUnapplied[i]) continue;
             uint32_t ticks = LwNavWaited(old[i]);
             if (ticks > g_lwNavHold.longest) g_lwNavHold.longest = ticks;
             if (ticks > g_lwNavHold.sumLongest) g_lwNavHold.sumLongest = ticks;
             g_lwNavHold.waiting[i]--;
-            return LwNavTake(list, off, oldPrev[i], old[i]);
+            return LwNavTake(list, off, oldPrev[i], old[i], i);
         }
-        if (!walked) { g_lwNavHold.stuckAt = 0; return 0; }
+        for (int i = 0; i < 4; i++)
+        {
+            if (!g_lwNavHold.waiting[i]) g_lwNavHold.stuckAt[i] = 0;
+            else if (!g_lwNavHold.stuckAt[i]) g_lwNavHold.stuckAt[i] = now;
+        }
+        if (!walked) return 0;
         /* nothing to take: the records left are waiting from this tick on */
         for (uintptr_t rec = *(uintptr_t*)(list + 0x28); rec; rec = *(uintptr_t*)(rec + off))
         {
@@ -3419,9 +3468,7 @@ static uintptr_t LwNavPopAt(uintptr_t list, uint32_t flush, ULONGLONG now)
             g_lwNavHold.seen[free].rec = rec; g_lwNavHold.seen[free].frame = g_lwNavHold.frame;
             g_lwNavHold.held++; g_lwNavHold.sumHeld++;
         }
-        if (!g_lwNavHold.stuckAt) g_lwNavHold.stuckAt = now;
-        if (pass || now - g_lwNavHold.stuckAt < LW_NAV_HOLD_MS) return 0;
-        LwNavHoldGiveWay(list, now);
+        if (pass || !LwNavHoldGiveWay(list, now)) return 0;
         if (g_lwNavHold.offLevel == g_world.levels + 1) { memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting); return LwNavPopHead(list, off); }
     }
     return 0;
@@ -3434,8 +3481,8 @@ static uintptr_t LwNavUnload(uintptr_t w, uint32_t* id, uint8_t graph)
     LwNavSwapLevel();
     g_lwSwap.swapCell[idx] = g_lwSwap.cell;
     int64_t t = co_framecost_now();
-    /* the pop let this cell through with its world idle: nothing to finish, and the next async step applies the swap */
-    g_lwNavHold.granted[idx] = g_lwSwap.cell != 0 && g_lwNavHold.grant[idx] == g_lwSwap.cell && LwNavIdle(idx, w);
+    /* the pop let this cell through between steps: nothing to finish, and the next async step applies the swap */
+    g_lwNavHold.granted[idx] = g_lwSwap.cell != 0 && g_lwNavHold.grant[idx] == g_lwSwap.cell && LwNavBetween(idx, w);
     g_lwNavHold.grant[idx] = 0;
     if (g_lwNavHold.granted[idx]) { memset(g_lwSwap.pre[idx], 0, sizeof g_lwSwap.pre[idx]); g_lwSwap.swap[idx] = 1; }
     else
@@ -3446,6 +3493,7 @@ static uintptr_t LwNavUnload(uintptr_t w, uint32_t* id, uint8_t graph)
     }
     int64_t u = LwNavNow();
     uintptr_t r = g_lwSwap.unload(w, id, graph);
+    LwNavQueued(idx, w, 1);
     g_lwSwap.unloadEnd[idx] = LwNavNow();
     g_lwSwap.unloadMs[idx] = LwNavMs(u, g_lwSwap.unloadEnd[idx]);
     co_framecost_add(CO_FC_NAVSWAP, t);
@@ -3470,12 +3518,13 @@ static void LwNavSwapNote(const char* span)
     if (g_lwSwap.sumSwaps > 0 || g_lwSwap.sumNoLoad > 0 || g_lwNavHold.sumHeld > 0 || g_lwNavHold.sumDrains > 0)
         Note("living world: nav swaps (%s): %u on the frame thread, %.0f ms in all (worst %.1f ms): in-flight steps waited %.0f ms, synchronous steps %.0f ms "
             "(the last on %d thread(s); %u of %u steps on the AI update's runner this level); %u unload(s) with no load; %u completion(s) held, the longest "
-            "%u tick(s); %u drain(s) on the frame thread (%u after %d ms held); this level %u swap(s) and %u unload(s) with no load for %u built "
+            "%u tick(s); %u drain(s) on the frame thread (%u after %d ms held); %u swap(s) let through with other changes queued; this level %u swap(s) and %u unload(s) with no load for %u built "
             "cell(s) marked; %d of 1024 section slots", span, g_lwSwap.sumSwaps, g_lwSwap.sumMs, g_lwSwap.sumWorst, g_lwSwap.sumWait, g_lwSwap.sumStep, g_lwSwap.threads, g_lwSwap.parallel,
-            g_lwSwap.steps, g_lwSwap.sumNoLoad, g_lwNavHold.sumHeld, g_lwNavHold.sumLongest, g_lwNavHold.sumDrains, g_lwNavHold.sumUses, LW_NAV_HOLD_MS, g_lwSwap.swaps,
+            g_lwSwap.steps, g_lwSwap.sumNoLoad, g_lwNavHold.sumHeld, g_lwNavHold.sumLongest, g_lwNavHold.sumDrains, g_lwNavHold.sumUses, LW_NAV_HOLD_MS, g_lwNavHold.sumRelaxed,
+            g_lwSwap.swaps,
             g_lwSwap.noLoad, g_lwNavHold.marked, LwNavSections());
     g_lwSwap.sumSwaps = g_lwSwap.sumNoLoad = 0; g_lwSwap.sumMs = g_lwSwap.sumWorst = g_lwSwap.sumStep = g_lwSwap.sumWait = 0;
-    g_lwNavHold.sumHeld = g_lwNavHold.sumLongest = g_lwNavHold.sumUses = g_lwNavHold.sumDrains = 0;
+    g_lwNavHold.sumHeld = g_lwNavHold.sumLongest = g_lwNavHold.sumUses = g_lwNavHold.sumDrains = g_lwNavHold.sumRelaxed = 0;
 }
 /* A new level: the last one's summary, then its counts start again. */
 static void LwNavSwapLevel(void)
@@ -3486,7 +3535,7 @@ static void LwNavSwapLevel(void)
     g_lwSwap.swaps = g_lwSwap.steps = g_lwSwap.parallel = g_lwSwap.lines = g_lwSwap.noLoad = 0;
     g_lwSwap.threads = 0; g_lwSwap.worstMs = 0;
     g_lwNavHold.held = g_lwNavHold.longest = g_lwNavHold.uses = g_lwNavHold.drains = g_lwNavHold.marked = 0;
-    g_lwNavHold.stuckAt = 0; memset(g_lwNavHold.seen, 0, sizeof g_lwNavHold.seen);
+    memset(g_lwNavHold.stuckAt, 0, sizeof g_lwNavHold.stuckAt); memset(g_lwNavHold.seen, 0, sizeof g_lwNavHold.seen);
 }
 /* Once a tick, before the game's nav tick can run again: an unload whose completion did not load (see .cell) ends here. */
 static void LwNavSwapFrame(void)
@@ -3511,6 +3560,7 @@ static uintptr_t LwNavLoad(uintptr_t w, uint32_t* out, uintptr_t inst, void* p4,
     double loadMs = LwNavMs(t, LwNavNow());
     int idx = LwAiwIndex(w);
     if (idx >= 0 && !LwLive()) g_lwSwap.swap[idx] = 0; /* a normal mission's swaps stay the game's */
+    else if (idx >= 0 && g_lwSwap.asyncMode(w)) LwNavQueued(idx, w, 0);
     if (idx < 0 || !g_lwSwap.swap[idx]) return r;
     g_lwSwap.swap[idx] = 0;
     if (g_lwSwap.swapCell[idx] != g_lwSwap.cell) { g_lwSwap.noLoad++; g_lwSwap.sumNoLoad++; return r; } /* another cell's first build */
@@ -3522,6 +3572,7 @@ static uintptr_t LwNavLoad(uintptr_t w, uint32_t* out, uintptr_t inst, void* p4,
     int held = g_lwNavHold.granted[idx], ok = 1;
     g_lwNavHold.granted[idx] = 0;
     if (!held) { g_lwNavHold.drains++; g_lwNavHold.sumDrains++; ok = LwNavDrain(w, idx, post); }
+    else if (g_lwNavHold.grantQueued[idx] > 0) g_lwNavHold.sumRelaxed++;
     co_framecost_add(CO_FC_NAVSWAP, between >= 0 ? g_lwSwap.unloadEnd[idx] : t);
     if (!ok) { g_lwSwap.refused++; InterlockedExchange(&g_lwSwap.unsafe, 1); return r; }
     const double* pre = g_lwSwap.pre[idx];
@@ -3536,10 +3587,12 @@ static uintptr_t LwNavLoad(uintptr_t w, uint32_t* out, uintptr_t inst, void* p4,
         g_lwSwap.lines++;
         Note("living world: nav: section %u %s (world %d): %.1f ms on the frame thread; before the unload %.1f (AI update %.1f, permit %.1f, "
             "step in flight %.1f, its commit %.1f, queued %.1f), the game's unload %.1f, connect %.1f, load %.1f, after the load %.1f (AI update %.1f, "
-            "step in flight %.1f, the swap's step %.1f); %u step(s) on %d thread(s); held %u tick(s); %u swaps this level, worst %.1f ms", out ? *out : 0u,
+            "step in flight %.1f, the swap's step %.1f); %u step(s) on %d thread(s); held %u tick(s), %d other change(s) queued; %u swaps this level, worst "
+            "%.1f ms", out ? *out : 0u,
             held ? "swapped in with the world idle, for its next step" : "swapped in at once", idx, ms, LwNavSum(pre),
             pre[LW_NAV_JOIN], pre[LW_NAV_PERMIT], pre[LW_NAV_WAIT], pre[LW_NAV_COMMIT], pre[LW_NAV_STEP], g_lwSwap.unloadMs[idx], between, loadMs, LwNavSum(post),
-            post[LW_NAV_JOIN], post[LW_NAV_WAIT], post[LW_NAV_STEP], g_lwSwap.steps - steps, g_lwSwap.threads, held ? g_lwNavHold.grantTicks[idx] : 0u, g_lwSwap.swaps,
+            post[LW_NAV_JOIN], post[LW_NAV_WAIT], post[LW_NAV_STEP], g_lwSwap.steps - steps, g_lwSwap.threads, held ? g_lwNavHold.grantTicks[idx] : 0u,
+            held ? g_lwNavHold.grantQueued[idx] : 0, g_lwSwap.swaps,
             g_lwSwap.worstMs);
         if (g_lwSwap.lines == LW_NAV_SWAP_LINES) Note("living world: nav: %d swap lines this level; the 30 s summaries go on", LW_NAV_SWAP_LINES);
     }
@@ -3564,6 +3617,8 @@ static const struct { uint32_t rva; const char* bytes; } kLwHoldPins[] = {
     {0x7D8618u, "C7 43 54 01 00 00 00"}, {0x7D8726u, "42 C7 44 33 54 00 00 00 00"},       /* the AI update's flag */
     {0xBD1963u, "E8 18 FA FF FF"}, {0xBD19C9u, "E8 12 EC FF FF"},                         /* the driver's start and commit */
     {0xC9513Au, "E8 F1 C2 F1 FF"},                                                         /* the queue is taken at a start */
+    {0xBB1449u, "E8 F2 32 F2 FF 85 C0 0F 84 92 00 00 00"}, {0xBB14C9u, "48 89 BB 98 04 00 00"}, /* only when not empty; its new buffer */
+    {0x7D77C9u, "39 88 9C 00 00 00 0F 94 C1 03 D9"}, {0x7D77DEu, "85 DB 0F 94 C1 88 88 78 04 00 00"}, /* the permit's test */
 };
 static void LwInstallNavHold(uintptr_t exe, uintptr_t stub)
 {
