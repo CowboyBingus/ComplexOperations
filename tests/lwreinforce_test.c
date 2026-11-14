@@ -1113,6 +1113,11 @@ static void TargetFought(void)
     CoXlTestLwFightTakeWhom(0, 0, 6, cd, at100and20, 2, now + 50000, pos);
     CoXlTestLwFightTakeWhom(0, 0, 6, a, at50, 1, now + 55000, pos);
     CHECK(CoXlTestLwFightTargetOf(0) == 0xD); /* fought 5 s ago */
+    g_case = "a target the units go on fighting stays, though they fight one nearer the point as well";
+    const uint32_t c[1] = {0xC}; const float at100[2] = {100, 0};
+    CoXlTestLwFightTakeWhom(0, 0, 6, c, at100, 1, now + 56000, pos);
+    CHECK(CoXlTestLwFightTargetOf(0) == 0xC);
+    for (int s = 57; s <= 70; s++) { CoXlTestLwFightTakeWhom(0, 0, 6, cd, at100and20, 2, now + 1000u * (uint64_t)s, pos); CHECK(CoXlTestLwFightTargetOf(0) == 0xC); }
     CoXlTestLwFightTarget(0, 0, NULL);
     CoXlTestLwFightsClear();
 }
