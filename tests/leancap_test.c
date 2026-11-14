@@ -32,8 +32,11 @@ int CoXlTestLeanWatch(const wchar_t* path);
 void CoXlTestTiltSunkLines(int n);
 int CoXlTestTiltSunkLinesNow(void);
 int CoXlTestTiltPropsOn(void);
+int CoXlTestTiltFootingNow(void);
 int CoXlTestLpSample(uint32_t id, const float* up, float tilt, float ground, float off, const float* last, float len);
 void CoXlTestLpNote(void);
+void CoXlTestLpSteep(int under);
+void CoXlTestLeanOnProp(int on);
 void CoXlTestFgWorld(float live);
 
 static int g_failed;
@@ -272,6 +275,20 @@ int main(void)
     CoXlTestLeanCounts(c);
     CHECK(c[0] == 3 && c[2] == 1 && c[3] == 0);
 
+    g_case = "a corner on a prop: no slope is added";
+    CoXlTestLeanAt(g_at); CoXlTestLeanOnProp(1); /* the ground hidden under the rock is 30 deg steep here */
+    memset(&g_limit, 0, sizeof g_limit); Lean(g_up, 45.5f, 0.0f);
+    CHECK(four(0x1234, g_out, g_up) == g_out && g_limit.calls == 1 && About(g_out, 25.0f, 0.0f) && About(g_up, 25.0f, 0.0f));
+    CoXlTestLeanAt(g_at); CoXlTestLeanOnProp(1);
+    memset(&g_limit, 0, sizeof g_limit); Lean(g_up, 24.0f, 0.0f);
+    CHECK(four(0x1234, g_out, g_up) == g_out && Is(g_up, 24.0f, 0.0f)); /* under it: as it was */
+    CHECK(Through(four, 45.5f, 0.0f) && Is(g_out, 45.5f, 0.0f)); /* the next pose, no prop: its slope again; one pose, one answer */
+    CoXlTestLeanAt(g_at); CoXlTestLeanOnProp(1); CoXlTestLeanAt(g_at); /* a new reading starts without it */
+    memset(&g_limit, 0, sizeof g_limit); Lean(g_up, 45.5f, 0.0f);
+    CHECK(four(0x1234, g_out, g_up) == g_out && Is(g_out, 45.5f, 0.0f));
+    CoXlTestLeanCounts(c);
+    CHECK(c[0] == 4 && c[2] == 1 && c[3] == 0);
+
     g_case = "not a unit vector: the game's";
     CoXlTestLeanTile(100.0f, -200.0f, 60.0f, 0.0f, 0.0f);
     CoXlTestLeanAt(g_at);
@@ -392,14 +409,17 @@ int main(void)
     CoXlTestLpScan();
     CoXlTestLpScan();
     CHECK(CoXlTestLpSample(7, a, 25.0f, 0.0f, 25.0f, hit, 4.0f) == 1);     /* not seen last scan: no pair */
+    CoXlTestLpSteep(0); CoXlTestLpSteep(1); CoXlTestLpSteep(1); CoXlTestLpSteep(1); CoXlTestLpSteep(-1); CoXlTestLpSteep(-1);
     CoXlTestLpNote();
     CHECK(fake_host_logged("lean probe (30 s): 11 four-corner samples on read ground, 1 over their limit by 2 deg or more (ground slope + 25, at most 45.6), 8 at it; "
-        "30 deg or more off their ground 2, 1 of them on ground of 30 deg or more; at their limit two scans running 1: up turned 34.8 deg on average, 34.8 at most, 2 corner readings changed kind"));
+        "30 deg or more off their ground 2, 1 of them on ground of 30 deg or more; at their limit two scans running 1: up turned 34.8 deg on average, 34.8 at most, 2 corner readings changed kind; "
+        "the ones on ground of 30 deg or more by what is under them: 1 the ground, 3 a prop, 2 nothing"));
     CoXlTestLeanSet(0.0f); /* a control run measures against the default */
     CoXlTestLpScan();
     CHECK(CoXlTestLpSample(20, a, 30.0f, 0.0f, 30.0f, hit, 4.0f) == 1);
     CoXlTestLpNote();
     CHECK(fake_host_logged("lean probe (30 s): 1 four-corner samples on read ground, 1 over their limit by 2 deg or more (ground slope + 25, at most 45.6), 1 at it; 30 deg or more off their ground 1, 0 of them"));
+    CHECK(fake_host_logged("by what is under them: 0 the ground, 0 a prop, 0 nothing")); /* the counts start again */
 
     g_case = "research: the degrees from a file, in play";
     wchar_t file[MAX_PATH];
@@ -413,7 +433,7 @@ int main(void)
     Put(file, "0\n");
     CHECK(CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 0.0f);
     CHECK(fake_host_logged("lean (30 s): 1 four-corner poses, 0 held at the game's 45.6 deg, 1 at their ground's slope and 25 deg")); /* the counts under 25, before */
-    CHECK(fake_host_logged("lean: now 0 deg over the slope (0: none), prop hits read the drawn ground, from xl-lean.txt"));
+    CHECK(fake_host_logged("lean: now 0 deg over the slope (0: none), prop hits read the drawn ground, footing 2 (0: the ground under any prop, 1: one balanced body keeps the game's, 2: by height), from xl-lean.txt"));
     CHECK(Through(four, 40.0f, 15.0f) && Is(g_out, 40.0f, 15.0f)); /* the game's answer, untouched */
     CHECK(!CoXlTestLeanWatch(file)); /* not written again: not read again */
     Put(file, "twelve");
@@ -426,17 +446,33 @@ int main(void)
     CHECK(fake_host_logged("lean (30 s): 1 four-corner poses, 0 held at the game's 45.6 deg, 0 at their ground's slope and 0 deg"));
     CHECK(fake_host_logged("lean: now 12 deg over the slope"));
     CHECK(Through(four, 40.0f, 15.0f) && Is(g_out, 12.0f, 15.0f));
-    CHECK(fake_host_logged("lean: now 12 deg over the slope (0: none), prop hits read the drawn ground, from xl-lean.txt"));
+    CHECK(fake_host_logged("lean: now 12 deg over the slope (0: none), prop hits read the drawn ground, footing 2 (0: the ground under any prop, 1: one balanced body keeps the game's, 2: by height), from xl-lean.txt"));
     CHECK(CoXlTestTiltPropsOn()); /* no second number: prop hits as they were */
     Put(file, "25 0\n");
     CHECK(CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 25.0f && !CoXlTestTiltPropsOn());
-    CHECK(fake_host_logged("lean: now 25 deg over the slope (0: none), prop hits read as the game reads them, from xl-lean.txt"));
+    CHECK(fake_host_logged("lean: now 25 deg over the slope (0: none), prop hits read as the game reads them, footing 2 (0: "));
     Put(file, "0");
     CHECK(CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 0.0f && !CoXlTestTiltPropsOn()); /* the degrees alone: prop hits stay off */
     Put(file, "25 1");
     CoXlTestTiltSunkLines(16);
     CHECK(CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 25.0f && CoXlTestTiltPropsOn());
     CHECK(CoXlTestTiltSunkLinesNow() == 0); /* a new value: the sunk units' lines start again */
+    CHECK(CoXlTestTiltFootingNow() == 2); /* no third number: the footing as it was */
+    Put(file, "25 1 0");
+    CHECK(CoXlTestLeanWatch(file) && CoXlTestTiltPropsOn() && CoXlTestTiltFootingNow() == 0);
+    CHECK(fake_host_logged("lean: now 25 deg over the slope (0: none), prop hits read the drawn ground, footing 0 (0: "));
+    Put(file, "25 1 1\n");
+    CHECK(CoXlTestLeanWatch(file) && CoXlTestTiltFootingNow() == 1);
+    Put(file, "25 1");
+    CHECK(CoXlTestLeanWatch(file) && CoXlTestTiltFootingNow() == 1); /* two numbers: the footing stays */
+    Put(file, "25 0 2");
+    CHECK(CoXlTestLeanWatch(file) && !CoXlTestTiltPropsOn() && CoXlTestTiltFootingNow() == 2);
+    Put(file, "25 1 3");
+    CHECK(CoXlTestLeanWatch(file) && CoXlTestTiltPropsOn() && CoXlTestTiltFootingNow() == 2); /* not a way to keep a footing: the default */
+    Put(file, "25 1 1");
+    CHECK(CoXlTestLeanWatch(file) && CoXlTestTiltFootingNow() == 1);
+    Put(file, "25 1 -1");
+    CHECK(CoXlTestLeanWatch(file) && CoXlTestTiltFootingNow() == 2);
     DeleteFileW(file);
     CHECK(!CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 25.0f && CoXlTestTiltPropsOn()); /* taken away: the last values stay */
 
