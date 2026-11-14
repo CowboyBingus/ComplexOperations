@@ -25,6 +25,13 @@
 #define LW_HEAR_MAX 600.0f  /* at most (D) */
 #define LW_HEAR_NEAR 30.0f  /* online: members are told within this of the point (D) */
 #define LW_HEAR_SQUADS 2    /* squads sent per noise event (D) */
+/* Squads one source draws per LW_NOISE_SOURCE_MS over all its events and both passes, and has on their way at once
+ * (D). A lone player's bubble takes 190 / 8 = 23 of the loader's units with 8 players: two squads of up to 9 fit
+ * (18), a third does not (27). Eight players firing from eight places draw 16 squads, 144 units at most, of 190. */
+#define LW_HEAR_SOURCE 2
+#define LW_HEAR_SAME_MS 10000  /* ms after its last emission a place's event still takes the next one: the firing goes on (D) */
+#define LW_HEAR_RETRY_MS 10000 /* ms between the tries of an event that drew no squad while its firing goes on (D) */
+#define LW_HEAR_RETRIES 12     /* such tries per event: two minutes of firing (D) */
 #define LW_RETAKE_WAIT 120000    /* ms a squad waits at the garrison for players to leave (D) */
 #define LW_INTENT_REST 30000 /* ms a squad patrols after an intent before the next (D) */
 
@@ -78,9 +85,9 @@ static float LwNoiseRange(uint8_t type)
     return range;
 }
 
-typedef struct { float pos[3], reach; uint32_t source; ULONGLONG at, born; uint8_t type, onlinePending; } LwEvent;
+typedef struct { float pos[3], reach; uint32_t source, drawn; ULONGLONG at, born, passAt, retryAt; uint8_t type, onlinePending, fixed, tries; } LwEvent; /* drawn: squads it sent; passAt: its last pass over the offline squads; tries: passes made again */
 static LwEvent g_lwEvents[16];
-static struct { uint32_t heard, kept, events, sent, told, ended; } g_lwHear; /* 30 s counters */
+static struct { uint32_t heard, kept, events, sent, told, ended, retries; } g_lwHear; /* 30 s counters */
 
 static int LwCalm(const LwSquad* q)
 {
@@ -1009,44 +1016,6 @@ static void LwIntentOfflineAt(LwSquad* q, ULONGLONG now)
 }
 static void LwIntentOffline(LwSquad* q) { LwIntentOfflineAt(q, GetTickCount64()); }
 
-/* pass 0 at the event: offline squads; pass 1, LW_HEAR_ONLINE_MS later: online squads still calm. The noise is caught in
- * the frame of the shot (0x573F81), before its hit raises the target's alert, so an online squad picked then would be the
- * one shot at, sent to the shooter's spot on top of the game's own reaction. */
-#define LW_HEAR_ONLINE_MS 1500
-static void LwInvestigate(const LwEvent* e, int pass)
-{
-    for (int f = 0; f < 16; f++) if (g_lwFights[f].live && LwDist2(g_lwFights[f].pos, e->pos[0], e->pos[1]) < 100.0f * 100.0f) return; /* a fight: 2b sends squads */
-    float native = LwNoiseRange(e->type);
-    int pick[LW_HEAR_SQUADS]; float d2s[LW_HEAR_SQUADS]; int picked = 0;
-    ULONGLONG now = GetTickCount64();
-    for (int i = 0; i < g_lwWorld.count; i++)
-    {
-        LwSquad* q = &g_lwSquads[i];
-        if ((q->state != (pass ? LW_ONLINE : LW_OFFLINE)) || q->intent != LW_PATROL || q->pulled || q->survivors == 0 || now < q->intentFree) continue;
-        float d2 = LwDist2(q->pos, e->pos[0], e->pos[1]);
-        if (d2 > e->reach * e->reach) continue;
-        if (q->state == LW_ONLINE && (d2 <= native * native || !LwCalm(q))) continue; /* its ears hear it, or it is busy */
-        int at = picked < LW_HEAR_SQUADS ? picked++ : (d2 < d2s[LW_HEAR_SQUADS - 1] ? LW_HEAR_SQUADS - 1 : -1);
-        if (at < 0) continue;
-        while (at > 0 && d2s[at - 1] > d2) { pick[at] = pick[at - 1]; d2s[at] = d2s[at - 1]; at--; }
-        pick[at] = i; d2s[at] = d2;
-    }
-    char list[160] = ""; size_t len = 0;
-    for (int j = 0; j < picked; j++)
-    {
-        LwSquad* q = &g_lwSquads[pick[j]];
-        q->intent = LW_INVESTIGATE; q->intentStage = 0; q->intentSent = 0; q->intentAt = now; q->intentSource = e->source; q->intentFrom = sqrtf(d2s[j]);
-        memcpy(q->target, e->pos, sizeof q->target);
-        if (q->state == LW_OFFLINE) { if (!LwIntentRoute(q)) { q->intent = LW_PATROL; continue; } }
-        else if (q->jobSet) { q->intentSent = 1; if (!LwSquadGoTo(q, q->target)) { q->intent = LW_PATROL; continue; } }
-        g_lwHear.sent++;
-        len += (size_t)snprintf(list + len, sizeof list - len, "%s%d (%s, %.0f m)", len ? ", " : "", pick[j], q->state == LW_ONLINE ? "online" : "offline", (double)sqrtf(d2s[j]));
-        if (len >= sizeof list) len = sizeof list - 1;
-    }
-    if (pass && !picked) return; /* the event's note is written at pass 0 */
-    Note("living world: noise type %u at (%.0f, %.0f, %.1f) from %08X, reach %.0f m%s: %s", e->type, (double)e->pos[0], (double)e->pos[1], (double)e->pos[2], e->source,
-        (double)e->reach, pass ? ", online squads" : "", picked ? list : "no calm squad in reach");
-}
 /* A source that stays in one place must not draw squads for good (run 3: one entity on the Helldivers' side, far from
  * every player, emitted every few seconds and drew the squads in its reach 84 times). A noise draws nobody with no
  * player within LW_NOISE_PLAYER of it or within its reach; and a source that is no player's body draws squads once per
@@ -1054,20 +1023,98 @@ static void LwInvestigate(const LwEvent* e, int pass)
 #define LW_NOISE_PLAYER 400.0f
 #define LW_NOISE_SOURCE_MS 120000u
 #define LW_NOISE_FIXED 50.0f
-/* 0 the noise may draw squads, 1 no player near, 2 its fixed source drew squads `sinceSent` ms ago at `moved` m from here
- * (sinceSent ~0 for a source that drew none, or a player's body). */
-static int LwNoiseSkip(float playerDist, float reach, ULONGLONG sinceSent, float moved)
-{
-    if (playerDist > (reach > LW_NOISE_PLAYER ? reach : LW_NOISE_PLAYER)) return 1;
-    if (sinceSent < LW_NOISE_SOURCE_MS && moved < LW_NOISE_FIXED) return 2;
-    return 0;
-}
-static struct { uint32_t source; float pos[2]; ULONGLONG at, noted; } g_lwNoiseSent[16];
-static uint32_t g_lwNoiseSkips[3];
+static struct { uint32_t source; float pos[2]; ULONGLONG at, drew[LW_HEAR_SOURCE]; } g_lwNoiseSent[16]; /* drew: when its last squads were drawn, one time a squad */
+static uint32_t g_lwNoiseSkips[4];
 static int LwNoiseSource(uint32_t source)
 {
     for (int i = 0; i < 16; i++) if (g_lwNoiseSent[i].source == source && g_lwNoiseSent[i].at) return i;
     return -1;
+}
+/* The squads a source may still draw: LW_HEAR_SOURCE less those it drew in the last LW_NOISE_SOURCE_MS or, if more,
+ * those investigating it now. A player who fires on and on, with pauses, would else draw every squad in reach. */
+static int LwNoiseRoom(uint32_t source, ULONGLONG now)
+{
+    int k = LwNoiseSource(source), drew = 0, out = 0;
+    if (k >= 0) for (int j = 0; j < LW_HEAR_SOURCE; j++) drew += g_lwNoiseSent[k].drew[j] && now - g_lwNoiseSent[k].drew[j] < LW_NOISE_SOURCE_MS;
+    for (int i = 0; i < g_lwWorld.count; i++) out += g_lwSquads[i].state != LW_FREE && g_lwSquads[i].intent == LW_INVESTIGATE && g_lwSquads[i].intentSource == source;
+    if (out > drew) drew = out;
+    return drew < LW_HEAR_SOURCE ? LW_HEAR_SOURCE - drew : 0;
+}
+/* This source drew `n` squads at `pos` now. */
+static void LwNoiseDrew(uint32_t source, const float* pos, int n, ULONGLONG now)
+{
+    int k = LwNoiseSource(source);
+    if (k < 0) { k = 0; for (int i = 1; i < 16; i++) if (g_lwNoiseSent[i].at < g_lwNoiseSent[k].at) k = i; memset(&g_lwNoiseSent[k], 0, sizeof g_lwNoiseSent[k]); }
+    g_lwNoiseSent[k].source = source; g_lwNoiseSent[k].pos[0] = pos[0]; g_lwNoiseSent[k].pos[1] = pos[1]; g_lwNoiseSent[k].at = now;
+    for (; n > 0; n--)
+    {
+        int old = 0;
+        for (int j = 1; j < LW_HEAR_SOURCE; j++) if (g_lwNoiseSent[k].drew[j] < g_lwNoiseSent[k].drew[old]) old = j;
+        g_lwNoiseSent[k].drew[old] = now;
+    }
+}
+/* A noise a fight answers: within LW_FIGHT_AIM of a live fight's point or of the target its squads go to, or made by
+ * that target. The fight sends its squads there; the noise's squads on top would be two sets for one battle. */
+static int LwNoiseFought(const float* pos, uint32_t source, ULONGLONG now)
+{
+    for (int f = 0; f < 16; f++)
+    {
+        LwFight* fi = &g_lwFights[f];
+        if (!fi->live) continue;
+        if (LwDist2(fi->pos, pos[0], pos[1]) < LW_FIGHT_AIM * LW_FIGHT_AIM) return 1;
+        if (LwFightTargetHolds(fi, now) && (fi->target == source || LwDist2(fi->tpos, pos[0], pos[1]) < LW_FIGHT_AIM * LW_FIGHT_AIM)) return 1;
+    }
+    return 0;
+}
+/* pass 0 at the event: offline squads; pass 1, LW_HEAR_ONLINE_MS later: online squads still calm. The noise is caught in
+ * the frame of the shot (0x573F81), before its hit raises the target's alert, so an online squad picked then would be the
+ * one shot at, sent to the shooter's spot on top of the game's own reaction. The squads it sent. */
+#define LW_HEAR_ONLINE_MS 1500
+static int LwInvestigate(LwEvent* e, int pass, ULONGLONG now)
+{
+    if (LwNoiseFought(e->pos, e->source, now)) return 0; /* a fight: 2b sends squads */
+    float native = LwNoiseRange(e->type);
+    int pick[LW_HEAR_SQUADS]; float d2s[LW_HEAR_SQUADS]; int picked = 0, sent = 0;
+    int most = LwNoiseRoom(e->source, now);
+    if (most > LW_HEAR_SQUADS) most = LW_HEAR_SQUADS;
+    for (int i = 0; i < g_lwWorld.count && most > 0; i++)
+    {
+        LwSquad* q = &g_lwSquads[i];
+        if ((q->state != (pass ? LW_ONLINE : LW_OFFLINE)) || q->intent != LW_PATROL || q->pulled || q->survivors == 0 || now < q->intentFree) continue;
+        float d2 = LwDist2(q->pos, e->pos[0], e->pos[1]);
+        if (d2 > e->reach * e->reach) continue;
+        if (q->state == LW_ONLINE && (d2 <= native * native || !LwCalm(q))) continue; /* its ears hear it, or it is busy */
+        int at = picked < most ? picked++ : (d2 < d2s[most - 1] ? most - 1 : -1);
+        if (at < 0) continue;
+        while (at > 0 && d2s[at - 1] > d2) { pick[at] = pick[at - 1]; d2s[at] = d2s[at - 1]; at--; }
+        pick[at] = i; d2s[at] = d2;
+    }
+    char list[160] = "", again[32] = ""; size_t len = 0;
+    for (int j = 0; j < picked; j++)
+    {
+        LwSquad* q = &g_lwSquads[pick[j]];
+        q->intent = LW_INVESTIGATE; q->intentStage = 0; q->intentSent = 0; q->intentAt = now; q->intentSource = e->source; q->intentFrom = sqrtf(d2s[j]);
+        memcpy(q->target, e->pos, sizeof q->target);
+        if (q->state == LW_OFFLINE) { if (!LwIntentRoute(q)) { q->intent = LW_PATROL; continue; } }
+        else if (q->jobSet) { q->intentSent = 1; if (!LwSquadGoTo(q, q->target)) { q->intent = LW_PATROL; continue; } }
+        g_lwHear.sent++; sent++;
+        len += (size_t)snprintf(list + len, sizeof list - len, "%s%d (%s, %.0f m)", len ? ", " : "", pick[j], q->state == LW_ONLINE ? "online" : "offline", (double)sqrtf(d2s[j]));
+        if (len >= sizeof list) len = sizeof list - 1;
+    }
+    if (sent) { LwNoiseDrew(e->source, e->pos, sent, now); e->drawn += (uint32_t)sent; }
+    if ((pass || e->tries) && !sent) return 0; /* the event's note is written at its first pass */
+    if (e->tries) snprintf(again, sizeof again, ", asked again (try %u)", e->tries);
+    Note("living world: noise type %u at (%.0f, %.0f, %.1f) from %08X, reach %.0f m%s%s: %s", e->type, (double)e->pos[0], (double)e->pos[1], (double)e->pos[2], e->source,
+        (double)e->reach, pass ? ", online squads" : "", again, sent ? list : most ? "no calm squad in reach" : "its source may draw no more squads now");
+    return sent;
+}
+/* 0 the noise may draw squads, 1 no player near, 2 its fixed source drew squads `sinceSent` ms ago at `moved` m from here
+ * (sinceSent ~0 for a source that drew none, or a player's body), 3 its source has no room (LwNoiseRoom). */
+static int LwNoiseSkip(float playerDist, float reach, ULONGLONG sinceSent, float moved, int room)
+{
+    if (playerDist > (reach > LW_NOISE_PLAYER ? reach : LW_NOISE_PLAYER)) return 1;
+    if (sinceSent < LW_NOISE_SOURCE_MS && moved < LW_NOISE_FIXED) return 2;
+    return room > 0 ? 0 : 3;
 }
 /* The gate for one noise: its skip reason (LwNoiseSkip), noted once per source, reason and LW_NOISE_SOURCE_MS. A
  * shot's source is the weapon's wielder (0x612BAA reads Wieldable +0x38, unchanged up to r8d at 0x614364), which
@@ -1076,12 +1123,11 @@ static int LwNoiseSource(uint32_t source)
  * n->fixed: the test's noise from the avatar that counts as a source in place. */
 static int LwNoiseGate(const LwNoise* n, float reach, ULONGLONG now)
 {
-    int body = 0, k = LwNoiseSource(n->source);
-    for (int i = 0; i < g_lwWorld.playersAt; i++) if (g_lwWorld.avatars[i] == n->source) body = 1;
+    int body = LwIsPlayer(n->source), k = LwNoiseSource(n->source);
     if (n->fixed) body = 0;
     ULONGLONG since = k >= 0 && !body ? now - g_lwNoiseSent[k].at : ~0ull;
     float moved = k >= 0 ? sqrtf(LwDist2(g_lwNoiseSent[k].pos, n->pos[0], n->pos[1])) : 0, away = sqrtf(LwNearestPlayer2(n->pos[0], n->pos[1]));
-    int skip = LwNoiseSkip(away, reach, since, moved);
+    int skip = LwNoiseSkip(away, reach, since, moved, LwNoiseRoom(n->source, now));
     if (!skip) return 0;
     g_lwNoiseSkips[skip]++;
     static struct { uint32_t source; int skip; ULONGLONG at; } noted[8]; static int next;
@@ -1089,9 +1135,54 @@ static int LwNoiseGate(const LwNoise* n, float reach, ULONGLONG now)
     noted[next].source = n->source; noted[next].skip = skip; noted[next].at = now; next = (next + 1) % 8;
     if (skip == 1) Note("living world: noise type %u at (%.0f, %.0f) from %08X draws no squad: the nearest player is %.0f m away (reach %.0f m, limit %.0f m)", n->type,
         (double)n->pos[0], (double)n->pos[1], n->source, (double)away, (double)reach, (double)(reach > LW_NOISE_PLAYER ? reach : LW_NOISE_PLAYER));
-    else Note("living world: noise type %u at (%.0f, %.0f) from %08X draws no squad: this source drew squads %.0f s ago, %.0f m from here (one send per %.0f s for a source that stays in place)",
+    else if (skip == 2) Note("living world: noise type %u at (%.0f, %.0f) from %08X draws no squad: this source drew squads %.0f s ago, %.0f m from here (one send per %.0f s for a source that stays in place)",
         n->type, (double)n->pos[0], (double)n->pos[1], n->source, (double)since / 1000.0, (double)moved, (double)LW_NOISE_SOURCE_MS / 1000.0);
+    else Note("living world: noise type %u at (%.0f, %.0f) from %08X draws no squad: this source drew %d squads in the last %.0f s or has as many on their way (at most %d)",
+        n->type, (double)n->pos[0], (double)n->pos[1], n->source, LW_HEAR_SOURCE, (double)LW_NOISE_SOURCE_MS / 1000.0, LW_HEAR_SOURCE);
     return skip;
+}
+/* One noise from the Helldivers' side with its reach: it refreshes its place's event, or opens one and sends squads. */
+static void LwNoiseEvent(const LwNoise* n, float reach, ULONGLONG now)
+{
+    int same = -1, oldest = 0;
+    for (int i = 0; i < 16; i++)
+    {
+        LwEvent* o = &g_lwEvents[i];
+        /* one event per place, and per moving source: a driven vehicle's engine (type 2) emits every 2-3 s along its
+         * way, and each emission sent squads after it (user, real play) */
+        if (o->at && now - o->at < LW_HEAR_SAME_MS && LwDist2(o->pos, n->pos[0], n->pos[1]) < 50.0f * 50.0f) { same = i; break; }
+        if (o->at && o->source == n->source && o->type == n->type && now - o->born < 15000 && LwDist2(o->pos, n->pos[0], n->pos[1]) < 150.0f * 150.0f) { same = i; break; }
+        if (o->at < g_lwEvents[oldest].at) oldest = i;
+    }
+    if (same >= 0) { g_lwEvents[same].at = now; return; }
+    if (LwNoiseGate(n, reach, now)) return;
+    LwEvent* e = &g_lwEvents[oldest];
+    memset(e, 0, sizeof *e);
+    memcpy(e->pos, n->pos, sizeof e->pos); e->reach = reach; e->source = n->source; e->at = e->born = e->passAt = now; e->type = n->type; e->onlinePending = 1; e->fixed = n->fixed;
+    e->retryAt = now + LW_HEAR_RETRY_MS;
+    g_lwHear.events++;
+    LwInvestigate(e, 0, now);
+}
+/* The events' later passes: the online squads LW_HEAR_ONLINE_MS after a pass over the offline ones; and for an event
+ * that drew no squad while its firing goes on, both passes again every LW_HEAR_RETRY_MS, LW_HEAR_RETRIES times. A
+ * player who fires on with no calm squad in reach at the first shot would else be heard by nobody. */
+static void LwNoiseLater(ULONGLONG now)
+{
+    for (int i = 0; i < 16; i++)
+    {
+        LwEvent* e = &g_lwEvents[i];
+        if (e->onlinePending) { if (now - e->passAt >= LW_HEAR_ONLINE_MS) { e->onlinePending = 0; LwInvestigate(e, 1, now); } continue; }
+        if (!e->at || e->drawn || e->tries >= LW_HEAR_RETRIES || now < e->retryAt || now - e->at >= LW_HEAR_SAME_MS) continue;
+        e->tries++; e->retryAt = now + LW_HEAR_RETRY_MS;
+        LwNoise n; memset(&n, 0, sizeof n);
+        memcpy(n.pos, e->pos, sizeof n.pos); n.source = e->source; n.type = e->type; n.fixed = e->fixed;
+        if (LwNoiseGate(&n, e->reach, now)) continue;
+        g_lwHear.retries++; e->passAt = now; e->onlinePending = 1;
+        LwInvestigate(e, 0, now);
+        if (e->tries == LW_HEAR_RETRIES && !e->drawn)
+            Note("living world: noise type %u at (%.0f, %.0f) from %08X: no calm squad in reach in %d tries over %.0f s of firing; the online squads are asked once more, then nobody",
+                e->type, (double)e->pos[0], (double)e->pos[1], e->source, LW_HEAR_RETRIES, (double)(now - e->born) / 1000.0);
+    }
 }
 /* each squads tick, before the squads: the noises since the last tick */
 static void LwNoiseDrain(void)
@@ -1111,38 +1202,16 @@ static void LwNoiseDrain(void)
         float reach = fminf(LwNoiseRange(n.type) * n.loudness * LW_HEAR_FAR, LW_HEAR_MAX);
         if (reach < 20.0f || !LwPlayerSide(n.source)) continue;
         g_lwHear.kept++;
-        int same = -1, oldest = 0;
-        for (int i = 0; i < 16; i++)
-        {
-            LwEvent* o = &g_lwEvents[i];
-            /* one event per place, and per moving source: a driven vehicle's engine (type 2) emits every 2-3 s along its
-             * way, and each emission sent squads after it (user, real play) */
-            if (o->at && now - o->at < 10000 && LwDist2(o->pos, n.pos[0], n.pos[1]) < 50.0f * 50.0f) { same = i; break; }
-            if (o->at && o->source == n.source && o->type == n.type && now - o->born < 15000 && LwDist2(o->pos, n.pos[0], n.pos[1]) < 150.0f * 150.0f) { same = i; break; }
-            if (o->at < g_lwEvents[oldest].at) oldest = i;
-        }
-        if (same >= 0) { g_lwEvents[same].at = now; continue; }
-        if (LwNoiseGate(&n, reach, now)) continue;
-        LwEvent* e = &g_lwEvents[oldest];
-        memcpy(e->pos, n.pos, sizeof e->pos); e->reach = reach; e->source = n.source; e->at = e->born = now; e->type = n.type; e->onlinePending = 1;
-        g_lwHear.events++;
-        uint32_t sentBefore = g_lwHear.sent;
-        LwInvestigate(e, 0);
-        if (g_lwHear.sent != sentBefore) /* this source drew squads here */
-        {
-            int k = LwNoiseSource(n.source);
-            if (k < 0) { k = 0; for (int i = 1; i < 16; i++) if (g_lwNoiseSent[i].at < g_lwNoiseSent[k].at) k = i; }
-            g_lwNoiseSent[k].source = n.source; g_lwNoiseSent[k].pos[0] = n.pos[0]; g_lwNoiseSent[k].pos[1] = n.pos[1]; g_lwNoiseSent[k].at = now;
-        }
+        LwNoiseEvent(&n, reach, now);
     }
-    for (int i = 0; i < 16; i++)
-        if (g_lwEvents[i].onlinePending && now - g_lwEvents[i].born >= LW_HEAR_ONLINE_MS) { g_lwEvents[i].onlinePending = 0; LwInvestigate(&g_lwEvents[i], 1); }
+    LwNoiseLater(now);
 }
 static void LwHearNote(void)
 {
     if (!g_lwNoiseOn || (g_lwHear.heard == 0 && g_lwHear.sent == 0)) return;
-    Note("living world: noise (30 s): %u emissions, %u from the Helldivers' side in reach, %u events, %u squads sent, %u members told, %u investigations ended; drew no squad: %u with no player near, %u from a source in place that drew squads in the last %.0f s",
-        g_lwHear.heard, g_lwHear.kept, g_lwHear.events, g_lwHear.sent, g_lwHear.told, g_lwHear.ended, g_lwNoiseSkips[1], g_lwNoiseSkips[2], (double)LW_NOISE_SOURCE_MS / 1000.0);
+    Note("living world: noise (30 s): %u emissions, %u from the Helldivers' side in reach, %u events, %u squads sent, %u members told, %u investigations ended; drew no squad: %u with no player near, %u from a source in place that drew squads in the last %.0f s, %u from a source with %d squads drawn or on their way; %u events asked again",
+        g_lwHear.heard, g_lwHear.kept, g_lwHear.events, g_lwHear.sent, g_lwHear.told, g_lwHear.ended, g_lwNoiseSkips[1], g_lwNoiseSkips[2], (double)LW_NOISE_SOURCE_MS / 1000.0, g_lwNoiseSkips[3], LW_HEAR_SOURCE,
+        g_lwHear.retries);
     memset(g_lwNoiseSkips, 0, sizeof g_lwNoiseSkips);
     memset(&g_lwHear, 0, sizeof g_lwHear);
 }

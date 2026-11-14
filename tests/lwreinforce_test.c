@@ -77,6 +77,10 @@ int CoXlTestLwFightTakeWhom(float x, float y, int n, const uint32_t* ids, const 
 uint32_t CoXlTestLwFightFar(void);
 void CoXlTestLwFightPoint(int f, float x, float y);
 void CoXlTestLwAvatars(const uint32_t* ids, int n);
+void CoXlTestLwNoiseWorld(const float* pl, int np, const float* sq, int n);
+void CoXlTestLwNoiseSquad(int i, int what, float x, float y);
+int CoXlTestLwNoise(uint32_t source, float x, float y, uint64_t now, uint32_t of);
+uint32_t CoXlTestLwNoiseCount(int what);
 void CoXlTestLwFightFought(int f, uint32_t ago);
 
 static int g_failed;
@@ -1372,6 +1376,115 @@ static void NoiseBody(void)
 }
 
 /* What places a fight. Run 5: four units at level 7 walked 1 km east at 1.7 m/s and took the fight's point along. */
+/* The noise path: an event that drew nobody is asked again while the firing goes on; one source draws two squads
+ * per 120 s over all its events and both passes; a noise a fight answers draws none. */
+static void NoisePath(void)
+{
+    const uint64_t t0 = GetTickCount64() + 11000000;
+    const float pl[2] = {0, 0}, out[2] = {2000, 0};
+    g_case = "no calm squad in reach at the first shot, the firing goes on: asked again after 10 s, and the squad that came in reach is sent";
+    CoXlTestLwNoiseWorld(pl, 1, out, 1);
+    const int tries = Count(", asked again (try 1): 0 (offline, 200 m)");
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0, 0) == 0 && CoXlTestLwNoiseCount(0) == 1);
+    CoXlTestLwNoiseSquad(0, 0, 200, 0);
+    for (int s = 1; s <= 9; s++) CHECK(CoXlTestLwNoise(0x500, 0, 0, t0 + 1000u * (uint64_t)s, 0) == 0);
+    CHECK(CoXlTestLwNoise(0, 0, 0, t0 + 9999, 0) == 0 && CoXlTestLwNoiseCount(2) == 0);
+    CHECK(CoXlTestLwNoise(0, 0, 0, t0 + 10000, 0) == 1 && CoXlTestLwNoiseCount(2) == 1 && CoXlTestLwNoiseCount(0) == 1);
+    CHECK(Count(", asked again (try 1): 0 (offline, 200 m)") == tries + 1);
+    g_case = "an event that drew a squad is not asked again";
+    for (int s = 11; s <= 40; s++) CoXlTestLwNoise(0x500, 0, 0, t0 + 1000u * (uint64_t)s, 0);
+    CHECK(CoXlTestLwNoiseCount(2) == 1 && CoXlTestLwNoiseCount(1) == 1);
+    g_case = "one shot and no more: the firing does not go on, nobody is asked again";
+    CoXlTestLwNoiseWorld(pl, 1, out, 1);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0, 0) == 0);
+    CoXlTestLwNoiseSquad(0, 0, 200, 0);
+    for (int s = 10; s <= 40; s += 10) CHECK(CoXlTestLwNoise(0, 0, 0, t0 + 1000u * (uint64_t)s, 0) == 0);
+    CHECK(CoXlTestLwNoiseCount(2) == 0);
+    g_case = "an online squad that came in reach is asked 1.5 s after the try, not with it";
+    CoXlTestLwNoiseWorld(pl, 1, out, 1);
+    CoXlTestLwNoiseSquad(0, 1, 0, 0);
+    CoXlTestLwNoise(0x500, 0, 0, t0, 0);
+    for (int s = 1; s <= 9; s++) { CoXlTestLwNoise(0x500, 0, 0, t0 + 1000u * (uint64_t)s, 0); if (s == 2) CoXlTestLwNoiseSquad(0, 0, 200, 0); }
+    CHECK(CoXlTestLwNoise(0, 0, 0, t0 + 10000, 0) == 0 && CoXlTestLwNoiseCount(2) == 1);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0 + 11499, 0) == 0);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0 + 11500, 0) == 1);
+    g_case = "two minutes of firing with nobody in reach: twelve tries, a line, then no more";
+    CoXlTestLwNoiseWorld(pl, 1, out, 1);
+    const int gave = Count("no calm squad in reach in 12 tries over 120 s of firing");
+    for (int s = 0; s <= 200; s++) CoXlTestLwNoise(0x500, 0, 0, t0 + 1000u * (uint64_t)s, 0);
+    CHECK(CoXlTestLwNoiseCount(2) == 12 && CoXlTestLwNoiseCount(0) == 1 && Count("no calm squad in reach in 12 tries over 120 s of firing") == gave + 1);
+
+    g_case = "six squads in reach, bursts 15 s apart for two minutes: two squads are drawn, the rest stay; noted once";
+    const float six[12] = {100, 0, 120, 0, 140, 0, 160, 0, 180, 0, 200, 0};
+    CoXlTestLwNoiseWorld(pl, 1, six, 6);
+    const int capped = Count("draws no squad: this source drew 2 squads in the last 120 s or has as many on their way (at most 2)");
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0, 0) == 2 && CoXlTestLwNoiseCount(1) == 2);
+    for (int s = 15; s < 120; s += 15) CHECK(CoXlTestLwNoise(0x500, 0, 0, t0 + 1000u * (uint64_t)s, 0) == 2);
+    CHECK(CoXlTestLwNoiseCount(0) == 1 && CoXlTestLwNoiseCount(3) == 7);
+    CHECK(Count("draws no squad: this source drew 2 squads in the last 120 s or has as many on their way (at most 2)") == capped + 1);
+    g_case = "their investigations over: still none within 120 s of the draw, two more after it";
+    CoXlTestLwNoiseSquad(0, 2, 0, 0); CoXlTestLwNoiseSquad(1, 2, 0, 0);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0 + 119999, 0) == 0);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0 + 131000, 0) == 2 && CoXlTestLwNoiseCount(1) == 4);
+    g_case = "one of the two drawn 60 s later: the next is drawn 120 s after the first, and no second one until 120 s after that one";
+    CoXlTestLwNoiseWorld(pl, 1, six, 1);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0, 0) == 1);
+    CoXlTestLwNoiseSquad(0, 2, 0, 0);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0 + 60000, 0) == 1 && CoXlTestLwNoiseCount(1) == 2);
+    CoXlTestLwNoiseSquad(0, 2, 0, 0);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0 + 119000, 0) == 0);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0 + 131000, 0) == 1 && CoXlTestLwNoiseCount(1) == 3);
+    CoXlTestLwNoiseSquad(0, 2, 0, 0);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0 + 179000, 0) == 0);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0 + 191000, 0) == 1 && CoXlTestLwNoiseCount(1) == 4);
+    g_case = "squads still investigating the source after 120 s count against it";
+    CoXlTestLwNoiseWorld(pl, 1, six, 6);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0, 0) == 2);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0 + 130000, 0) == 2);
+    CoXlTestLwNoiseSquad(0, 2, 0, 0);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0 + 145000, 0) == 2 && CoXlTestLwNoiseCount(1) == 3);
+    g_case = "one offline and three online squads in reach: the offline one at once, one online one 1.5 s later, two in all";
+    CoXlTestLwNoiseWorld(pl, 1, six, 4);
+    for (int i = 1; i < 4; i++) CoXlTestLwNoiseSquad(i, 1, 0, 0);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0, 0) == 1);
+    CHECK(CoXlTestLwNoise(0, 0, 0, t0 + 1500, 0) == 2);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0 + 15000, 0) == 2 && CoXlTestLwNoise(0, 0, 0, t0 + 16500, 0) == 2);
+
+    g_case = "eight players firing from eight places 1 km apart, four squads in reach of each: two squads each";
+    float pls[16], sqs[64];
+    for (int k = 0; k < 8; k++) { pls[2 * k] = 1000.0f * (float)k; pls[2 * k + 1] = 0; for (int j = 0; j < 4; j++) { sqs[8 * k + 2 * j] = 1000.0f * (float)k + 100.0f + 20.0f * (float)j; sqs[8 * k + 2 * j + 1] = 0; } }
+    const int np = CoXlTestLwPlayers(pls, 8);
+    CoXlTestLwNoiseWorld(pls, np, sqs, 4 * np);
+    for (int round = 0; round < 8; round++)
+        for (int k = 0; k < np; k++) CHECK(CoXlTestLwNoise(0x500u + (uint32_t)k, 1000.0f * (float)k, 0, t0 + 15000u * (uint64_t)round, 0x500u + (uint32_t)k) == 2);
+    CHECK(CoXlTestLwNoiseCount(1) == 2u * (uint32_t)np && CoXlTestLwNoise(0, 0, 0, t0 + 106500, 0) == 2 * np);
+
+    g_case = "a shooter 120 m from a live fight's point gets no noise squads; 150 m from it, two";
+    uint64_t seen; int eng; float pos[2];
+    CoXlTestLwNoiseWorld(pl, 1, six, 6);
+    CHECK(CoXlTestLwFightTake(-120, 0, 6, 6, 0, 0, t0, 0, pos, &eng, &seen) == 0);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0, 0) == 0 && CoXlTestLwNoiseCount(0) == 1);
+    CoXlTestLwNoiseWorld(pl, 1, six, 6);
+    CHECK(CoXlTestLwFightTake(-150, 0, 6, 6, 0, 0, t0, 0, pos, &eng, &seen) == 0);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0, 0) == 2);
+    g_case = "a shooter its fight's units fight from 400 m gets the fight's squads, not the noise's; another player there gets them";
+    const float two[4] = {0, 0, 0, 30}; const uint32_t av[1] = {0x500}; const float at0[2] = {0, 0};
+    CoXlTestLwNoiseWorld(two, 2, six, 6);
+    CHECK((CoXlTestLwFightTakeWhom(-400, 0, 6, av, at0, 1, t0, pos) & 0xFF) == 0);
+    CoXlTestLwFightTarget(0, 0x500, at0); CoXlTestLwFightFought(0, 0);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, GetTickCount64(), 0) == 0);
+    CHECK(CoXlTestLwNoise(0x501, 0, 30, GetTickCount64(), 0) == 0); /* 30 m from where the fight's squads go */
+    CHECK(CoXlTestLwNoise(0x501, 0, 150, GetTickCount64(), 0) == 2);
+    g_case = "that player fought no more: its own noise draws squads";
+    CoXlTestLwNoiseWorld(two, 2, six, 6);
+    CHECK((CoXlTestLwFightTakeWhom(-400, 0, 6, av, at0, 1, t0, pos) & 0xFF) == 0);
+    CoXlTestLwFightTarget(0, 0x500, at0); CoXlTestLwFightFought(0, 6000);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, GetTickCount64(), 0) == 2);
+    CoXlTestLwFightTarget(0, 0, NULL);
+    CoXlTestLwFightsClear();
+    CoXlTestLwPlayers(pl, 1);
+}
+
 static void FightPlace(void)
 {
     float pos[2], hot[2]; int eng; uint64_t seen;
@@ -1487,6 +1600,7 @@ int main(void)
     AimRules();
     FightNear();
     ShotAt();
+    NoisePath();
     AimNear();
     TargetFought();
     MoveKeeps();
