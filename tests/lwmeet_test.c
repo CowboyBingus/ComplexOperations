@@ -72,6 +72,11 @@ int main(void)
     CHECK(co_lw_meet_note(&m, 0, line, sizeof line) == 0);
     co_lw_meet_sample(&m, 0, 23000, 0, dist, units, road, 1);
     CHECK(co_lw_meet_note(&m, 0, line, sizeof line) == 1 && strstr(line, "(no such squad; none 100% of the time)") != NULL && strstr(line, "(1 s, by a road 0%)") != NULL);
+    g_case = "the least distance is the nearest of the window, not the last";
+    co_lw_meet_restart(&m);
+    { const float da[1] = {200}, db[1] = {90}, dc[1] = {210}; const uint8_t u1[1] = {5}, r1[1] = {1};
+      co_lw_meet_sample(&m, 0, 24000, 1, da, u1, r1, 1); co_lw_meet_sample(&m, 0, 25000, 1, db, u1, r1, 1); co_lw_meet_sample(&m, 0, 26000, 1, dc, u1, r1, 1); }
+    CHECK(co_lw_meet_note(&m, 0, line, sizeof line) == 1 && strstr(line, "least 90 m; none 0% of the time") != NULL && strstr(line, "within 250 m 1.00 on average") != NULL);
     g_case = "a slot past the table and an unread slot have no line";
     co_lw_meet_sample(&m, CO_LW_MEET_PLAYERS, 23000, 0, dist, units, road, 1);
     CHECK(co_lw_meet_note(&m, CO_LW_MEET_PLAYERS, line, sizeof line) == 0 && co_lw_meet_note(&m, 3, line, sizeof line) == 0);

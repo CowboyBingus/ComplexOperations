@@ -114,8 +114,11 @@ int main(void)
     least = CoXlTestLwMeetWalk(0, 30, 5, 2000.0f, 2000.0f, 9999, 760, 0, o);
     CHECK(least >= 155.0f && o[1] == 0 && o[2] == 1 && o[3] == 1 && o[0] < 1820.0f && o[0] > 1700.0f);
     g_case = "after the turn its next plan does not lead straight back to the player";
-    least = CoXlTestLwMeetWalk(0, 30, 5, 2000.0f, 2000.0f, 9999, 900, 0, o);
-    CHECK(least >= 155.0f && o[3] == 1 && o[0] < 1560.0f);
+    for (int k = 0; k < 8; k++) /* the way on is drawn by chance where there are two */
+    {
+        least = CoXlTestLwMeetWalk(0, 30, 5, 2000.0f, 2000.0f, 9999, 900, 0, o);
+        CHECK(least >= 155.0f && o[3] == 1 && o[2] == 1 && o[0] < 1560.0f);
+    }
     g_case = "a player who walks up to a waiting patrol pushes it back along its stretch, the edge's distance away";
     least = CoXlTestLwMeetWalk(0, 30, 5, 2000.0f, 1960.0f, 690, 692, 0, o);
     CHECK(o[4] == 1 && o[3] == 0 && o[1] == 1 && o[0] < 1805.1f && o[0] > 1800.0f);
