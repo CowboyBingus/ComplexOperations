@@ -956,6 +956,8 @@ void CoXlTestRoadsGround(float* h, uint32_t cols, uint32_t rows, int bodies, flo
     g_nearWater.level = g_world.levels; g_nearWater.count = bodies; g_nearWater.high = water;
 }
 void CoXlTestRoadsSlopeNote(uintptr_t block) { RoadsSlopeNote(block); }
+void CoXlTestRoadsIndexNote(uint64_t context, const char* when) { RoadsIndexNote(context, when); }
+void CoXlTestRoadsPointsWatch(uintptr_t block, uint32_t op) { RoadsPointsWatch(block, op); }
 uint8_t CoXlTestLocationOp(uint32_t i) { return g_locationOp[i]; }
 float CoXlTestStampSegmentBox(const float* s, const float* lo, const float* hi) { return StampSegmentBox(s, lo, hi); }
 void CoXlTestRoadsAfterOp(uintptr_t block, uint64_t context, uint64_t record, uint32_t op, uint32_t before, int counted)

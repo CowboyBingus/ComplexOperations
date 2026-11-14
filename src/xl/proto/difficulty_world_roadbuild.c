@@ -383,14 +383,14 @@ static void RoadsArterialsPoints(uintptr_t block)
 #define ROADS_SPUR_SLACK 40.0f   /* the path's meander about the chord the reserve is counted from */
 #define ROADS_SPURS (2 * ROADS_GROUP_MAX)
 typedef struct RoadSpur { float from[2], to[2]; uint32_t edge, first, end; } RoadSpur; /* place, the arterial's point; points [first, end) */
-static struct { LONG level; uint32_t terms, reserve, count; float xy[2 * ROADS_SPURS]; RoadSpur spur[ROADS_SPURS]; } g_spurs = {.level = -1};
+static struct { LONG level; uint32_t terms, reserve, count, points; float xy[2 * ROADS_SPURS]; RoadSpur spur[ROADS_SPURS]; } g_spurs = {.level = -1}; /* points: the count the spurs left */
 typedef void (*RoadCapsuleFn)(uint64_t index, const float* capsule, uint32_t id);
 static RoadCapsuleFn g_roadCapsule; /* tests: in place of the game's 0xFCADC0 */
 
 static uint32_t RoadsSpurCount(float length) { return length < ROADS_SPUR_MOST ? (uint32_t)ceilf(length / ROADS_SPUR_STEP) + 1 : 0; }
 static void RoadsSpurTerminals(const float* xy, const float* gap, uint32_t terms)
 {
-    g_spurs.level = g_world.levels; g_spurs.terms = terms; g_spurs.reserve = 0; g_spurs.count = 0;
+    g_spurs.level = g_world.levels; g_spurs.terms = terms; g_spurs.reserve = 0; g_spurs.count = 0; g_spurs.points = 0;
     memcpy(g_spurs.xy, xy, (size_t)terms * 8);
     for (uint32_t t = 0; t < terms; t++) g_spurs.reserve += RoadsSpurCount(gap[t] + ROADS_SPUR_SLACK);
 }
@@ -425,6 +425,37 @@ static void RoadsSpurPoints(const float from[2], const float to[2], uint32_t cou
     }
 }
 
+/* The stamp index's free places, counted to `most`: its free list starts at u32 [index + 8 + 0x2C] (0xFFFFFFFF: none,
+ * 0xC04F1C), each free place's first u32 names the next ([index + 8 + 0x30] + place x u16 [index + 8 + 0x24],
+ * 0xC04F3C..0xC04F7A). 0xFCADC0 writes through what 0xC04EF0 returns (0xFCAE69), also when that is null. -1: not readable. */
+static int RoadsIndexFree(uint64_t index, uint32_t most)
+{
+    uint32_t head = 0, n = 0; uint16_t stride = 0; uint64_t base = 0;
+    if (SafeRead(index + 8 + 0x2C, &head, 4) || SafeRead(index + 8 + 0x24, &stride, 2) || SafeRead(index + 8 + 0x30, &base, 8)) return -1;
+    while (head != 0xFFFFFFFFu && n < most)
+    {
+        if (SafeRead(base + (uint32_t)(stride * head), &head, 4)) return -1;
+        n++;
+    }
+    return (int)n;
+}
+#define ROADS_INDEX_COUNT 0x400000u
+static void RoadsIndexNote(uint64_t context, const char* when)
+{
+    uint64_t index = 0;
+    if (g_spurs.level != g_world.levels || SafeRead(context + 0x20, &index, 8) || index == 0) return;
+    Note("roads: level %ld stamp index %s: %d places free", (long)g_world.levels, when, RoadsIndexFree(index, ROADS_INDEX_COUNT));
+}
+/* The road point count after an op that could touch the points: it must stay what the spurs left. */
+static void RoadsPointsWatch(uintptr_t block, uint32_t op)
+{
+    if (g_spurs.level != g_world.levels || g_spurs.points == 0) return;
+    if (op != 0x03 && op != 0x09 && op != 0x5A && op != 0x8F && op != 0x3D && op != 0x0D && op != 0x41) return;
+    uint32_t now = 0;
+    SafeRead(block + 0x11A71D4u, &now, 4);
+    Note("roads: level %ld road points after op 0x%02X: %u (the spurs left %u)%s", (long)g_world.levels, op, now, g_spurs.points, now == g_spurs.points ? "" : ": CHANGED");
+}
+
 /* After the level's op 0x0F: the spurs' points and their capsules in the level's index, before any stamp is placed. */
 static void RoadsSpursBuild(uintptr_t block, uint64_t context)
 {
@@ -444,7 +475,7 @@ static void RoadsSpursBuild(uintptr_t block, uint64_t context)
         RoadsFreeEdges(e, n); if (pts != NULL) VirtualFree(pts, 0, MEM_RELEASE);
         return;
     }
-    uint32_t onRoad = 0, tooFar = 0, noRoom = 0, at = points; double km = 0; float longest = 0;
+    uint32_t onRoad = 0, tooFar = 0, noRoom = 0, noIndex = 0, at = points; double km = 0; float longest = 0;
     static float line[2 * 128];
     for (uint32_t t = 0; t < g_spurs.terms; t++)
     {
@@ -455,6 +486,7 @@ static void RoadsSpursBuild(uintptr_t block, uint64_t context)
         if (d < 1.0f) { onRoad++; continue; }
         if (count == 0 || count > 128) { tooFar++; continue; }
         if (at + count > room) { noRoom++; continue; }
+        if (RoadsIndexFree(index, count - 1) < (int)count - 1) { noIndex++; continue; } /* a full index would be written through null */
         RoadsSpurPoints(s->from, s->to, count, line);
         const float r = 0.5f * (e[s->edge].width > ROADS_ARTERIAL_WIDTH ? e[s->edge].width : ROADS_ARTERIAL_WIDTH);
         for (uint32_t k = 0; k < count; k++)
@@ -469,9 +501,10 @@ static void RoadsSpursBuild(uintptr_t block, uint64_t context)
         g_spurs.count++; km += d / 1000.0; if (d > longest) longest = d;
     }
     if (at != points) *(volatile uint32_t*)(block + 0x11A71D4u) = at;
+    g_spurs.points = at;
     Note("roads: level %ld spurs: %u of %u places joined to the arterials (%.1f km, the longest %.0f m; %u road points of %u kept for them), "
-        "%u on a road already, %u too far, %u without room", (long)g_world.levels, g_spurs.count, g_spurs.terms, km, (double)longest, at - points,
-        g_spurs.reserve, onRoad, tooFar, noRoom);
+        "%u on a road already, %u too far, %u without room, %u without a place in the stamp index (%d free after them)", (long)g_world.levels, g_spurs.count,
+        g_spurs.terms, km, (double)longest, at - points, g_spurs.reserve, onRoad, tooFar, noRoom, noIndex, RoadsIndexFree(index, ROADS_INDEX_COUNT));
     RoadsFreeEdges(e, n);
     VirtualFree(pts, 0, MEM_RELEASE);
 }
@@ -561,13 +594,13 @@ static void RoadsCensusItem(RoadsCensus* c, const RoadStrips* t, int kind, uint3
         hit.spur ? "spur" : "arterial", hit.centred);
     if (c->file != INVALID_HANDLE_VALUE) WriteFile(c->file, line, TsvLength(line, sizeof line, len), &wrote, NULL);
     if (c->listed++ < 8)
-        Note("roads: level %ld corridor: %s %u (op 0x%X, type %u, flags 0x%X, +0xC8 0x%X) at (%.0f, %.0f), box %.1f x %.1f m, %.2f m from the middle of %s %u's %.1f m half width%s",
+        Note("roads: level %ld corridor: %s %u (op 0x%X, type %u, flags 0x%X, location +0xC8 0x%X) at (%.0f, %.0f), box %.1f x %.1f m, %.2f m from the middle of %s %u's %.1f m half width%s",
             (long)g_world.levels, kNames[kind], index, op, type, flags, raw, (double)(pos[0] - c->halfWorld), (double)(pos[1] - c->halfWorld), (double)(hi[0] - lo[0]),
             (double)(hi[1] - lo[1]), (double)hit.d, hit.spur ? "the spur at edge" : "arterial edge", hit.edge, (double)hit.half, hit.centred ? ", its centre inside" : "");
 }
 
 /* After the level's op 0x2B and the mod's stamps: one line, the first eight finds, and corridor-<level>.tsv with all
- * (kind, index, op, type +0xD8, flags +0xD4, +0xC8, x, y in world metres, box, distance, half width, edge, class, centred).
+ * (kind, index, op, and of the 0xE0 location record type +0xD8, flags +0xD4 and the u32 at +0xC8, x, y in world metres, box, distance, half width, edge, class, centred).
  * before: the locations op 0x2B found; the ones from there on are its own, then the added ones. */
 static void RoadsCorridorNote(uintptr_t block, const uint8_t* ops, uint32_t before, uint32_t total)
 {
@@ -654,7 +687,8 @@ done:
 /* ---- The slope profile (log only) ----
  * How steep the ground is along each arterial and spur, from the level's own height capture (g_near.global: one float
  * per cell, row 0 at +y, TerrainNearDrop's indexing). The capture is read back after op 0x2B, so this measures the
- * roads as built; it cannot steer them. The two grades are the tank's and the FRV's grip as read from their physics
+ * roads as built; it cannot steer them. The near terrain copies it at the level's op 0x65, after ops 0x3D, 0x0D and
+ * 0x41 ran. The two grades are the tank's and the FRV's grip as read from their physics
  * data, not a limit the game states. */
 #define ROADS_GRADE_TANK 18.0f
 #define ROADS_GRADE_FRV 31.0f
@@ -754,7 +788,7 @@ static void RoadsSlopeNote(uintptr_t block)
     char wet[64];
     if (water) snprintf(wet, sizeof wet, "the highest water at %.1f m", (double)g_nearWater.high); else snprintf(wet, sizeof wet, "no water body");
     for (int c = 0; c < 2; c++)
-        Note("roads: level %ld slopes: %u %s, %.1f km on a %.0f m height grid: steepest %.1f deg (%s %u), %.0f m over %.0f deg in %u of them, %.0f m over %.0f deg, "
+        Note("roads: level %ld slopes: %u %s, %.1f km on the %.0f m height capture kept at op 0x65: steepest %.1f deg (%s %u), %.0f m over %.0f deg in %u of them, %.0f m over %.0f deg, "
             "cross slope at most %.1f deg, %.0f m at or under water (%s)", (long)g_world.levels, parts[c], c ? "spurs" : "arterial edges", sum[c].metres / 1000.0,
             (double)g.step, (double)sum[c].grade, c ? "spur" : "edge", worst[c], sum[c].overTank, (double)ROADS_GRADE_TANK, steep[c], sum[c].overFrv,
             (double)ROADS_GRADE_FRV, (double)sum[c].cross, sum[c].wet, wet);

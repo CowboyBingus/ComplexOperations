@@ -4858,6 +4858,8 @@ static void RoadsArterialsPoints(uintptr_t block);
 static void RoadsSpursBuild(uintptr_t block, uint64_t context);
 static void RoadsCorridorNote(uintptr_t block, const uint8_t* ops, uint32_t before, uint32_t total);
 static void RoadsSlopeNote(uintptr_t block);
+static void RoadsIndexNote(uint64_t context, const char* when);
+static void RoadsPointsWatch(uintptr_t block, uint32_t op);
 static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
 {
     WorldDispatchBegins(records, index, (uint32_t)d);
@@ -5101,6 +5103,8 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
             if (watch && op == 0x0E) RoadsArterialsPoints(block);
             if (watch && op == 0x0F) RoadsSpursBuild(block, b); /* before op 0x2B places a stamp */
             if (watch) RoadsSlopeNote(block); /* once the level's height capture is kept */
+            if (watch) RoadsPointsWatch(block, op);
+            if (watch && op == 0x2B) RoadsIndexNote(b, "after op 0x2B");
             if (watch && op == 0x2B) { uint32_t placed = 0; SafeRead(block + 0x11A7108, &placed, 4); RoadsCorridorNote(block, g_locationOp, before, placed); }
         }
     }

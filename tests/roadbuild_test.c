@@ -31,6 +31,8 @@ void CoXlTestRoadsStamps(uint32_t first, void* cand, uint32_t planned);
 void CoXlTestRoadsSlope(const float* h, uint32_t cols, uint32_t rows, float step, float water, const float* pts, uint32_t n, double* out);
 void CoXlTestRoadsGround(float* h, uint32_t cols, uint32_t rows, int bodies, float water);
 void CoXlTestRoadsSlopeNote(uintptr_t block);
+void CoXlTestRoadsIndexNote(uint64_t context, const char* when);
+void CoXlTestRoadsPointsWatch(uintptr_t block, uint32_t op);
 
 static int g_failed;
 static const char* g_case;
@@ -398,6 +400,16 @@ static void Capsule(uint64_t index, const float* capsule, uint32_t id)
     if (g_capsuleCount < 256) { g_capsules[g_capsuleCount].index = index; memcpy(g_capsules[g_capsuleCount].c, capsule, 24); g_capsules[g_capsuleCount].id = id; }
     g_capsuleCount++;
 }
+/* A stamp index as 0xC04EF0 reads it: the free list's head at +8 +0x2C, the place size at +8 +0x24, the places at +8 +0x30 */
+static uint8_t g_index[0x60];
+static uint32_t g_places[8 * 4];
+static void Index(uint32_t free_)
+{
+    const uint64_t base = (uint64_t)(uintptr_t)g_places; const uint16_t stride = 16;
+    memset(g_index, 0, sizeof g_index);
+    for (uint32_t i = 0; i < 8; i++) g_places[4 * i] = i + 1 < free_ ? i + 1 : 0xFFFFFFFFu;
+    Put32(g_index + 8 + 0x2C, free_ ? 0 : 0xFFFFFFFFu); memcpy(g_index + 8 + 0x24, &stride, 2); memcpy(g_index + 8 + 0x30, &base, 8);
+}
 static float Point(uint32_t i, int c) { float v; memcpy(&v, g_block + POINTS_AT + 8u * i + 4u * (uint32_t)c, 4); return v; }
 static uint32_t Count32(uint32_t at) { uint32_t v; memcpy(&v, g_block + at, 4); return v; }
 static float Width(uint32_t edge) { float w; memcpy(&w, g_block + EDGES_AT + 0x48u * edge + 0x30, 4); return w; }
@@ -438,7 +450,8 @@ static void ArterialsGlue(void)
 
     g_case = "spurs: each place's straight way to the nearest arterial point, as points and index capsules";
     static uint64_t context[5];
-    context[4] = 0x777;
+    Index(8);
+    context[4] = (uint64_t)(uintptr_t)g_index;
     uint32_t reserve = 0; const float* table = NULL;
     CHECK(CoXlTestRoadsSpurs(&reserve, &table) == 0 && reserve == 14); /* (14.1 + 40) / 10 -> 6 + 1, (11.2 + 40) / 10 -> 6 + 1 */
     /* edge 4 is no arterial: its points 5 m from the objective are not a spur's end */
@@ -453,13 +466,29 @@ static void ArterialsGlue(void)
     /* the objective (990, 1010) to edge 2's end (1000, 1000): 3 points; the outpost (2010, 5) to edge 1's end (2000, 0) */
     CHECK(Point(9, 0) == 990 && Point(9, 1) == 1010 && Point(10, 0) == 995 && Point(10, 1) == 1005 && Point(11, 0) == 1000 && Point(11, 1) == 1000);
     CHECK(Point(12, 0) == 2010 && Point(12, 1) == 5 && Point(14, 0) == 2000 && Point(14, 1) == 0 && Point(8, 0) == 985);
-    CHECK(g_capsules[0].index == 0x777 && g_capsules[0].id == (10u | (9u << 16)) && g_capsules[1].id == (11u | (9u << 16)));
+    CHECK(g_capsules[0].index == (uint64_t)(uintptr_t)g_index && g_capsules[0].id == (10u | (9u << 16)) && g_capsules[1].id == (11u | (9u << 16)));
     CHECK(g_capsules[0].c[0] == 990 && g_capsules[0].c[1] == 1010 && g_capsules[0].c[2] == 995 && g_capsules[0].c[3] == 1005 && g_capsules[0].c[4] == 4 && g_capsules[0].c[5] == 4);
     CHECK(g_capsules[1].c[0] == 995 && g_capsules[1].c[2] == 1000 && g_capsules[1].c[3] == 1000);
     CHECK(g_capsules[2].id == (13u | (5u << 16)) && g_capsules[3].id == (14u | (5u << 16)) && g_capsules[3].c[4] == 6); /* edge 1 is 12 m wide */
     CHECK(table[0] == 990 && table[1] == 1010 && table[2] == 1000 && table[3] == 1000);
     { uint32_t u[3]; memcpy(u, table + 4, 12); CHECK(u[0] == 2 && u[1] == 9 && u[2] == 12); }
-    CHECK(Lines("spurs: 2 of 2 places joined to the arterials (0.0 km, the longest 14 m; 6 road points of 14 kept for them), 0 on a road already, 0 too far, 0 without room") == 1);
+    CHECK(Lines("spurs: 2 of 2 places joined to the arterials (0.0 km, the longest 14 m; 6 road points of 14 kept for them), 0 on a road already, 0 too far, 0 without room, 0 without a place in the stamp index (8 free after them)") == 1);
+    g_fake.log[0] = 0;
+    CoXlTestRoadsIndexNote((uint64_t)(uintptr_t)context, "after op 0x2B");
+    CHECK(Lines("stamp index after op 0x2B: 8 places free") == 1);
+    Index(0);
+    CoXlTestRoadsIndexNote((uint64_t)(uintptr_t)context, "when full");
+    CHECK(Lines("stamp index when full: 0 places free") == 1);
+    Index(8);
+    g_case = "spurs: the road point count is watched after the ops that could touch it";
+    g_fake.log[0] = 0;
+    CoXlTestRoadsPointsWatch(block, 0x0D); CoXlTestRoadsPointsWatch(block, 0x0E);
+    CHECK(Lines("road points after op 0x0D: 15 (the spurs left 15)") == 1 && Lines("road points after") == 1 && Lines("CHANGED") == 0);
+    Put32(g_block + 0x11A71D4u, 9);
+    CoXlTestRoadsPointsWatch(block, 0x41);
+    CHECK(Lines("road points after op 0x41: 9 (the spurs left 15): CHANGED") == 1);
+    Put32(g_block + 0x11A71D4u, 15);
+    g_case = "spurs: each place's straight way to the nearest arterial point, as points and index capsules";
 
     g_case = "corridor: what stands in the arterials' and the spurs' strips, by kind";
     {
@@ -488,11 +517,11 @@ static void ArterialsGlue(void)
         CHECK(Lines("corridor: 3.0 km of arterials and 0.0 km of spurs (8 pairs): inside the strip 2 of the level's own op 0x2B stamps (2 centred, 1 on a spur), "
             "2 added stamps (2 centred, 0 on a spur), 1 of the plan's (0 centred, 0 on a spur), 2 places of other ops (1 centred, 0 on a spur); 1.65 stamps per km; "
             "clear across the middle: 0.0 m to the nearest of them; counted in ") == 1);
-        CHECK(Lines("corridor: place 1 (op 0x82, type 41, flags 0x2, +0xC8 0x0) at (-6182, -8187), box 10.0 x 10.0 m, 5.00 m from the middle of arterial edge 1's 6.0 m half width") == 1);
-        CHECK(Lines("corridor: place 2 (op 0x8E, type 42, flags 0x3, +0xC8 0x0) at (-7692, -8190), box 2.0 x 2.0 m, 1.00 m from the middle of arterial edge 0's 4.0 m half width, its centre inside") == 1);
-        CHECK(Lines("corridor: own 3 (op 0x2B, type 43, flags 0x4, +0xC8 0x0) at (-7189, -7692), box 2.0 x 2.0 m, 2.00 m from the middle of arterial edge 2's 4.0 m half width, its centre inside") == 1);
-        CHECK(Lines("corridor: own 5 (op 0x2B, type 45, flags 0x6, +0xC8 0x0) at (-7199, -7185), box 1.0 x 1.0 m, 0.00 m from the middle of the spur at edge 2's 4.0 m half width, its centre inside") == 1);
-        CHECK(Lines("corridor: added 7 (op 0x2B, type 47, flags 0x8, +0xC8 0x0) at (-7191, -8189), box 1.0 x 1.0 m, 0.50 m from the middle of arterial edge 2's 4.0 m half width, its centre inside") == 1);
+        CHECK(Lines("corridor: place 1 (op 0x82, type 41, flags 0x2, location +0xC8 0x0) at (-6182, -8187), box 10.0 x 10.0 m, 5.00 m from the middle of arterial edge 1's 6.0 m half width") == 1);
+        CHECK(Lines("corridor: place 2 (op 0x8E, type 42, flags 0x3, location +0xC8 0x0) at (-7692, -8190), box 2.0 x 2.0 m, 1.00 m from the middle of arterial edge 0's 4.0 m half width, its centre inside") == 1);
+        CHECK(Lines("corridor: own 3 (op 0x2B, type 43, flags 0x4, location +0xC8 0x0) at (-7189, -7692), box 2.0 x 2.0 m, 2.00 m from the middle of arterial edge 2's 4.0 m half width, its centre inside") == 1);
+        CHECK(Lines("corridor: own 5 (op 0x2B, type 45, flags 0x6, location +0xC8 0x0) at (-7199, -7185), box 1.0 x 1.0 m, 0.00 m from the middle of the spur at edge 2's 4.0 m half width, its centre inside") == 1);
+        CHECK(Lines("corridor: added 7 (op 0x2B, type 47, flags 0x8, location +0xC8 0x0) at (-7191, -8189), box 1.0 x 1.0 m, 0.50 m from the middle of arterial edge 2's 4.0 m half width, its centre inside") == 1);
         CHECK(Lines("corridor: added 6 (op 0x2B, type 46") == 1 && Lines("corridor: plan 0 (op 0x2B, type 0") == 1);
         CHECK(Lines("corridor: own 4 ") == 0 && Lines("corridor: place 0 ") == 0 && Lines("corridor: plan 1 ") == 0);
         /* without the mod's stamps: the level's own from `before` on, and no plan; the stamps on the spur and where the
@@ -520,9 +549,9 @@ static void ArterialsGlue(void)
         CHECK(Lines("slopes:") == 0); /* no capture yet */
         CoXlTestRoadsGround(level, 512, 512, 2, 5.0f);
         CoXlTestRoadsSlopeNote(block);
-        CHECK(Lines("slopes: 3 arterial edges, 3.0 km on a 32 m height grid: steepest 0.0 deg (edge 0), 0 m over 18 deg in 0 of them, 0 m over 31 deg, "
+        CHECK(Lines("slopes: 3 arterial edges, 3.0 km on the 32 m height capture kept at op 0x65: steepest 0.0 deg (edge 0), 0 m over 18 deg in 0 of them, 0 m over 31 deg, "
             "cross slope at most 0.0 deg, 3000 m at or under water (the highest water at 5.0 m)") == 1);
-        CHECK(Lines("slopes: 2 spurs, 0.0 km on a 32 m height grid: steepest 0.0 deg (spur 0), 0 m over 18 deg in 0 of them, 0 m over 31 deg, "
+        CHECK(Lines("slopes: 2 spurs, 0.0 km on the 32 m height capture kept at op 0x65: steepest 0.0 deg (spur 0), 0 m over 18 deg in 0 of them, 0 m over 31 deg, "
             "cross slope at most 0.0 deg, 25 m at or under water (the highest water at 5.0 m)") == 1);
         CoXlTestRoadsSlopeNote(block);
         CHECK(Lines("slopes:") == 2); /* once a level */
@@ -537,7 +566,7 @@ static void ArterialsGlue(void)
     g_fake.log[0] = 0; g_capsuleCount = 0;
     CoXlTestRoadsSpursBuild(block, (uint64_t)(uintptr_t)context, Capsule);
     /* (1000, 400) is on edge 2; (1000, 2100) is 1100 m from its end; (3000, 0) is 1000 m from edge 1's end: not under the most */
-    CHECK(g_capsuleCount == 0 && Count32(0x11A71D4u) == 9 && Lines("spurs: 0 of 3 places joined") == 1 && Lines("1 on a road already, 2 too far, 0 without room") == 1);
+    CHECK(g_capsuleCount == 0 && Count32(0x11A71D4u) == 9 && Lines("spurs: 0 of 3 places joined") == 1 && Lines("1 on a road already, 2 too far, 0 without room, 0 without a place") == 1);
     /* (1000, -10) is 10 m from the point where edges 0, 1 and 2 meet: the lowest edge is the one joined */
     { static const float tie[2] = {1000, -10}; memcpy(g_block + LOCATIONS_AT, tie, 8); }
     CoXlTestRoadsArterialsApply(block, three, 1);
@@ -545,11 +574,19 @@ static void ArterialsGlue(void)
     CoXlTestRoadsSpursBuild(block, (uint64_t)(uintptr_t)context, Capsule);
     CHECK(g_capsuleCount == 1 && g_capsules[0].id == (10u | (1u << 16)) && Count32(0x11A71D4u) == 11);
     Put32(g_block + 0x11A71D4u, 9);
+    /* a full index takes no pair: 0xFCADC0 would write through null */
+    Index(0);
+    Put32(g_block + 0x11A71D4u, 9);
+    CoXlTestRoadsArterialsApply(block, three, 1);
+    g_capsuleCount = 0; g_fake.log[0] = 0;
+    CoXlTestRoadsSpursBuild(block, (uint64_t)(uintptr_t)context, Capsule);
+    CHECK(g_capsuleCount == 0 && Count32(0x11A71D4u) == 9 && Lines("spurs: 0 of 1 places joined") == 1 && Lines("1 without a place in the stamp index (0 free after them)") == 1);
+    Index(8);
     context[4] = 0;
     g_fake.log[0] = 0;
     CoXlTestRoadsSpursBuild(block, (uint64_t)(uintptr_t)context, Capsule);
     CHECK(Lines("spurs: the stamp index or the road points are not readable; no spur made") == 1);
-    context[4] = 0x777;
+    context[4] = (uint64_t)(uintptr_t)g_index;
     for (uint32_t i = 0; i < 4; i++) memcpy(g_block + LOCATIONS_AT + 0xE0u * i, &xy[2 * i], 8);
 
     g_case = "arterials glue: the extraction is a terminal whatever op appended it";
