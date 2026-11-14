@@ -435,6 +435,9 @@ void CoXlTestRenderShrink(uintptr_t map, void (*rehash)(uintptr_t, uint32_t)) { 
 void CoXlTestRenderCopies(uintptr_t dev, void (*resize)(uintptr_t, uint32_t)) { g_lwRender.resize = (uintptr_t)resize; LwRenderCopiesFree(dev); }
 /* The route width's and the scatter set's stubs built at `stub`, and the notes of the guards that act on every level. */
 void CoXlTestRouteWidthBuild(uint8_t* stub, uintptr_t flag, uintptr_t back) { RouteWidthBuild(stub, flag, back); }
+void CoXlTestTreeClearBuild(uint8_t* stub, uintptr_t count, uintptr_t back) { TreeClearBuild(stub, count, back); }
+void CoXlTestLeafClearBuild(uint8_t* stub, uintptr_t count) { LeafClearBuild(stub, count); }
+void CoXlTestTreeClearNote(volatile LONG* a, volatile LONG* b, volatile LONG* c) { g_treeSkip[0] = a; g_treeSkip[1] = b; g_treeSkip[2] = c; TreeClearNote(); }
 void CoXlTestScatterSetBuild(uint8_t* stub, uintptr_t count, uintptr_t back) { ScatterSetBuild(stub, count, back); }
 void CoXlTestScatterSetNote(volatile LONG* count)
 {
@@ -688,6 +691,52 @@ void CoXlTestTileAdd(float cx, float cy, const uint16_t* heights, uint32_t n, fl
     NearTileAdd(NearTileFree(), cx, cy, 0x1234, &ground);
 }
 int CoXlTestTilesLive(void) { return NearTilesLive(); }
+/* The tiles' terrains at a level's end (proto/xl_free.c NearTilesDestroy, NearTilesLeft): slot k's handle and maps (k -1:
+ * g_near's and g_matband's, the drop tile's), a build in step `move` with the drop tile's handle stashed (0: none), the
+ * near state, and what a slot holds after (k -2: the stashed drop handle). */
+void CoXlTestTileReset(void)
+{
+    for (int k = 0; k < NEAR_TILES_MAX; k++) { g_tiles[k].handle = 0; g_tiles[k].tex[0] = g_tiles[k].tex[1] = g_tiles[k].band = 0; g_tiles[k].bandPixels = NULL; g_tiles[k].live = 0; }
+    g_near.handle = 0; g_near.tex[0] = g_near.tex[1] = 0; g_near.state = NEAR_IN; g_near.world = 0; g_matband.tex = 0; g_matband.pixels = NULL;
+    g_move.state = MV_IDLE; g_move.stashed = 0; g_move.dropHandle = 0; g_move.dropTex[0] = g_move.dropTex[1] = g_move.dropBand = 0; g_move.dropBandPixels = NULL;
+    memset(g_move.freeing, 0, sizeof g_move.freeing); memset(g_nearLeft, 0, sizeof g_nearLeft);
+    g_move.stTemp = g_move.stGone = 0; g_move.merge = g_move.acquired = g_move.pkgPending = 0; g_move.cutNoted = 0; g_move.shipSeen = 0; g_move.nodeOld = 0; g_nearStampOffset[0] = g_nearStampOffset[1] = 0.0f;
+}
+void CoXlTestTileTerrain(int k, uint64_t handle, uint64_t tex0, uint64_t tex1, uint64_t band)
+{
+    if (k < 0) { g_near.handle = handle; g_near.tex[0] = tex0; g_near.tex[1] = tex1; g_matband.tex = band; return; }
+    g_tiles[k].handle = handle; g_tiles[k].tex[0] = tex0; g_tiles[k].tex[1] = tex1; g_tiles[k].band = band;
+    g_tiles[k].live = 1; g_tiles[k].level = g_world.levels;
+}
+void CoXlTestTileBuild(int move, uint64_t dropHandle, uint64_t dropTex, int nearState)
+{
+    g_move.state = move ? MV_SPAWN : MV_IDLE; g_move.stashed = dropHandle != 0; g_move.dropHandle = dropHandle;
+    g_move.dropTex[0] = dropTex; g_near.state = nearState ? NEAR_READY : NEAR_IN;
+}
+uint64_t CoXlTestTileHandle(int k) { return k == -2 ? g_move.dropHandle : k < 0 ? g_near.handle : g_tiles[k].handle; }
+uint64_t CoXlTestTileLeft(int i) { return g_nearLeft[i]; } /* a terrain the last replay found still in the world */
+/* A tile build the level's end cuts short (proto/xl_free.c MoveBuildLeft): the level object, the mover's step, whether
+ * the merge is up and the package held, the stamp units already destroyed, the level's 0x66 record; then what is left
+ * of it (0 units, 1 merge, 2 package held, 3 its release pending, 4 the stamp pass's camera offset on), and the
+ * build's own teardown, the merge's start, and the tile's centre in y. */
+void CoXlTestBuildCut(uintptr_t level, int state, int merge, int held, uint32_t gone, uint64_t records, uint32_t at66)
+{
+    g_move.levelPtr = level; g_move.state = state; g_move.cutNoted = 0; g_move.shipSeen = 0; g_move.merge = merge; g_move.acquired = held; g_move.pkgPending = 0; g_move.stGone = gone;
+    g_move.stamped = g_move.stTemp != 0; g_near.records = records; g_move.at66 = at66;
+    g_nearStampOffset[0] = 0.0f; g_nearStampOffset[1] = g_move.stTemp != 0 ? MOVE_STAMP_OFFSET : 0.0f;
+    memset(g_move.ctx, 0, 8); /* no arena to reset */
+}
+void CoXlTestBuildEnv(uint64_t env) { memcpy(g_move.ctx + 0x98, &env, 8); }
+int CoXlTestBuildLeft(int what)
+{
+    return what == 0 ? (int)(g_move.stTemp - g_move.stGone) : what == 1 ? g_move.merge : what == 2 ? g_move.acquired : what == 3 ? g_move.pkgPending :
+        g_nearStampOffset[0] != 0.0f || g_nearStampOffset[1] != 0.0f;
+}
+int CoXlTestTeardown(void) { return MoveTeardown(0); }
+void CoXlTestMergeBegin(void) { MoveMergeBegin(); }
+void CoXlTestBuildCentre(float y) { g_move.centre[1] = y; }
+uint64_t CoXlTestTileTex(int k) { return k == -2 ? g_move.dropTex[0] : k < 0 ? g_near.tex[0] : g_tiles[k].tex[0]; }
+void CoXlTestLevelGone(void) { MoveLevelGone(); }
 /* The game code a replayed tile step runs under (proto/difficulty_world_terrain.c NearStepPatch): 1 when patched. */
 int CoXlTestNearStepPatch(uint8_t op, int on) { return NearStepPatch(op, on); }
 /* A replayed step's record copy, and the cone count over a tile's heights centred on (cx, cy) (NearRecordEdit,
@@ -936,6 +985,13 @@ uint32_t CoXlTestStreamDrain(double ms, uint32_t* waiting)
     *waiting = g_streamDropCount;
     ReleaseSRWLockExclusive(&g_streamLock);
     return done;
+}
+/* A frame's WorldStreamTick with its scan due, the slots set up counted as deferred. */
+void CoXlTestStreamTick(void)
+{
+    g_stream.nextScan = 0;
+    if (g_stream.deferred == 0) g_stream.deferred = g_stream.count;
+    WorldStreamTick(0.016f);
 }
 void CoXlTestStreamOutSince(uint32_t i, ULONGLONG since) { g_streamOutSince[i] = since; }
 void co_capacity_test_places(int region, uint32_t places);

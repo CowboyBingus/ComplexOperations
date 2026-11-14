@@ -484,11 +484,12 @@ static void SeatNode(CoRegs* regs) { regs->r8 = co_seat_node((uintptr_t)regs->rd
 /* B1, the per-frame booster update; rcx is B. */
 static void Boosters(CoRegs* regs) { co_boosters_update((uintptr_t)regs->rcx); }
 
-/* By the numbers in gen_count_sites.py; the empty slots (12, 13, 20 to 29, 37 to 39) are free for other caves. */
+/* By the numbers in gen_count_sites.py; the empty slots (22 to 29, 37 to 39) are free for other caves. */
 static void (*const kCountCallbacks[])(CoRegs*) = {
     FindByRsi, FindByR11, JoinGate, ClearValueKeys, LastSlotState, MessageFits, JoinSlot, JoinIndex,
     HostAppend, HostBuild, HostScores, co_cards_layout, co_cards_open, co_cards_ready,
     [14] = LootIndex, LootRow, Participant, Record, co_avatars_dist_sum, co_avatars_enc_spread, co_avatars_dormancy,
+    [21] = co_summary_layout,
     [30] = Waiting, AnswerRaxRsi, AnswerR10R11, AnswerRaxRdi, Dropped, RecordWaiting, DroppedRdx,
     [40] = SeatData, SeatList, SeatValid, Boosters, SeatNode,
 };

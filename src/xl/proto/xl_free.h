@@ -13,5 +13,9 @@ static void MoveBandStash(void);
 static void MoveBandUnstash(void);
 static void MoveTrimEvent(const char* why);
 static int MoveTrimTick(void);
+static int NearTilesDestroy(int ship);
+static void MoveBuildLeft(int ship);
+static uint64_t NearMainWorld(void);
+static int NearTilesLeft(void);
 
 #endif
