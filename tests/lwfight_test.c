@@ -32,6 +32,7 @@ void CoXlTestLwSpacedText(char* out, size_t size, int squad, float dist, uint64_
 const char* CoXlTestLwFitText(int ends);
 
 int CoXlTestLwNoiseSkip(float playerDist, float reach, uint64_t sinceSent, float moved);
+int CoXlTestLwGoalCanSend(int route, int records, uint64_t* after);
 static int g_failed;
 static const char* g_case;
 #define CHECK(what) do { if (!(what)) { printf("FAILED %s: %s\n", g_case, #what); g_failed++; } } while (0)
@@ -293,6 +294,12 @@ static void WideTick(void)
     CHECK(CoXlTestLwOnlineSteps(1, 6000, 6000) == 1);
     CHECK(CoXlTestLwOnlineSteps(1, 6000, 900000) == 1);
     CHECK(CoXlTestLwOnlineSteps(0, 6000, 1000) == 0);
+    g_case = "a goal that could not be sent leaves the squad goal-less, so the stall check asks again";
+    uint64_t after = 1;
+    CHECK(CoXlTestLwGoalCanSend(1, 1, &after) == 1 && after == 5000);
+    CHECK(CoXlTestLwGoalCanSend(0, 1, &after) == 0 && after == 0); /* the route used up and no new one */
+    CHECK(CoXlTestLwGoalCanSend(1, 0, &after) == 0 && after == 0); /* no job or squad record this tick */
+    CHECK(CoXlTestLwGoalCanSend(0, 0, &after) == 0 && after == 0);
     g_case = "the squad loop's step runs the tick of a wide squad (with no game the tick frees the squad), counts it and closes the listing";
     CHECK(CoXlTestLwOnlineStep(0, 1000) == 7);
     CHECK(CoXlTestLwOnlineStep(6000, 1000) == 5);   /* listed: ticked, counted, the listing still open */

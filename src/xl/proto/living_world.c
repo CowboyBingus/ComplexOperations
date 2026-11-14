@@ -1701,11 +1701,20 @@ static int LwNodeHasFace(int node)
     return face;
 }
 
+/* 1 when a goal can be sent (a route node left, the squad's records there). When not, the last goal no longer stands:
+ * left set, a squad standing at it read as "there" to the stall check for good, with no node left to reach. Goal-less,
+ * the stall check asks again. */
+static int LwGoalCanSend(LwSquad* q, int route, int records)
+{
+    if (route && records) return 1;
+    q->goalAt = 0;
+    return 0;
+}
 static void LwSendGoal(LwSquad* q)
 {
     if (LwIntentGoal(q)) return; /* an intent picks the destination (Phase 2) */
     if (q->pathAt >= q->pathLen) LwPlan(q);
-    if (q->pathAt >= q->pathLen || LwJobRecord(q->squad) == 0 || LwSquadRecord(q->squad) == 0) return;
+    if (!LwGoalCanSend(q, q->pathAt < q->pathLen, LwJobRecord(q->squad) != 0 && LwSquadRecord(q->squad) != 0)) return;
     if (!LwNodeHasFace(q->path[q->pathAt])) /* the next node has no navmesh: another destination whose next node has */
     {
         g_lwWorld.goalNoFace++;

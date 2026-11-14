@@ -450,6 +450,16 @@ int CoXlTestLwOnlineStep(uint64_t wideUntil, uint64_t now)
     return r;
 }
 int CoXlTestLwNoiseSkip(float playerDist, float reach, uint64_t sinceSent, float moved) { return LwNoiseSkip(playerDist, reach, sinceSent, moved); }
+/* Squad 0 with a goal sent at 5000: whether a goal can be sent now, and (*after) its goal time then. */
+int CoXlTestLwGoalCanSend(int route, int records, uint64_t* after)
+{
+    LwSquad* q = &g_lwSquads[0];
+    memset(q, 0, sizeof *q); q->goalAt = 5000;
+    int r = LwGoalCanSend(q, route, records);
+    *after = q->goalAt;
+    memset(q, 0, sizeof *q);
+    return r;
+}
 int CoXlTestLwOnProp(float top, float drawn, uint32_t owner, float hitZ) { return LwOnProp(top, drawn, owner, hitZ); }
 int CoXlTestLwPropTake(void) { return LW_PROP_TAKE; }
 void CoXlTestLwSpacedText(char* out, size_t size, int squad, float dist, uint64_t ago) { LwSpacedText(out, size, squad, dist, ago); }
