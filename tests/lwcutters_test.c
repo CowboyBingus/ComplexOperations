@@ -72,8 +72,8 @@ static void Measures(void)
     for (int i = 0; i < 4; i++) CHECK(CoXlTestLwCutBodyStep(0, 0.0f, 2.0f, 1, 0) == 0);
     CHECK(CoXlTestLwCutBodyStep(0, 0.0f, 2.0f, 1, 0) == 1);
     CHECK(CoXlTestLwCutBodyStep(1, 0.0f, 0.0f, 1, 2) == 0);
-    for (int i = 0; i < 254; i++) CoXlTestLwCutBodyStep(0, 0.0f, 0.0f, 1, 2);
-    CHECK(CoXlTestLwCutBodyStep(0, 0.0f, 0.0f, 1, 2) == 1);
+    for (int i = 1; i <= 254; i++) CoXlTestLwCutBodyStep(0, (float)i, 0.0f, 1, 2); /* walking, never in state 0 */
+    CHECK(CoXlTestLwCutBodyStep(0, 255.0f, 0.0f, 1, 2) == 1);
     CHECK(CoXlTestLwCutBodyStep(1, 0.0f, 0.0f, 1, 0) == 0);
     for (int i = 0; i < 254; i++) CoXlTestLwCutBodyStep(0, 0.0f, 0.0f, 1, 0);
     CHECK(CoXlTestLwCutBodyStep(0, 0.0f, 0.0f, 1, 0) == 1);
