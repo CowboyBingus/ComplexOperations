@@ -84,8 +84,13 @@ static int FakePermit(int idx) { g_permits++; if (g_grant && idx == IDX) g_aiw[0
 static void FakeJoin(int idx) { (void)idx; g_joins++; if (g_locked) g_lockedCalls++; }
 static void Queue(uintptr_t w) { if (g_model) { if (w == (uintptr_t)g_aiw2) g_queued2++; else g_queued++; } }
 static uintptr_t FakeUnload(uintptr_t w, uint32_t* id, uint8_t graph) { (void)id; (void)graph; g_unloads++; Queue(w); return 7; }
+static uint8_t* g_slots; static int g_slotsMove; /* the collection a load reserves its slot in; the array moves when full */
 static uintptr_t FakeLoad(uintptr_t w, uint32_t* out, uintptr_t inst, void* p4, uintptr_t graph, void* p6)
-{ (void)out; (void)inst; (void)p4; (void)graph; (void)p6; g_loads++; Queue(w); return 9; }
+{
+    (void)out; (void)inst; (void)p4; (void)graph; (void)p6; g_loads++; Queue(w);
+    if (g_slots) { int32_t n; memcpy(&n, g_slots + 0x40, 4); n++; memcpy(g_slots + 0x40, &n, 4); if (g_slotsMove) { uintptr_t a = 0x2000; memcpy(g_slots + 0x38, &a, 8); } }
+    return 9;
+}
 static void FakeEnter(uintptr_t list) { (void)list; g_enters++; g_locked = 1; }
 static void FakeLeave(uintptr_t list) { (void)list; g_leaves++; g_locked = 0; }
 
@@ -467,10 +472,22 @@ static void TestHoldIdle(void)
     CHECK(!fake_host_logged("swapped in at once"));
     HoldCounts(v); Counts(&swaps, &steps, &parallel, &refused, &noLoad);
     CHECK(v[0] == 0 && v[2] == 0 && v[3] == 0 && swaps == 1 && steps == 0 && refused == 0);
-    ResetHold("a first build is the game's own: taken with a step in flight, no drain");
+    ResetHold("a first build waits out a step in flight: its load takes a slot only between steps, no drain");
     Flight(1);
     Push(0, IDX, 3, 0);
-    CHECK(Tick(0, 0) == 1 && g_joins == 0 && g_steps == 0 && g_loads == 1 && g_broken == 0);
+    CHECK(Tick(0, 0) == 0 && Tick(0, 5000) == 0 && g_loads == 0 && g_joins == 0 && g_steps == 0);
+    AiUpdate(1); Flight(0);
+    CHECK(Tick(0, 5010) == 0 && g_loads == 0); /* the AI update runs: not between steps */
+    AiUpdate(0);
+    CHECK(Tick(0, 5020) == 1 && g_joins == 0 && g_steps == 0 && g_loads == 1 && g_broken == 0);
+    ResetHold("every waiting first build leaves in the one tick between steps, oldest first, before a built cell");
+    Section(IDX, 3, 40); Flight(1);
+    Push(0, IDX, 3, 0); Push(1, IDX, 5, 0); Push(2, IDX, 6, 0); Push(3, IDX, 7, 0);
+    CHECK(Tick(0, 0) == 0);
+    Flight(0);
+    CHECK(Tick(0, 10) == 3 && g_done[0] == 1 && g_done[1] == 2 && g_done[2] == 3 && g_loads == 3 && g_unloads == 0);
+    Driver(); CHECK(Tick(0, 20) == 0);
+    Driver(); CHECK(Tick(0, 30) == 1 && g_unloads == 1 && g_broken == 0 && g_joins == 0 && g_steps == 0);
     ResetHold("no cell work (flag 0x80): taken at once whatever the world does");
     Flight(1); Section(IDX, 3, 40);
     Push(0, IDX, 3, 0x80);
@@ -572,13 +589,13 @@ static void TestHoldOnePerRun(void)
     ResetHold("one swap a step: the next completion waits until the swap is applied and committed");
     Section(IDX, 3, 40); Section(IDX, 4, 41);
     Push(0, IDX, 3, 0); Push(1, IDX, 4, 0); Push(2, IDX, 5, 0); /* two built cells, then a first build */
-    CHECK(Tick(0, 0) == 1 && g_done[0] == 0 && g_queued == 2);
+    CHECK(Tick(0, 0) == 1 && g_done[0] == 2 && g_queued == 1); /* the first build; its load is unapplied */
     for (int t = 1; t < 50; t++) CHECK(Tick(0, 10 * t) == 0); /* no step yet: time alone frees nothing */
+    Driver(); CHECK(Tick(0, 600) == 0);       /* the step that took the load is in flight */
+    Driver(); CHECK(Tick(0, 610) == 1 && g_done[1] == 0 && g_queued == 2); /* committed: the older built cell, and only it */
     CHECK(CoXlTestLwNavHoldBusy());
-    Driver(); CHECK(Tick(0, 600) == 0);       /* the step that took the swap is in flight */
-    Driver(); CHECK(Tick(0, 610) == 1 && g_done[1] == 1); /* committed: the second built cell, and only it */
     Driver(); CHECK(Tick(0, 620) == 0);
-    Driver(); CHECK(Tick(0, 630) == 1 && g_done[2] == 2);
+    Driver(); CHECK(Tick(0, 630) == 1 && g_done[2] == 1);
     CHECK(g_broken == 0 && g_joins == 0 && g_waits == 0 && g_commits == 0 && g_steps == 0 && g_dones == 3);
     HoldCounts(v);
     CHECK(v[0] == 2 && v[3] == 0);
@@ -598,12 +615,12 @@ static void TestHoldOnePerRun(void)
     Driver(); CHECK(Tick(0, 30) == 1 && g_loads == 2 && g_broken == 0);
     ResetHold("a waiting record is counted once, whatever leaves before it");
     Section(IDX, 3, 40); Flight(1);
-    Push(0, IDX, 3, 0);
+    Push(0, IDX, 5, 0);
     CHECK(Tick(0, 0) == 0);
-    Push(1, IDX, 5, 0);
+    Push(1, IDX, 3, 0);
     CHECK(Tick(0, 10) == 0);
     Driver();
-    CHECK(Tick(0, 20) == 1 && g_done[0] == 0);
+    CHECK(Tick(0, 20) == 1 && g_done[0] == 0); /* the first build; the built cell waits for its load's step */
     CHECK(Tick(0, 30) == 0 && Tick(0, 40) == 0);
     HoldCounts(v);
     CHECK(v[0] == 2 && v[1] == 2);
@@ -1028,6 +1045,48 @@ static void TestSlots(void)
     CHECK(fake_host_logged("SECTION SLOTS"));
 }
 
+/* A load's slot reserve with a run in flight, and one that moved the section array, are counted and said. */
+static void TestReserve(void)
+{
+    static uint8_t all[0x48] __attribute__((aligned(16)));
+    ResetHold("slot reserves: none with a run in flight in play; the flush tick's are counted");
+    memset(all, 0, sizeof all); Put(all + 0x38, 0x1000); int32_t n[2] = {5, 8}; memcpy(all + 0x40, n, 8);
+    Put(g_aiw + 0x130, (uintptr_t)all); g_slots = all; g_slotsMove = 0;
+    CHECK(CoXlTestLwNavLeft(1, 3) == 0);
+    Flight(1);
+    Push(0, IDX, 5, 0);
+    CHECK(Tick(0, 0) == 0);
+    Flight(0);
+    CHECK(Tick(0, 10) == 1 && !fake_host_logged("a section slot was reserved"));
+    CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
+    CHECK(fake_host_logged("0 slot reserve(s) with a run in flight, 0 moved the section array"));
+    g_fake.log[0] = 0;
+    Flight(1); g_slotsMove = 1;
+    Push(1, IDX, 6, 0);
+    CHECK(Tick(1, 40000) == 1);      /* the level's end: the game's order */
+    CHECK(fake_host_logged("living world: nav: a section slot was reserved with a run in flight (world 1): the array 0000000000001000 -> 0000000000002000, 6 of 8 slots -> 7 of 8"));
+    Flight(0); AiUpdate(1);
+    Push(2, IDX, 7, 0);
+    CHECK(Tick(1, 40010) == 1);      /* the AI update running counts as a run */
+    AiUpdate(0); g_slotsMove = 0; Put(all + 0x38, 0x1000);
+    Push(3, IDX, 8, 0);
+    CHECK(Tick(0, 40020) == 1);
+    CoXlTestLwNavSwapSummary(61000);
+    CHECK(fake_host_logged("2 slot reserve(s) with a run in flight, 1 moved the section array"));
+    g_fake.log[0] = 0;
+    CoXlTestLwNavSwapSummary(91000);
+    CHECK(fake_host_logged("0 slot reserve(s) with a run in flight, 0 moved the section array"));
+    Flight(1);
+    for (int k = 0; k < 14; k++) { Push(4, IDX, 9 + k, 0); CHECK(Tick(1, 100000 + k) == 1); }
+    g_fake.log[0] = 0;
+    Push(4, IDX, 30, 0); CHECK(Tick(1, 100100) == 1);
+    CHECK(!fake_host_logged("a section slot was reserved")); /* 16 lines a level */
+    CoXlTestLwNavLevel(3);
+    Push(4, IDX, 31, 0); CHECK(Tick(1, 100200) == 1);
+    CHECK(fake_host_logged("a section slot was reserved"));
+    g_slots = NULL;
+}
+
 /* Marks wait for the nav's jobs in flight, which a held completion still counts in: every completion must leave. */
 static void TestHoldNoStarve(void)
 {
@@ -1037,10 +1096,11 @@ static void TestHoldNoStarve(void)
     int ticks = 0;
     for (; g_dones < 12 && ticks < 200; ticks++) { Tick(0, 16 * ticks); Driver(); }
     CHECK(g_dones == 12 && ticks <= 40 && g_broken == 0);
-    for (int c = 0; c < 12; c++) CHECK(g_done[c] == c);
+    for (int k = 0; k < 4; k++) CHECK(g_done[k] == 3 * k + 2); /* the first builds in the first tick, oldest first */
+    for (int k = 4, c = 0; k < 12; k++, c++) { if (c % 3 == 2) c++; CHECK(g_done[k] == c); } /* then the built cells in their order */
     CHECK(g_joins == 0 && g_waits == 0 && g_commits == 0 && g_steps == 0 && g_leaves == 0);
     HoldCounts(v);
-    CHECK(v[2] == 0 && v[3] == 0 && v[0] == 11);
+    CHECK(v[2] == 0 && v[3] == 0 && v[0] == 8);
     CHECK(Get(g_list + 0x28) == 0 && Get(g_list + 0x30) == 0);
     Driver(); Driver(); Tick(0, 5000);
     CHECK(!CoXlTestLwNavHoldBusy());
@@ -1100,6 +1160,7 @@ int main(void)
     TestBreaker();
     TestLeft();
     TestSlots();
+    TestReserve();
     TestHoldNoStarve();
     TestHoldBudget();
     TestWatch();
