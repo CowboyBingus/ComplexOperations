@@ -494,12 +494,34 @@ void CoXlTestNearCraterMaps(uint64_t source, uint64_t offset, uint64_t scorch)
 }
 void CoXlTestNearCraterMapsEarlier(void) { g_nearCraterMaps.level = g_world.levels - 1; }
 int CoXlTestNearCraterMapsMake(int newLevel) { if (newLevel) g_nearCraterMaps.level = -1; return NearCraterMapsMake(); }
+void CoXlTestNearAtmosMaps(uint64_t color, uint64_t transmittance)
+{
+    g_nearAtmosMaps.tex[0] = color; g_nearAtmosMaps.tex[1] = transmittance; g_nearAtmosMaps.level = g_world.levels;
+}
+int CoXlTestNearAtmosMapsMake(int newLevel)
+{
+    if (newLevel) g_nearAtmosMaps.level = -1;
+    NearAtmosMapsMake();
+    return (g_nearAtmosMaps.tex[0] != 0) + (g_nearAtmosMaps.tex[1] != 0);
+}
+/* The replay's end as NearReplayEnd leaves the bracket's state: its queue forgotten, leaked captures noted. */
+void CoXlTestNearReplayEnd(void) { NearReplayEnd(1); }
+void CoXlTestNearConsumeQueue(uint64_t queue, void* original) { g_nearConsume = (NearConsumeFn)original; NearConsume(queue); }
+uint64_t CoXlTestNearNamesQueue(void) { return g_nearNames.queue; }
+uint32_t CoXlTestNearProbeOutside(void) { return g_probeRun.outside; }
 void CoXlTestNearNamesClose(int opened) { NearNamesClose(opened); }
 uint64_t CoXlTestNearProbe(void* original) { g_nearProbe = (NearProbeFn)original; return NearProbe(1, 2, 3, 4, 5, 6, 7, 8, 9); }
 void CoXlTestNearProbeCounts(uint32_t* replay, uint32_t* tile) { *replay = g_probeRun.replay; *tile = g_probeRun.tile; }
 void CoXlTestNearProbeClear(void) { memset(&g_probeRun, 0, sizeof g_probeRun); }
 LONG CoXlTestNearResetState(void) { return g_nearReset.state; }
-void CoXlTestNearReset(LONG state, int pins) { g_nearReset.state = state; g_nearReset.pins = pins; }
+void CoXlTestNearReset(LONG state, int pins)
+{
+    g_nearReset.state = state; g_nearReset.pins = pins; g_nearReset.level = g_world.levels; g_nearReset.bare = 0;
+}
+void CoXlTestNearResetEarlier(void) { g_nearReset.level = g_world.levels - 1; }
+LONG CoXlTestNearNamesSky(void) { return g_nearNames.sky; }
+void CoXlTestNearResetDone(LONG done) { g_nearReset.done = done; }
+void CoXlTestNearAtmosMapsEarlier(void) { g_nearAtmosMaps.level = g_world.levels - 1; }
 void CoXlTestNearResetTick(void) { NearResetTick(); }
 /* The paths the frees rest on: a dispatcher call's start, the band's stash and take, the pins asked again, the render
  * hook's order and its pins. */
