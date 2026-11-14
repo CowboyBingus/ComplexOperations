@@ -1,6 +1,7 @@
 /* The rotation's ray reader (game 0x620810) on extra large levels: a ray that starts under a live tile's ground reads
  * that ground above it (minus the depth) when it missed; hits, misses over the ground, other places and a busy tile
  * list keep the game's answer. The game's call is always made as the game made it.
+ * The diagnostic beside it sorts units 30 deg or more off the drawn ground by what their own corner rays read.
  * Run on the fake game. */
 #include <math.h>
 #include <stdio.h>
@@ -14,6 +15,8 @@ void CoXlTestTiltTile(float cx, float cy, float z);
 float CoXlTestTiltUnder(float d, uint32_t count, float originZ, float ground);
 void CoXlTestTiltHold(int on);
 void CoXlTestTiltCounts(long* reads, long* under);
+int CoXlTestTiltClass(const float* corners, float len, float* residual);
+enum { FITS, MISSED, UNDER, LOOSE }; /* the diagnostic's classes, in its order */
 
 static int g_failed;
 static const char* g_case;
@@ -70,8 +73,64 @@ static int Passed(float got, float answer, uint32_t request, uint32_t coarse)
         g_read.request == request && g_read.coarse == coarse;
 }
 
+/* A four-corner unit's class and residual from its corners: 4 x (offset x, offset y, distance read). */
+static int Class(const float corners[4][3], float len, float* residual) { return CoXlTestTiltClass(&corners[0][0], len, residual); }
+static int Near(float a, float b, float within) { return fabsf(a - b) <= within; }
+
+/* The diagnostic's sorting of units 30 deg or more off the drawn ground. The numbers are logged units of one run:
+ * unit ids and times in the comments are its lines. */
+static void Classes(void)
+{
+    float r;
+    g_case = "settled on a rock: the same distance at every corner";
+    const float settled[4][3] = {{0.5f, 0.7f, 0.61f}, {0.5f, -0.7f, 0.68f}, {-0.5f, -0.7f, 0.61f}, {-0.5f, 0.7f, 0.68f}}; /* 64D, 00:45:09 */
+    CHECK(Class(settled, 4.0f, &r) == FITS && Near(r, 0.0f, 0.05f));
+    const float nearly[4][3] = {{0.5f, 0.7f, 1.24f}, {0.5f, -0.7f, 1.24f}, {-0.5f, -0.7f, 0.74f}, {-0.5f, 0.7f, 1.67f}}; /* 649, 00:44:21 */
+    CHECK(Class(nearly, 4.0f, &r) == FITS && Near(r, 18.5f, 0.2f));
+
+    g_case = "a long unit: the corners are not centred on it";
+    const float level[4][3] = {{0.5f, 0.7f, 1.5f}, {0.5f, -3.0f, 1.5f}, {-0.5f, -3.0f, 1.5f}, {-0.5f, 0.7f, 1.5f}};
+    CHECK(Class(level, 4.0f, &r) == FITS && Near(r, 0.0f, 0.01f));
+    const float pitched[4][3] = {{0.5f, 0.7f, 0.2f * 0.7f}, {0.5f, -3.0f, 0.2f * -3.0f}, {-0.5f, -3.0f, 0.2f * -3.0f}, {-0.5f, 0.7f, 0.2f * 0.7f}};
+    CHECK(Class(pitched, 4.0f, &r) == FITS && Near(r, 11.31f, 0.05f)); /* atan 0.2: it fits, whatever the signs read */
+    const float rolled[4][3] = {{0.5f, 0.7f, 1.0f + 0.5f}, {0.5f, -3.0f, 1.0f + 0.5f}, {-0.5f, -3.0f, 1.0f - 0.5f}, {-0.5f, 0.7f, 1.0f - 0.5f}};
+    CHECK(Class(rolled, 4.0f, &r) == LOOSE && Near(r, 45.0f, 0.05f)); /* 1 m across 1 m */
+
+    g_case = "corners that are no rectangle: the plane d = 0.3 x + 0.2 y";
+    const float skew[4][3] = {{1.0f, 0.0f, 0.3f}, {0.0f, 1.0f, 0.2f}, {-1.0f, 0.5f, -0.2f}, {0.0f, -1.0f, -0.2f}};
+    CHECK(Class(skew, 4.0f, &r) == FITS && Near(r, 19.83f, 0.05f));
+    const float steeper[4][3] = {{1.0f, 0.0f, 1.3f}, {0.0f, 1.0f, 1.25f}, {-1.0f, 0.5f, 0.825f}, {0.0f, -1.0f, 0.75f}}; /* 1 + 0.3 x + 0.25 y */
+    CHECK(Class(steeper, 4.0f, &r) == LOOSE && Near(r, 21.33f, 0.05f));
+
+    g_case = "a corner that missed reads the full length";
+    const float missed[4][3] = {{0.5f, 0.7f, 0.47f}, {0.5f, -0.7f, 0.62f}, {-0.5f, -0.7f, 0.61f}, {-0.5f, 0.7f, 4.0f}}; /* 64E, 00:45:42 */
+    CHECK(Class(missed, 4.0f, &r) == MISSED && Near(r, 64.6f, 0.2f));
+    CHECK(Class(missed, 3.0f, &r) == LOOSE); /* the same readings on a 3 m ray are a far hit */
+    const float both[4][3] = {{0.5f, 0.7f, 4.0f}, {0.5f, -0.7f, -1.0f}, {-0.5f, -0.7f, 0.6f}, {-0.5f, 0.7f, 0.6f}};
+    CHECK(Class(both, 4.0f, &r) == MISSED); /* the miss is named first */
+    const float holes[4][3] = {{0.5f, 0.7f, 4.0f}, {0.5f, -0.7f, 4.0f}, {-0.5f, -0.7f, 4.0f}, {-0.5f, 0.7f, 4.0f}};
+    CHECK(Class(holes, 4.0f, &r) == FITS); /* every corner over a hole: no plane to lean to */
+
+    g_case = "a corner whose ray started under a surface reads below 0";
+    const float inside[4][3] = {{0.5f, 0.7f, 0.71f}, {0.5f, -3.0f, -1.69f}, {-0.5f, -3.0f, -1.18f}, {-0.5f, 0.7f, 1.09f}}; /* 630, 00:44:04 */
+    CHECK(Class(inside, 4.0f, &r) == UNDER && Near(r, 37.7f, 0.2f));
+    const float edge[4][3] = {{0.5f, 0.7f, 0.39f}, {0.5f, -3.0f, 0.0f}, {-0.5f, -3.0f, 0.38f}, {-0.5f, 0.7f, -0.73f}}; /* 668, 00:46:12 */
+    CHECK(Class(edge, 4.0f, &r) == UNDER && Near(r, 20.9f, 0.2f)); /* just past the limit */
+
+    g_case = "neither a miss nor a start under a surface";
+    const float loose[4][3] = {{0.5f, 0.7f, 0.24f}, {0.5f, -0.7f, 1.20f}, {-0.5f, -0.7f, 0.29f}, {-0.5f, 0.7f, 3.15f}}; /* 64D, 00:44:24 */
+    CHECK(Class(loose, 4.0f, &r) == LOOSE && Near(r, 50.4f, 0.2f));
+    const float touching[4][3] = {{0.5f, 0.7f, 0.0f}, {0.5f, -0.7f, 0.0f}, {-0.5f, -0.7f, 1.0f}, {-0.5f, 0.7f, 1.0f}};
+    CHECK(Class(touching, 4.0f, &r) == LOOSE && Near(r, 45.0f, 0.05f)); /* a reading of 0 is not under a surface */
+
+    g_case = "corners that span no area";
+    const float point[4][3] = {{0.5f, 0.7f, 0.2f}, {0.5f, 0.7f, 0.9f}, {0.5f, 0.7f, 0.4f}, {0.5f, 0.7f, 0.1f}};
+    CHECK(Class(point, 4.0f, &r) == LOOSE && r == -1.0f);
+}
+
 int main(void)
 {
+    Classes();
     g_case = "the rule";
     CHECK(CoXlTestTiltUnder(4.0f, 0, 10.0f, 10.3f) == 10.0f - 10.3f); /* a miss under the ground: minus the depth */
     CHECK(CoXlTestTiltUnder(0.2f, 1, 10.0f, 10.3f) == 0.2f);          /* a hit stays the game's */

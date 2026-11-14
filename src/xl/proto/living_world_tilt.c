@@ -3,7 +3,8 @@
  * records 0xC with +8 enabled) sets each unit's rotation from R+0x54's mode: 2/3 bone rays, 4 four corner rays, 1 the
  * ground record's normal. A unit is off its ground by the angle between its up and the drawn ground's normal. Twice a
  * second; unit lines only 30 deg or more off (one per unit per 20 s, a few a window, LW_TILT_LINES a level), and a
- * summary with the 30 s notes. */
+ * summary with the 30 s notes. A unit on a rock is off the drawn ground and still lies as the game put it, so the
+ * four-corner units 30 deg off are also sorted by what their own corner rays read (LwTiltClass). */
 #define LW_TILT_ROT 0x33264A0u
 #define LW_TILT_UNITS 0x3326508u     /* unit component: hash +0x40, records +0x68 (0x308: +0x2D0 quaternion, +0x2E0 position) */
 #define LW_TILT_PHYS 0x3326328u      /* physics API: +0x68 ray (world, origin, dir, length, filter, hits 0x2C each, max) */
@@ -15,6 +16,8 @@
 #define LW_TILT_EXCESS 12.0f         /* degrees off the ground's normal that count as tilted */
 #define LW_TILT_LINE_OFF 30.0f       /* degrees off that make a unit line */
 #define LW_TILT_CHECKS 8             /* units 30 deg or more off checked for a prop under them, a scan */
+#define LW_TILT_FIT 20.0f            /* degrees from its corner rays' plane under which a unit lies as they read */
+enum { LW_TILT_FITS, LW_TILT_MISSED, LW_TILT_UNDER, LW_TILT_LOOSE, LW_TILT_CLASSES };
 
 static struct
 {
@@ -24,6 +27,8 @@ static struct
     int windowLines;
     /* units 30 deg or more off: on a prop (a body with a unit), navmesh under it or on its top, the prop's modifiers */
     uint32_t checked, onProp, navUnder, navTop, propStatic, propDynamic, propNone, propNoRecord;
+    /* four-corner units 30 deg or more off, by what their own corner rays read; the fitting ones found on a prop */
+    uint32_t four, cls[LW_TILT_CLASSES], fitsOnProp; int windowFits;
     uint32_t seenId[LW_TILT_SEEN]; ULONGLONG seenAt[LW_TILT_SEEN];
 } g_lwTilt = {.level = -1};
 
@@ -153,6 +158,46 @@ static void LwTiltColumn(uintptr_t mgr, float x, float y, float z, char* buf, si
     }
 }
 
+/* How far a four-corner unit lies from what its corner rays read: the slope, in degrees, of the least-squares plane
+ * through each corner's offset (x, y) and the distance its ray read. The rays start in the unit's own frame, so a unit
+ * settled on what is under it reads about the same distance at every corner, on a rock as on the ground. -1 when the
+ * corners span no area. */
+static float LwTiltResidual(float c[4][3])
+{
+    float mx = 0, my = 0, md = 0, xx = 0, yy = 0, xy = 0, xd = 0, yd = 0;
+    for (int k = 0; k < 4; k++) { mx += c[k][0] / 4; my += c[k][1] / 4; md += c[k][2] / 4; }
+    for (int k = 0; k < 4; k++)
+    {
+        float x = c[k][0] - mx, y = c[k][1] - my, d = c[k][2] - md;
+        xx += x * x; yy += y * y; xy += x * y; xd += x * d; yd += y * d;
+    }
+    float det = xx * yy - xy * xy;
+    if (!(det > 1e-6f)) return -1.0f;
+    return atanf(hypotf((xd * yy - yd * xy) / det, (yd * xx - xd * xy) / det)) * 57.29578f;
+}
+
+/* A four-corner unit 30 deg or more off the drawn ground: it fits its rays' plane (it stands as the game put it, on
+ * whatever is under it), or it does not and a corner missed (read the full length, a hole), or a corner read a
+ * negative distance (its ray started under a surface: inside a body, or under the ground), or neither. */
+static int LwTiltClass(float c[4][3], float len, float* residual)
+{
+    *residual = LwTiltResidual(c);
+    if (*residual >= 0.0f && *residual < LW_TILT_FIT) return LW_TILT_FITS;
+    for (int k = 0; k < 4; k++) if (fabsf(c[k][2] - len) < 0.001f) return LW_TILT_MISSED;
+    for (int k = 0; k < 4; k++) if (c[k][2] < 0.0f) return LW_TILT_UNDER;
+    return LW_TILT_LOOSE;
+}
+
+/* A four-corner unit's corners (R+0x58, 0x18 each: offset at +8, the last distance read at +0x10) and its ray length
+ * (R+0x48): 0 when they read. */
+static int LwTiltCorners(uintptr_t R, float c[4][3], float* len)
+{
+    if (SafeRead(R + 0x48, len, 4)) return 1;
+    for (int k = 0; k < 4; k++)
+        if (SafeRead(R + 0x58 + 0x18u * k + 8, c[k], 12)) return 1;
+    return 0;
+}
+
 /* ---- The fix: a ray that starts under a live tile's ground and misses reads that ground above it ---------------------
  * The reader 0x620810(mgr, i, rays, request, coarse request) returns R+0x48, the full length, whenever the ray's count
  * (request + 0x30, records of 0x40 B, start at +0x10) is 0 (0x620933): a hole. A heightfield is one-sided, so a corner
@@ -221,8 +266,9 @@ static int LwTiltSeen(uint32_t id, ULONGLONG now)
     return 0;
 }
 
-static void LwTiltLine(uintptr_t mgr, uintptr_t R, uint32_t id, uint32_t mode, const float* q, const float* p, float tilt, float ground, float off)
+static void LwTiltLine(uintptr_t mgr, uintptr_t R, uint32_t id, uint32_t mode, const float* q, const float* p, float tilt, float ground, float off, int cls, float residual)
 {
+    static const char* const kClass[LW_TILT_CLASSES] = {"it lies as they read", "a corner missed", "a corner started under a surface", "no miss, no start under a surface"};
     float f[4]; uint32_t hitId = 0;
     SafeRead(R + 0x48, f, 12); SafeRead(R + 0x28C, &hitId, 4);
     float up[3]; const float z1[3] = {0, 0, 1}; LwTiltRotate(q, z1, up);
@@ -230,6 +276,8 @@ static void LwTiltLine(uintptr_t mgr, uintptr_t R, uint32_t id, uint32_t mode, c
     LwTiltColumn(mgr, p[0], p[1], p[2], col, sizeof col);
     Note("living world: tilt: unit %08X mode %u at (%.1f, %.1f, %.2f): %.0f deg, its ground %.0f deg, %.0f deg off its ground; up (%.2f, %.2f, %.2f); R+0x48 %.2f, +0x4C %.2f, +0x50 %.2f, +0x28C %08X; under it: %s",
         id, mode, (double)p[0], (double)p[1], (double)p[2], (double)tilt, (double)ground, (double)off, (double)up[0], (double)up[1], (double)up[2], (double)f[0], (double)f[1], (double)f[2], hitId, col);
+    if (cls >= 0)
+        Note("living world: tilt: unit %08X is %.0f deg from the plane its corner rays read: %s", id, (double)residual, kClass[cls]);
     if (mode == 4)
         for (int k = 0; k < 4; k++)
         {
@@ -239,9 +287,10 @@ static void LwTiltLine(uintptr_t mgr, uintptr_t R, uint32_t id, uint32_t mode, c
             const float lx[3] = {1, 0, 0}, ly[3] = {0, 1, 0}; float ax[3], ay[3];
             LwTiltRotate(q, lx, ax); LwTiltRotate(q, ly, ay);
             float cx = p[0] + ax[0] * o[0] + ay[0] * o[1], cy = p[1] + ax[1] * o[0] + ay[1] * o[1];
+            float cz = p[2] + ax[2] * o[0] + ay[2] * o[1] + up[2] * 0.5f; /* the ray's start: the corner, 0.5 m up the unit's up */
             LwTiltColumn(mgr, cx, cy, p[2], col, sizeof col);
-            Note("living world: tilt: unit %08X corner %d offset (%.2f, %.2f) last %.2f (requests %u/%u, links %u %u) at (%.1f, %.1f): %s", id, k, (double)o[0], (double)o[1],
-                (double)last, req[0], req[1], s[0x14], s[0x15], (double)cx, (double)cy, col);
+            Note("living world: tilt: unit %08X corner %d offset (%.2f, %.2f) last %.2f (requests %u/%u, links %u %u) at (%.1f, %.1f), ray start z %.2f: %s", id, k, (double)o[0],
+                (double)o[1], (double)last, req[0], req[1], s[0x14], s[0x15], (double)cx, (double)cy, (double)cz, col);
         }
     else if (mode == 2 || mode == 3)
     {
@@ -259,14 +308,15 @@ static void LwTiltLine(uintptr_t mgr, uintptr_t R, uint32_t id, uint32_t mode, c
 
 /* A unit 30 deg or more off: whether it stands on a prop (the closest hit under it has a unit, at its feet), whether the
  * navmesh runs under that prop (a face within 0.5 m across from the drawn ground) or on its top, and the prop's
- * navmesh modifiers. A carved or painted-out prop leaves no face under it. */
-static void LwTiltCheck(uintptr_t mgr, const float* p)
+ * navmesh modifiers. A carved prop leaves no face under it; the face is asked for no agent, so a painted one does.
+ * 1 when the unit stands on a prop. */
+static int LwTiltCheck(uintptr_t mgr, const float* p)
 {
     uint8_t h[0x2C]; float f[7], fg[3], ft[3]; uint32_t u[4]; int tile;
     g_lwTilt.checked++;
-    if (LwTiltCast(mgr, p[0], p[1], p[2], h, 1) == 0) return;
+    if (LwTiltCast(mgr, p[0], p[1], p[2], h, 1) == 0) return 0;
     memcpy(f, h, sizeof f); memcpy(u, h + 0x1C, sizeof u);
-    if (u[0] == 0 || fabsf(f[2] - p[2]) > 0.3f) return;
+    if (u[0] == 0 || fabsf(f[2] - p[2]) > 0.3f) return 0;
     g_lwTilt.onProp++;
     float drawn = MoveTilesOn() ? MoveDrawnGround(p[0], p[1], &tile) : -9999.0f;
     if (drawn > -9000.0f && LwTiltFace(p[0], p[1], drawn, fg) && hypotf(fg[0] - p[0], fg[1] - p[1]) < 0.5f) g_lwTilt.navUnder++;
@@ -279,6 +329,7 @@ static void LwTiltCheck(uintptr_t mgr, const float* p)
         if ((rec >> 19) & 0xFu) g_lwTilt.propDynamic++;
         if (((rec >> 15) & 0xFFu) == 0) g_lwTilt.propNone++;
     }
+    return 1;
 }
 
 /* Live carvers in the nav grid (nav + 0x6710), walking its free list from the head as the insert pops it (co_nav.c's
@@ -350,10 +401,22 @@ static void LwTiltScan(void)
         }
         if (off < LW_TILT_EXCESS) continue;
         g_lwTilt.tilted++;
-        if (off >= 30.0f) { g_lwTilt.off30++; if (mode == 4 && LwTiltMissed(R)) g_lwTilt.off30Miss++; if (checks++ < LW_TILT_CHECKS) LwTiltCheck(mgr, p); }
+        int cls = -1; float residual = -1.0f, c[4][3], len;
+        if (off >= 30.0f)
+        {
+            g_lwTilt.off30++;
+            if (mode == 4 && LwTiltMissed(R)) g_lwTilt.off30Miss++;
+            if (mode == 4 && !LwTiltCorners(R, c, &len)) { cls = LwTiltClass(c, len, &residual); g_lwTilt.four++; g_lwTilt.cls[cls]++; }
+            if (checks++ < LW_TILT_CHECKS && LwTiltCheck(mgr, p) && cls == LW_TILT_FITS) g_lwTilt.fitsOnProp++;
+        }
         if (off > g_lwTilt.worst) { g_lwTilt.worst = off; g_lwTilt.worstId = id; g_lwTilt.worstMode = mode; }
-        if (off >= LW_TILT_LINE_OFF && g_lwTilt.lines < LW_TILT_LINES && g_lwTilt.windowLines < LW_TILT_WINDOW_LINES && !LwTiltSeen(id, now))
-        { g_lwTilt.lines++; g_lwTilt.windowLines++; LwTiltLine(mgr, R, id, mode, q, p, tilt, ground, off); }
+        /* one fitting unit a window is example enough: the lines are for the units that do not lie as their rays read */
+        if (off >= LW_TILT_LINE_OFF && g_lwTilt.lines < LW_TILT_LINES && g_lwTilt.windowLines < LW_TILT_WINDOW_LINES &&
+            (cls != LW_TILT_FITS || g_lwTilt.windowFits < 1) && !LwTiltSeen(id, now))
+        {
+            g_lwTilt.lines++; g_lwTilt.windowLines++; g_lwTilt.windowFits += cls == LW_TILT_FITS;
+            LwTiltLine(mgr, R, id, mode, q, p, tilt, ground, off, cls, residual);
+        }
     }
 }
 
@@ -366,6 +429,10 @@ static void LwTiltNote(void)
     Note("living world: tilt (30 s): %u scans, %u unit samples (by rotation mode 0-7: %u %u %u %u %u %u %u %u), %u %.0f deg or more off their ground, %u 30 deg or more (%u of them with a corner that missed), worst %.0f deg (unit %08X, mode %u)",
         g_lwTilt.scans, g_lwTilt.units, g_lwTilt.modes[0], g_lwTilt.modes[1], g_lwTilt.modes[2], g_lwTilt.modes[3], g_lwTilt.modes[4], g_lwTilt.modes[5], g_lwTilt.modes[6],
         g_lwTilt.modes[7], g_lwTilt.tilted, (double)LW_TILT_EXCESS, g_lwTilt.off30, g_lwTilt.off30Miss, (double)g_lwTilt.worst, g_lwTilt.worstId, g_lwTilt.worstMode);
+    if (g_lwTilt.four)
+        Note("living world: tilt (30 s): of the %u 30 deg or more off, %u four-corner units: %u lie as their own corner rays read (within %.0f deg; %u of them found standing on a prop), %u do not: %u with a corner that missed, %u with a corner that started under a surface, %u neither",
+            g_lwTilt.off30, g_lwTilt.four, g_lwTilt.cls[LW_TILT_FITS], (double)LW_TILT_FIT, g_lwTilt.fitsOnProp, g_lwTilt.four - g_lwTilt.cls[LW_TILT_FITS],
+            g_lwTilt.cls[LW_TILT_MISSED], g_lwTilt.cls[LW_TILT_UNDER], g_lwTilt.cls[LW_TILT_LOOSE]);
     if (g_lwTilt.longs)
         Note("living world: tilt (30 s): units with corners over 3 m apart on detailed tiles: %u samples, %u over 15 deg off their ground, worst %.0f deg off (unit %08X)",
             g_lwTilt.longs, g_lwTilt.longOver, (double)g_lwTilt.longWorst, g_lwTilt.longId);
@@ -383,7 +450,8 @@ static void LwTiltNote(void)
             (long long)carvers, slots, live);
     }
     g_lwTilt.checked = g_lwTilt.onProp = g_lwTilt.navUnder = g_lwTilt.navTop = g_lwTilt.propStatic = g_lwTilt.propDynamic = g_lwTilt.propNone = g_lwTilt.propNoRecord = 0;
-    g_lwTilt.windowLines = 0;
+    g_lwTilt.windowLines = g_lwTilt.windowFits = 0;
+    g_lwTilt.four = g_lwTilt.fitsOnProp = 0; memset(g_lwTilt.cls, 0, sizeof g_lwTilt.cls);
     g_lwTilt.longs = g_lwTilt.longOver = g_lwTilt.longId = 0; g_lwTilt.longWorst = 0;
     g_lwTilt.scans = g_lwTilt.units = g_lwTilt.tilted = g_lwTilt.off30 = g_lwTilt.off30Miss = 0; memset(g_lwTilt.modes, 0, sizeof g_lwTilt.modes); g_lwTilt.worst = 0; g_lwTilt.worstId = g_lwTilt.worstMode = 0;
 }
@@ -404,6 +472,13 @@ void CoXlTestTiltTile(float cx, float cy, float z)
 }
 int CoXlTestTiltInstall(uintptr_t game) { g_lw.game = game; g_lwTiltDone = 0; g_lwTiltRead = NULL; LwInstallTilt(); return g_lwTiltRead != NULL; }
 float CoXlTestTiltUnder(float d, uint32_t count, float originZ, float ground) { return LwTiltUnder(d, count, originZ, ground); }
+/* corners: 4 x (offset x, offset y, distance read); the class, with the residual in degrees */
+int CoXlTestTiltClass(const float* corners, float len, float* residual)
+{
+    float c[4][3];
+    memcpy(c, corners, sizeof c);
+    return LwTiltClass(c, len, residual);
+}
 void CoXlTestTiltHold(int on) { if (on) AcquireSRWLockExclusive(&g_tilesLock); else ReleaseSRWLockExclusive(&g_tilesLock); }
 void CoXlTestTiltCounts(long* reads, long* under) { *reads = InterlockedExchange(&g_lwTiltReads, 0); *under = InterlockedExchange(&g_lwTiltUnder, 0); }
 #endif
