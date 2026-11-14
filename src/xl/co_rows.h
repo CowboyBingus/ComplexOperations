@@ -19,15 +19,27 @@
 #define CO_ROW_OUTPOSTS_BACK 0xF7E4FDu
 #define CO_ROW_OBJECTIVES_SITE 0x175686Cu /* 0x1756730, no level in reach: [rsp+0x60] has the seed and, at +0x10, the level */
 #define CO_ROW_OBJECTIVES_BACK 0x1756872u
-extern const uint8_t kCoRowRadii[8], kCoRowOutposts[8], kCoRowObjectives[6];
+/* 0xF7E250's direct outposts: after the first draw each one weights a single random class with quota left
+ * (0xF7EEB0), and a draw with no item of its size in that class drops the rest of the size here (0xF7F876: `mov edi,
+ * [rbp+0xc8]; xor r12d, r12d`). Three missions ask 9 strongholds, which a map has in few classes. The deferred list asks
+ * for none. */
+#define CO_ROW_EMPTY_SITE 0xF7F876u
+#define CO_ROW_EMPTY_BACK 0xF7F87Fu
+#define CO_ROW_EMPTY_BUILD 0xF7F010u /* `mov edx, [rsp+0x50]`, then the candidates under the weights at [rbp+0x400] */
+#define CO_ROW_RETRIES 0x1010u       /* the page's count of draws taken again */
+extern const uint8_t kCoRowRadii[8], kCoRowOutposts[8], kCoRowObjectives[6], kCoRowEmpty[9];
 #define CO_ROW_RADII_STUB 54u
 #define CO_ROW_OUTPOSTS_STUB 64u
 #define CO_ROW_OBJECTIVES_STUB 79u
+#define CO_ROW_EMPTY_STUB 155u
 /* Each stub runs the site's own two instructions, the second last (the game branches on its flags). The first two
  * act on a level whose disk is the mod's key; the third on a level-11 seed with the mark while `honours` is 1. */
 size_t co_row_radii_stub(uint8_t* out, uintptr_t code, uintptr_t game, const float radii[4]);
 size_t co_row_outposts_stub(uint8_t* out, uintptr_t code, uintptr_t game);
 size_t co_row_objectives_stub(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t honours);
+/* On a level whose disk is the mod's key an empty draw is taken again under every class the map weights (the game's
+ * own set once no class has quota left, 0xF7EFF0); the size is dropped only when that one is empty too. */
+size_t co_row_empty_stub(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t retries);
 
 /* The distance row: seven instructions read `table[level - 1][k]`, three factors a level; HellForge pointed them at
  * its table of eleven rows. They read the mod's copy of it instead, whose row 11 is HellForge's or, while a complex
@@ -51,6 +63,8 @@ const char* co_rows_install(uintptr_t game);
 void co_rows_level(int complex);
 /* Whether this machine takes a marked seed for a complex mission now (co_complex_honours): the objective stub's switch. */
 void co_rows_honours(int on);
+/* Empty outpost draws taken again so far; 0 before the install. */
+long co_rows_retries(void);
 /* Level 10's city factor over the complex one's: what the prototype scales the city zone by. 1 before the install. */
 float co_rows_city_ratio(void);
 

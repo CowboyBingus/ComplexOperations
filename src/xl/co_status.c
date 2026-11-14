@@ -6,6 +6,7 @@
 
 #include "co_status.h"
 #include "co_status_sites.h"
+#include "co_unwind.h"
 
 typedef struct StatusData { uint32_t places; volatile LONG skips; uint64_t* list; } StatusData;
 static struct { uint8_t* page; StatusData* data; uint64_t* hash; } g_status;
@@ -147,6 +148,10 @@ const char* co_status_install(uintptr_t game)
         Release(page, list, hash);
         return "the status-effect volumes' unit registry could not be enlarged";
     }
+    /* the sixth stub calls C without a frame of its own: a stack walk from there unwinds as 0x13CC3E0 at the site */
+    static const CoUnwindRange sixth[1] = {{CO_STATUS_STUB * 5u, CO_STATUS_STUB, 0, 0, {0}}};
+    /* refused (no log here), the unwinder takes the stub for a leaf and [rsp] for its return address */
+    (void)co_unwind_block(page, sixth, 1, game + kCoStatusSites[5].rva, game + 0x21044A0u, page + 0x1800, 0x800);
     g_status.page = page; g_status.hash = hash;
     co_status_hash(game);
     return NULL;

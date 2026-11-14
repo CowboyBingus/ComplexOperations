@@ -12,6 +12,7 @@
 #include <string.h>
 #include <math.h>
 #include <tlhelp32.h>
+#include "co_unwind.h"
 #include "co_shim.h"
 #include "co_xl_standin.h"
 #include "co_pages.h"
@@ -190,14 +191,17 @@ static int CoXlInPlay(void)
 uint32_t CoIndexQueryThunk(uint64_t index, uint32_t key, uint32_t mode, uint64_t buffer, uint32_t places);
 uint32_t (*g_coIndexQueryClamped)(uint64_t, uint32_t, uint32_t, uint64_t, uint32_t) = IndexQueryClamped;
 __asm__(".text\n.p2align 4\n.globl CoIndexQueryThunk\nCoIndexQueryThunk:\n"
+        "  .seh_proc CoIndexQueryThunk\n"
         "  subq $0x98, %rsp\n"
+        "  .seh_stackalloc 0x98\n  .seh_endprologue\n"
         "  movdqu %xmm0, 0x30(%rsp)\n  movdqu %xmm1, 0x40(%rsp)\n  movdqu %xmm2, 0x50(%rsp)\n"
         "  movdqu %xmm3, 0x60(%rsp)\n  movdqu %xmm4, 0x70(%rsp)\n  movdqu %xmm5, 0x80(%rsp)\n"
         "  movq 0xC0(%rsp), %rax\n  movq %rax, 0x20(%rsp)\n"
         "  callq *g_coIndexQueryClamped(%rip)\n"
         "  movdqu 0x30(%rsp), %xmm0\n  movdqu 0x40(%rsp), %xmm1\n  movdqu 0x50(%rsp), %xmm2\n"
         "  movdqu 0x60(%rsp), %xmm3\n  movdqu 0x70(%rsp), %xmm4\n  movdqu 0x80(%rsp), %xmm5\n"
-        "  addq $0x98, %rsp\n  retq\n");
+        "  addq $0x98, %rsp\n  retq\n"
+        "  .seh_endproc\n");
 
 /* The game thread's part, in the order the loader's tick called it. */
 static void CoXlTick(HfMod* mod, float dt, void* user)
@@ -375,6 +379,35 @@ int CoXlTestLwSettle(uint32_t i, uint64_t peer, const float* at, uint64_t now, f
 int CoXlTestLwSightVerdict(const uint8_t* hits, uint32_t n, uint32_t target, const float* eye, const float* tpos, float nearR, float folR, int* at)
 { return LwSightVerdict(hits, n, target, eye, tpos, nearR, folR, at); }
 int CoXlTestLwStaticKind(float z, float drawn, float coarse, int tile) { return LwStaticKind(z, drawn, coarse, tile); }
+int CoXlTestLwSenseRule(uint32_t alert, float body, float reach, uint32_t code, int clear) { return LwSenseRule(alert, body, reach, code, clear); }
+float CoXlTestLwSightMod(float range, uint32_t op, float value) { return LwSightMod(range, op, value); }
+float CoXlTestLwSenseReach(float visibility, float base, uint32_t op, float value) { return LwSenseReach(visibility, base, op, value); }
+float CoXlTestLwBodyDist(float d, float radius) { return LwBodyDist(d, radius); }
+int CoXlTestLwSenseGate(uint8_t entity, uint64_t tags) { return LwSenseGate(entity, tags); }
+int CoXlTestLwPlaceHeld(const float* live, const float* held) { return LwPlaceHeld(live, held); }
+int CoXlTestLwSenseNextPlayer(int last, const uint8_t* ok, int n) { return LwSenseNextPlayer(last, ok, n); }
+/* The unit checked next against `player` among n candidates (checked at, metres, player, taken). */
+int CoXlTestLwSensePick(const uint64_t* checkedAt, const float* d, const uint8_t* player, const uint8_t* taken, int n, int who)
+{
+    LwSenseCand c[16] = {0};
+    for (int i = 0; i < n && i < 16; i++) c[i] = (LwSenseCand){.d = d[i], .checkedAt = checkedAt[i], .player = player[i], .taken = taken[i]};
+    return LwSensePick(c, n < 16 ? n : 16, who);
+}
+/* The notice table of `n` detectors (at most 8), driven by a script: op 'n' notices `det` through `unit` (-1: no slot,
+ * -2: waiting, else its notice count), 's' marks one of its units seen (arg: 1 when it left alert 0), 'c' confirms it. */
+int CoXlTestLwSenseDet(int reset, int n, char op, uint32_t det, int arg, uint64_t now)
+{
+    static LwSenseDet t[8];
+    if (reset) memset(t, 0, sizeof t);
+    LwSenseDet* e = LwSenseDetOf(t, n, det, now, op == 'n');
+    if (!e) return -1;
+    if (op == 'n') { if (e->pending || now < e->waitAt) return -2; LwSenseNoticed(e, (uint32_t)arg, 0, now); return e->tries; }
+    if (op == 's') { e->present = 1; if (arg) e->left = 1; return 0; }
+    return LwSenseConfirm(e, now);
+}
+int CoXlTestLwHostileRule(uint8_t entity, uint8_t on, uint8_t always, int avatar, uint32_t lists, uint32_t faction, uint32_t mask) { return LwHostileRule(entity, on, always, avatar, lists, faction, mask); }
+int CoXlTestLwSenseRoute(float awareness) { return LwSenseRoute(awareness); }
+int CoXlTestLwSenseLost(uint32_t flags, uint32_t state) { return LwSenseLost(flags, state); }
 /* The living world's navmesh pins (all in the exe) written into a fake exe, and a complex level's nav tick with no
  * director: 1 when it got past the pins, -1 when they refused. */
 void CoXlTestLwNavPins(uint8_t* exe)
@@ -461,6 +494,9 @@ void CoXlTestRenderShrink(uintptr_t map, void (*rehash)(uintptr_t, uint32_t)) { 
 void CoXlTestRenderCopies(uintptr_t dev, void (*resize)(uintptr_t, uint32_t)) { g_lwRender.resize = (uintptr_t)resize; LwRenderCopiesFree(dev); }
 /* The route width's and the scatter set's stubs built at `stub`, and the notes of the guards that act on every level. */
 void CoXlTestRouteWidthBuild(uint8_t* stub, uintptr_t flag, uintptr_t back) { RouteWidthBuild(stub, flag, back); }
+void CoXlTestTreeClearBuild(uint8_t* stub, uintptr_t count, uintptr_t back) { TreeClearBuild(stub, count, back); }
+void CoXlTestLeafClearBuild(uint8_t* stub, uintptr_t count) { LeafClearBuild(stub, count); }
+void CoXlTestTreeClearNote(volatile LONG* a, volatile LONG* b, volatile LONG* c) { g_treeSkip[0] = a; g_treeSkip[1] = b; g_treeSkip[2] = c; TreeClearNote(); }
 void CoXlTestScatterSetBuild(uint8_t* stub, uintptr_t count, uintptr_t back) { ScatterSetBuild(stub, count, back); }
 void CoXlTestScatterSetNote(volatile LONG* count)
 {
@@ -521,12 +557,34 @@ void CoXlTestNearCraterMaps(uint64_t source, uint64_t offset, uint64_t scorch)
 }
 void CoXlTestNearCraterMapsEarlier(void) { g_nearCraterMaps.level = g_world.levels - 1; }
 int CoXlTestNearCraterMapsMake(int newLevel) { if (newLevel) g_nearCraterMaps.level = -1; return NearCraterMapsMake(); }
+void CoXlTestNearAtmosMaps(uint64_t color, uint64_t transmittance)
+{
+    g_nearAtmosMaps.tex[0] = color; g_nearAtmosMaps.tex[1] = transmittance; g_nearAtmosMaps.level = g_world.levels;
+}
+int CoXlTestNearAtmosMapsMake(int newLevel)
+{
+    if (newLevel) g_nearAtmosMaps.level = -1;
+    NearAtmosMapsMake();
+    return (g_nearAtmosMaps.tex[0] != 0) + (g_nearAtmosMaps.tex[1] != 0);
+}
+/* The replay's end as NearReplayEnd leaves the bracket's state: its queue forgotten, leaked captures noted. */
+void CoXlTestNearReplayEnd(void) { NearReplayEnd(1); }
+void CoXlTestNearConsumeQueue(uint64_t queue, void* original) { g_nearConsume = (NearConsumeFn)original; NearConsume(queue); }
+uint64_t CoXlTestNearNamesQueue(void) { return g_nearNames.queue; }
+uint32_t CoXlTestNearProbeOutside(void) { return g_probeRun.outside; }
 void CoXlTestNearNamesClose(int opened) { NearNamesClose(opened); }
 uint64_t CoXlTestNearProbe(void* original) { g_nearProbe = (NearProbeFn)original; return NearProbe(1, 2, 3, 4, 5, 6, 7, 8, 9); }
 void CoXlTestNearProbeCounts(uint32_t* replay, uint32_t* tile) { *replay = g_probeRun.replay; *tile = g_probeRun.tile; }
 void CoXlTestNearProbeClear(void) { memset(&g_probeRun, 0, sizeof g_probeRun); }
 LONG CoXlTestNearResetState(void) { return g_nearReset.state; }
-void CoXlTestNearReset(LONG state, int pins) { g_nearReset.state = state; g_nearReset.pins = pins; }
+void CoXlTestNearReset(LONG state, int pins)
+{
+    g_nearReset.state = state; g_nearReset.pins = pins; g_nearReset.level = g_world.levels; g_nearReset.bare = 0;
+}
+void CoXlTestNearResetEarlier(void) { g_nearReset.level = g_world.levels - 1; }
+LONG CoXlTestNearNamesSky(void) { return g_nearNames.sky; }
+void CoXlTestNearResetDone(LONG done) { g_nearReset.done = done; }
+void CoXlTestNearAtmosMapsEarlier(void) { g_nearAtmosMaps.level = g_world.levels - 1; }
 void CoXlTestNearResetTick(void) { NearResetTick(); }
 /* The paths the frees rest on: a dispatcher call's start, the band's stash and take, the pins asked again, the render
  * hook's order and its pins. */
@@ -692,6 +750,52 @@ void CoXlTestTileAdd(float cx, float cy, const uint16_t* heights, uint32_t n, fl
     NearTileAdd(NearTileFree(), cx, cy, 0x1234, &ground);
 }
 int CoXlTestTilesLive(void) { return NearTilesLive(); }
+/* The tiles' terrains at a level's end (proto/xl_free.c NearTilesDestroy, NearTilesLeft): slot k's handle and maps (k -1:
+ * g_near's and g_matband's, the drop tile's), a build in step `move` with the drop tile's handle stashed (0: none), the
+ * near state, and what a slot holds after (k -2: the stashed drop handle). */
+void CoXlTestTileReset(void)
+{
+    for (int k = 0; k < NEAR_TILES_MAX; k++) { g_tiles[k].handle = 0; g_tiles[k].tex[0] = g_tiles[k].tex[1] = g_tiles[k].band = 0; g_tiles[k].bandPixels = NULL; g_tiles[k].live = 0; }
+    g_near.handle = 0; g_near.tex[0] = g_near.tex[1] = 0; g_near.state = NEAR_IN; g_near.world = 0; g_matband.tex = 0; g_matband.pixels = NULL;
+    g_move.state = MV_IDLE; g_move.stashed = 0; g_move.dropHandle = 0; g_move.dropTex[0] = g_move.dropTex[1] = g_move.dropBand = 0; g_move.dropBandPixels = NULL;
+    memset(g_move.freeing, 0, sizeof g_move.freeing); memset(g_nearLeft, 0, sizeof g_nearLeft);
+    g_move.stTemp = g_move.stGone = 0; g_move.merge = g_move.acquired = g_move.pkgPending = 0; g_move.cutNoted = 0; g_move.shipSeen = 0; g_move.nodeOld = 0; g_nearStampOffset[0] = g_nearStampOffset[1] = 0.0f;
+}
+void CoXlTestTileTerrain(int k, uint64_t handle, uint64_t tex0, uint64_t tex1, uint64_t band)
+{
+    if (k < 0) { g_near.handle = handle; g_near.tex[0] = tex0; g_near.tex[1] = tex1; g_matband.tex = band; return; }
+    g_tiles[k].handle = handle; g_tiles[k].tex[0] = tex0; g_tiles[k].tex[1] = tex1; g_tiles[k].band = band;
+    g_tiles[k].live = 1; g_tiles[k].level = g_world.levels;
+}
+void CoXlTestTileBuild(int move, uint64_t dropHandle, uint64_t dropTex, int nearState)
+{
+    g_move.state = move ? MV_SPAWN : MV_IDLE; g_move.stashed = dropHandle != 0; g_move.dropHandle = dropHandle;
+    g_move.dropTex[0] = dropTex; g_near.state = nearState ? NEAR_READY : NEAR_IN;
+}
+uint64_t CoXlTestTileHandle(int k) { return k == -2 ? g_move.dropHandle : k < 0 ? g_near.handle : g_tiles[k].handle; }
+uint64_t CoXlTestTileLeft(int i) { return g_nearLeft[i]; } /* a terrain the last replay found still in the world */
+/* A tile build the level's end cuts short (proto/xl_free.c MoveBuildLeft): the level object, the mover's step, whether
+ * the merge is up and the package held, the stamp units already destroyed, the level's 0x66 record; then what is left
+ * of it (0 units, 1 merge, 2 package held, 3 its release pending, 4 the stamp pass's camera offset on), and the
+ * build's own teardown, the merge's start, and the tile's centre in y. */
+void CoXlTestBuildCut(uintptr_t level, int state, int merge, int held, uint32_t gone, uint64_t records, uint32_t at66)
+{
+    g_move.levelPtr = level; g_move.state = state; g_move.cutNoted = 0; g_move.shipSeen = 0; g_move.merge = merge; g_move.acquired = held; g_move.pkgPending = 0; g_move.stGone = gone;
+    g_move.stamped = g_move.stTemp != 0; g_near.records = records; g_move.at66 = at66;
+    g_nearStampOffset[0] = 0.0f; g_nearStampOffset[1] = g_move.stTemp != 0 ? MOVE_STAMP_OFFSET : 0.0f;
+    memset(g_move.ctx, 0, 8); /* no arena to reset */
+}
+void CoXlTestBuildEnv(uint64_t env) { memcpy(g_move.ctx + 0x98, &env, 8); }
+int CoXlTestBuildLeft(int what)
+{
+    return what == 0 ? (int)(g_move.stTemp - g_move.stGone) : what == 1 ? g_move.merge : what == 2 ? g_move.acquired : what == 3 ? g_move.pkgPending :
+        g_nearStampOffset[0] != 0.0f || g_nearStampOffset[1] != 0.0f;
+}
+int CoXlTestTeardown(void) { return MoveTeardown(0); }
+void CoXlTestMergeBegin(void) { MoveMergeBegin(); }
+void CoXlTestBuildCentre(float y) { g_move.centre[1] = y; }
+uint64_t CoXlTestTileTex(int k) { return k == -2 ? g_move.dropTex[0] : k < 0 ? g_near.tex[0] : g_tiles[k].tex[0]; }
+void CoXlTestLevelGone(void) { MoveLevelGone(); }
 /* The game code a replayed tile step runs under (proto/difficulty_world_terrain.c NearStepPatch): 1 when patched. */
 int CoXlTestNearStepPatch(uint8_t op, int on) { return NearStepPatch(op, on); }
 /* A replayed step's record copy, and the cone count over a tile's heights centred on (cx, cy) (NearRecordEdit,
@@ -738,6 +842,11 @@ void CoXlTestLayerTile(int slot, int in, float cx, float cy) { NearLayerTileChan
 void CoXlTestLayerTileLater(int slot, int in, float cx, float cy) { NearLayerTileChangeLater(slot, in, cx, cy); }
 int CoXlTestLayerBusy(void) { return NearLayerBusy(); }
 void CoXlTestNearLevelLeft(int ship) { NearLevelLeft(ship); }
+/* The stream's own poll of a layer change (proto/difficulty_stream.c), whether the change's thread has ended, the
+ * changes finished so far. */
+int CoXlTestStreamLayerBusy(void) { return WorldStreamLayerBusy(); }
+int CoXlTestLayerThreadDone(void) { HANDLE t = g_layerJob.thread; return t != NULL && WaitForSingleObject(t, 0) == WAIT_OBJECT_0; }
+uint32_t CoXlTestLayerFills(void) { return (uint32_t)g_nearLayer.fills; }
 uint64_t CoXlTestLayerField(uint64_t unit, uint64_t field) { return NearLayerField(unit, field); }
 int CoXlTestLayerHeight(uint64_t desc, float x, float y, float* h) { return NearLayerHeight(desc, x, y, h); }
 int CoXlTestLayerWhy(uint64_t unit, uint64_t field, int* slot) { int why; NearLayerFieldWhy(unit, field, slot, &why); return why; }
@@ -768,6 +877,55 @@ uintptr_t CoXlTestLayerSpawnDetour(void) { return (uintptr_t)WorldLayerSpawn; }
 uintptr_t CoXlTestLayerSpawnOriginal(void) { return (uintptr_t)g_layerSpawn; }
 int CoXlTestGridEnter(uint64_t desc) { return NearLayerGridEnter(desc); }
 void CoXlTestGridLeave(int k) { NearLayerGridLeave(k); }
+void CoXlTestLayerChosen(void (*fn)(uint64_t)) { g_coTestLayerChosen = fn; }
+void CoXlTestGridReady(int slot, LONG ready) { InterlockedExchange(&g_layerGrid[slot].ready, ready); }
+void CoXlTestLayerCounts(long* grids, long* spawns, uint32_t* pending) { *grids = g_layerSpawnNote.grids; *spawns = g_layerSpawnNote.spawns; *pending = g_layerPending.count; }
+float CoXlTestSeen2(uint32_t i) { return g_streamSeen2[i]; }
+float CoXlTestSeen2Of(float side) { return MoveStampSeen2(side); }
+/* Unwinds from inside a stub laid over `site` (pre: before its 0x80 frame, else inside it) and from the site itself with
+ * the stub's frame taken off: out[0..4] the stub's Rip, Rsp, Rbx, R12 and Xmm6's low half, out[5..9] the site's. */
+static int CoXlTestUnwindFrom(uint64_t rip, uint64_t rsp, uint64_t* out)
+{
+    DWORD64 base = 0, frame = 0; PVOID data = NULL;
+    PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(rip, &base, NULL);
+    if (fe == NULL) return -1;
+    CONTEXT c; memset(&c, 0, sizeof c);
+    c.Rip = rip; c.Rsp = rsp;
+    RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, rip, fe, &c, &data, &frame, NULL);
+    out[0] = c.Rip; out[1] = c.Rsp; out[2] = c.Rbx; out[3] = c.R12; out[4] = c.Xmm6.Low;
+    return 0;
+}
+/* kind 0: a stub with 0x80 of its own (the smash stub's shape); 1: four pushes and 0x80 (the blast stub's, 0xA0).
+ * handler: the one the host's data may name. co_unwind_block's refusal comes back as it minus 10. */
+int CoXlTestUnwindWith(uintptr_t site, uintptr_t handler, int kind, int pre, uint64_t out[10])
+{
+    DWORD64 base = 0;
+    if (RtlLookupFunctionEntry(site, &base, NULL) == NULL) return -1;
+    uint8_t* block = AllocateNearGame((uintptr_t)base, 0x1000);
+    static uint64_t stack[0x400];
+    if (block == NULL) return -2;
+    memset(block, 0xCC, 0x800);
+    static const CoUnwindRange small[2] = {{0, 17, 0, 0, {0}}, {17, 102, 7, 1, {CO_UNWIND_ALLOC(7, 0x80)}}};
+    static const CoUnwindRange pushes[2] = {{0, 5, 0, 0, {0}},
+        {5, 108, 15, 5, {CO_UNWIND_ALLOC(15, 0x80), CO_UNWIND_PUSH(8, 11), CO_UNWIND_PUSH(6, 10), CO_UNWIND_PUSH(4, 9), CO_UNWIND_PUSH(2, 8)}}};
+    int rc = co_unwind_block(block, kind ? pushes : small, 2, site, handler, block + 0x800, 0x800);
+    if (rc != 0) return rc - 10;
+    for (int i = 0; i < 0x400; i++) stack[i] = 0x1000u + (uint64_t)i;
+    uint64_t rsp = (uint64_t)(uintptr_t)&stack[0x100];
+    if (CoXlTestUnwindFrom((uint64_t)(uintptr_t)block + (pre ? 3u : 60u), rsp, out)) return -4;
+    return CoXlTestUnwindFrom((uint64_t)site, pre ? rsp : rsp + (kind ? 0xA0u : 0x80u), out + 5);
+}
+int CoXlTestUnwind(uintptr_t site, int pre, uint64_t out[10]) { return CoXlTestUnwindWith(site, 0, 0, pre, out); }
+int CoXlTestThunkUnwind(uint64_t out[2], uint64_t* stackTop)
+{
+    static uint64_t stack[0x100];
+    for (int i = 0; i < 0x100; i++) stack[i] = 0x2000u + (uint64_t)i;
+    *stackTop = (uint64_t)(uintptr_t)&stack[0];
+    uint64_t r[5];
+    int k = CoXlTestUnwindFrom((uint64_t)(uintptr_t)CoIndexQueryThunk + 13u, (uint64_t)(uintptr_t)&stack[0], r);
+    out[0] = r[0]; out[1] = r[1];
+    return k;
+}
 /* The two leaf thunks against a target that wipes xmm0-xmm5: out gets xmm1-xmm5 after the call, the target's r9 and
  * fifth argument, and the address the runner's call returns to. which 0: the layer sampler's, 1: the index query's. */
 uint64_t g_coTestR9, g_coTestFifth;
@@ -886,6 +1044,13 @@ uint32_t CoXlTestStreamDrain(double ms, uint32_t* waiting)
     *waiting = g_streamDropCount;
     ReleaseSRWLockExclusive(&g_streamLock);
     return done;
+}
+/* A frame's WorldStreamTick with its scan due, the slots set up counted as deferred. */
+void CoXlTestStreamTick(void)
+{
+    g_stream.nextScan = 0;
+    if (g_stream.deferred == 0) g_stream.deferred = g_stream.count;
+    WorldStreamTick(0.016f);
 }
 void CoXlTestStreamOutSince(uint32_t i, ULONGLONG since) { g_streamOutSince[i] = since; }
 void co_capacity_test_places(int region, uint32_t places);

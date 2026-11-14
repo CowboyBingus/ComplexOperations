@@ -468,26 +468,90 @@ static const uint8_t kCullStub[32] = {
  * per-base bitmap ([r10+0x28], width [r10+0xA4]) when the cell leaves view, at index (y + w/2) * w + x, unchecked
  * (0x215B6C and 0x215F70). On a 16 km map a cell far from where the camera is now gives a negative index, and the
  * write lands gigabytes off (three landings ended there, 2026-11-02). With an extra large world a clear whose index is
- * not below w * w is skipped: such a bit was never inside the bitmap. The jump replaces the 23 bytes from the index
- * copy to the write; the stub redoes them behind the check. */
+ * not below the bitmap's own size is skipped, with the bound the game's set uses ([r10+0x20] dwords x 32, exe
+ * 0x1D49B0..0x1D49CC): such a bit was never inside the bitmap. An owner the level's teardown destroyed (exe 0x1D4150
+ * zeroes +0x20 and +0x28, the width stays) has no bits, so its clear is skipped too and no longer writes through null.
+ * The jump replaces the 23 bytes from the index copy to the write; the stub redoes them behind the check and counts
+ * the skips. The leaf clear (exe 0x1D4A00, one caller, 0x216ABC) writes the same way; its call goes to a copy with the
+ * same bound. */
 #define DIF_TREE_CLEAR_A 0x215B59u    /* mov r8d, r9d ... and [rdx+r8*4], eax; then jmp 0x215B79 */
 #define DIF_TREE_CLEAR_A_BACK 0x215B79u
 #define DIF_TREE_CLEAR_B 0x215F5Du    /* the same, then add dword [r11+8], -1 at 0x215F74 */
 #define DIF_TREE_CLEAR_B_BACK 0x215F74u
 static const char kTreeClearPin[] = "45 8B C1 41 83 E1 1F 41 0F B6 C9 49 C1 E8 05 D3 E0 F7 D0 42 21 04 82";
-static const uint8_t kTreeClearStub[40] = {
-    0x44, 0x8B, 0xC1,                                                 /*  0 mov r8d, ecx (the width) */
-    0x44, 0x0F, 0xAF, 0xC1,                                           /*  3 imul r8d, ecx */
-    0x45, 0x3B, 0xC8,                                                 /*  7 cmp r9d, r8d */
-    0x73, 0x17,                                                       /* 10 jae 35 (outside: skip the write) */
-    0x45, 0x8B, 0xC1,                                                 /* 12 mov r8d, r9d */
-    0x41, 0x83, 0xE1, 0x1F,                                           /* 15 and r9d, 0x1f */
-    0x41, 0x0F, 0xB6, 0xC9,                                           /* 19 movzx ecx, r9b */
-    0x49, 0xC1, 0xE8, 0x05,                                           /* 23 shr r8, 5 */
-    0xD3, 0xE0,                                                       /* 27 shl eax, cl (eax 1 already) */
-    0xF7, 0xD0,                                                       /* 29 not eax */
-    0x42, 0x21, 0x04, 0x82,                                           /* 31 and [rdx+r8*4], eax */
-    0xE9, 0, 0, 0, 0};                                                /* 35 jmp back (rel32 at 36) */
+static const char kLeafClearPin[] = "44 8B 81 A4 00 00 00 4C 8B CA 48 8B 49 28 41 8B C0 99 2B C2 D1 F8 45 8D 14 01";
+#define DIF_LEAF_CLEAR 0x1D4A00u
+#define DIF_LEAF_CLEAR_CALL 0x216AB9u /* mov rdx, [r8]; call 0x1D4A00; mov eax, [r11+0x28] */
+static const char kLeafClearCallPin[] = "49 8B 10 E8 3F DF FB FF 41 8B 43 28";
+static const uint8_t kTreeClearStub[53] = {
+    0x45, 0x8B, 0x42, 0x20,                                           /*  0 mov r8d, [r10+0x20] (the bitmap's dwords; r10 the owner) */
+    0x41, 0xC1, 0xE0, 0x05,                                           /*  4 shl r8d, 5 */
+    0x45, 0x3B, 0xC8,                                                 /*  8 cmp r9d, r8d */
+    0x73, 0x1C,                                                       /* 11 jae 41 (outside: skip the write) */
+    0x45, 0x8B, 0xC1,                                                 /* 13 mov r8d, r9d */
+    0x41, 0x83, 0xE1, 0x1F,                                           /* 16 and r9d, 0x1f */
+    0x41, 0x0F, 0xB6, 0xC9,                                           /* 20 movzx ecx, r9b */
+    0x49, 0xC1, 0xE8, 0x05,                                           /* 24 shr r8, 5 */
+    0xD3, 0xE0,                                                       /* 28 shl eax, cl (eax 1 already) */
+    0xF7, 0xD0,                                                       /* 30 not eax */
+    0x42, 0x21, 0x04, 0x82,                                           /* 32 and [rdx+r8*4], eax */
+    0xE9, 0, 0, 0, 0,                                                 /* 36 jmp back (rel32 at 37) */
+    0xF0, 0xFF, 0x05, 0, 0, 0, 0,                                     /* 41 lock inc dword [rip -> the count] (rel32 at 44) */
+    0xE9, 0, 0, 0, 0};                                                /* 48 jmp back (rel32 at 49) */
+/* exe 0x1D4A00 (rcx the owner, rdx the cell) with the set's bound in front of the write. */
+static const uint8_t kLeafClearStub[88] = {
+    0x44, 0x8B, 0x81, 0xA4, 0x00, 0x00, 0x00,                         /*  0 mov r8d, [rcx+0xA4] */
+    0x4C, 0x8B, 0xCA,                                                 /*  7 mov r9, rdx */
+    0x41, 0x8B, 0xC0,                                                 /* 10 mov eax, r8d */
+    0x99,                                                             /* 13 cdq */
+    0x2B, 0xC2,                                                       /* 14 sub eax, edx */
+    0xD1, 0xF8,                                                       /* 16 sar eax, 1 */
+    0x45, 0x8D, 0x14, 0x01,                                           /* 18 lea r10d, [r9+rax] */
+    0x49, 0xC1, 0xE9, 0x20,                                           /* 22 shr r9, 32 */
+    0x45, 0x0F, 0xAF, 0xD0,                                           /* 26 imul r10d, r8d */
+    0x45, 0x03, 0xD1,                                                 /* 30 add r10d, r9d */
+    0x8B, 0x41, 0x20,                                                 /* 33 mov eax, [rcx+0x20] */
+    0xC1, 0xE0, 0x05,                                                 /* 36 shl eax, 5 */
+    0x44, 0x3B, 0xD0,                                                 /* 39 cmp r10d, eax */
+    0x73, 0x24,                                                       /* 42 jae 80 */
+    0x48, 0x8B, 0x49, 0x28,                                           /* 44 mov rcx, [rcx+0x28] */
+    0xB8, 0x01, 0x00, 0x00, 0x00,                                     /* 48 mov eax, 1 */
+    0x41, 0x8B, 0xD2,                                                 /* 53 mov edx, r10d */
+    0x41, 0x83, 0xE2, 0x1F,                                           /* 56 and r10d, 0x1f */
+    0x48, 0xC1, 0xEA, 0x05,                                           /* 60 shr rdx, 5 */
+    0x4C, 0x8D, 0x04, 0x91,                                           /* 64 lea r8, [rcx+rdx*4] */
+    0x41, 0x0F, 0xB6, 0xCA,                                           /* 68 movzx ecx, r10b */
+    0xD3, 0xE0,                                                       /* 72 shl eax, cl */
+    0xF7, 0xD0,                                                       /* 74 not eax */
+    0x41, 0x21, 0x00,                                                 /* 76 and [r8], eax */
+    0xC3,                                                             /* 79 ret */
+    0xF0, 0xFF, 0x05, 0, 0, 0, 0,                                     /* 80 lock inc dword [rip -> the count] (rel32 at 83) */
+    0xC3};                                                            /* 87 ret */
+/* The skipped clears: the remove's (site A), the re-own's (site B) and the leaf's, in the stubs' page. */
+static volatile LONG* g_treeSkip[3];
+static LONG g_treeSkipNoted[3];
+static void TreeClearBuild(uint8_t* stub, uintptr_t count, uintptr_t back)
+{
+    memcpy(stub, kTreeClearStub, sizeof kTreeClearStub);
+    int32_t rel = (int32_t)((int64_t)back - (int64_t)(uintptr_t)(stub + 41)); memcpy(stub + 37, &rel, 4);
+    rel = (int32_t)((int64_t)count - (int64_t)(uintptr_t)(stub + 48)); memcpy(stub + 44, &rel, 4);
+    rel = (int32_t)((int64_t)back - (int64_t)(uintptr_t)(stub + 53)); memcpy(stub + 49, &rel, 4);
+}
+static void LeafClearBuild(uint8_t* stub, uintptr_t count)
+{
+    memcpy(stub, kLeafClearStub, sizeof kLeafClearStub);
+    int32_t rel = (int32_t)((int64_t)count - (int64_t)(uintptr_t)(stub + 87)); memcpy(stub + 83, &rel, 4);
+}
+static void TreeClearNote(void)
+{
+    LONG n[3];
+    int changed = 0;
+    for (int k = 0; k < 3; k++) { n[k] = g_treeSkip[k] != NULL ? *g_treeSkip[k] : 0; changed |= n[k] != g_treeSkipNoted[k]; }
+    if (!changed) return;
+    for (int k = 0; k < 3; k++) g_treeSkipNoted[k] = n[k];
+    Note("difficulty: scatter: cell clears outside the owner's bitset skipped (a destroyed owner's has no cells; the write would go through null): "
+        "%ld removes, %ld re-owns, %ld leaf clears so far", (long)n[0], (long)n[1], (long)n[2]);
+}
 
 /* The world's destruction records ([game+0x346D528]+0xC5F48, 0x8000 slots inline; difficulty_maps.c guards the general
  * hash insert 0x172F790) have an inlined insert too (0x13E0340): a full table leaves r8 0 and writes the entry through it
@@ -5311,9 +5375,9 @@ static int NearLayerHeightWhy(uint64_t desc, float x, float y, float* height, in
 static void NearLayerTrace(char kind, uint32_t caller, float x, float y, float z, int result, int why, float used);
 static void NearLayerTraceSnap(uint64_t unit, int slot, int why);
 static int NearLayerIsGrid(uint64_t desc);
-static uint64_t NearLayerSpawnField(uint64_t unit, uint64_t field, int again);
+static uint64_t NearLayerField(uint64_t unit, uint64_t field);
+static void NearLayerSpawnCount(uint64_t unit, uint64_t field, uint64_t grid, int chosen);
 static int NearLayerGridEnter(uint64_t desc);
-static void NearLayerSpawnStale(uint64_t unit);
 static void NearLayerGridLeave(int k);
 /* The level's descriptor at `field`: its data kept from generation, or the kept copy lent to a stack copy whose data the
  * level has freed. A tile's grid is not the level's and is never kept. */
@@ -5362,20 +5426,28 @@ static uint64_t WorldLayerSnap(uint64_t a, uint64_t b, uint64_t c, uint64_t fiel
  * Neither goes through 0xD5B10, so a stamp by a tile gets its grid here, for every member. */
 typedef uint64_t (*LayerSpawnFn)(uint64_t unit, uint64_t list, uint64_t count, uint64_t field);
 static LayerSpawnFn g_layerSpawn;
+#ifdef CO_TEST
+static void (*g_coTestLayerChosen)(uint64_t grid); /* a refill that begins between the choice and the entry */
+#endif
 static uint64_t WorldLayerSpawn(uint64_t unit, uint64_t list, uint64_t count, uint64_t field)
 {
     int slot = -1;
     if (field != 0 && (uint32_t)count != 0 && !NearLayerIsGrid(field))
     {
         WorldLayerKeep(field);
+        int chosen = 0;
         for (int tries = 0; tries < 2 && slot < 0; tries++) /* a refill that began after the choice: choose again */
         {
-            uint64_t grid = NearLayerSpawnField(unit, field, tries);
+            uint64_t grid = NearLayerField(unit, field);
             if (grid == 0) break;
+            chosen = 1;
+#ifdef CO_TEST
+            if (g_coTestLayerChosen != NULL) g_coTestLayerChosen(grid);
+#endif
             slot = NearLayerGridEnter(grid);
             if (slot >= 0) field = grid;
-            else if (tries == 1) NearLayerSpawnStale(unit);
         }
+        NearLayerSpawnCount(unit, field, slot >= 0 ? field : 0, chosen);
     }
     uint64_t r = g_layerSpawn(unit, list, count, field);
     NearLayerGridLeave(slot);
@@ -5449,14 +5521,17 @@ static float WorldLayerSample(uint64_t* holder, float x, float y, uintptr_t ret)
 float CoWorldLayerSampleThunk(uint64_t* holder, float x, float y);
 float (*g_coWorldLayerSample)(uint64_t*, float, float, uintptr_t) = WorldLayerSample;
 __asm__(".text\n.p2align 4\n.globl CoWorldLayerSampleThunk\nCoWorldLayerSampleThunk:\n"
+        "  .seh_proc CoWorldLayerSampleThunk\n"
         "  subq $0x78, %rsp\n"
+        "  .seh_stackalloc 0x78\n  .seh_endprologue\n"
         "  movdqu %xmm1, 0x20(%rsp)\n  movdqu %xmm2, 0x30(%rsp)\n  movdqu %xmm3, 0x40(%rsp)\n"
         "  movdqu %xmm4, 0x50(%rsp)\n  movdqu %xmm5, 0x60(%rsp)\n"
         "  movq 0x78(%rsp), %r9\n"
         "  callq *g_coWorldLayerSample(%rip)\n"
         "  movdqu 0x20(%rsp), %xmm1\n  movdqu 0x30(%rsp), %xmm2\n  movdqu 0x40(%rsp), %xmm3\n"
         "  movdqu 0x50(%rsp), %xmm4\n  movdqu 0x60(%rsp), %xmm5\n"
-        "  addq $0x78, %rsp\n  retq\n");
+        "  addq $0x78, %rsp\n  retq\n"
+        "  .seh_endproc\n");
 
 /* An engine call through the world interface ([game+0x3326308]+0x168, method 0; exe 0x32F6A0: rcx the world, edx an
  * object handle) looks the handle up (exe 0x9D8C0: 22-bit index, generation in the top byte) and calls through the
@@ -6654,11 +6729,12 @@ static const char* InstallWorld(DifficultyInstall* d)
         VirtualProtect(cull, 0x1000, PAGE_READWRITE, &old);
         for (int i = 0; i < 2; i++)
         {
-            uint8_t* stub = cull + 0x100 + 0x40 * i;
-            memcpy(stub, kTreeClearStub, sizeof kTreeClearStub);
-            rel = (int32_t)(exe + backs[i] - (uintptr_t)(stub + 40)); memcpy(stub + 36, &rel, 4);
+            g_treeSkip[i] = (volatile LONG*)(cull + 0x1F0 + 4 * i); *g_treeSkip[i] = 0;
+            TreeClearBuild(cull + 0x100 + 0x40 * i, (uintptr_t)g_treeSkip[i], exe + backs[i]);
         }
-        VirtualProtect(cull, 0x1000, PAGE_EXECUTE_READ, &old);
+        g_treeSkip[2] = (volatile LONG*)(cull + 0x1F8); *g_treeSkip[2] = 0;
+        LeafClearBuild(cull + 0x180, (uintptr_t)g_treeSkip[2]);
+        VirtualProtect(cull, 0x1000, PAGE_EXECUTE_READWRITE, &old); /* the counts are in it */
         FlushInstructionCache(GetCurrentProcess(), cull, 0x1000);
         for (int i = 0; i < 2; i++)
         {
@@ -6668,6 +6744,11 @@ static const char* InstallWorld(DifficultyInstall* d)
             rel = (int32_t)((uintptr_t)(cull + 0x100 + 0x40 * i) - (exe + sites[i] + 5)); memcpy(treeJump + 1, &rel, 4);
             if (ApiWrite(exe + sites[i], treeJump, sizeof treeJump)) return "SpeedTree's cell bitmap could not be guarded";
         }
+        const intptr_t leaf = (intptr_t)(cull + 0x180) - (intptr_t)(exe + DIF_LEAF_CLEAR_CALL + 8);
+        rel = (int32_t)leaf;
+        if (!ApiCodeMatches(exe + DIF_LEAF_CLEAR, kLeafClearPin) || !ApiCodeMatches(exe + DIF_LEAF_CLEAR_CALL, kLeafClearCallPin) || leaf != (intptr_t)rel ||
+            ApiWrite(exe + DIF_LEAF_CLEAR_CALL + 4, &rel, 4))
+            Note("difficulty: extra large maps: SpeedTree's leaf cell clear is not the reviewed one; it is not guarded");
     }
     else Note("difficulty: extra large maps: SpeedTree's cell bitmap clear is not the reviewed one; it is not guarded");
     /* a complex level's generator constants, in front of HellForge's own steps (../co_chain.c), before a level can be one */
