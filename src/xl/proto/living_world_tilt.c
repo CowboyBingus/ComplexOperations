@@ -2,19 +2,28 @@
  * reads. Rotation 0x620B60 (mgr [game+0x33264A0]: +0x2C count, +0x38 hash, +0x50 instances, +0x58 records 0x298, +0x60
  * records 0xC with +8 enabled) sets each unit's rotation from R+0x54's mode: 2/3 bone rays, 4 four corner rays, 1 the
  * ground record's normal. A unit is off its ground by the angle between its up and the drawn ground's normal. Twice a
- * second; at most LW_TILT_LINES unit lines a level, one per unit per 20 s, and a summary with the 30 s notes. */
+ * second; unit lines only 30 deg or more off (one per unit per 20 s, a few a window, LW_TILT_LINES a level), and a
+ * summary with the 30 s notes. */
 #define LW_TILT_ROT 0x33264A0u
 #define LW_TILT_UNITS 0x3326508u     /* unit component: hash +0x40, records +0x68 (0x308: +0x2D0 quaternion, +0x2E0 position) */
 #define LW_TILT_PHYS 0x3326328u      /* physics API: +0x68 ray (world, origin, dir, length, filter, hits 0x2C each, max) */
-#define LW_TILT_LINES 48
+#define LW_TILT_NAV 0x3326330u       /* nav API: +0x10 closest face (nav id, p in and out, radius, out, normal, agent hash) */
+#define LW_TILT_UNITREC 0x27C5B40u   /* exe: unit physics records, 0x18 each: +0 world << 30 | unit, +4 counts (bit 30 live) */
+#define LW_TILT_LINES 96
+#define LW_TILT_WINDOW_LINES 4       /* unit lines a 30 s window, so the lines cover the whole mission */
 #define LW_TILT_SEEN 64
-#define LW_TILT_EXCESS 12.0f         /* degrees off the ground's normal that make a line */
+#define LW_TILT_EXCESS 12.0f         /* degrees off the ground's normal that count as tilted */
+#define LW_TILT_LINE_OFF 30.0f       /* degrees off that make a unit line */
+#define LW_TILT_CHECKS 8             /* units 30 deg or more off checked for a prop under them, a scan */
 
 static struct
 {
     LONG level; ULONGLONG at; int lines;
     uint32_t scans, units, modes[8], tilted, off30, off30Miss, worstId, worstMode; float worst;
     uint32_t longs, longOver, longId; float longWorst; /* corner rays over 3 m apart (chargers' size) on a detailed tile */
+    int windowLines;
+    /* units 30 deg or more off: on a prop (a body with a unit), navmesh under it or on its top, the prop's modifiers */
+    uint32_t checked, onProp, navUnder, navTop, propStatic, propDynamic, propNone, propNoRecord;
     uint32_t seenId[LW_TILT_SEEN]; ULONGLONG seenAt[LW_TILT_SEEN];
 } g_lwTilt = {.level = -1};
 
@@ -81,17 +90,44 @@ static int LwTiltStamp(float x, float y, float* dist, int* inside)
     return best;
 }
 
+/* The physics record of `unit` (exe 0x7871F0 / 0x7E18C0 pack it): its counts word, 0 when the slot holds another unit.
+ * Bits 15-18 hold twice the static navmesh modifiers (0x7870B0 returns r14 * 2), bits 19-22 the dynamic ones. */
+static uint32_t LwTiltRecord(uint32_t unit)
+{
+    uintptr_t table = 0; uint32_t r[2];
+    if (unit == 0 || g_navExe == 0 || !EvpPtr(g_navExe + LW_TILT_UNITREC, &table) || table == 0 ||
+        SafeRead(table + 0x18ull * (unit & 0x3FFFFFu), r, sizeof r) || !(r[1] & 0x40000000u) || (r[0] & 0x3FFFFFFFu) != unit) return 0;
+    return r[1];
+}
+
+/* The navmesh face nearest (x, y, z) within 10 m, as LwPlace asks it (no agent filter): 1 with the face point. */
+static int LwTiltFace(float x, float y, float z, float* f)
+{
+    typedef int (*SnapFn)(uint32_t nav, float* p, float radius, float* out, float* normal, uint32_t agent);
+    uintptr_t table = 0, fn = 0;
+    if (g_lwWorld.dir == 0 || !EvpPtr(g_lw.game + LW_TILT_NAV, &table) || !EvpPtr(table + 0x10, &fn) || fn == 0) return 0;
+    f[0] = x; f[1] = y; f[2] = z;
+    return ((SnapFn)fn)(EvpU32(g_lwWorld.dir + 0x648, 0), f, 10.0f, f, NULL, 0) != 0 && isfinite(f[2]);
+}
+
+/* The world ray's closest hit from 4 m over z down 12 m (filter 0, as the rotation's rays): 1 with its hit record. */
+static uint32_t LwTiltCast(uintptr_t mgr, float x, float y, float z, uint8_t* hits, uint32_t max)
+{
+    uintptr_t phys = 0, fn = 0, settings = 0; uint32_t world = 0, n = 0;
+    const float origin[3] = {x, y, z + 4.0f}, down[3] = {0, 0, -1};
+    if (EvpPtr(g_lw.game + LW_TILT_PHYS, &phys) && EvpPtr(phys + 0x68, &fn) && fn && EvpPtr(mgr + 8, &settings) && !SafeRead(settings + 0xD4, &world, 4))
+        n = ((LwTiltRayFn)fn)(world, origin, down, 12.0f, 0, hits, max);
+    return n > max ? max : n;
+}
+
 /* What lies under one point: the world ray's hits from 4 m over z down 12 m (as the rotation's own rays, filter 0),
  * and the drawn ground; a hit on the level terrain's body ([mgr+0x18], 0x61FBBA) or near a live stamp says so. */
 static void LwTiltColumn(uintptr_t mgr, float x, float y, float z, char* buf, size_t size)
 {
-    uintptr_t phys = 0, fn = 0, settings = 0; uint32_t world = 0, coarseId = 0;
+    uint32_t coarseId = 0;
     SafeRead(mgr + 0x18, &coarseId, 4);
-    uint8_t hits[8 * 0x2C]; uint32_t n = 0;
-    const float origin[3] = {x, y, z + 4.0f}, down[3] = {0, 0, -1};
-    if (EvpPtr(g_lw.game + LW_TILT_PHYS, &phys) && EvpPtr(phys + 0x68, &fn) && fn && EvpPtr(mgr + 8, &settings) && !SafeRead(settings + 0xD4, &world, 4))
-        n = ((LwTiltRayFn)fn)(world, origin, down, 12.0f, 0, hits, 8);
-    if (n > 8) n = 8;
+    uint8_t hits[8 * 0x2C];
+    uint32_t n = LwTiltCast(mgr, x, y, z, hits, 8);
     int tile = -1; float drawn = MoveTilesOn() ? MoveDrawnGround(x, y, &tile) : -9999.0f;
     int at = snprintf(buf, size, "drawn %.2f (tile %d), %u hits:", (double)drawn, tile, n);
     for (uint32_t k = 0; k < n && at > 0 && (size_t)at < size; k++)
@@ -104,8 +140,15 @@ static void LwTiltColumn(uintptr_t mgr, float x, float y, float z, char* buf, si
         else if (u[0] != 0)
         {
             float sd = 0; int in = 0, s = LwTiltStamp(f[0], f[1], &sd, &in);
-            if (s >= 0) at += snprintf(buf + at, size - (size_t)at, " (stamp %d %s, %.1f m, %s its footprint)", s, g_streamDeferred[s] ? "streamed" : "level's", (double)sd, in ? "in" : "out of");
+            if (s >= 0) at += snprintf(buf + at, size - (size_t)at, " (stamp %d %s, resource %016llX, %.1f m, %s its footprint)", s, g_streamDeferred[s] ? "streamed" : "level's",
+                (unsigned long long)g_streamResource[s], (double)sd, in ? "in" : "out of");
             else at += snprintf(buf + at, size - (size_t)at, " (no live stamp within 32 m)");
+            if (at <= 0 || (size_t)at >= size) break;
+            uint32_t rec = LwTiltRecord(u[0]); float fg[3], ft[3];
+            int g = drawn > -9000.0f && LwTiltFace(x, y, drawn, fg), t = LwTiltFace(x, y, f[2], ft);
+            at += snprintf(buf + at, size - (size_t)at, " [record %08X: %u static, %u dynamic modifiers; face from the ground %s%.2f m across, z %.2f; from its top %s%.2f m across, z %.2f]",
+                rec, ((rec >> 15) & 0xFu) / 2u, (rec >> 19) & 0xFu, g ? "" : "none ", g ? (double)hypotf(fg[0] - x, fg[1] - y) : 0.0, g ? (double)fg[2] : 0.0,
+                t ? "" : "none ", t ? (double)hypotf(ft[0] - x, ft[1] - y) : 0.0, t ? (double)ft[2] : 0.0);
         }
     }
 }
@@ -214,6 +257,43 @@ static void LwTiltLine(uintptr_t mgr, uintptr_t R, uint32_t id, uint32_t mode, c
     }
 }
 
+/* A unit 30 deg or more off: whether it stands on a prop (the closest hit under it has a unit, at its feet), whether the
+ * navmesh runs under that prop (a face within 0.5 m across from the drawn ground) or on its top, and the prop's
+ * navmesh modifiers. A carved or painted-out prop leaves no face under it. */
+static void LwTiltCheck(uintptr_t mgr, const float* p)
+{
+    uint8_t h[0x2C]; float f[7], fg[3], ft[3]; uint32_t u[4]; int tile;
+    g_lwTilt.checked++;
+    if (LwTiltCast(mgr, p[0], p[1], p[2], h, 1) == 0) return;
+    memcpy(f, h, sizeof f); memcpy(u, h + 0x1C, sizeof u);
+    if (u[0] == 0 || fabsf(f[2] - p[2]) > 0.3f) return;
+    g_lwTilt.onProp++;
+    float drawn = MoveTilesOn() ? MoveDrawnGround(p[0], p[1], &tile) : -9999.0f;
+    if (drawn > -9000.0f && LwTiltFace(p[0], p[1], drawn, fg) && hypotf(fg[0] - p[0], fg[1] - p[1]) < 0.5f) g_lwTilt.navUnder++;
+    if (LwTiltFace(p[0], p[1], f[2], ft) && hypotf(ft[0] - p[0], ft[1] - p[1]) < 0.5f && fabsf(ft[2] - f[2]) < 0.5f) g_lwTilt.navTop++;
+    uint32_t rec = LwTiltRecord(u[0]);
+    if (rec == 0) g_lwTilt.propNoRecord++;
+    else
+    {
+        if ((rec >> 15) & 0xFu) g_lwTilt.propStatic++;
+        if ((rec >> 19) & 0xFu) g_lwTilt.propDynamic++;
+        if (((rec >> 15) & 0xFFu) == 0) g_lwTilt.propNone++;
+    }
+}
+
+/* Live carvers in the nav grid (nav + 0x6710), walking its free list from the head as the insert pops it (co_nav.c's
+ * count): -1 when the list does not end within the slots. */
+static int64_t LwTiltCarvers(uintptr_t nav, uint32_t* slots)
+{
+    const uintptr_t grid = nav + 0x6710u;
+    uintptr_t pool = 0; uint32_t n = 0, spare = 0; uint16_t stride = 0; int32_t at = -1;
+    if (SafeRead(grid + 0x1C, &n, 4) || SafeRead(grid + 0x24, &stride, 2) || SafeRead(grid + 0x2C, &at, 4) || SafeRead(grid + 0x30, &pool, 8) || pool == 0 || n == 0) return -1;
+    *slots = n;
+    for (; at != -1; spare++)
+        if (at <= 0 || (uint32_t)at >= n || spare >= n - 1u || SafeRead(pool + (uintptr_t)stride * (uint32_t)at, &at, 4)) return -1;
+    return (int64_t)n - 1 - spare;
+}
+
 /* Whether a four-corner unit holds a corner that read the full length (R+0x48): a miss, read as a hole. */
 static int LwTiltMissed(uintptr_t R)
 {
@@ -250,6 +330,7 @@ static void LwTiltScan(void)
     uint32_t n = EvpU32(mgr + 0x2C, 0);
     if (n > 1024) n = 1024;
     g_lwTilt.scans++;
+    int checks = 0;
     for (uint32_t i = 0; i < n; i++)
     {
         uintptr_t e = 0, R = recs + 0x298ull * i; uint8_t enabled = 0; uint32_t id = 0, mode = 0, ui = 0; float q[4], p[3], nrm[3];
@@ -269,9 +350,10 @@ static void LwTiltScan(void)
         }
         if (off < LW_TILT_EXCESS) continue;
         g_lwTilt.tilted++;
-        if (off >= 30.0f) { g_lwTilt.off30++; if (mode == 4 && LwTiltMissed(R)) g_lwTilt.off30Miss++; }
+        if (off >= 30.0f) { g_lwTilt.off30++; if (mode == 4 && LwTiltMissed(R)) g_lwTilt.off30Miss++; if (checks++ < LW_TILT_CHECKS) LwTiltCheck(mgr, p); }
         if (off > g_lwTilt.worst) { g_lwTilt.worst = off; g_lwTilt.worstId = id; g_lwTilt.worstMode = mode; }
-        if (g_lwTilt.lines < LW_TILT_LINES && !LwTiltSeen(id, now)) { g_lwTilt.lines++; LwTiltLine(mgr, R, id, mode, q, p, tilt, ground, off); }
+        if (off >= LW_TILT_LINE_OFF && g_lwTilt.lines < LW_TILT_LINES && g_lwTilt.windowLines < LW_TILT_WINDOW_LINES && !LwTiltSeen(id, now))
+        { g_lwTilt.lines++; g_lwTilt.windowLines++; LwTiltLine(mgr, R, id, mode, q, p, tilt, ground, off); }
     }
 }
 
@@ -287,6 +369,21 @@ static void LwTiltNote(void)
     if (g_lwTilt.longs)
         Note("living world: tilt (30 s): units with corners over 3 m apart on detailed tiles: %u samples, %u over 15 deg off their ground, worst %.0f deg off (unit %08X)",
             g_lwTilt.longs, g_lwTilt.longOver, (double)g_lwTilt.longWorst, g_lwTilt.longId);
+    if (g_lwTilt.checked)
+    {
+        uintptr_t dir = 0, nav = 0, H = 0; uint32_t id = 0, slots = 0; int64_t carvers = -2; uint32_t live = 0;
+        if (EvpPtr(g_lw.game + LW_DIRECTOR, &dir) && LwNavWorld(dir, &nav, &id, &H)) carvers = LwTiltCarvers(nav, &slots);
+        if (TryAcquireSRWLockShared(&g_streamLock))
+        {
+            for (uint32_t k = 0; k < g_stream.count && k < kStreamMaxLocations; k++) live += g_streamLive[k] != 0;
+            ReleaseSRWLockShared(&g_streamLock);
+        }
+        Note("living world: tilt on props (30 s): %u units 30 deg or more off checked, %u standing on a prop; of those a navmesh face under the prop %u, on its top %u; props with static modifiers %u, dynamic %u, none %u, no record %u; nav world carvers live %lld of %u; stamps live %u",
+            g_lwTilt.checked, g_lwTilt.onProp, g_lwTilt.navUnder, g_lwTilt.navTop, g_lwTilt.propStatic, g_lwTilt.propDynamic, g_lwTilt.propNone, g_lwTilt.propNoRecord,
+            (long long)carvers, slots, live);
+    }
+    g_lwTilt.checked = g_lwTilt.onProp = g_lwTilt.navUnder = g_lwTilt.navTop = g_lwTilt.propStatic = g_lwTilt.propDynamic = g_lwTilt.propNone = g_lwTilt.propNoRecord = 0;
+    g_lwTilt.windowLines = 0;
     g_lwTilt.longs = g_lwTilt.longOver = g_lwTilt.longId = 0; g_lwTilt.longWorst = 0;
     g_lwTilt.scans = g_lwTilt.units = g_lwTilt.tilted = g_lwTilt.off30 = g_lwTilt.off30Miss = 0; memset(g_lwTilt.modes, 0, sizeof g_lwTilt.modes); g_lwTilt.worst = 0; g_lwTilt.worstId = g_lwTilt.worstMode = 0;
 }
