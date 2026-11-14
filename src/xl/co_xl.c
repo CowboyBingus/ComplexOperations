@@ -878,6 +878,10 @@ int CoXlTestLwFightTakeWhom(float x, float y, int n, const uint32_t* ids, const 
 uint32_t CoXlTestLwFightFar(void) { return g_lwRush.afar; }
 /* Fight f's point moved to (x, y), the fight otherwise as it was. */
 void CoXlTestLwFightPoint(int f, float x, float y) { g_lwFights[f].pos[0] = x; g_lwFights[f].pos[1] = y; }
+/* The players' avatar entities, in the order of their places. */
+void CoXlTestLwAvatars(const uint32_t* ids, int n) { for (int i = 0; i < n && i < EVT_MAX_PLAYERS; i++) g_lwWorld.avatars[i] = ids[i]; }
+/* Fight f's target was last fought `ago` ms ago. */
+void CoXlTestLwFightFought(int f, uint32_t ago) { g_lwFights[f].foughtAt = GetTickCount64() - ago; }
 int CoXlTestLwTeleportUnder(float hit, float plan, float drawn) { return LwTeleportUnder(hit, plan, drawn); }
 void CoXlTestLwStallSet(int rushed, float dist) { g_lwSquads[0].rushed = (uint8_t)rushed; g_lwSquads[0].stallDist = dist; }
 /* An intent's end with no patrol goal set: whether the squad still has a goal. */

@@ -430,6 +430,7 @@ static void LwStallCheckAt(LwSquad* q, const uint32_t* members, int n, const flo
 #define LW_FIGHT_NEAR_HOLD 3000 /* ms a new fight beside an older one is seen before it sends: a cluster that split off for a scan sends nothing (D) */
 #define LW_FIGHT_RESEND 10000  /* ms between a fight's sends once it has sent: a squad that fails at once is not replaced every scan (D) */
 #define LW_FIGHT_AIM 150.0f    /* a fight's target is its squads' aim within this of the fight's point: a target that left is not followed across the map; and a fight is only within this of a player or of whom its units fight (D) */
+#define LW_FIGHT_OUT 200.0f    /* a fight that is on stays while a player is within this of its units: in at LW_FIGHT_AIM, out here, so a player at the edge does not end it and start it again with a new set of squads (D) */
 #define LW_FIGHT_FOUGHT 5000   /* ms a fight keeps a target none of its units fights: two clusters of one fight may fight two players, and the aim must not change with each (D) */
 #define LW_FIGHT_MISS 30000    /* ms a squad keeps its point after neither its fight's target nor its point took a goal, before it asks again (D) */
 #define LW_HEARD_HOLD 30000    /* ms members at alert 1 or 2 keep a squad from a new point: at a fight some member hears something most of the time, and it would never move (D) */
@@ -494,19 +495,33 @@ static int LwFightTargetLives(LwFight* fi)
     if (fi->target && !g_lwTargetLive(fi->target, fi->tpos)) fi->target = 0; /* dead or gone: the next scan picks another */
     return fi->target != 0;
 }
-static int LwFightTargetHolds(LwFight* fi) { return LwFightTargetLives(fi) && LwDist2(fi->tpos, fi->pos[0], fi->pos[1]) <= LW_FIGHT_AIM * LW_FIGHT_AIM; }
-static const float* LwFightAim(LwFight* fi) { return LwFightTargetHolds(fi) ? fi->tpos : fi->pos; }
+/* A player's Helldiver: the Behavior target and a shot's source are its avatar entity, the id in avatars[]. */
+static int LwIsPlayer(uint32_t entity)
+{
+    for (int i = 0; i < g_lwWorld.playersAt; i++) if (entity && g_lwWorld.avatars[i] == entity) return 1;
+    return 0;
+}
+/* The target is the aim: within LW_FIGHT_AIM of the point; a player also at any range while a unit of the fight
+ * fought it in the last LW_FIGHT_FOUGHT, so a player shot at from afar gets the help the shooters draw. One that
+ * left and is fought no more is not followed across the map. */
+static int LwFightTargetHolds(LwFight* fi, ULONGLONG now)
+{
+    if (!LwFightTargetLives(fi)) return 0;
+    if (LwDist2(fi->tpos, fi->pos[0], fi->pos[1]) <= LW_FIGHT_AIM * LW_FIGHT_AIM) return 1;
+    return LwIsPlayer(fi->target) && now <= fi->foughtAt + LW_FIGHT_FOUGHT;
+}
+static const float* LwFightAim(LwFight* fi, ULONGLONG now) { return LwFightTargetHolds(fi, now) ? fi->tpos : fi->pos; }
 /* The aim one squad can walk to: the fight's aim, or the fight's point while its goal at the aim found no navmesh (a
  * Helldiver on a rock or a roof) and the aim stays within 30 m of where that was. Enemies stand at the point. Its
  * own point instead: for LW_FIGHT_MISS after neither took a goal, and while the fight's point is the aim with no
- * player and no target of the fight within LW_FIGHT_AIM of it, so no squad is turned to a place the players left. */
+ * target that holds and no player within LW_FIGHT_OUT of it, so no squad is turned to a place the players left. */
 static const float* LwSquadAim(LwSquad* q, LwFight* fi, ULONGLONG now)
 {
-    const float* aim = LwFightAim(fi);
+    const float* aim = LwFightAim(fi, now);
     if (q->aimMiss == 2) { if (now < q->retargetAt) return q->target; q->aimMiss = 0; }
     if (q->aimMiss && LwDist2(aim, q->aimOff[0], q->aimOff[1]) > 30.0f * 30.0f) q->aimMiss = 0;
     if (q->aimMiss) aim = fi->pos;
-    if (aim == fi->pos && !LwFightTargetHolds(fi) && LwNearestPlayer2(aim[0], aim[1]) > LW_FIGHT_AIM * LW_FIGHT_AIM) return q->target;
+    if (aim == fi->pos && !LwFightTargetHolds(fi, now) && LwNearestPlayer2(aim[0], aim[1]) > LW_FIGHT_OUT * LW_FIGHT_OUT) return q->target;
     return aim;
 }
 /* A reinforcement's goal at its point; on a miss there, once, at its fight's point, which then is its point. 0: neither
@@ -891,7 +906,7 @@ static void LwReinforceTick(LwSquad* q, const uint32_t* members, int n, int enga
     }
     if ((uint32_t)engaged > q->intentPeak) q->intentPeak = (uint32_t)engaged;
     /* nobody engaged at the fight: every 10 s, up to 3 times, the members hear the fight's target where it is */
-    if (!engaged && q->tells < 3 && now >= q->tellAt && fi && fi->target && LwFightAim(fi) == fi->tpos)
+    if (!engaged && q->tells < 3 && now >= q->tellAt && fi && fi->target && LwFightAim(fi, now) == fi->tpos)
     {
         typedef void (*HearFn)(void*, uint32_t, uint32_t, const float*, float);
         int toldN = 0;
@@ -1130,9 +1145,10 @@ static void LwReinforce(int f, int want)
     LwFight* fi = &g_lwFights[f];
     float reach = g_lwWorld.radius > 1500.0f ? 2.0f * LW_FIGHT_REACH : LW_FIGHT_REACH;
     /* its target died or left since the scan placed it, and no player is at its point: nobody to send a squad to */
-    if (!LwFightTargetHolds(fi) && LwNearestPlayer2(fi->pos[0], fi->pos[1]) > LW_FIGHT_AIM * LW_FIGHT_AIM)
+    ULONGLONG now = GetTickCount64();
+    if (!LwFightTargetHolds(fi, now) && LwNearestPlayer2(fi->pos[0], fi->pos[1]) > LW_FIGHT_AIM * LW_FIGHT_AIM)
     {
-        fi->sentAt = GetTickCount64();
+        fi->sentAt = now;
         Note("living world: fight %d at (%.0f, %.0f) sends no squad: no player and no target of it within %.0f m of its point (the nearest player %.0f m)", f, (double)fi->pos[0], (double)fi->pos[1],
             (double)LW_FIGHT_AIM, (double)sqrtf(LwNearestPlayer2(fi->pos[0], fi->pos[1])));
         return;
@@ -1140,7 +1156,6 @@ static void LwReinforce(int f, int want)
     int pick[3]; float d2s[3], keys[3]; int picked = 0, tiers[3];
     int region = LwRegionOfNode(LwNearestNode(fi->pos[0], fi->pos[1]));
     if (want > 3) want = 3;
-    ULONGLONG now = GetTickCount64();
     for (int i = 0; i < g_lwWorld.count; i++)
     {
         LwSquad* q = &g_lwSquads[i];
@@ -1163,7 +1178,7 @@ static void LwReinforce(int f, int want)
         const LwSquad before = *q; /* a squad that is not sent keeps what it was doing */
         q->intent = LW_REINFORCE; q->intentStage = 0; q->intentSent = 0; q->intentAt = now; q->intentFrom = sqrtf(d2s[j]); q->fight = (int8_t)f; q->fightBorn = fi->born; q->retargetAt = now + 10000; q->moves = 0;
         q->onFrom = 0; q->onSum = 0; q->stageSum = 0; q->aimMiss = 0; q->heardFrom = 0;
-        memcpy(q->target, LwFightAim(fi), sizeof q->target);
+        memcpy(q->target, LwFightAim(fi, now), sizeof q->target);
         if (q->state == LW_OFFLINE) { if (!LwIntentRoute(q)) { q->intent = was; q->fight = -1; continue; } }
         else if (q->jobSet)
         {
@@ -1213,14 +1228,14 @@ static void LwClusterAdd(LwCluster* c, const float* p, int places)
     for (int a = 0; a < 3; a++) c->hot[a] = (c->hot[a] * (float)c->hotN + p[a]) / (float)(c->hotN + 1);
     c->hotN++;
 }
-/* Where a fight may be (D): within LW_FIGHT_AIM of a player, of one the cluster's units fight, or of the fight's
- * living target. Units that walk off from every player take no fight along and start none out there, so a
- * fight's squads go where a player can meet them. */
+/* Where a fight may be (D): within LW_FIGHT_AIM of a player (LW_FIGHT_OUT for a fight that is on), where its units
+ * fight a player at any range, or within LW_FIGHT_AIM of a living target of the cluster or the fight. Players who
+ * are shot at keep their fight; units that walk off from every player take none along and start none out there. */
 static int LwFightPlaceOk(const LwCluster* c, const float* at, int f)
 {
-    const float r2 = LW_FIGHT_AIM * LW_FIGHT_AIM;
-    if (LwNearestPlayer2(at[0], at[1]) <= r2) return 1;
-    for (int k = 0; k < c->targetN; k++) if (LwDist2(c->tpos[k], at[0], at[1]) <= r2) return 1;
+    const float r2 = LW_FIGHT_AIM * LW_FIGHT_AIM, in = f >= 0 ? LW_FIGHT_OUT : LW_FIGHT_AIM;
+    if (LwNearestPlayer2(at[0], at[1]) <= in * in) return 1;
+    for (int k = 0; k < c->targetN; k++) if (LwIsPlayer(c->target[k]) || LwDist2(c->tpos[k], at[0], at[1]) <= r2) return 1;
     return f >= 0 && LwFightTargetLives(&g_lwFights[f]) && LwDist2(g_lwFights[f].tpos, at[0], at[1]) <= r2;
 }
 /* The log's line for units engaged where no fight may be: at most one in 30 s, with the clusters since the last. */
@@ -1246,7 +1261,7 @@ static void LwFightTargetTake(LwFight* fi, const LwCluster* c, ULONGLONG now)
         if (c->target[k] == fi->target) fi->foughtAt = now;
         if (best < 0 || LwDist2(c->tpos[k], fi->pos[0], fi->pos[1]) < LwDist2(c->tpos[best], fi->pos[0], fi->pos[1])) best = k;
     }
-    if (best < 0 || (LwFightTargetHolds(fi) && now - fi->foughtAt <= LW_FIGHT_FOUGHT)) return;
+    if (best < 0 || (LwFightTargetHolds(fi, now) && now - fi->foughtAt <= LW_FIGHT_FOUGHT)) return;
     fi->target = c->target[best]; memcpy(fi->tpos, c->tpos[best], sizeof fi->tpos); fi->foughtAt = now;
 }
 /* A cluster into the fights: the nearest fight within LW_FIGHT_MATCH, else a new one. Only units at a placing level
