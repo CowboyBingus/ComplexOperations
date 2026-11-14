@@ -819,8 +819,8 @@ static int LwCallFor(int i, int root)
     LwSquad* q = &g_lwSquads[best];
     LwCallSend(q, bestToward, root);
     g_lwCallOf[best] = (uint8_t)(i + 1); g_lwCallLeast[best] = 0; g_lwCall.turn[i]++; g_lwCall.called++;
-    if (LwCallNote()) Note("living world: road patrol %d is called to player %d's road: %d road nodes out at (%.0f, %.0f), %.0f m from them, to walk in %s%s", best, i + 1, bestHops,
-        (double)q->pos[0], (double)q->pos[1], (double)sqrtf(LwDist2(g_lwWorld.players[i], q->pos[0], q->pos[1])), bestOn ? "from the side whose turn it is" : "from another side (none stood on the one whose turn it is)",
+    if (LwCallNote()) Note("living world: road patrol %d is called to player %d's road: %d road nodes out at (%.0f, %.0f), %.0f m from them (who draw its group to %.0f m), to walk past %s%s", best, i + 1, bestHops,
+        (double)q->pos[0], (double)q->pos[1], (double)sqrtf(LwDist2(g_lwWorld.players[i], q->pos[0], q->pos[1])), (double)LwMeetDrawn(q, i), bestOn ? "from the side whose turn it is" : "from another side (none stood on the one whose turn it is)",
         g_lwCall.notes == LW_MEET_NOTES ? " (the last such line this mission)" : "");
     return best;
 }
@@ -1625,6 +1625,9 @@ void CoXlTestLwSeenSwitch(int on) { g_lwTestMeetOff = g_lwMeetOff = !on; }
 void CoXlTestLwSeenBusy(int busy) { g_lwTestBusy = busy; }
 int CoXlTestLwSeenKeeps(int idx) { return LwMeetKeeps(&g_lwSquads[idx]); }
 int CoXlTestLwSeenFarRoom(int idx, int meet, int farUnits, int roadFar) { char why[128] = ""; g_lwMeet.roadFar = roadFar; const int r = LwMeetFarRoom(&g_lwSquads[idx], meet, farUnits, why, sizeof why); return r ? 1 : strncmp(why, "the far share", 13) == 0 ? 0 : -1; }
+/* The far units a request is measured against when squad `idx` alone is a far one of `units` (`stands`: it stands),
+ * the sums being `walking` and `standing`. */
+int CoXlTestLwSeenFarSum(int idx, int units, int stands, int walking, int standing) { LwMeetFarCount(-1, 0, 0); LwMeetFarCount(idx, units, stands); return LwMeetFarSum(walking, standing); }
 /* 1 while squad `idx`, online since `sinceMs`, `d` m from the nearest player, is kept by the stay rule at `nowMs`. */
 int CoXlTestLwSeenStays(int idx, float d, uint64_t sinceMs, uint64_t nowMs)
 {

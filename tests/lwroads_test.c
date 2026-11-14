@@ -34,6 +34,7 @@ void CoXlTestLwSeenEventHold(int idx, uint32_t units);
 uint32_t CoXlTestLwSeenEventHeld(int requester);
 int CoXlTestLwSeenKeeps(int idx);
 int CoXlTestLwSeenFarRoom(int idx, int meet, int farUnits, int roadFar);
+int CoXlTestLwSeenFarSum(int idx, int units, int stands, int walking, int standing);
 int CoXlTestLwSeenStays(int idx, float d, uint64_t sinceMs, uint64_t nowMs);
 int CoXlTestLwSeenCapText(void);
 void CoXlTestLwSeenEnd(void);
@@ -359,6 +360,12 @@ int main(void)
         CoXlTestLwSeenSquad(30, 0, -900, 1, 4, 0);
         CHECK(CoXlTestLwSeenFarRoom(20, 3, 0, 0) == 1 && CoXlTestLwSeenFarRoom(20, 3, 30, 8) == 1 && CoXlTestLwSeenFarRoom(20, 3, 32, 8) == 1 && CoXlTestLwSeenFarRoom(20, 3, 33, 8) == 0); /* 36 far units in all */
         CHECK(CoXlTestLwSeenFarRoom(20, 0, 14, 0) == 1 && CoXlTestLwSeenFarRoom(20, 0, 15, 0) == 0); /* on a player's road but asking by the far band's own rule: the landscape's share */
+        CHECK(CoXlTestLwSeenFarRoom(3, 3, 11, 0) == 1 && CoXlTestLwSeenFarRoom(3, 3, 12, 0) == 0); /* asking beyond the band but on no player's road: the landscape's share too (7 + 8 road units would pass 13) */
+        g_case = "the far sum: a standing far patrol that came online on a player's road counts whole, and is taken off the landscape's standing units";
+        CoXlTestLwSeenSquad(20, 600, 0, 3, 4, 4);
+        CHECK(CoXlTestLwSeenFarSum(20, 4, 1, 10, 4) == 14 && CoXlTestLwSeenFarSum(20, 4, 0, 14, 0) == 14 && CoXlTestLwSeenFarSum(20, 4, 1, 10, 24) == 16);
+        CoXlTestLwSeenSquad(20, 600, 0, 3, 4, 2);
+        CHECK(CoXlTestLwSeenFarSum(20, 4, 1, 10, 4) == 10 && CoXlTestLwSeenFarSum(20, 4, 1, 10, 24) == 16); /* online by the bands' own rule: the landscape's */
         CoXlTestLwSeenSquad(3, 100, 0, 1, 7, 0); CoXlTestLwSeenSquad(20, 250, 0, 1, 4, 1);
         g_case = "meet 0: a road patrol near a player is filler like any";
         CoXlTestLwSeenSwitch(0); CHECK(CoXlTestLwSeenKeeps(0) == 0);
@@ -473,6 +480,15 @@ int main(void)
           /* the second call is a period on, 15 % of it early or late at most */
           CHECK(CoXlTestLwCallTick(1000000u + period - period * 15u / 100u - 1500u) == 1 && CoXlTestLwCallTick(1000000u + period + period * 15u / 100u + 1500u) == 2);
           CHECK(CoXlTestLwCallOf(30) == 1 && CoXlTestLwCallOf(10) == 1 && CoXlTestLwCallOf(0) == 0); /* the second from the other side */ }
+        g_case = "a player off the road has no part in the period; one walking toward the patrol has a shorter one";
+        { const float one[2][2] = {{1500, 20}, {1600, 500}};
+          const uint32_t period = co_lw_meet_call_ms(6, 4, 1, B + 50.0f + 350.0f, 0), quick = co_lw_meet_call_ms(6, 4, 1, B + 50.0f + 350.0f, 1.5f);
+          CoXlTestLwCallWorld(30, 0, one, 2, sx, dir, none, 4);
+          CHECK(CoXlTestLwCallTick(1000000u) == 1 && CoXlTestLwCallTick(1000000u + period + period * 15u / 100u + 1500u) == 2);
+          CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
+          CoXlTestLwCallPlayer(0, 1500.0f, 1.5f);
+          CHECK(quick > 290000u && quick < 320000u && CoXlTestLwCallTick(1000000u) == 1 && CoXlTestLwCallTick(1000000u + quick - quick * 15u / 100u - 1500u) == 1 && CoXlTestLwCallTick(1000000u + quick + quick * 15u / 100u + 1500u) == 2);
+          CoXlTestLwCallPlayer(0, 1500.0f, 0); }
         g_case = "two players on a road: each has its call in turn, and twice the time to its next";
         { const float pair[2][2] = {{1500, 20}, {1600, -20}}, wide[4] = {250, 450, 550, 2750}; const int d4[4] = {1, 1, -1, -1};
           const uint32_t period = co_lw_meet_call_ms(6, 4, 1, B + 50.0f + 350.0f, 0);
