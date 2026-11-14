@@ -60,20 +60,28 @@ static void LwCutFrame(int mission, int host)
     if (!host && g_lwCut.mode >= 2 && g_lwCut.client == 0) return; /* no tick: this client's makes are the game's */
     ULONGLONG now = GetTickCount64();
     if (now - g_lwCut.tickAt < CO_CUTSET_TICK_MS) return;
-    g_lwCut.tickAt = now;
     CoCutCentre c[CO_CUTSET_CENTRES]; uint32_t n = 0, last = 0, squads = 0, beside = 0, left = 0;
     EvpPlayer list[EVT_MAX_PLAYERS];
     int count = EvpPlayers(g_lw.game, list);
     /* The places the streamer streams trees around (a hellpod's flight held still, co_settle.h), so a tree streamed
-     * in for a player is in that player's reach here. A player the streamer does not have keeps the last place. */
-    const int streamed = (int)g_stream.playerCount - (g_streamObserverOn ? 1 : 0);
+     * in for a player is in that player's reach here. A player the streamer does not have keeps the last place.
+     * Copied under the streamer's lock: a generator thread's capture empties the list, and a list read half
+     * written would pair a peer with another player's place. A capture can hold the lock for long, so a busy
+     * lock leaves the tick to the next frame. */
+    uint64_t peer[EVT_MAX_PLAYERS]; float place[EVT_MAX_PLAYERS][2];
+    if (!TryAcquireSRWLockShared(&g_streamLock)) return;
+    int streamed = (int)g_stream.playerCount - (g_streamObserverOn ? 1 : 0);
+    if (streamed > EVT_MAX_PLAYERS) streamed = EVT_MAX_PLAYERS;
+    for (int p = 0; p < streamed; p++) { peer[p] = g_streamPlayerPeer[p]; place[p][0] = g_streamPlayerAt[p][0]; place[p][1] = g_streamPlayerAt[p][1]; }
+    ReleaseSRWLockShared(&g_streamLock);
+    g_lwCut.tickAt = now;
     const int none = !host && g_lwCut.mode >= 2 && g_lwCut.client == 2; /* a client that adds none: no centre */
     for (int i = 0; i < count && i < EVT_MAX_PLAYERS && !none; i++)
     {
         float at[2] = {0, 0}, use[2];
         int reads = 0;
         for (int p = 0; p < streamed && !reads; p++)
-            if (g_streamPlayerPeer[p] == list[i].peer) { at[0] = g_streamPlayerAt[p][0]; at[1] = g_streamPlayerAt[p][1]; reads = 1; }
+            if (peer[p] == list[i].peer) { at[0] = place[p][0]; at[1] = place[p][1]; reads = 1; }
         const int kind = co_cutset_player(g_lwCut.held, EVT_MAX_PLAYERS, list[i].peer, reads, at[0], at[1], (uint32_t)now, use);
         if (kind == 0) continue;
         c[n++] = (CoCutCentre){use[0], use[1], CO_CUTSET_PLAYER_IN, CO_CUTSET_PLAYER_OUT};
