@@ -24,6 +24,9 @@ void CoXlTestNearReset(LONG state, int pins);
 void CoXlTestNearResetTick(void);
 void CoXlTestNearResetDone(LONG done);
 void CoXlTestNearAtmosMapsEarlier(void);
+void CoXlTestNearResetEarlier(void);
+int CoXlTestNearResetProbeOwed(void);
+LONG CoXlTestNearNamesSky(void);
 void CoXlTestNearCraterMaps(uint64_t source, uint64_t offset, uint64_t scorch);
 int CoXlTestNearCraterMapsMake(int newLevel);
 void CoXlTestNearCraterMapsEarlier(void);
@@ -235,7 +238,19 @@ int main(void)
 
     Setup("the sky LUTs: stand-ins inside the consumer, the render config's own after", 1);
     CoXlTestNearAtmosMaps(SKY0, SKY1);
-    CoXlTestNearConsume(queue, 1, (void*)Consumer);
+    {
+        LONG sky = CoXlTestNearNamesSky();
+        CoXlTestNearConsume(queue, 1, (void*)Consumer);
+        CHECK(CoXlTestNearNamesSky() == sky + 1);
+        CoXlTestNearAtmosMaps(SKY0, 0); /* one stand-in is not a kept LUT pair */
+        *(uint32_t*)(g_queue + 0x10) = 3;
+        CoXlTestNearConsume(queue, 1, (void*)Consumer);
+        CHECK(CoXlTestNearNamesSky() == sky + 1);
+        CoXlTestNearAtmosMaps(SKY0, SKY1);
+        memset(g_skySeen, 0xFF, sizeof g_skySeen); *(uint32_t*)(g_queue + 0x10) = 3;
+        CoXlTestNearConsume(queue, 1, (void*)Consumer);
+        CHECK(CoXlTestNearNamesSky() == sky + 2);
+    }
     CHECK(SawTile() && g_skySeen[0] == SKY0 && g_skySeen[1] == SKY1);
     CHECK(*Slot(SKY) == 0 && *Slot(SKYT) == 0 && LevelNow());
 
@@ -243,6 +258,8 @@ int main(void)
     SkyConfigs(32, 96); g_creates = 0; g_releases = 0;
     CHECK(CoXlTestNearAtmosMapsMake(1) == 2 && g_creates == 2);
     CHECK(g_made[0][0] == 32 && g_made[0][1] == 32 && g_made[0][2] == 1 && g_made[0][3] == 10 && g_made[1][3] == 24);
+    CHECK(fake_host_logged("sky LUT stand-in 0 for 0x5E058EEF: 0x9000, 32 x 32 of format 10, flags 0 (the LUT: 32 x 32 x 96, bytes +0x60 0, +0x63 0, +0x64 0)"));
+    CHECK(fake_host_logged("sky LUT stand-in 1 for 0xEA1A2316: 0x9001, 32 x 32 of format 24"));
     CHECK(CoXlTestNearAtmosMapsMake(0) == 2 && g_creates == 2);
     CHECK(CoXlTestNearAtmosMapsMake(1) == 2 && g_creates == 4 && g_releases == 2);
     CoXlTestNearConsume(queue, 1, (void*)Consumer);
@@ -260,12 +277,54 @@ int main(void)
     CHECK(CoXlTestNearNamesQueue() == queue);
     CoXlTestNearReplayEnd();
     CHECK(CoXlTestNearNamesQueue() == 0 && LevelNow());
+    CHECK(fake_host_logged("brackets had both sky LUT stand-ins published"));
     CoXlTestNearReplaying(1); /* even with a next replay under way before its own start */
     CoXlTestNearReset(1, 1);
     g_publishes = 0; *(uint32_t*)(g_queue + 0x10) = 3;
     CoXlTestNearConsumeQueue(queue, (void*)Consumer);
     CHECK(SawLevel() && g_publishes == 0 && CoXlTestNearResetState() == 1);
     CoXlTestNearReplaying(0);
+
+    Setup("a replay that fails with its finalize queued keeps the queue: the job's drain asks for the long reset", 1);
+    CoXlTestNearAtmosMaps(SKY0, SKY1);
+    CoXlTestNearConsume(queue, 1, (void*)Consumer);
+    CoXlTestNearReset(1, 1);
+    CoXlTestNearReplayEnd();
+    CHECK(CoXlTestNearNamesQueue() == queue && CoXlTestNearResetState() == 1);
+    g_publishes = 0; *(uint32_t*)(g_queue + 0x10) = 0;
+    CoXlTestNearConsumeQueue(queue, (void*)Consumer); /* an empty drain is not the job's */
+    CHECK(CoXlTestNearResetState() == 1 && CoXlTestNearNamesQueue() == queue);
+    *(uint32_t*)(g_queue + 0x10) = 1; memset(g_skySeen, 0xFF, sizeof g_skySeen);
+    CoXlTestNearConsumeQueue(queue, (void*)Consumer);
+    CHECK(SawLevel() && g_publishes == 0 && g_skySeen[0] == 0); /* under the level's names: the real LUTs */
+    CHECK(CoXlTestNearResetState() == 2 && CoXlTestNearNamesQueue() == 0);
+    SetFrames(0);
+    CoXlTestNearResetTick();
+    CHECK(Frames() == 8); /* the stand-ins exist, but this clear went to the LUTs */
+    CHECK(fake_host_logged("the sky LUTs were cleared: its jobs ran outside the replay"));
+    *(uint32_t*)(g_queue + 0x10) = 1;
+    CoXlTestNearConsumeQueue(queue, (void*)Consumer);
+    CHECK(CoXlTestNearResetState() == 0); /* once */
+
+    Setup("the next replay starts before the queued finalize drained: its jobs run in that replay's bracket, short reset", 1);
+    CoXlTestNearAtmosMaps(SKY0, SKY1);
+    CoXlTestNearReset(1, 1);
+    CoXlTestNearConsume(queue, 1, (void*)Consumer);
+    CHECK(SawTile() && g_skySeen[0] == SKY0 && CoXlTestNearResetState() == 2 && CoXlTestNearNamesQueue() == queue);
+    SetFrames(0);
+    CoXlTestNearResetTick();
+    CHECK(Frames() == 3);
+
+    Setup("a finalize queued in the level before: its level's end dropped the job, no reset in this level", 1);
+    CoXlTestNearReset(1, 1);
+    CoXlTestNearResetEarlier();
+    CoXlTestNearReplayEnd();
+    *(uint32_t*)(g_queue + 0x10) = 2;
+    CoXlTestNearConsumeQueue(queue, (void*)Consumer);
+    CHECK(CoXlTestNearResetState() == 0 && CoXlTestNearNamesQueue() == 0);
+    SetFrames(0); g_G[CUT] = 0;
+    CoXlTestNearResetTick();
+    CHECK(Frames() == 0 && g_G[CUT] == 0);
 
     Setup("a capture with the tile's names out and no replay running is counted, then noted at the replay's end", 1);
     {
@@ -359,29 +418,74 @@ int main(void)
     }
 
     Setup("a finalize's jobs run: the reset is asked for, then applied once on the game thread", 1);
-    CoXlTestNearReset(1, 1);
-    CoXlTestNearConsume(queue, 1, (void*)Consumer);
-    CHECK(CoXlTestNearResetState() == 2);
     SetFrames(0);
     memset(g_G + PROBE_ALL, 0, 12); g_G[CUT] = 0;
     uint32_t faces = 5; memcpy(g_G + PROBE_FACES, &faces, 4);
+    float weight = 0;
+    CoXlTestNearReset(0, 1);
+    CoXlTestNearConsume(queue, 1, (void*)Consumer); /* jobs of no finalize: the probe is left alone */
+    memcpy(&weight, g_G + PROBE_WEIGHT, 4);
+    CHECK(weight == 0.0f && CoXlTestNearResetState() == 0);
+    CoXlTestNearReset(1, -1);
+    *(uint32_t*)(g_queue + 0x10) = 3;
+    CoXlTestNearConsume(queue, 1, (void*)Consumer); /* the game's code not the reviewed one: nothing written */
+    memcpy(&weight, g_G + PROBE_WEIGHT, 4);
+    CHECK(weight == 0.0f);
+    CoXlTestNearReset(1, 1);
+    *(uint32_t*)(g_queue + 0x10) = 3;
+    CoXlTestNearConsume(queue, 1, (void*)Consumer);
+    CHECK(CoXlTestNearResetState() == 2);
+    /* in the consumer: the weight alone, for the probe update that runs before the next view */
+    memcpy(&weight, g_G + PROBE_WEIGHT, 4); memcpy(&faces, g_G + PROBE_FACES, 4);
+    CHECK(weight == 1.0f && faces == 5 && g_G[PROBE_ALL] == 0 && g_G[CUT] == 0 && Frames() == 0);
+    weight = 0.5f; memcpy(g_G + PROBE_WEIGHT, &weight, 4); /* that probe update ran first and let it fall */
     CoXlTestNearResetTick();
-    float weight = 0; memcpy(&weight, g_G + PROBE_WEIGHT, 4); memcpy(&faces, g_G + PROBE_FACES, 4);
-    CHECK(Frames() == 8 && g_G[PROBE_ALL] == 1 && g_G[CUT] == 1 && weight == 1.0f && faces == 0);
+    memcpy(&weight, g_G + PROBE_WEIGHT, 4); memcpy(&faces, g_G + PROBE_FACES, 4);
+    /* the first part: no six-face flag yet, and the face counter beside the weight is left alone */
+    CHECK(Frames() == 8 && g_G[PROBE_ALL] == 0 && g_G[CUT] == 1 && weight == 1.0f && faces == 5);
+    CHECK(CoXlTestNearResetProbeOwed() == 1);
     CHECK(fake_host_logged("after a replayed finalize: 8 frames of history invalidation"));
-    CHECK(fake_host_logged("the sky LUTs were cleared"));
+    CHECK(fake_host_logged("probe weight 1, the six-face light probe capture after the next view; the sky LUTs were cleared"));
     CHECK(CoXlTestNearResetState() == 0);
-    SetFrames(0);
+    SetFrames(0); g_G[CUT] = 0; weight = 0.25f; memcpy(g_G + PROBE_WEIGHT, &weight, 4);
+    CoXlTestNearResetTick(); /* a second level update before the frame's view and consumer: nothing yet */
+    memcpy(&weight, g_G + PROBE_WEIGHT, 4);
+    CHECK(Frames() == 0 && g_G[PROBE_ALL] == 0 && g_G[CUT] == 0 && weight == 0.25f && CoXlTestNearResetProbeOwed() == 1);
+    *(uint32_t*)(g_queue + 0x10) = 0;
+    CoXlTestNearConsume(queue, 0, (void*)Consumer); /* the next frame's consumer call, made after its view */
     CoXlTestNearResetTick();
-    CHECK(Frames() == 0); /* once */
+    memcpy(&weight, g_G + PROBE_WEIGHT, 4); memcpy(&faces, g_G + PROBE_FACES, 4);
+    CHECK(g_G[PROBE_ALL] == 1 && weight == 1.0f && faces == 0 && CoXlTestNearResetProbeOwed() == 0);
+    CHECK(Frames() == 0 && g_G[CUT] == 0); /* the second part is the capture alone */
+    g_G[PROBE_ALL] = 0;
+    CoXlTestNearConsume(queue, 0, (void*)Consumer);
+    CoXlTestNearResetTick();
+    CHECK(g_G[PROBE_ALL] == 0); /* once */
+
+    Setup("a second finalize's jobs run while the capture is owed: the capture, then the first part again", 1);
+    CoXlTestNearReset(2, 1);
+    CoXlTestNearResetTick();
+    CoXlTestNearConsume(queue, 0, (void*)Consumer);
+    CoXlTestNearReset(2, 1);
+    SetFrames(0); g_G[PROBE_ALL] = 0;
+    CoXlTestNearResetTick();
+    CHECK(g_G[PROBE_ALL] == 1 && Frames() == 8 && CoXlTestNearResetProbeOwed() == 1);
+    g_G[PROBE_ALL] = 0;
+    CoXlTestNearResetTick();
+    CHECK(g_G[PROBE_ALL] == 0 && CoXlTestNearResetProbeOwed() == 1);
+    CoXlTestNearConsume(queue, 0, (void*)Consumer);
+    CoXlTestNearResetTick();
+    CHECK(g_G[PROBE_ALL] == 1 && CoXlTestNearResetProbeOwed() == 0);
+    g_G[PROBE_ALL] = 0;
 
     Setup("the sky LUTs kept by their stand-ins: the game's own three frames", 1);
     CoXlTestNearAtmosMaps(SKY0, SKY1);
     CoXlTestNearReset(2, 1);
     SetFrames(0);
     CoXlTestNearResetTick();
-    CHECK(Frames() == 3 && g_G[PROBE_ALL] == 1 && g_G[CUT] == 1);
-    CHECK(fake_host_logged("3 frames of history invalidation from this frame, camera cut, six-face light probe capture; the sky LUTs were kept"));
+    CHECK(Frames() == 3 && g_G[PROBE_ALL] == 0 && g_G[CUT] == 1);
+    CHECK(fake_host_logged("3 frames of history invalidation from this frame, camera cut, probe weight 1, the six-face light probe capture after "
+        "the next view; the sky LUTs were kept by their stand-ins"));
     CoXlTestNearReset(2, 1);
     SetFrames(2);
     CoXlTestNearResetTick();
@@ -441,7 +545,9 @@ int main(void)
     Setup("the reset's code not the reviewed one: nothing written", 1);
     CoXlTestNearReset(2, -1);
     SetFrames(0); g_G[PROBE_ALL] = 0; g_G[CUT] = 0;
+    { float w0 = 0.5f; memcpy(g_G + PROBE_WEIGHT, &w0, 4); }
     CoXlTestNearResetTick();
+    { float w1 = 0; memcpy(&w1, g_G + PROBE_WEIGHT, 4); CHECK(w1 == 0.5f); }
     CHECK(Frames() == 0 && g_G[PROBE_ALL] == 0 && g_G[CUT] == 0 && CoXlTestNearResetState() == 2);
 
     CoXlTestNearReset(0, 1);

@@ -481,7 +481,14 @@ uint64_t CoXlTestNearProbe(void* original) { g_nearProbe = (NearProbeFn)original
 void CoXlTestNearProbeCounts(uint32_t* replay, uint32_t* tile) { *replay = g_probeRun.replay; *tile = g_probeRun.tile; }
 void CoXlTestNearProbeClear(void) { memset(&g_probeRun, 0, sizeof g_probeRun); }
 LONG CoXlTestNearResetState(void) { return g_nearReset.state; }
-void CoXlTestNearReset(LONG state, int pins) { g_nearReset.state = state; g_nearReset.pins = pins; }
+void CoXlTestNearReset(LONG state, int pins)
+{
+    g_nearReset.state = state; g_nearReset.pins = pins; g_nearReset.level = g_world.levels; g_nearReset.bare = 0;
+    if (state == 0) g_nearReset.probe = 0;
+}
+void CoXlTestNearResetEarlier(void) { g_nearReset.level = g_world.levels - 1; }
+int CoXlTestNearResetProbeOwed(void) { return g_nearReset.probe; }
+LONG CoXlTestNearNamesSky(void) { return g_nearNames.sky; }
 void CoXlTestNearResetDone(LONG done) { g_nearReset.done = done; }
 void CoXlTestNearAtmosMapsEarlier(void) { g_nearAtmosMaps.level = g_world.levels - 1; }
 void CoXlTestNearResetTick(void) { NearResetTick(); }
