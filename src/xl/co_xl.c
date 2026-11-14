@@ -738,7 +738,57 @@ void CoXlTestLwStallApply(int intent, int tries, const int* read, float atX, flo
 uint32_t CoXlTestLwStallCount(int what) { return what == 0 ? g_lwWorld.stallResent : what == 1 ? g_lwWorld.stallSnapped : what == 2 ? g_lwWorld.stallNewGoal : what == 3 ? g_lwWorld.stallResumed : what == 4 ? g_lwWorld.stallAction : g_lwWorld.stallBusy; }
 int CoXlTestLwStallWaits(int set) { if (set >= 0) g_lwSquads[0].stallWaits = (uint8_t)set; return g_lwSquads[0].stallWaits; }
 /* The band-edge wait's clocks moved back by ms: 0 the intent's start, 1 the time at this point; 2: the fight ends. */
-void CoXlTestLwHoldAge(int what, uint32_t ms) { LwSquad* q = &g_lwSquads[0]; if (what == 0) { q->intentAt -= ms; g_lwFights[0].born -= ms; q->fightBorn -= ms; } else if (what == 1) q->heldAt -= ms; else if (what == 2) g_lwFights[0].live = 0; else { memset(&g_lwNodes[0], 0, sizeof g_lwNodes[0]); g_lwNodeCount = 1; } } /* 3: one route node, for an intent's end */
+void CoXlTestLwHoldAge(int what, uint32_t ms) { LwSquad* q = &g_lwSquads[0]; if (what == 0) { q->intentAt -= ms; g_lwFights[0].born -= ms; q->fightBorn -= ms; } else if (what == 1) q->heldAt -= ms; else if (what == 2) g_lwFights[0].live = 0; else if (what == 4) q->heldFrom -= ms; else { memset(&g_lwNodes[0], 0, sizeof g_lwNodes[0]); g_lwNodeCount = 1; } } /* 3: one route node, for an intent's end; 4: its wait in this intent */
+/* Squad 0 online on its way to fight 0 (live, at `fight`), sent `sentAgo` ms ago, with one route node for an end. A
+ * fight's target as the test gives it: live at `at`, or dead (at NULL); target 0 puts the game's read back. */
+static int g_testTargetLive; static float g_testTargetAt[3];
+static int TestTargetLive(uint32_t target, float* pos) { (void)target; if (g_testTargetLive) memcpy(pos, g_testTargetAt, sizeof g_testTargetAt); return g_testTargetLive; }
+void CoXlTestLwFightTarget(int f, uint32_t target, const float* at)
+{
+    g_lwTargetLive = target ? TestTargetLive : LwLiveTarget; g_lwFights[f].target = target; g_testTargetLive = at != NULL;
+    if (at) { g_testTargetAt[0] = at[0]; g_testTargetAt[1] = at[1]; g_testTargetAt[2] = 0; }
+}
+void CoXlTestLwReinforceOn(const float* fight, uint32_t sentAgo, int intent)
+{
+    const float pl[2] = {0, 0};
+    CoXlTestLwReinforce(pl, fight, fight);
+    LwSquad* q = &g_lwSquads[0];
+    q->state = LW_ONLINE; q->intent = (uint8_t)intent; q->intentAt = GetTickCount64() - sentAgo; q->fightBorn = g_lwFights[0].born;
+    memcpy(g_lwFights[0].pos, fight, sizeof(float) * 2);
+    memset(&g_lwNodes[0], 0, sizeof g_lwNodes[0]); g_lwNodeCount = 1;
+}
+/* One online tick of squad 0's reinforcement `later` ms from now, its leader at `at`, `engaged` members engaged: its
+ * intent after it; its stage, point and moves. */
+int CoXlTestLwReinforceTick(const float* at, int engaged, uint32_t later, int* stage, float* target, int* moves)
+{
+    LwSquad* q = &g_lwSquads[0]; const uint32_t members[1] = {0};
+    LwReinforceTick(q, members, 1, engaged, at, GetTickCount64() + later);
+    *stage = q->intentStage; target[0] = q->target[0]; target[1] = q->target[1]; *moves = q->moves;
+    return q->intent;
+}
+/* The limits of squad 0's intent `later` ms from now: bit 0 late online, bit 1 late at the band's edge. */
+int CoXlTestLwIntentLate(uint32_t later) { LwSquad* q = &g_lwSquads[0]; ULONGLONG now = GetTickCount64() + later; return LwIntentLate(q, now) | LwHoldLate(q, now) << 1; }
+/* Squad 0 goes offline with its intent and comes back: whether its online time starts again. */
+int CoXlTestLwIntentOffline(void) { LwSquad* q = &g_lwSquads[0]; q->state = LW_OFFLINE; LwIntentOffline(q); q->state = LW_ONLINE; return q->intentOnAt == 0; }
+/* A scan's cluster of `n` units at levels[] and points pts[] (x, y pairs): its centre, its placing units' centre and count. */
+int CoXlTestLwCluster(const float* pts, const uint32_t* levels, int n, float* pos, float* hot)
+{
+    LwCluster c; memset(&c, 0, sizeof c);
+    for (int k = 0; k < n; k++) { float p[3] = {pts[2 * k], pts[2 * k + 1], 0}; if (LwAlertFights(levels[k])) LwClusterAdd(&c, p, LwAlertPlaces(levels[k])); }
+    pos[0] = c.pos[0]; pos[1] = c.pos[1]; hot[0] = c.hot[0]; hot[1] = c.hot[1];
+    return c.n | c.hotN << 8;
+}
+/* A cluster at (x, y) into the fights at `now`: n units, `hot` of them at a placing level, a call or not, its target.
+ * The fight's slot (-1 none) and, for slot `read`, its point, units and last scan seen. */
+int CoXlTestLwFightTake(float x, float y, int n, int hot, int call, uint32_t target, uint64_t now, int read, float* pos, int* engaged, uint64_t* seen)
+{
+    LwCluster c; memset(&c, 0, sizeof c);
+    c.pos[0] = c.hot[0] = c.tpos[0] = x; c.pos[1] = c.hot[1] = c.tpos[1] = y; c.n = n; c.hotN = hot; c.call = (uint8_t)call; c.target = target;
+    int f = LwFightTake(&c, now);
+    pos[0] = g_lwFights[read].pos[0]; pos[1] = g_lwFights[read].pos[1]; *engaged = g_lwFights[read].engaged; *seen = g_lwFights[read].seen;
+    return f;
+}
+int CoXlTestLwTeleportUnder(float hit, float plan, float drawn) { return LwTeleportUnder(hit, plan, drawn); }
 void CoXlTestLwStallSet(int rushed, float dist) { g_lwSquads[0].rushed = (uint8_t)rushed; g_lwSquads[0].stallDist = dist; }
 /* An intent's end with no patrol goal set: whether the squad still has a goal. */
 int CoXlTestLwIntentEndGoal(void) { LwSquad* q = &g_lwSquads[0]; q->goalAt = 5; q->intent = LW_INVESTIGATE; LwIntentEnd(q, "test"); return q->goalAt != 0; }

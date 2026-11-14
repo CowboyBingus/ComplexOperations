@@ -500,6 +500,7 @@ typedef struct LwSquad
     int16_t garrison; /* RETAKE: its g_lwGarrisons index */
     uint16_t home1; /* 2d: its home region + 1 (0 = none yet) */
     int8_t fight; uint8_t rushed, rushedN, tells; ULONGLONG retargetAt, tellAt; /* REINFORCE: its fight (g_lwFights index); members sped up (0x7EFFC0), how many; fight target tells; next goal refresh, next tell */
+    ULONGLONG intentOnAt; uint8_t moves; /* online with this intent since (the limits to reach its point count from here); REINFORCE: times it left a point it had reached for the fight's new place */
     float goalTo[3], stillFrom[2], stillWay, stillPath; ULONGLONG goalAt, stillSince, pendSince, jobAt; uint8_t goalSends, stallNoted, stallTries, stallWaits, goalLines, goalLineHit; int16_t goalNode; float stallDist, goalRaw[3]; ULONGLONG goalLineAt; /* jobAt: its job asked for; goalNode: the route node goalTo was sent for, -1 none */ /* the last goal sent online and when; the leader still since; the nav's request pending since (the stall note) */
     uint8_t planKind; float planDist; /* the last plan's home rule + 1 and distance to its destination, until its goal is sent (LwRouteNote) */
     uint16_t prevNode; uint8_t prevValid, goalPending, alerted; ULONGLONG calmSince; /* the node it walked from (no route starts back to it); a patrol goal held while members are alert; alert since it came online, calm since */
@@ -2371,6 +2372,14 @@ static void LwTestVantage(int seq)
     LwTestTeleport(seq, best[0], best[1]);
 }
 
+/* The test teleport's ground hit against the height plan (-9999: none here): 1 = refused. A hit over 3 m under the
+ * plan may be something under terrain whose collision is not in yet (the Helldiver dies there). Stamps (roads, pads)
+ * reshape the ground under the plan for good, so a hit within 0.5 m of the drawn ground is the ground and is taken. */
+static int LwTeleportUnder(float hit, float plan, float drawn)
+{
+    if (!(plan > -9000.0f) || hit >= plan - 3.0f) return 0;
+    return !(drawn > -9000.0f && fabsf(hit - drawn) <= 0.5f);
+}
 static void LwTestTeleport(int seq, float x, float y)
 {
     ActHealth h; const char* why = "";
@@ -2390,7 +2399,15 @@ static void LwTestTeleport(int seq, float x, float y)
     /* under the water a Helldiver drowns (kind 8 damage; lw92a: put at z -40.7 by water at -39.0, dead 9 s later) */
     float water = g_nearWater.level == g_world.levels ? g_nearWater.high : -500.0f;
     if (pos[2] < water + 0.5f) { Note("living world: test command %d: teleport: the ground at (%.0f, %.0f) reads %.1f m, under the water at %.1f m", seq, (double)x, (double)y, (double)pos[2], (double)water); return; }
-    if (plan > -9000.0f && pos[2] < plan - 3.0f) { Note("living world: test command %d: teleport: the ground at (%.0f, %.0f) reads %.1f m, %.1f m under the height plan: not streamed in yet", seq, (double)x, (double)y, (double)pos[2], (double)(plan - pos[2])); return; }
+    float drawn = -9999.0f;
+    if (plan > -9000.0f && pos[2] < plan - 3.0f) { int tile; drawn = MoveDrawnGround(x, y, &tile); }
+    if (LwTeleportUnder(pos[2], plan, drawn))
+    {
+        char off[96] = "the drawn ground does not read there: the hit is not known to be the ground";
+        if (drawn > -9000.0f) snprintf(off, sizeof off, "%.1f m off the drawn ground at %.1f m: the hit is not the ground", (double)fabsf(pos[2] - drawn), (double)drawn);
+        Note("living world: test command %d: teleport: the ground at (%.0f, %.0f) reads %.1f m, %.1f m under the height plan and %s", seq, (double)x, (double)y, (double)pos[2], (double)(plan - pos[2]), off);
+        return;
+    }
     /* a solo Helldiver put among enemies dies and, reinforced on the same spot, dies again until the mission fails
      * (lw67a, lw71a: back on the ship 90 s later); such a point is refused */
     float nearest; int foes = LwEnemiesNear(x, y, 120.0f, &nearest);
