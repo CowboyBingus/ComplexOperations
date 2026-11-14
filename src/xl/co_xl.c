@@ -396,6 +396,54 @@ int CoXlTestLwNavTick(uintptr_t game)
     return g_lwNav.pins;
 }
 LONG CoXlTestNoiseHead(void) { return g_lwNoiseHead; }
+/* An offline reinforcing squad (index 0) on the way to fight 0 at `t`, one player at `pl`, an extra large disc: the
+ * offline walk's arrival and band-edge hold (living_world_intent.c), without the game. */
+void CoXlTestLwReinforce(const float* pl, const float* at, const float* t)
+{
+    memset(&g_lwWorld, 0, sizeof g_lwWorld); memset(g_lwFights, 0, sizeof g_lwFights);
+    g_lwWorld.count = 1; g_lwWorld.playersAt = 1; g_lwWorld.rMin = 150.0f; g_lwWorld.radius = 7782.0f;
+    memcpy(g_lwWorld.players[0], pl, sizeof(float) * 2);
+    LwSquad* q = &g_lwSquads[0]; memset(q, 0, sizeof *q);
+    ULONGLONG now = GetTickCount64();
+    q->state = LW_OFFLINE; q->intent = LW_REINFORCE; q->speed = 2.0f; q->fight = 0; q->intentAt = now - 1000; q->intentStageAt = now - 60000;
+    q->pos[0] = at[0]; q->pos[1] = at[1]; q->target[0] = t[0]; q->target[1] = t[1];
+    g_lwFights[0].live = 1; g_lwFights[0].born = now - 2000;
+}
+void CoXlTestLwPlayerAt(const float* pl) { memcpy(g_lwWorld.players[0], pl, sizeof(float) * 2); }
+/* One offline walk step of squad 0: its stage, held flag, position and stage time; the push timer is cleared first. */
+void CoXlTestLwWalk(float dt, int* stage, int* held, float* pos, uint64_t* stageAt)
+{
+    LwSquad* q = &g_lwSquads[0];
+    q->pushAt = 0;
+    LwWalk(q, dt);
+    *stage = q->intentStage; *held = q->held; pos[0] = q->pos[0]; pos[1] = q->pos[1]; *stageAt = q->intentStageAt;
+}
+int CoXlTestLwIntent(void) { return g_lwSquads[0].intent; }
+/* The refusal gates' counts as the 30 s note lists them (then cleared). */
+void CoXlTestLwRefuse(const char* why) { LwRefuseCount(why); }
+void CoXlTestLwRefuseList(char* out, size_t size) { LwRefuseList(out, size); }
+/* The squad a member belongs to: listed, or lost in the last 10 s. */
+void CoXlTestLwLostAdd(uint32_t id, int squad) { LwLostAdd(id, squad); }
+int CoXlTestLwSquadOf(uint32_t id, uint64_t later, int* dead) { g_lwWorld.count = 0; return LwSquadOfMember(id, GetTickCount64() + later, dead); }
+void CoXlTestLwSlot(const float* pos, uint32_t i, uint32_t n, float* to) { LwMemberSlot(pos, i, n, to); }
+/* The units the status note gives as the limit: the bubbles' budgets under the density rules, else the effective cap. */
+int CoXlTestLwBudget(int density, int eff, int b0, int b1)
+{
+    g_lwWorld.eff = eff; g_lwDensity.on = density; g_lwDensity.count = 2; g_lwDensity.budget[0] = b0; g_lwDensity.budget[1] = b1;
+    int r = LwUnitBudget(); g_lwDensity.on = -1; return r;
+}
+/* Every build's note of why a waiting event squad is not online: index 0 (reinforcing) with `why`. */
+void CoXlTestLwHeldWhy(const char* why) { g_lwSquads[0].intent = LW_REINFORCE; LwHeldWhy(&g_lwSquads[0], why, 160.0f * 160.0f); }
+/* Squad 0 online and calm with a goal (fresh: a new stretch sent at `now`), its leader at `at` at `now` ms: the stall
+ * check; the 30 s count of still squads. */
+uint32_t CoXlTestLwStall(int fresh, const float* at, const float* goal, uint64_t now)
+{
+    LwSquad* q = &g_lwSquads[0];
+    if (fresh) { memset(q, 0, sizeof *q); q->state = LW_ONLINE; q->cap = 9; float g[3] = {goal[0], goal[1], 0}; LwGoalSent(q, g); q->goalAt = now; g_lwWorld.stalled = 0; }
+    LwStallCheck(q, NULL, 0, at, now);
+    return g_lwWorld.stalled;
+}
+void CoXlTestLwStallLines(uint32_t n) { g_lwWorld.stallLines = n; }
 const char* CoXlTestGuards(uintptr_t game) { return CoXlGuards(game); }
 void CoXlTestRenderShrink(uintptr_t map, void (*rehash)(uintptr_t, uint32_t)) { g_lwRender.rehash = (uintptr_t)rehash; LwRenderShrink(map); }
 void CoXlTestRenderCopies(uintptr_t dev, void (*resize)(uintptr_t, uint32_t)) { g_lwRender.resize = (uintptr_t)resize; LwRenderCopiesFree(dev); }

@@ -495,11 +495,12 @@ typedef struct LwSquad
     int16_t garrison; /* RETAKE: its g_lwGarrisons index */
     uint16_t home1; /* 2d: its home region + 1 (0 = none yet) */
     int8_t fight; uint8_t rushed, rushedN, tells; ULONGLONG retargetAt, tellAt; /* REINFORCE: its fight (g_lwFights index); members sped up (0x7EFFC0), how many; fight target tells; next goal refresh, next tell */
+    float goalTo[3], stillFrom[2]; ULONGLONG goalAt, stillSince, pendSince; uint8_t goalSends, stallNoted; /* the last goal sent online and when; the leader still since; the nav's request pending since (the stall note) */
     uint16_t prevNode; uint8_t prevValid, goalPending, alerted; ULONGLONG calmSince; /* the node it walked from (no route starts back to it); a patrol goal held while members are alert; alert since it came online, calm since */
 } LwSquad;
 static int LwIntentArrived(LwSquad* q); static int LwIntentGoal(LwSquad* q); static void LwIntentOnline(LwSquad* q, const uint32_t* members, int n, const float* at);
-static int LwSteerOk(const LwSquad* q); static uint32_t LwAwareDetector(uint32_t unit); static void LwIntentOffline(LwSquad* q); static int LwIntentHold(LwSquad* q, float nx, float ny); static int LwIntentInside(LwSquad* q); static int LwIntentLeg(LwSquad* q, float dt); static int LwTerritoryGoalOk(const LwSquad* q, int node); static void LwTerritoryTick(void); static void LwIntentTrace(void); static void LwAggroTrace(void); static void LwRetakeScan(void); static void LwTestClear(int seq, uint32_t entity); static void LwRetakeWait(int seq, float s); static void LwRetakeUnfit(int seq); static void LwRetakeTakenCmd(int seq); static int64_t LwFillMasks(uintptr_t desc, float* budget, char* trace, size_t traceLen); static void LwNoiseDrain(void); static void LwHearNote(void); static void LwFightScan(void); static void LwRushNote(void); static void LwTestNoise(int seq, int type, float dx, float dy);
-static void LwDensityOnline(const float* pos, uint32_t members); static int LwDensityOn(void); static int LwDensityRoom(const float* pos, uint32_t members, uint32_t held, char* why, size_t whyLen); static float LwDensityPopulateUnits(int eff); static float LwFarShareLimit(void); static int LwDensitySameBubble(const LwSquad* a, const LwSquad* b); static void LwDensityTick(float dt); static void LwDensityNote(void); static void LwDensityBudgetCmd(int n); static void LwSyncCensus(int seq); /* living_world_density.c */
+static int LwSteerOk(const LwSquad* q); static void LwGoalSent(LwSquad* q, const float* goal); static void LwStallCheck(LwSquad* q, const uint32_t* members, int n, const float* at, ULONGLONG now); static uint32_t LwAwareDetector(uint32_t unit); static void LwIntentOffline(LwSquad* q); static int LwIntentHold(LwSquad* q, float nx, float ny); static int LwIntentInside(LwSquad* q); static int LwIntentLeg(LwSquad* q, float dt); static int LwTerritoryGoalOk(const LwSquad* q, int node); static void LwTerritoryTick(void); static void LwIntentTrace(void); static void LwAggroTrace(void); static void LwRetakeScan(void); static void LwTestClear(int seq, uint32_t entity); static void LwRetakeWait(int seq, float s); static void LwRetakeUnfit(int seq); static void LwRetakeTakenCmd(int seq); static int64_t LwFillMasks(uintptr_t desc, float* budget, char* trace, size_t traceLen); static void LwNoiseDrain(void); static void LwHearNote(void); static void LwFightScan(void); static void LwRushNote(void); static void LwTestNoise(int seq, int type, float dx, float dy);
+static void LwDensityOnline(const float* pos, uint32_t members); static int LwDensityOn(void); static int LwDensityRoom(const float* pos, uint32_t members, uint32_t held, char* why, size_t whyLen); static float LwDensityPopulateUnits(int eff); static float LwFarShareLimit(void); static int LwUnitBudget(void); static int LwDensitySameBubble(const LwSquad* a, const LwSquad* b); static void LwDensityTick(float dt); static void LwDensityNote(void); static void LwDensityBudgetCmd(int n); static void LwSyncCensus(int seq); /* living_world_density.c */
 static void LwLodTick(void); static void LwLodNote(void); static void LwLodCmd(int on); static int LwLodFullUnits(void); /* living_world_lod.c */
 static void LwDeferTick(uintptr_t lg, uint32_t seed); static void LwDeferNote(void); static void LwSpawnSourcesNote(int seq); /* living_world_defer.c */
 static void LwSyncDump(int seq); /* living_world_density.c */
@@ -537,7 +538,9 @@ static LwSquad g_lwSquads[LW_SQUADS_MAX];
 #define LW_SLICES 8
 static uint8_t g_lwEvery[LW_SQUADS_MAX];
 static struct { uint32_t n; float dt[LW_SLICES]; } g_lwSlice;
-static uint8_t LwEveryOf(const LwSquad* q) { return q->state == LW_PENDING || q->state == LW_ONLINE || q->cycled == 1 || q->pulled == 2; }
+/* Every tick, not one slice in eight: squads online or pending, test squads, and an event squad waiting at the band's
+ * edge, so its tries to come online are not eight ticks apart while filler near it tries every tick. */
+static uint8_t LwEveryOf(const LwSquad* q) { return q->state == LW_PENDING || q->state == LW_ONLINE || q->cycled == 1 || q->pulled == 2 || q->held; }
 static struct
 {
     uintptr_t dir, lg; uint32_t seed;
@@ -551,6 +554,8 @@ static struct
     int farUnits;
     uint32_t noFace, moved, overhead, seen, rays, blockUnit, blockTerrain; double rayUs; /* placement and sight refusals, rays cast (30 s) */
     uint32_t crowded; /* points where a member's slot cast would not reach its slot (30 s) */
+    uint32_t seenSlot, spaced; /* points refused: a member's slot in sight; within LW_SPACING of a squad or recent request (30 s) */
+    uint32_t stalled, stallLines; /* online squads still 30 s with a goal (30 s); stall lines this mission */
     uint32_t goals, goalNoFace, goalReplans, goalStuck; /* goals sent, next nodes without a face within 25 m, replans, none found (30 s) */
     uint32_t heights, underGround, overGround; float worstUnder, worstOver; /* members against the drawn ground (30 s) */
     uint32_t building, undrawn; /* points refused: in the cell being built; the ground hit not the drawn ground (30 s) */
@@ -760,6 +765,30 @@ static void LwWalk(LwSquad* q, float dt)
  * mission not ending (0x8F32B0), the 70 room ([[game+0x3326D18]+0x1C] + [dir+0x36C0] - [dir+0x620] - [dir+0x61C], as
  * 0x952F3C) with the reserve, AiJob active + members + 1 below 448 - 32, the effective cap and the online ceiling. */
 static char g_lwRoomWhy[96]; /* the gate that refused the last request (test notes) */
+/* "request frames refused" by gate, for the 30 s note in every build: each refusal text starts with its gate's words
+ * (LwRoomFor, LwDensityRoom, LwOnline), so the count needs no change at the refusal sites. */
+static const struct { const char* prefix; const char* name; } kLwRefuseGates[] = {
+    {"no player list", "no player list"}, {"no player record", "no living player"}, {"the mission is ending", "mission ending"},
+    {"no character", "no tables"}, {"the game's 70 room", "the 70 room"}, {"AiJob", "AiJob"}, {"the networked entities", "networked entities"},
+    {"the boundary requests", "boundary requests"}, {"the upload", "upload"}, {"no player bubble", "no bubble"}, {"the full-update cap", "full-update cap"},
+    {"the cap: bubble", "the bubble budget"}, {"the cap", "the cap"}, {"no requesting squad", "no requester"}, {"no ground", "no ground"}, {"the spawn request returned no record", "no record"},
+    {"the spawn queue was full", "queue full"}, {"no survivors", "no survivors"}};
+#define LW_REFUSE_GATES (sizeof kLwRefuseGates / sizeof kLwRefuseGates[0])
+static uint32_t g_lwRefuse[LW_REFUSE_GATES + 1]; /* the last: a text no gate starts with */
+static void LwRefuseCount(const char* why)
+{
+    size_t k = 0;
+    while (k < LW_REFUSE_GATES && strncmp(why, kLwRefuseGates[k].prefix, strlen(kLwRefuseGates[k].prefix)) != 0) k++;
+    g_lwRefuse[k]++;
+}
+/* "gate N, gate N" for the counts since the last call (then cleared); "" with none. */
+static void LwRefuseList(char* out, size_t size)
+{
+    size_t used = 0; out[0] = 0;
+    for (size_t k = 0; k <= LW_REFUSE_GATES && used < size; k++)
+        if (g_lwRefuse[k]) used += (size_t)snprintf(out + used, size - used, "%s%s %u", used ? ", " : "", k < LW_REFUSE_GATES ? kLwRefuseGates[k].name : "other", g_lwRefuse[k]);
+    memset(g_lwRefuse, 0, sizeof g_lwRefuse);
+}
 /* Room held for a far squad in a player's sight while a hidden near squad it displaced leaves (LwSwapForFar): other
  * requests count it as used until that squad comes online or the hold lapses (audit 1e, 6: near squads took the room
  * first, so far squads came online only by chance). */
@@ -816,6 +845,8 @@ static int LwHiddenFar(const float* p);
 static int LwSeenFromView(int i, const float* point);
 static int g_lwFarSpawn; /* LwOnline: a far (sightline) squad's request */
 static int LwMembersFit(uintptr_t slot, const float* pos, uint32_t n);
+static int LwSlotsHidden(const float* p, uint32_t n);
+static void LwRefuseCount(const char* why);
 
 /* Brings a squad online: its group's slot (found again by definition), the request at its position, heading for its
  * next node. The loader places the point itself (LwPlace: on the navmesh, nothing overhead) and spawns only out of
@@ -848,6 +879,26 @@ static void LwStagedWhy(LwSquad* q, const char* why, float near2)
     lastIdx = idx; lastAt = now; snprintf(last, sizeof last, "%s", why);
     Note("living world: test: %s squad %d (%.0f m, %d units online of %d, far %d): not online: %s", q->pulled == 2 ? "staged" : "waiting", idx, (double)sqrtf(near2),
         g_lwWorld.onlineUnits, g_lwWorld.eff, g_lwWorld.farUnits, why);
+}
+
+/* Every build: why a squad an event sent (investigate, reinforce), waiting at the spawn band's edge, is not online yet.
+ * Noted when its reason changes or every 30 s while it stays, for at most LW_HELD_NOTES lines a mission; the gate that
+ * kept event squads offline is otherwise not in a player's log. */
+#define LW_HELD_NOTES 80
+static void LwHeldWhy(LwSquad* q, const char* why, float near2)
+{
+    static struct { int idx; char why[64]; ULONGLONG at; } last[8]; static int next, notes; static LONG mission = -1;
+    if (mission != g_lwMission) { mission = g_lwMission; memset(last, 0, sizeof last); next = notes = 0; for (int k = 0; k < 8; k++) last[k].idx = -1; }
+    ULONGLONG now = GetTickCount64(); int idx = (int)(q - g_lwSquads), k = 0;
+    while (k < 8 && last[k].idx != idx) k++;
+    if (k < 8 && strncmp(last[k].why, why, sizeof last[k].why - 1) == 0 && now - last[k].at < 30000) return;
+    if (notes >= LW_HELD_NOTES) return;
+    if (k == 8) k = next++ % 8;
+    last[k].idx = idx; last[k].at = now; snprintf(last[k].why, sizeof last[k].why, "%s", why);
+    notes++;
+    Note("living world: squad %d (%s, waiting at the spawn band's edge, %.0f m from the nearest player; %d units online) not online: %s%s", idx,
+        q->intent == LW_REINFORCE ? "reinforcing" : "investigating", (double)sqrtf(near2), g_lwWorld.onlineUnits, why,
+        notes == LW_HELD_NOTES ? " (the last such line this mission)" : "");
 }
 
 static int LwHidden(const float* p);
@@ -904,15 +955,33 @@ static int LwSwapForFar(LwSquad* fq)
 /* A squad an event sent (investigate, reinforce) waiting at the spawn band's edge goes before the world's filler: refused
  * for room, the room is held for it while it waits, and a calm hidden patrol may leave to make it (LwSwapForFar). lw113b:
  * at an outpost the game's own units left room for one squad at a time, and far filler took it by index order. */
+/* An event squad other than `idx` holds room while it waits at the band's edge. A far squad's swap must not take that
+ * hold over (LwSwapForFar moves g_lwHold to its own squad), so far squads wait while it lasts. */
+static int LwIntentHoldOther(int idx)
+{
+    return g_lwHold.idx >= 0 && g_lwHold.idx != idx && GetTickCount64() < g_lwHold.until && g_lwSquads[g_lwHold.idx].held && g_lwSquads[g_lwHold.idx].state == LW_OFFLINE;
+}
 static void LwHoldForIntent(LwSquad* q)
 {
     ULONGLONG now = GetTickCount64(); int idx = (int)(q - g_lwSquads);
-    if (g_lwHold.idx >= 0 && g_lwHold.idx != idx && now < g_lwHold.until && g_lwSquads[g_lwHold.idx].held && g_lwSquads[g_lwHold.idx].state == LW_OFFLINE) return; /* another waiting squad first */
+    if (LwIntentHoldOther(idx)) return; /* another waiting squad first */
     if (!LwSwapForFar(q)) { g_lwHold.idx = idx; g_lwHold.units = q->survivors; g_lwHold.until = now + 20000; }
 }
 
 static const char* g_lwOnlineWhy; /* test notes: the step of LwOnline that refused the last request */
 static int LwTestTraceOn(void);
+/* The request's point: ground under it and its target, the navmesh, every member's slot, and sight (a near squad's
+ * members' slots too). 1 with pos and target set; 0 with g_lwOnlineWhy, and a retry in 3 s unless the ground ray missed. */
+static int LwOnlinePlace(LwSquad* q, uintptr_t slot, uint32_t cap, float* pos, float* target)
+{
+    if (!LwGround(pos[0], pos[1], &pos[2]) || !LwGround(target[0], target[1], &target[2]))
+    { snprintf(g_lwRoomWhy, sizeof g_lwRoomWhy, "no ground under the point or its target"); g_lwOnlineWhy = g_lwRoomWhy; LwRefuseCount(g_lwRoomWhy); g_lwWorld.refused++; return 0; }
+    if (!LwPlace(slot, pos)) { g_lwOnlineWhy = "placement (LwPlace)"; q->retry = GetTickCount64() + 3000; return 0; }
+    if (!LwMembersFit(slot, pos, cap)) { g_lwOnlineWhy = "a member would not reach its slot"; q->retry = GetTickCount64() + 3000; return 0; }
+    if (g_lwTestVisible ? !LwSeenByAny(pos, LW_SIGHT) && (++g_lwTestUnseen, 1) : !(g_lwFarSpawn ? LwHiddenFar(pos) : LwHidden(pos) && LwSlotsHidden(pos, cap)))
+    { g_lwOnlineWhy = g_lwFarSpawn ? "sight: seen on the host's screen (or no off-screen read)" : "sight: seen"; q->retry = GetTickCount64() + 3000; return 0; }
+    return 1;
+}
 static void LwOnline(LwSquad* q)
 {
     g_lwOnlineWhy = NULL; g_lwRequester = (int)(q - g_lwSquads);
@@ -925,18 +994,20 @@ static void LwOnline(LwSquad* q)
     }
     uint32_t cap = q->survivors, size = LwGroupSize(slot);
     if (cap > size) cap = size;
-    if (cap == 0 || !LwRoomFor(cap)) { g_lwOnlineWhy = cap ? g_lwRoomWhy : "no survivors"; g_lwWorld.refused++; return; }
+    if (cap == 0) { g_lwOnlineWhy = "no survivors"; LwRefuseCount(g_lwOnlineWhy); g_lwWorld.refused++; return; }
     float pos[3] = {q->pos[0], q->pos[1], 0}, target[3] = {q->pos[0], q->pos[1], 0};
     if (q->pathAt < q->pathLen) { target[0] = g_lwNodes[q->path[q->pathAt]].x; target[1] = g_lwNodes[q->path[q->pathAt]].y; }
-    if (!LwGround(pos[0], pos[1], &pos[2]) || !LwGround(target[0], target[1], &target[2])) { snprintf(g_lwRoomWhy, sizeof g_lwRoomWhy, "no ground under the point or its target"); g_lwOnlineWhy = g_lwRoomWhy; g_lwWorld.refused++; return; }
-    float wanted[2] = {pos[0], pos[1]};
-    if (!LwPlace(slot, pos)) { g_lwOnlineWhy = "placement (LwPlace)"; q->retry = GetTickCount64() + 3000; return; }
-    if (!LwMembersFit(slot, pos, cap)) { g_lwOnlineWhy = "a member would not reach its slot"; q->retry = GetTickCount64() + 3000; return; }
-    if (g_lwTestVisible ? !LwSeenByAny(pos, LW_SIGHT) && (++g_lwTestUnseen, 1) : !(g_lwFarSpawn ? LwHiddenFar(pos) : LwHidden(pos))) { g_lwOnlineWhy = g_lwFarSpawn ? "sight: seen on the host's screen (or no off-screen read)" : "sight: seen"; q->retry = GetTickCount64() + 3000; return; }
+    /* A squad waiting at the band's edge is placed before room is asked for it: a refusal for room makes a calm patrol
+     * leave for it (LwHoldForIntent), which is wasted when its point would then be refused for placement or sight. */
+    int placeFirst = q->held && !g_lwFarSpawn;
+    if (placeFirst && !LwOnlinePlace(q, slot, cap, pos, target)) return;
+    if (!LwRoomFor(cap)) { g_lwOnlineWhy = g_lwRoomWhy; LwRefuseCount(g_lwRoomWhy); g_lwWorld.refused++; return; }
+    if (!placeFirst && !LwOnlinePlace(q, slot, cap, pos, target)) return;
+    float wanted[2] = {q->pos[0], q->pos[1]};
     uintptr_t rec = g_lw.spawn(g_lwWorld.dir, slot, pos, LW_JOB_PATROL, LW_PATROL_FLAGS, target, NULL, NULL, 0.0f, cap);
-    if (rec == 0) { snprintf(g_lwRoomWhy, sizeof g_lwRoomWhy, "the spawn request returned no record"); g_lwOnlineWhy = g_lwRoomWhy; g_lwWorld.refused++; return; }
+    if (rec == 0) { snprintf(g_lwRoomWhy, sizeof g_lwRoomWhy, "the spawn request returned no record"); g_lwOnlineWhy = g_lwRoomWhy; LwRefuseCount(g_lwRoomWhy); g_lwWorld.refused++; return; }
     uint8_t used = 0;
-    if (SafeRead(rec + 0x12, &used, 1) || used != 1) { snprintf(g_lwRoomWhy, sizeof g_lwRoomWhy, "the spawn queue was full"); g_lwOnlineWhy = g_lwRoomWhy; g_lwWorld.refused++; return; } /* the queue was full: nothing queued */
+    if (SafeRead(rec + 0x12, &used, 1) || used != 1) { snprintf(g_lwRoomWhy, sizeof g_lwRoomWhy, "the spawn queue was full"); g_lwOnlineWhy = g_lwRoomWhy; LwRefuseCount(g_lwRoomWhy); g_lwWorld.refused++; return; } /* the queue was full: nothing queued */
     Note("living world: squad %d requested at (%.0f, %.0f, %.1f) (snapped %.1f m), %.0f m from the nearest player, out of sight, %u of %u members (group 0x%llx)",
         (int)(q - g_lwSquads), (double)pos[0], (double)pos[1], (double)pos[2], (double)sqrtf(LwDist2(wanted, pos[0], pos[1])),
         (double)sqrtf(LwNearestPlayer2(pos[0], pos[1])), cap, size, (unsigned long long)q->definition);
@@ -1072,6 +1143,12 @@ static int LwVariantsOf(uint32_t hash, LwVariant* out)
  * when, for every member and every unit its family's pick can give (LwVariantsOf), the cast reaches the slot within
  * 0.1 m and that slot passes LwPlace's ground check (nothing over it within 2 m). 1 when all fit. */
 static uint32_t g_lwVariantNoted[16];
+/* Member i of n's slot around the request point, as the squad create places it (above); z is the point's. */
+static void LwMemberSlot(const float* pos, uint32_t i, uint32_t n, float* to)
+{
+    float r = 5.0f * sqrtf(((float)i + 0.5f) / ((float)n - 0.5f)), a = (float)(i + 1) * 6.2831854820f / 2.6180336475f;
+    to[0] = pos[0] + r * cosf(a); to[1] = pos[1] + r * sinf(a); to[2] = pos[2];
+}
 static int LwMembersFit(uintptr_t slot, const float* pos, uint32_t n)
 {
     typedef uint64_t (*CastFn)(uint32_t world, const float* from, const float* to, float radius, uint32_t layer, float* out);
@@ -1099,8 +1176,8 @@ static int LwMembersFit(uintptr_t slot, const float* pos, uint32_t n)
         }
         for (uint32_t c = 0; c < count && i < n; c++, i++)
         {
-            float r = 5.0f * sqrtf(((float)i + 0.5f) / ((float)n - 0.5f)), a = (float)(i + 1) * 6.2831854820f / 2.6180336475f;
-            float to[3] = {pos[0] + r * cosf(a), pos[1] + r * sinf(a), pos[2]}, top = NAN;
+            float to[3], top = NAN;
+            LwMemberSlot(pos, i, n, to);
             if (!LwGround(to[0], to[1], &top)) { g_lwWorld.crowded++; return 0; }
             if (MoveTilesOn()) { int tile; float drawn = MoveDrawnGround(to[0], to[1], &tile); if (drawn < -9000.0f || fabsf(top - drawn) > 0.5f) { g_lwWorld.undrawn++; return 0; } }
             for (int j = 0; j < nv; j++)
@@ -1201,6 +1278,21 @@ static int LwHidden(const float* p)
             int seen = LwSeenFromView(i, t);
             if (seen != 0) { g_lwWorld.seen++; return 0; } /* seen, or no ray to tell: refused */
         }
+    }
+    return 1;
+}
+/* Out of sight at every member's slot (LwMemberSlot) too, at the chest (1.0 m over the ground there), as a member's
+ * appearance is checked: slots lie up to 5.3 m from the point, around a corner the point's own rays do not see. A
+ * one-member squad stands on the point. */
+static int LwSlotsHidden(const float* p, uint32_t n)
+{
+    for (uint32_t m = 0; n > 1 && m < n; m++)
+    {
+        float t[3], top = NAN;
+        LwMemberSlot(p, m, n, t);
+        t[2] = (LwGround(t[0], t[1], &top) && isfinite(top) && top > p[2] ? top : p[2]) + 1.0f;
+        for (int i = 0; i < g_lwWorld.playersAt; i++)
+            if (LwDist2(g_lwWorld.players[i], t[0], t[1]) <= LW_SIGHT * LW_SIGHT && LwSeenFromView(i, t) != 0) { g_lwWorld.seenSlot++; return 0; }
     }
     return 1;
 }
@@ -1437,7 +1529,7 @@ static void LwSendGoal(LwSquad* q)
     float goal[3] = {g_lwNodes[q->path[q->pathAt]].x, g_lwNodes[q->path[q->pathAt]].y, 0};
     if (!LwGround(goal[0], goal[1], &goal[2])) return; /* the goal's face search needs its height (40 m sphere, 100 m ray up) */
     g_lw.goal(q->squad, goal);
-    g_lwWorld.goals++;
+    g_lwWorld.goals++; LwGoalSent(q, goal);
 }
 
 /* An online squad: its members kept, losses counted, steered node to node; offline again beyond R_off at alert 0. */
@@ -1451,6 +1543,24 @@ static void LwSendGoal(LwSquad* q)
  * from the hit before when 0; 0 = no player). The attacker is a Helldiver when it is in the avatar hash ([game+0x3326D20]
  * +0xF8, as 0x925524). */
 static int LwGarrisonUnitsAt(uint32_t unit, uint32_t* net, uint32_t* slot);
+/* Members lost in the last LW_LOST_MS, by squad: a member leaves its squad's seen list when it is lost, and one that dies
+ * (an exploding unit) can kill a mate in the same tick or the next, whose loss must still name the squad, not "an enemy". */
+#define LW_LOST_RING 64
+#define LW_LOST_MS 10000
+static struct { uint32_t id; int squad; ULONGLONG at; } g_lwLost[LW_LOST_RING];
+static int g_lwLostNext;
+static void LwLostAdd(uint32_t id, int squad) { int k = g_lwLostNext++ % LW_LOST_RING; g_lwLost[k].id = id; g_lwLost[k].squad = squad; g_lwLost[k].at = GetTickCount64(); }
+/* The squad index whose member (now listed, or lost within LW_LOST_MS: *dead = 1) `id` is; -1 for none. */
+static int LwSquadOfMember(uint32_t id, ULONGLONG now, int* dead)
+{
+    *dead = 0;
+    if (id == 0) return -1;
+    for (int k = 0; k < g_lwWorld.count; k++)
+        for (int m = 0; m < g_lwSquads[k].seenCount; m++) if (g_lwSquads[k].seen[m] == id) return k;
+    for (int k = 0; k < LW_LOST_RING; k++)
+        if (g_lwLost[k].id == id && g_lwLost[k].at && now - g_lwLost[k].at <= LW_LOST_MS) { *dead = 1; return g_lwLost[k].squad; }
+    return -1;
+}
 static const char* LwLostWhy(uint32_t unit, uint32_t* squad, char* by, size_t size, const float* at)
 {
     ActHealth h; uintptr_t m, links, av; uint32_t index;
@@ -1463,9 +1573,7 @@ static const char* LwLostWhy(uint32_t unit, uint32_t* squad, char* by, size_t si
         int helldiver = attacker && EvpPtr(g_lw.game + 0x3326D20u, &av) && EvpHash(av + 0xF8, attacker, 8, 4, &slot);
         uint32_t net = 0, point = 0;
         int enemy = !helldiver && attacker && attacker != unit && LwGarrisonUnitsAt(attacker, &net, &point) == 1;
-        char what[192]; int of = -1;
-        for (int k = 0; k < g_lwWorld.count && of < 0; k++)
-            for (int m = 0; m < g_lwSquads[k].seenCount && of < 0; m++) if (g_lwSquads[k].seen[m] == attacker) of = k;
+        char what[192]; int dead = 0, of = LwSquadOfMember(attacker, GetTickCount64(), &dead);
         if (of >= 0) /* lw42b: five members killed by squad mates, damage hash 0, 140-335 m from any player: the mate's
                       * resource and distance, and the victim's, to tell the units and the reach */
         {
@@ -1473,7 +1581,7 @@ static const char* LwLostWhy(uint32_t unit, uint32_t* squad, char* by, size_t si
             int placed = au && EvpUnitPosition(au, ap);
             /* hash 0 is a bullet or explosion hit (impacts carry E32E9832; KB living-world-spawn-losses "Mate kills"):
              * the shooter's alert says whether it was engaging something */
-            snprintf(what, sizeof what, "a member of squad %d (resource %016llx, alert %u, %s%.1f m away; the dead one %016llx)", of, (unsigned long long)res, LwAlert(attacker),
+            snprintf(what, sizeof what, "a %smember of squad %d (resource %016llx, alert %u, %s%.1f m away; the dead one %016llx)", dead ? "just killed " : "", of, (unsigned long long)res, LwAlert(attacker),
                 placed ? "" : "no position, ", placed ? (double)sqrtf((ap[0] - at[0]) * (ap[0] - at[0]) + (ap[1] - at[1]) * (ap[1] - at[1]) + (ap[2] - at[2]) * (ap[2] - at[2])) : 0.0, (unsigned long long)vres);
         }
         else if (enemy && net && net != 0x7FFF) snprintf(what, sizeof what, "an enemy of garrison net %08X", net);
@@ -1519,6 +1627,7 @@ static void LwOnlineTick(LwSquad* q, int* removals)
             for (int j = i + 1; j < q->seenCount; j++) if (q->seen[j] == q->seen[i]) { twice++; --q->seenCount; q->seen[j] = q->seen[q->seenCount]; memcpy(q->seenAt[j], q->seenAt[q->seenCount], sizeof q->seenAt[j]); j--; }
             if (twice) Note("living world: squad %d: member %08X was listed %d more time(s) in its seen list (counted once)", (int)(q - g_lwSquads), q->seen[i], twice);
             const char* why = LwLostWhy(q->seen[i], &other, by, sizeof by, at);
+            LwLostAdd(q->seen[i], (int)(q - g_lwSquads));
             LwGround(at[0], at[1], &ground);
             Note("living world: squad %d lost member %08X: %s%s (squad now %08X); last seen at (%.0f, %.0f, %.1f), ground there %.1f, %.0f m from the nearest player",
                 (int)(q - g_lwSquads), q->seen[i], why, by, other, (double)at[0], (double)at[1], (double)at[2], (double)ground,
@@ -1633,6 +1742,7 @@ static void LwOnlineTick(LwSquad* q, int* removals)
     }
     q->pos[0] = at[0]; q->pos[1] = at[1];
     LwIntentOnline(q, members, n, at);
+    LwStallCheck(q, members, n, at, now);
     /* test instrument (HELLFORGE_LW_TEST_TRACE=1): once per squad, when its leader is within 120 m of a player and that
      * player's eye sees its chest (the sight ray), a note for a screenshot aimed at it */
     static int testView = -1;
@@ -1714,7 +1824,7 @@ static void LwPendingTick(LwSquad* q)
     if (used == 1 && id != none && id != 0)
     {
         Note("living world: squad %d is online as %08X after %.1f s", (int)(q - g_lwSquads), id, (double)(GetTickCount64() - q->since) / 1000.0);
-        q->squad = id; q->state = LW_ONLINE; q->rec = 0; q->moved = 0;
+        q->squad = id; q->state = LW_ONLINE; q->rec = 0; q->moved = 0; q->goalAt = q->stillSince = q->pendSince = 0; q->goalSends = q->stallNoted = 0;
         /* keep at once (audit 1, criterion 6): the dispatch wrote rec+8 inside the director (0x954F4C), and the members
          * that exist by now must not meet the next despawner pass (0x572C69) with keep 0 */
         uint32_t members[32];
@@ -2637,7 +2747,7 @@ static void LwSquadsTick(void)
     if (dir != g_lwWorld.dir || lg != g_lwWorld.lg || seed != g_lwWorld.seed) /* a new mission */
     {
         LwSightRelease();
-        memset(&g_lwWorld, 0, sizeof g_lwWorld);
+        memset(&g_lwWorld, 0, sizeof g_lwWorld); memset(g_lwLost, 0, sizeof g_lwLost);
         g_lwWorld.dir = dir; g_lwWorld.lg = lg; g_lwWorld.seed = seed;
         g_lwMission++;
         g_lwRandom ^= seed | 1u;
@@ -2690,6 +2800,8 @@ static void LwSquadsTick(void)
             int nearBand = near2 < LW_R_ON * LW_R_ON && near2 >= rMin * rMin, farBand = !nearBand && near2 >= LW_R_ON * LW_R_ON && near2 < LwSquadBand(q) * LwSquadBand(q);
             if (!(!requested && (farBand && !back ? farTries < 2 : attempts < 4) && q->pos[0] * q->pos[0] + q->pos[1] * q->pos[1] < r * r && (nearBand || back || farBand)))
             {
+                if (q->held && !(nearBand || farBand) && near2 < rMin * rMin)
+                { snprintf(whyBuf, sizeof whyBuf, "nearer a player than the spawn band's %.0f m", (double)rMin); why = whyBuf; }
                 if (q->pulled == 2)
                 {
                     if (requested) why = "another squad's request this tick";
@@ -2700,7 +2812,7 @@ static void LwSquadsTick(void)
             }
             else
             {
-                if (!back && LwRecentNear(q->pos)) { why = "within 60 m of an online squad or a request in the last minute"; q->retry = now + 3000; goto offlineDone; } /* spaced from online squads and recent requests (audit 1, 11) */
+                if (!back && LwRecentNear(q->pos)) { why = "within 60 m of an online squad or a request in the last minute"; g_lwWorld.spaced++; q->retry = now + 3000; goto offlineDone; } /* spaced from online squads and recent requests (audit 1, 11) */
                 if (farBand && !back)
                 {
                     if ((float)(farUnits + q->survivors) > LwFarShareLimit())
@@ -2724,7 +2836,7 @@ static void LwSquadsTick(void)
                 }
                 if (back && requested) { q->cycled = 2; Note("living world: test: squad %d comes back with its %u survivors", (int)(q - g_lwSquads), q->cap); }
                 if (q->state == LW_OFFLINE) why = g_lwOnlineWhy ? g_lwOnlineWhy : "the request was not taken";
-                if (q->state == LW_OFFLINE && farBand && !back && g_lwOnlineWhy == g_lwRoomWhy &&
+                if (q->state == LW_OFFLINE && farBand && !back && g_lwOnlineWhy == g_lwRoomWhy && !LwIntentHoldOther(-1) &&
                     (strncmp(g_lwRoomWhy, "the game's 70 room", 18) == 0 || strncmp(g_lwRoomWhy, "the cap", 7) == 0))
                     LwSwapForFar(q);
                 if (q->state == LW_OFFLINE && q->held && g_lwOnlineWhy == g_lwRoomWhy &&
@@ -2733,7 +2845,8 @@ static void LwSquadsTick(void)
                 if (q->state != LW_OFFLINE && g_lwHold.idx == (int)(q - g_lwSquads)) g_lwHold.idx = -1; /* served */
             }
         offlineDone:
-            if ((q->pulled == 2 || (q->held && LwTestTraceOn())) && why) LwStagedWhy(q, why, near2); /* test notes */
+            if (q->pulled == 2 && why) LwStagedWhy(q, why, near2); /* test notes */
+            else if (q->held && why) LwHeldWhy(q, why, near2);
         }
         else if (q->state == LW_PENDING) { LwPendingTick(q); online++; }
         else if (q->state == LW_ONLINE) { LwOnlineTick(q, &removals); online++; }
@@ -2757,23 +2870,25 @@ static void LwSquadsTick(void)
             Note("living world: steering walls (30 s): %u requests, %u with no wall segment (%.1f%%), G %.1f m", g_lwWalls.requests,
                 g_lwWalls.empty, 100.0 * g_lwWalls.empty / g_lwWalls.requests, (double)(g_lwWallReach ? *g_lwWallReach : 0));
         g_lwWalls.requests = g_lwWalls.empty = 0;
-        if (g_lwWorld.rays || g_lwWorld.noFace || g_lwWorld.moved || g_lwWorld.overhead || g_lwWorld.crowded || g_lwWorld.building || g_lwWorld.undrawn)
+        if (g_lwWorld.rays || g_lwWorld.noFace || g_lwWorld.moved || g_lwWorld.overhead || g_lwWorld.crowded || g_lwWorld.building || g_lwWorld.undrawn || g_lwWorld.spaced)
             Note("living world: placement (30 s): refused %u with no navmesh face within 10 m, %u snapped more than 2 m, %u under something, %u where a member would not reach its slot, %u in a player's sight, "
-                "%u in the cell being built, %u where the ground hit is not the drawn ground; %u sight rays, %.1f us each; blocked by terrain %u, by static scenery %u", g_lwWorld.noFace, g_lwWorld.moved,
-                g_lwWorld.overhead, g_lwWorld.crowded, g_lwWorld.seen, g_lwWorld.building, g_lwWorld.undrawn,
+                "%u with a member's slot in a player's sight, %u in the cell being built, %u where the ground hit is not the drawn ground, %u within %.0f m of an online squad or a request in the last minute; "
+                "%u sight rays, %.1f us each; blocked by terrain %u, by static scenery %u", g_lwWorld.noFace, g_lwWorld.moved,
+                g_lwWorld.overhead, g_lwWorld.crowded, g_lwWorld.seen, g_lwWorld.seenSlot, g_lwWorld.building, g_lwWorld.undrawn, g_lwWorld.spaced, (double)LW_SPACING,
                 g_lwWorld.rays, g_lwWorld.rays ? g_lwWorld.rayUs / g_lwWorld.rays : 0.0, g_lwWorld.blockTerrain, g_lwWorld.blockUnit);
-        g_lwWorld.building = g_lwWorld.undrawn = 0;
+        g_lwWorld.building = g_lwWorld.undrawn = g_lwWorld.seenSlot = g_lwWorld.spaced = 0;
         g_lwWorld.noFace = g_lwWorld.moved = g_lwWorld.overhead = g_lwWorld.seen = g_lwWorld.rays = g_lwWorld.blockUnit = g_lwWorld.blockTerrain = g_lwWorld.crowded = 0; g_lwWorld.rayUs = 0;
-        if (g_lwWorld.goals || g_lwWorld.goalNoFace)
-            Note("living world: goals (30 s): %u sent, %u next nodes with no navmesh within 25 m, %u replans, %u squads left without a reachable goal",
-                g_lwWorld.goals, g_lwWorld.goalNoFace, g_lwWorld.goalReplans, g_lwWorld.goalStuck);
-        g_lwWorld.goals = g_lwWorld.goalNoFace = g_lwWorld.goalReplans = g_lwWorld.goalStuck = 0;
+        if (g_lwWorld.goals || g_lwWorld.goalNoFace || g_lwWorld.stalled)
+            Note("living world: goals (30 s): %u sent, %u next nodes with no navmesh within 25 m, %u replans, %u squads left without a reachable goal; %u online squads still for 30 s with a goal",
+                g_lwWorld.goals, g_lwWorld.goalNoFace, g_lwWorld.goalReplans, g_lwWorld.goalStuck, g_lwWorld.stalled);
+        g_lwWorld.goals = g_lwWorld.goalNoFace = g_lwWorld.goalReplans = g_lwWorld.goalStuck = g_lwWorld.stalled = 0;
         LwNavTypeDump(); /* test (HELLFORGE_LW_TEST_NAV=1): agent types and obstacle areas, twice a level */
         LwHearNote(); LwRushNote();
         LwGroundNote(); LwTiltNote();
-        Note("living world: %d squads, %d online (%d units of %d), %u spawned, %u taken offline, %u destroyed, %u request frames refused; job-1 units %u, AI %u; "
-            "player 1 at (%.0f, %.0f); by sightline: %u spawned (%u in sight, off the host's screen), %d units now", g_lwWorld.count, online, g_lwWorld.onlineUnits, g_lwWorld.eff, g_lwWorld.spawned, g_lwWorld.offlined, g_lwWorld.died,
-            g_lwWorld.refused, EvpU32(dir + 0x614, 0), LwAiCount(), (double)(g_lwWorld.playersAt ? g_lwWorld.players[0][0] : 0),
+        char gates[384]; LwRefuseList(gates, sizeof gates);
+        Note("living world: %d squads, %d online (%d units of %d), %u spawned, %u taken offline, %u destroyed, %u request frames refused%s%s%s; job-1 units %u, AI %u; "
+            "player 1 at (%.0f, %.0f); by sightline: %u spawned (%u in sight, off the host's screen), %d units now", g_lwWorld.count, online, g_lwWorld.onlineUnits, LwUnitBudget(), g_lwWorld.spawned, g_lwWorld.offlined, g_lwWorld.died,
+            g_lwWorld.refused, gates[0] ? " (30 s: " : "", gates, gates[0] ? ")" : "", EvpU32(dir + 0x614, 0), LwAiCount(), (double)(g_lwWorld.playersAt ? g_lwWorld.players[0][0] : 0),
             (double)(g_lwWorld.playersAt ? g_lwWorld.players[0][1] : 0), g_lwWorld.farSpawned, g_lwOffScreen, g_lwWorld.farUnits);
     }
 }
