@@ -4,12 +4,12 @@
  * - Grade: the target is the mean of the steepest-allowed surface below the ground and the one above it. That is the
  *   profile within the limit that strays least from the ground at its worst station (cut and fill balance).
  * - Pins: a station on a pad keeps the ground's height, and the target is clamped to what the pins allow around
- *   them. Pins too far apart in height for the road between them cannot be met: those stations are counted, and the
- *   caller reports the place instead of leaving a steep piece unsaid.
+ *   them. Pins too far apart in height for the road between them cannot be met: the road keeps the limit and passes
+ *   each of the two by half of what is lacking. Those stations are counted, and the caller reports the place.
  * - Floor: a station may carry a height it must stay above. The range the pins give is raised to the lowest surface
  *   over the floors that keeps the slope, so the road climbs out of a low place within the limit.
  * - Bends: crests and dips are eased by a fixed count of averaging passes, the grade enforced after each. */
-#define GRADE_LINKS 6
+#define GRADE_LINKS 8
 #define GRADE_FAR 1.0e30f
 #define GRADE_ROUNDS 4096u
 typedef struct GradeStation
@@ -70,14 +70,31 @@ static uint32_t GradePins(GradeStation* s, uint32_t n, float slope, float* under
     return torn;
 }
 
+/* The target moved into what the pins allow. Where the pins disagree (low > high) it is their middle, at a pinned
+ * station too: the mean of the two clamps is as gentle as its inputs, so no step stands beside a pin the road
+ * cannot reach, and the pin is missed by half of what the limit lacks (GradeMissed). */
 static void GradeClamp(GradeStation* s, uint32_t n)
 {
     for (uint32_t i = 0; i < n; i++)
     {
-        if (s[i].low > s[i].high) s[i].target = s[i].pinned ? s[i].ground : 0.5f * (s[i].low + s[i].high);
-        else if (s[i].target < s[i].low) s[i].target = s[i].low;
-        else if (s[i].target > s[i].high) s[i].target = s[i].high;
+        const float t = s[i].target, up = t > s[i].low ? t : s[i].low, down = t < s[i].high ? t : s[i].high;
+        s[i].target = 0.5f * ((down > s[i].low ? down : s[i].low) + (up < s[i].high ? up : s[i].high));
     }
+}
+
+/* The pinned stations the profile leaves by more than `by` metres, and the furthest of them (*worst, *at). */
+static uint32_t GradeMissed(const GradeStation* s, uint32_t n, float by, float* worst, uint32_t* at)
+{
+    uint32_t missed = 0;
+    *worst = 0.0f; *at = 0;
+    for (uint32_t i = 0; i < n; i++)
+    {
+        const float off = fabsf(s[i].target - s[i].ground);
+        if (!s[i].pinned || !(off > by)) continue;
+        missed++;
+        if (off > *worst) { *worst = off; *at = i; }
+    }
+    return missed;
 }
 
 /* The sharpest change of grade at a station with two links, as a slope difference (rise over run). */

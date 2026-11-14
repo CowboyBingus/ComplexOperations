@@ -1007,6 +1007,7 @@ uint32_t CoXlTestGradeField(const float* pts, const uint32_t* counts, const uint
     }
     for (uint32_t i = 0; i < f->stations; i++) { f->s[i].ground = ground(f->xy[2 * i], f->xy[2 * i + 1]); f->s[i].floor = floor; }
     GradeFieldLinks(f);
+    GradeFieldTies(f);
     for (uint32_t i = 0; i < f->stations; i++) f->s[i].cross = GradeFieldCross(f, i, TestGradeGround, (void*)ground);
     *torn = GradeSolve(f->s, f->stations, slope, passes);
     GradeFieldIndex(f, world);
@@ -1020,12 +1021,14 @@ void CoXlTestGradePads(const float* pads, uint32_t n)
     for (uint32_t i = 0; i < n && i < NEAR_PADS; i++, pads += 6)
         g_pads.pad[g_pads.count++] = (NearPad){.cx = pads[0], .cy = pads[1], .c = 1.0f, .a = pads[2], .ba = pads[3], .k = pads[4], .foot = pads[5] != 0.0f};
 }
-/* The road's share at a point (corner metres): all = 1 as a near tile takes it, 0 as the level's heights and the pins do. */
-float CoXlTestGradeFree(float world, float playable, float x, float y, int all)
+/* The road's share at a point (corner metres), as the level's heights and a near tile take it; *pinned: a station
+ * there keeps its ground. */
+float CoXlTestGradeFree(float world, float playable, float x, float y, int* pinned)
 {
     g_grade.world = world; g_grade.playable = playable;
     RoadGradePadIndex();
-    return RoadGradeFreeOf(x, y, all);
+    *pinned = RoadGradePinned(x, y);
+    return RoadGradeFree(x, y);
 }
 float CoXlTestGradeFieldAt(float x, float y, float* z, float* d) { return GradeFieldAt(&g_testField, x, y, z, d); }
 float CoXlTestGradeStation(uint32_t i, float* xy, float* band, uint32_t* links)
@@ -1054,6 +1057,26 @@ uint32_t CoXlTestGradeDraw(float world, float playable, GradeTriFn tri, float px
     *cells = g_grade.drawn;
     memset(&g_grade.f, 0, sizeof g_grade.f);
     return given;
+}
+uint32_t CoXlTestGradeTies(uint32_t* untied) { *untied = g_testField.untied; return g_testField.ties; }
+/* A near tile's texel on the test field: the level's height there, sharpened as the tile takes it. */
+float CoXlTestGradeSharpen(float world, float playable, float wx, float wy, float coarse)
+{
+    g_grade.f = g_testField; /* lent, as for the draw */
+    g_grade.world = world; g_grade.playable = playable; g_grade.ready = 1; g_grade.off = 0; g_grade.level = g_world.levels;
+    RoadGradePadIndex();
+    const float h = RoadGradeSharpen(wx, wy, coarse);
+    memset(&g_grade.f, 0, sizeof g_grade.f); g_grade.ready = 0; g_grade.level = -1;
+    return h;
+}
+/* The merge's first op on a level whose roads were graded (level) or not (-1): 1 when the roads will be graded again. */
+int CoXlTestGradeRestart(int graded)
+{
+    g_grade.level = graded ? g_world.levels : -1; g_grade.phase = graded ? 2 : 0; g_grade.ready = graded;
+    RoadGradeBegin();
+    const int again = graded && g_grade.level == -1 && g_grade.phase == 0 && !g_grade.ready;
+    g_grade.level = -1; g_grade.phase = 0; g_grade.ready = 0;
+    return again;
 }
 /* The roads' build (proto/difficulty_world_roadbuild.c): the point spacing, its stub and the arterial choice. */
 uint32_t CoXlTestRoadsLeftOut(const uint8_t* recs, uint32_t n, const uint8_t* taken, uint32_t used, uint32_t capacity, float spacing, uint32_t* total)

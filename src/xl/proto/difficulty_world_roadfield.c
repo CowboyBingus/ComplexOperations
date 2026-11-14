@@ -22,7 +22,7 @@ typedef struct GradeField
     GradeStation* s; float* xy; float* band;
     GradeSeg* seg;
     uint32_t* start; uint32_t* item;
-    uint32_t stations, stationRoom, segs, segRoom, unlinked, capped;
+    uint32_t stations, stationRoom, segs, segRoom, unlinked, capped, ties, untied;
     int grid;
 } GradeField;
 
@@ -132,6 +132,52 @@ static void GradeFieldLinks(GradeField* f)
         const GradeSeg* g = &f->seg[k];
         f->unlinked += !GradeLink(f->s, g->a, g->b, sqrtf((g->bx - g->ax) * (g->bx - g->ax) + (g->by - g->ay) * (g->by - g->ay)));
     }
+}
+
+/* Roads that cross or run side by side without sharing a station (two spurs into one place, a spur along an
+ * arterial) would each take their own height, and the field's mean between them tilts both. So after the links: any
+ * two stations within GRADE_TIE that no piece joins are tied by a link of GRADE_TIE_RATIO times their distance, which
+ * holds their heights within 3 degrees of each other across the gap (the ratio of tan 3 to the solver's tan 4.5).
+ * Stations one or two links apart are a road's own and are left alone. It reads positions only. ties counts them,
+ * untied the pairs a full station had no room for. */
+#define GRADE_TIE 8.0f
+#define GRADE_TIE_RATIO 0.66f
+#define GRADE_TIE_LEAST 0.5f
+#define GRADE_TIE_HASH 16384u
+static uint32_t GradeTieCell(int cx, int cy) { return ((uint32_t)cx * 73856093u ^ (uint32_t)cy * 19349663u) % GRADE_TIE_HASH; }
+static void GradeFieldTies(GradeField* f)
+{
+    f->ties = f->untied = 0;
+    uint32_t* head = (uint32_t*)malloc(4 * (size_t)(GRADE_TIE_HASH + (f->stations ? f->stations : 1)));
+    if (head == NULL) return;
+    uint32_t* next = head + GRADE_TIE_HASH;
+    memset(head, 0xFF, 4 * (size_t)GRADE_TIE_HASH);
+    for (uint32_t i = f->stations; i-- > 0;)
+    {
+        const uint32_t cell = GradeTieCell((int)floorf(f->xy[2 * i] / GRADE_TIE), (int)floorf(f->xy[2 * i + 1] / GRADE_TIE));
+        next[i] = head[cell]; head[cell] = i;
+    }
+    for (uint32_t i = 0; i < f->stations; i++)
+    {
+        const int cx = (int)floorf(f->xy[2 * i] / GRADE_TIE), cy = (int)floorf(f->xy[2 * i + 1] / GRADE_TIE);
+        for (int q = 0; q < 9; q++)
+            for (uint32_t j = head[GradeTieCell(cx + q % 3 - 1, cy + q / 3 - 1)]; j != GRADE_NONE; j = next[j])
+            {
+                const float far_ = GradeFar(f, j, f->xy[2 * i], f->xy[2 * i + 1]);
+                if (j <= i || !(far_ < GRADE_TIE)) continue;
+                /* not its own road's next stations: a link, or a link's link, joins them already */
+                int joined = 0;
+                for (uint32_t k = 0; k < f->s[i].links && !joined; k++)
+                {
+                    const GradeStation* via = &f->s[f->s[i].link[k]];
+                    joined = f->s[i].link[k] == j;
+                    for (uint32_t m = 0; m < via->links && !joined; m++) joined = via->link[m] == j;
+                }
+                if (joined) continue;
+                if (GradeLink(f->s, i, j, far_ * GRADE_TIE_RATIO > GRADE_TIE_LEAST ? far_ * GRADE_TIE_RATIO : GRADE_TIE_LEAST)) f->ties++; else f->untied++;
+            }
+    }
+    free(head);
 }
 
 /* After the solve: each station's band from what it cuts or fills, and the pieces in a grid of GRADE_CELL cells, each
@@ -254,7 +300,7 @@ static float GradeFieldAt(const GradeField* f, float x, float y, float* z, float
 #define GRADE_ACROSS 3.0f
 #define GRADE_BINS 360 /* quarter degrees */
 typedef float (*GradeHeightFn)(void* ctx, float x, float y);
-typedef struct GradeRoad { double metres, over[4], rise; float steepest, cross; uint32_t bin[GRADE_BINS]; } GradeRoad; /* over: 5, 8, 12, 18 degrees */
+typedef struct GradeRoad { double metres, over[4], rise; float steepest, cross, steepAt[2], crossAt[2]; uint32_t bin[GRADE_BINS]; } GradeRoad; /* over: 5, 8, 12, 18 degrees; At: where the worst is */
 
 static void GradeRoadAlong(GradeHeightFn height, void* ctx, const float* pts, uint32_t n, GradeRoad* out)
 {
@@ -276,7 +322,7 @@ static void GradeRoadAlong(GradeHeightFn height, void* ctx, const float* pts, ui
             if (isfinite(left) && isfinite(right))
             {
                 const float cross = atanf(fabsf(left - right) / (2.0f * GRADE_ACROSS)) * deg;
-                if (cross > out->cross) out->cross = cross;
+                if (cross > out->cross) { out->cross = cross; out->crossAt[0] = x; out->crossAt[1] = y; }
             }
             if (run > 0) { out->metres += GRADE_SAMPLE; out->rise += fabsf(h - ring[(run - 1) % lag]); }
             if (run >= lag)
@@ -284,7 +330,7 @@ static void GradeRoadAlong(GradeHeightFn height, void* ctx, const float* pts, ui
                 const float grade = atanf(fabsf(h - ring[run % lag]) / GRADE_BASE) * deg;
                 uint32_t bin = (uint32_t)(grade * 4.0f);
                 out->bin[bin < GRADE_BINS ? bin : GRADE_BINS - 1]++;
-                if (grade > out->steepest) out->steepest = grade;
+                if (grade > out->steepest) { out->steepest = grade; out->steepAt[0] = x; out->steepAt[1] = y; }
                 if (grade > 5.0f) out->over[0] += GRADE_SAMPLE;
                 if (grade > 8.0f) out->over[1] += GRADE_SAMPLE;
                 if (grade > 12.0f) out->over[2] += GRADE_SAMPLE;
@@ -315,6 +361,6 @@ static void GradeRoadAdd(GradeRoad* sum, const GradeRoad* g)
     sum->metres += g->metres; sum->rise += g->rise;
     for (int k = 0; k < 4; k++) sum->over[k] += g->over[k];
     for (uint32_t b = 0; b < GRADE_BINS; b++) sum->bin[b] += g->bin[b];
-    if (g->steepest > sum->steepest) sum->steepest = g->steepest;
-    if (g->cross > sum->cross) sum->cross = g->cross;
+    if (g->steepest > sum->steepest) { sum->steepest = g->steepest; sum->steepAt[0] = g->steepAt[0]; sum->steepAt[1] = g->steepAt[1]; }
+    if (g->cross > sum->cross) { sum->cross = g->cross; sum->crossAt[0] = g->crossAt[0]; sum->crossAt[1] = g->crossAt[1]; }
 }

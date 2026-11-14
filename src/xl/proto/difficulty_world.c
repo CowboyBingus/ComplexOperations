@@ -4861,6 +4861,7 @@ static void RoadsSpursBuild(uintptr_t block, uint64_t context);
 static void RoadsCorridorNote(uintptr_t block, const uint8_t* ops, uint32_t before, uint32_t total);
 static void RoadsSlopeNote(uintptr_t block);
 static int RoadGradeStep(uint64_t context); /* difficulty_world_roadlevel.c */
+static void RoadGradeBegin(void);
 static void RoadGradeEmbankNote(uint64_t record);
 static void RoadGradeAfterNote(uintptr_t block);
 static void RoadsIndexNote(uint64_t context, const char* when);
@@ -4912,6 +4913,7 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
         /* the map's terrain at vanilla density: the level waits at its SmoothHeightmap while the tiles are drawn */
         if (o == 0x40 && TerrainStep(records, (uint32_t)d, i, b, g, h)) { TerrainDiagAfter(records, index, diagAt, diagOp); return 0; }
         /* the roads' ground: the level waits at its LevelRoutes while the graded field is drawn */
+        if (o == 0x38 && g_world.current == 8.0f) RoadGradeBegin();
         if (o == 0xB8 && g_world.current == 8.0f) RoadGradeEmbankNote(records + (uint64_t)i * 0x19B0u);
         if (o == 0xB7 && RoadGradeStep(b)) { TerrainDiagAfter(records, index, diagAt, diagOp); return 0; }
         if (o == 0x0A && g_world.current == 8.0f) TerrainNearWater(records + (uint64_t)i * 0x19B0u);

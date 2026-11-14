@@ -2499,6 +2499,7 @@ static int NearCalStep(uint64_t records, uint32_t end, uint64_t context, uint64_
  *    texel), so the tile is the coarse surface to the centimetre where the coarse terrain's free edge lies; so are the
  *    cells the triangles miss H - T in by over NEAR_TEXEL_MISS. */
 #define NEAR_BATCH 16384
+#define NEAR_RENDER_FAR 100.0f /* metres: a tile's render this far from the level's capture on average is refused */
 #define NEAR_SHIFT_RADIUS 128 /* the shift's box passes: 257 texels (~129 m), three of them */
 #define NEAR_GRID 1025 /* grid lines: texel -0.5, 4, 8, ..., 4092, 4095.5 */
 #define NEAR_BLOCKS ((NEAR_GRID - 1) / 2) /* 2 x 2 grid cells: a 4.5 m block */
@@ -4447,7 +4448,7 @@ static struct { int phase, back, s64; uint32_t id, polls, waits; } g_stepDump;
 static int NearStepDumpOn(void)
 {
     static int on = -1;
-    if (on < 0) { char t[4] = ""; on = GetEnvironmentVariableA("HELLFORGE_XL_NEAR_STEPDUMP", t, sizeof t) > 0 && t[0] == '1'; }
+    if (on < 0) { char t[4] = ""; on = GetEnvironmentVariableA("HELLFORGE_XL_NEAR_STEPDUMP", t, sizeof t) > 0 ? (t[0] == '1' ? 1 : t[0] == '2' ? 2 : 0) : 0; }
     return on;
 }
 
@@ -4498,10 +4499,12 @@ static int NearStepDump(uint64_t records, uint32_t end, uint64_t context, uint64
             swprintf(name, 64, L"near-step-%d-%d-%02d-%02X%ls.u16", (int)lroundf(g_near.centre[0]), (int)lroundf(g_near.centre[1]), s, (unsigned)g_near.stepOp[s],
                 g_near.stepKind[s] == NEAR_TILE ? L"t" : L"");
         else swprintf(name, 64, L"near-step-%02d-%02X%ls.u16", s, (unsigned)g_near.stepOp[s], g_near.stepKind[s] == NEAR_TILE ? L"t" : L"");
-        HANDLE f = OpenLog(name);
-        if (copy != NULL && f != INVALID_HANDLE_VALUE && !SafeRead(data, copy, (size_t)4096 * 4096 * 2))
+        /* =2: the heights' line alone, no 32 MB file a step */
+        HANDLE f = NearStepDumpOn() == 1 ? OpenLog(name) : INVALID_HANDLE_VALUE;
+        if (copy != NULL && (f != INVALID_HANDLE_VALUE || NearStepDumpOn() == 2) && !SafeRead(data, copy, (size_t)4096 * 4096 * 2))
         {
-            DWORD wrote = 0; WriteFile(f, copy, 4096u * 4096u * 2u, &wrote, NULL);
+            DWORD wrote = 0;
+            if (f != INVALID_HANDLE_VALUE) WriteFile(f, copy, 4096u * 4096u * 2u, &wrote, NULL);
             double sum = 0; uint16_t lo = 65535, hi = 0;
             for (size_t i = 0; i < (size_t)4096 * 4096; i += 64) { sum += copy[i]; if (copy[i] < lo) lo = copy[i]; if (copy[i] > hi) hi = copy[i]; }
             Note("difficulty: near terrain: step dump after step %d (op 0x%02X%s): heights %.1f..%.1f m, mean %.1f", s, g_near.stepOp[s],
@@ -5780,10 +5783,12 @@ static int NearChooseCentre(float out[2], int picker)
     return 1;
 }
 
+static void NearLeftoverNote(uint64_t context); /* after g_tiles */
 static int TerrainNearReplay(uint64_t records, uint32_t end, uint32_t at, uint64_t context, uint64_t g, uint64_t h)
 {
     if (g_near.level != g_world.levels)
     {
+        NearLeftoverNote(context);
         MoveLevelGone();
         g_near.level = g_world.levels; g_near.state = NEAR_IDLE; g_near.ready = 0; g_near.handle = 0;
         /* the previous level's tile textures: its world is gone */
@@ -5958,6 +5963,14 @@ static int TerrainNearReplay(uint64_t records, uint32_t end, uint32_t at, uint64
                 diff += fabs((double)m - (double)NearGlobalAt(wx, wy));
                 if (m < lo) lo = m; if (m > hi) hi = m; sum += m; n++;
             }
+        /* a render that far from the level it was replayed from is not this ground (the conform moves 480 m at most) */
+        if (n != 0 && diff / n > NEAR_RENDER_FAR)
+        {
+            Note("difficulty: near terrain: the tile's render is refused: heights %.1f..%.1f m, mean |tile - level capture| %.2f m (over %.0f); no tile",
+                (double)lo, (double)hi, diff / n, (double)NEAR_RENDER_FAR);
+            NearReplayEnd(0);
+            return 0;
+        }
         if (NearConformOn() && g_near.state == NEAR_READBACK && !NearCalOn())
         {
             Note("difficulty: near terrain: the tile is rendered (%.1f s): heights %.1f..%.1f m; mean |tile - level capture| %.2f m; conforming it to the coarse terrain",
@@ -6015,6 +6028,25 @@ static int NearSpawnSlots(uint64_t world)
     return fine;
 }
 
+/* Research: the materials of a terrain the spawn returned (count [t+0xA60], 16-byte entries at [t+0xA68], the material
+ * at +8; its render handle [m+4] and its variable block [m+0x10] with the block's table, count and data pointers), all
+ * read through SafeRead. A count over 8 is not a terrain's: nothing more is read. */
+static void NearSpawnMaterialNote(uint64_t t)
+{
+    uint32_t count = 0; uint64_t list = 0;
+    if (t == 0 || SafeRead(t + 0xA60, &count, 4) || SafeRead(t + 0xA68, &list, 8)) { Note("difficulty: near terrain: spawn materials: terrain 0x%llX not readable", (unsigned long long)t); return; }
+    Note("difficulty: near terrain: spawn materials: level %ld terrain 0x%llX holds %u material(s) at 0x%llX", (long)g_world.levels, (unsigned long long)t, count,
+        (unsigned long long)list);
+    for (uint32_t i = 0; i < count && count <= 8 && list != 0; i++)
+    {
+        uint64_t m = 0, block = 0, table = 0, data = 0; uint32_t handle = 0, vars = 0;
+        if (SafeRead(list + 16ull * i + 8, &m, 8) || m == 0 || SafeRead(m + 4, &handle, 4) || SafeRead(m + 0x10, &block, 8)) { Note("difficulty: near terrain: spawn materials: %u not readable", i); continue; }
+        const int ok = block != 0 && !SafeRead(block + 0x48, &table, 8) && !SafeRead(block + 0x50, &vars, 4) && !SafeRead(block + 0x58, &data, 8);
+        Note("difficulty: near terrain: spawn materials: %u: material 0x%llX handle 0x%X block 0x%llX%s: table 0x%llX, %u variables, data 0x%llX", i, (unsigned long long)m,
+            handle, (unsigned long long)block, ok ? "" : " (not readable)", (unsigned long long)table, vars, (unsigned long long)data);
+    }
+}
+
 /* [api+8]+0x198 while InitSpawnTerrain spawns the tile: its pose, size and, for this call, the textures. */
 static uint64_t NearSpawn(void* world, float* pose, uint32_t a, uint32_t type, uint32_t name, uint64_t resource, uint32_t hash, float* size,
     float* range, uint8_t flag)
@@ -6048,6 +6080,7 @@ static uint64_t NearOneMipSpawn(void* world, float* pose, uint32_t a, uint32_t t
     uint64_t r = original(world, pose, a, type, name, resource, hash, size, range, flag);
     if (mat) { *g_coarseMat.slot = keepMat; NearMatRedirect(0); }
     *g_oneMip.slot = keep;
+    NearSpawnMaterialNote(r);
     if (!g_oneMip.spawned++)
         Note("difficulty: near terrain: the level's terrain spawned with the one-mip heightmap%s", !mat ? "" : g_coarseMat.served == 1 ?
             " and the interpolated material map (its physics materials from its pixels)" : g_coarseMat.served == 2 ?
@@ -6225,6 +6258,29 @@ typedef struct { int live; LONG level; float centre[2]; uint64_t handle; NearGro
 static uint16_t* g_groundBuf[NEAR_TILES_MAX + 1]; /* NearGroundOf's copies: a tile slot each, the coarse terrain last */
 static NearTile g_tiles[NEAR_TILES_MAX];
 static volatile LONG g_tilesGen;
+
+/* Research: the last level's tile terrains as the next level finds them, before their textures are freed. A first
+ * qword still inside the game's executable is a live object's vtable: the terrain outlived its level. */
+static void NearLeftoverNote(uint64_t context)
+{
+    const uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
+    uint64_t world = 0, first = 0;
+    SafeRead(context + 0x40, &world, 8);
+    int live = 0, held = 0;
+    for (int k = -1; k < NEAR_TILES_MAX; k++)
+    {
+        const uint64_t handle = k < 0 ? g_near.handle : g_tiles[k].handle;
+        if (handle == 0) continue;
+        held++; first = 0;
+        const int read = !SafeRead(handle, &first, 8), vt = read && first >= exe && first < exe + 0x4000000u;
+        live += vt;
+        Note("difficulty: near terrain: leftover: %s %d handle 0x%llX: first qword %s 0x%llX%s", k < 0 ? "the drop tile" : "tile", k, (unsigned long long)handle,
+            read ? "" : "(not readable)", (unsigned long long)first, vt ? " (in the executable: a live object)" : "");
+    }
+    Note("difficulty: near terrain: leftover: level %ld begins with %d tile handle(s) of the last level, %d of them live objects; world 0x%llX", (long)g_world.levels,
+        held, live, (unsigned long long)world);
+}
+
 static SRWLOCK g_tilesLock = SRWLOCK_INIT;
 
 static int NearTilesLive(void)
