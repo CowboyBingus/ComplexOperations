@@ -409,13 +409,16 @@ void CoXlTestLwNavSwapFakes(uintptr_t table, void* const* fn, uintptr_t jobs, ui
     g_lwSwap.queued = (int (*)(uintptr_t))fn[10]; g_lwSwap.permit = (int (*)(int))fn[11]; g_lwSwap.join = (void (*)(int))fn[12];
     g_lwSwap.table = table; g_lwSwap.tasksJobs = jobs; g_lwSwap.tasksInline = inl;
 }
-uintptr_t CoXlTestLwNavUnload(uintptr_t w, uint32_t* id) { return LwNavUnload(w, id, 0); }
-uintptr_t CoXlTestLwNavLoad(uintptr_t w, uint32_t* out) { return LwNavLoad(w, out, 0, NULL, 0, NULL); }
+/* The hooks as the stubs call them, with rbx (the completion's cell) stored first; a tick's start; the level counter. */
+uintptr_t CoXlTestLwNavUnload(uintptr_t w, uint32_t* id, uintptr_t cell) { g_lwSwap.cell = cell; return LwNavUnload(w, id, 0); }
+uintptr_t CoXlTestLwNavLoad(uintptr_t w, uint32_t* out, uintptr_t cell) { g_lwSwap.cell = cell; return LwNavLoad(w, out, 0, NULL, 0, NULL); }
+void CoXlTestLwNavSwapFrame(void) { LwNavSwapFrame(); }
+void CoXlTestLwNavLevel(long level) { g_world.levels = level; }
 void CoXlTestLwNavSwapSummary(ULONGLONG now) { LwNavSwapSummary(now); }
 int CoXlTestLwNavStepThreads(uintptr_t jobs, uintptr_t inl, uintptr_t runner, uintptr_t tasks, int32_t count)
 { return LwNavStepThreads(jobs, inl, runner, tasks, count); }
-void CoXlTestLwNavSwapCounts(uint32_t* swaps, uint32_t* steps, uint32_t* parallel, uint32_t* refused)
-{ *swaps = g_lwSwap.swaps; *steps = g_lwSwap.steps; *parallel = g_lwSwap.parallel; *refused = g_lwSwap.refused; }
+void CoXlTestLwNavSwapCounts(uint32_t* swaps, uint32_t* steps, uint32_t* parallel, uint32_t* refused, uint32_t* noLoad)
+{ *swaps = g_lwSwap.swaps; *steps = g_lwSwap.steps; *parallel = g_lwSwap.parallel; *refused = g_lwSwap.refused; *noLoad = g_lwSwap.noLoad; }
 LONG CoXlTestNoiseHead(void) { return g_lwNoiseHead; }
 const char* CoXlTestGuards(uintptr_t game) { return CoXlGuards(game); }
 void CoXlTestRenderShrink(uintptr_t map, void (*rehash)(uintptr_t, uint32_t)) { g_lwRender.rehash = (uintptr_t)rehash; LwRenderShrink(map); }

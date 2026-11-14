@@ -3113,7 +3113,7 @@ static void LwInstallNavLeaveFix(void)
 #define LW_AIW_TABLE 0x190D4A0u
 #define LW_NAV_PERMIT_MS 20
 #define LW_NAV_SWAP_LINES 400    /* swap lines a level; the 30 s summary goes on */
-#define LW_NAV_STEP_THREADS 64   /* a sanity cap on the stepper's thread count */
+#define LW_NAV_STEP_THREADS 256  /* a count above this is not the game's: the step stays serial */
 #define LW_NAV_TASKS_JOBS 0x7D7C20u   /* [W+0x4C8] in the threaded AI update (0x7D863A) */
 #define LW_NAV_TASKS_INLINE 0x814580u /* [W+0x4C8] when the AI update runs on the frame thread (0x7D866A) */
 typedef uintptr_t (*LwNavUnloadFn)(uintptr_t w, uint32_t* id, uint8_t graph);
@@ -3133,15 +3133,23 @@ static struct
     uintptr_t table, exe;
     uintptr_t tasksJobs, tasksInline; /* the two [W+0x4C8] the AI update sets; 0 when their code is not the reviewed one */
     uint8_t swap[4];
+    /* The completion's cell: rbx at both call sites (0x7B9058 reads and 0x7B924F writes its [+0x60]), stored by the
+     * hook stubs. 0x7B8A10 can unload without loading (0x7B908C, 0x7B91C0, 0x7B91CD, 0x7B91F0), so a load counts as
+     * the swap's only for the cell unloaded in the same tick. */
+    volatile uintptr_t cell;
+    uintptr_t swapCell[4];
     volatile LONG unsafe;            /* a swap went unsynchronised: hold new marks until the world is idle */
-    uint32_t swaps, steps, refused, parallel, lines, linesLevel;
+    uint32_t refused;
+    /* this level's: reset with g_world.levels */
+    long level;
+    uint32_t swaps, steps, parallel, lines, noLoad;
     int threads;                     /* the last synchronous step's threads */
     double worstMs;
     /* the completion being swapped, per world: the drain before its unload, the game's unload, when it returned */
     double pre[4][LW_NAV_PARTS], unloadMs[4];
     int64_t unloadEnd[4];
     /* 30 s summary */
-    uint32_t sumSwaps; double sumMs, sumWorst, sumStep, sumWait;
+    uint32_t sumSwaps, sumNoLoad; double sumMs, sumWorst, sumStep, sumWait;
     ULONGLONG sumAt;
 } g_lwSwap;
 
@@ -3152,15 +3160,15 @@ static int LwAiwIndex(uintptr_t w)
 }
 static double LwNavMs(int64_t from, int64_t to) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return (double)(to - from) * 1000.0 / (double)f.QuadPart; }
 static int64_t LwNavNow(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
-/* The synchronous step's threads: the game's own async step (0xBD1380) runs its task lists through [W+0x4C8] with the AI
- * table's runner (+0x28, 0x7D861F) and the stepper's count [[W+0x4A8]+0x28] (0xBD13CD); 0xBD0BB0 does the same when
- * given more than one thread (0xBD0C22 / 0xBD0C76) and runs every task on the caller otherwise. One thread put each
- * swap's recut on the frame thread: 100-1270 ms frames while flying over new tiles. 1 = serial (no runner, a [W+0x4C8]
- * the AI update did not set, or no count above one). */
+/* The synchronous step's threads, as the game's own synchronous step passes them (0xBD1A38): the AI table's runner
+ * (+0x28) and count (+0x38, the job system's workers + 4 at 0x78E197..0x78E1BD), stored at 0x7D861F / 0x7D8623 and
+ * handed down by 0x7D86A0 and 0xBD1890. With more than one thread 0xBD0BB0 runs its task lists through [W+0x4C8]
+ * (0xBD0C22 / 0xBD0C76). One thread put each swap's recut on the frame thread: 100-1270 ms frames while flying. 1 =
+ * serial: no runner, a [W+0x4C8] the AI update did not set, or a count the game would not pass. */
 static int LwNavStepThreads(uintptr_t jobsFn, uintptr_t inlineFn, uintptr_t runner, uintptr_t tasks, int32_t count)
 {
-    if (runner == 0 || tasks == 0 || (tasks != jobsFn && tasks != inlineFn) || count < 2) return 1;
-    return count > LW_NAV_STEP_THREADS ? LW_NAV_STEP_THREADS : count;
+    if (runner == 0 || tasks == 0 || (tasks != jobsFn && tasks != inlineFn) || count < 2 || count > LW_NAV_STEP_THREADS) return 1;
+    return count;
 }
 /* The vanilla flush's step (0x7B94F0..0x7B959E), on the AI update's runner when it has one. */
 static void LwNavSyncStep(uintptr_t w, int idx)
@@ -3168,9 +3176,8 @@ static void LwNavSyncStep(uintptr_t w, int idx)
     uint8_t runner[0x18] __attribute__((aligned(16)));
     uint8_t block[0x40] __attribute__((aligned(16)));
     memset(block, 0, sizeof block);
-    uintptr_t jobs = *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx + 0x28), stepper = *(volatile uintptr_t*)(w + 0x4A8);
-    int32_t count = 0;
-    if (stepper) count = *(volatile int32_t*)(stepper + 0x28);
+    uintptr_t jobs = *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx + 0x28);
+    int32_t count = *(volatile int32_t*)(g_lwSwap.table + 0x80u * idx + 0x38);
     int threads = LwNavStepThreads(g_lwSwap.tasksJobs, g_lwSwap.tasksInline, jobs, *(volatile uintptr_t*)(w + 0x4C8), count);
     block[0] = 1;
     *(uint32_t*)(block + 0x14) = 0x80000000u;
@@ -3216,10 +3223,13 @@ static int LwNavDrain(uintptr_t w, int idx, double* ms)
     return 1;
 }
 static double LwNavSum(const double* ms) { double s = 0; for (int k = 0; k < LW_NAV_PARTS; k++) s += ms[k]; return s; }
+static void LwNavSwapLevel(void);
 static uintptr_t LwNavUnload(uintptr_t w, uint32_t* id, uint8_t graph)
 {
     int idx = LwAiwIndex(w);
     if (idx < 0 || !LwLive() || !g_lwSwap.asyncMode(w)) return g_lwSwap.unload(w, id, graph);
+    LwNavSwapLevel();
+    g_lwSwap.swapCell[idx] = g_lwSwap.cell;
     int64_t t = co_framecost_now();
     if (LwNavDrain(w, idx, g_lwSwap.pre[idx])) g_lwSwap.swap[idx] = 1;
     else { g_lwSwap.swap[idx] = 0; g_lwSwap.refused++; InterlockedExchange(&g_lwSwap.unsafe, 1); }
@@ -3230,17 +3240,38 @@ static uintptr_t LwNavUnload(uintptr_t w, uint32_t* id, uint8_t graph)
     co_framecost_add(CO_FC_NAVSWAP, t);
     return r;
 }
-/* The 30 s summary, from the level tick; `now` GetTickCount64. */
+/* The summary since the last one, then its sums cleared. */
+static void LwNavSwapNote(const char* span)
+{
+    if (g_lwSwap.sumSwaps > 0 || g_lwSwap.sumNoLoad > 0)
+        Note("living world: nav swaps (%s): %u on the frame thread, %.0f ms in all (worst %.1f ms): in-flight steps waited %.0f ms, synchronous steps %.0f ms "
+            "(the last on %d thread(s); %u of %u steps on the AI update's runner this level); %u unload(s) with no load", span, g_lwSwap.sumSwaps, g_lwSwap.sumMs,
+            g_lwSwap.sumWorst, g_lwSwap.sumWait, g_lwSwap.sumStep, g_lwSwap.threads, g_lwSwap.parallel, g_lwSwap.steps, g_lwSwap.sumNoLoad);
+    g_lwSwap.sumSwaps = g_lwSwap.sumNoLoad = 0; g_lwSwap.sumMs = g_lwSwap.sumWorst = g_lwSwap.sumStep = g_lwSwap.sumWait = 0;
+}
+/* A new level: the last one's summary, then its counts start again. */
+static void LwNavSwapLevel(void)
+{
+    if (g_lwSwap.level == g_world.levels) return;
+    LwNavSwapNote("the level's last");
+    g_lwSwap.level = g_world.levels;
+    g_lwSwap.swaps = g_lwSwap.steps = g_lwSwap.parallel = g_lwSwap.lines = g_lwSwap.noLoad = 0;
+    g_lwSwap.threads = 0; g_lwSwap.worstMs = 0;
+}
+/* Once a tick, before the game's nav tick can run again: an unload whose completion did not load (see .cell) ends here. */
+static void LwNavSwapFrame(void)
+{
+    for (int i = 0; i < 4; i++)
+        if (g_lwSwap.swap[i]) { g_lwSwap.swap[i] = 0; g_lwSwap.noLoad++; g_lwSwap.sumNoLoad++; }
+}
+/* The 30 s summary, from the level tick on every peer; `now` GetTickCount64. */
 static void LwNavSwapSummary(ULONGLONG now)
 {
+    LwNavSwapLevel();
     if (g_lwSwap.sumAt == 0) { g_lwSwap.sumAt = now; return; }
     if (now - g_lwSwap.sumAt < 30000) return;
     g_lwSwap.sumAt = now;
-    if (g_lwSwap.sumSwaps == 0) return;
-    Note("living world: nav swaps (30 s): %u on the frame thread, %.0f ms in all (worst %.1f ms): in-flight steps waited %.0f ms, synchronous steps %.0f ms "
-        "(the last on %d thread(s); %u of %u steps on the AI update's runner this level)", g_lwSwap.sumSwaps, g_lwSwap.sumMs, g_lwSwap.sumWorst, g_lwSwap.sumWait,
-        g_lwSwap.sumStep, g_lwSwap.threads, g_lwSwap.parallel, g_lwSwap.steps);
-    g_lwSwap.sumSwaps = 0; g_lwSwap.sumMs = g_lwSwap.sumWorst = g_lwSwap.sumStep = g_lwSwap.sumWait = 0;
+    LwNavSwapNote("30 s");
 }
 static uintptr_t LwNavLoad(uintptr_t w, uint32_t* out, uintptr_t inst, void* p4, uintptr_t graph, void* p6)
 {
@@ -3251,6 +3282,7 @@ static uintptr_t LwNavLoad(uintptr_t w, uint32_t* out, uintptr_t inst, void* p4,
     if (idx >= 0 && !LwLive()) g_lwSwap.swap[idx] = 0; /* a normal mission's swaps stay the game's */
     if (idx < 0 || !g_lwSwap.swap[idx]) return r;
     g_lwSwap.swap[idx] = 0;
+    if (g_lwSwap.swapCell[idx] != g_lwSwap.cell) { g_lwSwap.noLoad++; g_lwSwap.sumNoLoad++; return r; } /* another cell's first build */
     /* the game's work between its unload and this load (the connect), when the load follows in the same completion */
     double between = LwNavMs(g_lwSwap.unloadEnd[idx], t);
     if (between < 0 || between > 1000.0) between = -1;
@@ -3266,13 +3298,12 @@ static uintptr_t LwNavLoad(uintptr_t w, uint32_t* out, uintptr_t inst, void* p4,
     g_lwSwap.sumSwaps++; g_lwSwap.sumMs += ms; if (ms > g_lwSwap.sumWorst) g_lwSwap.sumWorst = ms;
     g_lwSwap.sumWait += pre[LW_NAV_JOIN] + pre[LW_NAV_WAIT] + post[LW_NAV_JOIN] + post[LW_NAV_WAIT];
     g_lwSwap.sumStep += pre[LW_NAV_STEP] + post[LW_NAV_STEP];
-    if (g_lwSwap.linesLevel != (uint32_t)g_world.levels) { g_lwSwap.linesLevel = (uint32_t)g_world.levels; g_lwSwap.lines = 0; }
     if (g_lwSwap.lines < LW_NAV_SWAP_LINES)
     {
         g_lwSwap.lines++;
         Note("living world: nav: section %u swapped in at once (world %d): %.1f ms on the frame thread; before the unload %.1f (AI update %.1f, permit %.1f, "
             "step in flight %.1f, its commit %.1f, queued %.1f), the game's unload %.1f, connect %.1f, load %.1f, after the load %.1f (AI update %.1f, "
-            "step in flight %.1f, the swap's step %.1f); %u step(s) on %d thread(s); %u swaps, worst %.1f ms", out ? *out : 0u, idx, ms, LwNavSum(pre),
+            "step in flight %.1f, the swap's step %.1f); %u step(s) on %d thread(s); %u swaps this level, worst %.1f ms", out ? *out : 0u, idx, ms, LwNavSum(pre),
             pre[LW_NAV_JOIN], pre[LW_NAV_PERMIT], pre[LW_NAV_WAIT], pre[LW_NAV_COMMIT], pre[LW_NAV_STEP], g_lwSwap.unloadMs[idx], between, loadMs, LwNavSum(post),
             post[LW_NAV_JOIN], post[LW_NAV_WAIT], post[LW_NAV_STEP], g_lwSwap.steps - steps, g_lwSwap.threads, g_lwSwap.swaps, g_lwSwap.worstMs);
         if (g_lwSwap.lines == LW_NAV_SWAP_LINES) Note("living world: nav: %d swap lines this level; the 30 s summaries go on", LW_NAV_SWAP_LINES);
@@ -3285,7 +3316,7 @@ static void LwInstallNavSwapSync(void)
     if (done) return;
     done = 1;
     uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
-    if (!ApiCodeMatches(exe + 0x7B9053u, "E8 18 96 3F 00 8B 43 60") || !ApiCodeMatches(exe + 0x7B9244u, "E8 67 87 3F 00 8B 85 20 01 00 00") ||
+    if (!ApiCodeMatches(exe + 0x7B9053u, "E8 18 96 3F 00 8B 43 60") || !ApiCodeMatches(exe + 0x7B9244u, "E8 67 87 3F 00 8B 85 20 01 00 00 89 43 60") ||
         !ApiCodeMatches(exe + 0xBB2670u, "40 55 53 56 57 41 55 41 56 41 57") || !ApiCodeMatches(exe + 0xBB19B0u, "4C 89 4C 24 20 48 89 54 24 10") ||
         !ApiCodeMatches(exe + 0x7D7930u, "48 89 5C 24 10 48 89 6C 24 18") || !ApiCodeMatches(exe + 0x7D7740u, "48 89 74 24 18 57 48 83 EC 20 83 F9 04") ||
         !ApiCodeMatches(exe + 0xBD1150u, "48 83 B9 A8 04 00 00 00 0F 95 C0 C3") || !ApiCodeMatches(exe + 0xBD1190u, "48 83 B9 B0 04 00 00 00 0F 95 C0 C3") ||
@@ -3307,19 +3338,24 @@ static void LwInstallNavSwapSync(void)
     /* the parallel step's pins: 0xBD0BB0's dispatch by thread count, the async step's count, the AI update's runner and
      * its two task runners; any other code keeps every step on the frame thread */
     if (ApiCodeMatches(exe + 0xBD0C22u, "41 83 FE 01 7E 0F 4C 8D 05") && ApiCodeMatches(exe + 0xBD0C2Fu, "FF 96 C8 04 00 00 EB 0C 48 8B 07") &&
-        ApiCodeMatches(exe + 0xBD0C76u, "41 83 FE 01 7E 0F") && ApiCodeMatches(exe + 0xBD13BCu, "48 8B 87 A8 04 00 00 48 8D 55 67 4C 8B C6 48 8B CF 44 8B 48 28") &&
-        ApiCodeMatches(exe + 0x7D861Fu, "48 89 7B 28") && ApiCodeMatches(exe + 0x7D862Bu, "48 8D 0D EE F5 FF FF") &&
+        ApiCodeMatches(exe + 0xBD0C76u, "41 83 FE 01 7E 0F") && ApiCodeMatches(exe + 0xBD1A27u, "44 8B CE 48 8D 94 24 80 00 00 00 4C 8B C5 48 8B CB E8 73 F1 FF FF") &&
+        ApiCodeMatches(exe + 0xBD18ADu, "49 8B E8 4C 89 70 E8 41 8B F1") && ApiCodeMatches(exe + 0x7D86DCu, "44 8B CE 4C 8B C5") &&
+        ApiCodeMatches(exe + 0x7D86BFu, "41 8B F0") && ApiCodeMatches(exe + 0x7D71DDu, "44 8B 40 08 48 8B 12") &&
+        ApiCodeMatches(exe + 0x7D861Fu, "48 89 7B 28 89 6B 38") && ApiCodeMatches(exe + 0x7D8641u, "48 8D 53 30") && ApiCodeMatches(exe + 0x7D862Bu, "48 8D 0D EE F5 FF FF") &&
         ApiCodeMatches(exe + 0x7D8660u, "48 8D 0D 19 BF 03 00") && ApiCodeMatches(exe + LW_NAV_TASKS_JOBS, "48 89 5C 24 10 48 89 6C 24 18 56 57 41 56 48 83 EC 20 48 8B F2 48 8B D9") &&
         ApiCodeMatches(exe + LW_NAV_TASKS_INLINE, "48 8B C2 48 85 C9 74 10 48 85 D2 74 0B"))
     { g_lwSwap.tasksJobs = exe + LW_NAV_TASKS_JOBS; g_lwSwap.tasksInline = exe + LW_NAV_TASKS_INLINE; }
     else Note("living world: nav: the parallel step's code is not the reviewed one; swap steps run on the frame thread");
-    uint8_t code[24] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0,  /* mov rax, LwNavUnload; jmp rax */
-                        0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0}; /* mov rax, LwNavLoad; jmp rax */
-    uint64_t fn = (uint64_t)(uintptr_t)LwNavUnload; memcpy(code + 2, &fn, 8);
-    fn = (uint64_t)(uintptr_t)LwNavLoad; memcpy(code + 14, &fn, 8);
+    /* each stub: mov rax, &g_lwSwap.cell; mov [rax], rbx; mov rax, hook; jmp rax (rax is the call's to clobber) */
+    uint8_t code[64] = {0};
+    const uint8_t stub[25] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0x18, 0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0};
+    uint64_t cell = (uint64_t)(uintptr_t)&g_lwSwap.cell, fn = (uint64_t)(uintptr_t)LwNavUnload;
+    memcpy(code, stub, sizeof stub); memcpy(code + 2, &cell, 8); memcpy(code + 15, &fn, 8);
+    fn = (uint64_t)(uintptr_t)LwNavLoad;
+    memcpy(code + 32, stub, sizeof stub); memcpy(code + 34, &cell, 8); memcpy(code + 47, &fn, 8);
     memcpy(block, code, sizeof code);
     DWORD protect; VirtualProtect(block, 0x1000, PAGE_EXECUTE_READ, &protect); FlushInstructionCache(GetCurrentProcess(), block, 0x1000);
-    int64_t r1 = (int64_t)(uintptr_t)block - (int64_t)(exe + 0x7B9058u), r2 = (int64_t)(uintptr_t)(block + 12) - (int64_t)(exe + 0x7B9249u);
+    int64_t r1 = (int64_t)(uintptr_t)block - (int64_t)(exe + 0x7B9058u), r2 = (int64_t)(uintptr_t)(block + 32) - (int64_t)(exe + 0x7B9249u);
     if (!InRel32(r1) || !InRel32(r2)) { Note("living world: the nav swap is out of reach of the exe"); return; }
     uint8_t call[5] = {0xE8, 0, 0, 0, 0}; int32_t r32 = (int32_t)r1; memcpy(call + 1, &r32, 4);
     if (ApiWrite(exe + 0x7B9053u, call, sizeof call)) { Note("living world: the nav unload call could not be written"); return; }
@@ -4326,6 +4362,7 @@ static void LivingTick(void)
     memcpy(sect0, g_lwSect.ticks, sizeof sect0); memset(g_lwJobTicks, 0, sizeof g_lwJobTicks);
     QueryPerformanceCounter(&a);
     g_lwSect.at = __builtin_ia32_rdtsc(); g_lwSect.cur = LW_S_BEFORE;
+    LwNavSwapFrame();
     LivingTickBody();
     LW_SECT(LW_S_COUNT - 1); g_lwSect.ticks[LW_S_AFTER] += __builtin_ia32_rdtsc() - g_lwSect.at;
     QueryPerformanceCounter(&b); QueryPerformanceFrequency(&f);
@@ -4357,11 +4394,11 @@ static void LivingTickBody(void)
     LwPatrolsOff();
     int host = 0, mission = ActMission(g_lw.game, &host, NULL);
     LwPfFrame(mission); /* every peer, before this frame's physics step */
+    LwNavSwapSummary(GetTickCount64()); /* every peer: the swap hooks act wherever the game rebuilds a cell */
     if (!mission || !host) return;
     LwTraceTick();
     uintptr_t dir;
     if (EvpPtr(g_lw.game + LW_DIRECTOR, &dir)) LwNavTick(dir);
-    LwNavSwapSummary(GetTickCount64());
     LwGarrisonsTick();
     LwSquadsTick();
     LwTiltScan();
