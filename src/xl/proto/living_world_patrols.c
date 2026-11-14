@@ -53,8 +53,8 @@ static int g_lwPatrolsOld; /* test command "patrols old 1": the rules before the
 #define LW_MEET_LOOKS 4u     /* looks a tick over all squads: each is three rays and a ground ray per player in reach */
 #define LW_MEET_ON_ROAD 1u   /* offline, on a player's road */
 #define LW_MEET_CAME 2u      /* online: it came online on its way in, and no player has been within R_on of it yet */
-#define LW_MEET_FAR_ROAD 4u  /* online: that, on a player's road beyond R_on: its units are the far share's kept half */
-#define LW_MEET_NEARING 8u   /* offline, a road patrol still out whose way leads to a player: the far share keeps its room */
+#define LW_MEET_FAR_ROAD 4u  /* online: that, on a player's road beyond R_on: its far units are the road patrols', not the landscape's */
+#define LW_MEET_NEARING 8u   /* offline, a road patrol still out whose way leads to a player: it is not called, it comes anyway */
 static ULONGLONG g_lwMeetSince[LW_SQUADS_MAX], g_lwMeetLookAt[LW_SQUADS_MAX], g_lwMeetSwapAt[EVT_MAX_PLAYERS];
 static uint8_t g_lwMeetMark[LW_SQUADS_MAX], g_lwMeetGap[LW_SQUADS_MAX][CO_LW_MEET_PLAYERS]; /* gap: samples since player i saw it walk */
 static CoLwMeetCover g_lwMeetCover[LW_SQUADS_MAX];
@@ -66,7 +66,7 @@ static CoLwMeet g_lwMeetNear;
 static struct
 {
     uint32_t held, online, turned, back, gaveWay, noFiller, sight, room, spaced, other, close, notes, noFaceNotes;
-    uint32_t looks, looksTick, covered, edge, beyond, cameCover, cameEdge, cameBeyond, dispatched, shareNo, farNo, zoneLeft; int roadFar;
+    uint32_t looks, looksTick, covered, edge, beyond, cameCover, cameEdge, cameBeyond, dispatched, shareNo, farNo, zoneLeft; int roadFar, roadStand;
     float closeLeast; ULONGLONG sampleAt;
 } g_lwMeet;
 /* A patrol called along the road to a player on it (co_lw_meet.h): each player's next call and side in turn; the
@@ -320,8 +320,6 @@ static int LwPatrolFar(const LwSquad* q)
     if (q->state != LW_ONLINE || g_lwPatrolsOld) return CO_LW_VIEW_FAR_WALKS; /* requested: on its way in */
     return co_lw_view_far(1, LwNearestPlayer2(q->pos[0], q->pos[1]), LW_R_ON, co_lw_view_stood(&g_lwView, (uint32_t)(q - g_lwSquads), GetTickCount64()));
 }
-/* The far units a new far squad is measured against, from the walking and the standing ones' (co_lw_view_far_sum). */
-static int LwPatrolFarSum(int walking, int standing) { return co_lw_view_far_sum(walking, standing, (int)LwFarShareLimit()); }
 
 /* The band test's distance for an offline squad: the nearest player's, or the band of the point a vehicle will reach. */
 static float LwLeadNear2(const LwSquad* q)
@@ -661,7 +659,7 @@ static int LwMeetApproach(LwSquad* q, ULONGLONG now, int busy)
     if (!beyond || over >= CO_LW_MEET_OUTER) LwZoneClear(idx); /* the players moved: it stands no longer where it was refused */
     if (d2 < rMin * rMin || over >= CO_LW_MEET_OUTER)
     {
-        /* still out, its way leading to a player: the far share keeps its room from here, before it asks */
+        /* still out, its way leading to a player: marked from here, before it asks, so no call takes it */
         *mark = d2 >= rMin * rMin && over < CO_LW_MEET_OUTER + CO_LW_MEET_NOTICE && road && LwMeetOnRoad(q) ? LW_MEET_NEARING : 0;
         c->known = 0; c->steps = 0;
         return CO_LW_MEET_WALK;
@@ -823,21 +821,28 @@ static int LwCallFor(int i, int root)
         g_lwMeet.notes == LW_MEET_NOTES ? " (the last such line this mission)" : "");
     return best;
 }
-static int LwMeetRoadFar(void);
-/* The time to player i's next call after squad q was called: q's far walk for that player, over the share. */
-static uint32_t LwCallPeriod(LwSquad* q, int i, int roadPlayers)
+/* The time to player i's next call after squad q was called: q's way online for that player (from where it comes
+ * online, past them, to the offline radius), over the road patrols' part of the player's bubble, shared by the
+ * players of that bubble by a road (`root`). */
+static uint32_t LwCallPeriod(LwSquad* q, int i, const int* root, int np)
 {
-    const float walk = LwMeetDrawn(q, i) + LW_FAR_MARGIN + 0.5f * CO_LW_MEET_OUTER - LW_R_ON;
-    return co_lw_meet_call_ms((float)LwMeetRoadFar(), CO_LW_MEET_ROAD_MEMBERS, roadPlayers, walk);
+    const int rules = g_lwDensity.on == 1, b = rules ? g_lwDensity.of[i] : 0;
+    const float way = LwMeetDrawn(q, i) + LW_FAR_MARGIN + 0.5f * CO_LW_MEET_OUTER + LW_R_OFF;
+    const float* v = g_lwView.player[i].v;
+    int sharers = 0;
+    for (int j = 0; j < np; j++) sharers += root[j] >= 0 && (!rules || g_lwDensity.of[j] == b);
+    return co_lw_meet_call_ms(co_lw_meet_road_cap(rules && b >= 0 && b < g_lwDensity.count ? g_lwDensity.budget[b] : g_lwWorld.eff), CO_LW_MEET_ROAD_MEMBERS, sharers,
+        way, i < CO_LW_VIEW_PLAYERS && g_lwView.player[i].known ? sqrtf(v[0] * v[0] + v[1] * v[1]) : 0.0f);
 }
 /* Once a second: one player by a road whose time has come has a patrol called (co_lw_meet_call_ms apart for each),
- * the players taken in turn. The offline walk is free, so only the far share bounds what a road shows. */
+ * the players taken in turn. The offline walk is free, so only the road patrols' part of a bubble bounds what a
+ * road shows. */
 static void LwCallTick(ULONGLONG now)
 {
     if (now - g_lwCall.tickAt < 1000) return;
     g_lwCall.tickAt = now;
     if (!LwMeetOn() || g_lwRoadNodes < LW_ROAD_NODES_MIN) return;
-    int root[CO_LW_MEET_PLAYERS], np = g_lwWorld.playersAt < CO_LW_MEET_PLAYERS ? g_lwWorld.playersAt : CO_LW_MEET_PLAYERS, roadPlayers = 0;
+    int root[CO_LW_MEET_PLAYERS], np = g_lwWorld.playersAt < CO_LW_MEET_PLAYERS ? g_lwWorld.playersAt : CO_LW_MEET_PLAYERS;
     /* a called patrol whose player has gone, or walks away from it, is let go: free to be called again */
     for (int s = LwRoadNext(-1); s < g_lwWorld.count; s = LwRoadNext(s))
     {
@@ -846,15 +851,15 @@ static void LwCallTick(ULONGLONG now)
         if (of < g_lwWorld.playersAt && !co_lw_meet_call_lost(sqrtf(LwDist2(g_lwWorld.players[of], g_lwSquads[s].pos[0], g_lwSquads[s].pos[1])), &g_lwCallLeast[s])) continue;
         g_lwCallOf[s] = 0; g_lwCall.lost++;
     }
-    for (int i = 0; i < np; i++) { root[i] = LwCallRoot(g_lwWorld.players[i]); roadPlayers += root[i] >= 0; }
+    for (int i = 0; i < np; i++) root[i] = LwCallRoot(g_lwWorld.players[i]);
     /* a player's first call waits its part of a period, so the players' calls are spread over it and the share
-     * meets them one at a time (all at once, 8 players sent 32 units at a kept half of 23) */
+     * meets them one at a time (all at once, 8 players sent 32 units at a part of 18) */
     for (int i = 0; i < np; i++)
     {
         if (root[i] < 0 || g_lwCall.begun[i]) continue;
         LwSquad unit; memset(&unit, 0, sizeof unit);
         g_lwCall.begun[i] = 1;
-        g_lwCall.at[i] = now + co_lw_meet_call_first(LwCallPeriod(&unit, i, roadPlayers), i, np);
+        g_lwCall.at[i] = now + co_lw_meet_call_first(LwCallPeriod(&unit, i, root, np), i, np);
     }
     for (int k = 0; k < np; k++)
     {
@@ -863,7 +868,7 @@ static void LwCallTick(ULONGLONG now)
         g_lwCall.start = (uint32_t)i + 1;
         const int s = LwCallFor(i, root[i]);
         if (s < 0) { g_lwCall.none++; g_lwCall.at[i] = now + 5000; return; }
-        g_lwCall.at[i] = now + LwCallPeriod(&g_lwSquads[s], i, roadPlayers);
+        g_lwCall.at[i] = now + LwCallPeriod(&g_lwSquads[s], i, root, np);
         return;
     }
 }
@@ -905,27 +910,29 @@ static int LwMeetKeeps(const LwSquad* q)
     int budget = 0; const int units = LwMeetRoadUnits(LwMeetBubble(q), &budget);
     return co_lw_meet_keeps(road, LwNearestPlayer2(q->pos[0], q->pos[1]), LW_R_ON, units, budget);
 }
-/* LwTickSums: the far units of patrols that came online on a player's road (-1: a new sum). */
-static void LwMeetFarCount(int idx, int units)
+/* LwTickSums: the far units of patrols that came online on a player's road, `stands` those of them that stand
+ * (-1: a new sum). */
+static void LwMeetFarCount(int idx, int units, int stands)
 {
-    if (idx < 0) g_lwMeet.roadFar = 0;
-    else if (g_lwMeetMark[idx] & LW_MEET_FAR_ROAD) g_lwMeet.roadFar += units;
+    if (idx < 0) g_lwMeet.roadFar = g_lwMeet.roadStand = 0;
+    else if (g_lwMeetMark[idx] & LW_MEET_FAR_ROAD) { g_lwMeet.roadFar += units; if (stands) g_lwMeet.roadStand += units; }
 }
-/* The far units patrols on a player's road may hold: their own part of the budgets under the density rules, half
- * the far share without them (as the reserve kept it). */
-static int LwMeetRoadFar(void)
+/* LwTickSums: the far units a request is measured against. The road's standing ones are in both sums, so the
+ * landscape's part is what is left when the road's are taken off. */
+static int LwMeetFarSum(int walking, int standing) { return co_lw_meet_far_sum(walking, standing, g_lwMeet.roadFar, g_lwMeet.roadStand, (int)LwFarShareLimit()); }
+/* The far share for squad q's request, the refusal's text into `why`. A patrol on a player's road is measured by
+ * its bubble's road patrols; the others keep the far share, and all far units stay within their part of the
+ * budgets. A text that begins "the far share" is counted as such by LwMeetRefused. */
+static int LwMeetFarRoom(const LwSquad* q, int meet, int farUnits, char* why, size_t size)
 {
-    return g_lwDensity.on == 1 ? co_lw_meet_road_far(LwUnitBudget()) : (int)LwFarShareLimit() / CO_LW_MEET_FAR_RESERVE;
-}
-/* The far share for squad q's request: a patrol on a player's road has the road patrols' share, and the others
- * keep to half the far share while a road patrol is on its way to a player. */
-static int LwMeetFarRoom(const LwSquad* q, int meet, int farUnits)
-{
-    const int onRoad = meet && (g_lwMeetMark[q - g_lwSquads] & LW_MEET_ON_ROAD);
-    int reserve = 0; /* only while a road patrol is on its way to a player: the landscape has the whole share otherwise */
-    for (int i = LwRoadNext(-1); i < g_lwWorld.count && !reserve; i = LwRoadNext(i)) reserve = g_lwSquads[i].state == LW_OFFLINE && (g_lwMeetMark[i] & (LW_MEET_ON_ROAD | LW_MEET_NEARING));
-    reserve = reserve && LwMeetOn() && g_lwRoadNodes >= LW_ROAD_NODES_MIN && g_lwDensity.on == 1;
-    return co_lw_meet_far_room(farUnits, g_lwMeet.roadFar, q->survivors, (int)LwFarShareLimit(), onRoad, reserve, g_lwDensity.on == 1 ? LwMeetRoadFar() : 0);
+    const int rules = g_lwDensity.on == 1, onRoad = meet && (g_lwMeetMark[q - g_lwSquads] & LW_MEET_ON_ROAD), limit = (int)LwFarShareLimit(), members = (int)q->survivors;
+    int budget = 0; const int held = rules ? LwMeetRoadUnits(LwMeetBubble(q), &budget) : 0, cap = rules ? co_lw_meet_road_cap(budget) : -1, total = rules ? co_lw_meet_far_total(LwUnitBudget()) : 0;
+    if (co_lw_meet_far_room(farUnits, g_lwMeet.roadFar, members, limit, onRoad, held, cap, total)) return 1;
+    if (!rules) snprintf(why, size, "the far share: %d far units + %d over %d", farUnits, members, limit);
+    else if (farUnits + members > total) snprintf(why, size, "the far share: %d far units of every kind + %d over %d", farUnits, members, total);
+    else if (onRoad) snprintf(why, size, "the far share: the bubble's road patrols %d units + %d over their %d of %d", held, members, cap, budget);
+    else snprintf(why, size, "the far share: the landscape's %d far units + %d over %d", farUnits - g_lwMeet.roadFar, members, limit);
+    return 0;
 }
 /* After a squad's request. One that came online on its way in keeps its place while it walks in (LwMeetStays). */
 static void LwMeetAsked(LwSquad* q, int meet, int farAsk)
@@ -1104,6 +1111,13 @@ static void LwMeetNotes(void)
         g_lwMeet.cameEdge, g_lwMeet.cameBeyond, g_lwMeet.online, g_lwMeet.held, g_lwMeet.turned, g_lwMeet.back, g_lwMeet.dispatched, g_lwMeet.gaveWay, g_lwMeet.noFiller, g_lwMeet.shareNo, holds,
         g_lwMeet.sight, g_lwMeet.room, g_lwMeet.spaced, g_lwMeet.other, g_lwMeet.farNo, g_lwMeet.zoneLeft, CO_LW_MEET_ZONE_WAIT_MS / 1000u, g_lwCall.called, g_lwCall.came, g_lwCall.none, g_lwCall.lost, g_lwMeet.roadFar, g_lwMeet.close, (double)CO_LW_MEET_CLOSE, (double)g_lwMeet.closeLeast,
         g_lwPatrolsOld ? "; the old rules (test): no such rule" : g_lwMeetOff ? "; meet 0 (test): no such rule" : "");
+    /* what the road patrols take of each bubble is the landscape's cost: a run is read by this line first */
+    for (int b = 0; g_lwDensity.on == 1 && b < g_lwDensity.count; b++)
+    {
+        int budget = 0; const int units = LwMeetRoadUnits(b, &budget);
+        Note("living world: meet (30 s): bubble %d: road patrols' units %d of their %d (budget %d, %d players, %d units online or requested)", b + 1, units, co_lw_meet_road_cap(budget), budget,
+            g_lwDensity.players[b], g_lwDensity.units[b]);
+    }
     for (int i = 0; i < g_lwWorld.playersAt && i < CO_LW_MEET_PLAYERS; i++)
     {
         if (co_lw_meet_note(&g_lwMeetNear, (uint32_t)i, line, sizeof line)) Note("living world: %s", line);
@@ -1598,7 +1612,7 @@ void CoXlTestLwSeenSwitch(int on) { g_lwTestMeetOff = g_lwMeetOff = !on; }
 /* 1: the walks that follow have a request out every tick, so they take no look. */
 void CoXlTestLwSeenBusy(int busy) { g_lwTestBusy = busy; }
 int CoXlTestLwSeenKeeps(int idx) { return LwMeetKeeps(&g_lwSquads[idx]); }
-int CoXlTestLwSeenFarRoom(int idx, int meet, int farUnits, int roadFar) { g_lwMeet.roadFar = roadFar; return LwMeetFarRoom(&g_lwSquads[idx], meet, farUnits); }
+int CoXlTestLwSeenFarRoom(int idx, int meet, int farUnits, int roadFar) { char why[128] = ""; g_lwMeet.roadFar = roadFar; const int r = LwMeetFarRoom(&g_lwSquads[idx], meet, farUnits, why, sizeof why); return r ? 1 : strncmp(why, "the far share", 13) == 0 ? 0 : -1; }
 /* 1 while squad `idx`, online since `sinceMs`, `d` m from the nearest player, is kept by the stay rule at `nowMs`. */
 int CoXlTestLwSeenStays(int idx, float d, uint64_t sinceMs, uint64_t nowMs)
 {
@@ -1630,7 +1644,7 @@ int CoXlTestLwRoadTail(int base, int count, int probe, int* out, int max, int* m
 }
 /* A world for the calls: a line of road nodes 1..n (100 m apart, y 0), with a side road of 3 nodes north from node
  * `fork` (0: none); the `np` players at `pl`, player 0 the host; road patrols 10 k (k < squads) offline at x sx[k]
- * walking toward +x (dir 1) or -x (-1) with mark mk[k]; a far share of 18. */
+ * walking toward +x (dir 1) or -x (-1) with mark mk[k]; no density rules, a cap of 36 (the road patrols' 6). */
 void CoXlTestLwCallWorld(int n, int fork, const float (*pl)[2], int np, const float* sx, const int* dir, const int* mk, int squads)
 {
     memset(g_lwSquads, 0, 40 * sizeof g_lwSquads[0]); memset(g_lwNodeKind, 0, sizeof g_lwNodeKind); memset(&g_lwMeet, 0, sizeof g_lwMeet); memset(&g_lwCall, 0, sizeof g_lwCall);

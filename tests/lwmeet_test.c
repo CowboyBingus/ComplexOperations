@@ -51,20 +51,29 @@ int main(void)
     g_case = "a road patrol within the online radius never gives way; others do";
     CHECK(co_lw_meet_keeps(1, 249.0f * 249.0f, 250.0f, 8, 72) == 1 && co_lw_meet_keeps(2, 100.0f, 250.0f, 8, 72) == 1);
     CHECK(co_lw_meet_keeps(1, 250.0f * 250.0f, 250.0f, 8, 72) == 0 && co_lw_meet_keeps(0, 100.0f, 250.0f, 8, 72) == 0);
-    g_case = "a road patrol is kept only while the road patrols hold no more than half their bubble's budget";
-    CHECK(co_lw_meet_keeps(1, 100.0f, 250.0f, 11, 23) == 1 && co_lw_meet_keeps(1, 100.0f, 250.0f, 12, 23) == 0 && co_lw_meet_keeps(1, 100.0f, 250.0f, 36, 72) == 1);
-    g_case = "a filler squad leaves for a road patrol only within that half";
-    CHECK(co_lw_meet_road_room(0, 8, 23) == 1 && co_lw_meet_road_room(8, 8, 23) == 0 && co_lw_meet_road_room(28, 8, 72) == 1 && co_lw_meet_road_room(29, 8, 72) == 0);
+    g_case = "the road patrols' part of a bubble is 3/16 of its budget: 13 of 72 solo, 4 of 23 at 8 apart, 18 of 96 at 8 together";
+    CHECK(co_lw_meet_road_cap(72) == 13 && co_lw_meet_road_cap(23) == 4 && co_lw_meet_road_cap(96) == 18 && co_lw_meet_road_cap(5) == 0);
+    CHECK(co_lw_meet_far_total(72) == 36 && co_lw_meet_far_total(184) == 92 && co_lw_meet_far_total(96) == 48);
+    g_case = "at any budget the near landscape keeps three quarters of its 12/16, and the landscape's far share fits beside a full road part";
+    for (int budget = 1; budget <= 400; budget++)
+        CHECK(16 * co_lw_meet_road_cap(budget) <= 3 * budget && 4 * (budget - budget / 4 - co_lw_meet_road_cap(budget)) >= 3 * (budget - budget / 4) - 3 &&
+            budget / 4 + co_lw_meet_road_cap(budget) <= co_lw_meet_far_total(budget));
+    g_case = "a road patrol is kept only while the road patrols hold no more than their part of the bubble's budget";
+    CHECK(co_lw_meet_keeps(1, 100.0f, 250.0f, 4, 23) == 1 && co_lw_meet_keeps(1, 100.0f, 250.0f, 5, 23) == 0);
+    CHECK(co_lw_meet_keeps(1, 100.0f, 250.0f, 13, 72) == 1 && co_lw_meet_keeps(1, 100.0f, 250.0f, 14, 72) == 0);
+    g_case = "a filler squad leaves for a road patrol only within that part: one squad at 23, three at 72, four at 96";
+    CHECK(co_lw_meet_road_room(0, 4, 23) == 1 && co_lw_meet_road_room(1, 4, 23) == 0 && co_lw_meet_road_room(9, 4, 72) == 1 && co_lw_meet_road_room(10, 4, 72) == 0);
+    CHECK(co_lw_meet_road_room(14, 4, 96) == 1 && co_lw_meet_road_room(15, 4, 96) == 0 && co_lw_meet_road_room(0, 8, 23) == 0);
 
-    g_case = "the time between two calls: a far walk over the squads the kept half of the far share holds, for each player on a road";
-    CHECK(co_lw_meet_call_ms(9.0f, 4, 1, 465.0f) == 103333u && co_lw_meet_call_ms(23.0f, 4, 8, 661.0f) > 459000u && co_lw_meet_call_ms(23.0f, 4, 8, 661.0f) < 460500u);
-    CHECK(co_lw_meet_call_ms(9.0f, 8, 1, 465.0f) > 206000u && co_lw_meet_call_ms(9.0f, 4, 0, 465.0f) == 103333u);
-    g_case = "never under a minute or over ten; a share too small for one squad still passes one at a time";
-    CHECK(co_lw_meet_call_ms(36.0f, 4, 1, 100.0f) == CO_LW_MEET_CALL_MIN_MS && co_lw_meet_call_ms(9.0f, 4, 8, 3000.0f) == CO_LW_MEET_CALL_MAX_MS);
-    CHECK(co_lw_meet_call_ms(2.0f, 4, 1, 465.0f) == 232500u);
-    g_case = "on the road patrols' own far units a call comes sooner: a minute solo, 153 s each at 8 apart, 294 s each at 8 together";
-    CHECK(co_lw_meet_call_ms(27.0f, 4, 1, 465.0f) == CO_LW_MEET_CALL_MIN_MS && co_lw_meet_call_ms(69.0f, 4, 8, 661.0f) > 152500u && co_lw_meet_call_ms(69.0f, 4, 8, 661.0f) < 154000u);
-    CHECK(co_lw_meet_call_ms(36.0f, 4, 8, 661.0f) > 293000u && co_lw_meet_call_ms(36.0f, 4, 8, 661.0f) < 294500u);
+    g_case = "the time between two calls: a patrol's time online over the squads the bubble's road part holds, for each player of the bubble on a road";
+    CHECK(co_lw_meet_call_ms(13, 4, 1, 1065.0f, 0) == 177500u && co_lw_meet_call_ms(4, 4, 1, 1261.0f, 0) == 630500u && co_lw_meet_call_ms(18, 4, 8, 1261.0f, 0) == 1261000u);
+    CHECK(co_lw_meet_call_ms(12, 4, 1, 1065.0f, 0) == 177500u && co_lw_meet_call_ms(16, 4, 1, 1065.0f, 0) == 133125u); /* whole squads */
+    CHECK(co_lw_meet_call_ms(13, 8, 1, 1065.0f, 0) == 532500u && co_lw_meet_call_ms(13, 4, 0, 1065.0f, 0) == 177500u && co_lw_meet_call_ms(13, 4, 2, 1065.0f, 0) == 355000u);
+    g_case = "a player walking toward the patrol shortens its time online, so the next call comes sooner";
+    CHECK(co_lw_meet_call_ms(4, 4, 1, 1261.0f, 3.0f) == 252200u && co_lw_meet_call_ms(4, 4, 1, 1261.0f, -1.0f) == 630500u);
+    g_case = "never under the least time or over the most; a part too small for one squad still passes one at a time";
+    CHECK(co_lw_meet_call_ms(13, 4, 1, 60.0f, 0) == CO_LW_MEET_CALL_MIN_MS && co_lw_meet_call_ms(4, 4, 8, 1261.0f, 0) == CO_LW_MEET_CALL_MAX_MS);
+    CHECK(co_lw_meet_call_ms(2, 4, 1, 1065.0f, 0) == 532500u && co_lw_meet_call_ms(0, 4, 1, 1065.0f, 0) == 532500u);
     g_case = "a moving player's patrol is called from ahead; at a patrol's pace or faster, from ahead only";
     { const float dirs[2][2] = {{-100, 0}, {100, 0}}, cross[3][2] = {{-100, 0}, {100, 0}, {0, 100}}, slow[2] = {0.5f, 0}, walk[2] = {1.5f, 0}, run[2] = {3, 0}, back[2] = {-3, 0}, north[2] = {0.5f, 4}, off[2] = {0, 3}; int only = 9;
       CHECK(co_lw_meet_call_ahead(slow, dirs, 2, &only) == -1 && only == 0);
@@ -155,17 +164,24 @@ int main(void)
       c.steps = CO_LW_MEET_COVER_STEPS; CHECK(co_lw_meet_cover_ok(&c, here, path, 1, 4, far1, 1, 155.0f, 5000) == 0);
       c.steps = 0; c.known = 0; CHECK(co_lw_meet_cover_ok(&c, here, path, 1, 4, far1, 1, 155.0f, 5000) == 0); } /* used once: forgotten */
 
-    g_case = "the far share: half is kept for patrols on a player's road, and the whole is never passed";
-    CHECK(co_lw_meet_far_room(0, 0, 8, 18, 0, 1, 0) == 1 && co_lw_meet_far_room(2, 0, 8, 18, 0, 1, 0) == 0 && co_lw_meet_far_room(2, 0, 8, 18, 0, 0, 0) == 1);
-    CHECK(co_lw_meet_far_room(8, 0, 8, 18, 1, 1, 0) == 1 && co_lw_meet_far_room(11, 0, 8, 18, 1, 1, 0) == 0 && co_lw_meet_far_room(10, 0, 8, 18, 1, 1, 0) == 1);
-    CHECK(co_lw_meet_far_room(9, 8, 8, 18, 0, 1, 0) == 1 && co_lw_meet_far_room(10, 8, 8, 18, 0, 1, 0) == 0 && co_lw_meet_far_room(11, 0, 8, 18, 0, 0, 27) == 0);
-    g_case = "road patrols on a player's road have their own far units, 3/8 of the budgets: 27 of 72 solo, 69 of 184 at 8 apart";
-    CHECK(co_lw_meet_road_far(72) == 27 && co_lw_meet_road_far(184) == 69 && co_lw_meet_road_far(96) == 36);
-    CHECK(co_lw_meet_far_room(32, 23, 4, 18, 1, 1, 27) == 1 && co_lw_meet_far_room(33, 24, 4, 18, 1, 1, 27) == 0); /* whatever the landscape holds */
-    CHECK(co_lw_meet_far_room(0, 0, 4, 18, 1, 0, 27) == 1 && co_lw_meet_far_room(40, 24, 4, 18, 1, 0, 27) == 0);
-    g_case = "the landscape keeps its half of the far share while road patrols hold more than the share";
-    CHECK(co_lw_meet_far_room(28, 27, 8, 18, 0, 1, 27) == 1 && co_lw_meet_far_room(29, 27, 8, 18, 0, 1, 27) == 0);
-    CHECK(co_lw_meet_far_room(27, 27, 8, 18, 0, 0, 27) == 0 && co_lw_meet_far_room(10, 10, 8, 18, 0, 0, 27) == 1); /* none on its way: the whole share, the road's units in it */
+    g_case = "without the density rules every far squad shares the far share";
+    CHECK(co_lw_meet_far_room(10, 0, 8, 18, 0, 0, -1, 0) == 1 && co_lw_meet_far_room(11, 0, 8, 18, 0, 0, -1, 0) == 0);
+    CHECK(co_lw_meet_far_room(10, 0, 8, 18, 1, 0, -1, 0) == 1 && co_lw_meet_far_room(11, 0, 8, 18, 1, 0, -1, 0) == 0);
+    g_case = "the landscape's far share is its own: 18 of 72, whatever the road patrols hold, and never none";
+    CHECK(co_lw_meet_far_room(10, 0, 8, 18, 0, 0, 13, 36) == 1 && co_lw_meet_far_room(11, 0, 8, 18, 0, 0, 13, 36) == 0);
+    CHECK(co_lw_meet_far_room(22, 12, 8, 18, 0, 12, 13, 36) == 1 && co_lw_meet_far_room(23, 12, 8, 18, 0, 12, 13, 36) == 0);
+    CHECK(co_lw_meet_far_room(27, 27, 8, 18, 0, 27, 13, 36) == 1 && co_lw_meet_far_room(13, 13, 8, 18, 0, 13, 13, 36) == 1); /* the road's part full, none on its way */
+    g_case = "a patrol on a player's road is measured by its bubble's road patrols, far and near: 13 of 72";
+    CHECK(co_lw_meet_far_room(0, 0, 4, 18, 1, 9, 13, 36) == 1 && co_lw_meet_far_room(0, 0, 4, 18, 1, 10, 13, 36) == 0);
+    CHECK(co_lw_meet_far_room(26, 8, 4, 18, 1, 8, 13, 36) == 1 && co_lw_meet_far_room(8, 8, 4, 18, 1, 0, 13, 36) == 1); /* not by the landscape's units, nor by other bubbles' road units */
+    CHECK(co_lw_meet_far_room(0, 0, 4, 18, 1, 0, 0, 36) == 0); /* a budget too small for a road part is not "no rules" */
+    g_case = "far units of every kind never pass 4/8 of the budgets";
+    CHECK(co_lw_meet_far_room(32, 13, 4, 18, 1, 0, 13, 36) == 1 && co_lw_meet_far_room(33, 13, 4, 18, 1, 0, 13, 36) == 0);
+    CHECK(co_lw_meet_far_room(28, 20, 8, 18, 0, 0, 13, 36) == 1 && co_lw_meet_far_room(29, 20, 8, 18, 0, 0, 13, 36) == 0);
+    g_case = "the far sum: the landscape's standing units count past its share, the road's far units all, standing or not";
+    CHECK(co_lw_meet_far_sum(20, 10, 0, 0, 18) == 20 && co_lw_meet_far_sum(20, 30, 0, 0, 18) == 32);
+    CHECK(co_lw_meet_far_sum(20, 10, 12, 4, 18) == 24 && co_lw_meet_far_sum(20, 30, 12, 4, 18) == 32 && co_lw_meet_far_sum(8, 4, 12, 4, 18) == 12);
+    CHECK(co_lw_meet_far_sum(20, 10, 12, 4, 18) - 12 == 12 && co_lw_meet_far_sum(20, 22, 12, 4, 18) - 12 == 12 && co_lw_meet_far_sum(20, 23, 12, 4, 18) - 12 == 13); /* the landscape's part */
 
     g_case = "room held for patrols: one hold a bubble, counted in its bubble only and not against its own squad";
     { static CoLwMeetHolds h; int bubble[CO_LW_MEET_HOLDS]; for (int k = 0; k < CO_LW_MEET_HOLDS; k++) bubble[k] = -1;

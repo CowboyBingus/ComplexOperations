@@ -515,9 +515,9 @@ static int LwSteerOk(const LwSquad* q); static int LwSquadGoTo(LwSquad* q, const
 static void LwDensityOnline(const float* pos, uint32_t members); static int LwDensityOn(void); static int LwDensityRoom(const float* pos, uint32_t members, uint32_t held, char* why, size_t whyLen); static float LwDensityPopulateUnits(int eff); static float LwFarShareLimit(void); static int LwUnitBudget(void); static int LwDensitySameBubble(const LwSquad* a, const LwSquad* b); static void LwDensityTick(float dt); static void LwDensityNote(void); static void LwDensityBudgetCmd(int n); static void LwSyncCensus(int seq); /* living_world_density.c */
 static int LwMeetWaits(const LwSquad* q); static int LwMeetHold(LwSquad* q, float nx, float ny); static void LwMeetWhy(LwSquad* q, const char* why); static void LwNoFaceNote(const LwSquad* q); /* living_world_patrols.c */
 static int LwMeetKeeps(const LwSquad* q); static uint32_t LwMeetHeld(int requester); static int LwMeetApproach(LwSquad* q, ULONGLONG now, int busy); static int LwMeetPriority(const LwSquad* q);
-static int LwMeetFarRoom(const LwSquad* q, int meet, int farUnits); static void LwMeetAsked(LwSquad* q, int meet, int farAsk); static int LwMeetStays(LwSquad* q, float d2, ULONGLONG now); static void LwMeetFarCount(int idx, int units);
+static int LwMeetFarRoom(const LwSquad* q, int meet, int farUnits, char* why, size_t size); static int LwMeetFarSum(int walking, int standing); static void LwMeetAsked(LwSquad* q, int meet, int farAsk); static int LwMeetStays(LwSquad* q, float d2, ULONGLONG now); static void LwMeetFarCount(int idx, int units, int stands);
 static void LwMeetRefused(const LwSquad* q, int meet, const char* why, ULONGLONG now); static void LwMeetSight(LwSquad* q); static float LwMeetDrawn(LwSquad* q, int i); static void LwMeetCmd(int on); static void LwBesideCmd(int seq, float d); static void LwWayOnCmd(int seq);
-static int LwPatrolFar(const LwSquad* q); static int LwPatrolFarSum(int walking, int standing); static float LwLeadNear2(const LwSquad* q); static void LwPatrolAsked(const LwSquad* q); static int LwPatrolHolds(int idx); static void LwPatrolHoldTaken(void); static int LwPatrolYields(const LwSquad* q); static int LwRoadPlan(LwSquad* q, int home); static void LwPatrolsOldCmd(int on); static void LwTravelCmd(int seq, float v, float s); static void LwTravelBackCmd(int seq, float v); static void LwRoadPatrolsCmd(int on); static void LwPatrolsTick(void); /* living_world_patrols.c */
+static int LwPatrolFar(const LwSquad* q); static float LwLeadNear2(const LwSquad* q); static void LwPatrolAsked(const LwSquad* q); static int LwPatrolHolds(int idx); static void LwPatrolHoldTaken(void); static int LwPatrolYields(const LwSquad* q); static int LwRoadPlan(LwSquad* q, int home); static void LwPatrolsOldCmd(int on); static void LwTravelCmd(int seq, float v, float s); static void LwTravelBackCmd(int seq, float v); static void LwRoadPatrolsCmd(int on); static void LwPatrolsTick(void); /* living_world_patrols.c */
 static void LwLodTick(void); static void LwLodNote(void); static void LwLodCmd(int on); static int LwLodFullUnits(void); /* living_world_lod.c */
 static void LwDeferTick(uintptr_t lg, uint32_t seed); static void LwDeferNote(void); static void LwSpawnSourcesNote(int seq); /* living_world_defer.c */
 static void LwSyncDump(int seq); /* living_world_density.c */
@@ -3101,17 +3101,17 @@ static void LwTickScans(void)
 static int LwTickSums(int* units, int* waiting)
 {
     int farSum = 0, farStand = 0;
-    LwMeetFarCount(-1, 0);
+    LwMeetFarCount(-1, 0, 0);
     for (int i = 0; i < g_lwWorld.count; i++)
     {
         const LwSquad* q = &g_lwSquads[i];
         if (!g_lwEvery[i]) continue;
         int n = q->state == LW_PENDING ? q->cap : q->state == LW_ONLINE ? q->alive : 0;
         *units += n;
-        if (n) { int place = LwPatrolFar(q); if (place == CO_LW_VIEW_FAR_WALKS) farSum += n; else if (place == CO_LW_VIEW_FAR_STANDS) farStand += n; if (place != CO_LW_VIEW_FAR_NONE) LwMeetFarCount(i, n); }
+        if (n) { int place = LwPatrolFar(q); if (place == CO_LW_VIEW_FAR_WALKS) farSum += n; else if (place == CO_LW_VIEW_FAR_STANDS) farStand += n; if (place != CO_LW_VIEW_FAR_NONE) LwMeetFarCount(i, n, place == CO_LW_VIEW_FAR_STANDS); }
         *waiting |= q->state == LW_OFFLINE && q->cycled == 1;
     }
-    farSum = LwPatrolFarSum(farSum, farStand); /* standing far squads count past their own share (living_world_patrols.c) */
+    farSum = LwMeetFarSum(farSum, farStand); /* the landscape's standing ones count past their own share, the road's all (living_world_patrols.c) */
     g_lwWorld.onlineUnits = *units; g_lwWorld.farUnits = farSum;
     return farSum;
 }
@@ -3210,11 +3210,7 @@ static void LwSquadsTick(void)
                 if (!back && LwRecentNear(q->pos)) { why = g_lwSpacedWhy; g_lwWorld.spaced++; q->retry = now + 3000; goto offlineDone; } /* spaced from online squads and recent requests (audit 1, 11) */
                 if (farBand && !back)
                 {
-                    if (!LwMeetFarRoom(q, meet, farUnits))
-                    {
-                        snprintf(whyBuf, sizeof whyBuf, "the far share: %d far units + %u over %.0f", farUnits, q->survivors, (double)LwFarShareLimit()); why = whyBuf; q->retry = now + 3000;
-                        goto offlineDone;
-                    }
+                    if (!LwMeetFarRoom(q, meet, farUnits, whyBuf, sizeof whyBuf)) { why = whyBuf; q->retry = now + 3000; goto offlineDone; }
                     farTries++;
                     float here[3] = {q->pos[0], q->pos[1], 0};
                     int inView = meet || (LwGround(here[0], here[1], &here[2]) && LwSeenByAny(here, LwSquadBand(q))); /* a patrol on its way in asks by its own rule */

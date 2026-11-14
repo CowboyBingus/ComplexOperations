@@ -308,7 +308,7 @@ int main(void)
     {
         const float apart[2][2] = {{0, 0}, {3000, 0}}, solo[1][2] = {{0, 0}}; const char* cap = "the cap: bubble 20 online + 8 + 0 held over 23 (1 players)";
         CoXlTestLwSeenWorld(apart, 2, 23);
-        CoXlTestLwSeenSquad(0, 200, 0, 1, 8, 1); CoXlTestLwSeenSquad(20, 250, 0, 1, 8, 1); CoXlTestLwSeenSquad(10, 3200, 0, 1, 8, 1);
+        CoXlTestLwSeenSquad(0, 200, 0, 1, 4, 1); CoXlTestLwSeenSquad(20, 250, 0, 1, 4, 1); CoXlTestLwSeenSquad(10, 3200, 0, 1, 4, 1);
         CoXlTestLwSeenSquad(3, 100, 0, 1, 7, 0); CoXlTestLwSeenSquad(12, 3100, 0, 1, 7, 0); CoXlTestLwSeenSquad(5, 300, 0, 3, 6, 0); CoXlTestLwSeenSquad(6, 3300, 0, 3, 6, 0);
         g_case = "the cap's text reads as a refusal for units; sight and spacing do not";
         CHECK(CoXlTestLwSeenCapText() == 1);
@@ -319,55 +319,57 @@ int main(void)
         CHECK(CoXlTestLwSeenWhy(0, cap, 100000, -1) == 0 && CoXlTestLwSeenHeld(3, 100000) == 0);
         g_case = "refused for room with its point standing: a filler squad leaves and the room is held in its bubble only";
         CHECK(CoXlTestLwSeenWhy(0, cap, 106000, 5) == 1);
-        CHECK(CoXlTestLwSeenHeld(3, 106000) == 8 && CoXlTestLwSeenHeld(0, 106000) == 0 && CoXlTestLwSeenHeld(12, 106000) == 0);
+        CHECK(CoXlTestLwSeenHeld(3, 106000) == 4 && CoXlTestLwSeenHeld(0, 106000) == 0 && CoXlTestLwSeenHeld(12, 106000) == 0);
         g_case = "while room is made for it the patrol stands where its point stood; another walks on";
         CHECK(CoXlTestLwSeenStands(0, 106000) == 1 && CoXlTestLwSeenStands(20, 106000) == 0 && CoXlTestLwSeenStands(0, 126000) == 0);
         g_case = "another bubble's patrol swaps while that hold runs; the same bubble's does not";
-        CHECK(CoXlTestLwSeenWhy(10, cap, 107000, 6) == 1 && CoXlTestLwSeenHeld(12, 107000) == 8);
+        CHECK(CoXlTestLwSeenWhy(10, cap, 107000, 6) == 1 && CoXlTestLwSeenHeld(12, 107000) == 4);
         CHECK(CoXlTestLwSeenWhy(0, cap, 112000, 5) == 0 && CoXlTestLwSeenWhy(20, cap, 112000, 5) == 0);
         g_case = "the hold lapses after 20 s; then the next patrol of the bubble may swap";
-        CHECK(CoXlTestLwSeenHeld(3, 125999) == 8 && CoXlTestLwSeenHeld(3, 126000) == 0);
+        CHECK(CoXlTestLwSeenHeld(3, 125999) == 4 && CoXlTestLwSeenHeld(3, 126000) == 0);
         CHECK(CoXlTestLwSeenWhy(20, cap, 126000, 5) == 1);
         g_case = "one swap in 5 s a bubble";
         CoXlTestLwSeenWorld(apart, 2, 23);
-        CoXlTestLwSeenSquad(0, 200, 0, 1, 8, 1); CoXlTestLwSeenSquad(5, 300, 0, 3, 6, 0); CoXlTestLwSeenSquad(3, 100, 0, 1, 7, 0);
+        CoXlTestLwSeenSquad(0, 200, 0, 1, 4, 1); CoXlTestLwSeenSquad(5, 300, 0, 3, 6, 0); CoXlTestLwSeenSquad(3, 100, 0, 1, 7, 0);
         CHECK(CoXlTestLwSeenWhy(0, cap, 200000, -1) == 0 && CoXlTestLwSeenWhy(0, cap, 204999, 5) == 0 && CoXlTestLwSeenWhy(0, cap, 205000, 5) == 1);
-        g_case = "at 23 units the road patrols take one squad by swap: with one online the next is refused, and the farther one may be filler";
+        g_case = "at 23 units the road patrols take one squad of 4 by swap: with one online the next is refused, and the farther one may be filler";
         CoXlTestLwSeenWorld(apart, 2, 23);
-        CoXlTestLwSeenSquad(0, 200, 0, 3, 8, 0); CoXlTestLwSeenSquad(20, 250, 0, 1, 8, 1); CoXlTestLwSeenSquad(5, 300, 0, 3, 6, 0); CoXlTestLwSeenSquad(10, 3200, 0, 3, 8, 0);
+        CoXlTestLwSeenSquad(0, 200, 0, 3, 4, 0); CoXlTestLwSeenSquad(20, 250, 0, 1, 4, 1); CoXlTestLwSeenSquad(5, 300, 0, 3, 6, 0); CoXlTestLwSeenSquad(10, 3200, 0, 3, 4, 0);
         CHECK(CoXlTestLwSeenWhy(20, cap, 300000, 5) == 0 && CoXlTestLwSeenKeeps(0) == 1 && CoXlTestLwSeenKeeps(5) == 0);
-        CoXlTestLwSeenSquad(20, 250, 0, 3, 8, 0);
-        CHECK(CoXlTestLwSeenKeeps(0) == 0 && CoXlTestLwSeenKeeps(10) == 1); /* 16 of 23 in bubble 0; bubble 1's one squad stays */
-        CoXlTestLwSeenSquad(0, 400, 0, 3, 8, 0); CoXlTestLwSeenSquad(20, 250, 0, 1, 8, 1);
+        CoXlTestLwSeenSquad(20, 250, 0, 3, 4, 0);
+        CHECK(CoXlTestLwSeenKeeps(0) == 0 && CoXlTestLwSeenKeeps(10) == 1); /* 8 over bubble 0's 4; bubble 1's one squad stays */
+        CoXlTestLwSeenSquad(0, 400, 0, 3, 4, 0); CoXlTestLwSeenSquad(20, 250, 0, 1, 4, 1);
         CHECK(CoXlTestLwSeenKeeps(0) == 0); /* beyond 250 m: filler like any */
-        g_case = "at 72 units two road squads are kept and a third still swaps";
+        g_case = "at 72 units two road squads are kept and a third still swaps; a fourth does not: 13 units are the road patrols'";
         CoXlTestLwSeenWorld(solo, 1, 72);
-        CoXlTestLwSeenSquad(0, 200, 0, 3, 8, 0); CoXlTestLwSeenSquad(10, 0, 200, 3, 8, 0); CoXlTestLwSeenSquad(20, 250, 0, 1, 8, 1); CoXlTestLwSeenSquad(5, 300, 0, 3, 6, 0); CoXlTestLwSeenSquad(3, 100, 0, 1, 7, 0);
+        CoXlTestLwSeenSquad(0, 200, 0, 3, 4, 0); CoXlTestLwSeenSquad(10, 0, 200, 3, 4, 0); CoXlTestLwSeenSquad(20, 250, 0, 1, 4, 1); CoXlTestLwSeenSquad(5, 300, 0, 3, 6, 0); CoXlTestLwSeenSquad(3, 100, 0, 1, 7, 0);
         CHECK(CoXlTestLwSeenKeeps(0) == 1 && CoXlTestLwSeenKeeps(10) == 1 && CoXlTestLwSeenWhy(20, cap, 400000, 5) == 1);
-        g_case = "the far share of 18: 9 for other far squads; a patrol on a player's road has the road patrols' 27 of 72";
-        CHECK(CoXlTestLwSeenFarRoom(3, 0, 2, 0) == 1 && CoXlTestLwSeenFarRoom(3, 0, 3, 0) == 0 && CoXlTestLwSeenFarRoom(3, 2, 3, 0) == 0);
-        CHECK(CoXlTestLwSeenFarRoom(20, 3, 11, 0) == 1 && CoXlTestLwSeenFarRoom(20, 3, 30, 19) == 1 && CoXlTestLwSeenFarRoom(20, 3, 30, 20) == 0 && CoXlTestLwSeenFarRoom(3, 0, 10, 8) == 1);
-        CHECK(CoXlTestLwSeenFarRoom(3, 0, 29, 27) == 1 && CoXlTestLwSeenFarRoom(3, 0, 30, 27) == 0); /* the landscape's 9 beside a full road share */
-        CHECK(CoXlTestLwSeenFarRoom(20, 0, 3, 0) == 0); /* on a player's road but asking by the far band's own rule: no kept share */
-        g_case = "no road patrol on its way to a player: the other far squads have the whole share; one still out keeps the half";
-        CoXlTestLwSeenSquad(20, 250, 0, 1, 8, 0);
-        CHECK(CoXlTestLwSeenFarRoom(3, 0, 3, 0) == 1 && CoXlTestLwSeenFarRoom(3, 0, 11, 0) == 1 && CoXlTestLwSeenFarRoom(3, 0, 12, 0) == 0);
-        CoXlTestLwSeenSquad(20, 250, 0, 1, 8, 8); CHECK(CoXlTestLwSeenFarRoom(3, 0, 3, 0) == 0);
-        CoXlTestLwSeenSquad(20, 250, 0, 3, 8, 1); CHECK(CoXlTestLwSeenFarRoom(3, 0, 3, 0) == 1); /* online: its mark is no wish */
-        CoXlTestLwSeenSquad(3, 100, 0, 1, 7, 1); CHECK(CoXlTestLwSeenFarRoom(3, 0, 3, 0) == 1); /* squad 3 is no road patrol */
-        CoXlTestLwSeenSquad(3, 100, 0, 1, 7, 0); CoXlTestLwSeenSquad(20, 250, 0, 1, 8, 1);
+        CoXlTestLwSeenSquad(30, 0, -900, 3, 4, 0);
+        CHECK(CoXlTestLwSeenWhy(20, cap, 500000, 5) == 0 && CoXlTestLwSeenKeeps(0) == 1); /* a far road squad counts in the bubble's 13 too */
+        g_case = "the landscape's far share of 18 is its own, with or without a road patrol on its way";
+        CHECK(CoXlTestLwSeenFarRoom(3, 0, 11, 0) == 1 && CoXlTestLwSeenFarRoom(3, 0, 12, 0) == 0 && CoXlTestLwSeenFarRoom(3, 2, 12, 0) == 0);
+        CHECK(CoXlTestLwSeenFarRoom(3, 0, 19, 8) == 1 && CoXlTestLwSeenFarRoom(3, 0, 20, 8) == 0 && CoXlTestLwSeenFarRoom(3, 0, 23, 12) == 1);
+        CoXlTestLwSeenSquad(20, 250, 0, 1, 4, 0); CHECK(CoXlTestLwSeenFarRoom(3, 0, 11, 0) == 1 && CoXlTestLwSeenFarRoom(3, 0, 12, 0) == 0);
+        CoXlTestLwSeenSquad(20, 250, 0, 1, 4, 8); CHECK(CoXlTestLwSeenFarRoom(3, 0, 11, 0) == 1 && CoXlTestLwSeenFarRoom(3, 0, 12, 0) == 0); /* one still out: no half is kept from the landscape */
+        g_case = "a patrol on a player's road asks against its bubble's road patrols: 12 online of 13, no room for 4 more; with 8, room";
+        CoXlTestLwSeenSquad(20, 250, 0, 1, 4, 1);
+        CHECK(CoXlTestLwSeenFarRoom(20, 3, 0, 0) == 0 && CoXlTestLwSeenFarRoom(20, 3, 30, 12) == 0);
+        CoXlTestLwSeenSquad(30, 0, -900, 1, 4, 0);
+        CHECK(CoXlTestLwSeenFarRoom(20, 3, 0, 0) == 1 && CoXlTestLwSeenFarRoom(20, 3, 30, 8) == 1 && CoXlTestLwSeenFarRoom(20, 3, 32, 8) == 1 && CoXlTestLwSeenFarRoom(20, 3, 33, 8) == 0); /* 36 far units in all */
+        CHECK(CoXlTestLwSeenFarRoom(20, 0, 14, 0) == 1 && CoXlTestLwSeenFarRoom(20, 0, 15, 0) == 0); /* on a player's road but asking by the far band's own rule: the landscape's share */
+        CoXlTestLwSeenSquad(3, 100, 0, 1, 7, 0); CoXlTestLwSeenSquad(20, 250, 0, 1, 4, 1);
         g_case = "meet 0: a road patrol near a player is filler like any";
         CoXlTestLwSeenSwitch(0); CHECK(CoXlTestLwSeenKeeps(0) == 0);
         CoXlTestLwSeenSwitch(1); CHECK(CoXlTestLwSeenKeeps(0) == 1);
         g_case = "an event squad's hold counts in its own bubble only, and a patrol does not swap beside it there";
         CoXlTestLwSeenWorld(apart, 2, 23);
-        CoXlTestLwSeenSquad(0, 200, 0, 1, 8, 1); CoXlTestLwSeenSquad(10, 3200, 0, 1, 8, 1); CoXlTestLwSeenSquad(7, 3100, 0, 1, 9, 0); CoXlTestLwSeenSquad(3, 100, 0, 1, 7, 0);
+        CoXlTestLwSeenSquad(0, 200, 0, 1, 4, 1); CoXlTestLwSeenSquad(10, 3200, 0, 1, 4, 1); CoXlTestLwSeenSquad(7, 3100, 0, 1, 9, 0); CoXlTestLwSeenSquad(3, 100, 0, 1, 7, 0);
         CoXlTestLwSeenSquad(12, 3100, 0, 1, 7, 0); CoXlTestLwSeenSquad(5, 300, 0, 3, 6, 0); CoXlTestLwSeenSquad(6, 3300, 0, 3, 6, 0);
         CoXlTestLwSeenEventHold(7, 9);
         CHECK(CoXlTestLwSeenEventHeld(3) == 0 && CoXlTestLwSeenEventHeld(12) == 9 && CoXlTestLwSeenEventHeld(7) == 0);
         CHECK(CoXlTestLwSeenWhy(10, cap, 500000, 6) == 0 && CoXlTestLwSeenWhy(0, cap, 500000, 5) == 1);
         g_case = "a request counts the event squad's hold and the patrols' holds of its own bubble";
-        CHECK(CoXlTestLwSeenEventHeld(3) == 8 && CoXlTestLwSeenEventHeld(12) == 9 && CoXlTestLwSeenEventHeld(0) == 0);
+        CHECK(CoXlTestLwSeenEventHeld(3) == 4 && CoXlTestLwSeenEventHeld(12) == 9 && CoXlTestLwSeenEventHeld(0) == 0);
         g_case = "sent to reinforce while it waits with a hold: no wait, no priority, no mark, and its hold ends";
         CHECK(CoXlTestLwSeenErrand(0, 501000) == 0 && CoXlTestLwSeenEventHeld(3) == 0 && CoXlTestLwSeenEventHeld(12) == 9);
         CoXlTestLwSeenEventHold(-1, 0);
@@ -461,20 +463,20 @@ int main(void)
         { const float at5[1][2] = {{500, 20}}, at6[1][2] = {{600, 20}}, last[1] = {2950}; const int back[1] = {-1};
           CoXlTestLwCallWorld(30, 0, at5, 1, last, back, none, 1); CHECK(CoXlTestLwCallOne(0, 1, o) == -1); /* 24 nodes out, 2450 m */
           CoXlTestLwCallWorld(30, 0, at6, 1, last, back, none, 1); CHECK(CoXlTestLwCallOne(0, 1, o) == 0 && o[0] == 29 && o[1] == 29 && o[2] == 1); }
-        g_case = "one call a second at most, and a player's next call a far walk's time on: 103 s solo on a far share of 18";
-        { const uint32_t period = co_lw_meet_call_ms(9.0f, 4, 1, B + 50.0f - 250.0f);
+        g_case = "one call a second at most, and a player's next call a patrol's time online on: 532 s solo where the road patrols' part holds one squad (6 of 36)";
+        { const uint32_t period = co_lw_meet_call_ms(6, 4, 1, B + 50.0f + 350.0f, 0);
           CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
-          CHECK(period > 100000u && period < 107000u);
+          CHECK(period > 525000u && period < 540000u);
           CHECK(CoXlTestLwCallTick(1000000u) == 1 && CoXlTestLwCallTick(1000500u) == 1 && CoXlTestLwCallTick(1002000u) == 1);
           CHECK(CoXlTestLwCallTick(1000000u + period - 1500u) == 1 && CoXlTestLwCallTick(1000000u + period + 500u) == 2);
           CHECK(CoXlTestLwCallOf(30) == 1 && CoXlTestLwCallOf(10) == 1 && CoXlTestLwCallOf(0) == 0); /* the second from the other side */ }
         g_case = "two players on a road: each has its call in turn, and twice the time to its next";
         { const float pair[2][2] = {{1500, 20}, {1600, -20}}, wide[4] = {250, 450, 550, 2750}; const int d4[4] = {1, 1, -1, -1};
-          const uint32_t period = co_lw_meet_call_ms(9.0f, 4, 1, B + 50.0f - 250.0f);
-          const uint32_t first = co_lw_meet_call_ms(9.0f, 4, 2, CoXlTestLwSeenScopedOf(2.0f) + 100.0f - 250.0f) / 2u;
+          const uint32_t period = co_lw_meet_call_ms(6, 4, 1, B + 50.0f + 350.0f, 0);
+          const uint32_t first = co_lw_meet_call_ms(6, 4, 2, CoXlTestLwSeenScopedOf(2.0f) + 100.0f + 350.0f, 0) / 2u;
           CoXlTestLwCallWorld(30, 0, pair, 2, wide, d4, none, 4);
           /* the second player's first call is half its own period on (a peer's far walk is the scoped band's), from the other side */
-          CHECK(first > 140000u && first < 150000u && 2u * period > first + 50000u);
+          CHECK(first > 620000u && first < 640000u && 2u * period > first + 50000u);
           CHECK(CoXlTestLwCallTick(1000000u) == 1 && CoXlTestLwCallTick(1000500u) == 1 && CoXlTestLwCallTick(1001000u) == 1 && CoXlTestLwCallTick(1000000u + first - 2000u) == 1);
           CHECK(CoXlTestLwCallOf(20) == 1 && CoXlTestLwCallOf(30) == 0);
           CHECK(CoXlTestLwCallTick(1000000u + first + 2000u) == 2 && CoXlTestLwCallOf(30) == 2 && CoXlTestLwCallOf(10) == 0);

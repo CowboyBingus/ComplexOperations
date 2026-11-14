@@ -38,9 +38,13 @@ int co_lw_meet_next(uint64_t sinceMs, uint64_t nowMs, float nearest2, float ring
     return nearest2 < ring * ring ? CO_LW_MEET_BACK : CO_LW_MEET_WAITS;
 }
 
+int co_lw_meet_road_cap(int budget) { return budget * CO_LW_MEET_ROAD_16THS / 16; }
+
+int co_lw_meet_far_total(int budget) { return budget * CO_LW_MEET_FAR_8THS / 8; }
+
 int co_lw_meet_keeps(int road, float near2, float rOn, int roadUnits, int budget)
 {
-    return road && near2 < rOn * rOn && roadUnits <= budget / CO_LW_MEET_ROAD_SHARE;
+    return road && near2 < rOn * rOn && roadUnits <= co_lw_meet_road_cap(budget);
 }
 
 int co_lw_meet_on_way(const float (*way)[2], int n, const float* player, float width)
@@ -79,16 +83,21 @@ int co_lw_meet_cover_ok(const CoLwMeetCover* c, const float* at, const uint16_t*
     return 1;
 }
 
-int co_lw_meet_road_room(int roadUnits, int members, int budget) { return roadUnits + members <= budget / CO_LW_MEET_ROAD_SHARE; }
+int co_lw_meet_road_room(int roadUnits, int members, int budget) { return roadUnits + members <= co_lw_meet_road_cap(budget); }
 
-int co_lw_meet_far_room(int farUnits, int roadFar, int members, int limit, int onRoad, int reserve, int roadLimit)
+int co_lw_meet_far_sum(int walking, int standing, int roadFar, int roadStand, int limit)
 {
-    if (onRoad && roadLimit > 0) return roadFar + members <= roadLimit;
-    if (onRoad || !reserve) return farUnits + members <= limit;
-    return farUnits - roadFar + members <= limit - limit / CO_LW_MEET_FAR_RESERVE;
+    const int stood = standing - roadStand;
+    return walking - (roadFar - roadStand) + (stood > limit ? stood - limit : 0) + roadFar;
 }
 
-int co_lw_meet_road_far(int budget) { return budget * CO_LW_MEET_ROAD_FAR_8THS / 8; }
+int co_lw_meet_far_room(int farUnits, int roadFar, int members, int limit, int onRoad, int roadHeld, int roadLimit, int total)
+{
+    if (roadLimit < 0) return farUnits + members <= limit;
+    if (farUnits + members > total) return 0;
+    if (onRoad) return roadHeld + members <= roadLimit;
+    return farUnits - roadFar + members <= limit;
+}
 
 uint64_t co_lw_meet_stay_ms(float keep, float rOff) { return keep > rOff ? (uint64_t)((keep - rOff) / CO_LW_MEET_STAY_PACE * 1000.0f) : 0; }
 
@@ -101,11 +110,10 @@ int co_lw_meet_watched(uint8_t* run, int seen)
     return 1;
 }
 
-uint32_t co_lw_meet_call_ms(float roadFar, int members, int roadPlayers, float walk)
+uint32_t co_lw_meet_call_ms(int cap, int members, int sharers, float way, float speed)
 {
-    float kept = roadFar;
-    if (kept < (float)members) kept = (float)members; /* one squad walks in on any share */
-    const float ms = walk / CO_LW_MEET_PACE * 1000.0f * (float)members * (float)(roadPlayers > 0 ? roadPlayers : 1) / kept;
+    const int squads = members > 0 && cap >= members ? cap / members : 1; /* one squad passes on any part */
+    const float ms = way / (CO_LW_MEET_PACE + (speed > 0.0f ? speed : 0.0f)) * 1000.0f * (float)(sharers > 0 ? sharers : 1) / (float)squads;
     return ms < (float)CO_LW_MEET_CALL_MIN_MS ? CO_LW_MEET_CALL_MIN_MS : ms > (float)CO_LW_MEET_CALL_MAX_MS ? CO_LW_MEET_CALL_MAX_MS : (uint32_t)ms;
 }
 

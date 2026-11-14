@@ -28,19 +28,18 @@
 #define CO_LW_MEET_LOOK_SLOW_MS 2000u /* any other patrol walking toward a player */
 #define CO_LW_MEET_COVER_MS 120000u  /* a remembered point this old is forgotten: the players have moved */
 #define CO_LW_MEET_COVER_STEPS 6     /* steps back to cover in one approach; then it walks on */
-#define CO_LW_MEET_ROAD_SHARE 2      /* road patrols take a bubble's budget / this by swap, and are kept up to it */
-#define CO_LW_MEET_FAR_RESERVE 2     /* the far share / this is the landscape's while a road patrol is on its way to a player */
-/* Patrols on a player's road may hold this many eighths of the bubbles' budgets as far units (27 of 72 solo, 69 of
- * 184 at 8 apart), beside the landscape's half of the far share: the walk in from beyond the band is what a player
- * on a road sees. It is paid by near filler, a third of it at most (3/8 + 1/8 against the far share's 2/8 of the
- * budget, out of the 6/8 the near filler had). Where a squad comes online is not changed by it. */
-#define CO_LW_MEET_ROAD_FAR_8THS 3
+/* Road patrols hold this many sixteenths of their bubble's budget at most, far and near together, by the routes
+ * the meet rules opened (a far request on a player's road, a filler's swap): 13 of 72 solo, 4 of 23 at 8 apart, 18
+ * of 96 at 8 together. It is a quarter of the 12/16 the near squads have beside the far share, so the landscape
+ * near a player keeps three quarters of its units, and its far share stays its own. */
+#define CO_LW_MEET_ROAD_16THS 3
+#define CO_LW_MEET_FAR_8THS 4        /* far units of every kind hold this many eighths of the budgets at most */
 #define CO_LW_MEET_HOLDS 8           /* one hold a bubble at most */
 #define CO_LW_MEET_SEEN_GAP 5        /* samples (seconds) out of view before the next sight of a squad is a new sighting */
 #define CO_LW_MEET_PLAYERS 8
-/* More patrols on a player's road at no unit cost: road patrols are small, and the nearest one out of sight is
- * called along the road to each player there, as often as the far share's kept half lets one walk in. */
-#define CO_LW_MEET_ROAD_MEMBERS 4    /* a road patrol's units: two squads walk in on the kept half of a solo far share (9 of 18) */
+/* More patrols on a player's road: road patrols are small, and the nearest one out of sight is called along the
+ * road past each player there, as often as the road patrols' part of the bubble (co_lw_meet_road_cap) passes them. */
+#define CO_LW_MEET_ROAD_MEMBERS 4    /* a road patrol's units: three squads at once on a solo bubble's 13 */
 #define CO_LW_MEET_PACE 2.0f         /* m/s: a patrol's walk (the squads' default speed; 1.97 measured online) */
 #define CO_LW_MEET_CALL_NEAR 150.0f  /* m: a player this near a road node is on or by that road */
 #define CO_LW_MEET_CALL_HOPS 23      /* road nodes out from the player a called patrol may stand: 2.3 km, a plan's 32 nodes with the way past */
@@ -52,7 +51,7 @@
 #define CO_LW_MEET_CALL_MOVING 1.0f  /* m/s: a player this fast has patrols called from ahead of them */
 #define CO_LW_MEET_CALL_LOST 150.0f  /* m farther from its player than it has been: a called patrol is let go */
 #define CO_LW_MEET_CALL_MIN_MS 60000u  /* never more than a patrol a minute for one player */
-#define CO_LW_MEET_CALL_MAX_MS 600000u /* and one in ten minutes at least, however small that player's part of the share */
+#define CO_LW_MEET_CALL_MAX_MS 1800000u /* and one in half an hour at least: 8 players together share one bubble's part (1261 s each) */
 #define CO_LW_MEET_ZONE_WAIT_MS 90000u /* a patrol refused the far share stands beyond the band this long at most, then walks on */
 #define CO_LW_MEET_ZONE_ASK_MS 4000u   /* its refusal is this fresh: it asks every 3 s */
 #define CO_LW_MEET_RINGS 3          /* 50, 100 and 150 m */
@@ -71,8 +70,12 @@ int co_lw_meet_back(const float* at, const float* back, const float (*players)[3
 /* What a patrol waiting since `sinceMs` does: it turns back after CO_LW_MEET_WAIT_MS, steps back out while a player
  * is within `ring` of it (`nearest2` the squared distance), and waits otherwise. */
 int co_lw_meet_next(uint64_t sinceMs, uint64_t nowMs, float nearest2, float ring);
+/* The road patrols' units of a bubble's `budget`: CO_LW_MEET_ROAD_16THS sixteenths. */
+int co_lw_meet_road_cap(int budget);
+/* The far units of every kind `budget` (all bubbles') allows: CO_LW_MEET_FAR_8THS eighths. */
+int co_lw_meet_far_total(int budget);
 /* 1 for an online squad that never leaves to make room: a road patrol within `rOn` of a player is what they came
- * for, while its bubble's road patrols (`roadUnits`, itself among them) hold no more than their share of `budget`. */
+ * for, while its bubble's road patrols (`roadUnits`, itself among them) hold no more than their part of `budget`. */
 int co_lw_meet_keeps(int road, float near2, float rOn, int roadUnits, int budget);
 /* 1 when `player` (x, y) lies within `width` of the way through the `n` points. */
 int co_lw_meet_on_way(const float (*way)[2], int n, const float* player, float width);
@@ -96,19 +99,23 @@ void co_lw_meet_cover_set(CoLwMeetCover* c, const float* at, uint16_t node, uint
  * and fewer than CO_LW_MEET_COVER_STEPS steps taken. */
 int co_lw_meet_cover_ok(const CoLwMeetCover* c, const float* at, const uint16_t* path, uint8_t pathAt, uint8_t pathLen, const float (*players)[3], int n, float edge, uint64_t nowMs);
 /* 1 when a road patrol of `members` may have a filler squad leave for it: the bubble's road patrols stay within
- * their share of `budget`. */
+ * their part of `budget`. */
 int co_lw_meet_road_room(int roadUnits, int members, int budget);
-/* 1 when a far squad of `members` has room: `farUnits` far units now, `roadFar` of them patrols on a player's road.
- * A patrol on a player's road (`onRoad`) has the road patrols' own share `roadLimit`; with 0 (no density rules) it
- * shares `limit` with the others. The others have the far share `limit`, and with `reserve` (a road patrol is on
- * its way to a player) limit / CO_LW_MEET_FAR_RESERVE of it, whatever the road patrols hold. */
-int co_lw_meet_far_room(int farUnits, int roadFar, int members, int limit, int onRoad, int reserve, int roadLimit);
-/* The road patrols' far units of a budget of `budget` units: CO_LW_MEET_ROAD_FAR_8THS eighths. */
-int co_lw_meet_road_far(int budget);
-/* The time between two patrols called to one player's road: the walk `walk` m from where a patrol comes online to
- * the online radius, over the squads of `members` the road patrols' far units `roadFar` hold at once, for each of
- * the `roadPlayers` players on a road. Faster, the share would refuse them. */
-uint32_t co_lw_meet_call_ms(float roadFar, int members, int roadPlayers, float walk);
+/* The far units a new far squad is measured against: the landscape's by its own rule (walking ones, and standing
+ * ones past `limit`), and every far unit of patrols that came online on a player's road (`roadFar`, `roadStand` of
+ * them standing). `walking` and `standing` hold the road's too. */
+int co_lw_meet_far_sum(int walking, int standing, int roadFar, int roadStand, int limit);
+/* 1 when a far squad of `members` has room: `farUnits` far units now (co_lw_meet_far_sum), `roadFar` of them
+ * patrols on a player's road, and never more than `total` with it. A patrol on a player's road (`onRoad`) is
+ * measured by its bubble's road patrols, `roadHeld` units far and near, against their part `roadLimit`. The others
+ * have the far share `limit` to themselves, whatever the road holds. `roadLimit` < 0 (no density rules): all share
+ * `limit`. */
+int co_lw_meet_far_room(int farUnits, int roadFar, int members, int limit, int onRoad, int roadHeld, int roadLimit, int total);
+/* The time between two patrols called to one player's road: a patrol's time online, `way` m from where it comes
+ * online past the player to where it goes offline, at its pace and the player's `speed` toward it, over the squads
+ * of `members` the bubble's road patrols may hold at once (`cap` units), for each of the `sharers` players of that
+ * bubble on a road. Faster, the bubble would refuse them. */
+uint32_t co_lw_meet_call_ms(int cap, int members, int sharers, float way, float speed);
 /* The side of the road a moving player's patrol is called from: of the `n` directions `dirs` out of the player's
  * road node, the one most along the velocity `v` (m/s). -1 for a player slower than CO_LW_MEET_CALL_MOVING (the
  * sides then take turns). `only` is set when the player is as fast as a patrol walks: one called from another side
