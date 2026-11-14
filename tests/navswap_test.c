@@ -1005,17 +1005,17 @@ static void TestFirstBudget(void)
     CHECK(CoXlTestLwNavTickGap(66668) == 8000);
     for (int k = 0; k < 8; k++) CoXlTestLwNavTickGap(1000000);
     CHECK(CoXlTestLwNavTickGap(1000000) == 8000);
+    CoXlTestLwNavFirstBudget(200000, 0); /* 0.2 s, so the test's own time does not decide */
     for (int k = 0; k < 8; k++) CoXlTestLwNavTickGap(33333);
     Flight(1);
     for (int k = 0; k < 3; k++) Push(k, IDX, 4 + k, 0);
     CHECK(Tick(0, 0) == 0);
     Flight(0);
-    CoXlTestLwNavFirstBudget(2000, 0);
     rec = CoXlTestLwNavPop((uintptr_t)g_list, 0, 10); Process(rec, 1);
-    CoXlTestLwNavFirstBudget(2000, 3998);
+    CoXlTestLwNavFirstBudget(200000, 300000);
     rec = CoXlTestLwNavPop((uintptr_t)g_list, 0, 10);
-    CHECK(rec == (uintptr_t)g_rec[1]); Process(rec, 1); /* 3998 us of 3999 spent: the next goes */
-    CoXlTestLwNavFirstBudget(2000, 1);
+    CHECK(rec == (uintptr_t)g_rec[1]); Process(rec, 1); /* 0.3 s of 0.4 s spent: the next goes */
+    CoXlTestLwNavFirstBudget(200000, 100000);
     CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 10) == 0);
     CoXlTestLwNavFirstBudget(0, 0);
     CHECK(CoXlTestLwNavTickGap(33333) == 0); /* no budget set: none, at any frame length */
