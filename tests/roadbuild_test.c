@@ -331,14 +331,18 @@ static void InstallTolerance(void)
     g_toleranceStub = stub;
 }
 
-/* The game's shape test stood in for: shape 7 reaches 1.5 m into any strip, any other shape into none. */
+/* The game's shape test stood in for: every shape but g_shapes[1] reaches 1.5 m into any strip. A shape is the game's
+ * record: circles (pointer +0, count +8), quads (pointer +0x10, count +0x18). */
+typedef struct TestShape { uint64_t circles; uint32_t circleCount, pad0; uint64_t quads; uint32_t quadCount, pad1; } TestShape;
+static uint8_t g_shapeParts[0x14 * 5000]; /* room for more circles than a shape is taken to have */
+static TestShape g_shapes[4];
 static uint32_t g_shapeCalls; static float g_shapeAngle, g_shapePos[2];
 static uint8_t Shape(uint64_t shape, const float* pos, float angle, const float* p0, const float* p1, float half, float* at, float* depth)
 {
     (void)p0; (void)p1; (void)at;
     g_shapeCalls++;
-    if (shape != 7) return 0;
-    g_shapeAngle = angle; memcpy(g_shapePos, pos, 8);
+    if (shape == (uint64_t)(uintptr_t)&g_shapes[1]) return 0;
+    if (shape == (uint64_t)(uintptr_t)&g_shapes[0]) { g_shapeAngle = angle; memcpy(g_shapePos, pos, 8); }
     *depth = half - 2.5f;
     return 1;
 }
@@ -626,10 +630,17 @@ static void ArterialsGlue(void)
         CoXlTestRoadsStamps(6, plan, 2);
         g_fake.log[0] = 0;
         CoXlTestRoadsCorridor(block, before, 3, 8);
-        /* the shapes: own 3's reaches in, own 5's does not; the places name none */
-        static uint64_t shapes[2] = {7, 8};
-        { const uint64_t cell = (uint64_t)(uintptr_t)&shapes[0]; const float angle = 0.5f; memcpy(g_block + LOCATIONS_AT + 0xE0u * 3 + 0x90, &cell, 8); memcpy(g_block + LOCATIONS_AT + 0xE0u * 3 + 8, &angle, 4); }
-        { const uint64_t cell = (uint64_t)(uintptr_t)&shapes[1]; memcpy(g_block + LOCATIONS_AT + 0xE0u * 5 + 0x90, &cell, 8); }
+        /* the shapes: own 3's (two circles, three quads) reaches in, own 5's does not; place 1 names a shape whose
+         * count is no count and place 2 one whose quads cannot be read: the game's test is not asked about those */
+        static uint64_t cells[4];
+        g_shapes[0] = (TestShape){(uint64_t)(uintptr_t)g_shapeParts, 2, 0, (uint64_t)(uintptr_t)g_shapeParts, 3, 0};
+        g_shapes[1] = (TestShape){0, 0, 0, 0, 0, 0};
+        g_shapes[2] = (TestShape){(uint64_t)(uintptr_t)g_shapeParts, 5000, 0, 0, 0, 0};
+        g_shapes[3] = (TestShape){(uint64_t)(uintptr_t)g_shapeParts, 1, 0, 0x10, 1, 0};
+        for (uint32_t k = 0; k < 4; k++) cells[k] = (uint64_t)(uintptr_t)&g_shapes[k];
+        { const float angle = 0.5f; memcpy(g_block + LOCATIONS_AT + 0xE0u * 3 + 8, &angle, 4); }
+        static const uint32_t named[4] = {3, 5, 1, 2}; /* the location naming cell k (+0x90: a pointer to the shape's pointer) */
+        for (uint32_t k = 0; k < 4; k++) { const uint64_t cell = (uint64_t)(uintptr_t)&cells[k]; memcpy(g_block + LOCATIONS_AT + 0xE0u * named[k] + 0x90, &cell, 8); }
         CoXlTestRoadsShape(Shape);
         g_fake.log[0] = 0; g_shapeCalls = 0;
         CoXlTestRoadsCorridor(block, before, 3, 8);

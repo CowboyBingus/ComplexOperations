@@ -671,12 +671,34 @@ static int RoadStripsHit(const RoadStrips* t, const float pos[2], const float lo
     return found;
 }
 
+/* 0xFCC180 walks the shape unguarded: its circles ([shape] + 0x14 i, count u32 +8: 0xFCC21A, 0xFCAE97) and its quads
+ * ([shape+0x10] + 0x1C i, count u32 +0x18: 0xFCC280, 0xFCC2B7). A place of another op may name a shape that is gone,
+ * so both arrays are read through first, a page at a time. */
+#define ROADS_SHAPE_PARTS 4096u
+static int RoadShapeReadable(uint64_t shape)
+{
+    uint8_t head[0x20], byte;
+    if (SafeRead(shape, head, sizeof head)) return 0;
+    static const uint32_t kAt[2] = {0x00, 0x10}, kCount[2] = {0x08, 0x18}, kSize[2] = {0x14, 0x1C};
+    for (int q = 0; q < 2; q++)
+    {
+        uint64_t at; uint32_t count;
+        memcpy(&at, head + kAt[q], 8); memcpy(&count, head + kCount[q], 4);
+        if (count > ROADS_SHAPE_PARTS) return 0;
+        if (count == 0) continue;
+        const uint64_t end = at + (uint64_t)count * kSize[q];
+        if (at == 0 || end < at) return 0;
+        for (uint64_t p = at; p < end; p = (p | 0xFFFull) + 1) if (SafeRead(p, &byte, 1)) return 0;
+        if (SafeRead(end - 1, &byte, 1)) return 0;
+    }
+    return 1;
+}
 /* The deepest the location's shapes reach into a strip its box touches: -1 not readable, 0 in none. */
 static float RoadStripsShape(const RoadStrips* t, RoadShapeFn fn, const uint8_t* loc, const float lo[2], const float hi[2], uint32_t own)
 {
     uint64_t cell, shape = 0; float pos[2], angle, deepest = 0.0f;
     memcpy(&cell, loc + 0x90, 8); memcpy(pos, loc, 8); memcpy(&angle, loc + 8, 4);
-    if (cell == 0 || SafeRead(cell, &shape, 8) || shape == 0) return -1.0f;
+    if (cell == 0 || SafeRead(cell, &shape, 8) || shape == 0 || !RoadShapeReadable(shape)) return -1.0f;
     const int x0 = RoadStripCell(lo[0], t->grid), x1 = RoadStripCell(hi[0], t->grid), y0 = RoadStripCell(lo[1], t->grid), y1 = RoadStripCell(hi[1], t->grid);
     for (int y = y0; y <= y1; y++)
         for (int x = x0; x <= x1; x++)
