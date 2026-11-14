@@ -2618,7 +2618,7 @@ static int NearFineCell(int i, int j)
  * (ox sin + oy cos, oy sin - ox cos) + P (0xFC84A0); a rectangle's axes at the rotation - pi/2 + its angle. The
  * zone-type checks that skip a few stamps (0xF4D1B5, 0xF4D431) are not repeated: their areas take the level's surface. */
 #define NEAR_PADS 16384 /* s75p had 5196 shapes, s75u 2580 */
-typedef struct { float cx, cy, c, s, a, b, ba, bb, k; int rect, foot; } NearPad;
+typedef struct { float cx, cy, c, s, a, b, ba, bb, k; int rect, foot, zone; } NearPad; /* zone: an op 0x3E flatten zone, not level ground */
 static NearPad g_padStore[NEAR_PADS]; /* zero-initialised (.bss) */
 static struct { LONG level; int count, dropped; float band3C; NearPad* pad; float* w; LONG wLevel; float wCentre[2]; } g_pads = {.level = -1, .pad = g_padStore, .wLevel = -1};
 #define NEAR_PAD_STEP 2.0f
@@ -2635,7 +2635,7 @@ static void NearPadAdd(float x, float y, float rot, const float* f, int rect, fl
     float sn = sinf(rot), cs = cosf(rot);
     NearPad* p = &g_pads.pad[g_pads.count];
     p->cx = f[0] * sn + f[1] * cs + x - size / 2; p->cy = f[1] * sn - f[0] * cs + y - size / 2;
-    p->k = k > 1.0f ? 1.0f : k; p->rect = rect; p->foot = 0;
+    p->k = k > 1.0f ? 1.0f : k; p->rect = rect; p->foot = 0; p->zone = 0;
     const float B = g_pads.band3C > 0.0f && g_pads.band3C < 1000.0f ? g_pads.band3C : 8.0f;
     if (rect)
     {
@@ -2660,7 +2660,7 @@ static int NearPadFootprint(uint64_t P, float size)
     if (g_pads.count >= NEAR_PADS) { g_pads.dropped++; return 0; }
     NearPad* p = &g_pads.pad[g_pads.count++];
     p->cx = pos[0] - size / 2; p->cy = pos[1] - size / 2; p->k = 1.0f; p->rect = 0;
-    p->a = r; p->ba = fmaxf(g_xp.footBand * r, g_xp.footBandMin); p->c = 1; p->s = 0; p->b = 0; p->bb = 0; p->foot = 1;
+    p->a = r; p->ba = fmaxf(g_xp.footBand * r, g_xp.footBandMin); p->c = 1; p->s = 0; p->b = 0; p->bb = 0; p->foot = 1; p->zone = 0;
     return 1;
 }
 
@@ -2724,7 +2724,7 @@ static void TerrainNearPads(uint64_t record, uint64_t context)
             if (!(x1 - x0 > 0.0f && y1 - y0 > 0.0f && x1 - x0 < 6000.0f && y1 - y0 < 6000.0f)) continue;
             if (g_pads.count >= NEAR_PADS) { g_pads.dropped++; continue; }
             NearPad* p = &g_pads.pad[g_pads.count++];
-            p->cx = (x0 + x1) / 2 - (float)size / 2; p->cy = (y0 + y1) / 2 - (float)size / 2; p->k = 1.0f; p->rect = 1; p->foot = 0;
+            p->cx = (x0 + x1) / 2 - (float)size / 2; p->cy = (y0 + y1) / 2 - (float)size / 2; p->k = 1.0f; p->rect = 1; p->foot = 0; p->zone = 1;
             p->c = 1.0f; p->s = 0.0f; p->a = (x1 - x0) / 2; p->b = (y1 - y0) / 2; p->ba = 16.0f; p->bb = 16.0f;
             zones++;
         }

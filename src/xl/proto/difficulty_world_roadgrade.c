@@ -8,7 +8,10 @@
  *   each of the two by half of what is lacking. Those stations are counted, and the caller reports the place.
  * - Floor: a station may carry a height it must stay above. The range the pins give is raised to the lowest surface
  *   over the floors that keeps the slope, so the road climbs out of a low place within the limit.
- * - Bends: crests and dips are eased by a fixed count of averaging passes, the grade enforced after each. */
+ * - Cap: a worn path follows the land. The gentle profile is pulled back to within each station's `earth` of the
+ *   ground before the steeper hard limit is enforced, so deep cuts are made only where the hard limit needs them.
+ * - Bends: crests and dips are eased by a fixed count of averaging passes, the cap and the grade enforced after
+ *   each, so easing rounds a crest only within the cap. */
 #define GRADE_LINKS 8
 #define GRADE_FAR 1.0e30f
 #define GRADE_ROUNDS 4096u
@@ -17,6 +20,7 @@ typedef struct GradeStation
     float ground, target, low, high;
     float floor; /* the target never lies under it (water); -GRADE_FAR: none */
     float cross; /* the ground's slope across the road here, as a tangent (sizes the side band) */
+    float earth; /* GradeSolveCapped: the cut or fill the gentle profile may keep here; GRADE_FAR: any */
     float gap[GRADE_LINKS];
     uint32_t link[GRADE_LINKS];
     uint8_t links, pinned;
@@ -110,17 +114,25 @@ static float GradeBend(const GradeStation* s, uint32_t n)
     return worst;
 }
 
-/* slope is a rise over run. The ground is first moved into what the pins allow, so a road climbs to a pad instead of
- * dipping after it. Every step (clamp, the two surfaces' mean, the fixed count of easing passes) moves the result no
- * further than its input moved: peers whose captures differ by a rounding get profiles that differ by no more, and no
- * step branches on a height. Returns the torn stations (a count for the report only). */
-static uint32_t GradeSolve(GradeStation* s, uint32_t n, float slope, uint32_t passes)
+/* The targets pulled to within each station's `earth` of its ground (a clamp is as continuous as its inputs). */
+static void GradeCap(GradeStation* s, uint32_t n)
 {
-    float* under = (float*)malloc(sizeof(float) * 3 * (n ? n : 1));
-    if (under == NULL) { for (uint32_t i = 0; i < n; i++) s[i].target = s[i].ground; return n; }
+    for (uint32_t i = 0; i < n; i++)
+    {
+        const float low = s[i].ground - s[i].earth, high = s[i].ground + s[i].earth;
+        s[i].target = s[i].target < low ? low : s[i].target > high ? high : s[i].target;
+    }
+}
+
+/* From s[i].target as the start: moved into what the pins allow, so a road climbs to a pad instead of dipping after
+ * it, then the limit and the easing. Every step (clamp, the two surfaces' mean, the fixed count of easing passes)
+ * moves the result no further than its input moved: peers whose captures differ by a rounding get profiles that differ
+ * by no more, and no step branches on a height. capped: an eased profile goes back into the cap before the limit, so
+ * only the limit and the pins ever take a station past its cap. Returns the torn stations (for the report only). */
+static uint32_t GradeSolveFrom(GradeStation* s, uint32_t n, float slope, uint32_t passes, float* under, int capped)
+{
     float* over = under + n; float* next = over + n;
     const uint32_t torn = GradePins(s, n, slope, under, over);
-    for (uint32_t i = 0; i < n; i++) s[i].target = s[i].ground;
     GradeClamp(s, n);
     GradeWithin(s, n, slope, under, over);
     GradeClamp(s, n);
@@ -135,11 +147,54 @@ static uint32_t GradeSolve(GradeStation* s, uint32_t n, float slope, uint32_t pa
             next[i] = 0.5f * (s[i].target + line);
         }
         for (uint32_t i = 0; i < n; i++) s[i].target = next[i];
+        if (capped) GradeCap(s, n);
         GradeWithin(s, n, slope, under, over);
         GradeClamp(s, n);
     }
+    return torn;
+}
+
+/* slope is a rise over run: the profile within it that starts from the ground. */
+static uint32_t GradeSolve(GradeStation* s, uint32_t n, float slope, uint32_t passes)
+{
+    float* under = (float*)malloc(sizeof(float) * 3 * (n ? n : 1));
+    for (uint32_t i = 0; i < n; i++) s[i].target = s[i].ground;
+    if (under == NULL) return n;
+    const uint32_t torn = GradeSolveFrom(s, n, slope, passes, under, 0);
     free(under);
     return torn;
+}
+
+/* The worn path: the profile within `soft` wherever that keeps each station within its `earth` of the ground, and
+ * within `hard` everywhere. The gentle profile is pulled into the cap and the hard limit then starts from that, so
+ * it cuts deeper than the cap only where `hard` or a pin cannot be held without. */
+static uint32_t GradeSolveCapped(GradeStation* s, uint32_t n, float soft, float hard, uint32_t passes)
+{
+    float* under = (float*)malloc(sizeof(float) * 3 * (n ? n : 1));
+    for (uint32_t i = 0; i < n; i++) s[i].target = s[i].ground;
+    if (under == NULL) return n;
+    GradeWithin(s, n, soft, under, under + n);
+    GradeCap(s, n);
+    const uint32_t torn = GradeSolveFrom(s, n, hard, passes, under, 1);
+    free(under);
+    return torn;
+}
+
+/* The stations the profile moved more than their cap and `by` metres (the hard limit needed it), the furthest of
+ * them (*worst metres past the cap, *at) and the metres of road at them. */
+static uint32_t GradeOverCap(const GradeStation* s, uint32_t n, float by, float* worst, uint32_t* at, double* metres)
+{
+    uint32_t count = 0;
+    *worst = 0.0f; *at = 0; *metres = 0.0;
+    for (uint32_t i = 0; i < n; i++)
+    {
+        const float past = fabsf(s[i].target - s[i].ground) - s[i].earth;
+        if (s[i].pinned || !(past > by)) continue;
+        count++;
+        for (uint32_t k = 0; k < s[i].links; k++) *metres += 0.5 * s[i].gap[k];
+        if (past > *worst) { *worst = past; *at = i; }
+    }
+    return count;
 }
 
 typedef struct GradeStats { float steepest, bend, cut, fill; double metres, over5, over8, cut8, cut15; } GradeStats;

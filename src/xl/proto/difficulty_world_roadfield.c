@@ -5,14 +5,17 @@
  * height is their mean by nearness, so no piece of ground is set twice to different heights (the level's blend is
  * not commutative). It is a continuous function of the targets and never chooses by a height.
  * - Weight: 1 to GRADE_FULL from a centreline (the core and one step of the draw's lattice, so the core is held
- *   whole), then linear to 0 at the station's band. The level's shader and a close tile ease it (GradeSmooth).
- * - Band: wide enough for the side slope: the eased ramp is 1.5 times steeper at its middle than a straight one. */
+ *   whole), then down to 0 at the station's band (GradeBandWeight). The level's shader and a close tile ease it
+ *   (GradeSmooth).
+ * - Band: wide enough that the blend adds at most GRADE_SIDE to the ground's own side slope and bends at most
+ *   GRADE_BEND at the bed's edge (GradeBandRamp). A worn path has shoulders, not banks. */
 #define GRADE_NONE 0xFFFFFFFFu
 #define GRADE_CORE 8.0f
-#define GRADE_FULL 12.0f
-#define GRADE_BAND_LEAST 12.0f
+#define GRADE_FULL 10.0f
+#define GRADE_BAND_LEAST 24.0f /* a shoulder this wide bends under 10 degrees a 4 m span at its foot and top */
 #define GRADE_BAND_MOST 160.0f
-#define GRADE_SIDE 0.4663077f /* tan 25 degrees */
+#define GRADE_SIDE 0.2125566f /* tan 12 degrees */
+#define GRADE_BEND 0.0440817f /* tan 10 degrees over a 4 m span: the change of side slope a metre */
 #define GRADE_JOIN 1.0f       /* a point this close a station is that station */
 #define GRADE_CELL 64.0f
 #define GRADE_REACH 8.0f      /* past its band a road is still listed this much further: a lattice cell's far corner */
@@ -45,7 +48,7 @@ static uint32_t GradeFieldStation(GradeField* f, float x, float y)
         f->stationRoom = room;
     }
     memset(&f->s[f->stations], 0, sizeof *f->s);
-    f->s[f->stations].floor = -GRADE_FAR;
+    f->s[f->stations].floor = -GRADE_FAR; f->s[f->stations].earth = GRADE_FAR;
     f->xy[2 * f->stations] = x; f->xy[2 * f->stations + 1] = y;
     return f->stations++;
 }
@@ -180,19 +183,35 @@ static void GradeFieldTies(GradeField* f)
     free(head);
 }
 
-/* After the solve: each station's band from what it cuts or fills, and the pieces in a grid of GRADE_CELL cells, each
- * in every cell its box, grown by its band and GRADE_REACH, touches. world: the map's side in metres. 0: no memory. */
 /* The side band's ramp for a road moved `move` metres at its middle on ground that slopes `cross` (a tangent) across
- * it. The eased weight falls fastest at 1.5 / ramp, and on the uphill side the move has grown by the cross slope times
- * the distance out (GRADE_FULL + ramp / 2 where the weight falls fastest), so the bank stays under 25 degrees with
- * ramp >= 1.5 (move + GRADE_FULL cross) / (tan 25 - 1.75 cross). Ground steeper across than that allows takes the
- * widest band. */
+ * it. On the side where the move grows outwards (a cut's uphill side, a fill's downhill side) what the blend adds
+ * falls from bank = move + GRADE_FULL cross, still growing by `cross` a metre at the bed's edge, to nothing as a
+ * cubic (GradeBandWeight). Its steepest fall is (p - cross)^2 / 4p with p = 6 bank / ramp + 3 cross, its sharpest
+ * bend 6 bank / ramp^2 + 4 cross / ramp at the bed's edge: the ramp is the wider of the two that hold GRADE_SIDE and
+ * GRADE_BEND. From cross = 3 GRADE_SIDE (32.5 degrees) no width holds the side slope: infinite, the field caps it. */
 static float GradeBandRamp(float move, float cross)
 {
     if (!(cross >= 0.0f)) cross = 0.0f;
-    const float room = GRADE_SIDE - 1.75f * cross;
-    if (!(room > 0.0f)) return move > 0.0f || cross > 0.0f ? GRADE_BAND_MOST + 1.0f : GRADE_BAND_LEAST;
-    return 1.5f * (move + GRADE_FULL * cross) / room;
+    if (!(move >= 0.0f)) move = 0.0f;
+    const float bank = move + GRADE_FULL * cross, room = GRADE_SIDE + sqrtf(GRADE_SIDE * (GRADE_SIDE + cross)) - cross;
+    if (!(bank > 0.0f)) return 0.0f;
+    const float side = room > 0.0f ? 3.0f * bank / room : INFINITY;
+    const float bend = (4.0f * cross + sqrtf(16.0f * cross * cross + 24.0f * GRADE_BEND * bank)) / (2.0f * GRADE_BEND);
+    return side > bend ? side : bend;
+}
+/* The weight before easing at the share u of a ramp `ramp` metres wide. Eased, it is the cubic that leaves the bed's
+ * edge with the bank still growing by `cross` a metre and ends level, over the move there: so the surface has no
+ * crease at either end on a side-hill. On level ground that is 1 - u. The other side of the road moves less. */
+static float GradeBandWeight(float u, float ramp, float move, float cross)
+{
+    if (!(u > 0.0f)) return 1.0f;
+    if (!(u < 1.0f)) return 0.0f;
+    if (!(cross >= 0.0f)) cross = 0.0f;
+    if (!(move >= 0.0f)) move = 0.0f;
+    const double bank = (double)move + (double)GRADE_FULL * cross + 1.0e-6, grown = (double)cross * ramp * u, v = 1.0 - u;
+    double eased = (bank * v * v * (1.0 + 2.0 * u) + grown * v * v) / (bank + grown);
+    eased = eased < 0.0 ? 0.0 : eased > 1.0 ? 1.0 : eased;
+    return (float)(0.5 - sin(asin(1.0 - 2.0 * eased) / 3.0)); /* GradeSmooth's inverse */
 }
 /* The ground's slope across the road at station i (a tangent): the steepest over its links, between the two points
  * GRADE_FULL to either side. 0 where the ground cannot be read. */
@@ -214,6 +233,8 @@ static float GradeFieldCross(const GradeField* f, uint32_t i, float (*ground)(vo
     }
     return most;
 }
+/* After the solve: each station's band from what it cuts or fills, and the pieces in a grid of GRADE_CELL cells, each
+ * in every cell its box, grown by its band and GRADE_REACH, touches. world: the map's side in metres. 0: no memory. */
 static int GradeFieldIndex(GradeField* f, float world)
 {
     free(f->band); free(f->start); free(f->item); f->start = f->item = NULL;
@@ -279,7 +300,10 @@ static float GradeFieldAt(const GradeField* f, float x, float y, float* z, float
         t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
         const float qx = g->ax + t * dx - x, qy = g->ay + t * dy - y, dist = sqrtf(qx * qx + qy * qy);
         const float band = f->band[g->a] + t * (f->band[g->b] - f->band[g->a]);
-        const float w = dist <= GRADE_FULL ? 1.0f : dist >= band ? 0.0f : 1.0f - (dist - GRADE_FULL) / (band - GRADE_FULL);
+        const GradeStation* sa = &f->s[g->a]; const GradeStation* sb = &f->s[g->b];
+        const float ma = fabsf(sa->target - sa->ground), mb = fabsf(sb->target - sb->ground);
+        const float w = dist <= GRADE_FULL ? 1.0f : dist >= band ? 0.0f
+            : GradeBandWeight((dist - GRADE_FULL) / (band - GRADE_FULL), band - GRADE_FULL, ma + t * (mb - ma), sa->cross + t * (sb->cross - sa->cross));
         /* a listed road whose band ends short of here still counts a thousandth, so a lattice cell's outer corner
          * (weight 0) has a height to draw with; against a road that does reach, that moves *z by millimetres */
         const double close = (double)dist * dist + 1.0, share = (w > 1.0e-3f ? w : 1.0e-3f) / (close * close);
@@ -300,7 +324,41 @@ static float GradeFieldAt(const GradeField* f, float x, float y, float* z, float
 #define GRADE_ACROSS 3.0f
 #define GRADE_BINS 360 /* quarter degrees */
 typedef float (*GradeHeightFn)(void* ctx, float x, float y);
-typedef struct GradeRoad { double metres, over[4], rise; float steepest, cross, steepAt[2], crossAt[2]; uint32_t bin[GRADE_BINS]; } GradeRoad; /* over: 5, 8, 12, 18 degrees; At: where the worst is */
+#define GRADE_SIDE_STEP 4.0f  /* a shoulder span: the level's sample spacing */
+#define GRADE_SIDE_SPANS 13u  /* from GRADE_FULL - GRADE_SIDE_STEP out to GRADE_FULL + 48 m */
+#define GRADE_SIDE_EVERY 4u   /* a shoulder section every fourth sample along */
+/* over: 5, 8, 12, 18 degrees; At: where the worst is. side: the steepest shoulder span (degrees across the road, from
+ * the bed's edge out); crease: the sharpest change of side slope between neighbouring spans. */
+typedef struct GradeRoad
+{
+    double metres, over[4], rise;
+    float steepest, cross, steepAt[2], crossAt[2], side, crease, sideAt[2], creaseAt[2];
+    uint32_t bin[GRADE_BINS];
+} GradeRoad;
+
+/* One shoulder section at (x, y), (ux, uy) the unit vector across the road: both sides. */
+static void GradeRoadShoulder(GradeHeightFn height, void* ctx, float x, float y, float ux, float uy, GradeRoad* out)
+{
+    const float deg = 57.29578f;
+    for (int side = -1; side <= 1; side += 2)
+    {
+        float before = 0.0f, last = 0.0f;
+        for (uint32_t k = 0; k <= GRADE_SIDE_SPANS; k++)
+        {
+            const float off = (float)side * (GRADE_FULL - GRADE_SIDE_STEP + GRADE_SIDE_STEP * (float)k), px = x + ux * off, py = y + uy * off;
+            const float h = height(ctx, px, py);
+            if (!isfinite(h)) break;
+            if (k > 0)
+            {
+                const float slope = atanf((h - last) / GRADE_SIDE_STEP) * deg;
+                if (fabsf(slope) > out->side) { out->side = fabsf(slope); out->sideAt[0] = px; out->sideAt[1] = py; }
+                if (k > 1 && fabsf(slope - before) > out->crease) { out->crease = fabsf(slope - before); out->creaseAt[0] = px; out->creaseAt[1] = py; }
+                before = slope;
+            }
+            last = h;
+        }
+    }
+}
 
 static void GradeRoadAlong(GradeHeightFn height, void* ctx, const float* pts, uint32_t n, GradeRoad* out)
 {
@@ -308,6 +366,7 @@ static void GradeRoadAlong(GradeHeightFn height, void* ctx, const float* pts, ui
     const uint32_t lag = (uint32_t)(GRADE_BASE / GRADE_SAMPLE);
     float ring[8]; uint32_t run = 0; /* the last `lag` samples' heights */
     float carry = 0.0f;              /* metres from the last sample to the pair's start */
+    uint32_t sample = 0;
     for (uint32_t p = 1; p < n; p++)
     {
         const float ax = pts[2 * p - 2], ay = pts[2 * p - 1], dx = pts[2 * p] - ax, dy = pts[2 * p + 1] - ay, length = sqrtf(dx * dx + dy * dy);
@@ -319,6 +378,7 @@ static void GradeRoadAlong(GradeHeightFn height, void* ctx, const float* pts, ui
             const float x = ax + dx * at / length, y = ay + dy * at / length, h = height(ctx, x, y);
             if (!isfinite(h)) { run = 0; continue; }
             const float left = height(ctx, x + nx, y + ny), right = height(ctx, x - nx, y - ny);
+            if (sample++ % GRADE_SIDE_EVERY == 0) GradeRoadShoulder(height, ctx, x, y, nx / GRADE_ACROSS, ny / GRADE_ACROSS, out);
             if (isfinite(left) && isfinite(right))
             {
                 const float cross = atanf(fabsf(left - right) / (2.0f * GRADE_ACROSS)) * deg;
@@ -363,4 +423,6 @@ static void GradeRoadAdd(GradeRoad* sum, const GradeRoad* g)
     for (uint32_t b = 0; b < GRADE_BINS; b++) sum->bin[b] += g->bin[b];
     if (g->steepest > sum->steepest) { sum->steepest = g->steepest; sum->steepAt[0] = g->steepAt[0]; sum->steepAt[1] = g->steepAt[1]; }
     if (g->cross > sum->cross) { sum->cross = g->cross; sum->crossAt[0] = g->crossAt[0]; sum->crossAt[1] = g->crossAt[1]; }
+    if (g->side > sum->side) { sum->side = g->side; sum->sideAt[0] = g->sideAt[0]; sum->sideAt[1] = g->sideAt[1]; }
+    if (g->crease > sum->crease) { sum->crease = g->crease; sum->creaseAt[0] = g->creaseAt[0]; sum->creaseAt[1] = g->creaseAt[1]; }
 }

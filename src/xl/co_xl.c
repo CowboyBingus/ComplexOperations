@@ -1014,6 +1014,7 @@ uint32_t CoXlTestGradeField(const float* pts, const uint32_t* counts, const uint
     return f->stations;
 }
 float CoXlTestGradeBandRamp(float move, float cross) { return GradeBandRamp(move, cross); }
+float CoXlTestGradeBandWeight(float u, float ramp, float move, float cross) { return GradeBandWeight(u, ramp, move, cross); }
 /* The level's pads for the grading: n circles of (x, y from the world's centre, radius, band, strength, footprint). */
 void CoXlTestGradePads(const float* pads, uint32_t n)
 {
@@ -1077,6 +1078,82 @@ int CoXlTestGradeRestart(int graded)
     const int again = graded && g_grade.level == -1 && g_grade.phase == 0 && !g_grade.ready;
     g_grade.level = -1; g_grade.phase = 0; g_grade.ready = 0;
     return again;
+}
+/* The capped profile (GradeSolveCapped) on links as CoXlTestGradeSolve takes them; earth NULL: no cap anywhere.
+ * out: the stations GradeOverCap counts past `by`, the furthest's metres past its cap, its index, the metres of road. */
+uint32_t CoXlTestGradeCapped(const float* ground, const uint8_t* pinned, const float* earth, uint32_t n, const uint32_t* links, const float* gaps, uint32_t count,
+    float soft, float hard, uint32_t passes, float by, float* target, double out[4])
+{
+    GradeStation* s = (GradeStation*)calloc(n ? n : 1, sizeof *s);
+    if (s == NULL) return n;
+    for (uint32_t i = 0; i < n; i++)
+    { s[i].ground = ground[i]; s[i].pinned = pinned != NULL && pinned[i]; s[i].floor = -GRADE_FAR; s[i].earth = earth != NULL ? earth[i] : GRADE_FAR; }
+    for (uint32_t k = 0; k < count; k++) GradeLink(s, links[2 * k], links[2 * k + 1], gaps[k]);
+    const uint32_t torn = GradeSolveCapped(s, n, soft, hard, passes);
+    float worst = 0.0f; uint32_t at = 0; double metres = 0.0;
+    out[0] = GradeOverCap(s, n, by, &worst, &at, &metres); out[1] = worst; out[2] = at; out[3] = metres;
+    for (uint32_t i = 0; i < n; i++) target[i] = s[i].target;
+    free(s);
+    return torn;
+}
+/* n flatten zones (op 0x3E) after the pads CoXlTestGradePads gave, as TerrainNearPads keeps them: boxes of x0, y0,
+ * x1, y1 from the world's centre. */
+void CoXlTestGradeZones(const float* boxes, uint32_t n)
+{
+    for (uint32_t i = 0; i < n && g_pads.count < NEAR_PADS; i++, boxes += 4)
+        g_pads.pad[g_pads.count++] = (NearPad){.cx = (boxes[0] + boxes[2]) / 2, .cy = (boxes[1] + boxes[3]) / 2, .c = 1.0f, .a = (boxes[2] - boxes[0]) / 2,
+            .b = (boxes[3] - boxes[1]) / 2, .ba = 16.0f, .bb = 16.0f, .k = 1.0f, .rect = 1, .zone = 1};
+}
+/* The level's own solve (RoadGradeSolve) on one road of n points: ground(x, y) stands for the capture, the pins and
+ * caps come from the pads and the rim. The stations stay in the test field. Returns the torn stations, -1 when not
+ * solved; out: the pinned stations, those past the cap, the furthest's metres past it, its x and y, the metres. */
+static float (*g_testGradeGround)(float, float);
+static uint64_t TestGradeSample(void* descriptor, float* uv, void* out, uint64_t unused)
+{ (void)descriptor; (void)unused; *(float*)out = g_testGradeGround(uv[0] * g_grade.world, uv[1] * g_grade.world); return 0; }
+int CoXlTestGradeLevel(const float* pts, uint32_t n, float (*ground)(float, float), float world, float playable, double out[6])
+{
+    uint32_t first = GRADE_NONE, last = GRADE_NONE;
+    GradeFieldFree(&g_testField);
+    GradeFieldChain(&g_testField, pts, n, &first, &last);
+    GradeFieldFree(&g_grade.f);
+    g_grade.f = g_testField; /* lent, and taken back with what the solve made */
+    g_grade.world = world; g_grade.playable = playable; g_grade.sample = TestGradeSample; g_grade.capture = 1; g_testGradeGround = ground;
+    RoadGradePadIndex();
+    const int solved = RoadGradeSolve();
+    g_testField = g_grade.f;
+    memset(&g_grade.f, 0, sizeof g_grade.f); g_grade.sample = NULL; g_grade.capture = 0;
+    out[0] = g_grade.pinned; out[1] = g_grade.deep; out[2] = g_grade.deepest; out[3] = g_grade.deepAt[0]; out[4] = g_grade.deepAt[1]; out[5] = g_grade.deepMetres;
+    return solved ? (int)g_grade.torn : -1;
+}
+/* A station of the test field after CoXlTestGradeLevel: its cap; *pinned: it keeps its ground. */
+float CoXlTestGradeStationCap(uint32_t i, int* pinned) { *pinned = g_testField.s[i].pinned; return g_testField.s[i].earth; }
+/* What the grading adds at a point (RoadGradeMove) on the field and the ground CoXlTestGradeLevel left. */
+float CoXlTestGradeMove(float x, float y)
+{
+    g_grade.f = g_testField; /* lent, as for the draw */
+    g_grade.sample = TestGradeSample; g_grade.capture = 1;
+    RoadGradePadIndex();
+    const float move = RoadGradeMove(NULL, x, y);
+    memset(&g_grade.f, 0, sizeof g_grade.f); g_grade.sample = NULL; g_grade.capture = 0;
+    return move;
+}
+/* A road's shoulders on a surface: out = the steepest span (degrees), its x and y, the sharpest crease, its x and y. */
+void CoXlTestGradeShoulder(float (*height)(void*, float, float), const float* pts, uint32_t n, double out[6])
+{
+    static GradeRoad g;
+    memset(&g, 0, sizeof g);
+    GradeRoadAlong(height, NULL, pts, n, &g);
+    out[0] = g.side; out[1] = g.sideAt[0]; out[2] = g.sideAt[1]; out[3] = g.crease; out[4] = g.creaseAt[0]; out[5] = g.creaseAt[1];
+}
+/* 1 inside a stamp's footprint (corner metres); *open: RoadGradeOpen there over a surface that is 7 m everywhere. */
+static float TestGradeSeven(void* ctx, float x, float y) { (void)ctx; (void)x; (void)y; return 7.0f; }
+int CoXlTestGradeInPlace(float world, float playable, float x, float y, float* open)
+{
+    g_grade.world = world; g_grade.playable = playable; g_grade.under = TestGradeSeven;
+    RoadGradePadIndex();
+    *open = RoadGradeOpen(NULL, x, y);
+    g_grade.under = NULL;
+    return RoadGradeInPlace(x, y);
 }
 /* The roads' build (proto/difficulty_world_roadbuild.c): the point spacing, its stub and the arterial choice. */
 uint32_t CoXlTestRoadsLeftOut(const uint8_t* recs, uint32_t n, const uint8_t* taken, uint32_t used, uint32_t capacity, float spacing, uint32_t* total)
