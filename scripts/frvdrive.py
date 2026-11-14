@@ -57,7 +57,10 @@ if float(m.group(3)) > 100 or float(m.group(3)) < 6:
     if not m or float(m.group(3)) > 100: print('frvdrive: the Helldiver is not at the leg after the teleport'); sys.exit(2)
 if speed is not None: send('frv speed %g' % speed, r'frv: the next drive wants')
 off = size()
-got = send('frv drive ' + leg, r'frv: spawned FRV|' + REFUSED)
+# with no FRV in a loadout the mod first asks the game for its packages and waits up to 60 s for them
+got = send('frv drive ' + leg, r'frv: spawned FRV|' + REFUSED, 85.0)
+for l in since(off):
+    if re.search(r'frv: the FRV.s (unit is not loaded|\d+ packages are loaded)', l): print('frvdrive:', l[l.find('frv:'):][:300], flush=True)
 if not got or 'spawned FRV' not in got[-1]:
     print('frvdrive: REFUSED:', got[-1][got[-1].find('frv:'):][:300] if got else 'no line'); sys.exit(2)
 print('frvdrive:', got[-1][got[-1].find('frv:'):][:200], flush=True)
@@ -68,14 +71,15 @@ while time.time() < end and summary is None:
     time.sleep(2)
     for l in since(off):
         if 'frv: summary:' in l: summary = l
+        if 'frv: ended before a drive' in l: end = 0
     if subprocess.run(['pgrep', '-f', '[h]elldivers2\\.exe'], capture_output=True).returncode != 0: print('frvdrive: the game is gone'); break
 lines = [l for l in since(start) if 'frv:' in l]
 name = OUT + '/frv-%s.txt' % leg.replace(' ', '-')
 open(name, 'w').write('\n'.join(lines) + '\n')
 poses = [l for l in lines if 'frv: pose ' in l]
 for l in lines:
-    if re.search(r'frv: (FRV \w+ settled|stuck at|a positive steering|the vehicle|the level left)', l): print('frvdrive:', l[l.find('frv:'):][:300])
+    if re.search(r'frv: (FRV \w+ settled|stuck at|a positive steering|the vehicle|the level left|the game holds|ended before a drive|gear -?\d+ under throttle|shift-up was pressed|the FRV has no fuel)', l): print('frvdrive:', l[l.find('frv:'):][:300])
 print('frvdrive: %d pose lines, %d crash lines in modloader.log; lines in %s' % (len(poses), crashes(), name))
-if summary is None: print('frvdrive: NO SUMMARY within the time; last pose: %s' % (poses[-1][poses[-1].find('frv:'):] if poses else 'none')); send('frv stop', r'frv: summary|no drive to stop'); sys.exit(2)
+if summary is None: print('frvdrive: NO SUMMARY within the time; last pose: %s' % (poses[-1][poses[-1].find('frv:'):] if poses else 'none')); send('frv stop', r'frv: summary|no drive to stop|ended before a drive'); sys.exit(2)
 print(summary[summary.find('frv: summary:'):])
 sys.exit(0 if 'verdict: DROVE' in summary else 1)
