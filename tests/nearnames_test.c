@@ -25,6 +25,12 @@ void CoXlTestNearResetTick(void);
 void CoXlTestNearCraterMaps(uint64_t source, uint64_t offset, uint64_t scorch);
 int CoXlTestNearCraterMapsMake(int newLevel);
 void CoXlTestNearCraterMapsEarlier(void);
+void CoXlTestNearAtmosMaps(uint64_t color, uint64_t transmittance);
+int CoXlTestNearAtmosMapsMake(int newLevel);
+void CoXlTestNearReplayEnd(void);
+void CoXlTestNearConsumeQueue(uint64_t queue, void* original);
+uint64_t CoXlTestNearNamesQueue(void);
+uint32_t CoXlTestNearProbeOutside(void);
 
 static int g_failed;
 static const char* g_case;
@@ -41,6 +47,10 @@ static const char* g_case;
 #define SOURCE 0xFDF5405Bu /* the craters' maps: generated_heightmap_source, _offset, generated_materials_scorch */
 #define OFFSET 0x4758A80Au
 #define SCORCH 0xB1AA630Du
+#define SKY 0x5E058EEFu   /* the sky LUTs: atmospheric_scattering_color, _transmittance */
+#define SKYT 0xEA1A2316u
+#define SKY0 0x5800ull
+#define SKY1 0x5900ull
 #define STAND0 0x5000ull
 #define STAND1 0x6000ull
 #define STAND2 0x7000ull
@@ -67,19 +77,21 @@ static uint64_t* Slot(uint32_t name)
 static void Publish(uint32_t name, uint64_t resource) { *Slot(name) = resource; g_publishes++; }
 static void Unpublish(uint32_t name) { *Slot(name) = 0; g_unpublishes++; }
 static uint64_t g_craterSeen[3]; /* what the last render call saw under SOURCE, OFFSET, SCORCH */
+static uint64_t g_skySeen[2];    /* and under SKY, SKYT */
 static void See(void)
 {
     g_seen[0] = *Slot(HEIGHT); g_seen[1] = *Slot(MATERIALS); g_seen[2] = *Slot(ROADS); g_runs++;
     g_craterSeen[0] = *Slot(SOURCE); g_craterSeen[1] = *Slot(OFFSET); g_craterSeen[2] = *Slot(SCORCH);
+    g_skySeen[0] = *Slot(SKY); g_skySeen[1] = *Slot(SKYT);
 }
 /* The render config's textures as find returns them ({+8 format, +0x14 width, +0x18 height}) and what create made. */
-static uint8_t g_configs[3][0x70];
+static uint8_t g_configs[5][0x70]; /* the craters' three, then the sky LUTs (+0x1C depth) */
 static int g_creates;
 static uint32_t g_made[8][4]; /* w, h, mips, format */
 static uint64_t Find(uint32_t name)
 {
-    const uint32_t names[3] = {SOURCE, OFFSET, SCORCH};
-    for (int k = 0; k < 3; k++) if (name == names[k]) return (uint64_t)(uintptr_t)g_configs[k];
+    const uint32_t names[5] = {SOURCE, OFFSET, SCORCH, SKY, SKYT};
+    for (int k = 0; k < 5; k++) if (name == names[k]) return (uint64_t)(uintptr_t)g_configs[k];
     return 0;
 }
 static uint64_t Create(uint32_t w, uint32_t h, uint32_t mips, uint32_t format, uint32_t id, uint32_t flags)
@@ -94,6 +106,15 @@ static void Configs(uint32_t side)
 {
     const uint32_t formats[3] = {22, 31, 51};
     for (int k = 0; k < 3; k++) { memset(g_configs[k], 0, sizeof g_configs[k]); memcpy(g_configs[k] + 8, &formats[k], 4); memcpy(g_configs[k] + 0x14, &side, 4); memcpy(g_configs[k] + 0x18, &side, 4); }
+}
+static void SkyConfigs(uint32_t side, uint32_t depth)
+{
+    const uint32_t formats[2] = {10, 24};
+    for (int k = 3; k < 5; k++)
+    {
+        memset(g_configs[k], 0, sizeof g_configs[k]); memcpy(g_configs[k] + 8, &formats[k - 3], 4);
+        memcpy(g_configs[k] + 0x14, &side, 4); memcpy(g_configs[k] + 0x18, &side, 4); memcpy(g_configs[k] + 0x1C, &depth, 4);
+    }
 }
 static int SawLevel(void) { return g_seen[0] == ONEMIP && g_seen[2] == ONEMIP && g_seen[1] == 0; }
 static int SawTile(void) { return g_seen[0] == TILE0 && g_seen[2] == TILE0 && g_seen[1] == TILE1; }
@@ -155,7 +176,9 @@ static void Setup(const char* name, int replaying)
     CoXlTestNearProbeClear();
     CoXlTestNearReset(0, 1);
     CoXlTestNearCraterMaps(0, 0, 0);
+    CoXlTestNearAtmosMaps(0, 0);
     memset(g_craterSeen, 0xFF, sizeof g_craterSeen);
+    memset(g_skySeen, 0xFF, sizeof g_skySeen);
 }
 
 int main(void)
@@ -207,6 +230,54 @@ int main(void)
     CHECK(g_creates == 0);
     CoXlTestNearConsume(queue, 1, (void*)Consumer);
     CHECK(g_craterSeen[0] == 0);
+
+    Setup("the sky LUTs: stand-ins inside the consumer, the render config's own after", 1);
+    CoXlTestNearAtmosMaps(SKY0, SKY1);
+    CoXlTestNearConsume(queue, 1, (void*)Consumer);
+    CHECK(SawTile() && g_skySeen[0] == SKY0 && g_skySeen[1] == SKY1);
+    CHECK(*Slot(SKY) == 0 && *Slot(SKYT) == 0 && LevelNow());
+
+    Setup("the sky LUT stand-ins: once a level, 2D at the LUT's side and format", 1);
+    SkyConfigs(32, 96); g_creates = 0; g_releases = 0;
+    CHECK(CoXlTestNearAtmosMapsMake(1) == 2 && g_creates == 2);
+    CHECK(g_made[0][0] == 32 && g_made[0][1] == 32 && g_made[0][2] == 1 && g_made[0][3] == 10 && g_made[1][3] == 24);
+    CHECK(CoXlTestNearAtmosMapsMake(0) == 2 && g_creates == 2);
+    CHECK(CoXlTestNearAtmosMapsMake(1) == 2 && g_creates == 4 && g_releases == 2);
+    CoXlTestNearConsume(queue, 1, (void*)Consumer);
+    CHECK(g_skySeen[0] == 0x9002ull && g_skySeen[1] == 0x9003ull && *Slot(SKY) == 0);
+
+    Setup("a sky LUT of another shape: no stand-in, the tile's other names as before", 1);
+    SkyConfigs(32, 64); g_creates = 0;
+    CHECK(CoXlTestNearAtmosMapsMake(1) == 0 && g_creates == 0);
+    CoXlTestNearConsume(queue, 1, (void*)Consumer);
+    CHECK(SawTile() && g_skySeen[0] == 0 && g_skySeen[1] == 0);
+    CHECK(fake_host_logged("is not the reviewed one (32 x 32 x 64)"));
+
+    Setup("after the replay's end its queue is forgotten: a later drain opens nothing and asks for no reset", 1);
+    CoXlTestNearConsume(queue, 1, (void*)Consumer);
+    CHECK(CoXlTestNearNamesQueue() == queue);
+    CoXlTestNearReplayEnd();
+    CHECK(CoXlTestNearNamesQueue() == 0 && LevelNow());
+    CoXlTestNearReplaying(1); /* even with a next replay under way before its own start */
+    CoXlTestNearReset(1, 1);
+    g_publishes = 0; *(uint32_t*)(g_queue + 0x10) = 3;
+    CoXlTestNearConsumeQueue(queue, (void*)Consumer);
+    CHECK(SawLevel() && g_publishes == 0 && CoXlTestNearResetState() == 1);
+    CoXlTestNearReplaying(0);
+
+    Setup("a capture with the tile's names out and no replay running is counted, then noted at the replay's end", 1);
+    {
+        int opened = CoXlTestNearNamesOpen();
+        CHECK(opened == 1);
+        CoXlTestNearReplaying(0);
+        CoXlTestNearProbe((void*)Probe);
+        CHECK(CoXlTestNearProbeOutside() == 1);
+        CoXlTestNearNamesClose(opened);
+        CoXlTestNearProbe((void*)Probe);
+        CHECK(CoXlTestNearProbeOutside() == 1);
+        CoXlTestNearReplayEnd();
+        CHECK(CoXlTestNearProbeOutside() == 0 && fake_host_logged("1 captures saw them with no replay running"));
+    }
 
     Setup("the consumer on another queue: no name touched", 1);
     CoXlTestNearConsume(queue, 0, (void*)Consumer);
@@ -295,6 +366,7 @@ int main(void)
     CoXlTestNearResetTick();
     float weight = 0; memcpy(&weight, g_G + PROBE_WEIGHT, 4); memcpy(&faces, g_G + PROBE_FACES, 4);
     CHECK(Frames() == 8 && g_G[PROBE_ALL] == 1 && g_G[CUT] == 1 && weight == 1.0f && faces == 0);
+    CHECK(fake_host_logged("after a replayed finalize: 8 frames of history invalidation"));
     CHECK(CoXlTestNearResetState() == 0);
     SetFrames(0);
     CoXlTestNearResetTick();
