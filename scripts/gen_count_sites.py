@@ -44,6 +44,7 @@ sys.path.insert(0, HERE + '/sites')
 import cave_asm, difficulty_sites, extract_sites, figure_sites, loadout_sites, map_sites, stack_sites, summary_sites, tag_sites
 dump = open(sys.argv[1], 'rb').read()
 out = sys.argv[2] if len(sys.argv) > 2 else HERE + '/../src/co_count_sites.h'
+summary_sites.check(dump)
 
 # The session step's sites: rva + offset of the four bytes it rewrites.
 moved = set()

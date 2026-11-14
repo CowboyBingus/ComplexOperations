@@ -61,6 +61,11 @@ INPLACE = [
     (0x19941D2, '44889038090000', _d('448890', 0x938 + S_TAIL), '1993e30: [R1+0x938]'),
     (0x1992A5F, '4d8d8538090000', _d('4d8d85', 0x938 + S_TAIL), '1992660: R1 tail to W+0x84BA0'),
     (0x1992A66, '4981c138090000', _d('4981c1', 0x938 + S_TAIL), '1992660: R2 tail to W+0x84BA0'),
+    # The survey link's text (0x800 bytes at the tail's start): at its old place it would be rows 4 to 7, row 4's count
+    # four of its letters, and that row's card builds a list of that length past its 24 widgets.
+    (0x199443A, '4881c638090000', _d('4881c6', 0x938 + S_TAIL), '1994400: R1 tail, the link text written'),
+    (0x1993DD8, '80b83911000000', _d('80b8', 0x1139 + S_TAIL, '00'), '1993dd0 (by vtable): [R1+0x1139]'),
+    (0x1993E02, 'c6803911000000', _d('c680', 0x1139 + S_TAIL, '00'), '1993dd0 (by vtable): [R1+0x1139]'),
     # cards
     (0x1464983, '418984315cfc0400', _d('41898431', S_NC + 0x12544), '1464850: card i field +0x12544'),
     (0x1464A49, '4981f920970400', _d('4981f9', 8 * 0x125C8), '1464850: rows/cards loop end'),
@@ -120,3 +125,19 @@ GUARD8 = [
     (0x19942AE, '8bd0' + '4869c24c020000', 'cmp eax, 8\n jae game+0x19942D4\n mov edx, eax\n imul rax, rdx, 0x24c\n jmp game+0x19942B7', '1993e30 best scan'),
     (0x199430E, '8bc8' + '4869d14c020000', 'cmp eax, 8\n jae game+0x1994333\n cmp ebx, 4\n jae game+0x1994333\n mov ecx, eax\n imul rdx, rcx, 0x24c\n jmp game+0x1994317', '1993e30 best list (stack list stays 4)'),
 ]
+
+
+# A row block's tail by a displacement from the block: every one in the screen's code is a site above, or the text
+# lands in rows 4 to 7. 0x199070F reads another object (the global at game+0x33264F8).
+TAIL_CODE = ((0x1464850, 0x1465000), (0x1497920, 0x1498400), (0x198F060, 0x1995000))
+TAIL_OTHER = {0x199070F}
+
+
+def check(dump):
+    done = {rva + k for rva, old, _, _ in INPLACE for k in range(len(old) // 2)}
+    for lo, hi in TAIL_CODE:
+        for v in (0x938, 0x1138, 0x1139):
+            at = dump.find(struct.pack('<I', v), lo, hi)
+            while at >= 0:
+                assert at in done or at in TAIL_OTHER, 'summary: the tail at +0x%X is not moved at game+0x%X' % (v, at)
+                at = dump.find(struct.pack('<I', v), at + 1, hi)
