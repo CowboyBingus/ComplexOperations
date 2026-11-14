@@ -975,6 +975,7 @@ static void Steep(void)
     for (uint32_t i = 0; i < M; i++) { g_ground[i] = i < 6 ? 1.7633f * (float)i : 1.7633f * 5.0f; g_pinned[i] = i < 6; g_earth[i] = i < 6 ? 0.0f : 4.0f; }
     CHECK(CoXlTestGradeSteep(g_ground, g_pinned, g_earth, M, g_links, g_gaps, M - 1, SOFT, HARD, STEEP, 4.0f, 16, steep, out) == 0);
     for (uint32_t i = 0; i < 6; i++) CHECK(steep[i] == g_ground[i]);
+    CHECK(CoXlTestGradeSteep(g_ground, g_pinned, g_earth, M, g_links, g_gaps, M - 1, SOFT, HARD, 0.0f, 4.0f, 16, moved, flat) == 0); /* and with no steep rule */
     CHECK(out[0] == 0 && out[4] < 7.01); /* the links between pins are the pad's own ground, not road: not measured */
     for (uint32_t i = 0; i < M; i++) { g_pinned[i] = 0; g_earth[i] = 4.0f; }
 

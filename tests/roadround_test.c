@@ -90,6 +90,8 @@ static void Lines(void)
     g_case = "a fixed count of points: the same count, evenly along the longer line";
     n = CoXlTestRoadsKeepLine(a, b, NONE, 101, 0.0f, 101, g_line, &length, &state);
     CHECK(n == 101 && state == 1 && fabsf(Longest(g_line, n) - length / 100.0f) < 0.05f && Clear(g_line, n, 1500.0f, 5030.0f) > 99.4f);
+    CHECK(g_line[0] == a[0] && g_line[1] == a[1] && g_line[200] == b[0] && g_line[201] == b[1]); /* the ends are the edge's own, to the bit */
+    { static const float corner[8] = {0.0f, 0.0f, 10.0f, 0.0f, 10.0f, 10.0f, 10.0f, 20.0f}; CHECK(fabsf(CoXlTestRoundTurn(corner, 4)) < 1.0e-6f); } /* the sharpest corner, not the last */
 
     g_case = "places that overlap: round them all";
     { static const float d[9] = {1400.0f, 5010.0f, 30.0f, 1500.0f, 4990.0f, 50.0f, 1560.0f, 5060.0f, 20.0f}; CoXlTestRoadsKeep(d, 3); }
@@ -112,6 +114,13 @@ static void Lines(void)
         static const float c[2] = {1300.0f, 5000.0f}, e[2] = {1700.0f, 5000.0f};
         n = CoXlTestRoadsKeepLine(c, e, NONE, 30, 0.0f, 30, g_line, &length, &state);
         CHECK(n == 30 && state == 2 && Clear(g_line, n, 1500.0f, 5075.0f) > 63.0f && Clear(g_line, n, 1500.0f, 4925.0f) > 63.0f && Longest(g_line, n) < 16.0f);
+    }
+    /* one place on the line: round it at 58 m the 28 points come over 16 m apart, at 34 m they do not */
+    { static const float d[3] = {1500.0f, 5000.0f, 30.0f}; CoXlTestRoadsKeep(d, 1); }
+    {
+        static const float c[2] = {1300.0f, 5000.0f}, e[2] = {1700.0f, 5000.0f};
+        n = CoXlTestRoadsKeepLine(c, e, NONE, 28, 0.0f, 28, g_line, &length, &state);
+        CHECK(n == 28 && state == 2 && Clear(g_line, n, 1500.0f, 5000.0f) > 63.4f && Clear(g_line, n, 1500.0f, 5000.0f) < 70.0f);
     }
 
     g_case = "no fair way round at any margin: the straight line, counted";
@@ -144,7 +153,7 @@ static void Ends(void)
     CHECK(fabsf(s[0] - 1500.0f) < 1.0e-3f && fabsf(s[1] - 5042.0f) < 1.0e-3f);
 
     g_case = "another place's footprint over that point: the nearest free direction, 22.5 degrees on";
-    { static const float d[6] = {1500.0f, 5000.0f, 42.0f, 1505.0f, 5045.0f, 10.0f}; CoXlTestRoadsKeep(d, 2); }
+    { static const float d[9] = {1500.0f, 5000.0f, 42.0f, 1505.0f, 5045.0f, 10.0f, 3000.0f, 3000.0f, 20.0f}; CoXlTestRoadsKeep(d, 3); }
     CoXlTestRoadsSpurStart(centre, to, 0, s);
     CHECK(fabsf(sqrtf((s[0] - 1500.0f) * (s[0] - 1500.0f) + (s[1] - 5000.0f) * (s[1] - 5000.0f)) - 42.0f) < 1.0e-3f);
     CHECK(fabsf(s[0] - (1500.0f - 42.0f * 0.3826834f)) < 0.01f && fabsf(s[1] - (5000.0f + 42.0f * 0.9238795f)) < 0.01f);
