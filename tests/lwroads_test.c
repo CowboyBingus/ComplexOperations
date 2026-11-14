@@ -478,7 +478,7 @@ int main(void)
         { const float three[3][2] = {{1500, 20}, {1600, -20}, {1700, 20}}, wide[4] = {250, 450, 550, 2750}; const int d4[4] = {1, 1, -1, -1};
           CoXlTestLwCallWorld(30, 0, three, 3, wide, d4, none, 4);
           CHECK(CoXlTestLwCallTick(1000000u) == 1);
-          CHECK(CoXlTestLwCallTick(3000000u) == 2 && CoXlTestLwCallTick(3001000u) == 3 && CoXlTestLwCallTick(3002000u) == 4); }
+          CHECK(CoXlTestLwCallTick(3000000u) == 2 && CoXlTestLwCallTick(3000500u) == 2 && CoXlTestLwCallTick(3001000u) == 3 && CoXlTestLwCallTick(3002000u) == 4); }
         g_case = "a patrol of a group never measured is not called: the next one out is";
         CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
         CoXlTestLwCallGroup(30, 9);
@@ -497,6 +497,9 @@ int main(void)
         CHECK(CoXlTestLwCallTick(1000000u) == 1 && CoXlTestLwCallOf(30) == 1 && CoXlTestLwCallTick(1001000u) == 1);
         CoXlTestLwCallPlayer(0, 1640.0f, 0); CHECK(CoXlTestLwCallTick(1002000u) == 1 && CoXlTestLwCallOf(30) == 1 && CoXlTestLwCallLost() == 0);
         CoXlTestLwCallPlayer(0, 1660.0f, 0); CHECK(CoXlTestLwCallTick(1004000u) == 1 && CoXlTestLwCallOf(30) == 0 && CoXlTestLwCallLost() == 1);
+        g_case = "called again from farther out, its nearest so far starts anew: it is not let go at once";
+        CoXlTestLwCallPlayer(0, 1900.0f, 0);
+        CHECK(CoXlTestLwCallOne(0, 0, o) == 30 && CoXlTestLwCallTick(1006000u) == 2 && CoXlTestLwCallOf(30) == 1 && CoXlTestLwCallLost() == 1);
         CoXlTestLwCallPlayer(0, 1500.0f, 0);
         g_case = "meet 0: no patrol is called";
         CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
