@@ -53,6 +53,7 @@ static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
     co_counts_install(game);
     co_avatars_install(game);
     co_cards_install(game);
+    co_summary_install(game);
     co_session_install(game);
     co_engine_install(g_coApi->module_base("helldivers2.exe", &size));
 #ifdef CO_RESEARCH

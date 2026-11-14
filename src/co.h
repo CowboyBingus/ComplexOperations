@@ -80,6 +80,17 @@ int co_ui_guarded(void);
 /* What a cave's callback sees: the registers as the game had them, in the order the cave pushed them (co_counts.c). */
 typedef struct CoRegs { uint64_t r15, r14, r13, r12, r11, r10, r9, r8, rdi, rsi, rbp, rbx, rdx, rcx, rax, flags; } CoRegs;
 
+/* The mission summary's cards for eight (co_summary.c): which cards the row shows, their scale and the row's x in the
+ * 1920 window. `compact` is 0 for the game's four cards. The callback runs in front of each update of the summary. */
+typedef struct CoSummaryPlace { uint8_t shown[8]; uint32_t cards; int compact; float scale, x; } CoSummaryPlace;
+void co_summary_install(uintptr_t game);
+void co_summary_layout(CoRegs* regs);
+void co_summary_place(const uint8_t present[8], float canvasWidth, CoSummaryPlace* p);
+int co_summary_player(const uint32_t* pairs, uint32_t count, uint32_t empty, uint32_t factor, uint32_t id);
+#ifdef CO_TEST
+void co_summary_test_reset(void);
+#endif
+
 /* The loadout cards for eight (co_cards.c). The card's height in reference units, which the caves of every store of
  * it read (780, the game's, or 498), and what the open slots panel adds for its mission stratagems (113, the game's,
  * or 65 without the heading). The callbacks: `open` before the init's card loop and `ready` behind it (rdi = the

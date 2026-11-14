@@ -64,8 +64,8 @@ INPLACE = [
     # The survey link's text (0x800 bytes at the tail's start): at its old place it would be rows 4 to 7, row 4's count
     # four of its letters, and that row's card builds a list of that length past its 24 widgets.
     (0x199443A, '4881c638090000', _d('4881c6', 0x938 + S_TAIL), '1994400: R1 tail, the link text written'),
-    (0x1993DD8, '80b83911000000', _d('80b8', 0x1139 + S_TAIL, '00'), '1993dd0 (by vtable): [R1+0x1139]'),
-    (0x1993E02, 'c6803911000000', _d('c680', 0x1139 + S_TAIL, '00'), '1993dd0 (by vtable): [R1+0x1139]'),
+    (0x1993DD8, '80b83911000000', _d('80b8', 0x1139 + S_TAIL, '00'), '1993dd0 (no caller in code): [R1+0x1139]'),
+    (0x1993E02, 'c6803911000000', _d('c680', 0x1139 + S_TAIL, '00'), '1993dd0 (no caller in code): [R1+0x1139]'),
     # cards
     (0x1464983, '418984315cfc0400', _d('41898431', S_NC + 0x12544), '1464850: card i field +0x12544'),
     (0x1464A49, '4981f920970400', _d('4981f9', 8 * 0x125C8), '1464850: rows/cards loop end'),
@@ -86,7 +86,13 @@ INPLACE = [
     (0x14A145A, 'bd04000000', 'bd08000000', 'W ctor 14a13e0: cards loop'),
     (0x14A145F, '488d9e00fe0300', _d('488d9e', S_NCW + 0x4980), 'W ctor 14a13e0: cards'),
 ]
+# The screen-set update's case for the summary (0x1497AA1: rdi = SS) calls W's update at 0x1497AC3. The
+# row's layout callback (co_summary.c) runs in front of it every frame, and W's update ends in the row's layout pass.
+SUMMARY_LAYOUT = 21
+assert (S_NC, S_NR1, S_W + 0x110, S_W + 0x87FE8) == (0x8DA28, 0x8A548, 0x23A8, 0x8A280)   # co_summary.c
 CAVES = [
+    (0x1497ABC, '488d8f98220000', 'CALL(%d)\n lea rcx, [rdi+0x2298]\n jmp game+0x1497AC3' % SUMMARY_LAYOUT,
+     '1497920: the row\'s layout in front of W\'s update', []),
     (0x14648DD, '4c8d760849' + '8bd6', 'lea r14, [rsi+0x%x]\n mov rdx, r14\n jmp game+0x14648E4' % S_NR1, '1464850: R1', []),
     (0x1464B82, '498d7608' + '488bd6', 'lea rsi, [r14+0x%x]\n mov rdx, rsi\n jmp game+0x1464B89' % S_NR1, '1464b50: R1', []),
     (0x1464DF1, '488d5708' + '41b840110000', 'lea rdx, [rdi+0x%x]\n mov r8d, 0x%x\n jmp game+0x1464DFB' % (S_NR1, S_RSZ),
@@ -134,6 +140,11 @@ TAIL_OTHER = {0x199070F}
 
 
 def check(dump):
+    # co_summary.c's row: the container 56 from the window's left, cards 420 wide with 20 either side, anchored by the
+    # layout's mode; the callback's site has no jump into it (0x1497AB6 leaves, 0x1497AC3 is the call).
+    assert struct.unpack_from('<2f', dump, 0x23C7720)[0] == 56.0 and dump[0x199297E:0x1992986] == bytes.fromhex('f30f100d9a4da300')
+    assert dump[0x1992F58:0x1992F66] == bytes.fromhex('c7431000 00a041' 'c7431400 00a041'.replace(' ', ''))
+    assert dump[0x198F1A6:0x198F1AD] == bytes.fromhex('c745b00000d243')
     done = {rva + k for rva, old, _, _ in INPLACE for k in range(len(old) // 2)}
     for lo, hi in TAIL_CODE:
         for v in (0x938, 0x1138, 0x1139):
