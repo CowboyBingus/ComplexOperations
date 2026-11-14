@@ -79,7 +79,7 @@ static struct { uintptr_t w; void* runner; int threads; } g_step[8];
 
 static uint8_t FakeAsync(uintptr_t w) { (void)w; return 1; }
 static uint8_t FakeInFlight(uintptr_t w) { (void)w; if (g_locked) g_lockedCalls++; return (uint8_t)g_inFlight; }
-static int g_stepDone, g_drives, g_driveEnds; static float g_driveSec;
+static int g_stepDone, g_drives, g_driveEnds; static float g_driveSec; static DWORD g_stepMs;
 static uint8_t FakeStepDone(uintptr_t w) { (void)w; return (uint8_t)g_stepDone; }
 /* 0xBD04A0: the run driven for `seconds`; it ends in that time when g_driveEnds */
 static DWORD g_driveMs;
@@ -89,6 +89,7 @@ static void FakeCommit(uintptr_t w, void* p, int n) { (void)w; (void)p; (void)n;
 static uintptr_t FakeStep(uintptr_t w, void* block, void* runner, int threads)
 {
     (void)block;
+    if (g_stepMs) Sleep(g_stepMs);
     if (g_steps < 8) { g_step[g_steps].w = w; g_step[g_steps].runner = runner; g_step[g_steps].threads = threads; }
     g_steps++;
     if (g_model && w == (uintptr_t)g_aiw2) { if (g_queued2) Take(g_aiw2); g_queued2 = 0; Took(IDX2); }
@@ -128,7 +129,7 @@ static void Reset(const char* name, int32_t threads, uintptr_t tasks, uintptr_t 
     memset(g_step, 0, sizeof g_step);
     g_permits = g_joins = g_unloads = g_loads = g_makes = g_frees = g_steps = g_waits = g_commits = g_inFlight = 0;
     g_model = g_queued2 = g_locked = g_enters = g_leaves = g_lockedCalls = 0;
-    g_queued = 3; g_grant = 1; g_made = NULL; g_stepDone = 1; g_drives = g_driveEnds = 0; g_driveSec = 0; g_driveMs = 0;
+    g_queued = 3; g_grant = 1; g_made = NULL; g_stepDone = 1; g_drives = g_driveEnds = 0; g_driveSec = 0; g_driveMs = 0; g_stepMs = 0;
     Put(g_table + 0x80 * IDX, (uintptr_t)g_aiw);
     Put(g_table + 0x80 * IDX + 0x20, 1);
     Put(g_table + 0x80 * IDX + 0x28, RUNNER);
@@ -302,6 +303,14 @@ static void TestNotLiveOrRefused(void)
     Counts(&swaps, &steps, &parallel, &refused, &noLoad);
     CHECK(g_steps == 0 && swaps == 0 && refused == 1 && g_unloads == 1 && g_loads == 1);
     CHECK(!fake_host_logged("swapped in at once"));
+    Reset("the permit refused at the load only: that swap is unsynchronised too", 12, JOBS, JOBS, INLINE);
+    uint32_t id = 5, out = 5;
+    CHECK(CoXlTestLwNavUnload((uintptr_t)g_aiw, &id, CELL) == 7);
+    Counts(&swaps, &steps, &parallel, &refused, &noLoad); CHECK(refused == 0);
+    g_grant = 0;
+    CHECK(CoXlTestLwNavLoad((uintptr_t)g_aiw, &out, CELL) == 9);
+    Counts(&swaps, &steps, &parallel, &refused, &noLoad);
+    CHECK(refused == 1 && swaps == 0);
 }
 
 static void TestLinesAndSummary(void)
@@ -939,6 +948,11 @@ static void TestUnsynced(void)
     CHECK(fake_host_logged("unsynchronised swaps: 1 at a tick repeated with no game frame, 0 at a completion the pop did not let through, 0 at a level's end; "
         "rebuild marks held on 2 frame(s) after one"));
     CoXlTestLwNavMoreCounts(m); CHECK(m[4] == 0 && m[9] == 0); /* the span's counts start again */
+    CoXlTestLwNavSwapFrame();        /* a game frame: the next tick is play's own again */
+    Flight(1); g_stepDone = 0; Ring(100, 90);
+    Push(1, IDX, 5, 0);
+    CHECK(Tick(0, 100) == 1);        /* due with no scheduler in hand: let out beside the run */
+    CoXlTestLwNavMoreCounts(m); CHECK(m[5] == 1 && m[4] == 0);
     ResetHold("a due built cell with a query job reading: let out with no permit, counted as that");
     SchedOn(0); JobBudget(IDX, 8, 2); CoXlTestLwNavDrive(FakeDrive);
     Section(IDX, 3, 40); g_grant = 0; Ring(100, 95);
@@ -984,6 +998,13 @@ static void TestEndAll(void)
     Section(IDX, 5, 42); Push(2, IDX, 5, 0);
     CHECK(Tick(1, 20) == 1 && g_drives == drives && g_permits == permits && CoXlTestLwNavBounded() > bounded && g_unloads == 3);
     CHECK(fake_host_logged(" and the level's end has had its drains' time, nothing done"));
+    ResetHold("a permit that never comes and a drain's own step count for the level's end too");
+    Section(IDX, 3, 40); g_grant = 0;
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(1, 0) == 1 && CoXlTestLwNavEndMs(-1) >= 19.0); /* the 20 ms it asked for */
+    g_grant = 1; CoXlTestLwNavEndMs(0.0); g_stepMs = 5; g_queued = 3;
+    Section(IDX, 4, 41); Push(1, IDX, 4, 0);
+    CHECK(Tick(1, 10) == 1 && g_steps >= 1 && CoXlTestLwNavEndMs(-1) >= 4.0);
     ResetHold("the level's time is the end's only, and the next level's starts again");
     SchedOn(0); JobBudget(IDX, 8, 2); CoXlTestLwNavDrive(FakeDrive);
     Flight(1); g_stepDone = 0; Ring(100, 95);
@@ -1054,6 +1075,7 @@ static void TestWindow(void)
     CHECK(CoXlTestLwNavStartAsk((uintptr_t)g_aiw) == 1);                   /* none left waiting: no wish */
     CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
     CHECK(fake_host_logged("a run's start put off 4 time(s) for them"));
+    CoXlTestLwNavMoreCounts(m); CHECK(m[3] == 0); /* the span's count starts again */
     ResetHold("the world has no work: the game's no is not a start, and the window's time runs on");
     g_asks = 0; g_work = 0; CoXlTestLwNavWindow(FakeAsk, 500);
     Flight(1);

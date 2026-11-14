@@ -4286,7 +4286,7 @@ static uintptr_t LwNavPopIn(uintptr_t list, uint32_t flush, ULONGLONG now)
         memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting);
         for (uintptr_t rec = *(uintptr_t*)(list + 0x28); rec; prev = rec, rec = *(uintptr_t*)(rec + off))
         {
-            if (++walked > LW_NAV_HOLD_WALK) { memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting); g_lwSwap.repeat = 1; return LwNavPopHead(list, off, 0); }
+            if (++walked > LW_NAV_HOLD_WALK) { memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting); return LwNavPopHead(list, off, 0); }
             int k = LwNavRecWorld(rec, &c, &r);
             if (!k) { plain = rec; plainPrev = prev; continue; }
             rec2[k - 1][r] = rec; prev2[k - 1][r] = prev; old[k - 1] = rec; oldBuilt[k - 1] = r; g_lwNavHold.waiting[k - 1]++;
@@ -4378,7 +4378,6 @@ static uintptr_t LwNavPopIn(uintptr_t list, uint32_t flush, ULONGLONG now)
             g_lwNavHold.oldAt[i] = old[i] ? LwNavSeenAt(old[i], g_lwNavHold.stuckAt[i]) : 0;
             if (old[i]) LwNavLongHold(i, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * i), now);
             if (old[i]) LwNavHoldBound(i, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * i), now);
-            else g_lwNavHold.boundNoted[i] = 0;
         }
         g_lwNavHold.firstNow = firsts;
         if (firsts > g_lwNavHold.sum.firstMost) g_lwNavHold.sum.firstMost = firsts;
