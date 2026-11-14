@@ -234,7 +234,7 @@ static int LwLeanWatch(const wchar_t* path)
     LwTiltNote(); LwLeanNote();
     LwLeanSet(deg);
     if (rest != end) InterlockedExchange(&g_lwTiltPropsOn, props != 0);
-    g_lwLp.lines = g_lwLp.steepLines = 0;
+    g_lwLp.lines = g_lwLp.steepLines = 0; g_lwTiltSunkLines = 0;
     Note("living world: lean: now %.0f deg over the slope (0: none), prop hits read %s, from xl-lean.txt", (double)LwLeanDeg(),
         g_lwTiltPropsOn ? "the drawn ground" : "as the game reads them");
     return 1;

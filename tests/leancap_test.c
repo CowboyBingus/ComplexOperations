@@ -29,6 +29,8 @@ void CoXlTestTiltHold(int on);
 void CoXlTestLpLevel(void);
 void CoXlTestLpScan(void);
 int CoXlTestLeanWatch(const wchar_t* path);
+void CoXlTestTiltSunkLines(int n);
+int CoXlTestTiltSunkLinesNow(void);
 int CoXlTestTiltPropsOn(void);
 int CoXlTestLpSample(uint32_t id, const float* up, float tilt, float ground, float off, const float* last, float len);
 void CoXlTestLpNote(void);
@@ -432,7 +434,9 @@ int main(void)
     Put(file, "0");
     CHECK(CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 0.0f && !CoXlTestTiltPropsOn()); /* the degrees alone: prop hits stay off */
     Put(file, "25 1");
+    CoXlTestTiltSunkLines(16);
     CHECK(CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 25.0f && CoXlTestTiltPropsOn());
+    CHECK(CoXlTestTiltSunkLinesNow() == 0); /* a new value: the sunk units' lines start again */
     DeleteFileW(file);
     CHECK(!CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 25.0f && CoXlTestTiltPropsOn()); /* taken away: the last values stay */
 
