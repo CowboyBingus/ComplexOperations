@@ -337,6 +337,14 @@ static void CheckCallback(void)
     Put32(g_session + 0x16390, 1);
     co_summary_layout(&regs);
     CHECK(Word(Row(0)) == 0 && fake_host_logged("mission summary: research fill: refused, the unset id is a player"));
+    /* One digit only: 77 is no number of cards. */
+    SetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL", "77");
+    Screen(1920.0f);
+    Player(0x77);
+    Put32(Row(1), 0x77);
+    Put32(g_session + 0x16390, 1);
+    co_summary_layout(&regs);
+    CHECK(Word(Row(0)) == 0 && Word(Row(2)) == 0);
     /* The number is the last card filled: 3 fills cards 1 and 3 beside the player's. */
     SetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL", "3");
     Screen(1920.0f);
