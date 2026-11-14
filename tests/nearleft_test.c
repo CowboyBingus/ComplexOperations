@@ -198,6 +198,24 @@ int main(void)
     CoXlTestMapsNextLevel(MAT_TEX, ENTRY_MAT);
     CHECK(g_releases == 0 && g_matGones == 1 && g_matGone == MAT_TEX && fake_host_logged("its one-mip heightmap stays allocated") && !fake_host_logged("its material map stays"));
 
+    Start("the terrain is the second of its bucket's chain: its own entry's maps are the ones compared");
+    CoXlTestWorldLevel(lg, 0);
+    NearSetUp();
+    MapsGame(0x99, 1); EntryMaps(ENTRY_HEIGHT, ENTRY_MAT);
+    CHECK(CoXlTestOneMipSpawn(HEIGHTMAP, MATERIALS) == 0x99);
+    {
+        static uint8_t chain[2 * 0x170];
+        const uint64_t entries = (uint64_t)(uintptr_t)chain, first = 0x77, second = 0x99, otherHeight = ENTRY_HEIGHT + 0x100, otherMat = ENTRY_MAT + 0x100,
+            height = ENTRY_HEIGHT, mat = ENTRY_MAT;
+        const uint32_t count = 2, next = 1, last = 0x7FFFFFFFu;
+        MapsGame(0x99, 1);
+        memcpy(chain, &first, 8); memcpy(chain + 0x40, &otherHeight, 8); memcpy(chain + 0x48, &otherMat, 8); memcpy(chain + 0x168, &next, 4);
+        memcpy(chain + 0x170, &second, 8); memcpy(chain + 0x170 + 0x40, &height, 8); memcpy(chain + 0x170 + 0x48, &mat, 8); memcpy(chain + 0x170 + 0x168, &last, 4);
+        memcpy(g_mainWorld + 0x230550u + 8, &entries, 8); memcpy(g_mainWorld + 0x230550u + 0x18, &count, 4);
+    }
+    CoXlTestMapsNextLevel(MAT_TEX, ENTRY_MAT);
+    CHECK(g_releases == 0 && g_matGones == 0 && fake_host_logged("its one-mip heightmap stays allocated") && fake_host_logged("its material map stays allocated"));
+
     Start("the entry did not read when the terrain spawned: the handle alone decides, and listed maps stay");
     CoXlTestWorldLevel(lg, 0);
     NearSetUp();
