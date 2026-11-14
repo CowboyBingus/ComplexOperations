@@ -1118,7 +1118,9 @@ static void ShotAt(void)
     CHECK(CoXlTestLwFightOver(0, now + 34000) == 1 && Count("is over after") == over + 1);
     CHECK(Count("squads sent); the place rule ended it: its units were engaged to 1 s ago, over 200 m from every player and fighting none") == ruled + 1);
     CHECK(CoXlTestLwFightTake(150, 0, 6, 6, 0, 0, now + 40000, 0, pos, &eng, &seen) == 0);
-    CHECK(CoXlTestLwFightOver(0, now + 71000) == 1 && Count("is over after") == over + 2);
+    CHECK(CoXlTestLwFightTake(201, 0, 6, 6, 0, 0, now + 41000, 0, pos, &eng, &seen) == -1); /* refused once, then seen again */
+    CHECK(CoXlTestLwFightTake(190, 0, 6, 6, 0, 0, now + 42000, 0, pos, &eng, &seen) == 0 && seen == now + 42000);
+    CHECK(CoXlTestLwFightOver(0, now + 73000) == 1 && Count("is over after") == over + 2);
     CHECK(Count("the place rule ended it") == ruled + 1); /* its units calmed down: no such words */
     g_case = "eight players: units far from all that fight the last player make a fight; an avatar of nobody in the session does not";
     float pts[16]; uint32_t ids[8];
@@ -1410,6 +1412,10 @@ static void NoiseBody(void)
     CHECK(CoXlTestLwNoiseGate(0x502, 0x9001, 0x777, 0, 0, 0.0f, 0, 900.0f) == 1 && Count("draws no squad: the nearest player is") == farOff + 1);
     CHECK(CoXlTestLwNoiseGate(0x502, 0x9001, 0x777, 0x777, 30000, 0.0f, 0, 100.0f) == 2 && Count("draws no squad: this source drew squads") == rule + 1);
     CHECK(CoXlTestLwNoiseGate(0x502, 0x9001, 0x777, 0x777, 31000, 0.0f, 0, 100.0f) == 2 && Count("draws no squad: this source drew squads") == rule + 1);
+    g_case = "the test's noise has its line every time, so a run's checker finds each one";
+    CHECK(CoXlTestLwNoiseGate(0x502, 0x9001, 0x502, 0x502, 30000, 0.0f, 1, 100.0f) == 2 && Count("draws no squad: this source drew squads") == rule + 2);
+    CHECK(CoXlTestLwNoiseGate(0x502, 0x9001, 0x502, 0x502, 31000, 0.0f, 1, 100.0f) == 2 && Count("draws no squad: this source drew squads") == rule + 3);
+    CHECK(CoXlTestLwNoiseGate(0x502, 0x9001, 0x777, 0x777, 32000, 0.0f, 0, 100.0f) == 2 && Count("draws no squad: this source drew squads") == rule + 3);
 }
 
 /* What places a fight. Run 5: four units at level 7 walked 1 km east at 1.7 m/s and took the fight's point along. */

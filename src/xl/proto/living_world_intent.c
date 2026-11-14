@@ -1121,7 +1121,8 @@ static int LwNoiseSkip(float playerDist, float reach, ULONGLONG sinceSent, float
  * shot's source is the weapon's wielder (0x612BAA reads Wieldable +0x38, unchanged up to r8d at 0x614364), which
  * Wield sets to the entity that holds it (0x785EC3 -> 0x79B851) and the fire code looks up among the avatars
  * (0x613079): a Helldiver's shots come from its avatar entity, so they are a body's. A sentry wields itself: no body.
- * n->fixed: the test's noise from the avatar that counts as a source in place. */
+ * n->fixed: the test's noise from the avatar that counts as a source in place; each one has its line, so a run's
+ * checker finds why any of them drew nobody. */
 static int LwNoiseGate(const LwNoise* n, float reach, ULONGLONG now)
 {
     int body = LwIsPlayer(n->source), k = LwNoiseSource(n->source);
@@ -1132,7 +1133,7 @@ static int LwNoiseGate(const LwNoise* n, float reach, ULONGLONG now)
     if (!skip) return 0;
     g_lwNoiseSkips[skip]++;
     static struct { uint32_t source; int skip; ULONGLONG at; } noted[8]; static int next;
-    for (int i = 0; i < 8; i++) if (noted[i].source == n->source && noted[i].skip == skip && noted[i].at && now - noted[i].at < LW_NOISE_SOURCE_MS) return skip;
+    for (int i = 0; i < 8; i++) if (!n->fixed && noted[i].source == n->source && noted[i].skip == skip && noted[i].at && now - noted[i].at < LW_NOISE_SOURCE_MS) return skip;
     noted[next].source = n->source; noted[next].skip = skip; noted[next].at = now; next = (next + 1) % 8;
     if (skip == 1) Note("living world: noise type %u at (%.0f, %.0f) from %08X draws no squad: the nearest player is %.0f m away (reach %.0f m, limit %.0f m)", n->type,
         (double)n->pos[0], (double)n->pos[1], n->source, (double)away, (double)reach, (double)(reach > LW_NOISE_PLAYER ? reach : LW_NOISE_PLAYER));
