@@ -4746,10 +4746,13 @@ static int StampCompare(const void* a, const void* b)
 /* Distance from a segment to a box (2D), for the level's roads in its stamp index. */
 static float StampSegmentBox(const float* s, const float* lo, const float* hi)
 {
+    /* a sample every 0.3125 m at least (16 steps on a route's 5 m pair): a longer pair must not step over a small box */
+    const float length = sqrtf((s[2] - s[0]) * (s[2] - s[0]) + (s[3] - s[1]) * (s[3] - s[1]));
+    const int steps = length > 5.0f && length < 4096.0f ? (int)ceilf(length / 0.3125f) : 16;
     float best = 1e30f;
-    for (int k = 0; k <= 16; k++)
+    for (int k = 0; k <= steps; k++)
     {
-        float t = (float)k / 16.0f, x = s[0] + (s[2] - s[0]) * t, y = s[1] + (s[3] - s[1]) * t;
+        float t = (float)k / (float)steps, x = s[0] + (s[2] - s[0]) * t, y = s[1] + (s[3] - s[1]) * t;
         float dx = x < lo[0] ? lo[0] - x : x > hi[0] ? x - hi[0] : 0.0f, dy = y < lo[1] ? lo[1] - y : y > hi[1] ? y - hi[1] : 0.0f;
         float d = sqrtf(dx * dx + dy * dy);
         if (d < best) best = d;
