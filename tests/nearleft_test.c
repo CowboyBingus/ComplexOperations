@@ -69,7 +69,7 @@ static void FakeMatGone(uint64_t tex) { g_matGones++; g_matGone = tex; }
 static void MapsGame(uint64_t listed, int worldReads)
 {
     const uintptr_t game = (uintptr_t)g_fake.image, t10 = game + TABLE10, engine = game + ENGINE, release = (uintptr_t)FakeRelease, gone = (uintptr_t)FakeMatGone;
-    const uint64_t world = worldReads ? (uint64_t)(uintptr_t)g_mainWorld : 0x10, entries = (uint64_t)(uintptr_t)g_terrainEntry;
+    const uint64_t world = worldReads ? (uint64_t)(uintptr_t)g_mainWorld : 0, entries = (uint64_t)(uintptr_t)g_terrainEntry;
     const uint32_t count = listed != 0, buckets = 1, last = 0x7FFFFFFFu;
     memcpy(g_fake.image + API + 0x10, &t10, 8);
     memcpy(g_fake.image + TABLE10 + 0x198, &release, 8);
