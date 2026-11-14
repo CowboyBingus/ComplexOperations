@@ -1,5 +1,5 @@
 /* The rotation's ray reader (game 0x620810) on extra large levels: a ray that starts under a live tile's ground reads
- * that ground above it (minus the depth) when it missed; hits, misses over the ground, other places and a busy tile
+ * that ground at its start (just under 0, whatever its depth) when it missed; hits, misses over the ground, other places and a busy tile
  * list keep the game's answer. The game's call is always made as the game made it.
  * The diagnostic beside it sorts units 30 deg or more off the drawn ground by what their own corner rays read.
  * Run on the fake game. */
@@ -128,14 +128,29 @@ static void Classes(void)
     CHECK(Class(point, 4.0f, &r) == LOOSE && r == -1.0f);
 }
 
+static float MeanV(float a, float b, float c, float d, float len) { return 0.25f * ((1.0f - a / len) + (1.0f - b / len) + (1.0f - c / len) + (1.0f - d / len)); }
+
 int main(void)
 {
     Classes();
     g_case = "the rule";
-    CHECK(CoXlTestTiltUnder(4.0f, 0, 10.0f, 10.3f) == 10.0f - 10.3f); /* a miss under the ground: minus the depth */
+    CHECK(CoXlTestTiltUnder(4.0f, 0, 10.0f, 10.3f) == -0.01f);        /* a miss under the ground: the ground at its start */
+    CHECK(CoXlTestTiltUnder(4.0f, 0, 10.0f, 25.0f) == -0.01f);        /* however deep */
     CHECK(CoXlTestTiltUnder(0.2f, 1, 10.0f, 10.3f) == 0.2f);          /* a hit stays the game's */
     CHECK(CoXlTestTiltUnder(4.0f, 0, 10.0f, 9.5f) == 4.0f);           /* a miss over the ground stays a miss */
     CHECK(CoXlTestTiltUnder(4.0f, 0, 10.0f, 10.0f) == 4.0f);          /* at the ground: the game's */
+
+    /* The four-corner mode's mean of 1 - h / length over the corners (game 0x6227BC, 0x622C46): over 1 the unit is put
+     * world up (0x622CBB). */
+    g_case = "a long unit level on a 34 deg slope: its two buried rear corners do not put it world up";
+    const float front[2] = {0.71f, 1.09f}; /* unit 630 of run 4: start z 39.10, the ground at its rear corners 40.70 and 40.19 */
+    float rear[2] = {CoXlTestTiltUnder(4.0f, 0, 39.10f, 40.70f), CoXlTestTiltUnder(4.0f, 0, 39.10f, 40.19f)};
+    CHECK(MeanV(front[0], rear[0], rear[1], front[1], 4.0f) < 1.0f);
+    CHECK(MeanV(front[0], 39.10f - 40.70f, 39.10f - 40.19f, front[1], 4.0f) > 1.0f); /* its depths did */
+    g_case = "every corner buried: world up, as the game has a unit with no ground";
+    float deep = CoXlTestTiltUnder(4.0f, 0, 10.0f, 13.0f);
+    CHECK(MeanV(deep, deep, deep, deep, 4.0f) > 1.0f);
+    CHECK(MeanV(deep, deep, deep, deep, 2.0f) > 1.0f);
 
     g_case = "not the reviewed code";
     g_coApi = fake_host_reset(CO_GAME_BUILD);
@@ -170,7 +185,7 @@ int main(void)
     Ray(1, 0, 0, 40.0f, 0); /* another record: over the ground */
     Ray(2, 110.0f, -190.0f, 11.7f, 0);
     float d = Call(read, 2, 3, 4.0f);
-    CHECK(fabsf(d - (11.7f - 12.0f)) < 0.02f);
+    CHECK(d == -0.01f);
     CHECK(g_read.calls == 1 && g_read.request == 2 && g_read.coarse == 3); /* the game's call as made */
     CoXlTestTiltCounts(&reads, &under);
     CHECK(reads == 1 && under == 1);
@@ -193,7 +208,7 @@ int main(void)
     CoXlTestTiltHold(1);
     CHECK(Passed(Call(read, 2, 3, 4.0f), 4.0f, 2, 3));
     CoXlTestTiltHold(0);
-    CHECK(fabsf(Call(read, 2, 3, 4.0f) - (11.0f - 12.0f)) < 0.02f);
+    CHECK(Call(read, 2, 3, 4.0f) == -0.01f);
     CoXlTestTiltCounts(&reads, &under);
     CHECK(reads == 1 && under == 1);
 

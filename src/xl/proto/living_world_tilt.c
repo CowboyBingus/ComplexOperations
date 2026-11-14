@@ -198,19 +198,25 @@ static int LwTiltCorners(uintptr_t R, float c[4][3], float* len)
     return 0;
 }
 
-/* ---- The fix: a ray that starts under a live tile's ground and misses reads that ground above it ---------------------
+/* ---- The fix: a ray that starts under a live tile's ground and misses reads that ground at its start --------------
  * The reader 0x620810(mgr, i, rays, request, coarse request) returns R+0x48, the full length, whenever the ray's count
  * (request + 0x30, records of 0x40 B, start at +0x10) is 0 (0x620933): a hole. A heightfield is one-sided, so a corner
  * pushed under the ground misses it, reads a hole and tilts the unit further; it stays rolled. On a live tile such a
- * miss now reads minus its depth, the sign the game gives a hit under its level terrain. Hits stay the game's (craters
- * are not in the tile's CPU heights). Runs on the rotation's job threads: the tiles are read under g_tilesLock. */
+ * miss reads just under 0: the ground is at the ray's start. Its depth is not returned: the four-corner mode puts a
+ * unit world up when its corners' mean 1 - h / length is over 1 (0x622CBB), and the depths of two rear corners of a
+ * long unit standing level on a slope are enough for that, which keeps it level. Hits stay the game's (craters are not
+ * in the tile's CPU heights). Runs on the rotation's job threads: the tiles are read under g_tilesLock. */
 #define LW_TILT_READ 0x620810u
 typedef float (*LwTiltReadFn)(uintptr_t mgr, uint32_t i, uintptr_t rays, uint32_t request, uint32_t coarse);
 static LwTiltReadFn g_lwTiltRead;
 static volatile LONG g_lwTiltUnder, g_lwTiltReads;
 
-/* A miss that started under the ground: minus its depth; anything else as the game read it. */
-static float LwTiltUnder(float d, uint32_t count, float originZ, float ground) { return count == 0 && ground > originZ ? originZ - ground : d; }
+/* What a miss that started under the ground reads: under 0, so a unit with every corner buried still stands world up
+ * as the game has it, and so little that buried corners never outweigh the others' readings. */
+#define LW_TILT_SKIN 0.01f
+
+/* A miss that started under the ground: the ground at its start; anything else as the game read it. */
+static float LwTiltUnder(float d, uint32_t count, float originZ, float ground) { return count == 0 && ground > originZ ? -LW_TILT_SKIN : d; }
 
 /* The live tile's ground at (x, y); -9999 outside every live tile or when a writer holds the tiles. */
 static float LwTiltTileGround(float x, float y)
