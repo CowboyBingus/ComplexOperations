@@ -65,6 +65,17 @@ int main(void)
     g_case = "on the road patrols' own far units a call comes sooner: a minute solo, 153 s each at 8 apart, 294 s each at 8 together";
     CHECK(co_lw_meet_call_ms(27.0f, 4, 1, 465.0f) == CO_LW_MEET_CALL_MIN_MS && co_lw_meet_call_ms(69.0f, 4, 8, 661.0f) > 152500u && co_lw_meet_call_ms(69.0f, 4, 8, 661.0f) < 154000u);
     CHECK(co_lw_meet_call_ms(36.0f, 4, 8, 661.0f) > 293000u && co_lw_meet_call_ms(36.0f, 4, 8, 661.0f) < 294500u);
+    g_case = "a moving player's patrol is called from ahead; at a patrol's pace or faster, from ahead only";
+    { const float dirs[2][2] = {{-100, 0}, {100, 0}}, cross[3][2] = {{-100, 0}, {100, 0}, {0, 100}}, slow[2] = {0.5f, 0}, walk[2] = {1.5f, 0}, run[2] = {3, 0}, back[2] = {-3, 0}, north[2] = {0.5f, 4}, off[2] = {0, 3}; int only = 9;
+      CHECK(co_lw_meet_call_ahead(slow, dirs, 2, &only) == -1 && only == 0);
+      CHECK(co_lw_meet_call_ahead(walk, dirs, 2, &only) == 1 && only == 0);
+      CHECK(co_lw_meet_call_ahead(run, dirs, 2, &only) == 1 && only == 1 && co_lw_meet_call_ahead(back, dirs, 2, &only) == 0 && only == 1);
+      CHECK(co_lw_meet_call_ahead(north, cross, 3, &only) == 2 && only == 1);
+      CHECK(co_lw_meet_call_ahead(off, dirs, 2, &only) == -1 && only == 0); /* across the road: no side is ahead */ }
+    g_case = "a called patrol 150 m farther from its player than it has been is let go";
+    { float least = 0;
+      CHECK(co_lw_meet_call_lost(900.0f, &least) == 0 && least == 900.0f && co_lw_meet_call_lost(1050.0f, &least) == 0 && co_lw_meet_call_lost(1051.0f, &least) == 1);
+      CHECK(co_lw_meet_call_lost(600.0f, &least) == 0 && least == 600.0f && co_lw_meet_call_lost(749.0f, &least) == 0 && co_lw_meet_call_lost(751.0f, &least) == 1); }
     g_case = "a player's first call waits its part of the period: 8 players' calls fall an eighth of it apart";
     CHECK(co_lw_meet_call_first(480000u, 0, 8) == 0 && co_lw_meet_call_first(480000u, 1, 8) == 60000u && co_lw_meet_call_first(480000u, 7, 8) == 420000u);
     CHECK(co_lw_meet_call_first(480000u, 3, 1) == 0 && co_lw_meet_call_first(480000u, 1, 2) == 240000u);

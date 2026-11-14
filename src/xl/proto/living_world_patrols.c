@@ -70,7 +70,8 @@ static struct
 } g_lwMeet;
 /* A patrol called along the road to a player on it (co_lw_meet.h): each player's next call and side in turn; the
  * player + 1 a patrol was called to; the road nodes around the player; a patrol's stand beyond the band. */
-static struct { ULONGLONG at[CO_LW_MEET_PLAYERS], tickAt; uint8_t turn[CO_LW_MEET_PLAYERS], begun[CO_LW_MEET_PLAYERS]; uint32_t called, none, came, start; } g_lwCall;
+static struct { ULONGLONG at[CO_LW_MEET_PLAYERS], tickAt; uint8_t turn[CO_LW_MEET_PLAYERS], begun[CO_LW_MEET_PLAYERS]; uint32_t called, none, came, start, lost; } g_lwCall;
+static float g_lwCallLeast[LW_SQUADS_MAX]; /* a called patrol's nearest to its player since the call */
 static uint8_t g_lwCallOf[LW_SQUADS_MAX], g_lwCallHops[LW_NODES_MAX], g_lwCallSide[LW_NODES_MAX];
 static uint16_t g_lwCallUp[LW_NODES_MAX], g_lwCallQueue[LW_NODES_MAX];
 static ULONGLONG g_lwZoneSince[LW_SQUADS_MAX], g_lwZoneNo[LW_SQUADS_MAX];
@@ -779,7 +780,11 @@ static int LwCallFor(int i, int root)
     const float reach = (float)(CO_LW_MEET_CALL_HOPS + 2) * CO_LW_ROADS_STRETCH; /* no patrol the tree holds stands farther */
     for (int k = 0; k < g_lwNodes[root].degree; k++) if (g_lwNodeKind[g_lwNodes[root].next[k]]) sides[ns++] = k;
     if (ns == 0) return -1;
-    const int want = sides[(g_lwCall.turn[i] + i) % ns]; /* players standing together start on different sides */
+    /* a moving player's patrol comes from ahead: one called from behind walks after them and never arrives */
+    float dirs[16][2]; int only = 0, ahead = -1;
+    for (int k = 0; k < ns; k++) { const LwNode* o = &g_lwNodes[g_lwNodes[root].next[sides[k]]]; dirs[k][0] = o->x - g_lwNodes[root].x; dirs[k][1] = o->y - g_lwNodes[root].y; }
+    if (i < CO_LW_VIEW_PLAYERS && g_lwView.player[i].known) ahead = co_lw_meet_call_ahead(g_lwView.player[i].v, (const float (*)[2])dirs, ns, &only);
+    const int want = ahead >= 0 ? sides[ahead] : sides[(g_lwCall.turn[i] + i) % ns]; /* players standing together start on different sides */
     LwCallTree(root);
     for (int s = LwRoadNext(-1); s < g_lwWorld.count; s = LwRoadNext(s))
     {
@@ -788,12 +793,13 @@ static int LwCallFor(int i, int root)
         const int a = q->node, b = q->path[q->pathAt], toward = g_lwCallHops[b] < g_lwCallHops[a] ? b : a, hops = g_lwCallHops[toward];
         if (hops == 255 || toward == root) continue;
         const int on = g_lwCallSide[toward] == want;
+        if (only && !on) continue;
         if (co_lw_meet_call_better(hops, on, bestHops, bestOn)) { best = s; bestHops = hops; bestOn = on; bestToward = toward; }
     }
     if (best < 0) return -1;
     LwSquad* q = &g_lwSquads[best];
     LwCallSend(q, bestToward, root);
-    g_lwCallOf[best] = (uint8_t)(i + 1); g_lwCall.turn[i]++; g_lwCall.called++;
+    g_lwCallOf[best] = (uint8_t)(i + 1); g_lwCallLeast[best] = 0; g_lwCall.turn[i]++; g_lwCall.called++;
     if (LwMeetNote()) Note("living world: road patrol %d is called to player %d's road: %d road nodes out at (%.0f, %.0f), %.0f m from them, to walk in %s%s", best, i + 1, bestHops,
         (double)q->pos[0], (double)q->pos[1], (double)sqrtf(LwDist2(g_lwWorld.players[i], q->pos[0], q->pos[1])), bestOn ? "from the side whose turn it is" : "from another side (none stood on the one whose turn it is)",
         g_lwMeet.notes == LW_MEET_NOTES ? " (the last such line this mission)" : "");
@@ -814,6 +820,14 @@ static void LwCallTick(ULONGLONG now)
     g_lwCall.tickAt = now;
     if (!LwMeetOn() || g_lwRoadNodes < LW_ROAD_NODES_MIN) return;
     int root[CO_LW_MEET_PLAYERS], np = g_lwWorld.playersAt < CO_LW_MEET_PLAYERS ? g_lwWorld.playersAt : CO_LW_MEET_PLAYERS, roadPlayers = 0;
+    /* a called patrol whose player has gone, or walks away from it, is let go: free to be called again */
+    for (int s = LwRoadNext(-1); s < g_lwWorld.count; s = LwRoadNext(s))
+    {
+        const int of = g_lwCallOf[s] - 1;
+        if (of < 0) continue;
+        if (of < g_lwWorld.playersAt && !co_lw_meet_call_lost(sqrtf(LwDist2(g_lwWorld.players[of], g_lwSquads[s].pos[0], g_lwSquads[s].pos[1])), &g_lwCallLeast[s])) continue;
+        g_lwCallOf[s] = 0; g_lwCall.lost++;
+    }
     for (int i = 0; i < np; i++) { root[i] = LwCallRoot(g_lwWorld.players[i]); roadPlayers += root[i] >= 0; }
     /* a player's first call waits its part of a period, so the players' calls are spread over it and the share
      * meets them one at a time (all at once, 8 players sent 32 units at a kept half of 23) */
@@ -1067,10 +1081,10 @@ static void LwMeetNotes(void)
         "%u asked beyond the band; came online on their way in: %u from cover, %u at its edge, %u beyond the band, %u from the ring's edge; %u began to wait, %u turned back, "
         "%u steps back from a player, %u sent on an errand; %u squads gave way to them (%u times no calm hidden squad to leave, %u times the road patrols' share was full), %d holds now; "
         "their requests refused: sight %u, room %u, spacing %u, other %u (%u of them beyond the band, for the far share; %u such patrols walked on after %u s); "
-        "%u called to a player's road, %u of the called came online, %u times none to call; far units of patrols on a player's road %d; "
+        "%u called to a player's road, %u of the called came online, %u times none to call, %u of the called let go (their player moved away); far units of patrols on a player's road %d; "
         "%u road patrols offline within %.0f m of a player (nearest %.0f m)%s", onRoad, waiting, g_lwMeet.looks, g_lwMeet.covered, g_lwMeet.edge, g_lwMeet.beyond, g_lwMeet.cameCover,
         g_lwMeet.cameEdge, g_lwMeet.cameBeyond, g_lwMeet.online, g_lwMeet.held, g_lwMeet.turned, g_lwMeet.back, g_lwMeet.dispatched, g_lwMeet.gaveWay, g_lwMeet.noFiller, g_lwMeet.shareNo, holds,
-        g_lwMeet.sight, g_lwMeet.room, g_lwMeet.spaced, g_lwMeet.other, g_lwMeet.farNo, g_lwMeet.zoneLeft, CO_LW_MEET_ZONE_WAIT_MS / 1000u, g_lwCall.called, g_lwCall.came, g_lwCall.none, g_lwMeet.roadFar, g_lwMeet.close, (double)CO_LW_MEET_CLOSE, (double)g_lwMeet.closeLeast,
+        g_lwMeet.sight, g_lwMeet.room, g_lwMeet.spaced, g_lwMeet.other, g_lwMeet.farNo, g_lwMeet.zoneLeft, CO_LW_MEET_ZONE_WAIT_MS / 1000u, g_lwCall.called, g_lwCall.came, g_lwCall.none, g_lwCall.lost, g_lwMeet.roadFar, g_lwMeet.close, (double)CO_LW_MEET_CLOSE, (double)g_lwMeet.closeLeast,
         g_lwPatrolsOld ? "; the old rules (test): no such rule" : g_lwMeetOff ? "; meet 0 (test): no such rule" : "");
     for (int i = 0; i < g_lwWorld.playersAt && i < CO_LW_MEET_PLAYERS; i++)
     {
@@ -1080,7 +1094,7 @@ static void LwMeetNotes(void)
     co_lw_meet_restart(&g_lwMeetNear);
     g_lwMeet.held = g_lwMeet.online = g_lwMeet.turned = g_lwMeet.back = g_lwMeet.gaveWay = g_lwMeet.noFiller = g_lwMeet.sight = g_lwMeet.room = g_lwMeet.spaced = g_lwMeet.other = g_lwMeet.close = 0;
     g_lwMeet.looks = g_lwMeet.covered = g_lwMeet.edge = g_lwMeet.beyond = g_lwMeet.cameCover = g_lwMeet.cameEdge = g_lwMeet.cameBeyond = g_lwMeet.dispatched = g_lwMeet.shareNo = 0;
-    g_lwMeet.closeLeast = 0; g_lwMeet.farNo = g_lwMeet.zoneLeft = 0; g_lwCall.called = g_lwCall.came = g_lwCall.none = 0;
+    g_lwMeet.closeLeast = 0; g_lwMeet.farNo = g_lwMeet.zoneLeft = 0; g_lwCall.called = g_lwCall.came = g_lwCall.none = g_lwCall.lost = 0;
 }
 /* The squad whose next node had no navmesh within 25 m (the 30 s line only counts them). */
 static void LwNoFaceNote(const LwSquad* q)
@@ -1658,6 +1672,14 @@ int CoXlTestLwCallOver(int idx, int how)
 }
 /* Squad `idx` is of group `group`, whose units were never measured (any but 1). */
 void CoXlTestLwCallGroup(int idx, int group) { g_lwSquads[idx].definition = (uintptr_t)group; g_lwSquads[idx].bandGen = 0; }
+/* Player `i` stands at x `x` and moves at `vx` m/s along the road (0: its speed is not known). */
+void CoXlTestLwCallPlayer(int i, float x, float vx)
+{
+    g_lwWorld.players[i][0] = x; memset(&g_lwView.player[i], 0, sizeof g_lwView.player[i]);
+    if (vx != 0) { g_lwView.player[i].known = 1; g_lwView.player[i].v[0] = vx; }
+}
+/* The called patrols let go since the world was made. */
+int CoXlTestLwCallLost(void) { return (int)g_lwCall.lost; }
 /* The player + 1 squad `idx` is called to, 0 for none. */
 int CoXlTestLwCallOf(int idx) { return g_lwCallOf[idx]; }
 /* Road patrol 0 of the calls' world at x `x`, its plan the road on to node `to`: visited, refused the far share

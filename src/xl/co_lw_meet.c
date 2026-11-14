@@ -109,6 +109,27 @@ uint32_t co_lw_meet_call_ms(float roadFar, int members, int roadPlayers, float w
     return ms < (float)CO_LW_MEET_CALL_MIN_MS ? CO_LW_MEET_CALL_MIN_MS : ms > (float)CO_LW_MEET_CALL_MAX_MS ? CO_LW_MEET_CALL_MAX_MS : (uint32_t)ms;
 }
 
+int co_lw_meet_call_ahead(const float* v, const float (*dirs)[2], int n, int* only)
+{
+    const float speed = sqrtf(v[0] * v[0] + v[1] * v[1]);
+    int best = -1; float most = 0.0f;
+    *only = 0;
+    if (!(speed >= CO_LW_MEET_CALL_MOVING)) return -1;
+    for (int k = 0; k < n; k++)
+    {
+        const float len = sqrtf(dirs[k][0] * dirs[k][0] + dirs[k][1] * dirs[k][1]), along = len > 0.0f ? (v[0] * dirs[k][0] + v[1] * dirs[k][1]) / len : 0.0f;
+        if (along > most) { most = along; best = k; }
+    }
+    if (best >= 0) *only = speed >= CO_LW_MEET_PACE;
+    return best;
+}
+
+int co_lw_meet_call_lost(float d, float* least)
+{
+    if (!(*least > 0.0f) || d < *least) *least = d;
+    return d > *least + CO_LW_MEET_CALL_LOST;
+}
+
 uint32_t co_lw_meet_call_first(uint32_t periodMs, int slot, int players)
 {
     return players > 1 && slot > 0 ? (uint32_t)((uint64_t)periodMs * (uint64_t)(slot % players) / (uint64_t)players) : 0;

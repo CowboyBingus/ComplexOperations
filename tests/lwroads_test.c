@@ -47,6 +47,8 @@ int CoXlTestLwCallOf(int idx);
 int CoXlTestLwCallZone(float x, int to, float x2, int turn);
 void CoXlTestLwCallEnd(void);
 void CoXlTestLwCallGroup(int idx, int group);
+void CoXlTestLwCallPlayer(int i, float x, float vx);
+int CoXlTestLwCallLost(void);
 float CoXlTestLwSeenScopedOf(float radius);
 
 int main(void)
@@ -481,6 +483,21 @@ int main(void)
         CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
         CoXlTestLwCallGroup(30, 9);
         CHECK(CoXlTestLwCallOne(0, 0, o) == 0 && CoXlTestLwCallOf(30) == 0);
+        g_case = "a player walking along the road has the patrol called from ahead, whatever side's turn it is";
+        CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
+        CoXlTestLwCallPlayer(0, 1500.0f, 1.5f);
+        CHECK(CoXlTestLwCallOne(0, 0, o) == 10 && CoXlTestLwCallOne(0, 0, o) == 30); /* slower than a patrol: with none ahead, one from behind */
+        CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
+        CoXlTestLwCallPlayer(0, 1500.0f, 3.0f);
+        CHECK(CoXlTestLwCallOne(0, 0, o) == 10 && CoXlTestLwCallOne(0, 0, o) == -1); /* at 3 m/s one from behind never arrives: none */
+        CoXlTestLwCallPlayer(0, 1500.0f, -3.0f);
+        CHECK(CoXlTestLwCallOne(0, 1, o) == 30);
+        g_case = "a called patrol whose player walks 150 m away from it is let go, and may be called again";
+        CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
+        CHECK(CoXlTestLwCallTick(1000000u) == 1 && CoXlTestLwCallOf(30) == 1 && CoXlTestLwCallTick(1001000u) == 1);
+        CoXlTestLwCallPlayer(0, 1640.0f, 0); CHECK(CoXlTestLwCallTick(1002000u) == 1 && CoXlTestLwCallOf(30) == 1 && CoXlTestLwCallLost() == 0);
+        CoXlTestLwCallPlayer(0, 1660.0f, 0); CHECK(CoXlTestLwCallTick(1004000u) == 1 && CoXlTestLwCallOf(30) == 0 && CoXlTestLwCallLost() == 1);
+        CoXlTestLwCallPlayer(0, 1500.0f, 0);
         g_case = "meet 0: no patrol is called";
         CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
         CoXlTestLwSeenSwitch(0); CHECK(CoXlTestLwCallTick(1000000u) == 0); CoXlTestLwSeenSwitch(1);
