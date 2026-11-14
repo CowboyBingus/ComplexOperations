@@ -45,6 +45,7 @@
 #include "co_forest.h"
 #include "co_podstart.h"
 #include "co_settle.h"
+#include "co_terrainlog.h"
 #include "co_hitch.h"
 #include "../co_watch.h"
 
@@ -85,6 +86,7 @@ static double HitchNow(void)
 #include "proto/difficulty_world_move.c"
 #include "proto/difficulty_world_fargrass.c"
 #include "proto/xl_free.c"
+#include "proto/xl_terrain_research.c"
 #include "proto/difficulty_world_fargrass_ground.c"
 #include "proto/living_world.c"
 #include "proto/difficulty_tacmap.c"
