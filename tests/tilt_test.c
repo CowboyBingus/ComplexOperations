@@ -228,8 +228,12 @@ int main(void)
     Unit(7, 4, 4.0f);
     PropRay(104.0f, -200.0f, 13.6f, 0, 0, -1.0f, rock, rockBody); /* started under the drawn ground: minus the depth */
     CHECK(fabsf(PropCall(read, 7, -0.2f) + 0.4f) < 0.02f);
+    CoXlTestLeanTile(100.0f, -200.0f, 12.0f, 0.0f, 0.5f); /* rising north instead: 14 at y -196 */
+    PropRay(100.0f, -196.0f, 15.5f, 0, 0.6f, -0.8f, rock, rockBody);
+    CHECK(fabsf(PropCall(read, 7, 0.3f) - 1.5f / 1.1f) < 0.05f);
+    CoXlTestLeanTile(100.0f, -200.0f, 12.0f, 0.5f, 0.0f);
     CoXlTestTiltPropCounts(&pg, &pk);
-    CHECK(pg == 7 && pk == 0);
+    CHECK(pg == 8 && pk == 0);
 
     g_case = "a hit on the ground, another mode, another level, the switch off: the game's";
     PropRay(104.0f, -200.0f, 15.5f, 0, 0, -1.0f, 0, 0x80300099u); /* no owner: a tile's ground */
