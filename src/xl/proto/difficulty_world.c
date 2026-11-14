@@ -138,59 +138,122 @@ static uint32_t WorldScaleFor(float mapScale)
  * The config: [[exe+0x1A10268]] (stored at exe 0x1CD8C7), object types [cfg+0x78] x [cfg+0x70] (0x34C4C5), 0x50 bytes:
  * +0x18 field count, +0x20 type indices, +0x38 field hashes (0x34C27E..0x34C2BC); descriptors [cfg+0x18], 24 bytes,
  * +0xC kind (3 = vector3), +0xD bits per component: the writer 0x28C600 sends trunc((v - min) / (max - min) x (2^bits - 1)
- * + 0.5), or the raw float at 32 bits (0x34F4AB..0x34F4D7), so a wider range is a coarser step. */
-static struct { int state; uint32_t type[8]; int count; float low[8], high[8]; uint8_t bits[8]; } g_netPos; /* state 0 unread, 1 ok, -1 not the reviewed layout */
+ * + 0.5), or the raw float at 32 bits (0x34F4AB..0x34F4D7), so a wider range is a coarser step.
+ * Job points (run 2 of the reinforcement study: 76 of 76 far goal lines at +-2000 on an axis): the AiJob point's writer
+ * (game 0x7F5350) queues field 0xA4C332A8 (job_position) with the record's own address, so the same flush clamps the
+ * host's job point. Every object type's fields are read ([type+0x18] count, +0x38 hashes, +0x20 type indices, as
+ * 0x34C27E..0x34C2BC reads them), and each vector3 type one of kNetPosFields uses is widened; a type is widened whole,
+ * so its other fields follow (the file's type 122: job_position, target_position and 0xFA2F8349). The other vector3
+ * types at +-2000 are listed once and left: a velocity (0xA5D1F45B) is one of them. */
+static const uint32_t kNetPosFields[] = {0x8BBEB160u /* position */, 0xA4C332A8u /* job_position */};
+#define NET_VEC_TYPES 64
+#define NET_VEC_USERS 6
+typedef struct { uint32_t type, name, fields, user[NET_VEC_USERS], uses[NET_VEC_USERS]; int users; uint8_t bits, widen; float low, high; } NetVec;
+static int NetPosField(uint32_t hash) { for (size_t k = 0; k < sizeof kNetPosFields / sizeof kNetPosFields[0]; k++) if (kNetPosFields[k] == hash) return 1; return 0; }
+/* Every vector3 type with a symmetric range that an object field uses and that is at +-2000 or has a position field:
+ * its users by field hash and whether it is widened. The count; *posFields the kNetPosFields fields, *jobFields
+ * 0xA4C332A8's; -1 when the config does not read. */
+static int NetVecScan(uintptr_t cfg, NetVec* out, int cap, int* posFields, int* jobFields)
+{
+    uintptr_t types = 0, descs = 0; uint32_t count = 0, ntypes = 0; int n = 0;
+    *posFields = *jobFields = 0;
+    if (SafeRead(cfg + 0x70, &count, 4) || SafeRead(cfg + 0x78, &types, 8) || types == 0 || SafeRead(cfg + 0x18, &descs, 8) || descs == 0 ||
+        SafeRead(cfg + 0x10, &ntypes, 4) || count == 0 || count > 8192 || ntypes == 0 || ntypes > 65535) return -1;
+    for (uint32_t i = 0; i < count; i++)
+    {
+        uintptr_t t = types + 0x50u * i, hashes = 0, idx = 0; uint32_t fc = 0;
+        if (SafeRead(t + 0x18, &fc, 4) || fc == 0 || fc > 512 || SafeRead(t + 0x38, &hashes, 8) || SafeRead(t + 0x20, &idx, 8) || !hashes || !idx) continue;
+        for (uint32_t f = 0; f < fc; f++)
+        {
+            uint32_t h = 0, ti = 0; uint8_t kind = 0, bits = 0; float lo = 0, hi = 0;
+            if (SafeRead(hashes + 4u * f, &h, 4) || SafeRead(idx + 4u * f, &ti, 4) || ti >= ntypes) continue;
+            uintptr_t d = descs + 24u * ti; int pos = NetPosField(h);
+            if (SafeRead(d + 0xC, &kind, 1) || kind != 3) continue;
+            if (SafeRead(d + 0xD, &bits, 1) || SafeRead(d + 0x10, &lo, 4) || SafeRead(d + 0x14, &hi, 4)) continue;
+            int k = 0;
+            while (k < n && out[k].type != ti) k++;
+            if (k == n)
+            {
+                int fits = bits != 0 && bits <= 32 && hi > 0 && lo == -hi;
+                if (!fits && pos) Note("difficulty: extra large maps: network position type %u is not a symmetric vector3 (%.1f .. %.1f, %u bits); left as it is", ti, (double)lo, (double)hi, bits);
+                if (!fits || n >= cap) continue;
+                memset(&out[n], 0, sizeof out[n]);
+                out[n].type = ti; out[n].bits = bits; out[n].low = lo; out[n].high = hi; SafeRead(d, &out[n].name, 4); n++;
+            }
+            NetVec* v = &out[k];
+            if (pos) { v->widen = 1; (*posFields)++; if (h == 0xA4C332A8u) (*jobFields)++; }
+            v->fields++;
+            int u = 0;
+            while (u < v->users && v->user[u] != h) u++;
+            if (u == v->users && u < NET_VEC_USERS) { v->user[u] = h; v->users++; }
+            if (u < NET_VEC_USERS) v->uses[u]++;
+        }
+    }
+    int kept = 0; /* the list: the types a position field uses and the others at +-2000 */
+    for (int k = 0; k < n; k++) if (out[k].widen || out[k].high == 2000.0f) out[kept++] = out[k];
+    return kept;
+}
+/* One type's range for a level: the wider of vanilla's and the level's on an extra large one. The descriptor is
+ * written only while it holds vanilla's range or the one written last; 0 when it holds something else. */
+static int NetVecWrite(uintptr_t d, const NetVec* v, float scale, float* was)
+{
+    float hi = scale > 1.0f && v->widen ? fmaxf(v->high, 1024.0f * (scale + 1.0f)) : v->high, lo = -hi, now[2] = {0, 0};
+    if (SafeRead(d + 0x10, now, 8) || !((now[0] == v->low && now[1] == v->high) || (now[0] == -*was && now[1] == *was))) return 0;
+    ApiWrite(d + 0x10, &lo, 4); ApiWrite(d + 0x14, &hi, 4);
+    *was = hi;
+    return 1;
+}
+static struct { int state, count; NetVec type[NET_VEC_TYPES]; float was[NET_VEC_TYPES]; } g_netPos; /* state 0 unread, 1 ok, -1 not the reviewed layout */
+static void NetVecList(void)
+{
+    for (int k = 0; k < g_netPos.count; k++)
+    {
+        const NetVec* v = &g_netPos.type[k]; char users[200]; int len = 0; users[0] = 0;
+        for (int u = 0; u < v->users && len < (int)sizeof users - 24; u++) len += snprintf(users + len, sizeof users - len, "%s%08X x %u", u ? ", " : "", v->user[u], v->uses[u]);
+        Note("difficulty: extra large maps: network vector3 type %u (name %08X, %u bits, %.0f .. %.0f m), %u fields: %s%s: %s", v->type, v->name, v->bits, (double)v->low, (double)v->high,
+            v->fields, users, v->users == NET_VEC_USERS ? " (and maybe more)" : "", v->widen ? "widened on an extra large level" : "left as it is (no position field uses it)");
+    }
+}
 static void NetPositionRange(float scale)
 {
-    uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL), global = 0, cfg = 0, types = 0, descs = 0;
+    uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL), global = 0, cfg = 0, descs = 0;
     if (g_netPos.state == 0)
     {
         g_netPos.state = -1;
         if (!ApiCodeMatches(exe + 0x1CD8C7u, "48 89 05 9A 29 84 01") ||
             !ApiCodeMatches(exe + 0x34C4C5u, "48 8B 05 9C 3D 6C 01 45 33 C9 44 8B DA 48 8B 08 44 8B 41 70 48 8B 59 78") ||
             !ApiCodeMatches(exe + 0x34C27Eu, "4C 8D 0C 89 49 C1 E1 04 4C 03 4D 78 45 8B 41 18") ||
+            !ApiCodeMatches(exe + 0x34C2A8u, "49 8B 49 20 45 8B 09 8B D0 8B 14 91 48 8B 4D 18 4C 8D 04 52 4A 8D 14 C1") ||
             !ApiCodeMatches(exe + 0x34F47Eu, "F3 0F 10 5A 14 F3 0F 10 52 10"))
-        { Note("difficulty: extra large maps: the network position type is not the reviewed code; enemies past 2 km stay at the 2000 m line"); return; }
-        uint32_t count = 0;
-        if (SafeRead(exe + 0x1A10268u, &global, 8) || global == 0 || SafeRead(global, &cfg, 8) || cfg == 0 || SafeRead(cfg + 0x70, &count, 4) ||
-            SafeRead(cfg + 0x78, &types, 8) || types == 0 || SafeRead(cfg + 0x18, &descs, 8) || descs == 0 || count == 0 || count > 8192)
-        { Note("difficulty: extra large maps: the network config is not readable; enemies past 2 km stay at the 2000 m line"); return; }
-        int fields = 0;
-        for (uint32_t i = 0; i < count; i++)
-        {
-            uintptr_t t = types + 0x50u * i, hashes = 0, idx = 0; uint32_t fc = 0;
-            if (SafeRead(t + 0x18, &fc, 4) || fc == 0 || fc > 512 || SafeRead(t + 0x38, &hashes, 8) || SafeRead(t + 0x20, &idx, 8) || !hashes || !idx) continue;
-            for (uint32_t f = 0; f < fc; f++)
-            {
-                uint32_t h = 0, ti = 0;
-                if (SafeRead(hashes + 4u * f, &h, 4) || h != 0x8BBEB160u || SafeRead(idx + 4u * f, &ti, 4) || ti > 65535) continue;
-                fields++;
-                int known = 0;
-                for (int k = 0; k < g_netPos.count; k++) known |= g_netPos.type[k] == ti;
-                if (known || g_netPos.count >= 8) continue;
-                uint8_t kind = 0, bits = 0; float lo = 0, hi = 0; uintptr_t d = descs + 24u * ti;
-                if (SafeRead(d + 0xC, &kind, 1) || SafeRead(d + 0xD, &bits, 1) || bits == 0 || bits > 32 || SafeRead(d + 0x10, &lo, 4) || SafeRead(d + 0x14, &hi, 4) || kind != 3 || !(hi > 0) || lo != -hi)
-                { Note("difficulty: extra large maps: network position type %u is not a symmetric vector3 (kind %u, %.1f .. %.1f); left as it is", ti, kind, (double)lo, (double)hi); continue; }
-                g_netPos.type[g_netPos.count] = ti; g_netPos.low[g_netPos.count] = lo; g_netPos.high[g_netPos.count] = hi; g_netPos.bits[g_netPos.count] = bits; g_netPos.count++;
-            }
-        }
-        if (g_netPos.count == 0) { Note("difficulty: extra large maps: no network position type found (%d fields); enemies past 2 km stay at the 2000 m line", fields); return; }
+        { Note("difficulty: extra large maps: the network position type is not the reviewed code; enemies and their job points past 2 km stay at the 2000 m line"); return; }
+        int fields = 0, jobs = 0;
+        if (SafeRead(exe + 0x1A10268u, &global, 8) || global == 0 || SafeRead(global, &cfg, 8) || cfg == 0 ||
+            (g_netPos.count = NetVecScan(cfg, g_netPos.type, NET_VEC_TYPES, &fields, &jobs)) < 0)
+        { g_netPos.count = 0; Note("difficulty: extra large maps: the network config is not readable; enemies and their job points past 2 km stay at the 2000 m line"); return; }
+        int widened = 0, first = -1;
+        for (int k = 0; k < g_netPos.count; k++) { g_netPos.was[k] = g_netPos.type[k].high; if (g_netPos.type[k].widen) { widened++; if (first < 0) first = k; } }
+        if (widened == 0) { Note("difficulty: extra large maps: no network position type found (%d fields); enemies past 2 km stay at the 2000 m line", fields); return; }
         g_netPos.state = 1;
-        Note("difficulty: extra large maps: %d network position fields use %d type(s), the first %u at %.0f .. %.0f m", fields, g_netPos.count, g_netPos.type[0], (double)g_netPos.low[0], (double)g_netPos.high[0]);
+        Note("difficulty: extra large maps: %d network position fields use %d type(s), the first %u at %.0f .. %.0f m; %d of them job points (field A4C332A8)%s", fields, widened,
+            g_netPos.type[first].type, (double)g_netPos.type[first].low, (double)g_netPos.type[first].high, jobs, jobs ? "" : ": NONE FOUND, job points past 2 km stay at the 2000 m line");
+        NetVecList();
     }
     if (g_netPos.state != 1 || SafeRead(exe + 0x1A10268u, &global, 8) || SafeRead(global, &cfg, 8) || SafeRead(cfg + 0x18, &descs, 8) || descs == 0) return;
-    char steps[160]; int len = 0; steps[0] = 0;
+    char steps[320]; int len = 0, n = 0; float most = 0; steps[0] = 0;
     for (int k = 0; k < g_netPos.count; k++)
     {
-        float hi = scale > 1.0f ? fmaxf(g_netPos.high[k], 1024.0f * (scale + 1.0f)) : g_netPos.high[k], lo = -hi;
-        uintptr_t d = descs + 24u * g_netPos.type[k];
-        ApiWrite(d + 0x10, &lo, 4); ApiWrite(d + 0x14, &hi, 4);
-        if (len < (int)sizeof steps - 32)
-            len += g_netPos.bits[k] >= 32 ? snprintf(steps + len, sizeof steps - len, "%s32 bits (a float)", k ? ", " : "")
-                : snprintf(steps + len, sizeof steps - len, "%s%u bits %.1f mm", k ? ", " : "", g_netPos.bits[k], 1000.0 * (hi - lo) / (double)((1ull << g_netPos.bits[k]) - 1));
+        const NetVec* v = &g_netPos.type[k];
+        if (!v->widen) continue;
+        if (!NetVecWrite(descs + 24u * v->type, v, scale, &g_netPos.was[k]))
+        { Note("difficulty: extra large maps: network position type %u holds neither vanilla's range nor this mod's; left as it is", v->type); continue; }
+        float hi = g_netPos.was[k];
+        if (n == 0 || hi < most) most = hi; /* the narrowest: what every position field has at least */
+        if (len < (int)sizeof steps - 40)
+            len += v->bits >= 32 ? snprintf(steps + len, sizeof steps - len, "%s%u: 32 bits (a float)", n ? ", " : "", v->type)
+                : snprintf(steps + len, sizeof steps - len, "%s%u: %u bits %.1f mm", n ? ", " : "", v->type, v->bits, 1000.0 * (2.0 * hi) / (double)((1ull << v->bits) - 1));
+        n++;
     }
-    Note("difficulty: extra large maps: network positions range +-%.0f m (%s); step per type: %s", (double)(scale > 1.0f ? fmaxf(g_netPos.high[0], 1024.0f * (scale + 1.0f)) : g_netPos.high[0]),
-        scale > 1.0f ? "an extra large level" : "vanilla", steps);
+    Note("difficulty: extra large maps: network positions range +-%.0f m (%s); step per type: %s", (double)most, scale > 1.0f ? "an extra large level" : "vanilla", steps);
 }
 
 static volatile uint8_t* g_hudLive; /* 1 while the mission in play is complex: the stubs and the row state test it */
