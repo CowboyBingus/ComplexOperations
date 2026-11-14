@@ -73,6 +73,7 @@ static double HitchNow(void)
 #include "proto/difficulty_world_gates.c"
 #include "proto/difficulty_world_macro.c"
 #include "proto/difficulty_world_roads.c"
+#include "proto/difficulty_world_roadbuild.c"
 #include "proto/difficulty_status.c"
 #include "proto/difficulty_map_hud.c"
 #include "proto/difficulty_world_arcs.c"
@@ -933,6 +934,26 @@ void CoXlTestRoadsLevel(const uint8_t* ops, uint32_t n, uint32_t planned)
 }
 void CoXlTestRoadsAfterOp(uintptr_t block, uint64_t context, uint64_t record, uint32_t op, uint32_t before, int counted)
 { RoadsAfterOp(block, context, record, op, before, counted); }
+/* The roads' build (proto/difficulty_world_roadbuild.c): the point spacing, its stub and the arterial choice. */
+uint32_t CoXlTestRoadsLeftOut(const uint8_t* recs, uint32_t n, const uint8_t* taken, uint32_t used, uint32_t capacity, float spacing, uint32_t* total)
+{ RoadEdge e[64]; n = RoadsTestEdges(recs, n, e); return RoadsSpacingLeftOut(e, n, taken, used, capacity, spacing, total); }
+float CoXlTestRoadsSpacing(const uint8_t* recs, uint32_t n, const uint8_t* taken, uint32_t used, uint32_t capacity, uint32_t* total, uint32_t* left)
+{ RoadEdge e[64]; n = RoadsTestEdges(recs, n, e); return RoadsSpacingChoose(e, n, taken, used, capacity, total, left); }
+void CoXlTestRoadSpacingBuild(uint8_t* stub, uintptr_t constant, uintptr_t back) { RoadSpacingBuild(stub, constant, back); }
+void CoXlTestRoadSpacingAt(uint8_t* stub) { g_roadSpacing.key = (volatile uint64_t*)(stub + 0x30); g_roadSpacing.spacing = (volatile float*)(stub + 0x38); g_roadSpacing.level = -1; }
+void CoXlTestRoadsSpacingBegin(uintptr_t block, uint64_t record) { RoadsSpacingBegin(block, record); }
+void CoXlTestRoadsSpacingEnd(void) { RoadsSpacingEnd(); }
+uint32_t CoXlTestRoadsArterials(const uint8_t* recs, uint32_t edges, const uint32_t* ends, const float* nodeXY, uint32_t nodes, const float* termXY, uint32_t terms,
+    uint8_t* chosen, uint32_t* unreached)
+{
+    RoadEdge e[64];
+    edges = RoadsTestEdges(recs, edges, e);
+    const RoadsGraph g = {e, ends, nodeXY, edges, nodes};
+    return RoadsArterials(&g, termXY, terms, chosen, unreached);
+}
+void CoXlTestRoadsArterialsApply(uintptr_t block, const uint8_t* ops, uint32_t total) { RoadsArterialsApply(block, ops, total); }
+void CoXlTestRoadsArterialsPoints(uintptr_t block) { RoadsArterialsPoints(block); }
+int CoXlTestRoadsArterial(uint32_t edge) { return g_arterials.level == g_world.levels && (g_arterials.bits[edge >> 3] >> (edge & 7)) & 1; }
 /* The stamp packages a level requested early (EarlyPackages): held as a level that ended before its record 94 leaves them. */
 void CoXlTestEarlyHeld(const uint64_t* ids, uint32_t count)
 {
