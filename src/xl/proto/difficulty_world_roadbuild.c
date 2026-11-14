@@ -6,11 +6,13 @@
  *   went without points, and so without a path or a stamp corridor. The level's op 0x0E divides by the smallest
  *   spacing, in steps of 0.25 m from 5, at which every edge gets its points.
  * - Arterials. After op 0x86 (the game's own paths between important locations: flag 8), those edges and the shortest
- *   connections from them to the node nearest each objective and outpost take the width op 0x87 gives a convoy road
- *   (0xF8B264). Every later reader of the width (op 0x0F's capsules, the stamp tests, op 0x0D's line) sees it. */
+ *   connections from them to the node nearest each objective, outpost and op 0x17 place take 8 m, the width two vehicles pass on (a convoy
+ *   map's op 0x87 raises its convoy edges to 10, 0xF8B264). Every later reader of the width (op 0x0F's capsules, the stamp tests, op 0x0D's line) sees it. */
 #define ROADS_SPACING_GAME 5.0f
 #define ROADS_SPACING_STEP 0.25f
-#define ROADS_SPACING_MOST 40.0f
+/* Op 0x04 (0xF647A0) measures to the nearest point, not to the line: at 10 m the middle of a pair is 5 m from one,
+ * inside an arterial's width, so the ground along it is treated as road throughout. */
+#define ROADS_SPACING_MOST 10.0f
 /* The Bastion's hull is 4.95 m wide and an FRV's 2.71 m (their physics resources' collision boxes): the two pass. */
 #define ROADS_ARTERIAL_WIDTH 8.0f
 #define ROADS_GRAPH_NODES 16384u /* past these the choice is not made (a level has 2304 nodes and 3456 edges at most) */
@@ -22,6 +24,7 @@ static int RoadEdgeWantsPoints(const RoadEdge* e) { return RoadEdgeDrawable(e) &
 /* n as 0xF38B53..0xF38D37 computes it, in single precision; a chord that is not a number gives the game 0. */
 static uint32_t RoadEdgeSteps(const RoadEdge* e, float spacing)
 {
+#pragma STDC FP_CONTRACT OFF /* mulss, mulss, addss as the game: a fused multiply-add could differ in the last bit */
     const float dx = e->a[0] - e->b[0], dy = e->a[1] - e->b[1];
     const float v = sqrtf(dy * dy + dx * dx) / spacing + 1.0f;
     if (v != v) return 0;
@@ -311,8 +314,15 @@ static void RoadsArterialsApply(uintptr_t block, const uint8_t* ops, uint32_t to
             uint64_t p; memcpy(&p, raw + 0x48ull * i + 0x10 + 8 * q, 8);
             ends[2 * i + q] = p >= nodesAt && (p - nodesAt) % 0x98 == 0 && (p - nodesAt) / 0x98 < nodes ? (uint32_t)((p - nodesAt) / 0x98) : ROADS_NO_NODE;
         }
+    /* the extraction is the place the game's own test names (0xF78A4D), whatever op appended it */
+    uint32_t important = 0, extractions = 0;
+    SafeRead(block + 0x11A715Cu, &important, 4);
     for (uint32_t i = 0; i < total && terms < 2 * ROADS_GROUP_MAX; i++)
-        if ((ops[i] == 0x16 || ops[i] == 0x17 || ops[i] == 0x82) && !SafeRead(block + (offset - 0x90) + 0xE0ull * i, &termXY[2 * terms], 8)) terms++;
+    {
+        const int extraction = i < important && g_importantList != 0 && ClusterExtraction(block + g_importantList + 0x108ull * i);
+        if (!extraction && ops[i] != 0x16 && ops[i] != 0x17 && ops[i] != 0x82) continue;
+        if (!SafeRead(block + (offset - 0x90) + 0xE0ull * i, &termXY[2 * terms], 8)) { terms++; extractions += (uint32_t)extraction; }
+    }
     const RoadsGraph g = {e, ends, nodeXY, n, nodes};
     for (uint32_t i = 0; i < n; i++) open += (uint32_t)RoadEdgeArterialOk(&g, i);
     if (!readable || open == 0)
@@ -341,9 +351,9 @@ static void RoadsArterialsApply(uintptr_t block, const uint8_t* ops, uint32_t to
     }
     RoadsSpurTerminals(termXY, gap, terms);
     RoadsSummary(gap, terms, &gapMedian, &gapMost);
-    Note("roads: level %ld arterials: %u of %u open route edges (%.1f km; %u with flag 0x8) join %u objectives and outposts; %u widened to %.1f m, "
+    Note("roads: level %ld arterials: %u of %u open route edges (%.1f km; %u with flag 0x8) join %u objectives, outposts and op 0x17 places (%u an extraction); %u widened to %.1f m, "
         "%u wanted nodes not joined; the places lie median %.0f m, at most %.0f m from them; road set %08X", (long)g_world.levels, g_arterials.count, open,
-        km, skeleton, terms, widened, (double)ROADS_ARTERIAL_WIDTH, unreached, (double)gapMedian, (double)gapMost, hash);
+        km, skeleton, terms, extractions, widened, (double)ROADS_ARTERIAL_WIDTH, unreached, (double)gapMedian, (double)gapMost, hash);
     VirtualFree(mem, 0, MEM_RELEASE);
     RoadsFreeEdges(e, n);
 }

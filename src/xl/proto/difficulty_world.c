@@ -5582,6 +5582,7 @@ static void WorldLevel(uintptr_t level, uintptr_t preview)
         g_worldIndexFullSeen = full;
     }
     InterlockedIncrement(&g_world.levels);
+    memset(g_locationOp, 0, sizeof g_locationOp); /* a host's earlier level must not name a place a fresh client has not */
     if (preview == 0) { g_worldLevelLive = level; g_world.liveLevels = g_world.levels; co_spawners_mission(complex); } /* before the mission's first spawner is appended */
 }
 

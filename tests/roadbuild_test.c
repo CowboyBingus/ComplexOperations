@@ -22,6 +22,7 @@ void CoXlTestRoadsArterialsApply(uintptr_t block, const uint8_t* ops, uint32_t t
 void CoXlTestRoadsArterialsPoints(uintptr_t block);
 void CoXlTestRoadsSpursBuild(uintptr_t block, uint64_t context, void (*capsule)(uint64_t, const float*, uint32_t));
 uint32_t CoXlTestRoadsSpurs(uint32_t* reserve, const float** table);
+float CoXlTestStampSegmentBox(const float* s, const float* lo, const float* hi);
 void CoXlTestRoadsSpurTerminals(const float* xy, const float* gap, uint32_t terms);
 int CoXlTestRoadsArterial(uint32_t edge);
 
@@ -86,10 +87,23 @@ static void Spacing(void)
     /* 6.75: n 149, 150 used, 150 free < 151; 7.0: n 143, 144 used, 156 free */
     CHECK(Bits(CoXlTestRoadsSpacing(g_recs, 2, NULL, 0, 300, &total, &left)) == Bits(7.0f) && total == 288 && left == 0);
     CHECK(Bits(CoXlTestRoadsSpacing(g_recs, 2, NULL, 100, 400, &total, &left)) == Bits(7.0f) && total == 388);
-    g_case = "spacing: no further than 40 m";
-    CHECK(Bits(CoXlTestRoadsSpacing(g_recs, 2, NULL, 0, 10, &total, &left)) == Bits(40.0f) && left == 2 && total == 0);
-    CHECK(Bits(CoXlTestRoadsSpacing(g_recs, 2, NULL, 0, 30, &total, &left)) == Bits(40.0f) && left == 1 && total == 27);
+    g_case = "spacing: no further than 10 m";
+    CHECK(Bits(CoXlTestRoadsSpacing(g_recs, 2, NULL, 0, 10, &total, &left)) == Bits(10.0f) && left == 2 && total == 0);
+    CHECK(Bits(CoXlTestRoadsSpacing(g_recs, 2, NULL, 0, 110, &total, &left)) == Bits(10.0f) && left == 1 && total == 102); /* n 101 */
     CHECK(Bits(CoXlTestRoadsSpacing(g_recs, 0, NULL, 0, 0, &total, &left)) == Bits(5.0f) && left == 0);
+
+    g_case = "spacing: the merge's road test steps over no box on a longer pair";
+    {
+        /* 16 steps of 40 m fall at 2.5 and 5.0: 0.9 m from this box; a step every 0.3125 m meets its side at 0.5 m */
+        static const float pair[4] = {0, 0, 40, 0}, lo[2] = {3.25f, 0.5f}, hi[2] = {4.25f, 1.0f};
+        CHECK(Bits(CoXlTestStampSegmentBox(pair, lo, hi)) == Bits(0.5f));
+        /* a route's own 5 m pair keeps its 16 steps (0.3125 is 0.0375 m to the side of this box; 8 steps or the true distance give another) */
+        static const float five[4] = {0, 0, 5, 0}, lo5[2] = {0.35f, 1.0f}, hi5[2] = {0.45f, 2.0f};
+        const float d = CoXlTestStampSegmentBox(five, lo5, hi5);
+        CHECK(d > 1.0005f && d < 1.001f);
+        static const float point[4] = {7, 7, 7, 7};
+        CHECK(Bits(CoXlTestStampSegmentBox(point, lo, hi)) == Bits(sqrtf(2.75f * 2.75f + 6.0f * 6.0f)));
+    }
 }
 
 /* 0xF38D25 as the stub is entered: the pass at [rsp+0x78], the chord in xmm0; `back` stores the quotient. */
@@ -154,6 +168,7 @@ static void Stub(void)
 #define EDGES_AT 0x11B0000u
 #define POINTS_AT 0x11B8000u
 #define LOCATIONS_AT 0x10000u
+#define IMPORTANT_AT 0x40000u
 #define BLOCK_SIZE 0x11C0000u
 static uint8_t* g_block;
 static void Put32(uint8_t* at, uint32_t v) { memcpy(at, &v, 4); }
@@ -167,6 +182,7 @@ static void Layout(void)
     c->route_nodes = 2304u; c->route_edges = 3456u; c->route_points = 65520u; c->block_bytes = 0x2A00000u; c->moved = 1;
     for (uint32_t i = 0; i <= HF_GEN_ROUTE_POINTS; i++) { c->regions[i].at = 0x11A7280u + 0x100u * i; c->regions[i].places = 100u; }
     c->regions[HF_GEN_LOCATIONS_A].places = 65024u;
+    c->regions[HF_GEN_IMPORTANT].at = IMPORTANT_AT;
     c->regions[HF_GEN_ROUTE_NODES].at = NODES_AT; c->regions[HF_GEN_ROUTE_EDGES].at = EDGES_AT; c->regions[HF_GEN_ROUTE_POINTS].at = POINTS_AT;
     g_fake.levelRow = 0x1000;
     co_capacity_init();
@@ -372,7 +388,7 @@ static void ArterialsGlue(void)
     CHECK(Width(0) == 8.0f && Width(1) == 12.0f && Width(2) == 8.0f && Width(3) == 2.0f && Width(4) == 2.0f);
     CHECK(CoXlTestRoadsArterial(0) && CoXlTestRoadsArterial(1) && CoXlTestRoadsArterial(2) && !CoXlTestRoadsArterial(3) && !CoXlTestRoadsArterial(4));
     /* the objective (990, 1010) is 14 m from edge 2's end, the outpost (2010, 5) 11 m from edge 1's */
-    CHECK(Lines("arterials: 3 of 5 open route edges (3.0 km; 2 with flag 0x8) join 2 objectives and outposts; 2 widened to 8.0 m, 0 wanted nodes not joined; "
+    CHECK(Lines("arterials: 3 of 5 open route edges (3.0 km; 2 with flag 0x8) join 2 objectives, outposts and op 0x17 places (0 an extraction); 2 widened to 8.0 m, 0 wanted nodes not joined; "
         "the places lie median 14 m, at most 14 m from them; road set 253381B6") == 1);
     /* after op 0x0E: edge 0 has points, edges 1 and 2 none */
     Put32(g_block + 0x11A71D4u, 9);
@@ -423,6 +439,22 @@ static void ArterialsGlue(void)
     context[4] = 0x777;
     for (uint32_t i = 0; i < 4; i++) memcpy(g_block + LOCATIONS_AT + 0xE0u * i, &xy[2 * i], 8);
 
+    g_case = "arterials glue: the extraction is a terminal whatever op appended it";
+    static const uint8_t other[4] = {0x16, 0x82, 0x8E, 0x8B};
+    memset(g_block + IMPORTANT_AT, 0, 5 * 0x108);
+    g_block[IMPORTANT_AT + 3 * 0x108 + 0xDC] = 6;
+    Put32(g_block + 0x11A715Cu, 3); /* the fourth record is past the important locations: not one */
+    { const float two = 2.0f; memcpy(g_block + EDGES_AT + 0x48u * 3 + 0x30, &two, 4); } /* the case above widened it */
+    CoXlTestRoadsArterialsApply(block, other, 4);
+    CHECK(Width(3) == 2.0f && !CoXlTestRoadsArterial(3));
+    Put32(g_block + 0x11A715Cu, 4);
+    g_fake.log[0] = 0;
+    CoXlTestRoadsArterialsApply(block, other, 4);
+    CHECK(Width(3) == 8.0f && CoXlTestRoadsArterial(3) && Lines("join 3 objectives, outposts and op 0x17 places (1 an extraction);") == 1);
+    Put32(g_block + 0x11A715Cu, 0);
+    { const float two = 2.0f; memcpy(g_block + EDGES_AT + 0x48u * 3 + 0x30, &two, 4); }
+
+    g_case = "arterials glue: an op 0x17 place is a terminal";
     CoXlTestRoadsArterialsApply(block, ops, 4); /* the fourth place is by node 4 */
     CHECK(Width(3) == 8.0f && CoXlTestRoadsArterial(3) && Width(4) == 2.0f);
 

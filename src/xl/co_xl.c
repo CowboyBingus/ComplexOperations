@@ -932,6 +932,8 @@ void CoXlTestRoadsLevel(const uint8_t* ops, uint32_t n, uint32_t planned)
     memcpy(g_locationOp, ops, n);
     g_plan.level = g_world.levels; g_plan.count = planned;
 }
+uint8_t CoXlTestLocationOp(uint32_t i) { return g_locationOp[i]; }
+float CoXlTestStampSegmentBox(const float* s, const float* lo, const float* hi) { return StampSegmentBox(s, lo, hi); }
 void CoXlTestRoadsAfterOp(uintptr_t block, uint64_t context, uint64_t record, uint32_t op, uint32_t before, int counted)
 { RoadsAfterOp(block, context, record, op, before, counted); }
 /* The roads' build (proto/difficulty_world_roadbuild.c): the point spacing, its stub and the arterial choice. */
