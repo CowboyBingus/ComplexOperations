@@ -464,6 +464,14 @@ Open items:
 - That also corrects HellForge's ship navigation after a 256 m mission, where HellForge alone files the ship's
   obstacles under the 256 m grid. HellForge's own fix is pull request 378.
 
+The game cuts each navmesh face by the obstacles on it, and one cut holds at most 8192 edges. A face of the extra
+large map can lie under more trees than that. The mod bounds every cut:
+
+- A face takes obstacles up to 3584 outline segments. Later ones are left out, and enemies may walk through them.
+- A cut that still passes 8192 edges is done again with no obstacles, so the face stays whole.
+- Log, every 10 s: `navmesh cuts: the largest N half-edges of 8192; U left uncut ...`.
+- A research build reads `HELLFORGE_XL_NAVCUT=<edges>,<segments>` for lower limits.
+
 ### Cancelled preview
 
 With the part on, two guards act on every level, only where the game would go wrong:
@@ -694,6 +702,7 @@ leaves the whole mod out.
 | `src/co_pod_sites.h` | The code sites that address the manager and the pod table. Generated; do not edit. |
 | `src/co_managers.c` | The seven player managers and, in a build for eight, the avatar manager: memory, code sites and the loot rows' caves. |
 | `src/co_manager_sites.h` | Their code sites and caves. Generated; do not edit. |
+| `src/xl/co_navcut.c` | The navmesh face cutter's bounds: the segment budget a face and the cut done again uncut. |
 | `scripts/sites/` | The reviewed site lists of the seven managers and the avatar manager. |
 | `scripts/gen_manager_sites.py` | Writes `co_manager_sites.h` from those lists and a dump of the game's code; assembles the loot rows' caves with GNU `as`. |
 | `hellforge-recipe.json`, `.literals` | The bay's level, geometry and collision data and the Pelican's seat nodes as a HellForge recipe. |
