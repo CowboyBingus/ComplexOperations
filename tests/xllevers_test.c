@@ -14,6 +14,7 @@ void CoXlTestWorldShip(void);
 int CoXlTestZeroBox(int reset);
 int CoXlTestZeroBoxPath(void);
 void CoXlTestLevers(uintptr_t game);
+void CoXlTestLwNavSchedInstall(uintptr_t exe, uintptr_t stub);
 void CoXlTestVboxFrame(void);
 int CoXlTestNavJob(DWORD* tid);
 
@@ -179,7 +180,17 @@ int main(void)
     g_fake.originals[2].target = e + VB_FN; g_fake.originals[2].original = (void*)OrigBox;
     VbThunkWrite(g_fake.image);
     CoXlTestLive(0);
+    /* The nav hold goes in first and writes its own call over the tick's scheduler call (0x7B8ABA), which the nav job
+     * lever pins; the host's check fails on that site from then on, as it does on any rewritten code. */
+    static const uint8_t sched[5] = {0xE8, 0x41, 0xF7, 0xFF, 0xFF};
+    memcpy(exe + 0x7B8ABAu, sched, sizeof sched);
+    CoXlTestLwNavSchedInstall(e, e + 0x7C0000u);
+    CHECK(fake_host_logged("living world: nav: the tick's scheduler call goes through the hold (0x7B8ABA)"));
+    CHECK(exe[0x7B8ABAu] == 0xE8 && memcmp(exe + 0x7B8ABAu, sched, sizeof sched) != 0);
+    g_fake.noMatchExe[0] = 0x7B8ABAu;
     CoXlTestLevers(game);
+    CHECK(fake_host_logged("living world: nav job lever installed (mode ") && !fake_host_logged("is not the reviewed code") &&
+        !fake_host_logged("nav job lever not installed"));
     FourFn tick = (FourFn)fake_host_detour(e + NJ_TICK - game), start = (FourFn)fake_host_detour(e + NJ_START - game);
     void* box = fake_host_detour(e + VB_FN - game);
     CHECK(tick != NULL && start != NULL && box != NULL);

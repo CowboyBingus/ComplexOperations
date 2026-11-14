@@ -9,11 +9,12 @@
 #include <stdint.h>
 
 /* The timed parts: CoXlTick's, in its order, then the level update hook's (difficulty_world_move.c MoveLevelUpdate), then
- * the nav section swaps the game's cell tick runs through the living world's hooks (living_world.c LwNavUnload / LwNavLoad). */
+ * the nav section swaps the game's cell tick runs through the living world's hooks (living_world.c LwNavUnload / LwNavLoad),
+ * then the rest of that tick (LwNavSched to its empty pop): the job starts and each completion's load and connect. */
 enum
 {
     CO_FC_STATUS, CO_FC_STREAM, CO_FC_SPANS, CO_FC_NET, CO_FC_TDIAG, CO_FC_TPROBE, CO_FC_LIVING, CO_FC_DAYLIGHT,
-    CO_FC_TAC, CO_FC_DENSITY, CO_FC_SCATTER, CO_FC_MOVE, CO_FC_GROUNDKEEP, CO_FC_FARGRASS, CO_FC_NAVSWAP, CO_FC_PARTS
+    CO_FC_TAC, CO_FC_DENSITY, CO_FC_SCATTER, CO_FC_MOVE, CO_FC_GROUNDKEEP, CO_FC_FARGRASS, CO_FC_NAVSWAP, CO_FC_NAVTICK, CO_FC_PARTS
 };
 
 #define CO_FC_WINDOW_MS 10000.0

@@ -4,10 +4,12 @@
  * no timed part explains is told apart by these. Both hooks only time the game's call. */
 typedef uintptr_t (*LwFpJoinFn)(uintptr_t a);
 typedef uintptr_t (*LwFpWorldFn)(uintptr_t w, float a, float b);
-static struct { void *join, *world; int64_t joinTicks; DWORD taker; } g_lwFp;
+static struct { void *join, *world; int64_t joinTicks; DWORD taker; int quiet; } g_lwFp;
 
 static uintptr_t LwFpJoin(uintptr_t a)
 {
+    /* a nav drain's own join is that drain's time (nav swaps), not an AI join of the frame */
+    if (g_lwFp.quiet && GetCurrentThreadId() == g_lwFp.taker) return ((LwFpJoinFn)g_lwFp.join)(a);
     int64_t t = co_framecost_now();
     uintptr_t out = ((LwFpJoinFn)g_lwFp.join)(a);
     co_framecost_extra(CO_FX_JOIN, t);
@@ -28,6 +30,7 @@ static double LwFpJoinTake(void)
     g_lwFp.joinTicks = 0; g_lwFp.taker = GetCurrentThreadId();
     return LwNavMs(0, ticks);
 }
+static void LwFpJoinQuiet(int on) { g_lwFp.quiet = on; }
 static void LwInstallFrameParts(void)
 {
     static int done;

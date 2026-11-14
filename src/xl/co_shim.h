@@ -69,6 +69,13 @@ int co_act_pins(uintptr_t game, const ActPin* pins, size_t count);
 /* `pattern` (hex bytes, spaces allowed) at exe address `at`: the host's check, or else the bytes read before any hook
  * with the tile stubs' jumps read as the engine's code they lead to, as co_act_pins reads its exe pins. */
 int co_exe_code_matches(uintptr_t at, const char* pattern);
+/* A call or jump this mod wrote over engine code that another of its parts pins: `engine` the `n` bytes (at most 8)
+ * it replaced, `wrote` what stands there now. While the site still reads as `wrote`, co_exe_code_matches reads it as
+ * `engine`; any other change there still fails. 0 when it is recorded. */
+int co_exe_own_write(uintptr_t at, const uint8_t* engine, const uint8_t* wrote, size_t n);
+#ifdef CO_TEST
+void co_exe_own_reset(void);
+#endif
 int co_act_mission(uintptr_t game, int* host, uint32_t* modeEntity);
 int co_act_health_of(uintptr_t game, uint32_t entity, ActHealth* h);
 uint32_t co_act_local_avatar(uintptr_t game, int dead, ActHealth* h, const char** why);

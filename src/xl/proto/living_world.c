@@ -534,8 +534,8 @@ static void LwBpCmd(int on); static void LwBpFrame(void); static void LwPcFrame(
 static void LwBbFrame(void); /* living_world_bpbuild.c, test instrument */
 static void LwInstallNavTime(void); /* living_world_navtime.c, test instrument */
 static void LwInstallNavJob(void); static void LwNavJobCmd(int mode); static void LwNjFrame(void); /* living_world_navjob.c */
-static void LwAibFrame(void); static void LwAibInit(void); static void LwAibCmd(int us, int raiseMs); /* living_world_aibudget.c */
-static void LwInstallFrameParts(void); static double LwFpJoinTake(void); /* living_world_fparts.c */
+static void LwAibFrame(void); static void LwAibInit(void); static void LwAibCmd(int us, int raiseMs); static void LwAibDrainCmd(const char* text); /* living_world_aibudget.c */
+static void LwInstallFrameParts(void); static double LwFpJoinTake(void); static void LwFpJoinQuiet(int on); /* living_world_fparts.c */
 static void LwSemFrame(void); static void LwInstallSemCap(void); static void LwSemCapCmd(int on); /* living_world_semcap.c */
 static void LwRhFrame(void); static void LwInstallRenderHelp(void); static void LwRenderHelpCmd(int on); /* living_world_renderhelp.c */
 static void LwAllocStatsCmd(int mode); /* living_world_allocstats.c */
@@ -2972,6 +2972,7 @@ static void LwTestCommands(void)
         else if (sscanf(cmds[c], "delay %d", &idx) == 1) LwDelayCmd(idx);
         else if (sscanf(cmds[c], "substep cycle %d", &idx) == 1) LwSubCycleCmd(idx);
         else if (sscanf(cmds[c], "aitime %d", &idx) == 1) LwAiTimeCmd(idx);
+        else if (strncmp(cmds[c], "aidrain ", 8) == 0) LwAibDrainCmd(cmds[c] + 8);
         else if (sscanf(cmds[c], "aibudget %d %d", &ia, &ib) == 2) LwAibCmd(ia, ib);
         else if (sscanf(cmds[c], "aibudget %d", &idx) == 1) LwAibCmd(idx, 0);
         else if (strncmp(cmds[c], "tasks ", 6) == 0) LwTasksCmd(cmds[c] + 6);
@@ -3626,6 +3627,22 @@ static void LwInstallNavLeaveFix(void)
  * g_lwSwap.unsafe holds the loader's new rebuild marks until the world is idle. */
 #define LW_AIW_TABLE 0x190D4A0u
 #define LW_NAV_PERMIT_MS 20
+/* A drain never waits for the run in flight without a bound (0xBD0710 does: frames of 6 s and 61 s behind a long
+ * queue). It drives the run as the game's driver does (0xBD1997), for this long: half a 60 fps frame in play, more at
+ * a level's end, where no frame is shown. Its own step applies the whole queue with no yield (a serial runner never
+ * parks, 0xA1159F), so only a queue of up to as many commands: a cutter's removal took up to 0.28 ms (217843 in a
+ * 61 s frame), so about 9 ms and 250 ms. Past a bound the drain does nothing. */
+#define LW_NAV_WAIT_PLAY_MS 8
+#define LW_NAV_WAIT_END_MS 250
+#define LW_NAV_SYNC_PLAY 32
+#define LW_NAV_SYNC_END 900
+/* Each built cell's record asks twice at a level's end (its unload, its load), so the bounds above are an attempt's.
+ * All of a level's end drains together get this long; past it they do nothing, as at any other bound. */
+#define LW_NAV_END_ALL_MS 1000
+enum { LW_NAV_OK, LW_NAV_NO_PERMIT, LW_NAV_RUN_LONG, LW_NAV_QUEUE_LONGER, LW_NAV_END_SPENT };
+/* A swap that went on with its world's step not finished, by where: a tick repeated with no game frame, a completion
+ * the pop did not let through (a due built cell with a query job reading), a level's end. */
+enum { LW_UNSYNC_TICK, LW_UNSYNC_DUE, LW_UNSYNC_END, LW_UNSYNC_KINDS };
 #define LW_NAV_SWAP_LINES 400    /* swap lines a level; the 30 s summary goes on */
 #define LW_NAV_STEP_THREADS 256  /* a count above this is not the game's: the step stays serial */
 #define LW_NAV_TASKS_JOBS 0x7D7C20u   /* [W+0x4C8] in the threaded AI update (0x7D863A) */
@@ -3639,6 +3656,12 @@ static struct
     LwNavUnloadFn unload; LwNavLoadFn load;
     uint8_t (*asyncMode)(uintptr_t), (*inFlight)(uintptr_t), (*stepDone)(uintptr_t);
     void (*wait)(uintptr_t), (*commit)(uintptr_t, void*, int);
+    void (*drive)(uintptr_t, float); /* 0xBD04A0: the run driven for so many seconds, as the game's driver does each frame */
+    uint8_t gameOrder, why;          /* the last pop gave the game's order (a level's end); why the last drain did nothing */
+    uint8_t repeat;                  /* the last pop gave the game's order in play: a tick with no game frame before it */
+    uint32_t bounded;                /* drains that met a bound */
+    double endMs;                    /* this level's end drains so far */
+    uint32_t sumUnsync[LW_UNSYNC_KINDS]; /* the 30 s summary's unsynchronised swaps, by where */
     uintptr_t (*step)(uintptr_t, void*, void*, int);
     void (*runnerMake)(void*), (*runnerFree)(void*);
     int (*queued)(uintptr_t);
@@ -3710,34 +3733,68 @@ static void LwNavSyncStep(uintptr_t w, int idx)
     }
     g_lwSwap.steps++;
 }
-/* Finishes the world's async step and applies what is queued, timing each part into `ms`; 0 when the permit never came
- * (nothing done). */
+/* Finishes the world's async step and applies what is queued, timing each part into `ms`; 0 when the permit never
+ * came, the run did not end within its bound or more is queued than the bound (g_lwSwap.why): the caller's swap then
+ * goes on as vanilla's, unsynchronised. */
+static int LwNavDrainStop(uintptr_t w, int why)
+{
+    *(volatile uint8_t*)(w + 0x478) = 0; /* the permit goes back */
+    g_lwSwap.why = (uint8_t)why; g_lwSwap.bounded++;
+    return 0;
+}
 static int LwNavDrain(uintptr_t w, int idx, double* ms)
 {
     for (int k = 0; k < LW_NAV_PARTS; k++) ms[k] = 0;
-    int64_t a = LwNavNow(), b;
-    if (*(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx + 0x20)) g_lwSwap.join(idx);
+    int end = g_lwSwap.gameOrder;
+    if (end && g_lwSwap.endMs >= LW_NAV_END_ALL_MS) { g_lwSwap.why = LW_NAV_END_SPENT; g_lwSwap.bounded++; return 0; }
+    int64_t a = LwNavNow(), b, from = a;
+    if (*(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx + 0x20)) { LwFpJoinQuiet(1); g_lwSwap.join(idx); LwFpJoinQuiet(0); }
     b = LwNavNow(); ms[LW_NAV_JOIN] = LwNavMs(a, b); a = b;
     for (;;)
     {
         g_lwSwap.permit(idx);
         if (*(volatile uint8_t*)(w + 0x478)) break;
-        if (LwNavMs(a, LwNavNow()) > LW_NAV_PERMIT_MS) { ms[LW_NAV_PERMIT] = LwNavMs(a, LwNavNow()); return 0; }
+        if (LwNavMs(a, LwNavNow()) > LW_NAV_PERMIT_MS)
+        {
+            ms[LW_NAV_PERMIT] = LwNavMs(a, LwNavNow()); g_lwSwap.why = LW_NAV_NO_PERMIT;
+            if (end) g_lwSwap.endMs += LwNavMs(from, LwNavNow());
+            return 0;
+        }
         SwitchToThread();
     }
     b = LwNavNow(); ms[LW_NAV_PERMIT] = LwNavMs(a, b); a = b;
-    if (g_lwSwap.inFlight(w)) g_lwSwap.wait(w);
+    if (g_lwSwap.inFlight(w))
+    {
+        /* a run that is over does not block the game's wait (0xBD0776). The drive tells the world's listeners
+         * ([W+0xE8], 0xBD04E4..0xBD04F9) the seconds it was given, as the game's driver does with its budget. */
+        if (!g_lwSwap.drive || g_lwSwap.stepDone(w)) g_lwSwap.wait(w);
+        else g_lwSwap.drive(w, (float)(end ? LW_NAV_WAIT_END_MS : LW_NAV_WAIT_PLAY_MS) / 1000.0f);
+    }
     b = LwNavNow(); ms[LW_NAV_WAIT] = LwNavMs(a, b); a = b;
-    if (g_lwSwap.inFlight(w) && g_lwSwap.stepDone(w)) g_lwSwap.commit(w, NULL, 0);
+    if (end) g_lwSwap.endMs += LwNavMs(from, b);
+    if (g_lwSwap.inFlight(w) && !g_lwSwap.stepDone(w)) return LwNavDrainStop(w, LW_NAV_RUN_LONG);
+    if (g_lwSwap.inFlight(w)) g_lwSwap.commit(w, NULL, 0);
     b = LwNavNow(); ms[LW_NAV_COMMIT] = LwNavMs(a, b); a = b;
     uintptr_t q = *(volatile uintptr_t*)(w + 0x4A0);
-    if (q && g_lwSwap.queued(q) > 0) LwNavSyncStep(w, idx);
+    int queued = q ? g_lwSwap.queued(q) : 0;
+    if (g_lwSwap.drive && queued > (end ? LW_NAV_SYNC_END : LW_NAV_SYNC_PLAY)) return LwNavDrainStop(w, LW_NAV_QUEUE_LONGER);
+    if (queued > 0) LwNavSyncStep(w, idx);
     ms[LW_NAV_STEP] = LwNavMs(a, LwNavNow());
+    if (end) g_lwSwap.endMs += ms[LW_NAV_COMMIT] + ms[LW_NAV_STEP];
     *(volatile uint8_t*)(w + 0x478) = 0;
+    g_lwSwap.why = LW_NAV_OK;
     return 1;
 }
 static double LwNavSum(const double* ms) { double s = 0; for (int k = 0; k < LW_NAV_PARTS; k++) s += ms[k]; return s; }
 static void LwNavSwapLevel(void);
+/* A completion goes on with its world's step not finished: new rebuild marks wait until the world is idle. A drain
+ * that did nothing and left its record on the list is not one. */
+static void LwNavUnsynced(void)
+{
+    g_lwSwap.refused++;
+    g_lwSwap.sumUnsync[g_lwSwap.gameOrder ? LW_UNSYNC_END : g_lwSwap.repeat ? LW_UNSYNC_TICK : LW_UNSYNC_DUE]++;
+    InterlockedExchange(&g_lwSwap.unsafe, 1);
+}
 
 /* The hold. Finishing the AI world's step at every swap put the game's own async step on the frame thread: frames of
  * up to 1 s while flying. So a built cell's completion stays on the tick's list until its world is idle; its swap then
@@ -3751,7 +3808,7 @@ static void LwNavSwapLevel(void);
 #define LW_NAV_RAISE_US 4000   /* the run's budget a frame, never more: the AI join waits about as long as it gives */
 #define LW_NAV_BACK_MS 5000    /* a run this old with commands queued behind it gets that budget too */
 #define LW_NAV_LONG_MS 30000   /* a hold this long is noted once a world and level; it goes on */
-#define LW_NAV_QUEUE_LONG 1024 /* more commands queued than this: the stock budget, the raised one behind a run */
+#define LW_NAV_QUEUE_LONG CO_AIB_DRAIN_QUEUE /* more commands queued than the AI drain's start: the stock budget, the raised one behind a run */
 #define LW_NAV_DRAIN_LINES 64  /* drain lines a level */
 #define LW_NAV_BREAK_LINES 16  /* lines a level for a tick with no game frame before it */
 #define LW_NAV_HOLD_WALK 4096  /* more records than the nav's jobs can make: the game's order */
@@ -3761,6 +3818,22 @@ static void LwNavSwapLevel(void);
 #define LW_NAV_RING 512u
 #define LW_NAV_RING_LEFT 64u   /* job starts left before a waiting record is handed out again: it leaves now */
 #define LW_NAV_RING_LINES 8
+/* With the scheduler's call in hand no job starts while a waiting record is that near; this long of it and the
+ * world's step is finished for the record after all. Longer than any hold seen (195 ticks, a run 2.2 s old). */
+#define LW_NAV_PAUSE_MS 5000
+/* First builds leave in the one tick between two runs, each with its load and connect on the frame thread: 0.26 to
+ * 0.63 ms on average and 1.5 ms at worst a completion (107 held swaps), 17 of them behind a 2.2 s run. Past this much
+ * of a tick the rest wait for the next window; one always goes. 2 ms is an eighth of a 60 fps frame. */
+#define LW_NAV_FIRST_US 2000u
+/* A run comes between two windows, and one over a long queue lasts seconds: at 2 ms a window new tiles' cells would
+ * get their navmesh slower than they are built. So while that budget leaves first builds waiting the world's next
+ * run is put off a step (LwNavStartAsk), the next tick is a window too, and one first build at least leaves in each.
+ * A run starts after this long at the latest: paths and cuts wait for it, and the AI budget lever counts that wait. */
+#define LW_NAV_WINDOW_MS 500
+/* The hold has no forced end in play: a step finished on the frame thread holds the frame for the whole queue, and a
+ * swap with a run in flight is the cutter's fault. A record waiting this long is said, again each time it passes. */
+#define LW_NAV_HOLD_MOST_MS 60000
+#define LW_NAV_BOUND_LINES 8   /* its lines a level */
 static struct
 {
     uintptr_t worlds;                              /* exe 0x27C30B8: the nav world pointers */
@@ -3777,6 +3850,7 @@ static struct
     uint32_t frame; ULONGLONG stuckAt[4];          /* the mod's ticks; since when a world's records wait, none taken */
     ULONGLONG oldAt[4];                            /* when the world's oldest waiting record was first left on the list */
     uint8_t longNoted[4]; uint32_t flush;          /* the long hold's line is out; the last pop's flush argument */
+    uint32_t boundNoted[4], boundLines;            /* the bounds a world's oldest record has passed and said; this level's lines */
     struct { uintptr_t rec; uint32_t frame; ULONGLONG at; } seen[LW_NAV_HOLD_SEEN]; /* the waiting records, first left */
     uint32_t held, longest, drains, marked;        /* this level's; marked: built cells asked to rebuild */
     uint32_t drainLines; long slotLevel;           /* this level's drain lines; the level + 1 of the slot line */
@@ -3784,6 +3858,27 @@ static struct
     uint32_t heldFrame, breakFrame;                /* the mod's tick + 1 of the last pop that left records; of the last break */
     uint32_t breaks, sumBreaks;                    /* ticks given the game's order with no game frame before them */
     uint8_t wasRaised; uint32_t joins; double joinSum, joinWorst; /* the AI joins of the frames after a raised budget */
+    /* The cell tick, from its scheduler call to its empty pop. `sched` is 0x7B8200 once its call comes through here. */
+    void (*sched)(void);
+    volatile uintptr_t* listVar; volatile uint32_t* navCount; /* exe 0x1B1C158 (the list is at +0x40), 0x27C30C0 */
+    int64_t tickAt, doneAt, tickSwap; double tickSched;       /* this tick's start; the last record handed out; ticks in nav swaps */
+    int doneKind;                                             /* that record: 1 a first build, 2 a built cell's */
+    uint32_t tickFirst, tickBuilt, tickFirstUs, budgetUs;     /* this tick's completions, its first builds' time, their budget */
+    uint32_t can; ULONGLONG pauseAt; uint8_t pauseOff;        /* one call's starts; since when the scheduler is left out */
+    uint32_t pauseLines, budgetLines, budgets[4]; long budgetLevel;
+    uint32_t builtAge, builtLeft;                             /* the oldest waiting built cell at the last empty pop: ms, ring distance */
+    uint32_t firstNow, firstAge;                              /* first builds waiting then, and the oldest one's ms */
+    /* The window kept open (LW_NAV_WINDOW_MS). `startAsk` is 0xBD11B0 once the driver's call comes through here; it
+     * runs on the AI update's thread, so the tick's wish and the run's start cross as interlocked flags. */
+    uint8_t (*startAsk)(uintptr_t, void*);
+    volatile LONG noStart[4], started[4], kept; ULONGLONG openAt[4]; uint32_t windowMs;
+    uintptr_t lagBuf[4]; ULONGLONG lagTaken[4], lagPrev[4]; uint8_t lagOpen[4]; /* the queue's last two takes, a run not committed */
+    struct
+    {
+        uint32_t ticks, first, built, worstFirst, worstBuilt, mostFirst, over, paused, pauses, queueMost, oldest, nearGap, lag;
+        uint32_t firstMost, firstOldest, marksHeld, pastBound;
+        double ms, worst, worstSched, sched, firstMs, firstWorst, builtMs, builtWorst;
+    } sum;                                                    /* the 30 s summary's */
 } g_lwNavHold;
 
 /* Between steps: no AI update runs (table +0x54, set and cleared around it at 0x7D8618 / 0x7D8726 and read first and
@@ -3843,14 +3938,18 @@ static int LwNavBacklog(uintptr_t w)
     int q = g_lwSwap.queued != NULL ? LwNavQueue(w) : 0;
     return q > LW_NAV_QUEUE_LONG || (q > 0 && isfinite(age) && age * 1000.0f >= (float)LW_NAV_BACK_MS);
 }
-/* The budget in microseconds the AI world `h` gets this frame over its stock, 0 for none: a run is in flight with a
- * completion held or a backlog behind it. Asked once a frame by the budget lever, which counts for the summary. */
-static int LwNavHoldRaiseUs(uintptr_t h, ULONGLONG now)
+/* The step a raised budget ran in is joined before the next frame's call: its wait (`join` ms, taken once a frame by
+ * the budget lever) is what the raise costs. */
+static void LwNavHoldJoin(double join)
 {
-    /* the step a raised budget ran in is joined before the next frame's call: its wait is what the raise costs */
-    double join = LwFpJoinTake();
     if (g_lwNavHold.wasRaised) { g_lwNavHold.joins++; g_lwNavHold.joinSum += join; if (join > g_lwNavHold.joinWorst) g_lwNavHold.joinWorst = join; }
     g_lwNavHold.wasRaised = 0;
+}
+/* The budget in microseconds the AI world `h` gets this frame over its stock, 0 for none: a run is in flight with a
+ * completion held or a backlog behind it. Asked once a frame by the budget lever, which counts for the summary and
+ * writes the largest of this, its own and the AI drain's. */
+static int LwNavHoldRaiseUs(uintptr_t h, ULONGLONG now)
+{
     for (int i = 0; i < 4 && g_lwSwap.table && h; i++)
     {
         if (*(volatile uintptr_t*)(g_lwSwap.table + 0x80u * i) != h) continue;
@@ -3906,7 +4005,9 @@ static void LwNavDrainNote(const char* path, int idx, int queued, int ok, const 
     if (g_lwNavHold.drainLines >= LW_NAV_DRAIN_LINES) return;
     Note("living world: nav: a step finished on the frame thread (%s; flush %u, living world %s, world %d, %d queued before): %.1f ms%s: AI update %.1f, "
         "permit %.1f, step in flight %.1f, its commit %.1f, queued %.1f", path, g_lwNavHold.flush, LwLive() ? "live" : "not live", idx, queued, LwNavSum(ms),
-        ok ? "" : " and no permit, nothing done", ms[LW_NAV_JOIN], ms[LW_NAV_PERMIT], ms[LW_NAV_WAIT], ms[LW_NAV_COMMIT], ms[LW_NAV_STEP]);
+        ok ? "" : g_lwSwap.why == LW_NAV_RUN_LONG ? " and the run in flight did not end within the bound, nothing done" :
+        g_lwSwap.why == LW_NAV_QUEUE_LONGER ? " and more is queued than its step may apply, nothing done" :
+        g_lwSwap.why == LW_NAV_END_SPENT ? " and the level's end has had its drains' time, nothing done" : " and no permit, nothing done", ms[LW_NAV_JOIN], ms[LW_NAV_PERMIT], ms[LW_NAV_WAIT], ms[LW_NAV_COMMIT], ms[LW_NAV_STEP]);
     if (++g_lwNavHold.drainLines == LW_NAV_DRAIN_LINES) Note("living world: nav: %d drain lines this level; the 30 s summaries go on", LW_NAV_DRAIN_LINES);
 }
 /* When `rec` was first left on the list; `other` for one the table had no room for. */
@@ -3921,6 +4022,170 @@ static uint32_t LwNavRingLeft(uintptr_t rec)
     if (!g_lwNavHold.ring || !g_lwNavHold.ringNext || rec < g_lwNavHold.ring || rec >= g_lwNavHold.ring + LW_NAV_RING * 0x210u) return LW_NAV_RING;
     return ((uint32_t)((rec - g_lwNavHold.ring) / 0x210u) - *g_lwNavHold.ringNext) & (LW_NAV_RING - 1);
 }
+/* Job starts one scheduler call can make at most: a running nav starts while its budget [nav+0x88] is over the jobs
+ * counted against it (+0x8C: up at a start 0x7B86B3, down when the record is processed 0x7B8C55), and one with state
+ * 0x10 starts a single job (0x7B8412..0x7B8426). The budget's value is the game's to set; the sum is not cut. */
+static uint32_t LwNavCanStart(void)
+{
+    uintptr_t navs = g_lwNavHold.worlds ? *(volatile uintptr_t*)g_lwNavHold.worlds : 0;
+    uint32_t n = g_lwNavHold.navCount ? *g_lwNavHold.navCount : 0, can = 0;
+    for (uint32_t i = 0; navs && i < n && i < 128 && can < LW_NAV_RING; i++)
+    {
+        uintptr_t nav = *(volatile uintptr_t*)(navs + 8u * i);
+        uint32_t state = nav ? *(volatile uint32_t*)(nav + 0x20) : 0;
+        if ((state & 3) != 3) continue;
+        int32_t left = *(volatile int32_t*)(nav + 0x88) - *(volatile int32_t*)(nav + 0x8C);
+        can += (state & 0x10) ? 1u : left > 0 ? (uint32_t)left : 0u;
+    }
+    return can; /* the ring's size or more: any waiting record can be reached, so every call with one waiting is left out */
+}
+/* The least ring distance among the list's records under the hold's rules, read inside the list's lock. */
+static uint32_t LwNavRingNearest(uintptr_t list)
+{
+    uint32_t least = LW_NAV_RING, walked = 0; uintptr_t c = 0; int r = 0;
+    g_lwNavHold.enter(list);
+    uint32_t off = *(uint32_t*)(list + 0x38);
+    for (uintptr_t rec = *(uintptr_t*)(list + 0x28); rec && ++walked <= LW_NAV_HOLD_WALK; rec = *(uintptr_t*)(rec + off))
+        if (LwNavRecWorld(rec, &c, &r) && LwNavRingLeft(rec) < least) least = LwNavRingLeft(rec);
+    g_lwNavHold.leave(list);
+    return least;
+}
+/* Each nav's job budget, once a level and when one changes: what one scheduler call can start is their sum. */
+static void LwNavBudgets(void)
+{
+    uintptr_t navs = g_lwNavHold.worlds ? *(volatile uintptr_t*)g_lwNavHold.worlds : 0;
+    uint32_t n = g_lwNavHold.navCount ? *g_lwNavHold.navCount : 0, now[4] = {0, 0, 0, 0}, any = 0;
+    char text[200]; size_t o = 0;
+    for (uint32_t i = 0; navs && i < n && i < 4; i++)
+    {
+        uintptr_t nav = *(volatile uintptr_t*)(navs + 8u * i);
+        if (!nav || (*(volatile uint32_t*)(nav + 0x20) & 3) != 3) continue;
+        now[i] = *(volatile uint32_t*)(nav + 0x88); any = 1;
+        o += (size_t)snprintf(text + o, sizeof text - o, "%snav %u: %d (%d counted, %d record(s) out)", o ? "; " : "", i, (int32_t)now[i],
+            *(volatile int32_t*)(nav + 0x8C), *(volatile int32_t*)(nav + 0x94));
+    }
+    if (!any || (g_lwNavHold.budgetLevel == g_world.levels + 1 && !memcmp(now, g_lwNavHold.budgets, sizeof now))) return;
+    g_lwNavHold.budgetLevel = g_world.levels + 1; memcpy(g_lwNavHold.budgets, now, sizeof now);
+    if (g_lwNavHold.budgetLines++ < LW_NAV_RING_LINES) Note("living world: nav: job budgets [nav+0x88]: %s", text);
+}
+/* The tick's scheduler call (0x7B8ABA). 0x7B8200 is the job ring's only hand-out (0x7B8556) and has no other caller,
+ * so with a waiting record nearer its slot's turn than one call can start, the call is left out: no job starts, the
+ * ring stands, and the record leaves between steps like any other. The tick's time starts here. */
+static void LwNavSchedAt(uint32_t flush, ULONGLONG now)
+{
+    g_lwNavHold.tickAt = co_framecost_now(); g_lwNavHold.doneAt = 0; g_lwNavHold.tickSwap = 0;
+    uintptr_t base = g_lwNavHold.listVar ? *g_lwNavHold.listVar : 0;
+    uint32_t nearest = LW_NAV_RING;
+    g_lwNavHold.can = 0;
+    if (!flush && LwLive() && base && !g_lwNavHold.pauseOff)
+    {
+        LwNavSwapLevel();
+        LwNavBudgets();
+        g_lwNavHold.can = LwNavCanStart();
+        nearest = LwNavRingNearest(base + 0x40);
+    }
+    /* LW_NAV_RING: no record waits. A sum over the ring is under no record's distance, and would stop every call. */
+    if (nearest == LW_NAV_RING || nearest >= g_lwNavHold.can) { g_lwNavHold.pauseAt = 0; g_lwNavHold.sched(); }
+    else
+    {
+        g_lwNavHold.sum.paused++;
+        if (!g_lwNavHold.pauseAt)
+        {
+            g_lwNavHold.pauseAt = now ? now : 1; g_lwNavHold.sum.pauses++;
+            if (g_lwNavHold.pauseLines++ < LW_NAV_RING_LINES)
+                Note("living world: nav: no job starts for now: a waiting record is %u job start(s) from its ring slot's turn and one scheduler call "
+                    "can start %u", nearest, g_lwNavHold.can);
+        }
+    }
+    g_lwNavHold.tickSched = LwNavMs(g_lwNavHold.tickAt, co_framecost_now());
+}
+static void LwNavSched(uint32_t flush) { LwNavSchedAt(flush, GetTickCount64()); }
+/* A record is due when the ring is about to hand it out again. With the scheduler's call in hand that is only after
+ * LW_NAV_PAUSE_MS without job starts; without it, at LW_NAV_RING_LEFT. */
+static int LwNavPausing(void) { return g_lwNavHold.sched && !g_lwNavHold.pauseOff; }
+static int LwNavDue(uintptr_t rec, ULONGLONG now)
+{
+    if (!LwNavPausing()) return LwNavRingLeft(rec) < LW_NAV_RING_LEFT;
+    return g_lwNavHold.pauseAt && now >= g_lwNavHold.pauseAt + LW_NAV_PAUSE_MS && LwNavRingLeft(rec) < g_lwNavHold.can;
+}
+/* The time the record handed out last took the game (its load and connect), up to `t`. */
+static void LwNavTickDone(int64_t t)
+{
+    if (!g_lwNavHold.doneAt) return;
+    double ms = LwNavMs(g_lwNavHold.doneAt, t);
+    g_lwNavHold.doneAt = 0;
+    if (g_lwNavHold.doneKind == 1)
+    {
+        g_lwNavHold.sum.first++; g_lwNavHold.sum.firstMs += ms; g_lwNavHold.tickFirstUs += (uint32_t)(ms * 1000.0);
+        if (ms > g_lwNavHold.sum.firstWorst) g_lwNavHold.sum.firstWorst = ms;
+    }
+    else if (g_lwNavHold.doneKind == 2)
+    {
+        g_lwNavHold.sum.built++; g_lwNavHold.sum.builtMs += ms;
+        if (ms > g_lwNavHold.sum.builtWorst) g_lwNavHold.sum.builtWorst = ms;
+    }
+}
+/* The empty pop: the tick's time less its nav swaps' (a part of their own) is the frame's nav tick part. */
+static void LwNavTickEnd(void)
+{
+    if (g_lwNavHold.tickFirst > g_lwNavHold.sum.mostFirst) g_lwNavHold.sum.mostFirst = g_lwNavHold.tickFirst;
+    if (g_lwNavHold.tickAt)
+    {
+        double ms = LwNavMs(g_lwNavHold.tickAt, co_framecost_now());
+        co_framecost_add(CO_FC_NAVTICK, g_lwNavHold.tickAt + g_lwNavHold.tickSwap);
+        g_lwNavHold.sum.ticks++; g_lwNavHold.sum.ms += ms; g_lwNavHold.sum.sched += g_lwNavHold.tickSched;
+        if (ms > g_lwNavHold.sum.worst)
+        {
+            g_lwNavHold.sum.worst = ms; g_lwNavHold.sum.worstSched = g_lwNavHold.tickSched;
+            g_lwNavHold.sum.worstFirst = g_lwNavHold.tickFirst; g_lwNavHold.sum.worstBuilt = g_lwNavHold.tickBuilt;
+        }
+    }
+    g_lwNavHold.tickAt = 0; g_lwNavHold.tickFirst = g_lwNavHold.tickBuilt = g_lwNavHold.tickFirstUs = 0;
+}
+/* First builds past their budget of this tick wait for the next window; the first of a tick always goes. */
+static int LwNavFirstOver(void)
+{
+    return g_lwNavHold.budgetUs && g_lwNavHold.tickFirst && g_lwNavHold.tickFirstUs >= g_lwNavHold.budgetUs;
+}
+/* The budget left first builds of world `i` waiting: its next run is put off one step, while the window is younger
+ * than its bound. Asked again every tick, so a tick that does not come puts off one start at most. */
+static void LwNavWindowKeep(int i, ULONGLONG now)
+{
+    if (!g_lwNavHold.startAsk || !g_lwNavHold.windowMs) return;
+    if (!g_lwNavHold.openAt[i]) g_lwNavHold.openAt[i] = now ? now : 1;
+    if (now - g_lwNavHold.openAt[i] < g_lwNavHold.windowMs) InterlockedExchange(&g_lwNavHold.noStart[i], 1);
+}
+/* The driver's "has this world work for a run?" (0xBD11B0 at 0xBD194C; a no skips the start, 0xBD1953, as on a frame
+ * with nothing to do). No, once, for a world whose window the tick keeps open. A start ends that window's time. */
+static uint8_t LwNavStartAsk(uintptr_t w, void* block)
+{
+    int i = LwAiwIndex(w);
+    if (i >= 0 && InterlockedExchange(&g_lwNavHold.noStart[i], 0)) { InterlockedIncrement(&g_lwNavHold.kept); return 0; }
+    uint8_t work = g_lwNavHold.startAsk(w, block);
+    if (i >= 0 && work) InterlockedExchange(&g_lwNavHold.started[i], 1);
+    return work;
+}
+/* How stale the navmesh gets: a run applies what was queued before its start, so at its commit the oldest of that has
+ * waited since the run before it started. Section loads and cutter changes share the queue. Read once a tick. */
+static void LwNavLag(int i, ULONGLONG now)
+{
+    uintptr_t w = *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * i);
+    if (!w || !g_lwSwap.asyncMode(w)) return;
+    uintptr_t buf = *(volatile uintptr_t*)(w + 0x498);
+    if (buf != g_lwNavHold.lagBuf[i])
+    {
+        if (g_lwNavHold.lagBuf[i]) { g_lwNavHold.lagPrev[i] = g_lwNavHold.lagTaken[i]; g_lwNavHold.lagTaken[i] = now; g_lwNavHold.lagOpen[i] = 1; }
+        g_lwNavHold.lagBuf[i] = buf;
+    }
+    if (g_lwNavHold.lagOpen[i] && !*(volatile uintptr_t*)(w + 0x4B0))
+    {
+        ULONGLONG ms = now - (g_lwNavHold.lagPrev[i] ? g_lwNavHold.lagPrev[i] : g_lwNavHold.lagTaken[i]);
+        g_lwNavHold.lagOpen[i] = 0;
+        if (ms > g_lwNavHold.sum.lag) g_lwNavHold.sum.lag = (uint32_t)ms;
+    }
+    int q = LwNavQueue(w);
+    if (q > 0 && (uint32_t)q > g_lwNavHold.sum.queueMost) g_lwNavHold.sum.queueMost = (uint32_t)q;
+}
 /* The world's step finished on the frame thread, with the list's lock released: the nav's build threads push to it. */
 static int LwNavHoldDrain(uintptr_t list, int idx, uintptr_t w, const char* path)
 {
@@ -3930,23 +4195,24 @@ static int LwNavHoldDrain(uintptr_t list, int idx, uintptr_t w, const char* path
     g_lwNavHold.leave(list);
     int ok = LwNavDrain(w, idx, parts);
     g_lwNavHold.enter(list);
-    co_framecost_add(CO_FC_NAVSWAP, t);
+    g_lwNavHold.tickSwap += co_framecost_add(CO_FC_NAVSWAP, t);
     LwNavDrainNote(path, idx, queued, ok, parts);
-    if (!ok) { g_lwSwap.refused++; InterlockedExchange(&g_lwSwap.unsafe, 1); }
-    else g_lwNavHold.unapplied[idx] = g_lwNavHold.swapUnapplied[idx] = 0; /* committed, and the queue applied */
+    if (ok) g_lwNavHold.unapplied[idx] = g_lwNavHold.swapUnapplied[idx] = 0; /* committed, and the queue applied */
     return ok;
 }
 /* The game's order (a level's end, a normal mission). A swap the hold left to the next async step is
  * finished first, as every swap was before the hold: this completion's connect must not meet it half applied. */
-static uintptr_t LwNavPopHead(uintptr_t list, uint32_t off)
+static uintptr_t LwNavPopHead(uintptr_t list, uint32_t off, int end)
 {
+    g_lwSwap.gameOrder = (uint8_t)end; /* a level's end, where a drain may take longer than in play */
     for (int tries = 0; tries < 4; tries++)
     {
         uintptr_t head = *(uintptr_t*)(list + 0x28);
         if (!head) return 0;
         uint32_t flags = *(volatile uint32_t*)(head + 0xC), idx = flags & 0x7F;
         if ((flags & 0x80) || idx >= 4 || !g_lwNavHold.swapUnapplied[idx]) break;
-        if (!LwNavHoldDrain(list, (int)idx, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx), "the game's order, behind a swap not applied yet")) break;
+        if (!LwNavHoldDrain(list, (int)idx, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx), "the game's order, behind a swap not applied yet"))
+        { LwNavUnsynced(); break; } /* the head's connect meets that swap as it is */
     }
     uintptr_t head = *(uintptr_t*)(list + 0x28);
     return head ? LwNavTake(list, off, 0, head, -1) : 0;
@@ -3962,27 +4228,52 @@ static void LwNavLongHold(int i, uintptr_t w, ULONGLONG now)
         flight ? (int)g_lwSwap.stepDone(w) : -1, LwNavQuiet(i, w), LwNavQueue(w), *(volatile int32_t*)(g_lwSwap.table + 0x80u * i + 0x54),
         g_lwNavHold.unapplied[i], (double)budget * 1e6);
 }
+/* Past LW_NAV_HOLD_MOST_MS, and each time that long again: what waits and why nothing is forced. Rebuild marks wait
+ * with it (LwNavTick marks only with no job out, [nav+0x94]), so the navmesh of cells changed since stays as built. */
+static void LwNavHoldBound(int i, uintptr_t w, ULONGLONG now)
+{
+    ULONGLONG waited = g_lwNavHold.oldAt[i] ? now - g_lwNavHold.oldAt[i] : 0;
+    uint32_t passed = (uint32_t)(waited / LW_NAV_HOLD_MOST_MS);
+    if (!passed) { g_lwNavHold.boundNoted[i] = 0; return; }
+    g_lwNavHold.sum.pastBound++;
+    if (passed <= g_lwNavHold.boundNoted[i]) return;
+    g_lwNavHold.boundNoted[i] = passed;
+    if (g_lwNavHold.boundLines++ >= LW_NAV_BOUND_LINES) return;
+    int flight = *(volatile uintptr_t*)(w + 0x4B0) != 0;
+    Note("living world: nav: HOLD BOUND: world %d's oldest completion has waited %llu ms, over the hold's %d ms, with %u waiting: nothing is forced (a step "
+        "finished here would hold the frame for the %d command(s) queued and the run in flight; a swap beside that run is the cutter's fault); no new "
+        "rebuild is marked meanwhile and the cells' navmesh stays as built; run in flight %d, %.1f s old, budget %.0f us", i, (unsigned long long)waited,
+        LW_NAV_HOLD_MOST_MS, g_lwNavHold.waiting[i], LwNavQueue(w), flight, flight ? (double)*(volatile float*)(w + 0x484) : 0.0,
+        (double)*(volatile float*)(w + 0x47C) * 1e6);
+}
 /* The tick's pop, inside the list's lock; `flush` is the tick's argument (not 0 at a level's end). Per world the oldest
  * record goes first (the list is newest first, 0x7B2690). A built cell's goes between steps with no section command
  * unapplied and no query job, and with nothing else queued until the world's records have waited LW_NAV_HOLD_RELAX_MS
  * (cutter changes keep the queue full while tiles come in), and waits for that however long it takes. A first build
- * goes between steps too, behind no unapplied swap, and every waiting one in that tick, before a built cell's: its
- * load takes a slot (0xBAD120), which can move the section array a run in flight was built over. A record of no
- * world's rules goes at once. 0 = nothing to take this tick. */
-static uintptr_t LwNavPopAt(uintptr_t list, uint32_t flush, ULONGLONG now)
+ * goes between steps too, behind no unapplied swap: its load takes a slot (0xBAD120), which can move the section
+ * array a run in flight was built over. The waiting ones leave in that tick while LwNavFirstOver allows, the rest in
+ * the ticks after it, which LwNavWindowKeep keeps between steps. Of a world's
+ * two kinds the one with the older record has the window. A record of no world's rules goes at once. 0 = nothing to
+ * take this tick. */
+static uintptr_t LwNavPopIn(uintptr_t list, uint32_t flush, ULONGLONG now)
 {
     uint32_t off = *(uint32_t*)(list + 0x38);
+    g_lwNavHold.builtAge = 0; g_lwNavHold.builtLeft = LW_NAV_RING;
     LwNavSwapLevel();
     g_lwNavHold.flush = flush;
+    g_lwNavHold.firstNow = g_lwNavHold.firstAge = 0;
     for (int i = 0; i < 4; i++)
     {
         g_lwNavHold.grant[i] = 0;
         LwNavApplied(i);
+        /* the window's wish is this pop's: every pop of a tick asks again, a level's end never does */
+        InterlockedExchange(&g_lwNavHold.noStart[i], 0);
+        if (InterlockedExchange(&g_lwNavHold.started[i], 0)) g_lwNavHold.openAt[i] = 0;
     }
     if (flush || !LwLive())
     {
         memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting);
-        return LwNavPopHead(list, off);
+        return LwNavPopHead(list, off, 1);
     }
     /* A tick ends at the pop that takes nothing. One that starts with no game frame since is a caller looping on the
      * tick (it is also in the function table exe+0x27CD4E0, slot +0x50): a held record would never leave for it. */
@@ -3996,40 +4287,61 @@ static uintptr_t LwNavPopAt(uintptr_t list, uint32_t flush, ULONGLONG now)
                     "(%u this level)", g_lwNavHold.breaks);
         }
         memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting);
-        return LwNavPopHead(list, off);
+        g_lwSwap.repeat = 1;
+        return LwNavPopHead(list, off, 0);
     }
+    for (int i = 0; i < 4; i++) LwNavLag(i, now);
+    g_lwSwap.gameOrder = g_lwSwap.repeat = 0;
     for (int pass = 0; pass < 2; pass++)
     {
         /* per world the oldest first build [0] and the oldest built cell's [1]; `old` the older of the two, for the wait */
         uintptr_t plain = 0, plainPrev = 0, rec2[4][2] = {{0}}, prev2[4][2], cell[4], old[4] = {0, 0, 0, 0}, prev = 0, c = 0;
-        uintptr_t due = 0, duePrev = 0; int dueWorld = 0;
-        int r = 0; uint32_t walked = 0;
+        uintptr_t due = 0, duePrev = 0, dueCell = 0, builtOld = 0, firstOld = 0; int dueWorld = 0, dueBuilt = 0, oldBuilt[4] = {0, 0, 0, 0};
+        int r = 0; uint32_t walked = 0, firsts = 0;
         memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting);
         for (uintptr_t rec = *(uintptr_t*)(list + 0x28); rec; prev = rec, rec = *(uintptr_t*)(rec + off))
         {
-            if (++walked > LW_NAV_HOLD_WALK) { memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting); return LwNavPopHead(list, off); }
+            if (++walked > LW_NAV_HOLD_WALK) { memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting); g_lwSwap.repeat = 1; return LwNavPopHead(list, off, 0); }
             int k = LwNavRecWorld(rec, &c, &r);
             if (!k) { plain = rec; plainPrev = prev; continue; }
-            rec2[k - 1][r] = rec; prev2[k - 1][r] = prev; old[k - 1] = rec; g_lwNavHold.waiting[k - 1]++;
-            if (r) cell[k - 1] = c;
-            if (LwNavRingLeft(rec) < LW_NAV_RING_LEFT) { due = rec; duePrev = prev; dueWorld = k - 1; }
+            rec2[k - 1][r] = rec; prev2[k - 1][r] = prev; old[k - 1] = rec; oldBuilt[k - 1] = r; g_lwNavHold.waiting[k - 1]++;
+            if (r) { cell[k - 1] = c; builtOld = rec; } else { firsts++; firstOld = rec; }
+            if (LwNavDue(rec, now)) { due = rec; duePrev = prev; dueWorld = k - 1; dueCell = c; dueBuilt = r; }
         }
         if (plain)
         {
+            g_lwSwap.gameOrder = 1; /* a stopped nav's: the level is ending */
             /* the game's record of a world whose swap is not applied yet (its nav stopped): that swap first, then again */
             uint32_t flags = *(volatile uint32_t*)(plain + 0xC), idx = flags & 0x7F;
             if (!pass && !(flags & 0x80) && idx < 4 && g_lwNavHold.swapUnapplied[idx])
-            { LwNavHoldDrain(list, (int)idx, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx), "a stopped nav's record, behind a swap not applied yet"); continue; }
+            {
+                if (!LwNavHoldDrain(list, (int)idx, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx), "a stopped nav's record, behind a swap not applied yet"))
+                    LwNavUnsynced();
+                continue;
+            }
             return LwNavTake(list, off, plainPrev, plain, -1);
         }
         if (due)
         {
             /* no step may be in flight for it either: the world's is finished here, once, and the list is read again */
             uintptr_t w = *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * dueWorld);
-            if (!pass && !LwNavIdle(dueWorld, w)) { LwNavHoldDrain(list, dueWorld, w, "a waiting record is due in the job ring"); continue; }
+            if (!pass && !LwNavIdle(dueWorld, w))
+            {
+                /* nothing done, with the scheduler in hand: the ring stands, so the record waits on and is tried again.
+                 * No swap was made, so marks go on. Without the scheduler the record leaves all the same. */
+                if (!LwNavHoldDrain(list, dueWorld, w, "a waiting record is due in the job ring"))
+                {
+                    if (LwNavPausing()) g_lwNavHold.pauseAt = now ? now : 1;
+                    else LwNavUnsynced();
+                }
+                continue;
+            }
             if (g_lwNavHold.ringOuts++ < LW_NAV_RING_LINES)
                 Note("living world: nav: a waiting record left at the job ring's bound (world %d, %u job start(s) before its turn, waited %u tick(s))",
                     dueWorld, LwNavRingLeft(due), LwNavWaited(due));
+            /* a built cell's swap with the world idle and no query job needs no step of its own before or after */
+            if (dueBuilt && LwNavIdle(dueWorld, w) && !g_lwNavHold.unapplied[dueWorld] && LwNavQuiet(dueWorld, w))
+            { g_lwNavHold.grant[dueWorld] = dueCell; g_lwNavHold.grantTicks[dueWorld] = LwNavWaited(due); g_lwNavHold.grantQueued[dueWorld] = 0; }
             g_lwNavHold.waiting[dueWorld]--;
             return LwNavTake(list, off, duePrev, due, dueWorld);
         }
@@ -4038,8 +4350,13 @@ static uintptr_t LwNavPopAt(uintptr_t list, uint32_t flush, ULONGLONG now)
             if (!old[i]) continue;
             uintptr_t w = *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * i);
             if (!LwNavBetween(i, w)) continue;
+            /* the older kind has the window: behind first builds that kept coming a built cell's record never left */
             int r2 = 0;
-            if (rec2[i][0]) { if (g_lwNavHold.swapUnapplied[i]) continue; }
+            if (rec2[i][0] && !(rec2[i][1] && oldBuilt[i]))
+            {
+                if (g_lwNavHold.swapUnapplied[i]) continue;
+                if (LwNavFirstOver()) { g_lwNavHold.sum.over++; LwNavWindowKeep(i, now); continue; }
+            }
             else
             {
                 if (g_lwNavHold.unapplied[i]) continue;
@@ -4075,11 +4392,39 @@ static uintptr_t LwNavPopAt(uintptr_t list, uint32_t flush, ULONGLONG now)
         {
             g_lwNavHold.oldAt[i] = old[i] ? LwNavSeenAt(old[i], g_lwNavHold.stuckAt[i]) : 0;
             if (old[i]) LwNavLongHold(i, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * i), now);
+            if (old[i]) LwNavHoldBound(i, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * i), now);
+            else g_lwNavHold.boundNoted[i] = 0;
+        }
+        g_lwNavHold.firstNow = firsts;
+        if (firsts > g_lwNavHold.sum.firstMost) g_lwNavHold.sum.firstMost = firsts;
+        if (firstOld)
+        {
+            g_lwNavHold.firstAge = (uint32_t)(now - LwNavSeenAt(firstOld, now));
+            if (g_lwNavHold.firstAge > g_lwNavHold.sum.firstOldest) g_lwNavHold.sum.firstOldest = g_lwNavHold.firstAge;
         }
         g_lwNavHold.heldFrame = g_lwNavHold.frame + 1;
+        if (builtOld)
+        {
+            g_lwNavHold.builtAge = (uint32_t)(now - LwNavSeenAt(builtOld, now)); g_lwNavHold.builtLeft = LwNavRingLeft(builtOld);
+            if (g_lwNavHold.builtAge > g_lwNavHold.sum.oldest) g_lwNavHold.sum.oldest = g_lwNavHold.builtAge;
+            if (LW_NAV_RING - g_lwNavHold.builtLeft > g_lwNavHold.sum.nearGap) g_lwNavHold.sum.nearGap = LW_NAV_RING - g_lwNavHold.builtLeft;
+        }
         return 0;
     }
     return 0;
+}
+/* The pop, and around it the tick's count: what the record before this one cost, and which kind this one is. */
+static uintptr_t LwNavPopAt(uintptr_t list, uint32_t flush, ULONGLONG now)
+{
+    uintptr_t c = 0; int r = 0;
+    LwNavTickDone(co_framecost_now());
+    uintptr_t rec = LwNavPopIn(list, flush, now);
+    if (!rec) { LwNavTickEnd(); return 0; }
+    g_lwNavHold.doneKind = !LwNavRecWorld(rec, &c, &r) ? 0 : r ? 2 : 1;
+    if (g_lwNavHold.doneKind == 1) g_lwNavHold.tickFirst++;
+    else if (g_lwNavHold.doneKind == 2) g_lwNavHold.tickBuilt++;
+    g_lwNavHold.doneAt = co_framecost_now();
+    return rec;
 }
 static uintptr_t LwNavPop(uintptr_t list, uint32_t flush) { return LwNavPopAt(list, flush, GetTickCount64()); }
 static uintptr_t LwNavUnload(uintptr_t w, uint32_t* id, uint8_t graph)
@@ -4100,14 +4445,14 @@ static uintptr_t LwNavUnload(uintptr_t w, uint32_t* id, uint8_t graph)
         int queued = LwNavQueue(w), ok = LwNavDrain(w, idx, g_lwSwap.pre[idx]);
         LwNavDrainNote("before an unload the pop did not let through", idx, queued, ok, g_lwSwap.pre[idx]);
         if (ok) g_lwSwap.swap[idx] = 1;
-        else { g_lwSwap.swap[idx] = 0; g_lwSwap.refused++; InterlockedExchange(&g_lwSwap.unsafe, 1); }
+        else { g_lwSwap.swap[idx] = 0; LwNavUnsynced(); }
     }
     int64_t u = LwNavNow();
     uintptr_t r = g_lwSwap.unload(w, id, graph);
     LwNavQueued(idx, w, 1);
     g_lwSwap.unloadEnd[idx] = LwNavNow();
     g_lwSwap.unloadMs[idx] = LwNavMs(u, g_lwSwap.unloadEnd[idx]);
-    co_framecost_add(CO_FC_NAVSWAP, t);
+    g_lwNavHold.tickSwap += co_framecost_add(CO_FC_NAVSWAP, t);
     return r;
 }
 /* The most section slots an AI world has ([[W+0x130]+0x40]; 0xBAD120 gives a section the first free slot or a new one,
@@ -4169,6 +4514,24 @@ static void LwNavSwapNote(const char* span)
             g_lwNavHold.sumRaise, g_lwNavHold.sumBack, g_lwNavHold.joins ? g_lwNavHold.joinSum / g_lwNavHold.joins : 0.0, g_lwNavHold.joinWorst, g_lwNavHold.joins, g_lwNavHold.sumBreaks);
     g_lwNavHold.sumHeld = g_lwNavHold.sumLongest = g_lwNavHold.sumDrains = g_lwNavHold.sumRelaxed = g_lwNavHold.sumRaise = g_lwNavHold.sumBack = g_lwNavHold.sumDone = g_lwNavHold.sumResFlight = g_lwNavHold.sumResMoved = 0;
     g_lwNavHold.sumBreaks = g_lwNavHold.joins = 0; g_lwNavHold.joinSum = g_lwNavHold.joinWorst = 0;
+    uint32_t kept = (uint32_t)InterlockedExchange(&g_lwNavHold.kept, 0);
+    const uint32_t* un = g_lwSwap.sumUnsync;
+    if (g_lwNavHold.sum.ticks > 0 || g_lwNavHold.sum.first > 0 || g_lwNavHold.sum.built > 0 || g_lwNavHold.sum.queueMost > 0 || g_lwNavHold.sum.oldest > 0 ||
+        g_lwNavHold.sum.firstMost > 0 || g_lwNavHold.sum.marksHeld > 0 || un[0] + un[1] + un[2] > 0)
+        Note("living world: nav tick (%s): %u tick(s) timed, %.1f ms in all, the scheduler %.1f ms of it; the worst %.2f ms (the scheduler %.2f ms, %u first "
+            "build(s), %u built cell(s)); first builds: %u in %.1f ms, the worst %.2f ms, at most %u a tick, left for a later tick by the %u us budget %u "
+            "time(s); built cells: %u in %.1f ms, the worst %.2f ms; the oldest waiting built cell now %u ms old and %u job start(s) from its ring slot's "
+            "turn (this span at most %u ms, at least %u); no job starts on %u tick(s) in %u pause(s); navmesh lag: a command waited up to %u ms from queued "
+            "to applied, the queue at most %u; %u drain(s) this session stopped at a bound; first builds waiting now %u, the oldest %u ms (this span at most %u, "
+            "%u ms); a run's start put off %u time(s) for them; unsynchronised swaps: %u at a tick repeated with no game frame, %u at a completion the pop "
+            "did not let through, %u at a level's end; rebuild marks held on %u frame(s) after one; a completion past the hold's %d ms on %u tick(s)", span, g_lwNavHold.sum.ticks, g_lwNavHold.sum.ms, g_lwNavHold.sum.sched, g_lwNavHold.sum.worst,
+            g_lwNavHold.sum.worstSched, g_lwNavHold.sum.worstFirst, g_lwNavHold.sum.worstBuilt, g_lwNavHold.sum.first, g_lwNavHold.sum.firstMs,
+            g_lwNavHold.sum.firstWorst, g_lwNavHold.sum.mostFirst, g_lwNavHold.budgetUs, g_lwNavHold.sum.over, g_lwNavHold.sum.built, g_lwNavHold.sum.builtMs,
+            g_lwNavHold.sum.builtWorst, g_lwNavHold.builtAge, g_lwNavHold.builtLeft, g_lwNavHold.sum.oldest, LW_NAV_RING - g_lwNavHold.sum.nearGap,
+            g_lwNavHold.sum.paused, g_lwNavHold.sum.pauses, g_lwNavHold.sum.lag, g_lwNavHold.sum.queueMost, g_lwSwap.bounded,
+            g_lwNavHold.firstNow, g_lwNavHold.firstAge, g_lwNavHold.sum.firstMost, g_lwNavHold.sum.firstOldest, kept, un[LW_UNSYNC_TICK], un[LW_UNSYNC_DUE],
+            un[LW_UNSYNC_END], g_lwNavHold.sum.marksHeld, LW_NAV_HOLD_MOST_MS, g_lwNavHold.sum.pastBound);
+    memset(&g_lwNavHold.sum, 0, sizeof g_lwNavHold.sum); memset(g_lwSwap.sumUnsync, 0, sizeof g_lwSwap.sumUnsync);
     LwNavSlotGuard();
 }
 /* A new level: the last one's summary, then its counts start again. */
@@ -4180,6 +4543,10 @@ static void LwNavSwapLevel(void)
     g_lwSwap.swaps = g_lwSwap.steps = g_lwSwap.parallel = g_lwSwap.lines = g_lwSwap.noLoad = 0;
     g_lwSwap.threads = 0; g_lwSwap.worstMs = 0;
     g_lwNavHold.held = g_lwNavHold.longest = g_lwNavHold.drains = g_lwNavHold.marked = g_lwNavHold.drainLines = g_lwNavHold.breaks = g_lwNavHold.resLines = g_lwNavHold.ringOuts = 0;
+    g_lwNavHold.pauseLines = g_lwNavHold.budgetLines = g_lwNavHold.boundLines = 0; g_lwNavHold.pauseAt = 0; g_lwSwap.endMs = 0;
+    memset(g_lwNavHold.boundNoted, 0, sizeof g_lwNavHold.boundNoted); memset(g_lwNavHold.openAt, 0, sizeof g_lwNavHold.openAt);
+    memset(g_lwNavHold.lagBuf, 0, sizeof g_lwNavHold.lagBuf); memset(g_lwNavHold.lagTaken, 0, sizeof g_lwNavHold.lagTaken);
+    memset(g_lwNavHold.lagPrev, 0, sizeof g_lwNavHold.lagPrev); memset(g_lwNavHold.lagOpen, 0, sizeof g_lwNavHold.lagOpen);
     memset(g_lwNavHold.stuckAt, 0, sizeof g_lwNavHold.stuckAt); memset(g_lwNavHold.seen, 0, sizeof g_lwNavHold.seen);
     memset(g_lwNavHold.oldAt, 0, sizeof g_lwNavHold.oldAt); memset(g_lwNavHold.longNoted, 0, sizeof g_lwNavHold.longNoted);
 }
@@ -4248,8 +4615,8 @@ static uintptr_t LwNavLoad(uintptr_t w, uint32_t* out, uintptr_t inst, void* p4,
         LwNavDrainNote("after a load the pop did not let through", idx, queued, ok, post);
     }
     else if (g_lwNavHold.grantQueued[idx] > 0) g_lwNavHold.sumRelaxed++;
-    co_framecost_add(CO_FC_NAVSWAP, between >= 0 ? g_lwSwap.unloadEnd[idx] : t);
-    if (!ok) { g_lwSwap.refused++; InterlockedExchange(&g_lwSwap.unsafe, 1); return r; }
+    g_lwNavHold.tickSwap += co_framecost_add(CO_FC_NAVSWAP, between >= 0 ? g_lwSwap.unloadEnd[idx] : t);
+    if (!ok) { LwNavUnsynced(); return r; }
     const double* pre = g_lwSwap.pre[idx];
     double ms = LwNavSum(pre) + g_lwSwap.unloadMs[idx] + (between > 0 ? between : 0) + loadMs + LwNavSum(post);
     g_lwSwap.swaps++;
@@ -4296,6 +4663,82 @@ static const struct { uint32_t rva; const char* bytes; } kLwHoldPins[] = {
     {0xBB1449u, "E8 F2 32 F2 FF 85 C0 0F 84 92 00 00 00"}, {0xBB14C9u, "48 89 BB 98 04 00 00"}, /* only when not empty; its new buffer */
     {0x7D77C9u, "39 88 9C 00 00 00 0F 94 C1 03 D9"}, {0x7D77DEu, "85 DB 0F 94 C1 88 88 78 04 00 00"}, /* the permit's test */
 };
+/* The scheduler's call and what LwNavCanStart reads: the call, 0x7B8200's head and nav count, the state 0x10 test, the
+ * budget test, a start's counts, the "built" skip, the processing's decrement, the nav loop's end. */
+static const struct { uint32_t rva; const char* bytes; } kLwSchedPins[] = {
+    {0x7B8ABAu, "E8 41 F7 FF FF"}, {0x7B8200u, "4C 8B DC 55 56 41 55 41 56 48 81 EC 98 00 00 00"}, {0x7B8210u, "44 8B 35 A9 AE 00 02"},
+    {0x7B83D5u, "44 8B 47 20 41 C1 E8 04 41 83 E0 01"},
+    {0x7B8412u, "2B 9F 90 00 00 00 41 8B CD 89 5C 24 44 45 85 C0 74 04 85 DB EB 0E 8B 87 88 00 00 00 2B 87 8C 00 00 00 85 C0 0F 9F C1 85 C9 0F 84 87 03 00 00"},
+    {0x7B8470u, "8B 43 5C A8 02 75 0B 41 BF 01 00 00 00 45 8B E0 EB 0F 45 85 C0 0F 84 1C 03 00 00 41 BC 01 00 00 00"},
+    {0x7B86ACu, "44 01 A7 90 00 00 00 44 01 BF 8C 00 00 00 FF 87 94 00 00 00"}, {0x7B8C55u, "41 FF 8D 8C 00 00 00"},
+    {0x7B87D1u, "85 DB 0F 8F 77 FB FF FF"},
+};
+/* The window's pins: the driver's test for a run in flight, its work question and what a no skips (the start, the
+ * queue's take), the path with no run, the question's own answers, the driver's one caller. */
+static const struct { uint32_t rva; const char* bytes; } kLwWindowPins[] = {
+    {0xBD1925u, "E8 66 F8 FF FF 84 C0 75 46"},
+    {0xBD193Fu, "E8 EC 7C 01 00 48 8D 54 24 20 48 8B CB E8 5F F8 FF FF 84 C0 74 1F"},
+    {0xBD1974u, "48 8B CB E8 14 F8 FF FF 84 C0 74 64"}, {0xBD19E4u, "44 8B 4C 24 34"},
+    {0xBD11B0u, "48 89 5C 24 08 57 48 83 EC 40 80 3A 00 48 8B DA 48 8B F9 74 32 48 8B 89 A0 04 00 00 E8 6F 35 F0 FF 85 C0 7F 15"},
+    {0xBD11EAu, "B0 01"}, {0xBD11F7u, "80 7B 24 00 74 4C 80 3B 00 75 47"}, {0x7D86E9u, "E8 A2 91 3F 00"},
+};
+/* A research build's number from the environment, `other` when unset or in a player's build. */
+static uint32_t LwNavEnv(const char* name, uint32_t other)
+{
+#ifdef CO_RESEARCH
+    char t[16] = "";
+    if (GetEnvironmentVariableA(name, t, sizeof t) > 0 && t[0] >= '0' && t[0] <= '9') return (uint32_t)strtoul(t, NULL, 10);
+#else
+    (void)name;
+#endif
+    return other;
+}
+/* `stub` (mov ecx,[rbp+0x110]; jmp LwNavSched) takes the place of the call's target; the result was unused (0x7B8ABF). */
+static void LwInstallNavSched(uintptr_t exe, uintptr_t stub)
+{
+    for (size_t i = 0; i < sizeof kLwSchedPins / sizeof kLwSchedPins[0]; i++)
+        if (!ApiCodeMatches(exe + kLwSchedPins[i].rva, kLwSchedPins[i].bytes))
+        {
+            Note("living world: nav: the tick's scheduler call is not the reviewed code (0x%X): the tick is not timed and a waiting record leaves at %u "
+                "job starts from its ring slot's turn, its world's step finished on the frame thread", kLwSchedPins[i].rva, LW_NAV_RING_LEFT);
+            return;
+        }
+    int64_t rel = (int64_t)stub - (int64_t)(exe + 0x7B8ABFu);
+    uint8_t call[5] = {0xE8, 0, 0, 0, 0}; int32_t r32 = (int32_t)rel; memcpy(call + 1, &r32, 4);
+    g_lwNavHold.listVar = (volatile uintptr_t*)(exe + 0x1B1C158u); g_lwNavHold.navCount = (volatile uint32_t*)(exe + 0x27C30C0u);
+    g_lwNavHold.pauseOff = LwNavEnv("HELLFORGE_LW_NAVPAUSE", 1) == 0;
+    g_lwNavHold.sched = (void (*)(void))(exe + 0x7B8200u);
+    if (!InRel32(rel) || ApiWrite(exe + 0x7B8ABAu, call, sizeof call))
+    { g_lwNavHold.sched = NULL; Note("living world: nav: the tick's scheduler call could not be written; the tick is not timed, no pause"); return; }
+    /* the nav job lever pins the engine's call here and installs after this */
+    static const uint8_t engine[5] = {0xE8, 0x41, 0xF7, 0xFF, 0xFF};
+    co_exe_own_write(exe + 0x7B8ABAu, engine, call, sizeof call);
+    Note("living world: nav: the tick's scheduler call goes through the hold (0x7B8ABA): the tick is timed; %s", g_lwNavHold.pauseOff ?
+        "the pause is off (HELLFORGE_LW_NAVPAUSE=0)" : "no job starts while a waiting record is within one call's starts of its ring slot's turn");
+}
+/* `stub` (jmp LwNavStartAsk) takes the place of the driver's second call of 0xBD11B0. Without it the first builds'
+ * budget would hold new cells' navmesh back by a run each, so they then leave with no budget. */
+static void LwInstallNavWindow(uintptr_t exe, uintptr_t stub)
+{
+    g_lwNavHold.windowMs = LwNavEnv("HELLFORGE_LW_NAVWINDOW_MS", LW_NAV_WINDOW_MS);
+    int64_t rel = (int64_t)stub - (int64_t)(exe + 0xBD1951u);
+    uint8_t call[5] = {0xE8, 0, 0, 0, 0}; int32_t r32 = (int32_t)rel; memcpy(call + 1, &r32, 4);
+    int pins = 1;
+    for (size_t i = 0; pins && i < sizeof kLwWindowPins / sizeof kLwWindowPins[0]; i++) pins = ApiCodeMatches(exe + kLwWindowPins[i].rva, kLwWindowPins[i].bytes);
+    if (g_lwNavHold.budgetUs && g_lwNavHold.windowMs && pins && InRel32(rel))
+    {
+        g_lwNavHold.startAsk = (uint8_t (*)(uintptr_t, void*))(exe + 0xBD11B0u);
+        if (ApiWrite(exe + 0xBD194Cu, call, sizeof call)) g_lwNavHold.startAsk = NULL;
+    }
+    if (g_lwNavHold.startAsk)
+        Note("living world: nav: while first builds wait for their budget the AI world's next run is put off a step, %u ms at most (0xBD194C)", g_lwNavHold.windowMs);
+    else if (g_lwNavHold.budgetUs && g_lwNavHold.windowMs)
+    {
+        g_lwNavHold.budgetUs = 0;
+        Note("living world: nav: the run's start is not the reviewed code or could not be written; first builds leave with no budget");
+    }
+    else if (g_lwNavHold.budgetUs) Note("living world: nav: the window is not kept open (HELLFORGE_LW_NAVWINDOW_MS=0); first builds past their budget wait for the next run's end");
+}
 static void LwInstallNavHold(uintptr_t exe, uintptr_t stub)
 {
     char off[4] = "";
@@ -4318,6 +4761,10 @@ static void LwInstallNavHold(uintptr_t exe, uintptr_t stub)
     if (!g_lwNavHold.enter || !g_lwNavHold.leave || ApiWrite(exe + 0x7B8B0Bu, code, sizeof code))
     { Note("living world: nav: the tick's pop could not be written; each swap's step is finished on the frame thread"); return; }
     Note("living world: nav: a built cell's completion waits for an idle AI world (the pop at 0x7B8B0B); no step is finished on the frame thread in play");
+    g_lwNavHold.budgetUs = LwNavEnv("HELLFORGE_LW_NAVFIRST_US", LW_NAV_FIRST_US);
+    Note("living world: nav: first builds leave within %u us of a tick, one at least (0 = all of them)", g_lwNavHold.budgetUs);
+    LwInstallNavSched(exe, stub + 32);
+    LwInstallNavWindow(exe, stub + 64);
 }
 /* A crash in the cutter leaves a small dump with no heap in it. A fault in 0xC87A40 (the recut), 0xC8B310 (a face's
  * old pieces) or 0xCB1110 (their edges), or under one of them, first logs what the dump lacks: the registers, the
@@ -4333,8 +4780,9 @@ static int LwCutFn(uintptr_t exe, uintptr_t at)
 }
 static int LwCutRead(uintptr_t at, void* to, size_t n)
 {
-    /* all or nothing: a read that crosses into memory it cannot reach fails as a whole */
-    return ReadProcessMemory(GetCurrentProcess(), (const void*)at, to, n, NULL) != 0;
+    /* all or nothing, as SafeRead and co_watch's ReadWord ask it: a short read is no read */
+    SIZE_T got = 0;
+    return ReadProcessMemory(GetCurrentProcess(), (const void*)at, to, n, &got) != 0 && got == n;
 }
 static void LwCutHex(uintptr_t at, size_t n, char* out, size_t cap)
 {
@@ -4419,6 +4867,12 @@ static void LwInstallNavSwapSync(void)
     g_lwSwap.runnerMake = (void (*)(void*))(exe + 0xA0F4D0u); g_lwSwap.runnerFree = (void (*)(void*))(exe + 0xA0F4F0u);
     g_lwSwap.queued = (int (*)(uintptr_t))(exe + 0xAD4740u); g_lwSwap.permit = (int (*)(int))(exe + 0x7D7740u);
     g_lwSwap.join = (void (*)(int))(exe + 0x7D7930u); g_lwSwap.table = exe + LW_AIW_TABLE; g_lwSwap.exe = exe;
+    /* the bounded drive: 0xBD04A0 and its one caller, the game's per-frame driver, with the pool's deadline */
+    if (ApiCodeMatches(exe + 0xBD04A0u, "40 53 48 83 EC 30 48 8B D9 0F 29 74 24 20 48 8B 89 A8 04 00 00 0F 28 F1") &&
+        ApiCodeMatches(exe + 0xBD04D5u, "48 8B 8B A8 04 00 00 0F 28 CE E8 6C 07 E4 FF") && ApiCodeMatches(exe + 0xBD198Cu, "F3 0F 10 8B 7C 04 00 00 48 8B CB E8 04 EB FF FF") &&
+        ApiCodeMatches(exe + 0xA10CBFu, "4C 89 43 40"))
+        g_lwSwap.drive = (void (*)(uintptr_t, float))(exe + 0xBD04A0u);
+    else Note("living world: nav: the run's bounded drive is not the reviewed code; a drain waits for the run in flight without a bound");
     if (ApiCodeMatches(exe + 0xC87A40u, "48 8B C4 4C 89 40 18 48 89 50 10 55 48 8D 68 D8") && ApiCodeMatches(exe + 0xC87F50u, "48 8B 45 40 4C 8B F3 48 83 C3 28 48 8B 50 18") &&
         ApiCodeMatches(exe + 0xC8B310u, "4C 8B DC 53 55 56 41 56 48 83 EC 48") && ApiCodeMatches(exe + 0xCB1110u, "45 85 C9 0F 8E B2 01 00 00 55 56 41 55 41 56"))
         AddVectoredExceptionHandler(1, LwCutFault);
@@ -4435,7 +4889,7 @@ static void LwInstallNavSwapSync(void)
     { g_lwSwap.tasksJobs = exe + LW_NAV_TASKS_JOBS; g_lwSwap.tasksInline = exe + LW_NAV_TASKS_INLINE; }
     else Note("living world: nav: the parallel step's code is not the reviewed one; swap steps run on the frame thread");
     /* each stub: mov rax, &g_lwSwap.cell; mov [rax], rbx; mov rax, hook; jmp rax (rax is the call's to clobber) */
-    uint8_t code[96] = {0};
+    uint8_t code[160] = {0};
     const uint8_t stub[25] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0x18, 0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0};
     uint64_t cell = (uint64_t)(uintptr_t)&g_lwSwap.cell, fn = (uint64_t)(uintptr_t)LwNavUnload;
     memcpy(code, stub, sizeof stub); memcpy(code + 2, &cell, 8); memcpy(code + 15, &fn, 8);
@@ -4444,6 +4898,11 @@ static void LwInstallNavSwapSync(void)
     const uint8_t jump[12] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0}; /* the pop: mov rax, LwNavPop; jmp rax */
     fn = (uint64_t)(uintptr_t)LwNavPop;
     memcpy(code + 64, jump, sizeof jump); memcpy(code + 66, &fn, 8);
+    const uint8_t sched[18] = {0x8B, 0x8D, 0x10, 0x01, 0, 0, 0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0}; /* mov ecx,[rbp+0x110]; jmp LwNavSched */
+    fn = (uint64_t)(uintptr_t)LwNavSched;
+    memcpy(code + 96, sched, sizeof sched); memcpy(code + 104, &fn, 8);
+    fn = (uint64_t)(uintptr_t)LwNavStartAsk;                                   /* the run's start: mov rax, LwNavStartAsk; jmp rax */
+    memcpy(code + 128, jump, sizeof jump); memcpy(code + 130, &fn, 8);
     memcpy(block, code, sizeof code);
     DWORD protect; VirtualProtect(block, 0x1000, PAGE_EXECUTE_READ, &protect); FlushInstructionCache(GetCurrentProcess(), block, 0x1000);
     int64_t r1 = (int64_t)(uintptr_t)block - (int64_t)(exe + 0x7B9058u), r2 = (int64_t)(uintptr_t)(block + 32) - (int64_t)(exe + 0x7B9249u);
@@ -5327,6 +5786,14 @@ static int LwNavLeftAt(int read, uint32_t state)
     }
     return 1;
 }
+/* A frame of LwNavTick on which the hold after an unsynchronised swap (LwNavSwapHeld) kept its marks back, for the 30 s line. */
+static int LwNavMarksHeld(void)
+{
+    if (!LwNavSwapHeld()) return 0;
+    g_lwNav.busyFrames++; g_lwNavHold.sum.marksHeld++;
+    return 1;
+}
+
 static int LwNavLeft(void)
 {
     uintptr_t lg = LwLevel(); uint32_t state = 0;
@@ -5397,7 +5864,7 @@ static void LwNavTick(uintptr_t dir)
         else w++;
     }
     /* After a swap the hooks could not synchronise: no new marks until the AI world is idle (LwNavSwapHeld) */
-    if (LwNavSwapHeld()) { g_lwNav.busyFrames++; return; }
+    if (LwNavMarksHeld()) return;
     /* One slot that differs from what was written, when no job is in flight */
     int k = 0;
     for (; k < NEAR_TILES_MAX; k++)

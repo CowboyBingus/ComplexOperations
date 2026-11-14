@@ -10,7 +10,7 @@
 
 static const char* const kPartNames[CO_FC_PARTS] = {
     "status", "streamer", "span rescue", "net patience", "terrain diagnostics", "terrain probe", "living world",
-    "daylight", "tactical map", "density", "scatter merge", "moving tiles", "ground keep", "far grass", "nav swaps"};
+    "daylight", "tactical map", "density", "scatter merge", "moving tiles", "ground keep", "far grass", "nav swaps", "nav tick"};
 
 static struct
 {
