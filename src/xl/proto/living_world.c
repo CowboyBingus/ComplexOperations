@@ -531,7 +531,7 @@ static void LwBpCmd(int on); static void LwBpFrame(void); static void LwPcFrame(
 static void LwBbFrame(void); /* living_world_bpbuild.c, test instrument */
 static void LwInstallNavTime(void); /* living_world_navtime.c, test instrument */
 static void LwInstallNavJob(void); static void LwNavJobCmd(int mode); static void LwNjFrame(void); /* living_world_navjob.c */
-static void LwAibFrame(void); static void LwAibInit(void); static void LwAibCmd(int us, int raiseMs); /* living_world_aibudget.c */
+static void LwAibFrame(void); static void LwAibInit(void); static void LwAibCmd(int us, int raiseMs); static void LwAibDrainCmd(const char* text); /* living_world_aibudget.c */
 static void LwSemFrame(void); static void LwInstallSemCap(void); static void LwSemCapCmd(int on); /* living_world_semcap.c */
 static void LwRhFrame(void); static void LwInstallRenderHelp(void); static void LwRenderHelpCmd(int on); /* living_world_renderhelp.c */
 static void LwAllocStatsCmd(int mode); /* living_world_allocstats.c */
@@ -2962,6 +2962,7 @@ static void LwTestCommands(void)
         else if (sscanf(cmds[c], "delay %d", &idx) == 1) LwDelayCmd(idx);
         else if (sscanf(cmds[c], "substep cycle %d", &idx) == 1) LwSubCycleCmd(idx);
         else if (sscanf(cmds[c], "aitime %d", &idx) == 1) LwAiTimeCmd(idx);
+        else if (strncmp(cmds[c], "aidrain ", 8) == 0) LwAibDrainCmd(cmds[c] + 8);
         else if (sscanf(cmds[c], "aibudget %d %d", &ia, &ib) == 2) LwAibCmd(ia, ib);
         else if (sscanf(cmds[c], "aibudget %d", &idx) == 1) LwAibCmd(idx, 0);
         else if (strncmp(cmds[c], "tasks ", 6) == 0) LwTasksCmd(cmds[c] + 6);
