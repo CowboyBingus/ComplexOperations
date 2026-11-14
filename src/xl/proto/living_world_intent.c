@@ -1733,8 +1733,38 @@ static void LwHoldPoint(const float* pl, float a, float rMin, int k, float* out)
     float r = rMin + 8.0f + 6.0f * (float)(k % 3), b = a + side[k / 3 % 3] / r;
     out[0] = pl[0] + r * cosf(b); out[1] = pl[1] + r * sinf(b);
 }
-/* After a refused request: a waiting squad's next point (LwOnlinePlace). All nine refused, its bearing moves on by
- * LW_HOLD_SHIFT, away from the lower lanes, and stays moved (holdShift): the patch was a dead end. */
+/* No other waiting squad's bearing within LW_HOLD_CLEAR of this one: their points stay over LW_SPACING apart. */
+#define LW_HOLD_CLEAR 0.5f
+static int LwHoldClear(const LwSquad* q, float bearing)
+{
+    for (const LwSquad* o = g_lwSquads; o < g_lwSquads + g_lwWorld.count; o++)
+    {
+        if (o == q || o->state != LW_OFFLINE || !o->held) continue;
+        float d = o->holdA - bearing;
+        while (d > 3.14159265f) d -= 6.2831853f;
+        while (d < -3.14159265f) d += 6.2831853f;
+        if (fabsf(d) < LW_HOLD_CLEAR) return 0;
+    }
+    return 1;
+}
+/* A dead-end patch: the bearing turns to the next of LW_HOLD_SHIFT x (1, 2, 3, -1, -2, -3, 0) from its lane (mirrored
+ * in the lower lanes) that is clear of the other waiting squads, and stays there (holdShift). */
+static void LwHoldTurn(LwSquad* q)
+{
+    static const int8_t steps[7] = {0, 1, 2, 3, -1, -2, -3};
+    float lane = q->holdA - q->holdShift, dir = q->holdLane < 0 ? -LW_HOLD_SHIFT : LW_HOLD_SHIFT;
+    int at = 0;
+    for (int t = 1; t < 7; t++) if (fabsf(q->holdShift - dir * (float)steps[t]) < 0.01f) at = t;
+    for (int t = 0; t < 7; t++)
+    {
+        at = (at + 1) % 7;
+        float shift = dir * (float)steps[at];
+        if (!LwHoldClear(q, lane + shift)) continue;
+        q->holdShift = shift; q->holdA = lane + shift;
+        return;
+    }
+}
+/* After a refused request: a waiting squad's next point (LwOnlinePlace); all nine refused, its bearing turns. */
 static void LwHoldNext(LwSquad* q)
 {
     if (!q->held || q->state != LW_OFFLINE || g_lwWorld.playersAt <= 0) return;
@@ -1743,7 +1773,7 @@ static void LwHoldNext(LwSquad* q)
     for (int t = 0; t < 18; t++)
     {
         q->holdTry = (uint8_t)((q->holdTry + 1) % 9);
-        if (q->holdTry == 0) { float turn = q->holdLane < 0 ? -LW_HOLD_SHIFT : LW_HOLD_SHIFT; q->holdShift += turn; q->holdA += turn; }
+        if (q->holdTry == 0) LwHoldTurn(q);
         LwHoldPoint(g_lwWorld.players[pi], q->holdA, rMin, q->holdTry, p);
         if (LwNearestPlayer2(p[0], p[1]) < rMin * rMin || p[0] * p[0] + p[1] * p[1] >= g_lwWorld.radius * g_lwWorld.radius) continue;
         q->pos[0] = p[0]; q->pos[1] = p[1];
@@ -1785,6 +1815,9 @@ static int LwIntentHoldAt(LwSquad* q, float nx, float ny, int keep)
             while (da > 3.14159265f) da -= 6.2831853f;
             while (da < -3.14159265f) da += 6.2831853f;
             a = q->holdA + (da > 0.436f ? 0.436f : da < -0.436f ? -0.436f : da);
+            /* on its bearing already: its points go on from where they are (slot and sight refusals retry every 3 s,
+             * so a start over here would never reach the ninth point and the turn) */
+            if (fabsf(a - q->holdA) < 0.001f) { q->held = 1; return 1; }
         }
         float px = pl[0] + r * cosf(a), py = pl[1] + r * sinf(a);
         if (LwNearestPlayer2(px, py) >= rMin * rMin && px * px + py * py < g_lwWorld.radius * g_lwWorld.radius)
