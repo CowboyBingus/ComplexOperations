@@ -285,7 +285,10 @@ static int RoadGradeStations(uintptr_t block)
         const RoadSpur* s = &g_spurs.spur[k];
         if (s->end > points || s->end < s->first + 2) continue;
         uint32_t from = GRADE_NONE, to = GradeFieldAttach(&g_grade.f, pts[2 * (size_t)(s->end - 1)], pts[2 * (size_t)(s->end - 1) + 1], arterial);
+        /* the station on the arterial is the arterial's; the spur's own are solved after it, against its height */
+        const uint32_t own = g_grade.f.stations;
         GradeFieldChain(&g_grade.f, pts + 2 * (size_t)s->first, s->end - s->first, &from, &to);
+        for (uint32_t i = own; to != GRADE_NONE && i < g_grade.f.stations; i++) g_grade.f.s[i].later = 1;
         if (s->own != ROADS_NO_NODE && from != GRADE_NONE) g_grade.f.s[from].edge = 1;
     }
     free(nodeStation);
@@ -327,7 +330,7 @@ static int RoadGradeSolve(void)
         f->s[i].held = f->s[i].flat;
         for (uint32_t k = 0; k < f->s[i].links; k++) f->s[i].held &= f->s[f->s[i].link[k]].flat;
     }
-    g_grade.torn = GradeSolveCapped(f->s, f->stations, GRADE_SOFT, GRADE_HARD, GRADE_STEEP, GRADE_EARTH, GRADE_PASSES);
+    g_grade.torn = GradeSolveStaged(f->s, f->stations, GRADE_SOFT, GRADE_HARD, GRADE_STEEP, GRADE_EARTH, GRADE_PASSES);
     uint32_t at = 0;
     g_grade.steep = GradeRelaxed(f->s, f->stations, GRADE_HARD, &g_grade.steepMetres, &g_grade.steepest, &at);
     g_grade.steepAt[0] = f->stations ? f->xy[2 * at] : 0.0f; g_grade.steepAt[1] = f->stations ? f->xy[2 * at + 1] : 0.0f;

@@ -1962,7 +1962,8 @@ uint32_t CoXlTestGradeSteep(const float* ground, const uint8_t* pinned, const fl
     return torn;
 }
 /* Several roads through the level's own solve (RoadGradeSolve: pins, landings, ties, the capped and relaxed profile),
- * chains as CoXlTestGradeField takes them. out: landings, their links, pins missed, the furthest miss, the links that
+ * chains as CoXlTestGradeField takes them, but spur counts the last chains that are spurs, each hung on the chains
+ * before them. out: landings, their links, pins missed, the furthest miss, the links that
  * may climb over the hard limit, the steepest slope taken on one. Returns the stations torn; -1 not solved. */
 static float (*g_testGradeGround)(float, float);
 static uint64_t TestGradeSample(void* descriptor, float* uv, void* out, uint64_t unused);
@@ -1970,6 +1971,7 @@ int CoXlTestGradeRoads(const float* pts, const uint32_t* counts, const uint32_t*
     float playable, double out[6])
 {
     static uint32_t shared[64];
+    uint32_t arterial = 0;
     GradeField* f = &g_testField;
     GradeFieldFree(f);
     memset(shared, 0xFF, sizeof shared);
@@ -1978,8 +1980,12 @@ int CoXlTestGradeRoads(const float* pts, const uint32_t* counts, const uint32_t*
         uint32_t own[2] = {GRADE_NONE, GRADE_NONE};
         uint32_t* a = ends[2 * c] < 64 ? &shared[ends[2 * c]] : &own[0];
         uint32_t* b = ends[2 * c + 1] < 64 ? &shared[ends[2 * c + 1]] : &own[1];
-        if (spur && c + 1 == chains) own[1] = GradeFieldAttach(f, pts[2 * (counts[c] - 1)], pts[2 * (counts[c] - 1) + 1], f->segs);
+        const int hung = spur > 0 && c + (uint32_t)spur >= chains;
+        if (hung && c + (uint32_t)spur == chains) arterial = f->segs;
+        if (hung) own[1] = GradeFieldAttach(f, pts[2 * (counts[c] - 1)], pts[2 * (counts[c] - 1) + 1], arterial);
+        const uint32_t before = f->stations;
         GradeFieldChain(f, pts, counts[c], a, b);
+        for (uint32_t i = before; hung && i < f->stations; i++) f->s[i].later = 1;
         pts += 2 * (size_t)counts[c];
     }
     GradeFieldFree(&g_grade.f);
@@ -2005,12 +2011,15 @@ int CoXlTestGradeStations(uintptr_t block, float (*ground)(float, float), float 
     memset(&g_grade.f, 0, sizeof g_grade.f); g_grade.sample = NULL; g_grade.capture = 0;
     return made ? (int)g_testField.stations : -1;
 }
-/* A station's marks: bit 0 pinned, bit 1 a spur's end at its place's edge; *target and *ground its heights. */
+/* A station's marks: bit 0 pinned, bit 1 a spur's end at its place's edge, bit 2 a spur's own (solved after the
+ * arterials); *target and *ground its heights. */
 int CoXlTestGradeStationPin(uint32_t i, float* xy, float* target, float* ground)
 {
     xy[0] = g_testField.xy[2 * i]; xy[1] = g_testField.xy[2 * i + 1]; *target = g_testField.s[i].target; *ground = g_testField.s[i].ground;
-    return g_testField.s[i].pinned | g_testField.s[i].edge << 1;
+    return g_testField.s[i].pinned | g_testField.s[i].edge << 1 | g_testField.s[i].later << 2;
 }
+/* The ground's slope across the road at a station of the test field (GradeFieldCross), as a tangent. */
+float CoXlTestGradeStationCross(uint32_t i) { return g_testField.s[i].cross; }
 void CoXlTestRoadsRim(float playable) { g_roadsPlayable = playable; }
 int CoXlTestRoadsSpurPad(uint32_t own, float* at, float* away) { return RoadsSpurPad(own, at, away); }
 void CoXlTestRoadsKeepPlace(uint32_t i, uint64_t place) { g_roadKeep.place[i] = place; }

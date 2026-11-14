@@ -1029,18 +1029,20 @@ static void ArterialsRound(void)
 
     g_case = "grading: the spur's station at its place's edge keeps the ground, and no other station is held";
     /* a hillside of 27 degrees from 80 m north of the arterial: neither limit follows it, so only a pin stands on it */
-    uint32_t past = 99, edges = 0, pins = 0; float off = 0.0f;
+    uint32_t past = 99, edges = 0, pins = 0, hung = 0; float off = 0.0f;
     const int stations = CoXlTestGradeStations(block, GroundHill, 16384.0f, 9000.0f, &past);
     CHECK(stations > 51 && past == 0);
     for (int i = 0; i < stations; i++)
     {
         float xy[2], t, g; const int marks = CoXlTestGradeStationPin((uint32_t)i, xy, &t, &g);
-        pins += (uint32_t)(marks & 1);
+        pins += (uint32_t)(marks & 1); hung += (uint32_t)((marks >> 2) & 1);
         if (!(marks & 2)) continue;
         edges++; off = fabsf(t - g);
+        CHECK(marks & 4); /* the spur's own station: solved after the arterials, against their heights */
         CHECK((marks & 1) && fabsf(xy[0] - table[0]) < 0.01f && fabsf(xy[1] - table[1]) < 0.01f && g > 40.0f);
     }
     CHECK(edges == 1 && pins == 1 && off < 0.001f);
+    CHECK(hung >= 2 && hung + 51 <= (uint32_t)stations); /* the spur's stations but the one on the arterial */
 
     g_case = "grading: stations at the rim of a level whose roads stay inside keep their ground; where a road had to cross, none does";
     /* the roads lie 4,730 to 5,110 m from the middle of this world */
