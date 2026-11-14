@@ -996,7 +996,7 @@ static void FightNear(void)
     CHECK(Count("no fight is placed there") == lines + 2);
     CHECK(CoXlTestLwFightTake(151, 0, 6, 6, 0, 0, now + 29000, 0, pos, &eng, &seen) == -1 && Count("no fight is placed there") == lines + 2);
     CHECK(CoXlTestLwFightTake(151, 0, 6, 6, 0, 0, now + 31000, 0, pos, &eng, &seen) == -1 && Count("no fight is placed there") == lines + 3);
-    CHECK(Count("no fight is placed there (2 such clusters since the last such line)") == 1);
+    CHECK(Count("no fight is placed there; its units name nobody they fight (2 such clusters since the last such line)") == 1);
 
     g_case = "a fight's point follows its units while a player is near the new place; over 200 m from every player it stays and the fight is not seen";
     CoXlTestLwFightsClear();
@@ -1009,20 +1009,35 @@ static void FightNear(void)
     CHECK(CoXlTestLwFightTake(205, 0, 4, 0, 0, 0, now + 4000, 0, pos, &eng, &seen) == -1 && seen == now + 2000);
     CHECK(CoXlTestLwFightTake(195, 0, 4, 0, 0, 0, now + 5000, 0, pos, &eng, &seen) == 0 && seen == now + 5000 && pos[0] == 190.0f);
 
-    g_case = "no player near, but whom the units fight is within 150 m: the fight is there and its point follows them";
-    const uint32_t a[1] = {0xA}; const float a1100[2] = {1100, 0}, a1300[2] = {1300, 0};
+    g_case = "no player within 150 m, but one the units fight is, with a player 300 m from it: the fight is there and its point follows them";
+    const uint32_t a[1] = {0xA}; const float a1100[2] = {1100, 0}, a1300[2] = {1300, 0}, p1400[2] = {1400, 0}, p1401[2] = {1401, 0};
+    CoXlTestLwPlayerAt(p1400);
     CoXlTestLwFightsClear();
+    const int named = Count("; its units fight 0000000A, no player (resource 0000000000000000), 100 m away and 300 m from the nearest player");
     CHECK((CoXlTestLwFightTakeWhom(1000, 0, 6, a, a1100, 1, now, pos) & 0xFF) == 0 && pos[0] == 1000.0f && CoXlTestLwFightTargetOf(0) == 0xA);
+    CHECK(Count("; its units fight 0000000A, no player (resource 0000000000000000), 100 m away and 300 m from the nearest player") == named + 1);
     CoXlTestLwFightTarget(0, 0xA, a1100);
     CHECK((CoXlTestLwFightTakeWhom(1040, 0, 6, a, a1100, 1, now + 1000, pos) & 0xFF) == 0 && pos[0] == 1040.0f);
     g_case = "units that name nobody: within 150 m of the fight's living target they still count; with it dead they do not";
     CHECK(CoXlTestLwFightTake(1050, 0, 6, 6, 0, 0, now + 2000, 0, pos, &eng, &seen) == 0 && pos[0] == 1050.0f);
-    CoXlTestLwFightTarget(0, 0xA, NULL);
+    g_case = "the nearest player 301 m from that target: neither the cluster's target nor the fight's holds the fight";
+    CoXlTestLwPlayerAt(p1401);
+    CHECK(CoXlTestLwFightTakeWhom(1060, 0, 6, a, a1100, 1, now + 3000, pos) == -1);
     CHECK(CoXlTestLwFightTake(1060, 0, 6, 6, 0, 0, now + 3000, 0, pos, &eng, &seen) == -1 && pos[0] == 1050.0f);
-    g_case = "whom they fight 200 m from them: no fight there";
+    CoXlTestLwPlayerAt(p1400);
+    CHECK(CoXlTestLwFightTake(1060, 0, 6, 6, 0, 0, now + 4000, 0, pos, &eng, &seen) == 0 && pos[0] == 1060.0f);
+    CoXlTestLwFightTarget(0, 0xA, NULL);
+    CHECK(CoXlTestLwFightTake(1070, 0, 6, 6, 0, 0, now + 5000, 0, pos, &eng, &seen) == -1 && pos[0] == 1060.0f);
+    g_case = "one they fight 200 m from them, a player beside it: no fight there";
     CoXlTestLwFightsClear();
+    CoXlTestLwPlayerAt(p1400);
     CHECK(CoXlTestLwFightTakeWhom(1100, 0, 6, a, a1300, 1, now, pos) == -1);
     CoXlTestLwFightTarget(0, 0, NULL);
+    CoXlTestLwPlayerAt(pl);
+    g_case = "a new fight's line says when its units name nobody";
+    CoXlTestLwFightsClear();
+    const int nobody = Count("m from the nearest player; its units name nobody they fight");
+    CHECK(CoXlTestLwFightTake(100, 0, 6, 6, 0, 0, now, 0, pos, &eng, &seen) == 0 && Count("m from the nearest player; its units name nobody they fight") == nobody + 1);
 
     g_case = "eight players 400 m apart: units 100 m from the last one make a fight; 200 m from the two nearest make none";
     float pts[16]; for (int k = 0; k < 8; k++) { pts[2 * k] = 400.0f * (float)k; pts[2 * k + 1] = 0; }
@@ -1049,6 +1064,7 @@ static void ShotAt(void)
     g_case = "units 400 m from the only player that fight that player make a fight where they stand, the player its target";
     CoXlTestLwFightsClear();
     CHECK((CoXlTestLwFightTakeWhom(400, 0, 6, av, at0, 1, now, pos) & 0xFF) == 0 && pos[0] == 400.0f && CoXlTestLwFightTargetOf(0) == 0x502);
+    CHECK(Count("400 m from the nearest player; its units fight player 00000502 400 m away") == 1);
     g_case = "and keep it seen, scan after scan";
     CHECK(CoXlTestLwFightTake(410, 0, 6, 6, 0, 0x502, now + 1000, 0, pos, &eng, &seen) == 0 && seen == now + 1000 && pos[0] == 410.0f);
     g_case = "units as far that fight one that is no player make none";
@@ -1156,11 +1172,16 @@ static void AimNear(void)
     CoXlTestLwSendSetup(0, sq, fight);
     CoXlTestLwPlayerAt(gone);
     CHECK(CoXlTestLwSend(to, &moves, &next, &sentAt) == 0 && sentAt == 1 && Count("sends no squad: no player and no target of it within 150 m") == none + 1);
-    g_case = "its living target 60 m from its point: the squad is sent to the target";
+    g_case = "its living target 60 m from its point, a player 300 m from the target: the squad is sent to the target; 301 m: none is sent";
+    const float p1360[2] = {1360, 0}, p1361[2] = {1361, 0};
     CoXlTestLwSendSetup(0, sq, fight);
-    CoXlTestLwPlayerAt(gone);
+    CoXlTestLwPlayerAt(p1360);
     CoXlTestLwFightTarget(0, 0x400001, p);
     CHECK(CoXlTestLwSend(to, &moves, &next, &sentAt) == 2 && to[0] == 1060.0f && Count("sends no squad: no player and no target of it within 150 m") == none + 1);
+    CoXlTestLwSendSetup(0, sq, fight);
+    CoXlTestLwPlayerAt(p1361);
+    CoXlTestLwFightTarget(0, 0x400001, p);
+    CHECK(CoXlTestLwSend(to, &moves, &next, &sentAt) == 0 && Count("sends no squad: no player and no target of it within 150 m") == none + 2);
     CoXlTestLwFightTarget(0, 0, NULL);
 }
 
@@ -1195,6 +1216,12 @@ static void TargetFought(void)
     CoXlTestLwFightTakeWhom(0, 0, 6, cd, at100and20, 2, now + 50000, pos);
     CoXlTestLwFightTakeWhom(0, 0, 6, a, at50, 1, now + 55000, pos);
     CHECK(CoXlTestLwFightTargetOf(0) == 0xD); /* fought 5 s ago */
+    g_case = "of two that are no players, the one with a player within 300 m of it is the target, though the other is nearer the point";
+    const uint32_t ef[2] = {0xE, 0xF}; const float e350f200[4] = {350, 0, -200, 0}; float p100[2];
+    CoXlTestLwFightsClear();
+    CHECK((CoXlTestLwFightTakeWhom(100, 0, 6, ef, e350f200, 2, now + 51000, p100) >> 8) == 2 && CoXlTestLwFightTargetOf(0) == 0xF);
+    CoXlTestLwFightsClear();
+    CoXlTestLwFightTakeWhom(0, 0, 6, cd, at100and20, 2, now + 50000, pos);
     g_case = "a target the units go on fighting stays, though they fight one nearer the point as well";
     const uint32_t c[1] = {0xC}; const float at100[2] = {100, 0};
     CoXlTestLwFightTakeWhom(0, 0, 6, c, at100, 1, now + 56000, pos);

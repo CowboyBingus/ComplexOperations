@@ -431,6 +431,7 @@ static void LwStallCheckAt(LwSquad* q, const uint32_t* members, int n, const flo
 #define LW_FIGHT_RESEND 10000  /* ms between a fight's sends once it has sent: a squad that fails at once is not replaced every scan (D) */
 #define LW_FIGHT_AIM 150.0f    /* a fight's target is its squads' aim within this of the fight's point: a target that left is not followed across the map; and a fight is only within this of a player or of whom its units fight (D) */
 #define LW_FIGHT_OUT 200.0f    /* a fight that is on stays while a player is within this of its units: in at LW_FIGHT_AIM, out here, so a player at the edge does not end it and start it again with a new set of squads (D) */
+#define LW_FIGHT_OTHER 300.0f  /* a target that is no player (a sentry, an ally, an objective) holds or aims a fight only with a player within this of it: one far from every player drew squads to a place no player was (D) */
 #define LW_FIGHT_FOUGHT 5000   /* ms a fight keeps a target none of its units fights: two clusters of one fight may fight two players, and the aim must not change with each (D) */
 #define LW_FIGHT_MISS 30000    /* ms a squad keeps its point after neither its fight's target nor its point took a goal, before it asks again (D) */
 #define LW_HEARD_HOLD 30000    /* ms members at alert 1 or 2 keep a squad from a new point: at a fight some member hears something most of the time, and it would never move (D) */
@@ -501,13 +502,18 @@ static int LwIsPlayer(uint32_t entity)
     for (int i = 0; i < g_lwWorld.playersAt; i++) if (entity && g_lwWorld.avatars[i] == entity) return 1;
     return 0;
 }
-/* The target is the aim: within LW_FIGHT_AIM of the point; a player also at any range while a unit of the fight
- * fought it in the last LW_FIGHT_FOUGHT, so a player shot at from afar gets the help the shooters draw. One that
- * left and is fought no more is not followed across the map. */
+/* One on the Helldivers' side counts for a fight: a player, or another with a player within LW_FIGHT_OTHER of it. */
+static int LwTargetCounts(uint32_t target, const float* tpos)
+{
+    return LwIsPlayer(target) || LwNearestPlayer2(tpos[0], tpos[1]) <= LW_FIGHT_OTHER * LW_FIGHT_OTHER;
+}
+/* The target is the aim: one that counts within LW_FIGHT_AIM of the point; a player also at any range while a unit
+ * of the fight fought it in the last LW_FIGHT_FOUGHT, so a player shot at from afar gets the help the shooters
+ * draw. One that left and is fought no more is not followed across the map. */
 static int LwFightTargetHolds(LwFight* fi, ULONGLONG now)
 {
     if (!LwFightTargetLives(fi)) return 0;
-    if (LwDist2(fi->tpos, fi->pos[0], fi->pos[1]) <= LW_FIGHT_AIM * LW_FIGHT_AIM) return 1;
+    if (LwDist2(fi->tpos, fi->pos[0], fi->pos[1]) <= LW_FIGHT_AIM * LW_FIGHT_AIM) return LwTargetCounts(fi->target, fi->tpos);
     return LwIsPlayer(fi->target) && now <= fi->foughtAt + LW_FIGHT_FOUGHT;
 }
 static const float* LwFightAim(LwFight* fi, ULONGLONG now) { return LwFightTargetHolds(fi, now) ? fi->tpos : fi->pos; }
@@ -1229,14 +1235,33 @@ static void LwClusterAdd(LwCluster* c, const float* p, int places)
     c->hotN++;
 }
 /* Where a fight may be (D): within LW_FIGHT_AIM of a player (LW_FIGHT_OUT for a fight that is on), where its units
- * fight a player at any range, or within LW_FIGHT_AIM of a living target of the cluster or the fight. Players who
- * are shot at keep their fight; units that walk off from every player take none along and start none out there. */
+ * fight a player at any range, or within LW_FIGHT_AIM of a living target of the cluster or the fight that counts
+ * (LwTargetCounts). Players who are shot at keep their fight; units that walk off from every player take none along. */
 static int LwFightPlaceOk(const LwCluster* c, const float* at, int f)
 {
     const float r2 = LW_FIGHT_AIM * LW_FIGHT_AIM, in = f >= 0 ? LW_FIGHT_OUT : LW_FIGHT_AIM;
     if (LwNearestPlayer2(at[0], at[1]) <= in * in) return 1;
-    for (int k = 0; k < c->targetN; k++) if (LwIsPlayer(c->target[k]) || LwDist2(c->tpos[k], at[0], at[1]) <= r2) return 1;
-    return f >= 0 && LwFightTargetLives(&g_lwFights[f]) && LwDist2(g_lwFights[f].tpos, at[0], at[1]) <= r2;
+    for (int k = 0; k < c->targetN; k++)
+        if (LwIsPlayer(c->target[k]) || (LwDist2(c->tpos[k], at[0], at[1]) <= r2 && LwTargetCounts(c->target[k], c->tpos[k]))) return 1;
+    LwFight* fi = f >= 0 ? &g_lwFights[f] : NULL;
+    return fi && LwFightTargetLives(fi) && LwDist2(fi->tpos, at[0], at[1]) <= r2 && LwTargetCounts(fi->target, fi->tpos);
+}
+/* Whom a cluster's units fight, for the fight's lines: a player or not (then its resource, to tell a sentry from an
+ * ally), how far from the units and from the nearest player. A fight far from every player is read from this. */
+static const char* LwClusterWhom(const LwCluster* c, const float* at)
+{
+    static char text[420]; size_t len = 0;
+    if (c->targetN == 0) return "; its units name nobody they fight";
+    len = (size_t)snprintf(text, sizeof text, "; its units fight ");
+    for (int k = 0; k < c->targetN && len < sizeof text - 96; k++)
+    {
+        double off = (double)sqrtf(LwDist2(c->tpos[k], at[0], at[1])), byPlayer = (double)sqrtf(LwNearestPlayer2(c->tpos[k][0], c->tpos[k][1]));
+        uint32_t u = 0;
+        if (LwIsPlayer(c->target[k])) len += (size_t)snprintf(text + len, sizeof text - len, "%splayer %08X %.0f m away", k ? ", " : "", c->target[k], off);
+        else len += (size_t)snprintf(text + len, sizeof text - len, "%s%08X, no player (resource %016llx), %.0f m away and %.0f m from the nearest player", k ? ", " : "", c->target[k],
+            (unsigned long long)EvpEntityResource(g_lw.game, c->target[k], &u), off, byPlayer);
+    }
+    return text;
 }
 /* The log's line for units engaged where no fight may be: at most one in 30 s, with the clusters since the last. */
 static struct { ULONGLONG next; uint32_t since; } g_lwFar;
@@ -1246,8 +1271,9 @@ static void LwFightFar(const LwCluster* c, const float* at, int f, ULONGLONG now
     g_lwFar.since++; g_lwRush.afar++;
     if (now < g_lwFar.next) return;
     if (f >= 0) snprintf(stays, sizeof stays, "; fight %d's point stays at (%.0f, %.0f)", f, (double)g_lwFights[f].pos[0], (double)g_lwFights[f].pos[1]);
-    Note("living world: %d engaged at (%.0f, %.0f)%s, %.0f m from the nearest player: over %.0f m from every player and from whom they fight, no fight is placed there%s (%u such clusters since the last such line)",
-        c->n, (double)at[0], (double)at[1], c->call ? " (a call for reinforcements)" : "", (double)sqrtf(LwNearestPlayer2(at[0], at[1])), (double)LW_FIGHT_AIM, stays, g_lwFar.since);
+    Note("living world: %d engaged at (%.0f, %.0f)%s, %.0f m from the nearest player: over %.0f m from every player and from whom they fight, no fight is placed there%s%s (%u such clusters since the last such line)",
+        c->n, (double)at[0], (double)at[1], c->call ? " (a call for reinforcements)" : "", (double)sqrtf(LwNearestPlayer2(at[0], at[1])), (double)(f >= 0 ? LW_FIGHT_OUT : LW_FIGHT_AIM), stays,
+        c->call ? "" : LwClusterWhom(c, at), g_lwFar.since);
     g_lwFar.next = now + 30000; g_lwFar.since = 0;
 }
 /* The fight's target from a cluster: kept while it lives within LW_FIGHT_AIM of the point and a unit of the fight
@@ -1259,6 +1285,7 @@ static void LwFightTargetTake(LwFight* fi, const LwCluster* c, ULONGLONG now)
     for (int k = 0; k < c->targetN; k++)
     {
         if (c->target[k] == fi->target) fi->foughtAt = now;
+        if (!LwTargetCounts(c->target[k], c->tpos[k])) continue; /* far from every player: no aim for squads */
         if (best < 0 || LwDist2(c->tpos[k], fi->pos[0], fi->pos[1]) < LwDist2(c->tpos[best], fi->pos[0], fi->pos[1])) best = k;
     }
     if (best < 0 || (LwFightTargetHolds(fi, now) && now - fi->foughtAt <= LW_FIGHT_FOUGHT)) return;
@@ -1279,8 +1306,8 @@ static int LwFightTake(const LwCluster* c, ULONGLONG now)
         if (freeSlot < 0 || (c->hotN == 0 && !c->call)) return -1;
         f = freeSlot; memset(&g_lwFights[f], 0, sizeof g_lwFights[f]);
         g_lwFights[f].live = 1; g_lwFights[f].born = now; g_lwRush.fights++;
-        Note("living world: fight %d at (%.0f, %.0f, %.1f): %d engaged%s, %.0f m from the nearest player", f, (double)at[0], (double)at[1], (double)at[2], c->n,
-            c->call ? " (a call for reinforcements)" : "", (double)sqrtf(LwNearestPlayer2(at[0], at[1])));
+        Note("living world: fight %d at (%.0f, %.0f, %.1f): %d engaged%s, %.0f m from the nearest player%s", f, (double)at[0], (double)at[1], (double)at[2], c->n,
+            c->call ? " (a call for reinforcements)" : "", (double)sqrtf(LwNearestPlayer2(at[0], at[1])), c->call ? "" : LwClusterWhom(c, at));
     }
     LwFight* fi = &g_lwFights[f];
     if (c->hotN > 0 || c->call) fi->hotAt = now;
