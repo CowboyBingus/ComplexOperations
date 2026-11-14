@@ -485,6 +485,13 @@ static void ArterialsGlue(void)
     CoXlTestRoadsSpursBuild(block, (uint64_t)(uintptr_t)context, Capsule);
     /* (1000, 400) is on edge 2; (1000, 2100) is 1100 m from its end; (3000, 0) is 1000 m from edge 1's end: not under the most */
     CHECK(g_capsuleCount == 0 && Count32(0x11A71D4u) == 9 && Lines("spurs: 0 of 3 places joined") == 1 && Lines("1 on a road already, 2 too far, 0 without room") == 1);
+    /* (1000, -10) is 10 m from the point where edges 0, 1 and 2 meet: the lowest edge is the one joined */
+    { static const float tie[2] = {1000, -10}; memcpy(g_block + LOCATIONS_AT, tie, 8); }
+    CoXlTestRoadsArterialsApply(block, three, 1);
+    g_capsuleCount = 0;
+    CoXlTestRoadsSpursBuild(block, (uint64_t)(uintptr_t)context, Capsule);
+    CHECK(g_capsuleCount == 1 && g_capsules[0].id == (10u | (1u << 16)) && Count32(0x11A71D4u) == 11);
+    Put32(g_block + 0x11A71D4u, 9);
     context[4] = 0;
     g_fake.log[0] = 0;
     CoXlTestRoadsSpursBuild(block, (uint64_t)(uintptr_t)context, Capsule);
