@@ -1615,10 +1615,13 @@ static void NearNamesClose(int opened)
 }
 
 /* A replayed op 0x64 (terrain_generator_finalize) still clears play's fog, cloud and TAA histories and its clear_buffers
- * zeroes atmospheric_lookup; the sky LUTs have stand-ins. The game's reset after its own finalize (0x102F329) follows
- * once its jobs ran: G+0x10C4 frames of frame_history_invalidation (set each frame at 0xAB9369), which the fog, cloud and
- * ambience shaders read, the camera cut, and a six-face light probe capture at weight 1. */
-#define NEAR_RESET_FRAMES 8 /* atmospheric_scattering_calculate (CS f8dae03a) renews one of six faces a frame */
+ * zeroes atmospheric_lookup, a buffer no stand-in can take; the sky LUTs have stand-ins. The game's reset after its own
+ * finalize (0x102F329) follows once its jobs ran: G+0x10C4 frames of frame_history_invalidation (set each frame at
+ * 0xAB9369), under which the fog, cloud and ambience shaders take their new values whole, the camera cut, and a six-face
+ * light probe capture at weight 1 (the lookup's surrounding luminance blends by the capture's weight). */
+#define NEAR_RESET_FRAMES 3     /* the game's own count after a finalize; its temporal filters are off meanwhile */
+#define NEAR_RESET_FRAMES_LUT 8 /* no stand-ins: atmospheric_scattering_calculate (CS f8dae03a) renews one of six faces a frame */
+#define NEAR_RESET_NOTES 256    /* resets logged a session, two a tile build */
 static struct { volatile LONG state; int pins; LONG done; } g_nearReset; /* state: 1 a 0x64 queued, 2 its jobs ran */
 typedef void (*NearConsumeFn)(uint64_t queue);
 static NearConsumeFn g_nearConsume;
@@ -1641,14 +1644,17 @@ static void NearResetTick(void)
     uintptr_t G = 0;
     if (SafeRead(g_world.game + 0x3326340u, &G, 8) || G == 0) return;
     volatile int32_t* frames = (volatile int32_t*)(G + 0x10C4u);
-    if (*frames < NEAR_RESET_FRAMES) *frames = NEAR_RESET_FRAMES;
+    int kept = g_nearAtmosMaps.level == g_world.levels && g_nearAtmosMaps.tex[0] != 0 && g_nearAtmosMaps.tex[1] != 0;
+    int want = kept ? NEAR_RESET_FRAMES : NEAR_RESET_FRAMES_LUT;
+    if (*frames < want) *frames = want;
     *(volatile uint8_t*)(G + 0x78AC014u) = 1; /* the camera cut: the view copies it and clears it (0xAB5B04, 0xAB5B21) */
     *(volatile uint64_t*)(G + 0x7938498u) = 0x3F800000u; /* weight 1.0, and the face counter that picks six faces at 0 */
     *(volatile uint8_t*)(G + 0x7938494u) = 1;
     InterlockedExchange(&g_nearReset.state, 0);
-    g_nearReset.done++;
+    if (++g_nearReset.done > NEAR_RESET_NOTES) return;
     Note("difficulty: near terrain: history reset %ld after a replayed finalize: %d frames of history invalidation from this frame, camera cut, "
-        "six-face light probe capture", (long)g_nearReset.done, (int)*frames);
+        "six-face light probe capture; the sky LUTs were %s%s", (long)g_nearReset.done, (int)*frames, kept ? "kept by their stand-ins" : "cleared",
+        g_nearReset.done == NEAR_RESET_NOTES ? "; later resets are not logged" : "");
 }
 
 /* Every light probe capture (exe 0x110C40, called from render interface slot 0x268): runs made while the tile's names

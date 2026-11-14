@@ -482,6 +482,8 @@ void CoXlTestNearProbeCounts(uint32_t* replay, uint32_t* tile) { *replay = g_pro
 void CoXlTestNearProbeClear(void) { memset(&g_probeRun, 0, sizeof g_probeRun); }
 LONG CoXlTestNearResetState(void) { return g_nearReset.state; }
 void CoXlTestNearReset(LONG state, int pins) { g_nearReset.state = state; g_nearReset.pins = pins; }
+void CoXlTestNearResetDone(LONG done) { g_nearReset.done = done; }
+void CoXlTestNearAtmosMapsEarlier(void) { g_nearAtmosMaps.level = g_world.levels - 1; }
 void CoXlTestNearResetTick(void) { NearResetTick(); }
 /* The paths the frees rest on: a dispatcher call's start, the band's stash and take, the pins asked again, the render
  * hook's order and its pins. */

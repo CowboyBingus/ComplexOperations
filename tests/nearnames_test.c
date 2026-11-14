@@ -22,6 +22,8 @@ void CoXlTestNearProbeClear(void);
 LONG CoXlTestNearResetState(void);
 void CoXlTestNearReset(LONG state, int pins);
 void CoXlTestNearResetTick(void);
+void CoXlTestNearResetDone(LONG done);
+void CoXlTestNearAtmosMapsEarlier(void);
 void CoXlTestNearCraterMaps(uint64_t source, uint64_t offset, uint64_t scorch);
 int CoXlTestNearCraterMapsMake(int newLevel);
 void CoXlTestNearCraterMapsEarlier(void);
@@ -367,10 +369,59 @@ int main(void)
     float weight = 0; memcpy(&weight, g_G + PROBE_WEIGHT, 4); memcpy(&faces, g_G + PROBE_FACES, 4);
     CHECK(Frames() == 8 && g_G[PROBE_ALL] == 1 && g_G[CUT] == 1 && weight == 1.0f && faces == 0);
     CHECK(fake_host_logged("after a replayed finalize: 8 frames of history invalidation"));
+    CHECK(fake_host_logged("the sky LUTs were cleared"));
     CHECK(CoXlTestNearResetState() == 0);
     SetFrames(0);
     CoXlTestNearResetTick();
     CHECK(Frames() == 0); /* once */
+
+    Setup("the sky LUTs kept by their stand-ins: the game's own three frames", 1);
+    CoXlTestNearAtmosMaps(SKY0, SKY1);
+    CoXlTestNearReset(2, 1);
+    SetFrames(0);
+    CoXlTestNearResetTick();
+    CHECK(Frames() == 3 && g_G[PROBE_ALL] == 1 && g_G[CUT] == 1);
+    CHECK(fake_host_logged("3 frames of history invalidation from this frame, camera cut, six-face light probe capture; the sky LUTs were kept"));
+    CoXlTestNearReset(2, 1);
+    SetFrames(2);
+    CoXlTestNearResetTick();
+    CHECK(Frames() == 3); /* a shorter count the game left is raised */
+
+    Setup("one stand-in missing, or stand-ins of the level before: the LUT is cleared, eight frames", 1);
+    CoXlTestNearAtmosMaps(SKY0, 0);
+    CoXlTestNearReset(2, 1);
+    SetFrames(0);
+    CoXlTestNearResetTick();
+    CHECK(Frames() == 8);
+    CoXlTestNearAtmosMaps(0, SKY1);
+    CoXlTestNearReset(2, 1);
+    SetFrames(0);
+    CoXlTestNearResetTick();
+    CHECK(Frames() == 8);
+    CoXlTestNearAtmosMaps(SKY0, SKY1);
+    CoXlTestNearAtmosMapsEarlier();
+    CoXlTestNearReset(2, 1);
+    SetFrames(0);
+    CoXlTestNearResetTick();
+    CHECK(Frames() == 8);
+
+    Setup("the reset's line is bounded: the 256th says so, the 257th is applied and not logged", 1);
+    CoXlTestNearResetDone(255);
+    CoXlTestNearReset(2, 1);
+    SetFrames(0);
+    {
+        size_t from = strlen(g_fake.log);
+        CoXlTestNearResetTick();
+        CHECK(Frames() == 8 && strstr(g_fake.log + from, "history reset 256 after a replayed finalize") != NULL);
+        CHECK(strstr(g_fake.log + from, "; later resets are not logged") != NULL);
+        from = strlen(g_fake.log);
+        CoXlTestNearReset(2, 1);
+        SetFrames(0); g_G[CUT] = 0;
+        CoXlTestNearResetTick();
+        CHECK(Frames() == 8 && g_G[CUT] == 1 && CoXlTestNearResetState() == 0);
+        CHECK(strstr(g_fake.log + from, "history reset") == NULL);
+    }
+    CoXlTestNearResetDone(0);
 
     Setup("a longer reset the game asked for is kept", 1);
     CoXlTestNearReset(2, 1);
