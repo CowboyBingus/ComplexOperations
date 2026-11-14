@@ -3968,14 +3968,19 @@ static int NearMixTile(const void* ctx, double x, double y, uint32_t* id, double
     return n;
 }
 
-typedef struct { uint32_t* tile; const uint32_t* coarse; const NearMatCdf* cdf; int reach, encoded; float x0, y0; volatile LONG taken; const uint32_t* own; volatile LONG paths, track[32]; } NearBandJob;
+/* The outlines of a tile's patches broken up (difficulty_world_patches.c), before the paths and the track: those keep
+ * their own edges. */
+static int PatchMix(NearMixFn mix, const void* ctx, double x, double y, uint32_t* id, double* w, LONG* broken);
+static int PatchLevelGround(void);
+static void PatchNote(LONG broken, int own);
+typedef struct { uint32_t* tile; const uint32_t* coarse; const NearMatCdf* cdf; int reach, encoded; float x0, y0; volatile LONG taken; const uint32_t* own; volatile LONG paths, track[32], broken; } NearBandJob;
 #define NEAR_BAND_SCALE 6.0f
 #define NEAR_BAND_SEED 23u
 #define NEAR_BAND_OCT 3
 static void NearMatBandRows(void* ctx, int r0, int r1)
 {
     NearBandJob* job = (NearBandJob*)ctx;
-    LONG taken = 0, paths = 0;
+    LONG taken = 0, paths = 0, broken = 0;
     uint32_t tally[32] = {0};
     NearTileSrc own = {job->own, job->x0, job->y0};
     for (int r = r0; r < r1; r++)
@@ -3984,7 +3989,7 @@ static void NearMatBandRows(void* ctx, int r0, int r1)
             int interior = r >= job->reach && r < 4096 - job->reach && c >= job->reach && c < 4096 - job->reach;
             if (interior && job->own == NULL) { c = 4096 - job->reach - 1; continue; }
             float wx = job->x0 + NEAR_TEXEL * c, wy = job->y0 - NEAR_TEXEL * r;
-            float share = interior ? 0 : NearMatShare(wx, wy);
+            float share = interior ? (float)PatchLevelGround() : NearMatShare(wx, wy);
             if (share <= 0 || (share < 1 && NearMatUniform(job->cdf, 0, NearFbm(wx, wy, NEAR_BAND_SCALE, NEAR_BAND_SEED, NEAR_BAND_OCT)) >= share))
             {
                 /* the tile's own texel: the bilinear mix of its native 2048^2 weight texels (~1.1 m) at the texel's own
@@ -3994,7 +3999,7 @@ static void NearMatBandRows(void* ctx, int r0, int r1)
                  * criterion 8; static, subagent surfacing). Mixed, the blend varies smoothly and the cut is a curve. */
                 if (job->own == NULL) continue;
                 uint32_t id[NEAR_MAT_IDS]; double w[NEAR_MAT_IDS];
-                int n = NearMixTile(&own, wx, wy, id, w);
+                int n = PatchMix(NearMixTile, &own, wx, wy, id, w, &broken);
                 double qx, qy;
                 if (g_road.on && g_road.level == g_world.levels && NearRoadDistance(wx, wy, &qx, &qy) < ROAD_CORRIDOR)
                 { NearRoadStampWith(NearMixTile, &own, 1.0, wx, wy, id, w, &n); paths++; }
@@ -4014,6 +4019,7 @@ static void NearMatBandRows(void* ctx, int r0, int r1)
         }
     InterlockedExchangeAdd(&job->taken, taken);
     InterlockedExchangeAdd(&job->paths, paths);
+    InterlockedExchangeAdd(&job->broken, broken);
     RoadTrackTally(job->track, tally);
 }
 
@@ -4058,6 +4064,7 @@ static uint32_t NearMatBand(uint32_t* tile, const uint32_t* coarse)
     char what[128];
     snprintf(what, sizeof what, "the near tile at (%.0f, %.0f)%s, its map pass %lu ms", (double)g_near.centre[0], (double)g_near.centre[1], mixed ? "" : " (no memory for its own map: its band only)", took);
     RoadTrackNote(what, job.track);
+    PatchNote(job.broken, mixed);
     return (uint32_t)job.taken;
 }
 
