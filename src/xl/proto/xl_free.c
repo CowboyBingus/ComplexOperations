@@ -301,3 +301,288 @@ static int MoveTrimTick(void)
     g_trim.events = 0;
     return 1;
 }
+
+/* ---- The tiles' terrains at a level's end --------------------------------------------------------------------------
+ * A tile's terrain is spawned into the main world ([[game+0x3326340]+0x10E8]), which the ship and every level share,
+ * and no op of the level destroys it. Left there, the next levels draw it with the maps the next replay frees: the
+ * binder 0x6F8B30 then reads a freed map's heap link as its texture handle (crash exe+0x6F9394). */
+#define NEAR_TERRAINS 0x230550u /* world: the terrains by handle; entries (0x170 bytes) at +8, count +0x18, buckets +0x1C */
+
+static uint64_t NearMainWorld(void)
+{
+    uint64_t engine = 0, world = 0;
+    if (SafeRead(g_world.game + 0x3326340u, &engine, 8) || engine == 0 || SafeRead(engine + 0x10E8u, &world, 8)) return 0;
+    return world;
+}
+
+/* The world's find, exe 0x1BCF30, which neither inserts nor locks: 1 when `handle` is a terrain of `world`, 0 when not,
+ * -1 when the map does not read. The destroy (0x1ADEA0) finds with insert (0x1B86C0) and frees the handle's object, so
+ * a handle not found here is never given to it. */
+static int NearTerrainIn(uint64_t world, uint64_t handle)
+{
+    const uint64_t map = world + NEAR_TERRAINS;
+    uint64_t entries = 0, key = 0;
+    uint32_t count = 0, buckets = 0, next = 0;
+    if (world == 0 || SafeRead(map + 8, &entries, 8) || SafeRead(map + 0x18, &count, 4) || SafeRead(map + 0x1C, &buckets, 4)) return -1;
+    if (count == 0) return 0;
+    if (entries == 0 || buckets == 0) return -1;
+    const uint32_t m = 0x5BD1E995u;
+    uint32_t a = (uint32_t)handle * m, b = (uint32_t)(handle >> 32) * m;
+    a = (a ^ a >> 24) * m; b = (b ^ b >> 24) * m;
+    uint32_t h = ((a ^ 0xDE8F4CA8u) * m) ^ b;
+    h = (h ^ h >> 13) * m; h ^= h >> 15;
+    uint32_t i = h % buckets;
+    if (SafeRead(entries + (uint64_t)i * 0x170 + 0x168, &next, 4)) return -1;
+    if (next == 0xFFFFFFFEu) return 0; /* an empty bucket */
+    for (uint32_t steps = 0; steps <= count; steps++)
+    {
+        if (SafeRead(entries + (uint64_t)i * 0x170, &key, 8) || SafeRead(entries + (uint64_t)i * 0x170 + 0x168, &next, 4)) return -1;
+        if (key == handle) return 1;
+        if (next == 0x7FFFFFFFu) return 0;
+        i = next;
+    }
+    return -1;
+}
+
+/* Under the world's terrain lock, which the destroy takes too (so never held across it). */
+static int NearTerrainInLocked(uint64_t world, uint64_t handle)
+{
+    const int locked = world != 0 && g_nearTerrainLock[0] != NULL && g_nearTerrainLock[1] != NULL;
+    if (locked) g_nearTerrainLock[0](world + 0x230520u);
+    const int in = NearTerrainIn(world, handle);
+    if (locked) g_nearTerrainLock[1](world + 0x230520u);
+    return in;
+}
+
+/* Terrains a replay found still in the world (NearTilesLeft): the new level takes their slots, so their handles wait
+ * here for the next level's end. */
+#define NEAR_LEFT_MAX 16
+static uint64_t g_nearLeft[NEAR_LEFT_MAX];
+
+/* Every tile terrain handle the mod holds: the tiles', g_near's, a build's stashed drop tile's and the ones left. */
+#define NEAR_HANDLES (NEAR_TILES_MAX + 2 + NEAR_LEFT_MAX)
+static int NearHandles(uint64_t** at)
+{
+    int n = 0;
+    for (int k = 0; k < NEAR_TILES_MAX; k++) at[n++] = &g_tiles[k].handle;
+    at[n++] = &g_near.handle;
+    if (g_move.stashed) at[n++] = &g_move.dropHandle;
+    for (int k = 0; k < NEAR_LEFT_MAX; k++) at[n++] = &g_nearLeft[k];
+    return n;
+}
+
+/* The generator's job runs ([[level+0xF718]+8], which the level's own teardown waits on at 0xF7428A before it destroys
+ * the level's terrain): its 0x6A holds the world's terrain lock around a tile's work. */
+static int NearJobRuns(uintptr_t level)
+{
+    uintptr_t job = 0;
+    uint8_t runs = 0;
+    return level != 0 && !SafeRead(level + 0xF718u, &job, 8) && job != 0 && !SafeRead(job + 8, &runs, 1) && runs != 0;
+}
+static int NearGeneratorRuns(void) { return NearJobRuns(g_worldLevel); }
+
+/* The last level's tile terrains destroyed on the game thread (a level init or the ship's set-up), as MoveRelease
+ * destroys one; their maps go at the next replay. Kept: any handle whose world does not read; every one while the
+ * generator's job runs (the lock is never asked for beside it); at the ship a drop tile between its 0x69 and 0x6B,
+ * which that job may take up again. A level init comes only once the job has left (state 0: co_drain, the preview
+ * tick, the game's regenerate), so it destroys that tile too. A handle is forgotten once its terrain is gone: its
+ * address can be reused. */
+static int NearTilesDestroy(int ship)
+{
+    const char* why = ship ? "the ship" : "a level init";
+    typedef void (*DestroyFn)(uint64_t world, uint64_t handle);
+    DestroyFn destroy = (DestroyFn)NearApi(0x08, 0x1E0);
+    uint64_t world = NearMainWorld(), *at[NEAR_HANDLES], seen[NEAR_HANDLES];
+    int verdict[NEAR_HANDLES], unique = 0, gone = 0, absent = 0, kept = 0;
+    const int n = NearHandles(at);
+    const uint64_t generating = ship && g_move.state == MV_IDLE && g_near.state == NEAR_READY ? g_near.handle : 0;
+    const int busy = NearGeneratorRuns();
+    const int known = !busy && world != 0 && (g_near.world == 0 || g_near.world == world);
+    LARGE_INTEGER t0, t1, hz;
+    QueryPerformanceCounter(&t0);
+    for (int i = 0; i < n; i++)
+    {
+        const uint64_t h = *at[i];
+        int j = 0;
+        while (j < unique && seen[j] != h) j++;
+        if (h == 0 || j < unique) continue;
+        seen[unique] = h;
+        const int in = !known || h == generating ? -1 : NearTerrainInLocked(world, h);
+        verdict[unique] = in > 0 && destroy != NULL ? 1 : in == 0 ? 0 : -1;
+        if (verdict[unique] == 1)
+        {
+            if (gone == 0) NearTilesClear(); /* their heights stop being read before the terrain goes */
+            destroy(world, h);
+            gone++;
+        }
+        else if (verdict[unique] == 0) absent++;
+        else kept++;
+        unique++;
+    }
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < unique; j++)
+            if (*at[i] != 0 && *at[i] == seen[j] && verdict[j] >= 0) { *at[i] = 0; break; }
+    if (!g_move.stashed) g_move.dropHandle = 0;
+    QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
+    if (unique > 0)
+        Note("difficulty: near terrain: %s: %d tile terrain(s) of the last level destroyed (%.1f ms on the game thread), %d already gone, %d kept "
+            "(%s); their maps go at the next replay", why, gone, (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart, absent, kept,
+            busy ? "the generator's job still runs" : !known ? "the main world does not read" : destroy == NULL ? "no destroy call" : generating != 0 ? "the generation may still finalize the drop tile" : "none");
+    return gone;
+}
+
+/* The new level's replay, before it frees the last level's tile maps: a terrain still in the world (or one whose world
+ * does not read) keeps every map of that level, leaked, since the world may draw it in this level. Its handle waits
+ * in g_nearLeft for the next level's end, which destroys it. */
+static int NearTilesLeft(void)
+{
+    const uint64_t world = NearMainWorld();
+    uint64_t *at[NEAR_HANDLES], still[NEAR_LEFT_MAX];
+    const int n = NearHandles(at);
+    int left = 0, lost = 0;
+    for (int i = 0; i < n; i++)
+    {
+        const uint64_t h = *at[i];
+        *at[i] = 0;
+        if (h == 0 || NearTerrainInLocked(world, h) == 0) continue;
+        int j = 0;
+        while (j < left && still[j] != h) j++;
+        if (j < left) continue;
+        if (left < NEAR_LEFT_MAX) still[left++] = h; else lost++;
+    }
+    for (int k = 0; k < left; k++) g_nearLeft[k] = still[k];
+    if (left == 0) { Note("difficulty: near terrain: 0 tile terrains left from the last level"); return 0; }
+    for (int k = 0; k < NEAR_TILES_MAX; k++) { g_tiles[k].tex[0] = g_tiles[k].tex[1] = g_tiles[k].band = 0; g_tiles[k].bandPixels = NULL; }
+    g_near.tex[0] = g_near.tex[1] = 0; g_matband.tex = 0; g_matband.pixels = NULL;
+    g_move.dropTex[0] = g_move.dropTex[1] = g_move.dropBand = 0; g_move.dropBandPixels = NULL;
+    Note("difficulty: near terrain: %d tile terrain(s) left in the world from the last level; their maps stay allocated (leaked) so that it never draws "
+        "freed ones; the next level's end destroys them (%d more than the list holds)", left + lost, lost);
+    return left + lost;
+}
+
+/* ---- A tile build the level's end cut short ------------------------------------------------------------------------
+ * MoveTick runs only in a live level, so a build under way at the level's end never reaches its own teardown, and the
+ * level's (0xF6FF60, from state 4) ends only what a generation leaves: the first merge camera [R+8], R+0xB8, the 0x94
+ * lookup, the environment slot. The build's stamp units, the second camera, R+0x108 and the merge's other resources
+ * would stay in the main world, and the stamp pass's camera offset would move the next level's own 0x63. */
+
+static int MoveU64Cmp(const void* a, const void* b)
+{
+    const uint64_t x = *(const uint64_t*)a, y = *(const uint64_t*)b;
+    return x < y ? -1 : x > y;
+}
+
+/* The build's stamp units still in the world, destroyed as the level's teardown destroys its own with their stamp
+ * terrains spawned (0xF742F7..0xF7432F). The destroy (exe 0x338960) takes a unit it does not find in the world's list
+ * (array [world+0x230590], count [world+0x230588]) for the last one and frees it, so each is looked up in a copy of
+ * the list first. An address in the list may be another unit's by now, so it must also be this build's: its world at
+ * +0x18 and the pose it was spawned with at +0x20 (the constructor, exe 0xD7879..0xD78A8), which stands the offset
+ * north of the tile, where nothing of the level is. -1 when they could not be looked up: kept. */
+static int MoveStampUnitMine(uint64_t world, uint64_t unit)
+{
+    uint64_t in = 0;
+    float y = 0.0f;
+    return !SafeRead((uintptr_t)unit + 0x18, &in, 8) && in == world && !SafeRead((uintptr_t)unit + DIF_STREAM_UNIT_POSE + 13 * 4, &y, 4) &&
+        fabsf(y - (g_move.centre[1] + MOVE_STAMP_OFFSET)) <= NEAR_SIDE / 2 + 2 * MOVE_STAMP_MARGIN;
+}
+
+static int MoveStampUnitsLeft(uint64_t world, uint32_t* absent, uint32_t* other, int destroyThem)
+{
+    uintptr_t wi = 0, table = 0, destroy = 0;
+    uint64_t list = 0, *copy = NULL;
+    uint32_t count = 0;
+    *absent = *other = 0;
+    if (world == 0 || world != NearMainWorld() || SafeRead(g_world.game + DIF_STREAM_INTERFACE, &wi, 8) || wi == 0 || SafeRead(wi + DIF_STREAM_TABLE, &table, 8) ||
+        table == 0 || SafeRead(table + DIF_STREAM_DESTROY_ENTRY, &destroy, 8) || destroy == 0 || SafeRead(world + 0x230588u, &count, 4) ||
+        SafeRead(world + 0x230590u, &list, 8) || count > (1u << 22) || (count != 0 && list == 0)) return -1;
+    const uintptr_t wait = WorldStreamAnimWait(table);
+    if (wait == 0) return -1;
+    if (count != 0 && ((copy = (uint64_t*)VirtualAlloc(NULL, (size_t)count * 8, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)) == NULL || SafeRead(list, copy, (size_t)count * 8)))
+    { if (copy != NULL) VirtualFree(copy, 0, MEM_RELEASE); return -1; }
+    if (count != 0) qsort(copy, count, 8, MoveU64Cmp);
+    int gone = 0;
+    for (uint32_t k = g_move.stGone; k < g_move.stTemp; k++)
+    {
+        const uint64_t unit = g_move.stUnit[k];
+        if (unit == 0) continue;
+        if (count == 0 || bsearch(&unit, copy, count, 8, MoveU64Cmp) == NULL) { (*absent)++; continue; }
+        if (!MoveStampUnitMine(world, unit)) { (*other)++; continue; }
+        if (destroyThem)
+        {
+            if (gone == 0) ((WorldStreamAnimWaitFn)wait)(world); /* as every game destroy */
+            ((WorldStreamDestroyUnitFn)destroy)(world, unit, 0, 0);
+        }
+        gone++;
+    }
+    if (copy != NULL) VirtualFree(copy, 0, MEM_RELEASE);
+    return gone;
+}
+
+/* The generator is idle, which every call below rests on: its job gone and, at the ship, state 0, which only the
+ * level's own teardown leaves behind (0xF7444A..0xF7444F). A level init has written its own 1 before the hook
+ * (0xF7136D) and comes only once the last generation has ended (co_drain, the preview tick, the game's retry). */
+static int MoveGeneratorIdle(int ship, uint32_t* state, int* job)
+{
+    const uintptr_t level = g_move.levelPtr != 0 ? g_move.levelPtr : g_worldLevel;
+    *job = NearJobRuns(level);
+    if (level == 0 || SafeRead(level + 0x1E4, state, 4)) { *state = 0xFFFFFFFFu; return 0; }
+    return *state == (ship ? 0u : 1u) && !*job;
+}
+
+/* The ship's set-up or a level init, on the game thread, before the tile terrains go: what a build under way left in
+ * the world goes as its own failure would take it, in one call (no frame of this level follows). While the generator
+ * is not idle everything is kept as it is for the next level init. The package's release is never sent here
+ * (NearLevelLeft). */
+static void MoveBuildLeft(int ship)
+{
+    const char* why = ship ? "the ship" : "a level init";
+    const int state = g_move.state, merge = g_move.merge, held = g_move.acquired;
+    const uint32_t units = g_move.stTemp > g_move.stGone ? g_move.stTemp - g_move.stGone : 0;
+    if (units == 0 && !merge && !held)
+    {
+        if (state == MV_IDLE || g_move.cutNoted) return;
+        g_move.cutNoted = 1;
+        Note("difficulty: moving tiles: %s: the build of cell (%d, %d) was cut short in step '%s' with no stamp unit, merge or package of it left; "
+            "its tile goes with the tile terrains", why, g_move.cell[0], g_move.cell[1], MoveStateName(state));
+        return;
+    }
+    uint32_t generator = 0, absent = 0, other = 0;
+    int job = 0;
+    if (ship) g_move.shipSeen = 1; /* kept for a level init that takes this build over */
+    if (!MoveGeneratorIdle(ship, &generator, &job))
+    {
+        Note("difficulty: moving tiles: %s: the build of cell (%d, %d) was cut short in step '%s', and the level generator is not idle (state %u, its job %s): "
+            "its %u stamp units, its merge (%s) and its package (%s) wait for the next level init", why, g_move.cell[0], g_move.cell[1], MoveStateName(state),
+            generator, job ? "runs" : "is gone", units, merge ? "up" : "not up", held ? "held" : "not held");
+        return;
+    }
+    /* Once the ship is reached the mission's unload has destroyed every unit of the world (game 0xAB3CD9..0xAB3DEE: it
+     * starts at generator state 0 and goes on until none is left), and the ship's units live in the same world: an
+     * address of the build's that is listed again is another unit's. So the units are forgotten, never destroyed; only
+     * a level init straight from play still destroys what it finds. */
+    const int destroyThem = !g_move.shipSeen;
+    const int ring = MoveSpawnRingEmpty(MoveWorld());
+    LARGE_INTEGER t0, t1, hz;
+    QueryPerformanceCounter(&t0);
+    const int gone = units != 0 ? MoveStampUnitsLeft(MoveWorld(), &absent, &other, destroyThem) : 0;
+    g_move.stTemp = g_move.stGone = 0; g_move.stamped = 0; /* gone or not: the next build's list takes their place */
+    g_nearStampOffset[0] = g_nearStampOffset[1] = 0.0f;    /* else the next level's own 0x63 would look 20 km off */
+    const int torn = MoveTeardown(1);
+    MovePackageLater();
+    g_move.cutNoted = 1;
+    QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
+    char others[224] = "", ringText[40] = "";
+    int at = 0;
+    if (other != 0) at = snprintf(others, sizeof others, ", %u at their addresses are not this build's units (left alone)", other);
+    if (!destroyThem && gone > 0)
+        snprintf(others + at, sizeof others - (size_t)at, ", WARNING: %d still listed at the build's place are left in the world (nothing is destroyed after the ship)", gone);
+    if (destroyThem) snprintf(ringText, sizeof ringText, "; the spawn ring %s", ring == 1 ? "empty" : ring == 0 ? "not empty" : "did not read");
+    Note("difficulty: moving tiles: %s: the build of cell (%d, %d) was cut short in step '%s': %d of its %u stamp units destroyed, %u already gone%s%s; "
+        "the merge %s; the merge package %s (generator state %u; R+0x108 %s; %.1f ms on the game thread%s)", why, g_move.cell[0], g_move.cell[1],
+        MoveStateName(state), gone < 0 || !destroyThem ? 0 : gone, units, absent, others,
+        gone >= 0 ? "" : destroyThem ? ", the rest KEPT in the world (its unit list or the destroy did not read)" : ", the rest not looked up (the unit list did not read)",
+        torn ? "torn down" : merge ? "NOT torn down" : "was not up",
+        !held ? "was not held" : ship ? "is left to the next level init, which takes it over" : "is this level init's now",
+        generator, !torn ? "not looked at" : g_move.r108Out == 1 ? "destroyed" : g_move.r108Out == 2 ? "already gone" : "none",
+        (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart, ringText);
+}

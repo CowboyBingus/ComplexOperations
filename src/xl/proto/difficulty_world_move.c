@@ -77,6 +77,10 @@ static struct
     float origin[2], centre[2];
     uint32_t at2F, at37, at38, at4C, at66, frames, waits, calls;
     int pkgPending; uint32_t pkgFrames;
+    uint32_t nodeOld; /* [R+0x18] when the merge began: a camera node destroyed before, never this build's */
+    int cutNoted;     /* MoveBuildLeft has ended or noted this build */
+    int shipSeen;     /* the ship was reached with this build left: its stamp units are never destroyed after that */
+    int r108Out;      /* MoveTeardown's R+0x108: 0 none, 1 destroyed, 2 not in the world's list any more */
     uint32_t ringWaits; /* frames the stamp units' destroy waited for the async spawn ring */
     int failState; /* the state a build failed in (MoveFailRest destroys the new tile's terrain from MV_SPAWN on) */ /* the merge package's release, MOVE_PKG_FRAMES after the teardown that gave it up */
     /* the stamp terrains of the tile's locations (0x2F spawns them for 0x63 to draw, 0x65 takes them away): staging
@@ -200,10 +204,13 @@ static void MoveRestoreDrop(void)
     MoveHold(0);
 }
 
-/* A new level starts (TerrainNearReplay's first call): the last level's world is gone with every tile in it. */
+/* A new level starts (TerrainNearReplay's first call): the last level's tile terrains went at its end (NearTilesDestroy),
+ * so their maps go now; one still in the world keeps them (NearTilesLeft). A build that end cut short was ended there
+ * too (MoveBuildLeft); what is reset here is the mod's own state. */
 static void MoveLevelGone(void)
 {
     NearLayerSettle();
+    NearTilesLeft();
     if (g_move.state != MV_IDLE && g_move.stashed)
         MoveFreeNow(g_move.dropTex[0] == g_near.tex[0] ? 0 : g_move.dropTex[0], g_move.dropTex[1] == g_near.tex[1] ? 0 : g_move.dropTex[1],
             g_move.dropBand == g_matband.tex ? 0 : g_move.dropBand, g_move.dropBand == g_matband.tex ? NULL : g_move.dropBandPixels);
@@ -216,7 +223,8 @@ static void MoveLevelGone(void)
             g_tiles[k].tex[0] = g_tiles[k].tex[1] = g_tiles[k].band = 0; g_tiles[k].bandPixels = NULL;
         }
     g_move.state = MV_IDLE; g_move.level = -1; g_move.on = 0;
-    g_move.stTemp = g_move.stGone = 0; g_move.stamped = 0; /* their levels went with the world */
+    g_move.stTemp = g_move.stGone = 0; g_move.stamped = 0;
+    g_nearStampOffset[0] = g_nearStampOffset[1] = 0.0f; /* else this level's own 0x63 would look 20 km off */
     g_moveReplace.on = 0;
     InterlockedExchange(&g_moveBuilding, 0);
     MoveHold(0);
@@ -488,24 +496,56 @@ static uint64_t MoveWorld(void)
 }
 
 /* From MV_KICK on the merge's resources may exist, and its world-size views stay out of the scatter update. */
+static uintptr_t MoveMergeObject(void);
 static void MoveMergeBegin(void)
 {
+    if (!g_move.merge)
+    {
+        /* 0x66 and MoveTeardown destroy the second camera's node and leave its id at R+0x18 (0xC17C5B..0xC17C63); a
+         * teardown before 0x38 has made this build's must not queue that id again (exe 0x12D2D0) */
+        const uintptr_t R = MoveMergeObject();
+        g_move.nodeOld = 0;
+        if (R != 0) SafeRead(R + 0x18, &g_move.nodeOld, 4);
+    }
     g_move.merge = 1;
     TdScatterMergeOpen();
 }
 
-/* The merge as the level's 0x66 and 0x67 leave it (the parts this build re-created). */
-static void MoveTeardown(void)
+/* The merge object R is part of the level object (level+0x2B30: level init stores that at [G], 0xF7150F..0xF71516,
+ * and the level's destructor passes it to 0xFCF2F0, 0xF6F88E), so it is there after the level's teardown has cleared G. */
+static uintptr_t MoveMergeObject(void)
 {
-    if (!g_move.merge) return;
+    const uintptr_t level = g_move.levelPtr != 0 ? g_move.levelPtr : g_worldLevel;
+    uintptr_t gen = 0, R = 0;
+    if (level == 0 || SafeRead(level + 0x2C8, &gen, 8) || gen == 0 || SafeRead(gen, &R, 8) || (R != 0 && R != level + 0x2B30u)) return 0;
+    return level + 0x2B30u;
+}
+
+/* `object` is one of the pointers of a world list. R+0x108's destroy ([api+8]+0x478, exe 0x1B3F90) looks for it in
+ * [world+0x230910] (count +0x230908) and reads the object all the same when it is not there (0x1B3FDE). */
+static int MoveListed(uint64_t countAt, uint64_t listAt, uint64_t object)
+{
+    uint32_t count = 0;
+    uint64_t list = 0, entry = 0;
+    if (SafeRead(countAt, &count, 4) || SafeRead(listAt, &list, 8) || count > 4096 || list == 0) return 0;
+    for (uint32_t i = 0; i < count; i++) if (!SafeRead(list + 8ull * i, &entry, 8) && entry == object) return 1;
+    return 0;
+}
+
+/* The merge as the level's 0x66 and 0x67 leave it (the parts this build re-created); 1 when torn down. `left`: the
+ * level has ended and its own teardown (0xF6FF60) has run: that released the 0x94 lookup and ended the environment's
+ * slot 5 (0xF708AB), the records may be the next generation's, and the saved environment pointer may be gone. */
+static int MoveTeardown(int left)
+{
+    if (!g_move.merge) return 0;
     g_move.merge = 0;
     TdScatterMergeClose(); /* its camera units go below; the scatter cut ends once their queued renders ran */
-    uintptr_t gen = 0, R = 0, api = 0, t8 = 0, t10 = 0;
+    uintptr_t R = MoveMergeObject(), api = 0, t8 = 0, t10 = 0;
     uint64_t world = MoveWorld(), env = 0;
     memcpy(&env, g_move.ctx + 0x98, 8);
-    if (SafeRead(g_worldLevel + 0x2C8, &gen, 8) || gen == 0 || SafeRead(gen, &R, 8) || R == 0 || SafeRead(g_world.game + 0x3326308u, &api, 8) || api == 0 ||
-        SafeRead(api + 8, &t8, 8) || t8 == 0 || SafeRead(api + 0x10, &t10, 8) || t10 == 0 || world == 0)
-    { Note("difficulty: moving tiles: the merge could not be torn down (no merge object or engine tables)"); return; }
+    if (R == 0 || SafeRead(g_world.game + 0x3326308u, &api, 8) || api == 0 ||
+        SafeRead(api + 8, &t8, 8) || t8 == 0 || SafeRead(api + 0x10, &t10, 8) || t10 == 0 || world == 0 || (left && world != NearMainWorld()))
+    { Note("difficulty: moving tiles: the merge could not be torn down (no merge object or engine tables)"); return 0; }
     typedef void (*NodeFn)(uint64_t world, uint32_t node);
     typedef void (*UnitFn)(uint64_t world, uint64_t unit);
     typedef void (*PtrFn)(uint64_t p);
@@ -514,17 +554,21 @@ static void MoveTeardown(void)
     NodeFn destroyNode = NULL; UnitFn destroyUnit = NULL; PtrFn releaseRead = NULL, release = NULL; NameFn unpublish = NULL; PkgFn pkgRelease = NULL;
     SafeRead(t8 + 0x60, &destroyNode, 8); SafeRead(t8 + 0x478, &destroyUnit, 8); SafeRead(t10 + 0x1E0, &releaseRead, 8); SafeRead(t10 + 0x190, &release, 8);
     SafeRead(t10 + 0x218, &unpublish, 8); SafeRead(t10 + 0x300, &pkgRelease, 8);
-    if (destroyNode == NULL || destroyUnit == NULL || releaseRead == NULL || release == NULL || unpublish == NULL || pkgRelease == NULL) return;
+    if (destroyNode == NULL || destroyUnit == NULL || releaseRead == NULL || release == NULL || unpublish == NULL || pkgRelease == NULL) return 0;
     /* 0x66: the cameras, R+0x108 */
     uint32_t n0 = 0, n1 = 0; uint64_t r108 = 0;
     SafeRead(R + 8, &n0, 4); SafeRead(R + 0x18, &n1, 4); SafeRead(R + 0x108, &r108, 8);
     if (n0 != 0) destroyNode(world, n0);
-    if (n1 != 0) destroyNode(world, n1);
-    if (r108 != 0) destroyUnit(world, r108);
+    if (n1 != 0 && n1 != g_move.nodeOld) destroyNode(world, n1);
+    g_move.nodeOld = n1;
+    /* after the level only one the world still lists is its to destroy; 0xFCF2F0 below skips a zero */
+    const int listed = r108 != 0 && (!left || MoveListed(world + 0x230908u, world + 0x230910u, r108));
+    if (listed) destroyUnit(world, r108);
+    g_move.r108Out = r108 == 0 ? 0 : listed ? 1 : 2; /* for the level end's line */
     *(volatile uint32_t*)(R + 8) = 0; *(volatile uint64_t*)(R + 0x108) = 0;
     /* 0x66: 0x94's lookup ([record+0x18]: its readback +0x10, its texture +0x18 under 0xDBCD240D) */
     uint64_t lookup = 0, rd = 0, tex = 0;
-    if (!SafeRead(g_near.records + (uint64_t)g_move.at66 * 0x19B0u + 0x18, &lookup, 8) && lookup != 0)
+    if (!left && !SafeRead(g_near.records + (uint64_t)g_move.at66 * 0x19B0u + 0x18, &lookup, 8) && lookup != 0)
     {
         if (!SafeRead(lookup + 0x10, &rd, 8) && rd != 0) releaseRead(lookup);
         if (!SafeRead(lookup + 0x18, &tex, 8) && tex != 0) { unpublish(0xDBCD240Du); release(tex); *(volatile uint64_t*)(lookup + 0x18) = 0; }
@@ -532,7 +576,7 @@ static void MoveTeardown(void)
     typedef void (*MergeFn)(uint64_t R, uint64_t world);
     typedef void (*EnvFn)(uint64_t manager, uint32_t slot);
     ((MergeFn)(g_world.game + 0xFCF2F0u))(R, world);
-    if (env != 0) ((EnvFn)(g_world.game + 0x1009890u))(env, 5);
+    if (env != 0 && !left) ((EnvFn)(g_world.game + 0x1009890u))(env, 5);
     /* 0x67: the four textures and their names */
     static const struct { uint32_t name, at, flag; } kFree[4] = {{0xA2003184u, 0x98, 0xE8}, {0x1BB41B90u, 0xA0, 0xE9}, {0x2FFE957Du, 0xB8, 0xEC}, {0xEBD2B190u, 0xD8, 0xF0}};
     for (int k = 0; k < 4; k++)
@@ -547,6 +591,7 @@ static void MoveTeardown(void)
     memcpy(&arena, g_move.ctx, 8);
     typedef void (*ArenaFn)(uint64_t arena);
     if (arena != 0) ((ArenaFn)(g_world.game + 0x173BAB0u))(arena);
+    return 1;
 }
 
 /* 0x65's cleanup queues one destroy per live layer unit (exe 0xE1200 -> 0x12D2D0) and up to 0x1000 stamp levels a call;
@@ -558,12 +603,12 @@ static void MoveTeardown(void)
 static void MoveFailRest(void)
 {
     MoveStampUnitsDestroy(1e30);
-    MoveTeardown();
+    MoveTeardown(0);
     if (g_move.failState >= MV_SPAWN && g_near.handle != 0 && g_near.handle != g_move.dropHandle)
     {
         typedef void (*DestroyFn)(uint64_t world, uint64_t handle);
         DestroyFn destroy = (DestroyFn)NearApi(0x08, 0x1E0);
-        if (destroy != NULL) destroy(MoveWorld(), g_near.handle);
+        if (destroy != NULL) { destroy(MoveWorld(), g_near.handle); g_near.handle = 0; }
     }
     if (g_move.stashed)
     {
@@ -762,6 +807,7 @@ static void MoveRelease(int slot)
         destroy(world, t.handle);
         QueryPerformanceCounter(&d1);
         g_move.destroyTicks = d1.QuadPart - d0.QuadPart;
+        g_tiles[slot].handle = 0; /* its object is freed: a later terrain may get the address */
     }
     MoveFreeLater(t.tex[0], t.tex[1], t.band, t.bandPixels);
     g_move.released++;
@@ -815,7 +861,7 @@ static int MoveStart(void)
     g_move.stashed = 1;
     g_near.tex[0] = g_near.tex[1] = 0; g_matband.tex = 0; g_matband.pixels = NULL;
     InterlockedExchange(&g_moveBuilding, 1);
-    g_move.acquired = 0; g_move.merge = 0; g_move.waits = 0; g_move.frames = 0; g_move.started = GetTickCount64();
+    g_move.acquired = 0; g_move.merge = 0; g_move.cutNoted = 0; g_move.shipSeen = 0; g_move.waits = 0; g_move.frames = 0; g_move.started = GetTickCount64();
     g_move.state = MV_PACKAGE;
     Note("difficulty: moving tiles: building cell (%d, %d) at (%.0f, %.0f) for a player %.0f m from it; %d tiles live", g_move.cell[0], g_move.cell[1],
         (double)g_move.centre[0], (double)g_move.centre[1], (double)MoveCellDistance(g_move.cell[0], g_move.cell[1], g_move.player[0][0], g_move.player[0][1]),
@@ -1274,7 +1320,7 @@ static void MoveTick(uint64_t level)
             g_move.waits = 0; g_move.state = MV_UNSTAMP;
             return;
         }
-        MoveTeardown();
+        MoveTeardown(0);
         memcpy(g_near.one69, g_near.keep69, sizeof g_near.one69); memcpy(g_near.one6B, g_near.keep6B, sizeof g_near.one6B);
         g_move.state = MV_SPAWN;
         return;
@@ -1306,7 +1352,7 @@ static void MoveTick(uint64_t level)
         }
         if (g_move.stGone == 0 && !MoveStampUnitsReady()) return;
         if (!MoveStampUnitsDestroy(MOVE_UNSTAMP_MS)) return;
-        MoveTeardown();
+        MoveTeardown(0);
         memcpy(g_near.one69, g_near.keep69, sizeof g_near.one69); memcpy(g_near.one6B, g_near.keep6B, sizeof g_near.one6B);
         g_move.state = MV_SPAWN;
         return;
@@ -1429,6 +1475,13 @@ static void MoveInstall(uintptr_t game)
 static void NearLevelLeft(int ship)
 {
     NearLayerSettle();
+    MoveBuildLeft(ship); /* the merge cameras go before the terrains they draw */
+    /* A release still owed is never sent outside play. A level init has asked for the package before this hook
+     * (0xF712FF, a no-op while it is listed, exe 0x603746..0x603828), and its 0x43 asks again only when has() is 0
+     * (0xF61E8B..0xF61EA9), which stays 1 until the queued unload is reached (exe 0x603290): a release here would
+     * take the package from this level's own merge. The level holds it now and its 0x67 releases it (0xC17CF7). */
+    if (!ship) g_move.pkgPending = 0;
+    NearTilesDestroy(ship); /* the world outlives the level: its tiles go with the level */
     NearOneMipDisarm();
     InterlockedExchange(&g_nearActive, 0);
     MoveHold(0);
