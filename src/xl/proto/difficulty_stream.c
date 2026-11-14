@@ -1304,6 +1304,7 @@ static void WorldStreamLeftLocked(uint32_t state)
             "world's unit list searched %u times (%.2f ms in all, the longest %.3f ms, %u units at the last); %u looks did not read", (int)state, units,
             g_streamDropCount, flagged, g_stream.removed, g_stream.gone, g_stream.looks, g_stream.lookMs, g_stream.lookMost, g_stream.listed, g_stream.lookFails);
         g_streamLeft.frames = kStreamLeftFrames; g_streamLeft.destroys = g_streamDestroys; g_streamLeft.levels = g_stream.levels;
+        TerrainLogState("at the leave");
     }
     WorldStreamClearLocked();
 }

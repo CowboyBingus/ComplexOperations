@@ -1539,6 +1539,7 @@ static void NearLevelLeft(int ship)
      * take the package from this level's own merge. The level holds it now and its 0x67 releases it (0xC17CF7). */
     if (!ship) g_move.pkgPending = 0;
     NearTilesDestroy(ship); /* the world outlives the level: its tiles go with the level */
+    TerrainLogState(ship ? "at the ship" : "at a level init");
     NearOneMipDisarm();
     InterlockedExchange(&g_nearActive, 0);
     MoveHold(0);

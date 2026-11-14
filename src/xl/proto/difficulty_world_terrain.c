@@ -6180,16 +6180,24 @@ static uint64_t NearSpawn(void* world, float* pose, uint32_t a, uint32_t type, u
     float* range, uint8_t flag)
 {
     if (!(type == kNearNames[0] && name == kNearNames[1] && g_nearSpawnThread == GetCurrentThreadId() && g_nearSlots[0] && g_nearSlots[1]))
-        return g_nearSpawnOriginal(world, pose, a, type, name, resource, hash, size, range, flag);
+    {
+        const uint64_t passed = g_nearSpawnOriginal(world, pose, a, type, name, resource, hash, size, range, flag);
+        TerrainLogPassed("tile", type, name, passed, g_nearSpawnThread);
+        TerrainLogSpawned(passed, "passed through");
+        return passed;
+    }
     pose[12] += g_near.centre[0]; pose[13] += g_near.centre[1];
     size[0] = NEAR_SPAN; size[1] = NEAR_SPAN; /* sample to sample (texel span x 4095 / 4096) */
     uint64_t keep[2] = {*g_nearSlots[0], *g_nearSlots[1]};
     for (int k = 0; k < 2; k++) *g_nearSlots[k] = g_near.tex[k];
     int band = g_matband.tex != 0 && NearMatRedirect(1);
     if (band) *g_nearSlots[1] = g_matband.tex;
+    TerrainLogBefore(world, "a tile's");
     uint64_t r = g_nearSpawnOriginal(world, pose, a, type, name, resource, hash, size, range, flag);
     if (band) NearMatRedirect(0);
     for (int k = 0; k < 2; k++) *g_nearSlots[k] = keep[k];
+    TerrainLogSlots(world, "a tile's", (uint64_t*)g_nearSlots[0], (uint64_t*)g_nearSlots[1]);
+    TerrainLogSpawned(r, "a tile");
     return r;
 }
 
@@ -6200,17 +6208,25 @@ static uint64_t NearOneMipSpawn(void* world, float* pose, uint32_t a, uint32_t t
     /* the level check: a slot that stayed armed past a level init serves that level's own spawn unchanged */
     if (!(type == kNearNames[0] && name == kNearNames[1] && g_oneMip.armed && g_oneMip.thread == GetCurrentThreadId() && g_oneMip.slot != NULL &&
         g_oneMip.level == g_world.levels))
-        return original(world, pose, a, type, name, resource, hash, size, range, flag);
+    {
+        const uint64_t passed = original(world, pose, a, type, name, resource, hash, size, range, flag);
+        TerrainLogPassed("one-mip", type, name, passed, g_oneMip.thread);
+        TerrainLogSpawned(passed, "passed through");
+        return passed;
+    }
     uint64_t keep = *g_oneMip.slot, keepMat = g_coarseMat.slot != NULL ? *g_coarseMat.slot : 0;
     *g_oneMip.slot = g_oneMip.tex;
     int mat = g_coarseMat.slot != NULL && g_coarseMat.tex != 0 && NearMatRedirect(1);
     if (mat) *g_coarseMat.slot = g_coarseMat.tex;
+    TerrainLogBefore(world, "the level terrain's");
     uint64_t r = original(world, pose, a, type, name, resource, hash, size, range, flag);
     const uint64_t mainWorld = NearMainWorld();
     if (mat) { *g_coarseMat.slot = keepMat; NearMatRedirect(0); g_coarseMat.terrain = r; g_coarseMat.mark = NearTerrainMapLocked(mainWorld, r, 1); }
     *g_oneMip.slot = keep;
     NearSpawnMaterialNote(r);
     g_oneMip.terrain = r; g_oneMip.mark = NearTerrainMapLocked(mainWorld, r, 0);
+    TerrainLogSlots(world, "the level terrain's", (uint64_t*)g_oneMip.slot, mat ? (uint64_t*)g_coarseMat.slot : NULL);
+    TerrainLogSpawned(r, "the level's");
     if (!g_oneMip.spawned++)
         Note("difficulty: near terrain: the level's terrain spawned with the one-mip heightmap%s", !mat ? "" : g_coarseMat.served == 1 ?
             " and the interpolated material map (its physics materials from its pixels)" : g_coarseMat.served == 2 ?

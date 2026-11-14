@@ -18,4 +18,19 @@ static void MoveBuildLeft(int ship);
 static uint64_t NearMainWorld(void);
 static int NearTilesLeft(void);
 
+/* The research log of the terrains' materials (xl_terrain_research.c); a release has none of it. */
+#ifdef CO_RESEARCH
+static void TerrainLogState(const char* when);
+static void TerrainLogBefore(void* world, const char* what);
+static void TerrainLogSpawned(uint64_t terrain, const char* what);
+static void TerrainLogSlots(void* world, const char* what, uint64_t* heightmap, uint64_t* material);
+static void TerrainLogPassed(const char* hook, uint32_t type, uint32_t name, uint64_t handle, DWORD armedFor);
+#else
+#define TerrainLogState(when) ((void)0)
+#define TerrainLogBefore(world, what) ((void)0)
+#define TerrainLogSpawned(terrain, what) ((void)0)
+#define TerrainLogSlots(world, what, heightmap, material) ((void)0)
+#define TerrainLogPassed(hook, type, name, handle, armedFor) ((void)0)
+#endif
+
 #endif
