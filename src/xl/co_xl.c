@@ -992,6 +992,8 @@ void CoXlTestStreamTick(void)
     if (g_stream.deferred == 0) g_stream.deferred = g_stream.count;
     WorldStreamTick(0.016f);
 }
+/* The look before a removal: slots given up, searches of the world's unit list, the session's destroy calls. */
+void CoXlTestStreamBelt(uint32_t* gone, uint32_t* looks, long* destroys) { *gone = g_stream.gone; *looks = g_stream.looks; *destroys = g_streamDestroys; }
 void CoXlTestStreamOutSince(uint32_t i, ULONGLONG since) { g_streamOutSince[i] = since; }
 void co_capacity_test_places(int region, uint32_t places);
 /* Slots [base, high) as live far window stamps, then one eviction over the bodies' budget: the far removals queued. */

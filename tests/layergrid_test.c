@@ -52,6 +52,9 @@ void CoXlTestStreamScan(void);
 uint32_t CoXlTestStreamScanFrames(int frames);
 uint32_t CoXlTestStreamDrain(double ms, uint32_t* waiting);
 void CoXlTestStreamTick(void);
+void CoXlTestStreamBelt(uint32_t* gone, uint32_t* looks, long* destroys);
+void co_shim_install(void);
+int co_safe_find(uintptr_t list, size_t count, uint64_t value);
 void CoXlTestMission(uintptr_t level, int complex);
 void CoXlTestStreamOutSince(uint32_t i, unsigned long long since);
 uint32_t CoXlTestWindowEvictFar(uint32_t base, uint32_t high);
@@ -193,7 +196,30 @@ static void Start(const char* name)
  * the reviewed exe 0x3340A0, here a `ret`). */
 static int g_destroys;
 static uint64_t g_destroyed;
-static void FakeDestroy(uint64_t world, uint64_t unit, uint64_t a, uint64_t b) { (void)world; (void)a; (void)b; g_destroys++; g_destroyed = unit; }
+/* The fake world: its unit list (count +0x230588, array [+0x230590]) and its queued destroys (+0x30, count +0x10030),
+ * as DestroyUnit (exe 0x338960) and the enqueue (0x12D2D0) keep them. A test's unit id is an address in g_unitMem. */
+static uint8_t* g_worldMem;
+static uint8_t* g_unitMem;
+static uint64_t g_listed[512];
+#define U(id) ((uint64_t)(uintptr_t)(g_unitMem + (id)))
+static uint32_t ListCount(void) { uint32_t n; memcpy(&n, g_worldMem + 0x230588u, 4); return n; }
+static void ListSet(uint32_t n) { memcpy(g_worldMem + 0x230588u, &n, 4); }
+static void ListAdd(uint64_t unit) { const uint32_t n = ListCount(); g_listed[n] = unit; ListSet(n + 1); }
+static int ListTake(uint64_t unit)
+{
+    const uint32_t n = ListCount();
+    for (uint32_t k = 0; k < n; k++)
+        if (g_listed[k] == unit) { g_listed[k] = g_listed[n - 1]; ListSet(n - 1); return 1; }
+    return 0;
+}
+static void Queued(uint32_t k, uint64_t unit) { const uint32_t n = k + 1; memcpy(g_worldMem + 0x30u + 8u * k, &unit, 8); memcpy(g_worldMem + 0x10030u, &n, 4); }
+static int g_unlisted; /* destroys of a unit the list did not hold: the engine would free it all the same */
+static void FakeDestroy(uint64_t world, uint64_t unit, uint64_t a, uint64_t b)
+{
+    (void)world; (void)a; (void)b;
+    g_destroys++; g_destroyed = unit;
+    if (!ListTake(unit)) g_unlisted++;
+}
 static void StreamGame(void)
 {
     uint8_t* exe = fake_host_exe();
@@ -206,14 +232,21 @@ static void StreamGame(void)
     memcpy(g_fake.image + API + 8, &table, 8);
     memcpy(g_fake.image + TABLE + 0x388, &destroy, 8);
     memcpy(g_fake.image + TABLE + 0x410, &wait, 8);
-    g_destroys = 0; g_destroyed = 0;
+    g_destroys = 0; g_destroyed = 0; g_unlisted = 0;
 }
 
 /* The streamer on the fake game with `count` slots, the level's heightfield kept (40 m but where a case sets it). */
 static uint8_t g_context[0x100], g_array[128 * 0xE0];
 static void Stream(uint32_t count)
 {
-    uint64_t world = 0xABC0;
+    if (g_worldMem == NULL)
+    {
+        g_worldMem = (uint8_t*)VirtualAlloc(NULL, 0x231000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        g_unitMem = (uint8_t*)VirtualAlloc(NULL, 0x100000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    }
+    const uint64_t world = (uint64_t)(uintptr_t)g_worldMem, list = (uint64_t)(uintptr_t)g_listed;
+    const uint32_t none = 0;
+    memcpy(g_worldMem + 0x230590u, &list, 8); ListSet(0); memcpy(g_worldMem + 0x10030u, &none, 4);
     memcpy(g_context + 0x40, &world, 8);
     memset(g_array, 0, sizeof g_array);
     CoXlTestStreamSetup((uintptr_t)g_fake.image, g_context, g_array, count);
@@ -226,7 +259,34 @@ static void Slot(uint32_t i, float x, float y, float side, uint64_t unit, int mi
 {
     float box[4] = {x - side / 2, y - side / 2, x + side / 2, y + side / 2};
     memcpy(g_array + (size_t)i * 0xE0 + 0xB0, box, sizeof box);
+    if (unit != 0 && unit < 0x100000) unit = U(unit); /* an id: a unit of the fake world, listed as SpawnUnit lists one */
+    if (unit != 0) { const uint64_t world = (uint64_t)(uintptr_t)g_worldMem; memcpy((void*)(uintptr_t)(unit + 0x18), &world, 8); ListAdd(unit); }
     CoXlTestStreamSlot(i, x, y, unit, mission);
+}
+
+static void Generator(uint32_t state);
+static void InMission(void);
+static int g_tileOfB;
+/* A mission in play with three streamed stamps, the first and the third on the new ground of a tile that just came in
+ * (flagged to go out and come back), as when run grade2/run1 left its mission. */
+static int Lines(const char* text);
+static void Flagged(void)
+{
+    CoXlTestMission((uintptr_t)g_lg, 1);
+    StreamGame();
+    InMission();
+    Stream(4); /* the fourth holds no unit */
+    const int a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);
+    CoXlTestLayerTile(a, 1, AX, AY);
+    g_tileOfB = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTile(g_tileOfB, 1, BX, AY);
+    Slot(0, BX + 500.0f, AY, 20.0f, 0x1000, 0);
+    Slot(1, BX + 1600.0f, AY, 20.0f, 0x2000, 0);
+    Slot(2, BX + 400.0f, AY, 20.0f, 0x3000, 0);
+    Generator(3);
+    CoXlTestStreamTick(); /* in play, nothing to take out */
+    CHECK(g_destroys == 0 && Lines("the level left play") == 0);
+    CHECK(CoXlTestStampsReplace(g_tileOfB, BX, AY) == 2 && CoXlTestStreamFlag(0) && CoXlTestStreamFlag(2));
 }
 
 static int Lines(const char* text)
@@ -441,7 +501,7 @@ int main(void)
     for (uint32_t k = 1; k <= 4; k++)
     {
         CoXlTestStreamSlotState(k, &live, &due, &unit);
-        CHECK(live && unit == 0x1000u * (k + 1));
+        CHECK(live && unit == U(0x1000u * (k + 1)));
     }
     CHECK(CoXlTestVisibleWithNone(BX + 900.0f, AY) == CoXlTestVisibleAt(BX + 900.0f, AY) &&
         CoXlTestVisibleWithNone(BX + 1100.0f, AY) == CoXlTestVisibleAt(BX + 1100.0f, AY) &&
@@ -509,7 +569,7 @@ int main(void)
     CoXlTestStreamSlotState(0, &live, &due, &unit);
     CHECK(!live && unit == 0);
     CoXlTestStreamSlotState(1, &live, &due, &unit);
-    CHECK(live && unit == 0x2000 && CoXlTestStreamFlag(1));
+    CHECK(live && unit == U(0x2000) && CoXlTestStreamFlag(1));
     CoXlTestStreamScan();
     CHECK(g_destroys == 33);
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
@@ -533,10 +593,10 @@ int main(void)
     for (int f = 0; f < 8 && waiting > 0; f++) CHECK(CoXlTestStreamDrain(1.0e9, &waiting) <= 4);
     CHECK(waiting == 0 && g_destroys == 31);
     CoXlTestStreamSlotState(q, &live, &due, &unit);
-    CHECK(live && unit == 0x1000u * (q + 1));
+    CHECK(live && unit == U(0x1000u * (q + 1)));
     CHECK(CoXlTestStreamScanFrames(-1) == 1 && g_destroys == 32); /* the next scan: the one left over; q is not flagged */
     CoXlTestStreamSlotState(q, &live, &due, &unit);
-    CHECK(live && unit == 0x1000u * (q + 1));
+    CHECK(live && unit == U(0x1000u * (q + 1)));
     CoXlTestStreamObserver(0, 0.0f, 0.0f);
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
 
@@ -698,44 +758,171 @@ int main(void)
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
     CoXlTestProbePlayer(0, 0.0f, 0.0f);
 
-    /* The mission's unload (game 0xAB36F0) steps the generator to 0 and destroys every unit of the world itself while
-     * the game state still says mission: from then on the streamer destroys nothing and scans nothing. */
-    Start("the level leaves play: the streamer's tick does nothing and no removal destroys a unit");
+    /* The level generator leaves 3 only through 4 (game 0xF70D10), whose update destroys the records' stamp units
+     * (0xF742F7), and the mission's unload destroys every other unit once the state is 0 (0xAB3CD9): from the first
+     * frame that reads 4 or 0 the streamer holds no unit and no queued removal, and destroys nothing. */
+    Start("the level leaves play with stamps flagged for new ground: all is forgotten and nothing is destroyed");
+    Flagged();
+    Generator(4); /* the unload asked for the teardown */
+    CoXlTestStreamTick();
+    int goneLive = 9, goneDue = 9; uint64_t goneUnit = 9; uint32_t left = 9, gone = 9, looks = 9; long calls = 9;
+    for (uint32_t k = 0; k < 3; k++)
+    {
+        CoXlTestStreamSlotState(k, &goneLive, &goneDue, &goneUnit);
+        CHECK(!goneLive && !goneDue && goneUnit == 0 && !CoXlTestStreamFlag(k) && !CoXlTestStreamQueued(k));
+    }
+    CHECK(g_destroys == 0 && fake_host_logged("the level left play (generator state 4): streaming stopped; 3 stamp units, 0 queued removals and 2 more flagged for new ground are forgotten"));
+    CHECK(fake_host_logged("0 removed in play, 0 given up"));
+    Generator(0);
+    CoXlTestStreamTick();
+    Generator(3); /* never after 0 without a level init; nothing is held to act on all the same */
+    CoXlTestStreamTick();
+    CHECK(CoXlTestStreamScanFrames(1) == 0 && CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 0 && g_destroys == 0);
+    CHECK(Lines("the level left play") == 1 && ListCount() == 3);
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestMission(0, 0);
+
+    Start("the level leaves play with removals queued: the queue is dropped, and a removal before the next tick destroys nothing");
+    Flagged();
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueued(0) && CoXlTestStreamQueued(2)); /* decided, not done */
+    Generator(0); /* the unload's reset, before the streamer's next frame */
+    CHECK(CoXlTestStreamDrain(1.0e9, &left) == 0 && g_destroys == 0); /* the removal's own test */
+    CHECK(CoXlTestStampsReplace(g_tileOfB, BX, AY) == 2 && CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueued(0));
+    CoXlTestStreamTick();
+    CHECK(fake_host_logged("the level left play (generator state 0): streaming stopped; 3 stamp units, 2 queued removals and 0 more flagged for new ground are forgotten"));
+    CHECK(!CoXlTestStreamQueued(0) && !CoXlTestStreamQueued(2) && CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 0 && g_destroys == 0);
+    for (int f = 0; f < 118; f++) CoXlTestStreamTick();
+    CHECK(Lines("frames after level") == 0);
+    CoXlTestStreamTick();
+    CHECK(Lines("frames after level") == 1 && fake_host_logged("left play: 0 destroy call(s) by the streamer since"));
+    for (int f = 0; f < 200; f++) CoXlTestStreamTick();
+    CHECK(Lines("frames after level") == 1 && Lines("the level left play") == 1);
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestMission(0, 0);
+
+    Start("the ship is reached before the streamer saw the generator leave 3: forgotten all the same");
+    Flagged();
+    CoXlTestMission(0, 0); /* no mission in play */
+    CoXlTestStreamTick();
+    CoXlTestStreamSlotState(0, &goneLive, &goneDue, &goneUnit);
+    CHECK(g_destroys == 0 && !goneLive && goneUnit == 0 && !CoXlTestStreamFlag(0) && Lines("the level left play (generator state 3)") == 1);
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+
+    Start("a level still generating, or with a second pipeline in play, is held as it is and goes on at 3");
     CoXlTestMission((uintptr_t)g_lg, 1);
     StreamGame();
     InMission();
-    Stream(4); /* the fourth holds no unit */
-    a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);
-    CoXlTestLayerTile(a, 1, AX, AY);
+    Stream(4);
     b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
     CoXlTestLayerTile(b, 1, BX, AY);
     Slot(0, BX + 500.0f, AY, 20.0f, 0x1000, 0);
-    Slot(1, BX + 1600.0f, AY, 20.0f, 0x2000, 0);
-    Slot(2, BX + 400.0f, AY, 20.0f, 0x3000, 0);
-    CoXlTestStreamTick(); /* in play, nothing to take out */
-    CHECK(g_destroys == 0 && Lines("the level is no longer in play") == 0);
-    CHECK(CoXlTestStampsReplace(b, BX, AY) == 2 && CoXlTestStreamFlag(0) && CoXlTestStreamFlag(2));
-    Generator(0); /* the unload's reset */
+    Slot(1, BX + 400.0f, AY, 20.0f, 0x2000, 0);
+    Generator(1); /* the generation runs: captured, never yet in play */
     CoXlTestStreamTick();
-    CHECK(g_destroys == 0 && !CoXlTestStreamQueued(0) && !CoXlTestStreamQueued(2)); /* no scan either */
-    CHECK(fake_host_logged("the level is no longer in play (generator state 0): streaming stops with 3 stamp units held and 0 removals queued; none is destroyed here"));
+    Generator(2);
     CoXlTestStreamTick();
-    CHECK(g_destroys == 0 && Lines("the level is no longer in play") == 1);
-    uint32_t left = 9;
-    CHECK(CoXlTestStreamScanFrames(1) == 0 && g_destroys == 0); /* a removal reached past the tick's test: its own */
-    Generator(4); /* cancelling */
-    CoXlTestStreamTick();
-    CHECK(CoXlTestStreamScanFrames(1) == 0 && CoXlTestStreamDrain(1.0e9, &left) == 0 && g_destroys == 0);
-    int goneLive = 0, goneDue = 0; uint64_t goneUnit = 0;
     CoXlTestStreamSlotState(0, &goneLive, &goneDue, &goneUnit);
-    CHECK(goneLive && goneUnit == 0x1000 && CoXlTestStreamFlag(0)); /* held as it was */
-    Generator(3); /* the same level in play: the removals go as before */
+    CHECK(goneLive && goneUnit == U(0x1000) && Lines("the level left play") == 0);
+    Generator(3);
     CoXlTestStreamTick();
-    CHECK(g_destroys == 2);
+    CHECK(CoXlTestStampsReplace(b, BX, AY) == 2);
+    Generator(5); /* another pipeline: back to 3 after it (game 0xF7451E) */
+    CoXlTestStreamTick();
     CoXlTestStreamSlotState(0, &goneLive, &goneDue, &goneUnit);
-    CHECK(!goneLive && goneUnit == 0);
+    CHECK(g_destroys == 0 && goneLive && goneUnit == U(0x1000) && CoXlTestStreamFlag(0) && Lines("the level left play") == 0);
+    Generator(3);
+    CoXlTestStreamTick();
+    CHECK(g_destroys == 2 && g_unlisted == 0 && ListCount() == 0);
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
     CoXlTestMission(0, 0);
+
+    Start("the next level after a leave streams and removes as the first did");
+    Flagged();
+    CoXlTestStreamBelt(&gone, &looks, &calls);
+    const long callsBefore = calls;
+    Generator(4);
+    CoXlTestStreamTick();
+    Generator(3); /* a new level on the same generator object */
+    Flagged();
+    CoXlTestStreamTick();
+    CoXlTestStreamBelt(&gone, &looks, &calls);
+    CHECK(g_destroys == 2 && g_unlisted == 0 && gone == 0 && looks == 2 && calls == callsBefore + 2 && ListCount() == 1);
+    CoXlTestStreamSlotState(1, &goneLive, &goneDue, &goneUnit);
+    CHECK(goneLive && goneUnit == U(0x2000));
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestMission(0, 0);
+
+    /* DestroyUnit (exe 0x338960) frees its argument whether the world's unit list holds it or not, after running the
+     * queued destroys: a unit the engine took, or is about to take, is never passed to it. */
+    Start("a stamp unit the world no longer lists is given up without a destroy call");
+    Flagged();
+    CHECK(ListTake(U(0x1000))); /* the engine destroyed it */
+    { const uint64_t held = U(0x1000); memcpy(g_array + 0xA8, &held, 8); } /* the record still names it */
+    CoXlTestStreamTick();
+    CoXlTestStreamBelt(&gone, &looks, &calls);
+    CHECK(g_destroys == 1 && g_destroyed == U(0x3000) && g_unlisted == 0 && gone == 1 && looks == 2);
+    CHECK(Lines("slot 0's stamp unit") == 1 && fake_host_logged("is not in the world's unit list any more (or its destroy is queued): the slot is given up with no destroy call"));
+    int spawned = 0;
+    CoXlTestStreamSlotState(0, &goneLive, &goneDue, &goneUnit);
+    CoXlTestStreamSpawned(0, &spawned, &goneDue);
+    CHECK(!goneLive && goneUnit == 0 && spawned && !goneDue && !CoXlTestStreamFlag(0));
+    { uint64_t at = 9; memcpy(&at, g_array + 0xA8, 8); CHECK(at == 0); }
+    CoXlTestStreamObserver(1, BX + 500.0f, AY); /* a player right at it: a slot given up is never due again */
+    CoXlTestStreamTick();
+    CoXlTestStreamSpawned(0, &spawned, &goneDue);
+    CHECK(spawned && !goneDue && g_destroys == 1);
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
+    Generator(0);
+    CoXlTestStreamTick();
+    CHECK(fake_host_logged("1 removed in play, 1 given up (their unit was gone); the world's unit list searched 2 times"));
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestMission(0, 0);
+
+    Start("a stamp unit whose destroy the engine has queued, or that is another world's, is given up too");
+    Flagged();
+    Queued(0, 0x7777); Queued(1, U(0x1000)); /* listed still, and waiting in the world's destroy queue */
+    { const uint64_t other = 0xABC0; memcpy((void*)(uintptr_t)(U(0x3000) + 0x18), &other, 8); } /* its address is another world's unit now */
+    CoXlTestStreamTick();
+    CoXlTestStreamBelt(&gone, &looks, &calls);
+    CHECK(g_destroys == 0 && gone == 2 && looks == 2 && Lines("the slot is given up with no destroy call") == 1 && ListCount() == 3);
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestMission(0, 0);
+
+    Start("an empty unit list gives the slot up; a list that does not read turns the removal off and keeps the slot");
+    Flagged();
+    ListSet(0);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 1);
+    CoXlTestStreamBelt(&gone, &looks, &calls);
+    CHECK(g_destroys == 0 && gone == 1);
+    { const uint64_t bad = 0x10; memcpy(g_worldMem + 0x230590u, &bad, 8); ListSet(3); }
+    CHECK(CoXlTestStreamDrain(1.0e9, &left) == 0 && g_destroys == 0);
+    CoXlTestStreamSlotState(2, &goneLive, &goneDue, &goneUnit);
+    CoXlTestStreamBelt(&gone, &looks, &calls);
+    CHECK(goneLive && goneUnit == U(0x3000) && gone == 1 && fake_host_logged("removal off: the world's unit list does not read"));
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestMission(0, 0);
+
+    /* The guarded search (proto/safe_read.c) the look uses: through SafeRead in pieces, then in place under the fault
+     * handler; the list's second page is not readable. */
+    g_case = "a list is searched whole, and one that stops reading is no answer";
+    {
+        uint8_t* pages = (uint8_t*)VirtualAlloc(NULL, 0x2000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        uint64_t* list = (uint64_t*)pages;
+        DWORD was;
+        for (uint32_t k = 0; k < 512; k++) list[k] = 0x5000 + k;
+        VirtualProtect(pages + 0x1000, 0x1000, PAGE_NOACCESS, &was);
+        for (int pass = 0; pass < 2; pass++)
+        {
+            CHECK(co_safe_find((uintptr_t)list, 512, 0x5000) == 1 && co_safe_find((uintptr_t)list, 512, 0x51FF) == 1);
+            CHECK(co_safe_find((uintptr_t)list, 511, 0x51FF) == 0 && co_safe_find((uintptr_t)list, 512, 0x5200) == 0);
+            CHECK(co_safe_find((uintptr_t)list, 0, 0x5000) == 0 && co_safe_find(0x10, 0, 0x5000) == 0);
+            CHECK(co_safe_find((uintptr_t)list, 513, 0x9999) == -1 && co_safe_find((uintptr_t)(list + 500), 600, 0x9999) == -1);
+            CHECK(co_safe_find((uintptr_t)(pages + 0x1000), 4, 0) == -1 && co_safe_find(0x10, 4, 0) == -1);
+            CHECK(co_safe_find((uintptr_t)list + 4, 8, 0x5001) == -1 && co_safe_find(0x7FFFFFFE0000ull, (size_t)1 << 40, 0) == -1);
+            if (pass == 1) CHECK(co_safe_find((uintptr_t)list, 600, 0x5100) == 1); /* in place: found before the page that does not read */
+            co_shim_install(); /* the second pass searches in place */
+        }
+    }
 
     Start("the layer spawn's two callers with a heightfield go through it, only on the reviewed code");
     uint8_t* exe = fake_host_exe();
