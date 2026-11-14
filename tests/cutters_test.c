@@ -194,6 +194,16 @@ int main(void)
         CHECK(seen.dropped == 2);
     }
 
+    Reset("a 0 after the first handle goes too");
+    CHECK(co_cutters_install((uintptr_t)g_exe) == NULL);
+    destroy = Detour();
+    if (destroy != NULL)
+    {
+        const uint32_t batch[3] = {0x81018958u, 0, 0x81018957u};
+        destroy(batch, 3);
+        CHECK(g_calls == 1 && g_seenCount == 2 && g_seen[0] == 0x81018958u && g_seen[1] == 0x81018957u);
+    }
+
     Reset("no 0: the game's batch as it is");
     CHECK(co_cutters_install((uintptr_t)g_exe) == NULL);
     destroy = Detour();
@@ -306,6 +316,7 @@ int main(void)
     CHECK(co_cutters_install((uintptr_t)g_exe) == NULL);
     CHECK(co_cutters_record_arm((uintptr_t)g_exe, 3, CO_CUTSET_ADDS) == NULL);
     CHECK(co_cutters_record_arm((uintptr_t)g_exe, 9, 9) == NULL && co_cutters_test_set()->cap == 3); /* armed once */
+    co_cutters_test_switch(EngineSwitch); g_swCalls = 0;
     make = MakeDetour(); destroy = Detour();
     CHECK(make != NULL && destroy != NULL);
     if (make != NULL && destroy != NULL)
@@ -351,7 +362,7 @@ int main(void)
         StepTask(0);
         CHECK(t.bound == 1 && t.hooked == 1 && t.records == 2 && t.wanted == 1 && t.on == 1 && t.adds == 1 && t.removes == 0 && t.cap == 3);
         CHECK(t.trees == 4 && t.others == 2 && t.unbound == 0 && t.destroyed == 2 && t.world == 0x5000 && t.binds == 1);
-        CHECK(g_makes == makes && g_calls == 0);
+        CHECK(g_makes == makes && g_calls == 0 && g_swCalls == 0);
         /* any other caller's cutter in a recorded slot (through the hook itself): the tree's old record goes */
         g_makeAnswer = 0x81030005u;
         CHECK(make(&d) == 0x81030005u && s->records == 1 && s->replaced == 1 && s->on == 0);
@@ -478,6 +489,11 @@ int main(void)
         for (uint32_t i = 0; i < 150; i++) { g_makeAnswer = 0x81010100u + i; co_cutters_test_make(&d, forest); }
         g_swCalls = g_swOnCount = g_swBiggest = 0;
         CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1 && t.adds == 150 && t.held == 152 && g_swCalls == 3 && g_swBiggest == 64 && g_swOnCount == 150);
+        {
+            uint32_t sum = 0, want = 0; /* every handle once, whatever the order */
+            for (uint32_t i = 0; i < 150; i++) { sum += g_swOn[i]; want += 0x81010100u + i; }
+            CHECK(sum == want);
+        }
         /* the level's end: the next level's first trees are the game's again */
         CHECK(co_cutters_live(0) > 0 && co_cutters_live(1) == 0);
         g_makeAnswer = 0x81010005u;
@@ -558,6 +574,19 @@ int main(void)
         VirtualFree(page, 0, MEM_RELEASE);
     }
 
+    Reset("the make not hooked: the tick says so");
+    RecordPins(g_exe); AiWorld(0x5000); Mask(g_pool, 0xFFFF);
+    g_fake.noHook = (uintptr_t)g_exe + CO_CUTTERS_MAKE - (uintptr_t)g_fake.image;
+    CHECK(co_cutters_install((uintptr_t)g_exe) == NULL && MakeDetour() == NULL);
+    CHECK(co_cutters_record_arm((uintptr_t)g_exe, CO_CUTSET_SLOTS, CO_CUTSET_ADDS) == NULL);
+    co_cutters_test_switch(EngineSwitch);
+    co_cutters_switch(1);
+    {
+        CoCuttersTick t;
+        co_cutters_live(1);
+        CHECK(co_cutters_tick(NULL, 0, GetTickCount(), 0, &t) == 1 && t.hooked == 0 && t.bound == 1);
+    }
+
     Reset("more threads than the table holds: the rest count as off the tick's too");
     RecordPins(g_exe); AiWorld(0x5000); Mask(g_pool, 0xFFFF);
     CHECK(co_cutters_install((uintptr_t)g_exe) == NULL);
@@ -567,10 +596,11 @@ int main(void)
         CoCuttersTick t;
         co_cutters_live(1);
         g_makeAnswer = 0x81010300u;
-        CHECK(co_cutters_tick(NULL, 0, 900, 0, &t) == 1 && t.makesOff == 0 && t.threadsOff == 0);
+        OnOtherThread((OffThread){&d, 0, NULL, 0}); /* the first make of all, before any tick: not the tick's thread's */
+        CHECK(co_cutters_tick(NULL, 0, 900, 0, &t) == 1 && t.makesOff == 1 && t.threadsOff == 1);
         for (uint32_t i = 0; i < 70; i++) OnOtherThread((OffThread){&d, 0, i < 3 || i == 69 ? Detour() : NULL, 0x81010300u});
         co_cutters_test_make(&d, 0);
-        CHECK(co_cutters_tick(NULL, 0, 1000, 0, &t) == 1 && t.makesOff == 70 && t.destroysOff == 4 && t.threadsOff == 63 && t.others == 71);
+        CHECK(co_cutters_tick(NULL, 0, 1000, 0, &t) == 1 && t.makesOff == 71 && t.destroysOff == 4 && t.threadsOff == 63 && t.others == 72);
     }
 
     {

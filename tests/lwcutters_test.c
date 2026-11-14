@@ -57,9 +57,14 @@ int main(void)
     g_case = "only the players the manager lists, and none past the limit";
     CHECK(CoXlTestLwCutCentres(players, 1, peer, place, 2, 1, 0, 50000, c, out) == 1 && c[0].x == 100.0f);
     {
+        uint64_t unnamed[2] = {0xA1, 0}; /* the streamer holds a place with no peer: no player past the list is it */
+        CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
+        CHECK(CoXlTestLwCutCentres(players, 1, unnamed, place, 2, 1, 0, 1000, c, out) == 1 && out[0] == 1 && c[0].x == 2000.0f);
+    }
+    {
         uint64_t many[CO_SHIM_MAX_PLAYERS + 2], manyPeer[CO_SHIM_MAX_PLAYERS];
         float manyPlace[CO_SHIM_MAX_PLAYERS][2];
-        for (int i = 0; i < CO_SHIM_MAX_PLAYERS + 2; i++) many[i] = 0x500u + (uint64_t)i;
+        for (int i = 0; i < CO_SHIM_MAX_PLAYERS + 2; i++) many[i] = 0x500u + (uint64_t)(i % CO_SHIM_MAX_PLAYERS); /* the two past the limit would read */
         for (int i = 0; i < CO_SHIM_MAX_PLAYERS; i++) { manyPeer[i] = 0x500u + (uint64_t)i; manyPlace[i][0] = 1000.0f * (float)i; manyPlace[i][1] = 0; }
         CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
         CHECK(CoXlTestLwCutCentres(many, CO_SHIM_MAX_PLAYERS + 2, manyPeer, manyPlace, CO_SHIM_MAX_PLAYERS, 1, 0, 1000, c, out) == CO_SHIM_MAX_PLAYERS);
