@@ -59,6 +59,7 @@ void CoXlTestMission(uintptr_t level, int complex);
 void CoXlTestStreamOutSince(uint32_t i, unsigned long long since);
 uint32_t CoXlTestWindowEvictFar(uint32_t base, uint32_t high);
 void CoXlTestStreamSlotState(uint32_t i, int* live, int* due, uint64_t* unit);
+void CoXlTestStreamSpawned(uint32_t i, int* spawned, int* due);
 int CoXlTestLayerWhy(uint64_t unit, uint64_t field, int* slot);
 float CoXlTestTraceGridAt(int slot, float x, float y);
 void CoXlTestProbePlayer(int count, float x, float y);
@@ -284,8 +285,9 @@ static void Flagged(void)
     Slot(1, BX + 1600.0f, AY, 20.0f, 0x2000, 0);
     Slot(2, BX + 400.0f, AY, 20.0f, 0x3000, 0);
     Generator(3);
+    const int leaves = Lines("the level left play");
     CoXlTestStreamTick(); /* in play, nothing to take out */
-    CHECK(g_destroys == 0 && Lines("the level left play") == 0);
+    CHECK(g_destroys == 0 && Lines("the level left play") == leaves);
     CHECK(CoXlTestStampsReplace(g_tileOfB, BX, AY) == 2 && CoXlTestStreamFlag(0) && CoXlTestStreamFlag(2));
 }
 
@@ -791,7 +793,7 @@ int main(void)
     CoXlTestStreamTick();
     CHECK(fake_host_logged("the level left play (generator state 0): streaming stopped; 3 stamp units, 2 queued removals and 0 more flagged for new ground are forgotten"));
     CHECK(!CoXlTestStreamQueued(0) && !CoXlTestStreamQueued(2) && CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 0 && g_destroys == 0);
-    for (int f = 0; f < 118; f++) CoXlTestStreamTick();
+    for (int f = 0; f < 119; f++) CoXlTestStreamTick();
     CHECK(Lines("frames after level") == 0);
     CoXlTestStreamTick();
     CHECK(Lines("frames after level") == 1 && fake_host_logged("left play: 0 destroy call(s) by the streamer since"));
@@ -888,17 +890,25 @@ int main(void)
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
     CoXlTestMission(0, 0);
 
-    Start("an empty unit list gives the slot up; a list that does not read turns the removal off and keeps the slot");
+    Start("an empty unit list gives the slots up, each with one search");
     Flagged();
     ListSet(0);
-    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 1);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 0);
     CoXlTestStreamBelt(&gone, &looks, &calls);
-    CHECK(g_destroys == 0 && gone == 1);
-    { const uint64_t bad = 0x10; memcpy(g_worldMem + 0x230590u, &bad, 8); ListSet(3); }
-    CHECK(CoXlTestStreamDrain(1.0e9, &left) == 0 && g_destroys == 0);
-    CoXlTestStreamSlotState(2, &goneLive, &goneDue, &goneUnit);
+    CHECK(g_destroys == 0 && gone == 2 && looks == 2);
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestMission(0, 0);
+    Start("a unit list that does not read turns the removal off and keeps the slots");
+    Flagged();
+    { const uint64_t bad = 0x10; memcpy(g_worldMem + 0x230590u, &bad, 8); }
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 0 && g_destroys == 0);
     CoXlTestStreamBelt(&gone, &looks, &calls);
-    CHECK(goneLive && goneUnit == U(0x3000) && gone == 1 && fake_host_logged("removal off: the world's unit list does not read"));
+    CHECK(gone == 0 && fake_host_logged("removal off: the world's unit list does not read"));
+    for (uint32_t k = 0; k < 3; k += 2)
+    {
+        CoXlTestStreamSlotState(k, &goneLive, &goneDue, &goneUnit);
+        CHECK(goneLive && goneUnit == U(0x1000u * (k + 1)));
+    }
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
     CoXlTestMission(0, 0);
 
@@ -923,6 +933,24 @@ int main(void)
             co_shim_install(); /* the second pass searches in place */
         }
     }
+
+    Start("slots given up count against a frame's removals: each cost a search of the unit list");
+    CoXlTestMission((uintptr_t)g_lg, 1);
+    StreamGame();
+    InMission();
+    Stream(8);
+    g_tileOfB = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTile(g_tileOfB, 1, BX, AY);
+    for (uint32_t k = 0; k < 6; k++) Slot(k, BX + 300.0f + 40.0f * (float)k, AY, 20.0f, 0x1000u * (k + 1), 0);
+    Generator(3);
+    CoXlTestStreamTick();
+    CHECK(CoXlTestStampsReplace(g_tileOfB, BX, AY) == 6);
+    ListSet(0); /* the engine took them all */
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 2);
+    CoXlTestStreamBelt(&gone, &looks, &calls);
+    CHECK(gone == 4 && looks == 4 && g_destroys == 0);
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestMission(0, 0);
 
     Start("the layer spawn's two callers with a heightfield go through it, only on the reviewed code");
     uint8_t* exe = fake_host_exe();

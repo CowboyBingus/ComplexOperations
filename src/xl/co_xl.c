@@ -616,6 +616,8 @@ void CoXlTestSectionEnd(void) { SectionEnd(); }
 /* The destroy queue's hook (proto/difficulty_world_destroy.c) on a fake exe; a mission in play as level init sets it
  * (level 0: the ship, as WorldShip leaves it). */
 int CoXlTestDestroyInstall(void) { InstallDestroyQueue(); return g_destroyQueue != NULL; }
+/* The unit table alone, as the install leaves it (0 = not known). */
+void CoXlTestDestroyTable(uintptr_t at, void* lock, void* unlock) { g_destroyTableAt = at; g_destroyLock = (DestroyLockFn)lock; g_destroyUnlock = (DestroyLockFn)unlock; }
 void CoXlTestDestroyTick(void) { DestroyTick(); }
 LONG CoXlTestDestroyWaiting(void) { return g_destroyWaiting; }
 /* Level init and the ship's set-up as the stubs call them, and the near terrain's state they leave or clear
@@ -681,6 +683,14 @@ void CoXlTestOneMipArm(uint64_t tex, uint64_t* renderSlot)
 int CoXlTestOneMipArmed(void) { return g_oneMip.armed; }
 uint64_t CoXlTestOneMipTex(void) { return g_oneMip.tex; }
 uint64_t CoXlTestOneMipSpawn(uint32_t type, uint32_t name) { return NearOneMipSpawn(NULL, NULL, 0, type, name, 0, 0, NULL, NULL, 0); }
+/* The next extra large level's op 0x38 and its first replay's drop, the last level's material map being `matTex`. */
+void CoXlTestMapsNextLevel(uint64_t matTex)
+{
+    g_coarseMat.tex = matTex; g_coarseMat.terrain = g_oneMip.terrain;
+    g_world.levels++;
+    NearOneMipLevel();
+    NearCoarseMatDrop();
+}
 void CoXlTestNearActive(LONG on, uint64_t cam) { g_nearActive = on; g_near.cam[0] = cam; }
 LONG CoXlTestNearActiveNow(void) { return g_nearActive; }
 int CoXlTestCamShift(uint64_t camera) { const float v[3] = {1, 2, 3}; float out[3]; return TerrainNearCamShift(camera, g_world.game + 0xAB0725u, v, out); }

@@ -893,9 +893,9 @@ static void WindowEvictedLocked(void); /* difficulty_stream_window.c */
  * The removals done. */
 static uint32_t WorldStreamDrainLocked(uint32_t most, double ms)
 {
-    uint32_t done = 0;
+    uint32_t done = 0, given = 0; /* a slot given up cost a search of the world's unit list: it counts as a removal here */
     const double t0 = HitchNow();
-    while (g_streamDropCount > 0 && done < most)
+    while (g_streamDropCount > 0 && done + given < most)
     {
         const uint32_t i = g_streamDropList[g_streamDropHead];
         g_streamDropHead = (g_streamDropHead + 1) % kStreamDropQueue; g_streamDropCount--;
@@ -904,7 +904,8 @@ static uint32_t WorldStreamDrainLocked(uint32_t most, double ms)
         if (kind == STREAM_DROP_FAR) g_streamDropFar--;
         if (i >= g_stream.count || !g_streamLive[i] || !g_streamPoseGood[i] || g_streamNeedsUnit[i] || g_streamUnit[i] == 0) continue;
         if (kind == STREAM_DROP_OUT ? g_streamOutSince[i] == 0 : kind == STREAM_DROP_REPLACE ? !g_streamReplace[i] : !(g_streamOut2[i] > 0.0f)) continue;
-        if (!WorldStreamRemoveLocked(i)) continue;
+        const uint32_t gone = g_stream.gone;
+        if (!WorldStreamRemoveLocked(i)) { given += g_stream.gone != gone; continue; }
         done++;
         if (kind == STREAM_DROP_REPLACE) /* due again: a window slot is free and enters again from the plan */
         {

@@ -532,6 +532,15 @@ static int MoveListed(uint64_t countAt, uint64_t listAt, uint64_t object)
     return 0;
 }
 
+/* A camera of the merge may be asked to go. After the level its handle may be gone already (the unload destroys every
+ * unit, 0xAB3D20..0xAB3DCB), and one that resolves to no unit ends the game in the destroy queue's drain when the
+ * queue's own filter is not in (exe 0x12E70E..0x12E71B). So it goes only while it resolves; with no unit table known
+ * it is left to the world. */
+static int MoveNodeGoes(uint32_t node, int left)
+{
+    return node != 0 && (!left || (g_destroyTableAt != 0 && DestroyHandleState(node) == 0));
+}
+
 /* The merge as the level's 0x66 and 0x67 leave it (the parts this build re-created); 1 when torn down. `left`: the
  * level has ended and its own teardown (0xF6FF60) has run: that released the 0x94 lookup and ended the environment's
  * slot 5 (0xF708AB), the records may be the next generation's, and the saved environment pointer may be gone. */
@@ -558,8 +567,8 @@ static int MoveTeardown(int left)
     /* 0x66: the cameras, R+0x108 */
     uint32_t n0 = 0, n1 = 0; uint64_t r108 = 0;
     SafeRead(R + 8, &n0, 4); SafeRead(R + 0x18, &n1, 4); SafeRead(R + 0x108, &r108, 8);
-    if (n0 != 0) destroyNode(world, n0);
-    if (n1 != 0 && n1 != g_move.nodeOld) destroyNode(world, n1);
+    if (MoveNodeGoes(n0, left)) destroyNode(world, n0);
+    if (n1 != g_move.nodeOld && MoveNodeGoes(n1, left)) destroyNode(world, n1);
     g_move.nodeOld = n1;
     /* after the level only one the world still lists is its to destroy; 0xFCF2F0 below skips a zero */
     const int listed = r108 != 0 && (!left || MoveListed(world + 0x230908u, world + 0x230910u, r108));
