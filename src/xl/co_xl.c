@@ -932,6 +932,14 @@ void CoXlTestRoadsLevel(const uint8_t* ops, uint32_t n, uint32_t planned)
     memcpy(g_locationOp, ops, n);
     g_plan.level = g_world.levels; g_plan.count = planned;
 }
+void CoXlTestRoadsCorridor(uintptr_t block, const uint8_t* ops, uint32_t before, uint32_t total) { RoadsCorridorNote(block, ops, before, total); }
+/* The mod's added locations from `first` on, and `planned` plan entries at cand (each CoXlTestStampCandidateSize bytes, the location first). */
+uint32_t CoXlTestStampCandidateSize(void) { return (uint32_t)sizeof(StampCandidate); }
+void CoXlTestRoadsStamps(uint32_t first, void* cand, uint32_t planned)
+{
+    g_stamps.ringLevel = g_world.levels; g_stamps.first = first; g_stamps.cand = (StampCandidate*)cand;
+    g_plan.level = g_world.levels; g_plan.count = planned;
+}
 uint8_t CoXlTestLocationOp(uint32_t i) { return g_locationOp[i]; }
 float CoXlTestStampSegmentBox(const float* s, const float* lo, const float* hi) { return StampSegmentBox(s, lo, hi); }
 void CoXlTestRoadsAfterOp(uintptr_t block, uint64_t context, uint64_t record, uint32_t op, uint32_t before, int counted)

@@ -475,3 +475,178 @@ static void RoadsSpursBuild(uintptr_t block, uint64_t context)
     RoadsFreeEdges(e, n);
     VirtualFree(pts, 0, MEM_RELEASE);
 }
+
+/* ---- The corridor census (log only) ----
+ * What stands in the strips a vehicle is to drive: every location whose box (+0xB0) comes nearer an arterial's or a
+ * spur's point pair than half its width, as the stamp tests measure it. The level's own op 0x2B stamps, the stamps
+ * the mod added, the plan's, and the places of other ops (a spur's own place apart) are counted on their own. */
+#define ROADS_STRIP_CELL 64.0f
+#define ROADS_STRIP_GRID 512
+typedef struct RoadStrip { float seg[4], half; uint32_t edge, spur; } RoadStrip; /* spur: 1 + its index; 0 an arterial's pair */
+typedef struct RoadStrips { RoadStrip* s; uint32_t n; uint32_t* start; uint32_t* item; int grid; } RoadStrips;
+typedef struct RoadStripHit { float d, half; uint32_t edge, spur; int centred; } RoadStripHit;
+static int RoadStripCell(float v, int grid) { const int c = (int)floorf(v / ROADS_STRIP_CELL); return c < 0 ? 0 : c >= grid ? grid - 1 : c; }
+/* The strips in a grid of 64 m cells: each in every cell its pair, widened by its half width, touches. */
+static int RoadStripsIndex(RoadStrips* t, float world)
+{
+    t->grid = (int)ceilf(world / ROADS_STRIP_CELL);
+    if (t->grid < 1) t->grid = 1;
+    if (t->grid > ROADS_STRIP_GRID) t->grid = ROADS_STRIP_GRID;
+    const size_t cells = (size_t)t->grid * (size_t)t->grid;
+    t->start = (uint32_t*)VirtualAlloc(NULL, (cells + 1) * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (t->start == NULL) return 0;
+    for (int pass = 0; pass < 2; pass++)
+    {
+        for (uint32_t k = 0; k < t->n; k++)
+        {
+            const RoadStrip* s = &t->s[k];
+            const int x0 = RoadStripCell(fminf(s->seg[0], s->seg[2]) - s->half, t->grid), x1 = RoadStripCell(fmaxf(s->seg[0], s->seg[2]) + s->half, t->grid);
+            const int y0 = RoadStripCell(fminf(s->seg[1], s->seg[3]) - s->half, t->grid), y1 = RoadStripCell(fmaxf(s->seg[1], s->seg[3]) + s->half, t->grid);
+            for (int y = y0; y <= y1; y++)
+                for (int x = x0; x <= x1; x++)
+                {
+                    const size_t c = (size_t)y * (size_t)t->grid + (size_t)x;
+                    if (pass == 0) t->start[c + 1]++; else t->item[t->start[c]++] = k;
+                }
+        }
+        if (pass == 1) break;
+        for (size_t c = 0; c < cells; c++) t->start[c + 1] += t->start[c];
+        const uint32_t total = t->start[cells];
+        t->item = (uint32_t*)VirtualAlloc(NULL, ((size_t)total + 1) * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (t->item == NULL) { VirtualFree(t->start, 0, MEM_RELEASE); t->start = NULL; return 0; }
+    }
+    /* the fill moved each cell's start to its end: back by one cell */
+    for (size_t c = cells; c > 0; c--) t->start[c] = t->start[c - 1];
+    t->start[0] = 0;
+    return 1;
+}
+/* The strip the box lies deepest in (the least distance from its pair, under its half width): 1 with *hit, 0 when the
+ * box is in none. own: 1 + the spur whose place this is (its own spur ends in it), 0 none. */
+static int RoadStripsHit(const RoadStrips* t, const float pos[2], const float lo[2], const float hi[2], uint32_t own, RoadStripHit* hit)
+{
+    int found = 0;
+    const int x0 = RoadStripCell(lo[0], t->grid), x1 = RoadStripCell(hi[0], t->grid), y0 = RoadStripCell(lo[1], t->grid), y1 = RoadStripCell(hi[1], t->grid);
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++)
+        {
+            const size_t c = (size_t)y * (size_t)t->grid + (size_t)x;
+            for (uint32_t k = t->start[c]; k < t->start[c + 1]; k++)
+            {
+                const RoadStrip* s = &t->s[t->item[k]];
+                if (own != 0 && s->spur == own) continue;
+                const float d = StampSegmentBox(s->seg, lo, hi);
+                if (!(d < s->half) || (found && !(d < hit->d))) continue;
+                found = 1;
+                hit->d = d; hit->half = s->half; hit->edge = s->edge; hit->spur = s->spur;
+                hit->centred = RoadsSegment(pos[0], pos[1], s->seg[0], s->seg[1], s->seg[2], s->seg[3]) < s->half;
+            }
+        }
+    return found;
+}
+
+enum { ROADS_IN_OWN, ROADS_IN_ADDED, ROADS_IN_PLAN, ROADS_IN_PLACE, ROADS_IN_KINDS };
+typedef struct RoadsCensus { uint32_t box[ROADS_IN_KINDS], centred[ROADS_IN_KINDS], onSpur[ROADS_IN_KINDS], listed; float nearest; HANDLE file; float halfWorld; } RoadsCensus;
+static void RoadsCensusItem(RoadsCensus* c, const RoadStrips* t, int kind, uint32_t index, uint32_t op, const uint8_t* loc, uint32_t own)
+{
+    static const char* const kNames[ROADS_IN_KINDS] = {"own", "added", "plan", "place"};
+    float pos[2], box[4]; uint32_t type, raw; uint16_t flags; RoadStripHit hit;
+    memcpy(pos, loc, 8); memcpy(box, loc + 0xB0, 16); memcpy(&type, loc + 0xD8, 4); memcpy(&flags, loc + 0xD4, 2); memcpy(&raw, loc + 0xC8, 4);
+    const float lo[2] = {fminf(box[0], box[2]), fminf(box[1], box[3])}, hi[2] = {fmaxf(box[0], box[2]), fmaxf(box[1], box[3])};
+    if (!(lo[0] <= hi[0]) || !(lo[1] <= hi[1]) || !RoadStripsHit(t, pos, lo, hi, own, &hit)) return;
+    c->box[kind]++; c->centred[kind] += (uint32_t)hit.centred; c->onSpur[kind] += hit.spur != 0;
+    if (kind != ROADS_IN_PLACE && hit.d < c->nearest) c->nearest = hit.d;
+    char line[224]; DWORD wrote;
+    const int len = snprintf(line, sizeof line, "%s\t%u\t0x%X\t%u\t0x%X\t0x%X\t%.1f\t%.1f\t%.1f\t%.1f\t%.2f\t%.1f\t%u\t%s\t%d\n", kNames[kind], index, op, type, flags, raw,
+        (double)(pos[0] - c->halfWorld), (double)(pos[1] - c->halfWorld), (double)(hi[0] - lo[0]), (double)(hi[1] - lo[1]), (double)hit.d, (double)hit.half, hit.edge,
+        hit.spur ? "spur" : "arterial", hit.centred);
+    if (c->file != INVALID_HANDLE_VALUE) WriteFile(c->file, line, TsvLength(line, sizeof line, len), &wrote, NULL);
+    if (c->listed++ < 8)
+        Note("roads: level %ld corridor: %s %u (op 0x%X, type %u, flags 0x%X, +0xC8 0x%X) at (%.0f, %.0f), box %.1f x %.1f m, %.2f m from the middle of %s %u's %.1f m half width%s",
+            (long)g_world.levels, kNames[kind], index, op, type, flags, raw, (double)(pos[0] - c->halfWorld), (double)(pos[1] - c->halfWorld), (double)(hi[0] - lo[0]),
+            (double)(hi[1] - lo[1]), (double)hit.d, hit.spur ? "the spur at edge" : "arterial edge", hit.edge, (double)hit.half, hit.centred ? ", its centre inside" : "");
+}
+
+/* After the level's op 0x2B and the mod's stamps: one line, the first eight finds, and corridor-<level>.tsv with all
+ * (kind, index, op, type +0xD8, flags +0xD4, +0xC8, x, y in world metres, box, distance, half width, edge, class, centred).
+ * before: the locations op 0x2B found; the ones from there on are its own, then the added ones. */
+static void RoadsCorridorNote(uintptr_t block, const uint8_t* ops, uint32_t before, uint32_t total)
+{
+    if (g_arterials.level != g_world.levels || g_arterials.count == 0) return;
+    LARGE_INTEGER t0, t1, hz;
+    QueryPerformanceCounter(&t0);
+    const RoadsLayout L = {g_routeEdges, g_routePoints, 0};
+    RoadEdge* e = NULL; uint32_t points = 0, offset = 0;
+    const uint32_t n = RoadsReadEdges(block, &L, &e);
+    float* pts = RoadsReadPoints(block, &L, &points);
+    const uint32_t spurs = g_spurs.level == g_world.levels ? g_spurs.count : 0;
+    RoadStrips t = {NULL, 0, NULL, NULL, 0};
+    uint32_t pairs = 0;
+    for (uint32_t i = 0; i < n; i++)
+        if (((g_arterials.bits[i >> 3] >> (i & 7)) & 1) && RoadEdgeHasPoints(&e[i], points)) pairs += e[i].end - e[i].first - 1;
+    for (uint32_t k = 0; k < spurs; k++) if (g_spurs.spur[k].end <= points) pairs += g_spurs.spur[k].end - g_spurs.spur[k].first - 1;
+    if (pts != NULL && pairs != 0) t.s = (RoadStrip*)VirtualAlloc(NULL, (size_t)pairs * sizeof *t.s, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (t.s == NULL || SafeRead(g_world.game + 0xC176A7 + 3, &offset, 4) || offset < 0x90)
+    {
+        Note("roads: level %ld corridor: no arterial has points, or the locations are not readable; nothing counted", (long)g_world.levels);
+        goto done;
+    }
+    double km[2] = {0, 0};
+    for (uint32_t i = 0; i < n; i++)
+    {
+        if (!((g_arterials.bits[i >> 3] >> (i & 7)) & 1) || !RoadEdgeHasPoints(&e[i], points)) continue;
+        for (uint32_t p = e[i].first + 1; p < e[i].end; p++)
+        {
+            RoadStrip* s = &t.s[t.n++];
+            memcpy(s->seg, &pts[2 * (p - 1)], 16); s->half = 0.5f * e[i].width; s->edge = i; s->spur = 0;
+            km[0] += sqrt((double)(s->seg[2] - s->seg[0]) * (s->seg[2] - s->seg[0]) + (double)(s->seg[3] - s->seg[1]) * (s->seg[3] - s->seg[1])) / 1000.0;
+        }
+    }
+    for (uint32_t k = 0; k < spurs; k++)
+    {
+        const RoadSpur* sp = &g_spurs.spur[k];
+        if (sp->end > points || sp->edge >= n) continue;
+        for (uint32_t p = sp->first + 1; p < sp->end; p++)
+        {
+            RoadStrip* s = &t.s[t.n++];
+            memcpy(s->seg, &pts[2 * (p - 1)], 16); s->half = 0.5f * e[sp->edge].width; s->edge = sp->edge; s->spur = k + 1;
+            km[1] += sqrt((double)(s->seg[2] - s->seg[0]) * (s->seg[2] - s->seg[0]) + (double)(s->seg[3] - s->seg[1]) * (s->seg[3] - s->seg[1])) / 1000.0;
+        }
+    }
+    if (!RoadStripsIndex(&t, 2048.0f * g_world.current)) goto done;
+    RoadsCensus c; memset(&c, 0, sizeof c);
+    c.nearest = ROADS_NONE; c.halfWorld = 1024.0f * g_world.current;
+    wchar_t name[48];
+    swprintf(name, 48, L"corridor-%ld.tsv", (long)g_world.levels);
+    c.file = OpenLog(name);
+    const uint32_t added = g_stamps.ringLevel == g_world.levels ? g_stamps.first : 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < total; i++)
+    {
+        uint8_t loc[0xE0];
+        if (SafeRead(block + (offset - 0x90) + 0xE0ull * i, loc, sizeof loc)) break;
+        const uint8_t op = i < before && i < DIF_LOCATIONS ? ops[i] : 0x2B;
+        uint32_t own = 0;
+        if (op != 0x2B) /* a place's own spur starts at its position */
+            for (uint32_t k = 0; k < spurs && own == 0; k++) if (memcmp(g_spurs.spur[k].from, loc, 8) == 0) own = k + 1;
+        RoadsCensusItem(&c, &t, i >= added ? ROADS_IN_ADDED : op == 0x2B ? ROADS_IN_OWN : ROADS_IN_PLACE, i, op, loc, own);
+    }
+    const uint32_t planned = g_plan.level == g_world.levels && g_stamps.cand != NULL ? g_plan.count : 0;
+    for (uint32_t k = 0; k < planned; k++) RoadsCensusItem(&c, &t, ROADS_IN_PLAN, k, 0x2B, g_stamps.cand[k].loc, 0);
+    if (c.file != INVALID_HANDLE_VALUE) CloseHandle(c.file);
+    const double all = km[0] + km[1];
+    const uint32_t stamps = c.box[ROADS_IN_OWN] + c.box[ROADS_IN_ADDED] + c.box[ROADS_IN_PLAN];
+    char clear[48];
+    QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
+    if (c.nearest < ROADS_NONE) snprintf(clear, sizeof clear, "%.1f m to the nearest of them", (double)(2.0f * c.nearest)); else snprintf(clear, sizeof clear, "the full width everywhere");
+    Note("roads: level %ld corridor: %.1f km of arterials and %.1f km of spurs (%u pairs): inside the strip %u of the level's own op 0x2B stamps (%u centred, %u on a spur), "
+        "%u added stamps (%u centred, %u on a spur), %u of the plan's (%u centred, %u on a spur), %u places of other ops (%u centred, %u on a spur); %.2f stamps per km; "
+        "clear across the middle: %s; counted in %.1f ms", (long)g_world.levels, km[0], km[1], t.n, c.box[ROADS_IN_OWN], c.centred[ROADS_IN_OWN], c.onSpur[ROADS_IN_OWN],
+        c.box[ROADS_IN_ADDED], c.centred[ROADS_IN_ADDED], c.onSpur[ROADS_IN_ADDED], c.box[ROADS_IN_PLAN], c.centred[ROADS_IN_PLAN], c.onSpur[ROADS_IN_PLAN],
+        c.box[ROADS_IN_PLACE], c.centred[ROADS_IN_PLACE], c.onSpur[ROADS_IN_PLACE], all > 0 ? stamps / all : 0.0, clear,
+        (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart);
+done:
+    if (t.item != NULL) VirtualFree(t.item, 0, MEM_RELEASE);
+    if (t.start != NULL) VirtualFree(t.start, 0, MEM_RELEASE);
+    if (t.s != NULL) VirtualFree(t.s, 0, MEM_RELEASE);
+    RoadsFreeEdges(e, n);
+    if (pts != NULL) VirtualFree(pts, 0, MEM_RELEASE);
+}

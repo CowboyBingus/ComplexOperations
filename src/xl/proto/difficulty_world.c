@@ -4856,6 +4856,7 @@ static void RoadsSpacingEnd(void);
 static void RoadsArterialsApply(uintptr_t block, const uint8_t* ops, uint32_t total);
 static void RoadsArterialsPoints(uintptr_t block);
 static void RoadsSpursBuild(uintptr_t block, uint64_t context);
+static void RoadsCorridorNote(uintptr_t block, const uint8_t* ops, uint32_t before, uint32_t total);
 static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
 {
     WorldDispatchBegins(records, index, (uint32_t)d);
@@ -5098,6 +5099,7 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
             if (watch && op == 0x86) { uint32_t placed = 0; SafeRead(block + 0x11A7108, &placed, 4); RoadsArterialsApply(block, g_locationOp, placed < DIF_LOCATIONS ? placed : DIF_LOCATIONS); }
             if (watch && op == 0x0E) RoadsArterialsPoints(block);
             if (watch && op == 0x0F) RoadsSpursBuild(block, b); /* before op 0x2B places a stamp */
+            if (watch && op == 0x2B) { uint32_t placed = 0; SafeRead(block + 0x11A7108, &placed, 4); RoadsCorridorNote(block, g_locationOp, before, placed); }
         }
     }
     TerrainDiagAfter(records, index, diagAt, diagOp);

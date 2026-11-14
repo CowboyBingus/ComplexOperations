@@ -25,6 +25,9 @@ uint32_t CoXlTestRoadsSpurs(uint32_t* reserve, const float** table);
 float CoXlTestStampSegmentBox(const float* s, const float* lo, const float* hi);
 void CoXlTestRoadsSpurTerminals(const float* xy, const float* gap, uint32_t terms);
 int CoXlTestRoadsArterial(uint32_t edge);
+void CoXlTestRoadsCorridor(uintptr_t block, const uint8_t* ops, uint32_t before, uint32_t total);
+uint32_t CoXlTestStampCandidateSize(void);
+void CoXlTestRoadsStamps(uint32_t first, void* cand, uint32_t planned);
 
 static int g_failed;
 static const char* g_case;
@@ -421,6 +424,56 @@ static void ArterialsGlue(void)
     CHECK(table[0] == 990 && table[1] == 1010 && table[2] == 1000 && table[3] == 1000);
     { uint32_t u[3]; memcpy(u, table + 4, 12); CHECK(u[0] == 2 && u[1] == 9 && u[2] == 12); }
     CHECK(Lines("spurs: 2 of 2 places joined to the arterials (0.0 km, the longest 14 m; 6 road points of 14 kept for them), 0 on a road already, 0 too far, 0 without room") == 1);
+
+    g_case = "corridor: what stands in the arterials' and the spurs' strips, by kind";
+    {
+        /* x, y, half side: the objective and the outpost (each at its own spur's start; the outpost's box 5 m from
+         * edge 1's end, inside its 6 m), a place on edge 0, own stamps on edge 2, beside it and on the objective's
+         * spur, an added stamp on edge 0, and one in three strips where the edges meet: 2.55 m from edge 0's
+         * pair, 2.5 m from edge 1's, 0.5 m from edge 2's, the deepest */
+        static const float at[8][3] = {{990, 1010, 5}, {2010, 5, 5}, {500, 2, 1}, {1003, 500, 1}, {1010, 500, 1}, {993, 1007, 0.5f}, {250, -3, 1}, {1001, 3, 0.5f}};
+        static const uint8_t before[3] = {0x16, 0x82, 0x8E};
+        static uint8_t plan[2 * 0x200];
+        const uint32_t size = CoXlTestStampCandidateSize();
+        for (uint32_t i = 0; i < 8; i++)
+        {
+            uint8_t* loc = g_block + LOCATIONS_AT + 0xE0u * i;
+            const float box[4] = {at[i][0] + at[i][2], at[i][1] - at[i][2], at[i][0] - at[i][2], at[i][1] + at[i][2]}; /* corners in either order */
+            memset(loc, 0, 0xE0); memcpy(loc, at[i], 8); memcpy(loc + 0xB0, box, 16);
+            Put32(loc + 0xD8, 40u + i); loc[0xD4] = (uint8_t)(i + 1);
+        }
+        CHECK(size >= 0xE0 && size <= 0x200);
+        memset(plan, 0, sizeof plan);
+        { const float p[2] = {1500, 6.5f}, box[4] = {1499, 5, 1501, 8}; memcpy(plan, p, 8); memcpy(plan + 0xB0, box, 16); }       /* 5 m from edge 1: inside its 6 m */
+        { const float p[2] = {1500, 7.5f}, box[4] = {1499, 6, 1501, 9}; memcpy(plan + size, p, 8); memcpy(plan + size + 0xB0, box, 16); } /* 6 m: not inside */
+        CoXlTestRoadsStamps(6, plan, 2);
+        g_fake.log[0] = 0;
+        CoXlTestRoadsCorridor(block, before, 3, 8);
+        CHECK(Lines("corridor: 3.0 km of arterials and 0.0 km of spurs (8 pairs): inside the strip 2 of the level's own op 0x2B stamps (2 centred, 1 on a spur), "
+            "2 added stamps (2 centred, 0 on a spur), 1 of the plan's (0 centred, 0 on a spur), 2 places of other ops (1 centred, 0 on a spur); 1.65 stamps per km; "
+            "clear across the middle: 0.0 m to the nearest of them; counted in ") == 1);
+        CHECK(Lines("corridor: place 1 (op 0x82, type 41, flags 0x2, +0xC8 0x0) at (-6182, -8187), box 10.0 x 10.0 m, 5.00 m from the middle of arterial edge 1's 6.0 m half width") == 1);
+        CHECK(Lines("corridor: place 2 (op 0x8E, type 42, flags 0x3, +0xC8 0x0) at (-7692, -8190), box 2.0 x 2.0 m, 1.00 m from the middle of arterial edge 0's 4.0 m half width, its centre inside") == 1);
+        CHECK(Lines("corridor: own 3 (op 0x2B, type 43, flags 0x4, +0xC8 0x0) at (-7189, -7692), box 2.0 x 2.0 m, 2.00 m from the middle of arterial edge 2's 4.0 m half width, its centre inside") == 1);
+        CHECK(Lines("corridor: own 5 (op 0x2B, type 45, flags 0x6, +0xC8 0x0) at (-7199, -7185), box 1.0 x 1.0 m, 0.00 m from the middle of the spur at edge 2's 4.0 m half width, its centre inside") == 1);
+        CHECK(Lines("corridor: added 7 (op 0x2B, type 47, flags 0x8, +0xC8 0x0) at (-7191, -8189), box 1.0 x 1.0 m, 0.50 m from the middle of arterial edge 2's 4.0 m half width, its centre inside") == 1);
+        CHECK(Lines("corridor: added 6 (op 0x2B, type 46") == 1 && Lines("corridor: plan 0 (op 0x2B, type 0") == 1);
+        CHECK(Lines("corridor: own 4 ") == 0 && Lines("corridor: place 0 ") == 0 && Lines("corridor: plan 1 ") == 0);
+        /* without the mod's stamps: the level's own from `before` on, and no plan; the stamps on the spur and where the
+         * edges meet away: 4 m clear (the place 1 m from the middle is no stamp) */
+        CoXlTestRoadsStamps(0xFFFFFFFFu, NULL, 0);
+        { const float off[2] = {5000, 5000}, box[4] = {4999, 4999, 5001, 5001}; memcpy(g_block + LOCATIONS_AT + 0xE0u * 5, off, 8); memcpy(g_block + LOCATIONS_AT + 0xE0u * 5 + 0xB0, box, 16); }
+        g_fake.log[0] = 0;
+        CoXlTestRoadsCorridor(block, before, 3, 7);
+        CHECK(Lines("inside the strip 2 of the level's own op 0x2B stamps (2 centred, 0 on a spur), 0 added stamps (0 centred, 0 on a spur), 0 of the plan's (0 centred, 0 on a spur), "
+            "2 places of other ops (1 centred, 0 on a spur); 0.66 stamps per km; clear across the middle: 4.0 m to the nearest of them") == 1);
+        /* nothing in a strip */
+        g_fake.log[0] = 0;
+        CoXlTestRoadsCorridor(block, before, 1, 1); /* the objective alone: its own spur ends in it */
+        CHECK(Lines("inside the strip 0 of the level's own op 0x2B stamps") == 1 && Lines("0 places of other ops (0 centred, 0 on a spur); 0.00 stamps per km; clear across the middle: the full width everywhere") == 1);
+        for (uint32_t i = 0; i < 8; i++) memset(g_block + LOCATIONS_AT + 0xE0u * i, 0, 0xE0);
+        for (uint32_t i = 0; i < 4; i++) memcpy(g_block + LOCATIONS_AT + 0xE0u * i, &xy[2 * i], 8);
+    }
 
     g_case = "spurs: a place on a road, one too far, and no index";
     static const float away[2 * 3] = {1000, 400, 1000, 2100, 3000, 0};
