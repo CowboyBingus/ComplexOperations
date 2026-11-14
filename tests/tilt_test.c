@@ -522,7 +522,7 @@ int main(void)
     HitAt(104.0f, -200.0f, 15.0f);
     CHECK(fabsf(PropCall(read, 7, 0.5f) - (3.5f + (0.5f - 3.5f) * 0.741f)) < 0.01f);
     Frame(1); Ray(2, 104.0f, -201.0f, 15.5f, 0); /* its next corner over a hole: the same entity, so the rock corner is still its own */
-    CHECK(Call(read, 2, 3, 4.0f) == 4.0f && CoXlTestLeanProp() == 1);
+    CHECK(PropCall(read, 7, 4.0f) == 4.0f && CoXlTestLeanProp() == 1);
     Frame(0); Entity(7, 0); CoXlTestTiltFeetClear(); CoXlTestTiltFooted(&footed, &part); CoXlTestTiltPropCounts(&pg, &pk);
     PropRay(104.0f, -200.0f, 15.25f, 0, 0, -1.0f, rock, rockBody);
     HitAt(104.0f, -200.0f, 14.75f);
@@ -545,7 +545,7 @@ int main(void)
     CHECK(PropCall(read, 7, 0.5f) == 0.5f && CoXlTestLeanProp() == 0); /* a third, on the ground: no prop corner is its own */
     Frame(8); Ray(2, 104.0f, -200.0f, 15.25f, 0);
     Entity(7, 0x7A3);
-    CHECK(Call(read, 2, 3, 4.0f) == 4.0f && CoXlTestLeanProp() == 0); /* a miss by a fourth */
+    CHECK(PropCall(read, 7, 4.0f) == 4.0f && CoXlTestLeanProp() == 0); /* a miss by a fourth */
     Entity(7, 0);
     Frame(0); CoXlTestTiltFeetClear();
     PropRay(104.0f, -200.0f, 18.2f, 0, 0, -1.0f, rock, rockBody); /* the roof again, 5.7 m up */
