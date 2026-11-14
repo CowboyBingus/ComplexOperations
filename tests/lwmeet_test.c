@@ -96,6 +96,44 @@ int main(void)
     g_case = "a player's first call waits its part of the period: 8 players' calls fall an eighth of it apart";
     CHECK(co_lw_meet_call_first(480000u, 0, 8) == 0 && co_lw_meet_call_first(480000u, 1, 8) == 60000u && co_lw_meet_call_first(480000u, 7, 8) == 420000u);
     CHECK(co_lw_meet_call_first(480000u, 3, 1) == 0 && co_lw_meet_call_first(480000u, 1, 2) == 240000u);
+    g_case = "a patrol in two minutes for one player at most";
+    CHECK(CO_LW_MEET_CALL_MIN_MS == 120000u && co_lw_meet_call_ms(72, 4, 1, 1065.0f, 3.0f) == 120000u);
+    g_case = "a call is off its even time by 15 % of the period at most, either way, the same for the same seed, and not the same for all";
+    { int32_t lo = 0, hi = 0; int same = 1, early = 0;
+      for (uint32_t seed = 0; seed < 2000u; seed++)
+      {
+          const int32_t j = co_lw_meet_call_jitter(120000u, seed);
+          if (j < lo) lo = j;
+          if (j > hi) hi = j;
+          if (j != co_lw_meet_call_jitter(120000u, seed)) same = 0;
+          early += j < 0;
+      }
+      CHECK(lo >= -18000 && lo < -16000 && hi <= 18000 && hi > 16000 && same && early > 800 && early < 1200);
+      CHECK(co_lw_meet_call_jitter(0, 7u) == 0 && co_lw_meet_call_jitter(600000u, 3u) != co_lw_meet_call_jitter(600000u, 4u)); }
+    g_case = "the next call is a period on from the player's even time, with the jitter: 84 to 156 s after the last at the least period";
+    { uint64_t slot = 1000000u, at = 1000000u; int ok = 1;
+      for (uint32_t k = 0; k < 500u; k++)
+      {
+          const uint64_t was = slot, next = co_lw_meet_call_next(&slot, 120000u, at + 900u, k * 31u + 5u); /* the tick finds it up to a second late */
+          if (slot != was + 120000u || next < at + 84000u || next > at + 156000u || (int64_t)next - (int64_t)slot != co_lw_meet_call_jitter(120000u, k * 31u + 5u)) ok = 0;
+          at = next;
+      }
+      CHECK(ok && slot == 1000000u + 500u * 120000u); /* the even times do not drift with the jitter */ }
+    g_case = "after a spell with none to call the late call falls back onto the player's even time: the spread over the players is kept";
+    { uint64_t slot[8], next[8]; int ok = 1;
+      for (int i = 0; i < 8; i++) slot[i] = 1000000u + co_lw_meet_call_first(480000u, i, 8);
+      /* all eight are called within 8 s of each other, 700 s late */
+      for (int i = 0; i < 8; i++) next[i] = co_lw_meet_call_next(&slot[i], 480000u, 1700000u + 1000u * (uint64_t)i, (uint32_t)i);
+      for (int i = 0; i < 8; i++)
+      {
+          if ((slot[i] - 1000000u) % 480000u != (uint64_t)(60000 * i)) ok = 0; /* each in its own eighth of the period again */
+          if (next[i] < 1700000u + 1000u * (uint64_t)i + 288000u || next[i] > 1700000u + 1000u * (uint64_t)i + 288000u + 480000u + 144000u) ok = 0;
+      }
+      CHECK(ok); }
+    g_case = "the next call is never under 6/10 of a period after the last, however late that was";
+    { uint64_t slot = 1000000u; const uint64_t next = co_lw_meet_call_next(&slot, 120000u, 1100000u, 1u);
+      CHECK(slot == 1240000u && next >= 1100000u + 72000u);
+      slot = 1000000u; CHECK(co_lw_meet_call_next(&slot, 120000u, 1010000u, 1u) >= 1010000u + 72000u && slot == 1120000u); }
     g_case = "the patrol to call: the wanted side first, then the nearer";
     CHECK(co_lw_meet_call_better(5, 1, -1, 0) == 1 && co_lw_meet_call_better(5, 0, -1, 1) == 1);
     CHECK(co_lw_meet_call_better(9, 1, 3, 0) == 1 && co_lw_meet_call_better(3, 0, 9, 1) == 0);

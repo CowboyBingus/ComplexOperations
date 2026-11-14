@@ -49,6 +49,7 @@ void CoXlTestLwCallEnd(void);
 void CoXlTestLwCallGroup(int idx, int group);
 void CoXlTestLwCallPlayer(int i, float x, float vx);
 int CoXlTestLwCallLost(void);
+uint64_t CoXlTestLwCallSlot(int i);
 float CoXlTestLwSeenScopedOf(float radius);
 
 int main(void)
@@ -468,7 +469,8 @@ int main(void)
           CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
           CHECK(period > 525000u && period < 540000u);
           CHECK(CoXlTestLwCallTick(1000000u) == 1 && CoXlTestLwCallTick(1000500u) == 1 && CoXlTestLwCallTick(1002000u) == 1);
-          CHECK(CoXlTestLwCallTick(1000000u + period - 1500u) == 1 && CoXlTestLwCallTick(1000000u + period + 500u) == 2);
+          /* the second call is a period on, 15 % of it early or late at most */
+          CHECK(CoXlTestLwCallTick(1000000u + period - period * 15u / 100u - 1500u) == 1 && CoXlTestLwCallTick(1000000u + period + period * 15u / 100u + 1500u) == 2);
           CHECK(CoXlTestLwCallOf(30) == 1 && CoXlTestLwCallOf(10) == 1 && CoXlTestLwCallOf(0) == 0); /* the second from the other side */ }
         g_case = "two players on a road: each has its call in turn, and twice the time to its next";
         { const float pair[2][2] = {{1500, 20}, {1600, -20}}, wide[4] = {250, 450, 550, 2750}; const int d4[4] = {1, 1, -1, -1};
@@ -480,7 +482,7 @@ int main(void)
           CHECK(CoXlTestLwCallTick(1000000u) == 1 && CoXlTestLwCallTick(1000500u) == 1 && CoXlTestLwCallTick(1001000u) == 1 && CoXlTestLwCallTick(1000000u + first - 2000u) == 1);
           CHECK(CoXlTestLwCallOf(20) == 1 && CoXlTestLwCallOf(30) == 0);
           CHECK(CoXlTestLwCallTick(1000000u + first + 2000u) == 2 && CoXlTestLwCallOf(30) == 2 && CoXlTestLwCallOf(10) == 0);
-          CHECK(CoXlTestLwCallTick(1000000u + 2u * period - 2000u) == 2 && CoXlTestLwCallTick(1000000u + 2u * period + 2000u) == 3); }
+          CHECK(CoXlTestLwCallTick(1000000u + 2u * period - 2u * period * 15u / 100u - 2000u) == 2 && CoXlTestLwCallTick(1000000u + 2u * period + 2u * period * 15u / 100u + 2000u) == 3); }
         g_case = "three players all due in one tick: one call a tick, the others in the ticks after";
         { const float three[3][2] = {{1500, 20}, {1600, -20}, {1700, 20}}, wide[4] = {250, 450, 550, 2750}; const int d4[4] = {1, 1, -1, -1};
           CoXlTestLwCallWorld(30, 0, three, 3, wide, d4, none, 4);
@@ -508,6 +510,23 @@ int main(void)
         CoXlTestLwCallPlayer(0, 1900.0f, 0);
         CHECK(CoXlTestLwCallOne(0, 0, o) == 30 && CoXlTestLwCallTick(1006000u) == 2 && CoXlTestLwCallOf(30) == 1 && CoXlTestLwCallLost() == 1);
         CoXlTestLwCallPlayer(0, 1500.0f, 0);
+        g_case = "a player whose called patrol was let go is called again 5 s on, not a period on";
+        CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
+        CHECK(CoXlTestLwCallTick(1000000u) == 1 && CoXlTestLwCallTick(1001000u) == 1);
+        CoXlTestLwCallPlayer(0, 1660.0f, 0); CHECK(CoXlTestLwCallTick(1002000u) == 1 && CoXlTestLwCallLost() == 1);
+        CHECK(CoXlTestLwCallTick(1006000u) == 1 && CoXlTestLwCallTick(1007500u) == 2);
+        CoXlTestLwCallPlayer(0, 1500.0f, 0);
+        g_case = "none to call for a spell: asked again every 5 s; then both players are called a second apart, and each one's even time is back in its own place";
+        { const float pair[2][2] = {{1500, 20}, {1600, -20}}, wide[4] = {250, 450, 550, 2750}; const int d4[4] = {1, 1, -1, -1};
+          const uint32_t p0 = co_lw_meet_call_ms(6, 4, 2, B + 50.0f + 350.0f, 0), p1 = co_lw_meet_call_ms(6, 4, 2, CoXlTestLwSeenScopedOf(2.0f) + 100.0f + 350.0f, 0);
+          const uint64_t t0 = 1000000u, late = t0 + 2u * (uint64_t)p1 + 300000u;
+          CoXlTestLwCallWorld(30, 0, pair, 2, wide, d4, none, 4);
+          for (int k = 0; k < 4; k++) CoXlTestLwCallGroup(10 * k, 9);
+          CHECK(CoXlTestLwCallTick(t0) == 0 && CoXlTestLwCallTick(t0 + 4000u) == 0 && CoXlTestLwCallSlot(0) == t0 && CoXlTestLwCallSlot(1) == t0 + p1 / 2u);
+          for (int k = 0; k < 4; k++) CoXlTestLwCallGroup(10 * k, 1);
+          CHECK(CoXlTestLwCallTick(late) == 1 && CoXlTestLwCallTick(late + 1000u) == 2);
+          CHECK((CoXlTestLwCallSlot(0) - t0) % p0 == 0 && (CoXlTestLwCallSlot(1) - t0 - p1 / 2u) % p1 == 0 && CoXlTestLwCallSlot(0) > late && CoXlTestLwCallSlot(1) > late);
+          CHECK(CoXlTestLwCallTick(late + (uint64_t)p0 * 45u / 100u) == 2); /* neither again inside 6/10 of a period less the jitter */ }
         g_case = "meet 0: no patrol is called";
         CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
         CoXlTestLwSeenSwitch(0); CHECK(CoXlTestLwCallTick(1000000u) == 0); CoXlTestLwSeenSwitch(1);

@@ -71,7 +71,7 @@ static struct
 } g_lwMeet;
 /* A patrol called along the road to a player on it (co_lw_meet.h): each player's next call and side in turn; the
  * player + 1 a patrol was called to; the road nodes around the player; a patrol's stand beyond the band. */
-static struct { ULONGLONG at[CO_LW_MEET_PLAYERS], tickAt; uint8_t turn[CO_LW_MEET_PLAYERS], begun[CO_LW_MEET_PLAYERS]; uint32_t called, none, came, start, lost; } g_lwCall;
+static struct { ULONGLONG at[CO_LW_MEET_PLAYERS], slot[CO_LW_MEET_PLAYERS], tickAt; uint8_t turn[CO_LW_MEET_PLAYERS], begun[CO_LW_MEET_PLAYERS]; uint32_t called, none, came, start, lost; } g_lwCall;
 static float g_lwCallLeast[LW_SQUADS_MAX]; /* a called patrol's nearest to its player since the call */
 static uint8_t g_lwCallOf[LW_SQUADS_MAX], g_lwCallHops[LW_NODES_MAX], g_lwCallSide[LW_NODES_MAX];
 static uint16_t g_lwCallUp[LW_NODES_MAX], g_lwCallQueue[LW_NODES_MAX];
@@ -545,7 +545,7 @@ static void LwMeetCmd(int on)
 {
     g_lwMeetOff = on == 0;
     memset(g_lwMeetMark, 0, sizeof g_lwMeetMark); memset(g_lwMeetSince, 0, sizeof g_lwMeetSince); memset(&g_lwMeetHolds, 0, sizeof g_lwMeetHolds);
-    memset(g_lwCallOf, 0, sizeof g_lwCallOf); memset(g_lwZoneSince, 0, sizeof g_lwZoneSince); memset(g_lwZoneNo, 0, sizeof g_lwZoneNo); memset(g_lwCall.at, 0, sizeof g_lwCall.at); memset(g_lwCall.begun, 0, sizeof g_lwCall.begun);
+    memset(g_lwCallOf, 0, sizeof g_lwCallOf); memset(g_lwZoneSince, 0, sizeof g_lwZoneSince); memset(g_lwZoneNo, 0, sizeof g_lwZoneNo); memset(g_lwCall.at, 0, sizeof g_lwCall.at); memset(g_lwCall.slot, 0, sizeof g_lwCall.slot); memset(g_lwCall.begun, 0, sizeof g_lwCall.begun);
     Note("living world: test: a patrol on its way to a player %s (meet %d)", g_lwMeetOff ? "has no rule of its own: it comes online only where it stands unseen in the bands" :
         "comes online at the last hidden point of its way or beyond what is drawn, a road patrol waits at the ring's edge, and one is called to a player's road in turn", !g_lwMeetOff);
 }
@@ -842,7 +842,7 @@ static void LwCallTick(ULONGLONG now)
     if (now - g_lwCall.tickAt < 1000) return;
     g_lwCall.tickAt = now;
     if (!LwMeetOn() || g_lwRoadNodes < LW_ROAD_NODES_MIN) return;
-    int root[CO_LW_MEET_PLAYERS], np = g_lwWorld.playersAt < CO_LW_MEET_PLAYERS ? g_lwWorld.playersAt : CO_LW_MEET_PLAYERS;
+    int root[CO_LW_MEET_PLAYERS]; const int np = g_lwWorld.playersAt < CO_LW_MEET_PLAYERS ? g_lwWorld.playersAt : CO_LW_MEET_PLAYERS;
     /* a called patrol whose player has gone, or walks away from it, is let go: free to be called again */
     for (int s = LwRoadNext(-1); s < g_lwWorld.count; s = LwRoadNext(s))
     {
@@ -850,6 +850,8 @@ static void LwCallTick(ULONGLONG now)
         if (of < 0) continue;
         if (of < g_lwWorld.playersAt && !co_lw_meet_call_lost(sqrtf(LwDist2(g_lwWorld.players[of], g_lwSquads[s].pos[0], g_lwSquads[s].pos[1])), &g_lwCallLeast[s])) continue;
         g_lwCallOf[s] = 0; g_lwCall.lost++;
+        /* the patrol it was promised will not pass: the player's call is made again, not a period on */
+        if (of < np && g_lwCall.at[of] > now + CO_LW_MEET_CALL_RETRY_MS) g_lwCall.at[of] = now + CO_LW_MEET_CALL_RETRY_MS;
     }
     for (int i = 0; i < np; i++) root[i] = LwCallRoot(g_lwWorld.players[i]);
     /* a player's first call waits its part of a period, so the players' calls are spread over it and the share
@@ -859,7 +861,7 @@ static void LwCallTick(ULONGLONG now)
         if (root[i] < 0 || g_lwCall.begun[i]) continue;
         LwSquad unit; memset(&unit, 0, sizeof unit);
         g_lwCall.begun[i] = 1;
-        g_lwCall.at[i] = now + co_lw_meet_call_first(LwCallPeriod(&unit, i, root, np), i, np);
+        g_lwCall.at[i] = g_lwCall.slot[i] = now + co_lw_meet_call_first(LwCallPeriod(&unit, i, root, np), i, np);
     }
     for (int k = 0; k < np; k++)
     {
@@ -867,8 +869,8 @@ static void LwCallTick(ULONGLONG now)
         if (root[i] < 0 || now < g_lwCall.at[i]) continue;
         g_lwCall.start = (uint32_t)i + 1;
         const int s = LwCallFor(i, root[i]);
-        if (s < 0) { g_lwCall.none++; g_lwCall.at[i] = now + 5000; return; }
-        g_lwCall.at[i] = now + LwCallPeriod(&g_lwSquads[s], i, root, np);
+        if (s < 0) { g_lwCall.none++; g_lwCall.at[i] = now + CO_LW_MEET_CALL_RETRY_MS; return; } /* its slot stays: the spread comes back with the patrols */
+        g_lwCall.at[i] = co_lw_meet_call_next(&g_lwCall.slot[i], LwCallPeriod(&g_lwSquads[s], i, root, np), now, (uint32_t)i * 0x9E3779B9u + (uint32_t)g_lwMission * 0x85EBCA6Bu + g_lwCall.turn[i]);
         return;
     }
 }
@@ -1710,6 +1712,8 @@ void CoXlTestLwCallPlayer(int i, float x, float vx)
     g_lwWorld.players[i][0] = x; memset(&g_lwView.player[i], 0, sizeof g_lwView.player[i]);
     if (vx != 0) { g_lwView.player[i].known = 1; g_lwView.player[i].v[0] = vx; }
 }
+/* Player `i`'s even time for its next call. */
+uint64_t CoXlTestLwCallSlot(int i) { return g_lwCall.slot[i]; }
 /* The called patrols let go since the world was made. */
 int CoXlTestLwCallLost(void) { return (int)g_lwCall.lost; }
 /* The player + 1 squad `idx` is called to, 0 for none. */

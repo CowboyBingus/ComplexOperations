@@ -50,7 +50,11 @@
 #define CO_LW_MEET_CALL_PAST_MAX 8
 #define CO_LW_MEET_CALL_MOVING 1.0f  /* m/s: a player this fast has patrols called from ahead of them */
 #define CO_LW_MEET_CALL_LOST 150.0f  /* m farther from its player than it has been: a called patrol is let go */
-#define CO_LW_MEET_CALL_MIN_MS 60000u  /* never more than a patrol a minute for one player */
+#define CO_LW_MEET_CALL_MIN_MS 120000u /* a patrol in two minutes for one player at most: one a minute read as a conveyor, not as traffic */
+/* Each call is off its even time by up to this many percent of the period, either way, so the time between two
+ * is up to twice that off (84 to 156 s at the least period) and no player can set a watch by the patrols. */
+#define CO_LW_MEET_CALL_JITTER 15
+#define CO_LW_MEET_CALL_RETRY_MS 5000u /* none to call, or a called patrol let go: asked again this soon */
 #define CO_LW_MEET_CALL_MAX_MS 1800000u /* and one in half an hour at least: 8 players together share one bubble's part (1261 s each) */
 #define CO_LW_MEET_ZONE_WAIT_MS 90000u /* a patrol refused the far share stands beyond the band this long at most, then walks on */
 #define CO_LW_MEET_ZONE_ASK_MS 4000u   /* its refusal is this fresh: it asks every 3 s */
@@ -133,6 +137,14 @@ int co_lw_meet_call_lost(float d, float* least);
 /* How long player `slot` of `players` waits for its first call: its part of the period `periodMs`, so the players'
  * calls fall evenly over it. */
 uint32_t co_lw_meet_call_first(uint32_t periodMs, int slot, int players);
+/* How far off its even time a call is, in ms: within CO_LW_MEET_CALL_JITTER percent of `periodMs` either way, the
+ * same for the same `seed` (the host's own count: no player's machine has a part in it). */
+int32_t co_lw_meet_call_jitter(uint32_t periodMs, uint32_t seed);
+/* The time of a player's next call after one at `nowMs`. `slot` is its even time: it moves on by whole periods
+ * (one at least), so a call made late, after a spell with none to call, falls back into its place among the
+ * players' and they stay spread over the period. The time returned is the slot's with the jitter, and at least
+ * 6/10 of a period after `nowMs`. */
+uint64_t co_lw_meet_call_next(uint64_t* slot, uint32_t periodMs, uint64_t nowMs, uint32_t seed);
 /* 1 when a patrol `hops` road nodes from the player, on the wanted side of them or not, is the better one to call
  * than the best so far (`bestHops` < 0: none): the wanted side first, then the nearer. */
 int co_lw_meet_call_better(int hops, int onSide, int bestHops, int bestOnSide);

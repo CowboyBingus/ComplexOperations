@@ -156,6 +156,23 @@ uint32_t co_lw_meet_call_first(uint32_t periodMs, int slot, int players)
     return players > 1 && slot > 0 ? (uint32_t)((uint64_t)periodMs * (uint64_t)(slot % players) / (uint64_t)players) : 0;
 }
 
+int32_t co_lw_meet_call_jitter(uint32_t periodMs, uint32_t seed)
+{
+    const uint32_t most = (uint32_t)((uint64_t)periodMs * CO_LW_MEET_CALL_JITTER / 100u);
+    uint32_t x = seed; /* a 32-bit mix: neighbouring seeds give unrelated values */
+    x ^= x >> 16; x *= 0x7FEB352Du; x ^= x >> 15; x *= 0x846CA68Bu; x ^= x >> 16;
+    return (int32_t)(x % (2u * most + 1u)) - (int32_t)most;
+}
+
+uint64_t co_lw_meet_call_next(uint64_t* slot, uint32_t periodMs, uint64_t nowMs, uint32_t seed)
+{
+    const int64_t p = periodMs > 0 ? (int64_t)periodMs : 1, jitter = co_lw_meet_call_jitter(periodMs, seed);
+    const int64_t least = (int64_t)nowMs + p * 6 / 10 - jitter - (int64_t)*slot; /* the slot must be this far on */
+    const int64_t steps = least > p ? (least + p - 1) / p : 1;
+    *slot += (uint64_t)(steps * p);
+    return (uint64_t)((int64_t)*slot + jitter);
+}
+
 int co_lw_meet_call_better(int hops, int onSide, int bestHops, int bestOnSide)
 {
     if (bestHops < 0) return 1;
