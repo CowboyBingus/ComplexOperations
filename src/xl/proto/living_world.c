@@ -3035,7 +3035,8 @@ static void LwTestCommands(void)
 
 /* With the 30 s notes: the obstacle smashes spared, and where the members stood against the drawn ground; the
  * counts start again. */
-static void LwTiltScan(void); static void LwTiltNote(void); /* living_world_tilt.c */
+static void LwTiltScan(void); static void LwTiltNote(void); static void LwTiltBaseline(void); /* living_world_tilt.c */
+static void LwLeanNote(void); /* living_world_leancap.c */
 static void LwGroundNote(void)
 {
     { LONG spared = InterlockedExchange(&g_lwSpared, 0); if (spared) Note("living world: obstacle smashes (30 s): squad mates kept out of the zones %ld times (a mate is tested again every frame of a zone)", (long)spared); }
@@ -3265,7 +3266,7 @@ static void LwSquadsTick(void)
         g_lwWorld.goals = g_lwWorld.goalNoFace = g_lwWorld.goalReplans = g_lwWorld.goalStuck = g_lwWorld.stalled = g_lwWorld.stalledOther = 0;
         LwNavTypeDump(); /* test (HELLFORGE_LW_TEST_NAV=1): agent types and obstacle areas, twice a level */
         LwHearNote(); LwRushNote();
-        LwGroundNote(); LwTiltNote();
+        LwGroundNote(); LwTiltNote(); LwLeanNote();
         char gates[384]; LwRefuseList(gates, sizeof gates);
         Note("living world: %d squads, %d online (%d units of %d), %u spawned, %u taken offline, %u destroyed, %u request frames refused%s%s%s; job-1 units %u, AI %u; "
             "player 1 at (%.0f, %.0f); by sightline: %u spawned (%u in sight, off the host's screen), %d units now; %u far swaps waited for an event squad's hold", g_lwWorld.count, online, g_lwWorld.onlineUnits, LwUnitBudget(), g_lwWorld.spawned, g_lwWorld.offlined, g_lwWorld.died,
@@ -4750,7 +4751,8 @@ static void LwSlowTickNote(double ms, uint64_t tsc, const uint64_t* sect0, ULONG
 static void LivingTickBody(void);
 static void LivingTick(void)
 {
-    if (!LwEnabled() || !LwLive()) return;
+    if (!LwEnabled()) return;
+    if (!LwLive()) { LwTiltBaseline(); return; }
     LARGE_INTEGER a, b, f;
     uint64_t sect0[LW_S_COUNT], tsc0 = __builtin_ia32_rdtsc();
     memcpy(sect0, g_lwSect.ticks, sizeof sect0); memset(g_lwJobTicks, 0, sizeof g_lwJobTicks);
@@ -4858,6 +4860,7 @@ static void LwRmCmd(const char* a) { (void)a; } /* the render phase timer and th
 #include "living_world_records.c" /* test fix: the destruction records' room and hash (KB xl-destruction-record-map-full) */
 #include "living_world_mover.c" /* the 256 navmesh boundary requests a frame (KB living-world-mover-query-overflow) */
 #include "living_world_tilt.c" /* diagnostic: units tilted past the ground under them, and what their rays meet */
+#include "living_world_leancap.c" /* four-corner units lean at most 25 deg on complex levels */
 #include "living_world_defer.c" /* mission locations' loose entities spawned near the players (KB living-world-density) */
 #include "living_world_skin.c" /* the skin palette levers' instrument: render worlds, frames, palette-job waits */
 #include "living_world_skincopy.c" /* the skin palette upload copied by helper threads */
