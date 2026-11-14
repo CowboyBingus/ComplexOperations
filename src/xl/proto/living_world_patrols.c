@@ -796,11 +796,12 @@ static int LwCallFor(int i, int root)
         g_lwMeet.notes == LW_MEET_NOTES ? " (the last such line this mission)" : "");
     return best;
 }
+static int LwMeetRoadFar(void);
 /* The time to player i's next call after squad q was called: q's far walk for that player, over the share. */
 static uint32_t LwCallPeriod(LwSquad* q, int i, int roadPlayers)
 {
     const float walk = LwMeetDrawn(q, i) + LW_FAR_MARGIN + 0.5f * CO_LW_MEET_OUTER - LW_R_ON;
-    return co_lw_meet_call_ms(LwFarShareLimit(), CO_LW_MEET_ROAD_MEMBERS, roadPlayers, walk);
+    return co_lw_meet_call_ms((float)LwMeetRoadFar(), CO_LW_MEET_ROAD_MEMBERS, roadPlayers, walk);
 }
 /* Once a second: one player by a road whose time has come has a patrol called (co_lw_meet_call_ms apart for each),
  * the players taken in turn. The offline walk is free, so only the far share bounds what a road shows. */
@@ -875,14 +876,21 @@ static void LwMeetFarCount(int idx, int units)
     if (idx < 0) g_lwMeet.roadFar = 0;
     else if (g_lwMeetMark[idx] & LW_MEET_FAR_ROAD) g_lwMeet.roadFar += units;
 }
-/* The far share for squad q's request: half is kept for patrols on a player's road while one is on its way to a player. */
+/* The far units patrols on a player's road may hold: their own part of the budgets under the density rules, half
+ * the far share without them (as the reserve kept it). */
+static int LwMeetRoadFar(void)
+{
+    return g_lwDensity.on == 1 ? co_lw_meet_road_far(LwUnitBudget()) : (int)LwFarShareLimit() / CO_LW_MEET_FAR_RESERVE;
+}
+/* The far share for squad q's request: a patrol on a player's road has the road patrols' share, and the others
+ * keep to half the far share while a road patrol is on its way to a player. */
 static int LwMeetFarRoom(const LwSquad* q, int meet, int farUnits)
 {
     const int onRoad = meet && (g_lwMeetMark[q - g_lwSquads] & LW_MEET_ON_ROAD);
     int reserve = 0; /* only while a road patrol is on its way to a player: the landscape has the whole share otherwise */
     for (int i = LwRoadNext(-1); i < g_lwWorld.count && !reserve; i = LwRoadNext(i)) reserve = g_lwSquads[i].state == LW_OFFLINE && (g_lwMeetMark[i] & (LW_MEET_ON_ROAD | LW_MEET_NEARING));
     reserve = reserve && LwMeetOn() && g_lwRoadNodes >= LW_ROAD_NODES_MIN && g_lwDensity.on == 1;
-    return co_lw_meet_far_room(farUnits, g_lwMeet.roadFar, q->survivors, (int)LwFarShareLimit(), onRoad, reserve);
+    return co_lw_meet_far_room(farUnits, g_lwMeet.roadFar, q->survivors, (int)LwFarShareLimit(), onRoad, reserve, g_lwDensity.on == 1 ? LwMeetRoadFar() : 0);
 }
 /* After a squad's request. One that came online on its way in keeps its place while it walks in (LwMeetStays). */
 static void LwMeetAsked(LwSquad* q, int meet, int farAsk)

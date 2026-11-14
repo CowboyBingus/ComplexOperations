@@ -335,9 +335,10 @@ int main(void)
         CoXlTestLwSeenWorld(solo, 1, 72);
         CoXlTestLwSeenSquad(0, 200, 0, 3, 8, 0); CoXlTestLwSeenSquad(10, 0, 200, 3, 8, 0); CoXlTestLwSeenSquad(20, 250, 0, 1, 8, 1); CoXlTestLwSeenSquad(5, 300, 0, 3, 6, 0); CoXlTestLwSeenSquad(3, 100, 0, 1, 7, 0);
         CHECK(CoXlTestLwSeenKeeps(0) == 1 && CoXlTestLwSeenKeeps(10) == 1 && CoXlTestLwSeenWhy(20, cap, 400000, 5) == 1);
-        g_case = "the far share of 18: 9 for other far squads, the whole for a patrol on a player's road";
+        g_case = "the far share of 18: 9 for other far squads; a patrol on a player's road has the road patrols' 27 of 72";
         CHECK(CoXlTestLwSeenFarRoom(3, 0, 2, 0) == 1 && CoXlTestLwSeenFarRoom(3, 0, 3, 0) == 0 && CoXlTestLwSeenFarRoom(3, 2, 3, 0) == 0);
-        CHECK(CoXlTestLwSeenFarRoom(20, 3, 10, 0) == 1 && CoXlTestLwSeenFarRoom(20, 3, 11, 0) == 0 && CoXlTestLwSeenFarRoom(3, 0, 10, 8) == 1);
+        CHECK(CoXlTestLwSeenFarRoom(20, 3, 11, 0) == 1 && CoXlTestLwSeenFarRoom(20, 3, 30, 19) == 1 && CoXlTestLwSeenFarRoom(20, 3, 30, 20) == 0 && CoXlTestLwSeenFarRoom(3, 0, 10, 8) == 1);
+        CHECK(CoXlTestLwSeenFarRoom(3, 0, 29, 27) == 1 && CoXlTestLwSeenFarRoom(3, 0, 30, 27) == 0); /* the landscape's 9 beside a full road share */
         CHECK(CoXlTestLwSeenFarRoom(20, 0, 3, 0) == 0); /* on a player's road but asking by the far band's own rule: no kept share */
         g_case = "no road patrol on its way to a player: the other far squads have the whole share; one still out keeps the half";
         CoXlTestLwSeenSquad(20, 250, 0, 1, 8, 0);
@@ -447,7 +448,7 @@ int main(void)
           const float at3[1][2] = {{300, 20}};
           CoXlTestLwCallWorld(30, 0, at3, 1, last, back, none, 1); CHECK(CoXlTestLwCallOne(0, 1, o) == 0 && o[0] == 29 && o[1] == 29 && o[2] == 1); }
         g_case = "one call a second at most, and a player's next call a far walk's time on: 103 s solo on a far share of 18";
-        { const uint32_t period = co_lw_meet_call_ms(18.0f, 4, 1, B + 50.0f - 250.0f);
+        { const uint32_t period = co_lw_meet_call_ms(9.0f, 4, 1, B + 50.0f - 250.0f);
           CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
           CHECK(period > 100000u && period < 107000u);
           CHECK(CoXlTestLwCallTick(1000000u) == 1 && CoXlTestLwCallTick(1000500u) == 1 && CoXlTestLwCallTick(1002000u) == 1);
@@ -455,8 +456,8 @@ int main(void)
           CHECK(CoXlTestLwCallOf(30) == 1 && CoXlTestLwCallOf(10) == 1 && CoXlTestLwCallOf(0) == 0); /* the second from the other side */ }
         g_case = "two players on a road: each has its call in turn, and twice the time to its next";
         { const float pair[2][2] = {{1500, 20}, {1600, -20}}, wide[4] = {250, 450, 550, 2750}; const int d4[4] = {1, 1, -1, -1};
-          const uint32_t period = co_lw_meet_call_ms(18.0f, 4, 1, B + 50.0f - 250.0f);
-          const uint32_t first = co_lw_meet_call_ms(18.0f, 4, 2, CoXlTestLwSeenScopedOf(2.0f) + 100.0f - 250.0f) / 2u;
+          const uint32_t period = co_lw_meet_call_ms(9.0f, 4, 1, B + 50.0f - 250.0f);
+          const uint32_t first = co_lw_meet_call_ms(9.0f, 4, 2, CoXlTestLwSeenScopedOf(2.0f) + 100.0f - 250.0f) / 2u;
           CoXlTestLwCallWorld(30, 0, pair, 2, wide, d4, none, 4);
           /* the second player's first call is half its own period on (a peer's far walk is the scoped band's), from the other side */
           CHECK(first > 140000u && first < 150000u && 2u * period > first + 50000u);

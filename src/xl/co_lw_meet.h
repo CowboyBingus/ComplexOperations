@@ -29,7 +29,12 @@
 #define CO_LW_MEET_COVER_MS 120000u  /* a remembered point this old is forgotten: the players have moved */
 #define CO_LW_MEET_COVER_STEPS 6     /* steps back to cover in one approach; then it walks on */
 #define CO_LW_MEET_ROAD_SHARE 2      /* road patrols take a bubble's budget / this by swap, and are kept up to it */
-#define CO_LW_MEET_FAR_RESERVE 2     /* the far share / this is kept for patrols on a player's road */
+#define CO_LW_MEET_FAR_RESERVE 2     /* the far share / this is the landscape's while a road patrol is on its way to a player */
+/* Patrols on a player's road may hold this many eighths of the bubbles' budgets as far units (27 of 72 solo, 69 of
+ * 184 at 8 apart), beside the landscape's half of the far share: the walk in from beyond the band is what a player
+ * on a road sees. It is paid by near filler, a third of it at most (3/8 + 1/8 against the far share's 2/8 of the
+ * budget, out of the 6/8 the near filler had). Where a squad comes online is not changed by it. */
+#define CO_LW_MEET_ROAD_FAR_8THS 3
 #define CO_LW_MEET_HOLDS 8           /* one hold a bubble at most */
 #define CO_LW_MEET_SEEN_GAP 5        /* samples (seconds) out of view before the next sight of a squad is a new sighting */
 #define CO_LW_MEET_PLAYERS 8
@@ -87,13 +92,17 @@ int co_lw_meet_cover_ok(const CoLwMeetCover* c, const float* at, const uint16_t*
 /* 1 when a road patrol of `members` may have a filler squad leave for it: the bubble's road patrols stay within
  * their share of `budget`. */
 int co_lw_meet_road_room(int roadUnits, int members, int budget);
-/* 1 when a far squad of `members` fits the far share `limit`: `farUnits` far units now, `roadFar` of them patrols on
- * a player's road. With `reserve` the others leave limit / CO_LW_MEET_FAR_RESERVE to those patrols. */
-int co_lw_meet_far_room(int farUnits, int roadFar, int members, int limit, int onRoad, int reserve);
+/* 1 when a far squad of `members` has room: `farUnits` far units now, `roadFar` of them patrols on a player's road.
+ * A patrol on a player's road (`onRoad`) has the road patrols' own share `roadLimit`; with 0 (no density rules) it
+ * shares `limit` with the others. The others have the far share `limit`, and with `reserve` (a road patrol is on
+ * its way to a player) limit / CO_LW_MEET_FAR_RESERVE of it, whatever the road patrols hold. */
+int co_lw_meet_far_room(int farUnits, int roadFar, int members, int limit, int onRoad, int reserve, int roadLimit);
+/* The road patrols' far units of a budget of `budget` units: CO_LW_MEET_ROAD_FAR_8THS eighths. */
+int co_lw_meet_road_far(int budget);
 /* The time between two patrols called to one player's road: the walk `walk` m from where a patrol comes online to
- * the online radius, over the squads of `members` the far share's kept half (`farLimit` / CO_LW_MEET_FAR_RESERVE)
- * holds at once, for each of the `roadPlayers` players on a road. Faster, the share would refuse them. */
-uint32_t co_lw_meet_call_ms(float farLimit, int members, int roadPlayers, float walk);
+ * the online radius, over the squads of `members` the road patrols' far units `roadFar` hold at once, for each of
+ * the `roadPlayers` players on a road. Faster, the share would refuse them. */
+uint32_t co_lw_meet_call_ms(float roadFar, int members, int roadPlayers, float walk);
 /* How long player `slot` of `players` waits for its first call: its part of the period `periodMs`, so the players'
  * calls fall evenly over it. */
 uint32_t co_lw_meet_call_first(uint32_t periodMs, int slot, int players);
