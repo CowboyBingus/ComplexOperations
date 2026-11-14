@@ -552,6 +552,23 @@ static void TestHoldRing(void)
     Flight(1); Push(0, IDX, 10, 0); CHECK(Tick(0, 70) == 1 && fake_host_logged("a waiting record left at the job ring's bound"));
     g_fake.log[0] = 0;
     Flight(1); Push(0, IDX, 11, 0); CHECK(Tick(0, 80) == 1 && !fake_host_logged("a waiting record left at the job ring's bound"));
+    CoXlTestLwNavLevel(2); /* the lines are a level's: the next level's first is written again */
+    g_fake.log[0] = 0;
+    Flight(1); Push(0, IDX, 12, 0); CHECK(Tick(0, 90) == 1 && fake_host_logged("a waiting record left at the job ring's bound"));
+    ResetHold("a world still not between steps after its step was finished here: finished once, and the record leaves");
+    AiUpdate(1); Flight(1); Ring(100, 90);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 1 && g_joins == 1 && g_waits == 1 && g_commits == 1 && g_loads == 1);
+    HoldCounts(v); CHECK(v[3] == 1);
+    ResetHold("the waiting count is what a pop left on the list: a record taken is not in it");
+    Ring(100, 90);
+    Push(0, IDX, 3, 0);
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 0) == (uintptr_t)g_rec[0] && !CoXlTestLwNavHoldBusy()); /* at the ring's bound */
+    Ring(100, 300);
+    Push(1, IDX, 4, 0);
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 10) == (uintptr_t)g_rec[1] && !CoXlTestLwNavHoldBusy()); /* between steps */
+    Flight(1); Push(2, IDX, 5, 0);
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 20) == 0 && CoXlTestLwNavHoldBusy());
 }
 
 /* A fault in the cutter: what the note holds, and which faults it is written for. */

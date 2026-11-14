@@ -3820,8 +3820,8 @@ static int LwCutFn(uintptr_t exe, uintptr_t at)
 }
 static int LwCutRead(uintptr_t at, void* to, size_t n)
 {
-    SIZE_T got = 0;
-    return ReadProcessMemory(GetCurrentProcess(), (const void*)at, to, n, &got) && got == n;
+    /* all or nothing: a read that crosses into memory it cannot reach fails as a whole */
+    return ReadProcessMemory(GetCurrentProcess(), (const void*)at, to, n, NULL) != 0;
 }
 static void LwCutHex(uintptr_t at, size_t n, char* out, size_t cap)
 {
