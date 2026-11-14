@@ -41,6 +41,7 @@
 #include "co_framecost.h"
 #include "co_switch.h"
 #include "co_steer.h"
+#include "co_aibudget.h"
 #include "co_cutters.h"
 #include "co_navcut.h"
 #include "co_forest.h"
