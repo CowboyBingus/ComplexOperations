@@ -940,6 +940,22 @@ void CoXlTestRoadsStamps(uint32_t first, void* cand, uint32_t planned)
     g_stamps.ringLevel = g_world.levels; g_stamps.first = first; g_stamps.cand = (StampCandidate*)cand;
     g_plan.level = g_world.levels; g_plan.count = planned;
 }
+/* The slope profile over a height grid (cols x rows cells of `step` m, row 0 at +y): out = metres, over the tank's
+ * grade, over the FRV's, wet, steepest grade, worst cross slope, lowest, highest. */
+void CoXlTestRoadsSlope(const float* h, uint32_t cols, uint32_t rows, float step, float water, const float* pts, uint32_t n, double* out)
+{
+    const RoadsGround g = {h, cols, rows, step, water};
+    RoadsSlope s; memset(&s, 0, sizeof s);
+    RoadsSlopeAlong(&g, pts, n, &s);
+    out[0] = s.metres; out[1] = s.overTank; out[2] = s.overFrv; out[3] = s.wet; out[4] = s.grade; out[5] = s.cross; out[6] = s.low; out[7] = s.high;
+}
+/* The level's height capture and water as the near terrain keeps them, and the note over them. */
+void CoXlTestRoadsGround(float* h, uint32_t cols, uint32_t rows, int bodies, float water)
+{
+    g_near.level = g_world.levels; g_near.global = h; g_near.columns = cols; g_near.rows = rows;
+    g_nearWater.level = g_world.levels; g_nearWater.count = bodies; g_nearWater.high = water;
+}
+void CoXlTestRoadsSlopeNote(uintptr_t block) { RoadsSlopeNote(block); }
 uint8_t CoXlTestLocationOp(uint32_t i) { return g_locationOp[i]; }
 float CoXlTestStampSegmentBox(const float* s, const float* lo, const float* hi) { return StampSegmentBox(s, lo, hi); }
 void CoXlTestRoadsAfterOp(uintptr_t block, uint64_t context, uint64_t record, uint32_t op, uint32_t before, int counted)

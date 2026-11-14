@@ -650,3 +650,114 @@ done:
     RoadsFreeEdges(e, n);
     if (pts != NULL) VirtualFree(pts, 0, MEM_RELEASE);
 }
+
+/* ---- The slope profile (log only) ----
+ * How steep the ground is along each arterial and spur, from the level's own height capture (g_near.global: one float
+ * per cell, row 0 at +y, TerrainNearDrop's indexing). The capture is read back after op 0x2B, so this measures the
+ * roads as built; it cannot steer them. The two grades are the tank's and the FRV's grip as read from their physics
+ * data, not a limit the game states. */
+#define ROADS_GRADE_TANK 18.0f
+#define ROADS_GRADE_FRV 31.0f
+#define ROADS_TRACK 1.3f /* half the FRV's wheel track: the cross slope is taken over it */
+typedef struct RoadsGround { const float* h; uint32_t cols, rows; float step, water; } RoadsGround;
+typedef struct RoadsSlope { double metres, overTank, overFrv, wet; float grade, cross, low, high; } RoadsSlope;
+/* The ground between the four cell centres about (x, y), generator metres. */
+static float RoadsGroundAt(const RoadsGround* g, float x, float y)
+{
+    float fx = x / g->step - 0.5f, fy = y / g->step - 0.5f;
+    const float mx = (float)(g->cols - 1), my = (float)(g->rows - 1);
+    fx = fx < 0.0f ? 0.0f : fx > mx ? mx : fx; fy = fy < 0.0f ? 0.0f : fy > my ? my : fy;
+    uint32_t c = (uint32_t)fx, r = (uint32_t)fy;
+    if (c > g->cols - 2) c = g->cols - 2;
+    if (r > g->rows - 2) r = g->rows - 2;
+    const float tx = fx - (float)c, ty = fy - (float)r;
+    const float* lo = g->h + (size_t)(g->rows - 1 - r) * g->cols + c;
+    const float* hi = g->h + (size_t)(g->rows - 2 - r) * g->cols + c;
+    return (lo[0] * (1.0f - tx) + lo[1] * tx) * (1.0f - ty) + (hi[0] * (1.0f - tx) + hi[1] * tx) * ty;
+}
+/* Along the n points: each pair in pieces of a cell at most; a piece's grade from its ends, its cross slope from the
+ * ground a wheel track to each side of its far end. Adds to *s (grade, cross: the worst, in degrees). */
+static void RoadsSlopeAlong(const RoadsGround* g, const float* pts, uint32_t n, RoadsSlope* s)
+{
+    const float deg = 57.29578f;
+    for (uint32_t p = 1; p < n; p++)
+    {
+        const float ax = pts[2 * p - 2], ay = pts[2 * p - 1], dx = pts[2 * p] - ax, dy = pts[2 * p + 1] - ay, length = sqrtf(dx * dx + dy * dy);
+        if (!(length > 1.0e-3f) || !(length < 1.0e5f)) continue;
+        const uint32_t pieces = (uint32_t)ceilf(length / g->step);
+        const float piece = length / (float)pieces, nx = -dy / length * ROADS_TRACK, ny = dx / length * ROADS_TRACK;
+        float before = RoadsGroundAt(g, ax, ay);
+        if (s->metres == 0.0) { s->low = s->high = before; }
+        for (uint32_t k = 1; k <= pieces; k++)
+        {
+            const float t = (float)k / (float)pieces, x = ax + dx * t, y = ay + dy * t, h = RoadsGroundAt(g, x, y);
+            const float grade = atanf(fabsf(h - before) / piece) * deg;
+            const float cross = atanf(fabsf(RoadsGroundAt(g, x + nx, y + ny) - RoadsGroundAt(g, x - nx, y - ny)) / (2.0f * ROADS_TRACK)) * deg;
+            s->metres += piece;
+            if (grade > ROADS_GRADE_TANK) s->overTank += piece;
+            if (grade > ROADS_GRADE_FRV) s->overFrv += piece;
+            if (h <= g->water || before <= g->water) s->wet += piece;
+            if (grade > s->grade) s->grade = grade;
+            if (cross > s->cross) s->cross = cross;
+            if (h < s->low) s->low = h;
+            if (h > s->high) s->high = h;
+            before = h;
+        }
+    }
+}
+
+static LONG g_roadsSlopeLevel = -1;
+/* Once a level, when its height capture is kept: a line for the arterials, one for the spurs, and slopes-<level>.tsv
+ * (class, index, edge, metres, steepest grade, metres over 18 and over 31 degrees, worst cross slope, metres at or
+ * under the highest water, lowest and highest ground). */
+static void RoadsSlopeNote(uintptr_t block)
+{
+    if (g_roadsSlopeLevel == g_world.levels || g_arterials.level != g_world.levels || g_arterials.count == 0 || g_near.level != g_world.levels ||
+        g_near.global == NULL || g_near.columns < 2 || g_near.rows < 2) return;
+    g_roadsSlopeLevel = g_world.levels;
+    const RoadsLayout L = {g_routeEdges, g_routePoints, 0};
+    RoadEdge* e = NULL; uint32_t points = 0;
+    const uint32_t n = RoadsReadEdges(block, &L, &e);
+    float* pts = RoadsReadPoints(block, &L, &points);
+    const int water = g_nearWater.level == g_world.levels && g_nearWater.count > 0;
+    const RoadsGround g = {g_near.global, g_near.columns, g_near.rows, 2048.0f * g_world.current / (float)g_near.columns, water ? g_nearWater.high : -1.0e30f};
+    const uint32_t spurs = g_spurs.level == g_world.levels ? g_spurs.count : 0;
+    wchar_t name[48];
+    swprintf(name, 48, L"slopes-%ld.tsv", (long)g_world.levels);
+    HANDLE file = pts != NULL ? OpenLog(name) : INVALID_HANDLE_VALUE;
+    RoadsSlope sum[2]; uint32_t parts[2] = {0, 0}, steep[2] = {0, 0}, worst[2] = {0, 0};
+    memset(sum, 0, sizeof sum);
+    for (uint32_t k = 0; pts != NULL && k < n + spurs; k++)
+    {
+        const int spur = k >= n;
+        uint32_t first, end, edge;
+        if (!spur)
+        {
+            if (!((g_arterials.bits[k >> 3] >> (k & 7)) & 1) || !RoadEdgeHasPoints(&e[k], points)) continue;
+            first = e[k].first; end = e[k].end; edge = k;
+        }
+        else { first = g_spurs.spur[k - n].first; end = g_spurs.spur[k - n].end; edge = g_spurs.spur[k - n].edge; }
+        if (end > points || end <= first) continue;
+        RoadsSlope s; memset(&s, 0, sizeof s);
+        RoadsSlopeAlong(&g, pts + 2 * (size_t)first, end - first, &s);
+        RoadsSlope* t = &sum[spur];
+        parts[spur]++; steep[spur] += s.overTank > 0.0;
+        if (s.grade > t->grade) { t->grade = s.grade; worst[spur] = spur ? k - n : k; }
+        if (s.cross > t->cross) t->cross = s.cross;
+        t->metres += s.metres; t->overTank += s.overTank; t->overFrv += s.overFrv; t->wet += s.wet;
+        char line[192]; DWORD wrote;
+        const int len = snprintf(line, sizeof line, "%s\t%u\t%u\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\n", spur ? "spur" : "arterial", spur ? k - n : k, edge,
+            s.metres, (double)s.grade, s.overTank, s.overFrv, (double)s.cross, s.wet, (double)s.low, (double)s.high);
+        if (file != INVALID_HANDLE_VALUE) WriteFile(file, line, TsvLength(line, sizeof line, len), &wrote, NULL);
+    }
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    char wet[64];
+    if (water) snprintf(wet, sizeof wet, "the highest water at %.1f m", (double)g_nearWater.high); else snprintf(wet, sizeof wet, "no water body");
+    for (int c = 0; c < 2; c++)
+        Note("roads: level %ld slopes: %u %s, %.1f km on a %.0f m height grid: steepest %.1f deg (%s %u), %.0f m over %.0f deg in %u of them, %.0f m over %.0f deg, "
+            "cross slope at most %.1f deg, %.0f m at or under water (%s)", (long)g_world.levels, parts[c], c ? "spurs" : "arterial edges", sum[c].metres / 1000.0,
+            (double)g.step, (double)sum[c].grade, c ? "spur" : "edge", worst[c], sum[c].overTank, (double)ROADS_GRADE_TANK, steep[c], sum[c].overFrv,
+            (double)ROADS_GRADE_FRV, (double)sum[c].cross, sum[c].wet, wet);
+    RoadsFreeEdges(e, n);
+    if (pts != NULL) VirtualFree(pts, 0, MEM_RELEASE);
+}

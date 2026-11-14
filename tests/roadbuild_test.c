@@ -28,6 +28,9 @@ int CoXlTestRoadsArterial(uint32_t edge);
 void CoXlTestRoadsCorridor(uintptr_t block, const uint8_t* ops, uint32_t before, uint32_t total);
 uint32_t CoXlTestStampCandidateSize(void);
 void CoXlTestRoadsStamps(uint32_t first, void* cand, uint32_t planned);
+void CoXlTestRoadsSlope(const float* h, uint32_t cols, uint32_t rows, float step, float water, const float* pts, uint32_t n, double* out);
+void CoXlTestRoadsGround(float* h, uint32_t cols, uint32_t rows, int bodies, float water);
+void CoXlTestRoadsSlopeNote(uintptr_t block);
 
 static int g_failed;
 static const char* g_case;
@@ -107,6 +110,39 @@ static void Spacing(void)
         static const float point[4] = {7, 7, 7, 7};
         CHECK(Bits(CoXlTestStampSegmentBox(point, lo, hi)) == Bits(sqrtf(2.75f * 2.75f + 6.0f * 6.0f)));
     }
+}
+
+static int Near(double a, double b, double by) { return fabs(a - b) <= by; }
+static float g_ground[64 * 64];
+/* 64 x 64 cells of 4 m, row 0 at +y: the ground rises with x at `east` and with y at `north` per metre, from cell centres */
+static void Ground(float east, float north)
+{
+    for (int r = 0; r < 64; r++)
+        for (int c = 0; c < 64; c++) g_ground[r * 64 + c] = east * (4.0f * (float)c + 2.0f) + north * (4.0f * (float)(63 - r) + 2.0f);
+}
+static void Slopes(void)
+{
+    double out[8];
+    g_case = "slopes: the grade along a line and the cross slope beside it";
+    Ground(0.5f, 0.0f); /* 26.57 degrees to the east */
+    static const float east[4] = {20, 100, 120, 100}, north[6] = {100, 20, 100, 60, 100, 120}, flat[4] = {20, 20, 20, 20};
+    CoXlTestRoadsSlope(g_ground, 64, 64, 4.0f, -1.0e30f, east, 2, out);
+    CHECK(Near(out[0], 100, 1e-3) && Near(out[1], 100, 1e-3) && out[2] == 0 && out[3] == 0 && Near(out[4], 26.565, 0.01) && Near(out[5], 0, 0.01));
+    CHECK(Near(out[6], 10, 1e-3) && Near(out[7], 60, 1e-3));
+    CoXlTestRoadsSlope(g_ground, 64, 64, 4.0f, -1.0e30f, north, 3, out); /* across the slope, two pairs */
+    CHECK(Near(out[0], 100, 1e-3) && out[1] == 0 && Near(out[4], 0, 0.01) && Near(out[5], 26.565, 0.01) && Near(out[6], 50, 1e-3) && Near(out[7], 50, 1e-3));
+    CoXlTestRoadsSlope(g_ground, 64, 64, 4.0f, -1.0e30f, flat, 2, out); /* a pair of no length */
+    CHECK(out[0] == 0 && out[4] == 0);
+    g_case = "slopes: over the FRV's grade, and under water";
+    Ground(0.0f, 0.7f); /* 34.99 degrees to the north */
+    CoXlTestRoadsSlope(g_ground, 64, 64, 4.0f, 30.0f, north, 3, out); /* 14 m at y 20 to 84 m at y 120: wet to y 42.86, in pieces of 4 m */
+    CHECK(Near(out[0], 100, 1e-3) && Near(out[1], 100, 1e-3) && Near(out[2], 100, 1e-3) && Near(out[3], 24, 1e-3) && Near(out[4], 34.992, 0.01));
+    g_case = "slopes: past the grid's edge the nearest cells answer";
+    static const float out_[4] = {-50, -50, 300, 300};
+    Ground(0.0f, 0.0f);
+    g_ground[0] = 7.0f;
+    CoXlTestRoadsSlope(g_ground, 64, 64, 4.0f, -1.0e30f, out_, 2, out);
+    CHECK(out[6] == 0 && out[7] == 0 && out[0] > 494 && out[0] < 496);
 }
 
 /* 0xF38D25 as the stub is entered: the pass at [rsp+0x78], the chord in xmm0; `back` stores the quotient. */
@@ -475,6 +511,23 @@ static void ArterialsGlue(void)
         for (uint32_t i = 0; i < 4; i++) memcpy(g_block + LOCATIONS_AT + 0xE0u * i, &xy[2 * i], 8);
     }
 
+    g_case = "slopes: one line for the arterials and one for the spurs, once the capture is kept";
+    {
+        static float level[512 * 512]; /* 32 m cells over the 16 km level: flat at 3 m, the water at 5 m */
+        for (uint32_t i = 0; i < 512 * 512; i++) level[i] = 3.0f;
+        g_fake.log[0] = 0;
+        CoXlTestRoadsSlopeNote(block);
+        CHECK(Lines("slopes:") == 0); /* no capture yet */
+        CoXlTestRoadsGround(level, 512, 512, 2, 5.0f);
+        CoXlTestRoadsSlopeNote(block);
+        CHECK(Lines("slopes: 3 arterial edges, 3.0 km on a 32 m height grid: steepest 0.0 deg (edge 0), 0 m over 18 deg in 0 of them, 0 m over 31 deg, "
+            "cross slope at most 0.0 deg, 3000 m at or under water (the highest water at 5.0 m)") == 1);
+        CHECK(Lines("slopes: 2 spurs, 0.0 km on a 32 m height grid: steepest 0.0 deg (spur 0), 0 m over 18 deg in 0 of them, 0 m over 31 deg, "
+            "cross slope at most 0.0 deg, 25 m at or under water (the highest water at 5.0 m)") == 1);
+        CoXlTestRoadsSlopeNote(block);
+        CHECK(Lines("slopes:") == 2); /* once a level */
+    }
+
     g_case = "spurs: a place on a road, one too far, and no index";
     static const float away[2 * 3] = {1000, 400, 1000, 2100, 3000, 0};
     static const uint8_t three[3] = {0x16, 0x16, 0x82};
@@ -555,6 +608,7 @@ int main(void)
     g_coApi = fake_host_reset(CO_GAME_BUILD);
     g_coMod = (HfMod*)&g_fake;
     Spacing();
+    Slopes();
     Stub();
     Arterials();
     g_block = (uint8_t*)VirtualAlloc(NULL, BLOCK_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
