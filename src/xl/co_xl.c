@@ -491,6 +491,7 @@ void CoXlTestLwNavHoldCounts(uint32_t* v)
 }
 int CoXlTestLwNavLeft(int read, uint32_t state) { return LwNavLeftAt(read, state); }
 int CoXlTestLwPeerParts(int mission, int host) { return LwPeerParts(mission, host); }
+int CoXlTestLwNavWriteStart(uintptr_t at, const uint8_t* call) { return LwNavWriteStart(at, call); }
 /* The scheduler's call on a fake scheduler, list variable and nav count; the first builds' budget and the time this
  * tick's have taken; the tick summary's counts (paused ticks, pauses, budget waits, lag ms, queue most, the oldest
  * waiting built cell's ms and ring distance, one call's starts). */
@@ -500,6 +501,8 @@ void CoXlTestLwNavSched(uint32_t flush, ULONGLONG now) { LwNavSchedAt(flush, now
 void CoXlTestLwNavDrive(void (*drive)(uintptr_t, float)) { g_lwSwap.drive = drive; }
 uint32_t CoXlTestLwNavBounded(void) { return g_lwSwap.bounded; }
 void CoXlTestLwNavFirstBudget(uint32_t us, uint32_t spentUs) { g_lwNavHold.budgetUs = us; g_lwNavHold.tickFirstUs += spentUs; }
+/* A tick `us` after the one before; the first builds' budget it gives. */
+uint32_t CoXlTestLwNavTickGap(uint32_t us) { LwNavTickGap(us); return g_lwNavHold.tickBudgetUs; }
 void CoXlTestLwNavTickCounts(uint32_t* v)
 {
     v[0] = g_lwNavHold.sum.paused; v[1] = g_lwNavHold.sum.pauses; v[2] = g_lwNavHold.sum.over; v[3] = g_lwNavHold.sum.lag; v[4] = g_lwNavHold.sum.queueMost;

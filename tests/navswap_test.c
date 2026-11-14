@@ -34,6 +34,7 @@ float CoXlTestLwAibSteer(float stock, float cur, float lat);
 float CoXlTestLwAibWorld(uintptr_t w, float stock, float lat, int on, ULONGLONG now);
 int CoXlTestLwNavLeft(int read, uint32_t state);
 int CoXlTestLwPeerParts(int mission, int host);
+int CoXlTestLwNavWriteStart(uintptr_t at, const uint8_t* call);
 void CoXlTestLwFpJoin(double ms);
 void CoXlTestLwAibReset(void);
 void CoXlTestLwAibUnread(void);
@@ -48,6 +49,7 @@ int CoXlTestLwNavMarksHeld(void);
 void CoXlTestLwNavSchedFakes(void (*sched)(void), volatile uintptr_t* listVar, volatile uint32_t* navCount, int pauseOff);
 void CoXlTestLwNavSched(uint32_t flush, ULONGLONG now);
 void CoXlTestLwNavFirstBudget(uint32_t us, uint32_t spentUs);
+uint32_t CoXlTestLwNavTickGap(uint32_t us);
 void CoXlTestLwNavTickCounts(uint32_t* v);
 void CoXlTestLwNavDrive(void (*drive)(uintptr_t, float));
 uint32_t CoXlTestLwNavBounded(void);
@@ -106,7 +108,8 @@ static void FakeMake(void* r) { g_makes++; g_made = r; }
 static void FakeFree(void* r) { if (r == g_made) g_frees++; }
 static int FakeQueued(uintptr_t q) { return q == Q2 ? g_queued2 : g_queued; }
 static int FakePermit(int idx) { g_permits++; if (g_grant && idx == IDX) g_aiw[0x478] = 1; if (g_grant && idx == IDX2) g_aiw2[0x478] = 1; return 0; }
-static void FakeJoin(int idx) { (void)idx; g_joins++; if (g_locked) g_lockedCalls++; }
+static int g_joinWrites, g_joined;
+static void FakeJoin(int idx) { g_joins++; g_joined |= 1 << idx; g_joinWrites = g_fake.wroteCount; if (g_locked) g_lockedCalls++; }
 static void Queue(uintptr_t w) { if (g_model) { if (w == (uintptr_t)g_aiw2) g_queued2++; else g_queued++; } }
 static uintptr_t FakeUnload(uintptr_t w, uint32_t* id, uint8_t graph) { (void)id; (void)graph; g_unloads++; Queue(w); return 7; }
 static uint8_t* g_slots; static int g_slotsMove; /* the collection a load reserves its slot in; the array moves when full */
@@ -957,6 +960,37 @@ static void TestFirstBudget(void)
     Push(3, IDX, 8, 0);
     CoXlTestLwNavFirstBudget(0, 5000);
     CHECK(Tick(0, 50) == 2);
+    ResetHold("the budget is a share of the frame: 8 ticks 33.3 ms apart double it, one slow frame does not, and four times is the most");
+    CoXlTestLwNavFirstBudget(2000, 0);
+    for (int k = 0; k < 7; k++) CHECK(CoXlTestLwNavTickGap(33333) == 2000); /* not 8 gaps yet */
+    CHECK(CoXlTestLwNavTickGap(33333) == 3999);
+    CHECK(CoXlTestLwNavTickGap(16000) == 2000 && CoXlTestLwNavTickGap(200000) == 2000); /* a short gap among the 8 */
+    for (int k = 0; k < 8; k++) CoXlTestLwNavTickGap(16667);
+    CHECK(CoXlTestLwNavTickGap(16667) == 2000 && CoXlTestLwNavTickGap(8000) == 2000); /* 60 fps and over: the budget as set */
+    for (int k = 0; k < 8; k++) CoXlTestLwNavTickGap(16668);
+    CHECK(CoXlTestLwNavTickGap(16668) == 2000); /* 2000.1: rounded down */
+    for (int k = 0; k < 8; k++) CoXlTestLwNavTickGap(66668);
+    CHECK(CoXlTestLwNavTickGap(66668) == 8000);
+    for (int k = 0; k < 8; k++) CoXlTestLwNavTickGap(1000000);
+    CHECK(CoXlTestLwNavTickGap(1000000) == 8000);
+    for (int k = 0; k < 8; k++) CoXlTestLwNavTickGap(33333);
+    Flight(1);
+    for (int k = 0; k < 3; k++) Push(k, IDX, 4 + k, 0);
+    CHECK(Tick(0, 0) == 0);
+    Flight(0);
+    CoXlTestLwNavFirstBudget(2000, 0);
+    rec = CoXlTestLwNavPop((uintptr_t)g_list, 0, 10); Process(rec, 1);
+    CoXlTestLwNavFirstBudget(2000, 3998);
+    rec = CoXlTestLwNavPop((uintptr_t)g_list, 0, 10);
+    CHECK(rec == (uintptr_t)g_rec[1]); Process(rec, 1); /* 3998 us of 3999 spent: the next goes */
+    CoXlTestLwNavFirstBudget(2000, 1);
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 10) == 0);
+    CoXlTestLwNavFirstBudget(0, 0);
+    CHECK(CoXlTestLwNavTickGap(33333) == 0); /* no budget set: none, at any frame length */
+    CoXlTestLwNavFirstBudget(2000, 0);
+    CoXlTestLwNavTickGap(33333);
+    CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
+    CHECK(fake_host_logged("; first builds' budget a tick up to 3999 us (2000 us a 16.7 ms frame, more over a longer one)"));
     ResetHold("the budget is the first builds' only: a built cell's record is not kept by it");
     Section(IDX, 3, 40);
     Push(0, IDX, 3, 0);
@@ -1159,7 +1193,7 @@ static void TestWindow(void)
     CHECK(!fake_host_logged("first builds waiting now"));
     const char* tickLine = strstr(g_fake.log, "living world: nav tick (30 s): "); const char* waitLine = strstr(g_fake.log, "living world: nav tick (30 s), waits: ");
     CHECK(tickLine && waitLine && strchr(tickLine, '\n') < waitLine);              /* two lines: one passed the log's 1024 characters */
-    CHECK(tickLine && strchr(tickLine, '\n') - tickLine < 760 && waitLine && strchr(waitLine, '\n') - waitLine < 720);
+    CHECK(tickLine && strchr(tickLine, '\n') - tickLine < 760 && waitLine && strchr(waitLine, '\n') - waitLine < 830);
     ResetHold("a first build that leaves at the ring's bound counts its wait too; path requests' wait and the run's age are the span's most");
     Flight(1); RunAge(2.5f); { float wait = 0.75f; memcpy(g_aiw + 0x480, &wait, 4); }
     Push(0, IDX, 4, 0);
@@ -1951,6 +1985,16 @@ static void TestLeft(void)
 {
     ResetHold("a level that left play marks no more cells");
     CoXlTestLwNavLevel(5);
+    {
+        /* the run's start is written with every world's AI update joined: worlds 1 and 3 have a job, 0 and 2 none */
+        uint8_t site[8] = {0}; const uint8_t call[5] = {0xE8, 1, 2, 3, 4};
+        Put(g_table + 0x80 * 3 + 0x20, 1); g_joins = g_joined = 0; g_locked = 0;
+        const int before = g_fake.wroteCount;
+        CoXlTestLwNavWriteStart((uintptr_t)site, call);
+        CHECK(g_joins == 2 && g_joined == ((1 << IDX) | (1 << 3)) && g_joinWrites == before && g_fake.wroteCount == before + 1);
+        CHECK(g_fake.wrote[before] == (uintptr_t)site);
+        Put(g_table + 0x80 * 3 + 0x20, 0);
+    }
     /* a client in a mission runs the hold's budget help and the play mark; the squads stay the host's */
     CHECK(CoXlTestLwPeerParts(1, 0) == 1 && CoXlTestLwPeerParts(1, 1) == 2 && CoXlTestLwPeerParts(0, 0) == 0 && CoXlTestLwPeerParts(0, 1) == 0);
     CHECK(CoXlTestLwNavLeft(1, 1) == 0 && CoXlTestLwNavLeft(0, 0) == 0); /* still generating: not left */
