@@ -565,9 +565,21 @@ int main(void)
         CHECK(study.same == 4 && study.differ == 1 && study.notKept == 0);
         /* more faces than rows: the rest are counted, none takes another's row */
         E.facesOnFirst = 1;
-        for (uint32_t k = 0; k < 20000; k++) { face(&s, &g_instance, kUp, 0, 0x10000u + k, &g_vertices); Sweep(&s); }
+        for (uint32_t k = 0; k < 1280000; k++) { face(&s, &g_instance, kUp, 0, 0x10000u + k, &g_vertices); Sweep(&s); }
         co_navcut_study(&study);
-        CHECK(study.notKept >= 20000 - 16384 && study.notKept < 20000 - 8192 && study.same == 4 && study.differ == 1);
+        CHECK(study.notKept >= 1280000 - 1048576 && study.notKept < 1280000 - 524288 && study.same == 4 && study.differ == 1);
+        /* a flight's faces alone leave the table open: a cut done again after them still finds its row */
+        Reset("research: the table holds a flight's faces alone and the cuts done again after them");
+        CHECK(co_navcut_install((uintptr_t)g_exe) == NULL);
+        co_navcut_limits(CO_NAVCUT_MAX, CO_NAVCUT_MAX);
+        Construct(&s);
+        E.faceSegments = 5; E.faceEvents = 5; E.perStep = 2; E.perStepAlone = 2; E.facesOnFirst = 1; E.own = 5;
+        for (uint32_t k = 0; k < 150000; k++) { face(&s, &g_instance, kUp, 0, 0x10000u + k, &g_vertices); Sweep(&s); }
+        co_navcut_study(&study);
+        CHECK(study.notKept == 0 && study.same == 0 && study.differ == 0);
+        for (uint32_t k = 0; k < 150000; k += 15) { face(&s, &g_instance, kUp, 0, 0x10000u + k, &g_vertices); add(&s, points, 5000, 1); Sweep(&s); }
+        co_navcut_study(&study);
+        CHECK(study.notKept == 0 && study.same == 10000 && study.differ == 0);
     }
 
     Reset("research: whole cuts by the segments they began with");

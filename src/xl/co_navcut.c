@@ -93,9 +93,10 @@ static uint32_t Metres(float v) { return (uint32_t)(int32_t)(v < -32767.0f ? -32
 
 #if defined(CO_RESEARCH) || defined(CO_TEST)
 /* Research only. The redo's claim is that a face added again comes to what the engine makes of that face alone, so
- * the two ends are kept by the face add's whole input and compared. The table is fixed: a face with no free row
- * within 8 of its place is counted and not kept. */
-#define NAVCUT_SAME 16384u
+ * the two ends are kept by the face add's whole input and compared. The table is fixed and no row is freed: a face
+ * with no free row within 8 of its place is counted and not kept. A flight ends over 140000 faces alone, so the
+ * table is 2^20 rows (16 MB), which keeps a row for the cuts done again after them. */
+#define NAVCUT_SAME 1048576u
 static struct
 {
     SRWLOCK lock;
