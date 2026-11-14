@@ -4991,6 +4991,8 @@ static int RoadGradeStep(uint64_t context); /* difficulty_world_roadlevel.c */
 static void RoadGradeBegin(void);
 static void RoadGradeEmbankNote(uint64_t record);
 static void RoadGradeAfterNote(uintptr_t block);
+static void RoadTrackThin(uintptr_t block); /* difficulty_world_roadtracklevel.c */
+static void RoadTrackBuild(void);
 static void RoadsIndexNote(uint64_t context, const char* when);
 static void RoadsPointsWatch(uintptr_t block, uint32_t op);
 static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
@@ -5042,6 +5044,7 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
         /* the roads' ground: the level waits at its LevelRoutes while the graded field is drawn */
         if (o == 0x38 && g_world.current == 8.0f) RoadGradeBegin();
         if (o == 0xB8 && g_world.current == 8.0f) RoadGradeEmbankNote(records + (uint64_t)i * 0x19B0u);
+        if (o == 0xB7 && g_world.current == 8.0f) RoadTrackBuild(); /* the track from the points the grading reads; no rendered map */
         if (o == 0xB7 && RoadGradeStep(b)) { TerrainDiagAfter(records, index, diagAt, diagOp); return 0; }
         if (o == 0x0A && g_world.current == 8.0f) TerrainNearWater(records + (uint64_t)i * 0x19B0u);
         if (o == 0x6C && g_world.current == 8.0f) MacroStamps(); /* once a level, before its first call */
@@ -5242,6 +5245,7 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
             /* a complex level's arterials, before op 0x0E gives the edges points and op 0x0F their corridors */
             if (watch && op == 0x0E) RoadsArterialsPoints(block);
             if (watch && op == 0x0F) RoadsSpursBuild(block, b); /* before op 0x2B places a stamp */
+            if (watch && op == 0xBB) RoadTrackThin(block); /* before op 0x95 registers the scatter callback */
             if (watch) RoadsSlopeNote(block); /* once the level's height capture is kept */
             if (watch) RoadGradeAfterNote(block);
             if (watch) RoadsPointsWatch(block, op);
