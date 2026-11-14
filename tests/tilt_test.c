@@ -441,7 +441,7 @@ static void NavHeights(void)
     DetailFn detail = (DetailFn)fake_host_detour(at + 0x8B53B0u);
     CHECK(raster != NULL && compact != NULL && detail != NULL);
     if (raster == NULL || compact == NULL || detail == NULL) return;
-    CHECK(fake_host_logged("nav heights installed: where a level's nav cells are over 0.5 m the navmesh's terrain has a cell height of 0.50 m (0: as the game has it), detail error 0.50 m, sampled every 4.0 m"));
+    CHECK(fake_host_logged("nav heights installed: where a level's nav cells are over 0.5 m the navmesh's terrain has a cell height of 0.50 m (0: as the game has it), detail error 0.50 m, sampled every 16.0 m"));
     CHECK(g_fake.hooks[0].target == at + 0x8B53B0u); /* the detail mesh first: it undoes what the others change */
 
     float field[16], chf[16] = {0}, bounds[6] = {0};

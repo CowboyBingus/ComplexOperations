@@ -13,7 +13,7 @@
  * A level whose cells are 0.5 m is left as it is. On the nav job's worker threads: nothing here is shared but counts. */
 #define LW_NH_CH 0.5f        /* the cell height: the game's own on its maps */
 #define LW_NH_ERROR 0.5f     /* the detail mesh's largest error, metres: the game's own on its maps */
-#define LW_NH_DIST 4.0f      /* the detail mesh's sample distance, metres: one cell */
+#define LW_NH_DIST 16.0f     /* the detail mesh's sample distance, metres: four cells; at one a cell takes far longer to build */
 #define LW_NH_COARSE 0.5f    /* a cell size over this is an extra large level's */
 #define LW_NH_SPANS 8191.0f  /* cell heights a span can count: 13 bits (0x89B862, 0x89B882) */
 
