@@ -519,7 +519,7 @@ static void LwDensityOnline(const float* pos, uint32_t members); static int LwDe
 static int LwMeetWaits(const LwSquad* q); static int LwMeetHold(LwSquad* q, float nx, float ny); static void LwMeetWhy(LwSquad* q, const char* why); static void LwNoFaceNote(const LwSquad* q); /* living_world_patrols.c */
 static int LwMeetKeeps(const LwSquad* q); static uint32_t LwMeetHeld(int requester); static int LwMeetApproach(LwSquad* q, ULONGLONG now, int busy); static int LwMeetPriority(const LwSquad* q);
 static int LwMeetFarRoom(const LwSquad* q, int meet, int farUnits); static void LwMeetAsked(LwSquad* q, int meet, int farAsk); static int LwMeetStays(LwSquad* q, float d2, ULONGLONG now); static void LwMeetFarCount(int idx, int units);
-static void LwMeetFarNo(const LwSquad* q, ULONGLONG now); static void LwMeetSight(LwSquad* q); static float LwMeetDrawn(LwSquad* q, int i); static void LwMeetCmd(int on); static void LwBesideCmd(int seq, float d); static void LwWayOnCmd(int seq);
+static void LwMeetRefused(const LwSquad* q, int meet, const char* why, ULONGLONG now); static void LwMeetSight(LwSquad* q); static float LwMeetDrawn(LwSquad* q, int i); static void LwMeetCmd(int on); static void LwBesideCmd(int seq, float d); static void LwWayOnCmd(int seq);
 static int LwPatrolFar(const LwSquad* q); static int LwPatrolFarSum(int walking, int standing); static float LwLeadNear2(const LwSquad* q); static void LwPatrolAsked(const LwSquad* q); static int LwPatrolHolds(int idx); static void LwPatrolHoldTaken(void); static int LwPatrolYields(const LwSquad* q); static int LwRoadPlan(LwSquad* q, int home); static void LwPatrolsOldCmd(int on); static void LwTravelCmd(int seq, float v, float s); static void LwTravelBackCmd(int seq, float v); static void LwRoadPatrolsCmd(int on); static void LwPatrolsTick(void); /* living_world_patrols.c */
 static void LwLodTick(void); static void LwLodNote(void); static void LwLodCmd(int on); static int LwLodFullUnits(void); /* living_world_lod.c */
 static void LwDeferTick(uintptr_t lg, uint32_t seed); static void LwDeferNote(void); static void LwSpawnSourcesNote(int seq); /* living_world_defer.c */
@@ -3250,7 +3250,6 @@ static void LwSquadsTick(void)
                     if (!LwMeetFarRoom(q, meet, farUnits))
                     {
                         snprintf(whyBuf, sizeof whyBuf, "the far share: %d far units + %u over %.0f", farUnits, q->survivors, (double)LwFarShareLimit()); why = whyBuf; q->retry = now + 3000;
-                        if (meet == CO_LW_MEET_ASK_BEYOND) LwMeetFarNo(q, now); /* it stands beyond the band for room (living_world_patrols.c) */
                         goto offlineDone;
                     }
                     farTries++;
@@ -3283,6 +3282,7 @@ static void LwSquadsTick(void)
                 if (q->state != LW_OFFLINE && g_lwHold.idx == (int)(q - g_lwSquads)) g_lwHold.idx = -1; /* served */
             }
         offlineDone:
+            if (why) LwMeetRefused(q, meet, why, now); /* beyond the band it stands for any refusal (living_world_patrols.c) */
             if (why) LwMeetWhy(q, why); /* a waiting road patrol: its refusals counted, room made (living_world_patrols.c) */
             if (q->pulled == 2 && why) LwStagedWhy(q, why, near2); /* test notes */
             else if (q->held && why) LwHeldWhy(q, why, near2);

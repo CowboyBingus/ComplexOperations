@@ -57,11 +57,28 @@ int main(void)
     CHECK(co_lw_meet_road_room(0, 8, 23) == 1 && co_lw_meet_road_room(8, 8, 23) == 0 && co_lw_meet_road_room(28, 8, 72) == 1 && co_lw_meet_road_room(29, 8, 72) == 0);
 
     g_case = "the time between two calls: a far walk over the squads the kept half of the far share holds, for each player on a road";
-    CHECK(co_lw_meet_call_ms(18.0f, 4, 1, 465.0f) == 103333u && co_lw_meet_call_ms(46.0f, 4, 8, 661.0f) > 459000u && co_lw_meet_call_ms(46.0f, 4, 8, 661.0f) < 460500u);
-    CHECK(co_lw_meet_call_ms(18.0f, 8, 1, 465.0f) > 206000u && co_lw_meet_call_ms(18.0f, 4, 0, 465.0f) == 103333u);
+    CHECK(co_lw_meet_call_ms(9.0f, 4, 1, 465.0f) == 103333u && co_lw_meet_call_ms(23.0f, 4, 8, 661.0f) > 459000u && co_lw_meet_call_ms(23.0f, 4, 8, 661.0f) < 460500u);
+    CHECK(co_lw_meet_call_ms(9.0f, 8, 1, 465.0f) > 206000u && co_lw_meet_call_ms(9.0f, 4, 0, 465.0f) == 103333u);
     g_case = "never under a minute or over ten; a share too small for one squad still passes one at a time";
-    CHECK(co_lw_meet_call_ms(72.0f, 4, 1, 100.0f) == CO_LW_MEET_CALL_MIN_MS && co_lw_meet_call_ms(18.0f, 4, 8, 3000.0f) == CO_LW_MEET_CALL_MAX_MS);
-    CHECK(co_lw_meet_call_ms(4.0f, 4, 1, 465.0f) == 232500u);
+    CHECK(co_lw_meet_call_ms(36.0f, 4, 1, 100.0f) == CO_LW_MEET_CALL_MIN_MS && co_lw_meet_call_ms(9.0f, 4, 8, 3000.0f) == CO_LW_MEET_CALL_MAX_MS);
+    CHECK(co_lw_meet_call_ms(2.0f, 4, 1, 465.0f) == 232500u);
+    g_case = "on the road patrols' own far units a call comes sooner: a minute solo, 153 s each at 8 apart, 294 s each at 8 together";
+    CHECK(co_lw_meet_call_ms(27.0f, 4, 1, 465.0f) == CO_LW_MEET_CALL_MIN_MS && co_lw_meet_call_ms(69.0f, 4, 8, 661.0f) > 152500u && co_lw_meet_call_ms(69.0f, 4, 8, 661.0f) < 154000u);
+    CHECK(co_lw_meet_call_ms(36.0f, 4, 8, 661.0f) > 293000u && co_lw_meet_call_ms(36.0f, 4, 8, 661.0f) < 294500u);
+    g_case = "a moving player's patrol is called from ahead; at a patrol's pace or faster, from ahead only";
+    { const float dirs[2][2] = {{-100, 0}, {100, 0}}, cross[3][2] = {{-100, 0}, {100, 0}, {0, 100}}, slow[2] = {0.5f, 0}, walk[2] = {1.5f, 0}, run[2] = {3, 0}, back[2] = {-3, 0}, north[2] = {0.5f, 4}, off[2] = {0, 3}; int only = 9;
+      CHECK(co_lw_meet_call_ahead(slow, dirs, 2, &only) == -1 && only == 0);
+      CHECK(co_lw_meet_call_ahead(walk, dirs, 2, &only) == 1 && only == 0);
+      CHECK(co_lw_meet_call_ahead(run, dirs, 2, &only) == 1 && only == 1 && co_lw_meet_call_ahead(back, dirs, 2, &only) == 0 && only == 1);
+      CHECK(co_lw_meet_call_ahead(north, cross, 3, &only) == 2 && only == 1);
+      CHECK(co_lw_meet_call_ahead(off, dirs, 2, &only) == -1 && only == 0); /* across the road: no side is ahead */ }
+    g_case = "a called patrol 150 m farther from its player than it has been is let go";
+    { float least = 0;
+      CHECK(co_lw_meet_call_lost(900.0f, &least) == 0 && least == 900.0f && co_lw_meet_call_lost(1050.0f, &least) == 0 && co_lw_meet_call_lost(1051.0f, &least) == 1);
+      CHECK(co_lw_meet_call_lost(600.0f, &least) == 0 && least == 600.0f && co_lw_meet_call_lost(749.0f, &least) == 0 && co_lw_meet_call_lost(751.0f, &least) == 1); }
+    g_case = "a player's first call waits its part of the period: 8 players' calls fall an eighth of it apart";
+    CHECK(co_lw_meet_call_first(480000u, 0, 8) == 0 && co_lw_meet_call_first(480000u, 1, 8) == 60000u && co_lw_meet_call_first(480000u, 7, 8) == 420000u);
+    CHECK(co_lw_meet_call_first(480000u, 3, 1) == 0 && co_lw_meet_call_first(480000u, 1, 2) == 240000u);
     g_case = "the patrol to call: the wanted side first, then the nearer";
     CHECK(co_lw_meet_call_better(5, 1, -1, 0) == 1 && co_lw_meet_call_better(5, 0, -1, 1) == 1);
     CHECK(co_lw_meet_call_better(9, 1, 3, 0) == 1 && co_lw_meet_call_better(3, 0, 9, 1) == 0);
@@ -131,9 +148,16 @@ int main(void)
       c.steps = 0; c.known = 0; CHECK(co_lw_meet_cover_ok(&c, here, path, 1, 4, far1, 1, 155.0f, 5000) == 0); } /* used once: forgotten */
 
     g_case = "the far share: half is kept for patrols on a player's road, and the whole is never passed";
-    CHECK(co_lw_meet_far_room(0, 0, 8, 18, 0, 1) == 1 && co_lw_meet_far_room(2, 0, 8, 18, 0, 1) == 0 && co_lw_meet_far_room(2, 0, 8, 18, 0, 0) == 1);
-    CHECK(co_lw_meet_far_room(8, 0, 8, 18, 1, 1) == 1 && co_lw_meet_far_room(11, 0, 8, 18, 1, 1) == 0 && co_lw_meet_far_room(10, 0, 8, 18, 1, 1) == 1);
-    CHECK(co_lw_meet_far_room(9, 8, 8, 18, 0, 1) == 1 && co_lw_meet_far_room(10, 8, 8, 18, 0, 1) == 0 && co_lw_meet_far_room(16, 16, 8, 18, 0, 1) == 0);
+    CHECK(co_lw_meet_far_room(0, 0, 8, 18, 0, 1, 0) == 1 && co_lw_meet_far_room(2, 0, 8, 18, 0, 1, 0) == 0 && co_lw_meet_far_room(2, 0, 8, 18, 0, 0, 0) == 1);
+    CHECK(co_lw_meet_far_room(8, 0, 8, 18, 1, 1, 0) == 1 && co_lw_meet_far_room(11, 0, 8, 18, 1, 1, 0) == 0 && co_lw_meet_far_room(10, 0, 8, 18, 1, 1, 0) == 1);
+    CHECK(co_lw_meet_far_room(9, 8, 8, 18, 0, 1, 0) == 1 && co_lw_meet_far_room(10, 8, 8, 18, 0, 1, 0) == 0 && co_lw_meet_far_room(11, 0, 8, 18, 0, 0, 27) == 0);
+    g_case = "road patrols on a player's road have their own far units, 3/8 of the budgets: 27 of 72 solo, 69 of 184 at 8 apart";
+    CHECK(co_lw_meet_road_far(72) == 27 && co_lw_meet_road_far(184) == 69 && co_lw_meet_road_far(96) == 36);
+    CHECK(co_lw_meet_far_room(32, 23, 4, 18, 1, 1, 27) == 1 && co_lw_meet_far_room(33, 24, 4, 18, 1, 1, 27) == 0); /* whatever the landscape holds */
+    CHECK(co_lw_meet_far_room(0, 0, 4, 18, 1, 0, 27) == 1 && co_lw_meet_far_room(40, 24, 4, 18, 1, 0, 27) == 0);
+    g_case = "the landscape keeps its half of the far share while road patrols hold more than the share";
+    CHECK(co_lw_meet_far_room(28, 27, 8, 18, 0, 1, 27) == 1 && co_lw_meet_far_room(29, 27, 8, 18, 0, 1, 27) == 0);
+    CHECK(co_lw_meet_far_room(27, 27, 8, 18, 0, 0, 27) == 0 && co_lw_meet_far_room(10, 10, 8, 18, 0, 0, 27) == 1); /* none on its way: the whole share, the road's units in it */
 
     g_case = "room held for patrols: one hold a bubble, counted in its bubble only and not against its own squad";
     { static CoLwMeetHolds h; int bubble[CO_LW_MEET_HOLDS]; for (int k = 0; k < CO_LW_MEET_HOLDS; k++) bubble[k] = -1;
