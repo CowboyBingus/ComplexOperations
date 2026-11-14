@@ -517,6 +517,10 @@ void CoXlTestLwNavMoreCounts(uint32_t* v)
     v[4] = g_lwSwap.sumUnsync[LW_UNSYNC_TICK]; v[5] = g_lwSwap.sumUnsync[LW_UNSYNC_DUE]; v[6] = g_lwSwap.sumUnsync[LW_UNSYNC_END];
     v[7] = g_lwNavHold.sum.pastBound; v[8] = (uint32_t)g_lwSwap.unsafe; v[9] = g_lwNavHold.sum.marksHeld;
 }
+/* The span's: the oldest first build's wait, the frames the hold asked and a larger budget ran, path requests' wait
+ * for a start and the oldest run in flight (ms). */
+void CoXlTestLwNavSpanCounts(uint32_t* v)
+{ v[0] = g_lwNavHold.sum.firstOldest; v[1] = g_lwNavHold.sumOver; v[2] = g_lwNavHold.sum.reqWait; v[3] = g_lwNavHold.sum.runAge; }
 double CoXlTestLwNavEndMs(double set) { if (set >= 0) g_lwSwap.endMs = set; return g_lwSwap.endMs; }
 void CoXlTestLwNavSchedInstall(uintptr_t exe, uintptr_t stub) { LwInstallNavSched(exe, stub); }
 int CoXlTestLwNavMarksHeld(void) { return LwNavMarksHeld(); }
@@ -528,11 +532,22 @@ float CoXlTestLwAibWorld(uintptr_t w, float stock, float lat, int on, ULONGLONG 
 {
     float cur = *(float*)(w + 0x47C);
     g_lwAib.b.world = w; g_lwAib.b.stock = stock; g_lwAib.b.raised = 0; g_lwAib.on = on;
-    LwNavHoldJoin(LwFpJoinTake());
+    LwAibJoin(LwFpJoinTake(), 1);
     LwAibSteer(w, cur, lat, *(float*)(w + 0x484), now);
+    g_lwAib.wasDraining = g_lwAib.b.draining && g_lwAib.b.ran == CO_AIB_RAN_DRAIN;
     return *(float*)(w + 0x47C);
 }
-void CoXlTestLwAibReset(void) { memset(&g_lwAib.b, 0, sizeof g_lwAib.b); g_lwAib.on = 1; g_lwAib.wasDraining = 0; }
+/* A frame whose AI world did not read, as LwAibFrame leaves it: the joins so far are taken and dropped. */
+void CoXlTestLwAibUnread(void) { LwAibJoin(LwFpJoinTake(), 0); }
+/* The AI drain as the tests set it, and the joins counted for its frames: count, sum and worst in ms. */
+void CoXlTestLwAibDrain(int us, int runMs, int queue) { g_lwAib.drain.us = us; g_lwAib.drain.runMs = runMs; g_lwAib.drain.queue = queue; }
+void CoXlTestLwAibDrainJoins(uint32_t* n, double* sum, double* worst) { *n = g_lwAib.drainJoins; *sum = g_lwAib.drainJoinSum; *worst = g_lwAib.drainJoinWorst; }
+void CoXlTestLwAibReset(void)
+{
+    memset(&g_lwAib.b, 0, sizeof g_lwAib.b); g_lwAib.on = 1; g_lwAib.wasDraining = 0;
+    g_lwAib.drainJoins = 0; g_lwAib.drainJoinSum = g_lwAib.drainJoinWorst = 0;
+    g_lwAib.drain = (CoAiDrain){CO_AIB_DRAIN_US, CO_AIB_DRAIN_RUN_MS, CO_AIB_DRAIN_QUEUE};
+}
 int CoXlTestLwNavWatch(uint16_t cx, uint16_t cy, uint32_t flags, uint32_t section) { LwNavWatch(cx, cy, flags, section, 1); return g_lwNav.watching; }
 /* The AI budget lever's choice for a step: the budget it leaves at H+0x47C from `cur`, with requests `lat` s old. */
 float CoXlTestLwAibSteer(float stock, float cur, float lat)

@@ -57,7 +57,7 @@ static void TestLows(void)
     CHECK(over25 == 2 && over33 == 1 && over1s == 0); /* 29.97 ms is over 25, not over 33.3 */
     CHECK(low01 > 24.9 && low01 < 25.1);                 /* the one 40 ms frame */
     CHECK(fake_host_logged("frame times (10.0 s of play, QPC): 998 frames"));
-    CHECK(fake_host_logged("worst 40.0 ms (timed parts 0.32 ms, the most: living world 0.30 ms); 2 over 25 ms, 1 over 33.3 ms, 0 of 1 s or more; timed parts (CoXlTick, the level update) 0.32 ms a frame, off the game thread 0.0 ms"));
+    CHECK(fake_host_logged("worst 40.0 ms (timed parts 0.32 ms, the most: living world 0.30 ms); 2 over 16.7 ms, 2 over 25 ms, 1 over 33.3 ms, 0 of 1 s or more; timed parts (CoXlTick, the level update) 0.32 ms a frame, off the game thread 0.0 ms"));
     CHECK(fake_host_logged("a 40.0 ms frame (QPC; the game's window in front): timed parts (CoXlTick, the level update) 0.32 ms (the most: living world 0.30 ms), untimed 39.7 ms"));
 }
 
@@ -105,7 +105,7 @@ static void TestLongFrames(void)
     Last(&over25, &over33, &over1s, &starved);
     CHECK(over1s == 1 && over33 == 1 && over25 == 1);
     CHECK(fake_host_logged("worst 1528.0 ms"));
-    CHECK(fake_host_logged("1 over 25 ms, 1 over 33.3 ms, 1 of 1 s or more"));
+    CHECK(fake_host_logged("; 1 over 16.7 ms, 1 over 25 ms, 1 over 33.3 ms, 1 of 1 s or more"));
     CHECK(fake_host_logged("a 1528.0 ms frame"));
 }
 
@@ -282,6 +282,96 @@ static void TestCpuAndContext(void)
     CHECK(fake_host_logged("the nearest garrison with living spawners none known"));
 }
 
+/* One frame of `ms` in play with its costs in ms: a nav tick and a nav swap (level update parts), the AI joins, and
+ * the world update from `worldAt` for `world`; `inWorld` puts the nav tick and the joins inside it. */
+static void Cost(double ms, double tick, double swap, double join, double world, int inWorld)
+{
+    int64_t t = g_now, w = t + 1000, at = inWorld ? w + 500 : t + 500;
+    co_framecost_test_begin(t, 1, g_mission);
+    if (world > 0 && inWorld) co_framecost_test_world(1, w);
+    if (tick > 0) { co_framecost_test_add(CO_FC_NAVTICK, at, at + (int64_t)(tick * 1000.0)); at += (int64_t)(tick * 1000.0); }
+    if (swap > 0) { co_framecost_test_add(CO_FC_NAVSWAP, at, at + (int64_t)(swap * 1000.0)); at += (int64_t)(swap * 1000.0); }
+    if (join > 0) { co_framecost_test_extra(CO_FX_JOIN, at, at + (int64_t)(join * 1000.0)); at += (int64_t)(join * 1000.0); }
+    if (world > 0 && inWorld) co_framecost_test_world(0, w + (int64_t)(world * 1000.0));
+    if (world > 0 && !inWorld) { co_framecost_test_world(1, at); co_framecost_test_world(0, at + (int64_t)(world * 1000.0)); }
+    g_now += (int64_t)(ms * 1000.0);
+}
+static uint32_t g_over, g_led[CO_FC_CAUSES], g_only[CO_FC_CAUSES];
+static void Causes(void) { for (int i = 0; i < 1200; i++) Frame(9.0, 0.0, 1); co_framecost_test_causes(&g_over, g_led, g_only); }
+
+/* Frames over 16.7 ms are counted, each under the cause that led it and under each it was over only with: the two
+ * slow-frame lines a window start at 25 ms and cannot judge a 60 fps target. */
+static void TestCauses(void)
+{
+    Reset("a window with no frame over the target writes no causes line");
+    Frame(9.0, 0.0, 1); Cost(16.7, 5.0, 0, 0, 0, 0); /* 16.7 ms is at the target, not over it */
+    Causes();
+    CHECK(g_over == 0 && !fake_host_logged("frame times, causes") && fake_host_logged("; 0 over 16.7 ms, 0 over 25 ms"));
+
+    Reset("a nav tick inside the world update is not hidden by it");
+    Frame(9.0, 0.0, 1); Cost(20.0, 8.0, 0, 0, 12.0, 1); /* the update's own 4 ms, the rest 8 ms less the marks */
+    Causes();
+    CHECK(g_over == 1 && g_led[CO_FC_NAVTICK] == 1 && g_led[CO_FC_CAUSE_WORLD] == 0 && g_led[CO_FC_CAUSE_REST] == 0);
+    CHECK(g_only[CO_FC_NAVTICK] == 1 && g_only[CO_FC_CAUSE_WORLD] == 1 && g_only[CO_FC_NAVSWAP] == 0 && g_only[CO_FC_CAUSE_JOIN] == 0);
+    CHECK(fake_host_logged("frame times, causes (10.0 s of play): 1 frame(s) over 16.7 ms; led by (the largest of the timed parts, AI joins, the world "
+        "update's own time, the rest): nav swaps 0, nav tick 1, AI joins 0, world update 0, the rest 0; over only with (within 16.7 ms "
+        "without it): nav swaps 0, nav tick 1, AI joins 0, world update 1"));
+    CHECK(fake_host_logged("; 1 over 16.7 ms, 0 over 25 ms, 0 over 33.3 ms"));
+
+    Reset("the world update leads with its own time; a join inside it comes off too");
+    Frame(9.0, 0.0, 1); Cost(20.0, 2.0, 0, 3.0, 14.0, 1); /* own 9 ms, the rest 6 ms */
+    Causes();
+    CHECK(g_over == 1 && g_led[CO_FC_CAUSE_WORLD] == 1 && g_only[CO_FC_CAUSE_WORLD] == 1 && g_only[CO_FC_NAVTICK] == 0 && g_only[CO_FC_CAUSE_JOIN] == 0);
+
+    Reset("joins and a nav swap outside the world update; the rest");
+    Frame(9.0, 0.0, 1);
+    Cost(18.0, 0, 0, 9.0, 1.0, 0);   /* joins lead; without the update's 1 ms still 17 ms */
+    Cost(30.0, 0, 20.0, 0, 0, 0);    /* a nav swap */
+    Cost(30.0, 0, 5.0, 0, 0, 0);     /* the rest leads; 25 ms without the swap: over only with nothing */
+    Cost(16.8, 0, 0, 0, 0, 0);       /* nothing timed: the rest */
+    Causes();
+    CHECK(g_over == 4 && g_led[CO_FC_CAUSE_JOIN] == 1 && g_led[CO_FC_NAVSWAP] == 1 && g_led[CO_FC_CAUSE_REST] == 2 && g_led[CO_FC_CAUSE_WORLD] == 0);
+    CHECK(g_only[CO_FC_CAUSE_JOIN] == 1 && g_only[CO_FC_NAVSWAP] == 1 && g_only[CO_FC_CAUSE_WORLD] == 0 && g_only[CO_FC_CAUSE_REST] == 0);
+    CHECK(fake_host_logged("nav swaps 1, nav tick 0, AI joins 1, world update 0, the rest 2; over only with"));
+    Causes(); /* the next window starts from 0 */
+    CHECK(g_over == 0 && g_led[CO_FC_CAUSE_REST] == 0 && g_only[CO_FC_NAVSWAP] == 0);
+
+    Reset("more than two slow frames a window are all counted; other parts are named, the most first");
+    Frame(9.0, 0.0, 1);
+    for (int i = 0; i < 5; i++) Cost(26.0, 0, 14.0, 0, 0, 0);
+    for (int i = 0; i < 3; i++) Frame(20.0, 15.0, 1); /* the living world */
+    for (int i = 0; i < 2; i++) { co_framecost_test_begin(g_now, 1, g_mission); co_framecost_test_add(CO_FC_MOVE, g_now + 10, g_now + 15010); g_now += 20000; }
+    co_framecost_test_begin(g_now, 1, g_mission); co_framecost_test_add(CO_FC_SCATTER, g_now + 10, g_now + 15010); g_now += 20000;
+    Causes();
+    CHECK(g_over == 11 && g_led[CO_FC_NAVSWAP] == 5 && g_only[CO_FC_NAVSWAP] == 5 && g_led[CO_FC_LIVING] == 3 && g_led[CO_FC_MOVE] == 2 && g_led[CO_FC_SCATTER] == 1);
+    CHECK(fake_host_logged("world update 0, the rest 0, living world 3, moving tiles 2, other parts 1; over only with"));
+    CHECK(fake_host_logged("AI joins 0, world update 0, living world 3, moving tiles 2, other parts 1\n"));
+    CHECK(co_framecost_test_detail_lines() == CO_FC_SLOW_LINES_WINDOW); /* the detailed lines stay two */
+    const char* line = strstr(g_fake.log, "frame times, causes"); const char* end = line ? strchr(line, '\n') : NULL;
+    CHECK(line && end && end - line < 420); /* the log takes 512 a line: 13 of time, longer part names and four-digit counts add 75 at most */
+
+    Reset("a frame that starts inside the world update: each frame gets its share");
+    Frame(9.0, 0.0, 1);
+    co_framecost_test_begin(g_now, 1, g_mission); co_framecost_test_world(1, g_now + 10000); g_now += 30000;
+    co_framecost_test_begin(g_now, 1, g_mission); co_framecost_test_add(CO_FC_NAVTICK, g_now + 100, g_now + 1100);
+    co_framecost_test_world(0, g_now + 4000); g_now += 30000;
+    Frame(9.0, 0.0, 1);
+    double join, world; int grass;
+    CHECK(co_framecost_test_slow(0, &join, &world, &grass) == 30.0 && world == 20.0);
+    CHECK(co_framecost_test_slow(1, &join, &world, &grass) == 30.0 && world == 4.0);
+    Causes();
+    CHECK(g_over == 2 && g_led[CO_FC_CAUSE_WORLD] == 1 && g_led[CO_FC_CAUSE_REST] == 1 && g_only[CO_FC_NAVTICK] == 0);
+    CHECK(fake_host_logged("AI joins 0.0 ms, world update 20.0 ms") && fake_host_logged("AI joins 0.0 ms, world update 4.0 ms"));
+
+    Reset("a window cut short still writes its causes; a world update with no frame begun is not timed");
+    co_framecost_test_world(1, g_now); co_framecost_test_world(0, g_now + 5000);
+    Frame(9.0, 0.0, 1); Cost(30.0, 0, 20.0, 0, 0, 0); Frame(9.0, 0.0, 1);
+    CHECK(!fake_host_logged("frame times, causes"));
+    Frame(50.0, 0.0, 0);
+    CHECK(fake_host_logged("frame times, causes (0.0 s of play): 1 frame(s) over 16.7 ms") && fake_host_logged("led by (the largest of the timed parts, AI "
+        "joins, the world update's own time, the rest): nav swaps 1,"));
+}
+
 int main(void)
 {
     TestLows();
@@ -298,6 +388,7 @@ int main(void)
     TestSlowest();
     TestOffThread();
     TestCpuAndContext();
+    TestCauses();
     if (g_failed) { printf("%d check(s) failed\n", g_failed); return 1; }
     printf("framecost: all checks passed\n");
     return 0;

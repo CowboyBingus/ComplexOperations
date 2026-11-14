@@ -3843,6 +3843,7 @@ static struct
     uint32_t heldFrame, breakFrame;                /* the mod's tick + 1 of the last pop that left records; of the last break */
     uint32_t breaks, sumBreaks;                    /* ticks given the game's order with no game frame before them */
     uint8_t wasRaised; uint32_t joins; double joinSum, joinWorst; /* the AI joins of the frames after a raised budget */
+    uint8_t asked; uint32_t sumOver;               /* the raise asked this frame (2: for a backlog); frames a larger budget ran instead */
     /* The cell tick, from its scheduler call to its empty pop. `sched` is 0x7B8200 once its call comes through here. */
     void (*sched)(void);
     volatile uintptr_t* listVar; volatile uint32_t* navCount; /* exe 0x1B1C158 (the list is at +0x40), 0x27C30C0 */
@@ -3861,7 +3862,7 @@ static struct
     struct
     {
         uint32_t ticks, first, built, worstFirst, worstBuilt, mostFirst, over, paused, pauses, queueMost, oldest, nearGap, lag;
-        uint32_t firstMost, firstOldest, marksHeld, pastBound;
+        uint32_t firstMost, firstOldest, marksHeld, pastBound, reqWait, runAge;
         double ms, worst, worstSched, sched, firstMs, firstWorst, builtMs, builtWorst;
     } sum;                                                    /* the 30 s summary's */
 } g_lwNavHold;
@@ -3931,8 +3932,8 @@ static void LwNavHoldJoin(double join)
     g_lwNavHold.wasRaised = 0;
 }
 /* The budget in microseconds the AI world `h` gets this frame over its stock, 0 for none: a run is in flight with a
- * completion held or a backlog behind it. Asked once a frame by the budget lever, which counts for the summary and
- * writes the largest of this, its own and the AI drain's. */
+ * completion held or a backlog behind it. Asked once a frame by the budget lever, which writes the largest of this,
+ * its own and the AI drain's and says which with LwNavHoldRan. */
 static int LwNavHoldRaiseUs(uintptr_t h, ULONGLONG now)
 {
     for (int i = 0; i < 4 && g_lwSwap.table && h; i++)
@@ -3942,11 +3943,21 @@ static int LwNavHoldRaiseUs(uintptr_t h, ULONGLONG now)
         if (g_lwSwap.stepDone(h)) g_lwNavHold.sumDone++; /* it waits for its commit (a query job), not for time */
         int held = g_lwNavHold.waiting[i] && g_lwNavHold.oldAt[i] && now - g_lwNavHold.oldAt[i] >= LW_NAV_RAISE_MS;
         if (!held && !LwNavBacklog(h)) return 0;
-        g_lwNavHold.sumRaise++; g_lwNavHold.wasRaised = 1;
-        if (!held) g_lwNavHold.sumBack++;
+        g_lwNavHold.asked = held ? 1 : 2;
         return LW_NAV_RAISE_US;
     }
     return 0;
+}
+/* What the step ran with after the hold asked: `mine`, the hold's raise, or a larger budget (the AI drain's). Only a
+ * frame at the hold's own value is its cost: joins after 8000 us were reported as a 4000 us raise's. */
+static void LwNavHoldRan(int mine)
+{
+    uint8_t asked = g_lwNavHold.asked;
+    g_lwNavHold.asked = 0;
+    if (!asked) return;
+    if (!mine) { g_lwNavHold.sumOver++; return; }
+    g_lwNavHold.sumRaise++; g_lwNavHold.wasRaised = 1;
+    if (asked == 2) g_lwNavHold.sumBack++;
 }
 /* A record's world index + 1 when the hold's rules are its, 0 when the game's: no cell work (flag 0x80), a nav that is
  * not running, a world with no async step. `*rebuild`: its cell has a section, which the completion unloads (0x7B9026). */
@@ -4170,6 +4181,11 @@ static void LwNavLag(int i, ULONGLONG now)
     }
     int q = LwNavQueue(w);
     if (q > 0 && (uint32_t)q > g_lwNavHold.sum.queueMost) g_lwNavHold.sum.queueMost = (uint32_t)q;
+    /* what a window kept open and a long run cost paths: the wait for a run's start and the run's age, as the game
+     * sums them (0xC40030: [W+0x480] while work waits, [W+0x484] while a run is in flight) */
+    float wait = *(volatile float*)(w + 0x480), age = *(volatile float*)(w + 0x484);
+    if (isfinite(wait) && wait > 0 && wait < 4000000.0f && (uint32_t)(wait * 1000.0f) > g_lwNavHold.sum.reqWait) g_lwNavHold.sum.reqWait = (uint32_t)(wait * 1000.0f);
+    if (isfinite(age) && age > 0 && age < 4000000.0f && (uint32_t)(age * 1000.0f) > g_lwNavHold.sum.runAge) g_lwNavHold.sum.runAge = (uint32_t)(age * 1000.0f);
 }
 /* The world's step finished on the frame thread, with the list's lock released: the nav's build threads push to it. */
 static int LwNavHoldDrain(uintptr_t list, int idx, uintptr_t w, const char* path)
@@ -4230,6 +4246,13 @@ static void LwNavHoldBound(int i, uintptr_t w, ULONGLONG now)
         "rebuild is marked meanwhile and the cells' navmesh stays as built; run in flight %d, %.1f s old, budget %.0f us", i, (unsigned long long)waited,
         LW_NAV_HOLD_MOST_MS, g_lwNavHold.waiting[i], LwNavQueue(w), flight, flight ? (double)*(volatile float*)(w + 0x484) : 0.0,
         (double)*(volatile float*)(w + 0x47C) * 1e6);
+}
+/* A first build leaves the list: its whole wait counts for the span's oldest, not only what the last empty pop saw
+ * (the line's "now" is one instant, 0 as often as not). */
+static void LwNavFirstLeft(uintptr_t rec, ULONGLONG now)
+{
+    uint32_t ms = (uint32_t)(now - LwNavSeenAt(rec, now));
+    if (ms > g_lwNavHold.sum.firstOldest) g_lwNavHold.sum.firstOldest = ms;
 }
 /* The tick's pop, inside the list's lock; `flush` is the tick's argument (not 0 at a level's end). Per world the oldest
  * record goes first (the list is newest first, 0x7B2690). A built cell's goes between steps with no section command
@@ -4327,6 +4350,7 @@ static uintptr_t LwNavPopIn(uintptr_t list, uint32_t flush, ULONGLONG now)
             /* a built cell's swap with the world idle and no query job needs no step of its own before or after */
             if (dueBuilt && LwNavIdle(dueWorld, w) && !g_lwNavHold.unapplied[dueWorld] && LwNavQuiet(dueWorld, w))
             { g_lwNavHold.grant[dueWorld] = dueCell; g_lwNavHold.grantTicks[dueWorld] = LwNavWaited(due); g_lwNavHold.grantQueued[dueWorld] = 0; }
+            if (!dueBuilt) LwNavFirstLeft(due, now);
             g_lwNavHold.waiting[dueWorld]--;
             return LwNavTake(list, off, duePrev, due, dueWorld);
         }
@@ -4352,6 +4376,7 @@ static uintptr_t LwNavPopIn(uintptr_t list, uint32_t flush, ULONGLONG now)
                 g_lwNavHold.grant[i] = cell[i]; g_lwNavHold.grantTicks[i] = LwNavWaited(rec2[i][1]); g_lwNavHold.grantQueued[i] = queued > 0 ? queued : 0;
             }
             uint32_t ticks = LwNavWaited(rec2[i][r2]);
+            if (!r2) LwNavFirstLeft(rec2[i][0], now);
             if (ticks > g_lwNavHold.longest) g_lwNavHold.longest = ticks;
             if (ticks > g_lwNavHold.sumLongest) g_lwNavHold.sumLongest = ticks;
             g_lwNavHold.waiting[i]--;
@@ -4492,29 +4517,38 @@ static void LwNavSwapNote(const char* span)
             g_lwSwap.steps, g_lwSwap.sumNoLoad, g_lwNavHold.sumHeld, g_lwNavHold.sumLongest, g_lwNavHold.sumDrains, g_lwNavHold.sumRelaxed, g_lwSwap.swaps,
             g_lwSwap.noLoad, g_lwNavHold.marked, LwNavSections(), queue, g_lwNavHold.sumDone, g_lwNavHold.sumResFlight, g_lwNavHold.sumResMoved);
     g_lwSwap.sumSwaps = g_lwSwap.sumNoLoad = 0; g_lwSwap.sumMs = g_lwSwap.sumWorst = g_lwSwap.sumStep = g_lwSwap.sumWait = 0;
-    if (g_lwNavHold.sumRaise > 0 || g_lwNavHold.sumBreaks > 0)
+    if (g_lwNavHold.sumRaise > 0 || g_lwNavHold.sumBreaks > 0 || g_lwNavHold.sumOver > 0)
         Note("living world: nav hold (%s): AI budget raised to %d us on %u frame(s) (%u for a backlog, no completion held); the AI joins after them "
-            "%.2f ms on average, %.2f ms at worst (%u frame(s)); %u tick(s) given the game's order with no game frame before them", span, LW_NAV_RAISE_US,
-            g_lwNavHold.sumRaise, g_lwNavHold.sumBack, g_lwNavHold.joins ? g_lwNavHold.joinSum / g_lwNavHold.joins : 0.0, g_lwNavHold.joinWorst, g_lwNavHold.joins, g_lwNavHold.sumBreaks);
+            "%.2f ms on average, %.2f ms at worst (%u frame(s)); %u tick(s) given the game's order with no game frame before them; on %u more frame(s) "
+            "the hold asked and a larger budget ran (the AI drain's; their joins are in the AI path budget line)", span, LW_NAV_RAISE_US,
+            g_lwNavHold.sumRaise, g_lwNavHold.sumBack, g_lwNavHold.joins ? g_lwNavHold.joinSum / g_lwNavHold.joins : 0.0, g_lwNavHold.joinWorst, g_lwNavHold.joins, g_lwNavHold.sumBreaks,
+            g_lwNavHold.sumOver);
+    g_lwNavHold.sumOver = 0;
     g_lwNavHold.sumHeld = g_lwNavHold.sumLongest = g_lwNavHold.sumDrains = g_lwNavHold.sumRelaxed = g_lwNavHold.sumRaise = g_lwNavHold.sumBack = g_lwNavHold.sumDone = g_lwNavHold.sumResFlight = g_lwNavHold.sumResMoved = 0;
     g_lwNavHold.sumBreaks = g_lwNavHold.joins = 0; g_lwNavHold.joinSum = g_lwNavHold.joinWorst = 0;
     uint32_t kept = (uint32_t)InterlockedExchange(&g_lwNavHold.kept, 0);
     const uint32_t* un = g_lwSwap.sumUnsync;
     if (g_lwNavHold.sum.ticks > 0 || g_lwNavHold.sum.first > 0 || g_lwNavHold.sum.built > 0 || g_lwNavHold.sum.queueMost > 0 || g_lwNavHold.sum.oldest > 0 ||
         g_lwNavHold.sum.firstMost > 0 || g_lwNavHold.sum.marksHeld > 0 || un[0] + un[1] + un[2] > 0)
+    {
         Note("living world: nav tick (%s): %u tick(s) timed, %.1f ms in all, the scheduler %.1f ms of it; the worst %.2f ms (the scheduler %.2f ms, %u first "
             "build(s), %u built cell(s)); first builds: %u in %.1f ms, the worst %.2f ms, at most %u a tick, left for a later tick by the %u us budget %u "
             "time(s); built cells: %u in %.1f ms, the worst %.2f ms; the oldest waiting built cell now %u ms old and %u job start(s) from its ring slot's "
             "turn (this span at most %u ms, at least %u); no job starts on %u tick(s) in %u pause(s); navmesh lag: a command waited up to %u ms from queued "
-            "to applied, the queue at most %u; %u drain(s) this session stopped at a bound; first builds waiting now %u, the oldest %u ms (this span at most %u, "
-            "%u ms); a run's start put off %u time(s) for them; unsynchronised swaps: %u at a tick repeated with no game frame, %u at a completion the pop "
-            "did not let through, %u at a level's end; rebuild marks held on %u frame(s) after one; a completion past the hold's %d ms on %u tick(s)", span, g_lwNavHold.sum.ticks, g_lwNavHold.sum.ms, g_lwNavHold.sum.sched, g_lwNavHold.sum.worst,
+            "to applied, the queue at most %u; %u drain(s) this session stopped at a bound", span, g_lwNavHold.sum.ticks, g_lwNavHold.sum.ms, g_lwNavHold.sum.sched, g_lwNavHold.sum.worst,
             g_lwNavHold.sum.worstSched, g_lwNavHold.sum.worstFirst, g_lwNavHold.sum.worstBuilt, g_lwNavHold.sum.first, g_lwNavHold.sum.firstMs,
             g_lwNavHold.sum.firstWorst, g_lwNavHold.sum.mostFirst, g_lwNavHold.budgetUs, g_lwNavHold.sum.over, g_lwNavHold.sum.built, g_lwNavHold.sum.builtMs,
             g_lwNavHold.sum.builtWorst, g_lwNavHold.builtAge, g_lwNavHold.builtLeft, g_lwNavHold.sum.oldest, LW_NAV_RING - g_lwNavHold.sum.nearGap,
-            g_lwNavHold.sum.paused, g_lwNavHold.sum.pauses, g_lwNavHold.sum.lag, g_lwNavHold.sum.queueMost, g_lwSwap.bounded,
-            g_lwNavHold.firstNow, g_lwNavHold.firstAge, g_lwNavHold.sum.firstMost, g_lwNavHold.sum.firstOldest, kept, un[LW_UNSYNC_TICK], un[LW_UNSYNC_DUE],
-            un[LW_UNSYNC_END], g_lwNavHold.sum.marksHeld, LW_NAV_HOLD_MOST_MS, g_lwNavHold.sum.pastBound);
+            g_lwNavHold.sum.paused, g_lwNavHold.sum.pauses, g_lwNavHold.sum.lag, g_lwNavHold.sum.queueMost, g_lwSwap.bounded);
+        /* a line of its own: with the counts above one line passed the log's 1024 and lost its last fields. The span's
+         * most leads: "now" is one instant and reads 0 on a good build as often as on a bad one. */
+        Note("living world: nav tick (%s), waits: first builds waiting: this span at most %u, the oldest wait %u ms (now %u, %u ms); a run's start put off "
+            "%u time(s) for them in %u tick(s); path requests waited up to %u ms for a run's start and a run in flight was up to %u ms old; unsynchronised "
+            "swaps: %u at a tick repeated with no game frame, %u at a completion the pop did not let through, %u at a level's end; rebuild marks held on "
+            "%u frame(s) after one; a completion past the hold's %d ms on %u tick(s)", span, g_lwNavHold.sum.firstMost, g_lwNavHold.sum.firstOldest,
+            g_lwNavHold.firstNow, g_lwNavHold.firstAge, kept, g_lwNavHold.sum.ticks, g_lwNavHold.sum.reqWait, g_lwNavHold.sum.runAge, un[LW_UNSYNC_TICK],
+            un[LW_UNSYNC_DUE], un[LW_UNSYNC_END], g_lwNavHold.sum.marksHeld, LW_NAV_HOLD_MOST_MS, g_lwNavHold.sum.pastBound);
+    }
     memset(&g_lwNavHold.sum, 0, sizeof g_lwNavHold.sum); memset(g_lwSwap.sumUnsync, 0, sizeof g_lwSwap.sumUnsync);
     LwNavSlotGuard();
 }

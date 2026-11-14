@@ -35,6 +35,10 @@ float CoXlTestLwAibWorld(uintptr_t w, float stock, float lat, int on, ULONGLONG 
 int CoXlTestLwNavLeft(int read, uint32_t state);
 void CoXlTestLwFpJoin(double ms);
 void CoXlTestLwAibReset(void);
+void CoXlTestLwAibUnread(void);
+void CoXlTestLwAibDrain(int us, int runMs, int queue);
+void CoXlTestLwAibDrainJoins(uint32_t* n, double* sum, double* worst);
+void CoXlTestLwNavSpanCounts(uint32_t* v);
 void CoXlTestLwNavWindow(uint8_t (*ask)(uintptr_t, void*), uint32_t ms);
 int CoXlTestLwNavStartAsk(uintptr_t w);
 void CoXlTestLwNavMoreCounts(uint32_t* v);
@@ -1034,8 +1038,29 @@ static void TestWindow(void)
     Flight(0);
     CHECK(Tick(0, 900) == 3);
     CoXlTestLwNavMoreCounts(m); CHECK(m[0] == 0 && m[1] == 0 && m[2] == 3);
+    /* the span's most leads; the oldest wait is the whole of it, to the tick the record left (100 to 900), not the 700 ms the last empty pop saw */
+    CoXlTestLwNavSpanCounts(m); CHECK(m[0] == 800);
     CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
-    CHECK(fake_host_logged("first builds waiting now 0, the oldest 0 ms (this span at most 3, 700 ms); a run's start put off 0 time(s) for them"));
+    CHECK(fake_host_logged("living world: nav tick (30 s), waits: first builds waiting: this span at most 3, the oldest wait 800 ms (now 0, 0 ms); a run's start "
+        "put off 0 time(s) for them in "));
+    CHECK(!fake_host_logged("first builds waiting now"));
+    const char* tickLine = strstr(g_fake.log, "living world: nav tick (30 s): "); const char* waitLine = strstr(g_fake.log, "living world: nav tick (30 s), waits: ");
+    CHECK(tickLine && waitLine && strchr(tickLine, '\n') < waitLine);              /* two lines: one passed the log's 1024 characters */
+    CHECK(tickLine && strchr(tickLine, '\n') - tickLine < 760 && waitLine && strchr(waitLine, '\n') - waitLine < 560);
+    ResetHold("a first build that leaves at the ring's bound counts its wait too; path requests' wait and the run's age are the span's most");
+    Flight(1); RunAge(2.5f); { float wait = 0.75f; memcpy(g_aiw + 0x480, &wait, 4); }
+    Push(0, IDX, 4, 0);
+    CHECK(Tick(0, 100) == 0);
+    RunAge(0.25f); { float wait = 0.125f; memcpy(g_aiw + 0x480, &wait, 4); }
+    CHECK(Tick(0, 400) == 0);
+    CoXlTestLwNavSpanCounts(m); CHECK(m[0] == 300 && m[2] == 750 && m[3] == 2500);
+    { float bad = -1.0f; memcpy(g_aiw + 0x480, &bad, 4); bad = (float)(0.0 / 1.0e-300 * 0.0 + 1.0e30); memcpy(g_aiw + 0x484, &bad, 4); } /* not times: not taken */
+    CHECK(Tick(0, 500) == 0);
+    CoXlTestLwNavSpanCounts(m); CHECK(m[2] == 750 && m[3] == 2500);
+    RunAge(0.0f); { float wait = 0.0f; memcpy(g_aiw + 0x480, &wait, 4); }
+    CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
+    CHECK(fake_host_logged("path requests waited up to 750 ms for a run's start and a run in flight was up to 2500 ms old; unsynchronised swaps: 0 at"));
+    CoXlTestLwNavSpanCounts(m); CHECK(m[0] == 0 && m[2] == 0 && m[3] == 0); /* the span's start again */
     ResetHold("a built cell's record is not a first build waiting");
     Section(IDX, 3, 40); Flight(1);
     Push(0, IDX, 3, 0);
@@ -1554,6 +1579,64 @@ static void TestHoldRaise(void)
     CHECK(Aib(1, 2016) == 0.004f);
     CoXlTestLwNavSwapSummary(91000);
     CHECK(fake_host_logged("AI budget raised to 4000 us on 2 frame(s) (0 for a backlog, no completion held); the AI joins after them 2.00 ms on average, 2.00 ms at worst (1 frame(s)); 0 tick(s)"));
+    CHECK(fake_host_logged("; on 0 more frame(s) the hold asked and a larger budget ran (the AI drain's; their joins are in the AI path budget line)"));
+    {
+        uint32_t n, s[4]; double sum, worst;
+        ResetHold("the hold asks and the AI drain's larger budget runs: the frame and its join are the drain's, not a 4000 us raise's");
+        Section(IDX, 3, 40); Flight(1); Budget(0.002f);
+        Push(0, IDX, 3, 0);
+        CHECK(Tick(0, 1000) == 0);
+        RunAge(9.0f);                          /* a run over 3 s old: the drain's 8000 us */
+        CHECK(Aib(1, 1100) == 0.008f);
+        CoXlTestLwFpJoin(7.5);
+        CHECK(Aib(1, 1116) == 0.008f);
+        HoldCounts(v); CoXlTestLwNavSpanCounts(s); CoXlTestLwAibDrainJoins(&n, &sum, &worst);
+        CHECK(v[2] == 0 && s[1] == 2 && n == 1 && sum == 7.5 && worst == 7.5);
+        RunAge(0.0f);                          /* the drain ends: the hold's own value is written */
+        CoXlTestLwFpJoin(6.0);                 /* the join of the last 8000 us frame */
+        CHECK(Aib(1, 1132) == 0.004f);
+        CoXlTestLwFpJoin(2.0);                 /* and of the first at 4000 us */
+        CHECK(Aib(1, 1148) == 0.004f);
+        HoldCounts(v); CoXlTestLwNavSpanCounts(s); CoXlTestLwAibDrainJoins(&n, &sum, &worst);
+        CHECK(v[2] == 2 && s[1] == 2 && n == 2 && sum == 13.5 && worst == 7.5);
+        CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
+        CHECK(fake_host_logged("AI budget raised to 4000 us on 2 frame(s) (0 for a backlog, no completion held); the AI joins after them 2.00 ms on average, 2.00 ms at worst (1 frame(s)); "
+            "0 tick(s) given the game's order with no game frame before them; on 2 more frame(s) the hold asked and a larger budget ran"));
+        CoXlTestLwNavSpanCounts(s); CHECK(s[1] == 0);
+        g_fake.log[0] = 0;
+        RunAge(9.0f); CHECK(Aib(1, 40000) == 0.008f); RunAge(0.0f);
+        CoXlTestLwNavSwapSummary(61000);
+        CHECK(fake_host_logged("nav hold (30 s): AI budget raised to 4000 us on 0 frame(s)") && fake_host_logged("on 1 more frame(s) the hold asked")); /* written for these alone */
+        ResetHold("an AI drain set under the hold's raise: draining, yet the hold's value runs and the join is the hold's");
+        CoXlTestLwAibDrain(3000, 3000, 1024);
+        Section(IDX, 3, 40); Flight(1); Budget(0.002f); RunAge(9.0f);
+        Push(0, IDX, 3, 0);
+        CHECK(Tick(0, 1000) == 0 && Aib(1, 1100) == 0.004f);
+        CoXlTestLwFpJoin(3.0);
+        CHECK(Aib(1, 1116) == 0.004f);
+        HoldCounts(v); CoXlTestLwNavSpanCounts(s); CoXlTestLwAibDrainJoins(&n, &sum, &worst);
+        CHECK(v[2] == 2 && s[1] == 0 && n == 0);
+        Flight(0); RunAge(0.0f);
+        ResetHold("a frame whose AI world did not read: its joins are dropped, not summed into the next frame's");
+        Section(IDX, 3, 40); Flight(1); Budget(0.002f);
+        Push(0, IDX, 3, 0);
+        CHECK(Tick(0, 1000) == 0 && Aib(1, 1100) == 0.004f);
+        CoXlTestLwFpJoin(50.0); CoXlTestLwAibUnread();
+        CoXlTestLwFpJoin(60.0); CoXlTestLwAibUnread();
+        CoXlTestLwFpJoin(1.5);
+        CHECK(Aib(1, 1200) == 0.004f);         /* the frame before had no known budget: 1.5 ms is no raise's join */
+        CoXlTestLwFpJoin(2.5);
+        CHECK(Aib(1, 1216) == 0.004f);
+        CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
+        CHECK(fake_host_logged("the AI joins after them 2.50 ms on average, 2.50 ms at worst (1 frame(s))"));
+        RunAge(9.0f); CHECK(Aib(1, 1232) == 0.008f);
+        CoXlTestLwFpJoin(40.0); CoXlTestLwAibUnread();
+        CoXlTestLwFpJoin(1.0);
+        CHECK(Aib(1, 1248) == 0.008f);
+        CoXlTestLwAibDrainJoins(&n, &sum, &worst);
+        CHECK(n == 0);                         /* the drain's too */
+        Flight(0); RunAge(0.0f);
+    }
     ResetHold("the largest of the lever's, the AI drain's and the hold's raise is written, never a sum");
     Section(IDX, 3, 40); Flight(1); Budget(0.002f);
     Push(0, IDX, 3, 0);
@@ -1599,7 +1682,7 @@ static void TestHoldRaise(void)
     HoldCounts(v);
     CHECK(v[2] == 2);
     RunAge(5.0f);
-    CHECK(Aib(1, 1000) == 0.008f && Aib(0, 1000) == 0.008f); /* the hold's raise is counted; the drain's is the larger */
+    CHECK(Aib(1, 1000) == 0.008f && Aib(0, 1000) == 0.008f); /* the hold asks; the drain's is the larger and the frame is its */
     g_queued = 0; RunAge(900.0f);
     CHECK(Aib(1, 1000) == 0.008f);  /* an old run with nothing behind it: the drain's alone */
     g_queued = 1; RunAge(__builtin_nanf(""));
@@ -1607,14 +1690,14 @@ static void TestHoldRaise(void)
     RunAge(60.0f); Flight(0);
     CHECK(Aib(1, 1000) == 0.0005f);
     HoldCounts(v);
-    CHECK(v[2] == 4 && v[5] == 4);
+    CHECK(v[2] == 2 && v[5] == 2);
     CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
-    CHECK(fake_host_logged("AI budget raised to 4000 us on 4 frame(s) (4 for a backlog, no completion held); "));
+    CHECK(fake_host_logged("AI budget raised to 4000 us on 2 frame(s) (2 for a backlog, no completion held); ") && fake_host_logged("; on 2 more frame(s) the hold asked"));
     g_fake.log[0] = 0;
     Flight(1);
     CHECK(Aib(1, 32000) == 0.008f);
     CoXlTestLwNavSwapSummary(61000);
-    CHECK(fake_host_logged("AI budget raised to 4000 us on 1 frame(s) (1 for a backlog, no completion held); ")); /* counted since the last line */
+    CHECK(fake_host_logged("AI budget raised to 4000 us on 0 frame(s) (0 for a backlog, no completion held); ") && fake_host_logged("; on 1 more frame(s) the hold asked")); /* counted since the last line */
     ResetHold("in play the summary is written with nothing to count: the queue, the run and the slots");
     CoXlTestLwNavLevel(7); Budget(0.002f);
     CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);

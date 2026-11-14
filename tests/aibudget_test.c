@@ -55,15 +55,21 @@ static void ThreeWay(void)
     const CoAiDrain d8 = {8000, 3000, 1024}, d3 = {3000, 3000, 1024}, d1 = {1000, 3000, 1024};
     CoAiBudget b = {0};
     co_aibudget_stock(&b, 0x1000, stock);
-    /* drain 8000 > hold 4000 > lever (stock, its wait raised it) */
-    CHECK(co_aibudget_step(&b, &d8, 1, 9.0f, 500, 500, 1, 9.0f, 0, hold) == 0.008f);
+    /* drain 8000 > hold 4000 > lever (stock, its wait raised it); `ran` names whose value it is */
+    CHECK(co_aibudget_step(&b, &d8, 1, 9.0f, 500, 500, 1, 9.0f, 0, hold) == 0.008f && b.ran == CO_AIB_RAN_DRAIN);
     /* hold 4000 > drain 3000 > lever 2000 */
-    CHECK(co_aibudget_step(&b, &d3, 1, 9.0f, 500, 500, 1, 9.0f, 0, hold) == hold);
+    CHECK(co_aibudget_step(&b, &d3, 1, 9.0f, 500, 500, 1, 9.0f, 0, hold) == hold && b.ran == CO_AIB_RAN_MORE && b.draining);
     /* hold 4000 > lever 2000 > drain 1000 */
-    CHECK(co_aibudget_step(&b, &d1, 1, 9.0f, 500, 500, 1, 9.0f, 0, hold) == hold);
+    CHECK(co_aibudget_step(&b, &d1, 1, 9.0f, 500, 500, 1, 9.0f, 0, hold) == hold && b.ran == CO_AIB_RAN_MORE);
     /* lever 2000 > hold 1500 > drain 1000; and drain 3000 > lever 2000 > hold 1500 */
-    CHECK(co_aibudget_step(&b, &d1, 1, 9.0f, 500, 500, 1, 9.0f, 0, 0.0015f) == stock);
-    CHECK(co_aibudget_step(&b, &d3, 1, 9.0f, 500, 500, 1, 9.0f, 0, 0.0015f) == 0.003f);
+    CHECK(co_aibudget_step(&b, &d1, 1, 9.0f, 500, 500, 1, 9.0f, 0, 0.0015f) == stock && b.ran == CO_AIB_RAN_LEVER && b.draining);
+    CHECK(co_aibudget_step(&b, &d3, 1, 9.0f, 500, 500, 1, 9.0f, 0, 0.0015f) == 0.003f && b.ran == CO_AIB_RAN_DRAIN);
+    /* a tie is the first one's: the drain's over the hold's, the lever's over the drain's */
+    { const CoAiDrain d4 = {4000, 3000, 1024}, d2 = {2000, 3000, 1024};
+      CHECK(co_aibudget_step(&b, &d4, 1, 9.0f, 500, 500, 1, 9.0f, 0, hold) == hold && b.ran == CO_AIB_RAN_DRAIN);
+      CHECK(co_aibudget_step(&b, &d2, 1, 9.0f, 500, 500, 1, 9.0f, 0, 0.0f) == stock && b.ran == CO_AIB_RAN_LEVER); }
+    /* a stock not known: nothing is anyone's */
+    { CoAiBudget u = {0}; u.ran = CO_AIB_RAN_MORE; CHECK(co_aibudget_step(&u, &d8, 1, 9.0f, 500, 500, 1, 9.0f, 0, hold) == 0.0f && u.ran == CO_AIB_RAN_LEVER); }
     /* the lever held at the stock by the hold (leverOn 0), no drain: the hold's raise is not lost */
     CHECK(co_aibudget_step(&b, &d8, 0, 0.0f, 500, 500, 0, 0.0f, 0, hold) == hold);
     CHECK(co_aibudget_step(&b, &d8, 0, 0.0f, 500, 500, 0, 0.0f, 0, 0.0f) == stock);
