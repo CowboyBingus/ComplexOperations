@@ -1487,6 +1487,14 @@ static void NoisePath(void)
     CHECK(CoXlTestLwNoise(0, 0, 0, t0 + 1500, 0) == 2);
     CHECK(CoXlTestLwNoise(0x500, 0, 0, t0 + 15000, 0) == 2 && CoXlTestLwNoise(0, 0, 0, t0 + 16500, 0) == 2);
 
+    g_case = "an event asked again goes through the gate: its source drew its two squads elsewhere meanwhile, so it is not passed again";
+    const float pl2[4] = {0, 0, 700, 0}, at700[4] = {800, 0, 820, 0};
+    CoXlTestLwNoiseWorld(pl2, 2, at700, 2);
+    CHECK(CoXlTestLwNoise(0x500, 0, 0, t0, 0) == 0);
+    CHECK(CoXlTestLwNoise(0x500, 700, 0, t0 + 500, 0) == 2);
+    for (int s = 1; s <= 10; s++) CoXlTestLwNoise(0x500, 0, 0, t0 + 1000u * (uint64_t)s, 0);
+    CHECK(CoXlTestLwNoiseCount(2) == 0 && CoXlTestLwNoiseCount(3) == 1 && CoXlTestLwNoiseCount(0) == 2);
+
     g_case = "eight players firing from eight places 1 km apart, four squads in reach of each: two squads each";
     float pls[16], sqs[64];
     for (int k = 0; k < 8; k++) { pls[2 * k] = 1000.0f * (float)k; pls[2 * k + 1] = 0; for (int j = 0; j < 4; j++) { sqs[8 * k + 2 * j] = 1000.0f * (float)k + 100.0f + 20.0f * (float)j; sqs[8 * k + 2 * j + 1] = 0; } }

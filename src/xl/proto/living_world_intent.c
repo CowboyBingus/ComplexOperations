@@ -1054,16 +1054,16 @@ static void LwNoiseDrew(uint32_t source, const float* pos, int n, ULONGLONG now)
         g_lwNoiseSent[k].drew[old] = now;
     }
 }
-/* A noise a fight answers: within LW_FIGHT_AIM of a live fight's point or of the target its squads go to, or made by
- * that target. The fight sends its squads there; the noise's squads on top would be two sets for one battle. */
-static int LwNoiseFought(const float* pos, uint32_t source, ULONGLONG now)
+/* A noise a fight answers: within LW_FIGHT_AIM of a live fight's point or of the target its squads go to. The fight
+ * sends its squads there; the noise's squads on top would be two sets for one battle. */
+static int LwNoiseFought(const float* pos, ULONGLONG now)
 {
     for (int f = 0; f < 16; f++)
     {
         LwFight* fi = &g_lwFights[f];
         if (!fi->live) continue;
         if (LwDist2(fi->pos, pos[0], pos[1]) < LW_FIGHT_AIM * LW_FIGHT_AIM) return 1;
-        if (LwFightTargetHolds(fi, now) && (fi->target == source || LwDist2(fi->tpos, pos[0], pos[1]) < LW_FIGHT_AIM * LW_FIGHT_AIM)) return 1;
+        if (LwFightTargetHolds(fi, now) && LwDist2(fi->tpos, pos[0], pos[1]) < LW_FIGHT_AIM * LW_FIGHT_AIM) return 1;
     }
     return 0;
 }
@@ -1073,7 +1073,7 @@ static int LwNoiseFought(const float* pos, uint32_t source, ULONGLONG now)
 #define LW_HEAR_ONLINE_MS 1500
 static int LwInvestigate(LwEvent* e, int pass, ULONGLONG now)
 {
-    if (LwNoiseFought(e->pos, e->source, now)) return 0; /* a fight: 2b sends squads */
+    if (LwNoiseFought(e->pos, now)) return 0; /* a fight: 2b sends squads */
     float native = LwNoiseRange(e->type);
     int pick[LW_HEAR_SQUADS]; float d2s[LW_HEAR_SQUADS]; int picked = 0, sent = 0;
     int most = LwNoiseRoom(e->source, now);
