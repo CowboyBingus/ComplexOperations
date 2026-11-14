@@ -3115,12 +3115,13 @@ static void LwInstallNavLeaveFix(void)
 #define LW_NAV_PERMIT_MS 20
 /* A drain never waits for the run in flight without a bound (0xBD0710 does: frames of 6 s and 61 s behind a long
  * queue). It drives the run as the game's driver does (0xBD1997), for this long: half a 60 fps frame in play, more at
- * a level's end, where no frame is shown. Its own step applies the queue only up to as many commands: 24340 took
- * 1938 ms on 20 threads, 0.08 ms each, so about 5 ms and 250 ms. Past a bound the drain does nothing. */
+ * a level's end, where no frame is shown. Its own step applies the whole queue with no yield (a serial runner never
+ * parks, 0xA1159F), so only a queue of up to as many commands: a cutter's removal took up to 0.28 ms (217843 in a
+ * 61 s frame), so about 9 ms and 250 ms. Past a bound the drain does nothing. */
 #define LW_NAV_WAIT_PLAY_MS 8
 #define LW_NAV_WAIT_END_MS 250
-#define LW_NAV_SYNC_PLAY 64
-#define LW_NAV_SYNC_END 3000
+#define LW_NAV_SYNC_PLAY 32
+#define LW_NAV_SYNC_END 900
 enum { LW_NAV_OK, LW_NAV_NO_PERMIT, LW_NAV_RUN_LONG, LW_NAV_QUEUE_LONGER };
 #define LW_NAV_SWAP_LINES 400    /* swap lines a level; the 30 s summary goes on */
 #define LW_NAV_STEP_THREADS 256  /* a count above this is not the game's: the step stays serial */
@@ -3623,9 +3624,9 @@ static int LwNavHoldDrain(uintptr_t list, int idx, uintptr_t w, const char* path
 }
 /* The game's order (a level's end, a normal mission). A swap the hold left to the next async step is
  * finished first, as every swap was before the hold: this completion's connect must not meet it half applied. */
-static uintptr_t LwNavPopHead(uintptr_t list, uint32_t off)
+static uintptr_t LwNavPopHead(uintptr_t list, uint32_t off, int end)
 {
-    g_lwSwap.gameOrder = 1;
+    g_lwSwap.gameOrder = (uint8_t)end; /* a level's end, where a drain may take longer than in play */
     for (int tries = 0; tries < 4; tries++)
     {
         uintptr_t head = *(uintptr_t*)(list + 0x28);
@@ -3670,7 +3671,7 @@ static uintptr_t LwNavPopIn(uintptr_t list, uint32_t flush, ULONGLONG now)
     if (flush || !LwLive())
     {
         memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting);
-        return LwNavPopHead(list, off);
+        return LwNavPopHead(list, off, 1);
     }
     /* A tick ends at the pop that takes nothing. One that starts with no game frame since is a caller looping on the
      * tick (it is also in the function table exe+0x27CD4E0, slot +0x50): a held record would never leave for it. */
@@ -3684,7 +3685,7 @@ static uintptr_t LwNavPopIn(uintptr_t list, uint32_t flush, ULONGLONG now)
                     "(%u this level)", g_lwNavHold.breaks);
         }
         memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting);
-        return LwNavPopHead(list, off);
+        return LwNavPopHead(list, off, 0);
     }
     for (int i = 0; i < 4; i++) LwNavLag(i, now);
     g_lwSwap.gameOrder = 0;
@@ -3697,7 +3698,7 @@ static uintptr_t LwNavPopIn(uintptr_t list, uint32_t flush, ULONGLONG now)
         memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting);
         for (uintptr_t rec = *(uintptr_t*)(list + 0x28); rec; prev = rec, rec = *(uintptr_t*)(rec + off))
         {
-            if (++walked > LW_NAV_HOLD_WALK) { memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting); return LwNavPopHead(list, off); }
+            if (++walked > LW_NAV_HOLD_WALK) { memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting); return LwNavPopHead(list, off, 0); }
             int k = LwNavRecWorld(rec, &c, &r);
             if (!k) { plain = rec; plainPrev = prev; continue; }
             rec2[k - 1][r] = rec; prev2[k - 1][r] = prev; old[k - 1] = rec; oldBuilt[k - 1] = r; g_lwNavHold.waiting[k - 1]++;
@@ -3719,8 +3720,8 @@ static uintptr_t LwNavPopIn(uintptr_t list, uint32_t flush, ULONGLONG now)
             uintptr_t w = *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * dueWorld);
             if (!pass && !LwNavIdle(dueWorld, w))
             {
-                /* a bound met with the scheduler in hand: the ring stands, so the record waits on and is tried again */
-                if (!LwNavHoldDrain(list, dueWorld, w, "a waiting record is due in the job ring") && g_lwSwap.why > LW_NAV_NO_PERMIT && LwNavPausing())
+                /* nothing done, with the scheduler in hand: the ring stands, so the record waits on and is tried again */
+                if (!LwNavHoldDrain(list, dueWorld, w, "a waiting record is due in the job ring") && LwNavPausing())
                     g_lwNavHold.pauseAt = now ? now : 1;
                 continue;
             }
