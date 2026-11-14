@@ -187,8 +187,22 @@ static void GuardNote(void)
                     (long)i + 1, e[0], index, e[0] >> 22, genRead ? "" : "unread ", (unsigned)gen, count, e[1], e[2], e[3]);
         }
         bodyNoted = dead;
-        Note("difficulty: extra large maps: moved bodies of units that are gone left out of the pose sync: %ld", (long)dead);
     }
+    /* The count grows nearly every frame under a dense map, so its line is paced: the newest count every 10 s, and
+     * once more when the mission in play changes, so a level's last count is in the log. */
+    static LONG bodySummed;
+    static ULONGLONG bodySummedAt;
+    static uintptr_t bodyLevel;
+    if (dead != bodySummed)
+    {
+        const ULONGLONG now = GetTickCount64();
+        if (bodyLevel != g_worldLevelLive || now - bodySummedAt >= 10000u)
+        {
+            bodySummed = dead; bodySummedAt = now;
+            Note("difficulty: extra large maps: moved bodies of units that are gone left out of the pose sync: %ld", (long)dead);
+        }
+    }
+    bodyLevel = g_worldLevelLive;
     /* The task guard acts on every level and no code bounds a level's guard points, so a run's log shows when it
      * acted. The stub only ever increments its count: read without a lock. */
     static LONG tasksNoted;
