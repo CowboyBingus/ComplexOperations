@@ -43,6 +43,7 @@ void CoXlTestLwHoldTarget(float x, float y);
 void CoXlTestLwHoldPoint(float a, int k, float* out);
 void CoXlTestLwHoldTwo(int idx, float* pos);
 int CoXlTestLwPlans(float radius, float step, float x, float y, int plans, int* beyond, int* turned);
+int CoXlTestLwPlansAt(float radius, float step, const float* at, const float* home, int plans, int notes, int* inHome, int* turned);
 void CoXlTestLwHoldNext(float* pos);
 uint64_t CoXlTestLwHeldFrom(void);
 int CoXlTestLwStallTries(int set);
@@ -554,6 +555,52 @@ static void Plans(void)
     CHECK(CoXlTestLwPlans(1000.0f, 900.0f, 800.0f, -100.0f, 300, &beyond, &turned) < 300 / 20);
     CHECK(turned > 300 / 4);
 }
+
+/* The home rule on the extra large disc: 7 of 10 plans keep to the home region when it has nodes in range (about a
+ * quarter of them here), and a squad far from its home still gets a route that does not start back the way it came. */
+static void HomePlans(void)
+{
+    const float at[2] = {3018.0f, 3018.0f}, homeNear[3] = {3400.0f, 3000.0f, 600.0f}, homeAway[3] = {-3000.0f, -3000.0f, 600.0f};
+    int inHome = 0, turned = 0;
+    g_fake.log[0] = 0;
+    g_case = "most destinations in the home region";
+    CHECK(CoXlTestLwPlansAt(7782.0f, 200.0f, at, homeNear, 300, 40, &inHome, &turned) == 0);
+    CHECK(inHome > 300 * 6 / 10); /* without the rule: the region's share of the nodes in range, about 75 */
+    CHECK(inHome < 300 * 9 / 10); /* 3 of 10 plans draw freely */
+    CHECK(turned < 300 / 20);
+    g_case = "a new route's line names the home rule";
+    CHECK(Count("squad 0 takes a new route: to node ") == 40 && Count(" nodes; home rule kept; its goal is sent") + Count(" nodes; no home rule (the free draw); its goal is sent") == 40);
+    CHECK(Count("home rule kept") > 15 && Count("no home rule (the free draw)") > 3);
+    g_case = "a home region out of range";
+    CHECK(CoXlTestLwPlansAt(7782.0f, 200.0f, at, homeAway, 300, 20, &inHome, &turned) == 0);
+    CHECK(inHome == 0);
+    CHECK(turned < 300 / 20); /* the tries the home rule used up do not end the about-turn rule */
+    CHECK(Count("home rule gave way (no home node in its tries)") > 5);
+    g_case = "no home region";
+    CHECK(CoXlTestLwPlansAt(7782.0f, 200.0f, at, NULL, 300, 5, &inHome, &turned) == 0);
+    CHECK(Count("no home rule (the squad has no home region)") == 5);
+}
+
+/* No node in range (the squad 1500 m outside the grid): every plan ends without a route after its capped draws. Run on
+ * a thread with a time limit, so a planner that draws without end fails here instead of hanging the suite. */
+static struct { int failed, inHome, turned; } g_far;
+static DWORD WINAPI FarPlans(LPVOID unused)
+{
+    const float at[2] = {0.0f, 3500.0f};
+    (void)unused;
+    g_far.failed = CoXlTestLwPlansAt(2000.0f, 400.0f, at, NULL, 200, 0, &g_far.inHome, &g_far.turned);
+    return 0;
+}
+static void PlanCap(void)
+{
+    g_case = "no node in range: the draws end";
+    HANDLE thread = CreateThread(NULL, 0, FarPlans, NULL, 0, NULL);
+    int ended = thread != NULL && WaitForSingleObject(thread, 20000) == WAIT_OBJECT_0;
+    CHECK(ended);
+    if (thread != NULL && !ended) TerminateThread(thread, 1);
+    if (thread != NULL) CloseHandle(thread);
+    CHECK(ended && g_far.failed == 200);
+}
 int main(void)
 {
     g_case = "set-up";
@@ -572,6 +619,8 @@ int main(void)
     StallStep();
     Stall();
     Plans();
+    HomePlans();
+    PlanCap();
     if (g_failed) { printf("lwreinforce: %d checks failed\n", g_failed); return 1; }
     printf("lwreinforce: all cases passed\n");
     return 0;
