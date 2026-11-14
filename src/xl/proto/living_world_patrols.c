@@ -6,6 +6,10 @@
  * spawn band looking ahead of a vehicle, room for a squad about to walk into view, and a line per player every 30 s. */
 #define LW_ROAD_SHARE_OF 10       /* one squad in this many is a road patrol (D: one about every 360 m of a 294 km network) */
 #define LW_ROAD_NODES_MIN 500
+#define LW_ROAD_ART_OF 2          /* one road patrol in this many keeps to the arterials, the roads vehicles drive (D) */
+#define LW_ROAD_ART_MIN 200       /* arterial nodes: fewer, and no road patrol is an arterial one */
+#define LW_ROAD_SPUR_ODDS 4       /* an arterial patrol passing a spur turns into it one time in this many (D) */
+#define LW_PATROL_YIELD 85.0f     /* m: a waiting squad's nine points lie within 23 m of each other, and LW_SPACING of all must stay free */
 #define LW_ROAD_OFF_COST 4.0f     /* a road patrol's path counts a stretch off the roads this many times */
 #define LW_ROAD_END 100.0f        /* m: a road's first and last point lie this near its edge's nodes, or it is left alone */
 #define LW_ROAD_NEAR 30.0f        /* m to a road point: "by a road" in the notes */
@@ -18,12 +22,14 @@ static CoLwRoads g_lwRoads;
 static struct
 {
     ULONGLONG stepAt, noteAt, swapAt, bandAt;
-    uint32_t phase, notes, scanAt, gaveWay, served, stoodOff, sightRefused, ledOn, ledLeft;
+    uint32_t phase, notes, scanAt, gaveWay, served, stoodOff, sightRefused, ledOn, ledLeft, yielded;
     int hold1; /* the squad a filler gave way to, + 1 */
     LONG mission;
 } g_lwPatrols;
 static uint8_t g_lwPatrolLed[LW_SQUADS_MAX];     /* 1 in the spawn band only by a vehicle's lead, 2 online so, 4 a player came within R_on */
 static ULONGLONG g_lwPatrolLookAt[LW_SQUADS_MAX]; /* a standing far squad's next sight test */
+static uint16_t g_lwRoadEdge[LW_NODES_MAX];       /* a road node's route edge (the spurs join an edge) */
+static int g_lwArtNodes;
 static int g_lwPatrolsOld; /* test command "patrols old 1": the rules before these, for a before value in the same run */
 
 static float LwRoadCost(int a, int b)
@@ -31,19 +37,43 @@ static float LwRoadCost(int a, int b)
     return g_lwPathRoad && (!g_lwNodeKind[a] || !g_lwNodeKind[b]) ? LW_ROAD_OFF_COST : 1.0f;
 }
 /* Too few road nodes (a level whose roads have no points) and the road patrols would crowd them: none then. */
-static int LwRoadSquad(int index) { return g_lwRoadNodes >= LW_ROAD_NODES_MIN && index % LW_ROAD_SHARE_OF == 0; }
+/* 0 no road patrol, 1 one of any road, 2 one of the arterials and their spurs. */
+static int LwRoadSquad(int index)
+{
+    if (g_lwRoadNodes < LW_ROAD_NODES_MIN || index % LW_ROAD_SHARE_OF) return 0;
+    return g_lwArtNodes >= LW_ROAD_ART_MIN && index / LW_ROAD_SHARE_OF % LW_ROAD_ART_OF == 0 ? 2 : 1;
+}
+/* Where a squad starts: an arterial patrol at an arterial's point, another road patrol at another road's, the rest off them. */
+static int LwRoadStart(int index, int node)
+{
+    const int kind = g_lwNodeKind[node], road = LwRoadSquad(index);
+    return road == 2 ? (kind & CO_LW_ROADS_ARTERIAL) && (kind & CO_LW_ROADS_POINT) : road == 1 ? kind == CO_LW_ROADS_POINT : !(kind & (CO_LW_ROADS_POINT | CO_LW_ROADS_SPUR));
+}
+/* A road patrol's next node from `at`: an arterial patrol keeps to the arterials and now and then turns into a spur,
+ * the others walk any road but the spurs; with no such way on, any road. */
+static int LwRoadStep(int road, int at, int from)
+{
+    const LwNode* n = &g_lwNodes[at];
+    int next = -1;
+    if (road == 2 && LwRand() % LW_ROAD_SPUR_ODDS == 0) next = co_lw_roads_step(n->next, n->degree, g_lwNodeKind, CO_LW_ROADS_SPUR, from, LwRand());
+    if (next < 0) next = co_lw_roads_step(n->next, n->degree, g_lwNodeKind, road == 2 ? CO_LW_ROADS_ARTERIAL : CO_LW_ROADS_END | CO_LW_ROADS_POINT, from, LwRand());
+    if (next < 0) next = co_lw_roads_step(n->next, n->degree, g_lwNodeKind, 0xFF, from, LwRand());
+    return next;
+}
 
 /* A road patrol's way: from a road node, hop by hop along the roads (never straight back, but for a road's end), up
  * to 1200 m of road; from anywhere else, back to the nearest road node. Goals drawn from all nodes left the roads. */
 static int LwRoadPlan(LwSquad* q, int home)
 {
     const float r2 = g_lwWorld.radius * g_lwWorld.radius;
+    const int road = LwRoadSquad((int)(q - g_lwSquads));
     if (!g_lwNodeKind[q->node])
     {
         int best = -1; float bd = 3.0e38f;
         for (int i = g_lwNodeCount - g_lwRoadNodes; i < g_lwNodeCount; i++)
         {
             float d = LwDist2(q->pos, g_lwNodes[i].x, g_lwNodes[i].y);
+            if (road == 2 && !(g_lwNodeKind[i] & CO_LW_ROADS_ARTERIAL)) continue;
             if (d < bd && g_lwNodes[i].x * g_lwNodes[i].x + g_lwNodes[i].y * g_lwNodes[i].y <= r2) { bd = d; best = i; }
         }
         g_lwPathRoad = 1;
@@ -58,7 +88,7 @@ static int LwRoadPlan(LwSquad* q, int home)
         uint16_t path[LW_PATH_MAX];
         while (n < hops)
         {
-            int next = co_lw_roads_step(g_lwNodes[at].next, g_lwNodes[at].degree, g_lwNodeKind, from, LwRand());
+            int next = LwRoadStep(road, at, from);
             if (next < 0 && n == 0 && from >= 0 && g_lwNodeKind[from]) next = from; /* a road's end: about turn */
             if (next < 0 || g_lwNodes[next].x * g_lwNodes[next].x + g_lwNodes[next].y * g_lwNodes[next].y > r2) break;
             path[n++] = (uint16_t)next; from = at; at = next;
@@ -85,7 +115,7 @@ static void LwRoadRoutes(uintptr_t lg)
 {
     uintptr_t G = GenerationBlock(g_lw.game);
     uint32_t edges = 0, points = 0, levelNodes = 0; float size = 0;
-    memset(g_lwNodeKind, 0, sizeof g_lwNodeKind); g_lwRoadNodes = 0; g_lwRoads.count = 0;
+    memset(g_lwNodeKind, 0, sizeof g_lwNodeKind); memset(g_lwRoadEdge, 0xFF, sizeof g_lwRoadEdge); g_lwRoadNodes = g_lwArtNodes = 0; g_lwRoads.count = 0;
     if (g_lwWorld.radius < 1500.0f) return; /* a vanilla disc: the level's routes are its roads already */
     if (G == 0 || SafeRead(G + 0x11A71CCu, &edges, 4) || SafeRead(G + 0x11A71D4u, &points, 4) || SafeRead(G + 0x11A71B4u, &levelNodes, 4) ||
         SafeRead(lg + 0x1E0, &size, 4) || edges == 0 || edges > 65536 || points < 2 || points > CO_LW_ROADS_POINTS || (int)levelNodes > g_lwNodeCount)
@@ -99,7 +129,9 @@ static void LwRoadRoutes(uintptr_t lg)
     }
     co_lw_roads_index(&g_lwRoads, points, -half);
     const uintptr_t nodes = G + g_routeNodes;
-    uint32_t roads = 0, noPoints = 0, off = 0, full = 0; double km = 0;
+    uint32_t roads = 0, noPoints = 0, off = 0, full = 0, artRoads = 0; double km = 0, artKm = 0;
+    /* the roads' build marks its arterials and lists its spurs for the level it last built: only that level's are read */
+    const int built = g_arterials.level == g_world.levels && g_arterials.count > 0;
     for (uint32_t e = 0; e < edges; e++)
     {
         uint8_t rec[0x48]; uint64_t ends[4]; uint32_t range[2]; uint16_t flags;
@@ -109,7 +141,8 @@ static void LwRoadRoutes(uintptr_t lg)
         const int fit = !(ends[0] < nodes || ends[1] < nodes || (ends[0] - nodes) % 0x98u || (ends[1] - nodes) % 0x98u ||
             (ends[0] - nodes) / 0x98u >= levelNodes || (ends[1] - nodes) / 0x98u >= levelNodes || ends[0] == ends[1] || ends[2] == 0 || ends[3] == 0); /* cells +0x20 / +0x28: the copy links no edge without both */
         int a = fit ? (int)((ends[0] - nodes) / 0x98u) : 0, b = fit ? (int)((ends[1] - nodes) / 0x98u) : 0;
-        if (fit) { if (!g_lwNodeKind[a]) g_lwNodeKind[a] = 1; if (!g_lwNodeKind[b]) g_lwNodeKind[b] = 1; } /* a road without points is its chord: still a road */
+        const uint8_t art = built && e < ROADS_EDGES_MAX && ((g_arterials.bits[e >> 3] >> (e & 7)) & 1) ? CO_LW_ROADS_ARTERIAL : 0;
+        if (fit) { g_lwNodeKind[a] |= CO_LW_ROADS_END | art; g_lwNodeKind[b] |= CO_LW_ROADS_END | art; } /* a road without points is its chord: still a road */
         if (range[1] > points || range[1] < range[0] + 2) { noPoints++; continue; }
         if (!fit) { off++; continue; }
         const float* first = g_lwRoads.pts[range[0]]; const float* last = g_lwRoads.pts[range[1] - 1];
@@ -125,16 +158,55 @@ static void LwRoadRoutes(uintptr_t lg)
         {
             LwNode* o = &g_lwNodes[g_lwNodeCount]; memset(o, 0, sizeof *o);
             o->x = g_lwRoads.pts[cut[k]][0]; o->y = g_lwRoads.pts[cut[k]][1];
-            g_lwNodeKind[g_lwNodeCount] = 2;
-            LwLink(prev, g_lwNodeCount); prev = g_lwNodeCount++; g_lwRoadNodes++;
+            g_lwNodeKind[g_lwNodeCount] = CO_LW_ROADS_POINT | art; g_lwRoadEdge[g_lwNodeCount] = (uint16_t)(e < 0xFFFFu ? e : 0xFFFFu);
+            LwLink(prev, g_lwNodeCount); prev = g_lwNodeCount++; g_lwRoadNodes++; if (art) g_lwArtNodes++;
         }
         LwLink(prev, b);
-        roads++;
-        for (uint32_t i = range[0] + 1; i < range[1]; i++) km += sqrt((double)LwDist2(g_lwRoads.pts[i], g_lwRoads.pts[i - 1][0], g_lwRoads.pts[i - 1][1])) / 1000.0;
+        roads++; if (art) artRoads++;
+        double len = 0;
+        for (uint32_t i = range[0] + 1; i < range[1]; i++) len += sqrt((double)LwDist2(g_lwRoads.pts[i], g_lwRoads.pts[i - 1][0], g_lwRoads.pts[i - 1][1])) / 1000.0;
+        km += len; if (art) artKm += len;
+    }
+    /* A spur's points run from its place to a point of an arterial edge. Its nodes join that edge's nearest road node
+     * (an end node for a short edge); none stands within half a stretch of the place, so a patrol turns back short of it. */
+    uint32_t spurs = 0, spurNodes = 0, spurShort = 0, spurOff = 0;
+    for (uint32_t k = 0; g_spurs.level == g_world.levels && built && k < g_spurs.count && k < ROADS_SPURS; k++)
+    {
+        const RoadSpur* sp = &g_spurs.spur[k];
+        uint32_t cut[32];
+        if (sp->end > points || sp->end < sp->first + 2 || sp->edge >= edges) { spurOff++; continue; }
+        const uint32_t n = co_lw_roads_cut((const float (*)[2])g_lwRoads.pts, sp->first, sp->end, CO_LW_ROADS_STRETCH, cut, 32);
+        if (n == 0) { spurShort++; continue; }
+        const float* to = g_lwRoads.pts[sp->end - 1];
+        int join = -1; float jd = LW_ROAD_END * LW_ROAD_END * 4.0f; uint64_t ends[2] = {0, 0};
+        for (int i = g_lwNodeCount - g_lwRoadNodes; i < g_lwNodeCount; i++)
+        {
+            float d = LwDist2(to, g_lwNodes[i].x, g_lwNodes[i].y);
+            if (g_lwRoadEdge[i] == sp->edge && d < jd) { jd = d; join = i; }
+        }
+        for (int end = 0; end < 2 && !SafeRead(G + g_routeEdges + 0x48ull * sp->edge + 0x10, ends, 16); end++)
+        {
+            if (ends[end] < nodes || (ends[end] - nodes) % 0x98u || (ends[end] - nodes) / 0x98u >= levelNodes) continue;
+            const int i = (int)((ends[end] - nodes) / 0x98u); float d = LwDist2(to, g_lwNodes[i].x, g_lwNodes[i].y);
+            if (d < jd) { jd = d; join = i; }
+        }
+        if (join < 0 || g_lwNodeCount + (int)n > LW_NODES_MAX || g_lwNodes[join].degree >= 16) { spurOff++; continue; }
+        int prev = join;
+        for (uint32_t c = n; c-- > 0;) /* from the arterial out */
+        {
+            LwNode* o = &g_lwNodes[g_lwNodeCount]; memset(o, 0, sizeof *o);
+            o->x = g_lwRoads.pts[cut[c]][0]; o->y = g_lwRoads.pts[cut[c]][1];
+            g_lwNodeKind[g_lwNodeCount] = CO_LW_ROADS_SPUR;
+            LwLink(prev, g_lwNodeCount); prev = g_lwNodeCount++; g_lwRoadNodes++; spurNodes++;
+        }
+        spurs++;
     }
     Note("living world: roads: %u roads of %u edges walked along their points (%.0f km, %d nodes about %.0f m apart; %u points); left as they were: "
         "%u without points, %u whose points or nodes do not fit, %u for room; one squad in %d keeps to roads", roads, edges, km, g_lwRoadNodes,
         (double)CO_LW_ROADS_STRETCH, points, noPoints, off, full, LW_ROAD_SHARE_OF);
+    Note("living world: roads: arterials %u roads (%.0f km, %d nodes)%s; spurs %u of %u walked (%u nodes), %u too short for a node, %u that do not fit; "
+        "%s", artRoads, artKm, g_lwArtNodes, built ? "" : " (the roads' build has none for this level)", spurs, g_spurs.level == g_world.levels ? g_spurs.count : 0,
+        spurNodes, spurShort, spurOff, g_lwArtNodes >= LW_ROAD_ART_MIN ? "every second road patrol keeps to the arterials and their spurs" : "no arterial patrols");
 }
 
 /* A squad's place among the far ones (co_lw_view_far): by sightline and still beyond R_on, walking or standing. */
@@ -180,6 +252,16 @@ static void LwPatrolAsked(const LwSquad* q)
     if (q->state != LW_OFFLINE) { if (mine) { g_lwPatrols.hold1 = 0; g_lwPatrols.served++; } return; }
     if ((LwPatrolHolds(idx) || (g_lwPatrolLed[idx] & 1)) && g_lwOnlineWhy && strncmp(g_lwOnlineWhy, "sight", 5) == 0) g_lwPatrols.sightRefused++;
 }
+static void LwPatrolHoldTaken(void) { g_lwPatrols.hold1 = 0; }
+/* A patrol does not come online where a squad sent by an event waits at the band's edge: within LW_SPACING of one of
+ * that squad's points it would refuse the squad's own request for a minute (LwRecentNear). */
+static int LwPatrolYields(const LwSquad* q)
+{
+    if (q->intent != LW_PATROL || q->held) return 0;
+    for (const LwSquad* o = g_lwSquads; o < g_lwSquads + g_lwWorld.count; o++)
+        if (o != q && o->held && o->state == LW_OFFLINE && LwDist2(o->pos, q->pos[0], q->pos[1]) < LW_PATROL_YIELD * LW_PATROL_YIELD) { g_lwPatrols.yielded++; return 1; }
+    return 0;
+}
 static void LwPatrolsOldCmd(int on)
 {
     g_lwPatrolsOld = on != 0; g_lwPatrols.bandAt = 0;
@@ -212,10 +294,10 @@ static int LwSquadHidden(const LwSquad* q)
     for (int k = 0; k < q->seenCount; k++) if (!isfinite(q->seenAt[k][2]) || !LwHidden(q->seenAt[k])) return 0;
     return q->seenCount > 0;
 }
-/* Whether a far squad that stands may be taken offline. N's stall recovery answers here too: not while it still tries. */
+/* Whether a far squad that stands may be taken offline: not while the stall recovery still tries (co_lw_view_gave_up). */
 static int LwPatrolMayRemove(const LwSquad* q, ULONGLONG now)
 {
-    return co_lw_view_stood(&g_lwView, (uint32_t)(q - g_lwSquads), now) >= 2 * CO_LW_VIEW_STAND_MS;
+    return co_lw_view_gave_up(co_lw_view_stood(&g_lwView, (uint32_t)(q - g_lwSquads), now), q->stallTries, q->goalAt != 0);
 }
 
 /* One online squad's sample: where its leader stands, who has a clear line to it, whether a member fights. */
@@ -306,7 +388,7 @@ static void LwPatrolGiveWay(ULONGLONG now)
         if (near2 < rMin * rMin || near2 >= LW_R_ON * LW_R_ON) continue;
         int b = LwBubbleOf(q->pos[0], q->pos[1]);
         if (b < 0 || g_lwDensity.units[b] + (int)q->survivors <= g_lwDensity.budget[b]) continue; /* room: it asks for itself */
-        if (LwRecentNear(q->pos)) continue;
+        if (LwRecentNear(q->pos) || LwPatrolYields(q)) continue;
         tries++;
         if (!LwAboutToBeSeen(q)) continue;
         float pickD;
@@ -326,7 +408,7 @@ static void LwPatrolGiveWay(ULONGLONG now)
 static void LwPatrolsNotes(ULONGLONG now)
 {
     char line[512];
-    int farWalk = 0, farStand = 0, roadOnline = 0, led = 0;
+    int farWalk = 0, farStand = 0, roadOnline = 0, artOnline = 0, led = 0;
     for (int i = 0; i < g_lwWorld.count; i++)
     {
         const LwSquad* q = &g_lwSquads[i];
@@ -334,19 +416,20 @@ static void LwPatrolsNotes(ULONGLONG now)
         const int place = LwPatrolFar(q);
         if (place == CO_LW_VIEW_FAR_WALKS) farWalk += q->alive; else if (place == CO_LW_VIEW_FAR_STANDS) farStand += q->alive;
         if (LwRoadSquad(i)) roadOnline++;
+        if (LwRoadSquad(i) == 2) artOnline++;
     }
     for (int i = 0; i < g_lwWorld.playersAt && i < CO_LW_VIEW_PLAYERS; i++) { float lead[2]; led += co_lw_view_lead(&g_lwView, (uint32_t)i, g_lwWorld.players[i], lead); }
     if (co_lw_view_note(&g_lwView, now, line, sizeof line))
-        Note("living world: %s; far beyond %.0f m: %d units walking, %d standing, a share of %.0f each; road squads online %d; %u gave way to a squad walking "
+        Note("living world: %s; far beyond %.0f m: %d units walking, %d standing, a share of %.0f each; road squads online %d (%d the arterials'); %u gave way to a squad walking "
             "into view (%u such squads came online), %u stood unseen and left; ahead of a vehicle %u squads came online, %u went offline with no player within "
-            "%.0f m; %u requests of squads given room or ahead of a vehicle refused for sight; band for a 2 m unit %.0f m (%.0f deg view); %d players' bands "
-            "look ahead%s", line, (double)LW_R_ON, farWalk, farStand, (double)LwFarShareLimit(), roadOnline, g_lwPatrols.gaveWay, g_lwPatrols.served,
-            g_lwPatrols.stoodOff, g_lwPatrols.ledOn, g_lwPatrols.ledLeft, (double)LW_R_ON, g_lwPatrols.sightRefused, (double)LwFarBand(2.0f),
+            "%.0f m; %u requests of squads given room or ahead of a vehicle refused for sight; %u patrol requests left a waiting squad's points free; band for a 2 m unit %.0f m (%.0f deg view); %d players' bands "
+            "look ahead%s", line, (double)LW_R_ON, farWalk, farStand, (double)LwFarShareLimit(), roadOnline, artOnline, g_lwPatrols.gaveWay, g_lwPatrols.served,
+            g_lwPatrols.stoodOff, g_lwPatrols.ledOn, g_lwPatrols.ledLeft, (double)LW_R_ON, g_lwPatrols.sightRefused, g_lwPatrols.yielded, (double)LwFarBand(2.0f),
             (double)(g_lwBandFov * 57.29578f), led, g_lwPatrolsOld ? "; the old rules (test)" : "");
     for (int i = 0; i < g_lwWorld.playersAt && i < CO_LW_VIEW_PLAYERS; i++)
         if (co_lw_view_player_note(&g_lwView, (uint32_t)i, now, line, sizeof line)) Note("living world: %s", line);
     co_lw_view_restart(&g_lwView, now);
-    g_lwPatrols.gaveWay = g_lwPatrols.served = g_lwPatrols.stoodOff = g_lwPatrols.ledOn = g_lwPatrols.ledLeft = g_lwPatrols.sightRefused = 0;
+    g_lwPatrols.gaveWay = g_lwPatrols.served = g_lwPatrols.stoodOff = g_lwPatrols.ledOn = g_lwPatrols.ledLeft = g_lwPatrols.sightRefused = g_lwPatrols.yielded = 0;
 }
 
 static void LwPatrolsTick(void)

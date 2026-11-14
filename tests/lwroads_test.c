@@ -70,16 +70,23 @@ int main(void)
 
     g_case = "a road patrol's next node lies on a road and is not the one it came from";
     {
-        const uint8_t kind[8] = {1, 2, 0, 2, 0, 2, 1, 0};
-        const uint16_t next[5] = {2, 1, 4, 3, 5};   /* two grid nodes among three road nodes */
+        const uint8_t kind[8] = {1, 2, 0, 6, 0, 8, 5, 0};  /* an end, a point, an arterial's point, a spur's point, an arterial's end */
+        const uint16_t next[5] = {2, 1, 4, 3, 5};          /* two grid nodes among three road nodes */
         uint32_t got = 0;
-        for (uint32_t rnd = 0; rnd < 6; rnd++) got |= 1u << co_lw_roads_step(next, 5, kind, -1, rnd);
+        for (uint32_t rnd = 0; rnd < 6; rnd++) got |= 1u << co_lw_roads_step(next, 5, kind, 0xFF, -1, rnd);
         CHECK(got == ((1u << 1) | (1u << 3) | (1u << 5)));
-        CHECK(co_lw_roads_step(next, 5, kind, 3, 0) == 1 && co_lw_roads_step(next, 5, kind, 3, 1) == 5 && co_lw_roads_step(next, 5, kind, 3, 2) == 1);
-        CHECK(co_lw_roads_step(next, 5, kind, 1, 0) == 3);
+        CHECK(co_lw_roads_step(next, 5, kind, 0xFF, 3, 0) == 1 && co_lw_roads_step(next, 5, kind, 0xFF, 3, 1) == 5 && co_lw_roads_step(next, 5, kind, 0xFF, 3, 2) == 1);
+        CHECK(co_lw_roads_step(next, 5, kind, 0xFF, 1, 0) == 3);
         g_case = "a road's end: no way on but back, or only grid nodes";
-        CHECK(co_lw_roads_step(next, 2, kind, 1, 7) == -1 && co_lw_roads_step(next, 1, kind, -1, 0) == -1 && co_lw_roads_step(next, 0, kind, -1, 0) == -1);
-        CHECK(co_lw_roads_step(next + 1, 1, kind, -1, 9) == 1);
+        CHECK(co_lw_roads_step(next, 2, kind, 0xFF, 1, 7) == -1 && co_lw_roads_step(next, 1, kind, 0xFF, -1, 0) == -1 && co_lw_roads_step(next, 0, kind, 0xFF, -1, 0) == -1);
+        CHECK(co_lw_roads_step(next + 1, 1, kind, 0xFF, -1, 9) == 1);
+        g_case = "the kinds a patrol keeps to: the arterials, a spur, any road but a spur";
+        for (uint32_t rnd = 0; rnd < 4; rnd++)
+        {
+            CHECK(co_lw_roads_step(next, 5, kind, CO_LW_ROADS_ARTERIAL, -1, rnd) == 3 && co_lw_roads_step(next, 5, kind, CO_LW_ROADS_SPUR, -1, rnd) == 5);
+            CHECK(co_lw_roads_step(next, 5, kind, CO_LW_ROADS_END | CO_LW_ROADS_POINT, -1, rnd) == (rnd & 1 ? 3 : 1));
+        }
+        CHECK(co_lw_roads_step(next, 5, kind, CO_LW_ROADS_ARTERIAL, 3, 0) == -1 && co_lw_roads_step(next, 5, kind, CO_LW_ROADS_SPUR, 5, 0) == -1);
     }
 
     if (g_failed) { printf("%d check(s) failed\n", g_failed); return 1; }

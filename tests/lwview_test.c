@@ -155,6 +155,11 @@ int main(void)
         CHECK(standing == 32 && standing <= 2 * 18);
     }
 
+    g_case = "a standing far squad is given up after the stall recovery's three tries, a goal-less one after 120 s";
+    CHECK(co_lw_view_gave_up(2 * CO_LW_VIEW_STAND_MS, 3, 1) == 1 && co_lw_view_gave_up(2 * CO_LW_VIEW_STAND_MS - 1, 3, 1) == 0);
+    CHECK(co_lw_view_gave_up(10 * CO_LW_VIEW_STAND_MS, 2, 1) == 0 && co_lw_view_gave_up(2 * CO_LW_VIEW_STAND_MS, 200, 1) == 1);
+    CHECK(co_lw_view_gave_up(4 * CO_LW_VIEW_STAND_MS - 1, 9, 0) == 0 && co_lw_view_gave_up(4 * CO_LW_VIEW_STAND_MS, 0, 0) == 1);
+
     g_case = "a scan of three a turn starts where the last one stopped: every squad gets its turn";
     {
         uint32_t start = 0, tested = 0;

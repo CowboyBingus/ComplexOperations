@@ -25,8 +25,10 @@ int co_lw_roads_near(const CoLwRoads* r, float x, float y, float reach);
 /* A road's points first..end (exclusive) cut into stretches of about `stretch` metres: the points where a stretch
  * ends, in order, into out (at most max); none nearer than half a stretch along the road to its last point. Its count. */
 uint32_t co_lw_roads_cut(const float (*pts)[2], uint32_t first, uint32_t end, float stretch, uint32_t* out, uint32_t max);
-/* A road patrol's next node: one of the `degree` nodes in `next` that lies on a road (its kind not 0) and is not the
- * one it came from (`from`, -1 for none), picked by `rnd`. -1 where the road ends: the patrol turns round or stops. */
-int co_lw_roads_step(const uint16_t* next, int degree, const uint8_t* kind, int from, uint32_t rnd);
+/* A route node's kind, as bits: a road's end, a point along a road, on an arterial, a point of a spur. 0: off the roads. */
+enum { CO_LW_ROADS_END = 1, CO_LW_ROADS_POINT = 2, CO_LW_ROADS_ARTERIAL = 4, CO_LW_ROADS_SPUR = 8 };
+/* A road patrol's next node: one of the `degree` nodes in `next` whose kind has a bit of `mask` and that is not the
+ * one it came from (`from`, -1 for none), picked by `rnd`. -1 with no such way on: the patrol turns round or stops. */
+int co_lw_roads_step(const uint16_t* next, int degree, const uint8_t* kind, uint8_t mask, int from, uint32_t rnd);
 
 #endif

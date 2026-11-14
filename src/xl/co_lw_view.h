@@ -74,6 +74,9 @@ int co_lw_view_far(int farOn, float dist2, float rOn, uint64_t stoodMs);
 /* The units a new far squad is measured against. The walking ones hold the far share; the standing ones have a share
  * of the same size of their own and count here only past it, so far squads never hold more than two shares. */
 int co_lw_view_far_sum(int walking, int standing, int limit);
+/* A far squad that stands is given up (and may go offline) once it has stood two stand times and the stall recovery
+ * has had its turns: its goal sent again, then two new goals (three tries); one without a goal after four stand times. */
+int co_lw_view_gave_up(uint64_t stoodMs, uint32_t stallTries, int hasGoal);
 /* A scan that tests a few squads a turn starts where the last one stopped, or the first few are all it ever tests:
  * the k-th squad of a turn that starts at `start` (the next turn's start, for k the squads this one looked at). */
 uint32_t co_lw_view_scan_at(uint32_t start, uint32_t k, uint32_t count);

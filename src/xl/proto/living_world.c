@@ -193,7 +193,7 @@ static int g_lwNodeCount;
  * there are, and whether the path being searched is a road patrol's. */
 static uint8_t g_lwNodeKind[LW_NODES_MAX];
 static int g_lwRoadNodes, g_lwPathRoad;
-static float LwRoadCost(int a, int b); static int LwRoadSquad(int index); static void LwRoadRoutes(uintptr_t lg);
+static float LwRoadCost(int a, int b); static int LwRoadSquad(int index); static int LwRoadStart(int index, int node); static void LwRoadRoutes(uintptr_t lg);
 
 /* Why the squads wait, noted once per mission (a reason that keeps them from starting is never silent). */
 static char g_lwWhy[160];
@@ -734,7 +734,7 @@ static void LwPopulate(void)
         }
         int node = (int)(LwRand() % (uint32_t)g_lwNodeCount);
         if (g_lwNodes[node].degree == 0) continue;
-        if (LwRoadSquad(made) != (g_lwNodeKind[node] == 2)) continue; /* a road patrol starts on a road, the others off them */
+        if (!LwRoadStart(made, node)) continue; /* a road patrol starts on a road of its kind, the others off them */
         int to = g_lwNodes[node].next[LwRand() % g_lwNodes[node].degree];
         float t = LwUnit(), x = g_lwNodes[node].x + t * (g_lwNodes[to].x - g_lwNodes[node].x), y = g_lwNodes[node].y + t * (g_lwNodes[to].y - g_lwNodes[node].y), r = g_lwWorld.radius;
         if (x * x + y * y > r * r || LwNearestPlayer2(x, y) < least * least) continue;
@@ -2937,6 +2937,7 @@ static void LwSquadsTick(void)
             }
             else
             {
+                if (!back && LwPatrolYields(q)) { why = "a squad waiting at the band's edge has its points here"; q->retry = now + 3000; goto offlineDone; } /* living_world_patrols.c */
                 if (!back && LwRecentNear(q->pos)) { why = "within 60 m of an online squad or a request in the last minute"; g_lwWorld.spaced++; q->retry = now + 3000; goto offlineDone; } /* spaced from online squads and recent requests (audit 1, 11) */
                 if (farBand && !back)
                 {

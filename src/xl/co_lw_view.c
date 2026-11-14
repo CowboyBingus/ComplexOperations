@@ -127,6 +127,12 @@ int co_lw_view_far_sum(int walking, int standing, int limit)
     return walking + (standing > limit ? standing - limit : 0);
 }
 
+int co_lw_view_gave_up(uint64_t stoodMs, uint32_t stallTries, int hasGoal)
+{
+    if (stoodMs < 2 * CO_LW_VIEW_STAND_MS) return 0;
+    return hasGoal ? stallTries >= 3 : stoodMs >= 4 * CO_LW_VIEW_STAND_MS;
+}
+
 uint32_t co_lw_view_scan_at(uint32_t start, uint32_t k, uint32_t count)
 {
     return count ? (uint32_t)(((uint64_t)start + k) % count) : 0;

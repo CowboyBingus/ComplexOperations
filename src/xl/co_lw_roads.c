@@ -56,12 +56,12 @@ uint32_t co_lw_roads_cut(const float (*pts)[2], uint32_t first, uint32_t end, fl
     return n;
 }
 
-int co_lw_roads_step(const uint16_t* next, int degree, const uint8_t* kind, int from, uint32_t rnd)
+int co_lw_roads_step(const uint16_t* next, int degree, const uint8_t* kind, uint8_t mask, int from, uint32_t rnd)
 {
     int ways = 0;
-    for (int k = 0; k < degree; k++) if (kind[next[k]] && next[k] != from) ways++;
+    for (int k = 0; k < degree; k++) if ((kind[next[k]] & mask) && next[k] != from) ways++;
     if (ways == 0) return -1;
     int pick = (int)(rnd % (uint32_t)ways);
-    for (int k = 0; k < degree; k++) if (kind[next[k]] && next[k] != from && pick-- == 0) return next[k];
+    for (int k = 0; k < degree; k++) if ((kind[next[k]] & mask) && next[k] != from && pick-- == 0) return next[k];
     return -1;
 }
