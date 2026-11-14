@@ -124,7 +124,11 @@ static void Junction(void)
     CHECK(fabsf(g_target[59] - g_target[180]) <= SLOPE * STEP + 1.0e-4f && fabsf(g_target[119] - g_target[180]) <= SLOPE * STEP + 1.0e-4f &&
         fabsf(g_target[179] - g_target[180]) <= SLOPE * STEP + 1.0e-4f);
     CHECK(g_target[0] == 0.0f && g_target[60] == 20.0f);
-    CHECK(fabs(g_out[4] - 180 * STEP) < 1.0e-2);
+    CHECK(fabs(g_out[4] - 180 * STEP) < 1.0e-2);    g_case = "a bend is measured where two links meet, not at a junction";
+    for (uint32_t i = 0; i < 180; i++) g_ground[i] = i < 120 ? 0.05f * STEP * (float)(60 - i % 60) : 0.0f; /* two arms fall to the junction, one is level */
+    g_ground[180] = 0.0f;
+    CoXlTestGradeSolve(g_ground, g_pinned, 181, g_links, g_gaps, links, SLOPE, 0, g_target, g_out);
+    CHECK(g_out[1] < 1.0e-3 && fabs(g_out[0] - 2.8624) < 0.01);
 }
 
 static void Crest(void)
@@ -323,6 +327,21 @@ static void Field(void)
     CHECK(CoXlTestGradeFieldAt(604.0f, 1000.0f, &z, &d) == 1.0f && fabsf(z - meet) < 1.0e-3f);
     /* beside the meeting point both roads count, by nearness: the height stays within the two roads' own there */
     CHECK(CoXlTestGradeFieldAt(610.0f, 994.0f, &z, &d) == 1.0f && fabsf(z - meet) < SLOPE * 12.0f);
+    g_case = "on a road's line its own height holds, though another road's band reaches there";
+    counts[0] = Line(g_road, 200.0f, 1000.0f, 1800.0f, 1000.0f, 201);
+    counts[1] = Line(g_road + 402, 1000.0f, 600.0f, 1000.0f, 1000.0f, 41);
+    ends[1] = ends[2] = ~0u;
+    CHECK(CoXlTestGradeField(g_road, counts, ends, 2, 1, GroundTilt, FAR_BACK, SLOPE, 0, WORLD, &torn) == 201 + 40);
+    CHECK(fabsf(CoXlTestGradeFieldAt(1000.0f, 984.0f, &z, &d) - 1.0f) < 1.0e-6f && fabsf(z - 50.0f) < 0.02f);
+    CHECK(CoXlTestGradeFieldAt(1016.0f, 1000.0f, &z, &d) == 1.0f && fabsf(z - 50.8f) < 0.02f); /* 16 m from the spur, inside its band */
+    counts[0] = Line(g_road, 200.0f, 1000.0f, 1000.0f, 1000.0f, 101);
+    counts[1] = Line(g_road + 202, 1000.3f, 1000.2f, 1000.0f, 1800.0f, 101);
+    counts[2] = Line(g_road + 404, 604.0f, 600.0f, 604.0f, 1000.0f, 41);
+    ends[1] = 7; ends[2] = 7;
+    g_road[2 * 40] = g_road[2 * 39] + 0.4f; /* a point 0.4 m after the one before it is that station */
+    CHECK(CoXlTestGradeField(g_road, counts, ends, 3, 1, GroundStep, FAR_BACK, SLOPE, 4, WORLD, &torn) == 101 + 100 + 40 && torn == 0);
+    CHECK(CoXlTestGradeFieldPieces(&unlinked, &capped) == 100 + 100 + 40 && unlinked == 0);
+    g_road[2 * 40] = 520.0f;
     counts[2] = Line(g_road + 404, 600.5f, 600.0f, 600.5f, 1000.0f, 41); /* half a metre from a point of the first road */
     CHECK(CoXlTestGradeField(g_road, counts, ends, 3, 1, GroundStep, FAR_BACK, SLOPE, 4, WORLD, &torn) == 101 + 100 + 40);
     CoXlTestGradeStation(50, xy, &band, &links);
@@ -331,6 +350,7 @@ static void Field(void)
 
 static float PlaneAlong(void* c, float x, float y) { (void)c; (void)y; return 0.1f * x; }
 static float PlaneAcross(void* c, float x, float y) { (void)c; (void)x; return 0.05f * y; }
+static float PlaneBent(void* c, float x, float y) { (void)c; (void)y; return x < 1000.0f ? 0.0f : 0.3f * (x - 1000.0f); }
 static float PlaneGap(void* c, float x, float y) { (void)c; (void)y; return x > 500.0f && x < 520.0f ? NAN : x < 510.0f ? 0.0f : 300.0f; }
 static void Slopes(void)
 {
@@ -342,12 +362,15 @@ static void Slopes(void)
     CHECK(fabs(out[5] - 100.0) < 0.05 && fabs(out[6] - 5.7106) < 0.01 && out[7] == 5.75 && out[8] < 1.0e-3);
     CoXlTestGradeRoad(PlaneAcross, g_road, n, out);
     CHECK(out[6] == 0.0 && out[1] == 0.0 && fabs(out[8] - 2.8624) < 0.01 && out[5] == 0.0);
+    CoXlTestGradeRoad(PlaneBent, g_road, n, out); /* nine tenths level, the last tenth at 0.3: 95 of 100 samples lie under that grade only */
+    CHECK(fabs(out[6] - 16.699) < 0.01 && out[7] == 16.75 && fabs(out[1] - 98.0) < 0.01 && fabs(out[2] - 96.0) < 0.01 && fabs(out[3] - 94.0) < 0.01 && out[4] == 0.0);
     g_case = "a height that is not there ends the run: no grade spans the gap";
     CoXlTestGradeRoad(PlaneGap, g_road, n, out);
     CHECK(out[6] == 0.0 && out[1] == 0.0 && out[0] > 950.0 && out[0] < 985.0);
 }
 
 static uint32_t g_tris, g_twice, g_bad, g_full, g_rim;
+static float g_cellMost;
 static uint8_t g_seen[512 * 512];
 static float g_px;
 static void Tri(uint64_t gui, const float* p0, const float* p1, const float* p2, uint32_t layer, const float* colour, uint64_t material, const float* uv0,
@@ -356,6 +379,8 @@ static void Tri(uint64_t gui, const float* p0, const float* p1, const float* p2,
     const float* p[3] = {p0, p1, p2}; const float* uv[3] = {uv0, uv1, uv2};
     g_bad += gui != 1 || material != 2 || layer != 0 || colour[0] != 255.0f;
     /* a cell is its lowest corner; its first triangle starts there */
+    const int second = g_tris % 2;
+    if (!second) g_cellMost = 0.0f;
     if (g_tris++ % 2 == 0)
     {
         const uint32_t c = (uint32_t)(p0[0] / g_px / 4.0f + 0.5f), r = (uint32_t)(p0[1] / g_px / 4.0f + 0.5f);
@@ -373,8 +398,13 @@ static void Tri(uint64_t gui, const float* p0, const float* p1, const float* p2,
         if (w > 0.0f) g_bad += fabsf(p[k][2] - z) > 1.0e-3f;
         if (d <= 12.0f && rim == 1.0f) { g_full++; g_bad += w != 1.0f; }
         if (away >= 700.0f) { g_rim++; g_bad += w != 0.0f; }
+        if (w > g_cellMost) g_cellMost = w;
     }
+    if (second) g_bad += !(g_cellMost > 0.0f); /* a cell without weight is not drawn */
 }
+/* Two changes to the draw no case tells apart: walking every lattice cell instead of the marked ones gives the same
+ * cells (the marks cover every band; they only save time), and the height given to a corner no road is listed at
+ * is never used here, since a corner of a drawn cell is within a cell's diagonal of a band and so always listed. */
 static void Draw(void)
 {
     uint32_t torn = 0, counts[2], ends[4] = {~0u, 3, 3, ~0u}, cells = 0;
