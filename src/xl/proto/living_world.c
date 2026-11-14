@@ -514,6 +514,9 @@ static int LwIntentArrived(LwSquad* q); static int LwIntentGoal(LwSquad* q); sta
 static int LwSteerOk(const LwSquad* q); static int LwSquadGoTo(LwSquad* q, const float* target); static void LwGoalSent(LwSquad* q, const float* goal); static void LwStallCheck(LwSquad* q, const uint32_t* members, int n, const float* at, ULONGLONG now); static uint32_t LwAwareDetector(uint32_t unit); static void LwIntentOffline(LwSquad* q); static int LwIntentHold(LwSquad* q, float nx, float ny); static void LwHoldNext(LwSquad* q); static int LwIntentInside(LwSquad* q); static int LwIntentLeg(LwSquad* q, float dt); static int LwTerritoryGoalOk(const LwSquad* q, int node); static void LwTerritoryTick(void); static void LwIntentTrace(void); static void LwAggroTrace(void); static void LwRetakeScan(void); static void LwTestClear(int seq, uint32_t entity); static void LwRetakeWait(int seq, float s); static void LwRetakeUnfit(int seq); static void LwRetakeTakenCmd(int seq); static int64_t LwFillMasks(uintptr_t desc, float* budget, char* trace, size_t traceLen); static void LwNoiseDrain(void); static void LwHearNote(void); static void LwFightScan(void); static void LwRushNote(void); static void LwTestNoise(int seq, int type, float dx, float dy);
 static void LwDensityOnline(const float* pos, uint32_t members); static int LwDensityOn(void); static int LwDensityRoom(const float* pos, uint32_t members, uint32_t held, char* why, size_t whyLen); static float LwDensityPopulateUnits(int eff); static float LwFarShareLimit(void); static int LwUnitBudget(void); static int LwDensitySameBubble(const LwSquad* a, const LwSquad* b); static void LwDensityTick(float dt); static void LwDensityNote(void); static void LwDensityBudgetCmd(int n); static void LwSyncCensus(int seq); /* living_world_density.c */
 static int LwMeetWaits(const LwSquad* q); static int LwMeetHold(LwSquad* q, float nx, float ny); static void LwMeetWhy(LwSquad* q, const char* why); static void LwNoFaceNote(const LwSquad* q); /* living_world_patrols.c */
+static int LwMeetKeeps(const LwSquad* q); static uint32_t LwMeetHeld(int requester); static int LwMeetApproach(LwSquad* q, ULONGLONG now, int busy); static int LwMeetPriority(const LwSquad* q);
+static int LwMeetFarRoom(const LwSquad* q, int meet, int farUnits); static void LwMeetAsked(LwSquad* q, int meet, int farAsk); static int LwMeetStays(LwSquad* q, float d2, ULONGLONG now); static void LwMeetFarCount(int idx, int units);
+static void LwMeetSight(LwSquad* q); static void LwMeetCmd(int on); static void LwBesideCmd(int seq, float d); static void LwWayOnCmd(int seq);
 static int LwPatrolFar(const LwSquad* q); static int LwPatrolFarSum(int walking, int standing); static float LwLeadNear2(const LwSquad* q); static void LwPatrolAsked(const LwSquad* q); static int LwPatrolHolds(int idx); static void LwPatrolHoldTaken(void); static int LwPatrolYields(const LwSquad* q); static int LwRoadPlan(LwSquad* q, int home); static void LwPatrolsOldCmd(int on); static void LwTravelCmd(int seq, float v, float s); static void LwTravelBackCmd(int seq, float v); static void LwRoadPatrolsCmd(int on); static void LwPatrolsTick(void); /* living_world_patrols.c */
 static void LwLodTick(void); static void LwLodNote(void); static void LwLodCmd(int on); static int LwLodFullUnits(void); /* living_world_lod.c */
 static void LwDeferTick(uintptr_t lg, uint32_t seed); static void LwDeferNote(void); static void LwSpawnSourcesNote(int seq); /* living_world_defer.c */
@@ -552,9 +555,9 @@ static LwSquad g_lwSquads[LW_SQUADS_MAX];
 #define LW_SLICES 8
 static uint8_t g_lwEvery[LW_SQUADS_MAX];
 static struct { uint32_t n; float dt[LW_SLICES]; } g_lwSlice;
-/* Every tick, not one slice in eight: squads online or pending, test squads, and an event squad or a road patrol
- * waiting at the band's edge, so its tries to come online are not eight ticks apart while filler near it tries every tick. */
-static uint8_t LwEveryOf(const LwSquad* q) { return q->state == LW_PENDING || q->state == LW_ONLINE || q->cycled == 1 || q->pulled == 2 || q->held || LwMeetWaits(q); }
+/* Every tick, not one slice in eight: squads online or pending, test squads, and an event squad at the band's edge or
+ * a road patrol on a player's road, so its tries to come online are not eight ticks apart while filler near it tries every tick. */
+static uint8_t LwEveryOf(const LwSquad* q) { return q->state == LW_PENDING || q->state == LW_ONLINE || q->cycled == 1 || q->pulled == 2 || q->held || LwMeetPriority(q); }
 static struct
 {
     uintptr_t dir, lg; uint32_t seed;
@@ -853,9 +856,24 @@ static int LwRoomDensity(uint32_t members, uint32_t held)
     if (g_lwRequester < 0 || g_lwRequester >= g_lwWorld.count) { snprintf(g_lwRoomWhy, sizeof g_lwRoomWhy, "no requesting squad"); return 0; }
     return LwDensityRoom(g_lwSquads[g_lwRequester].pos, members, held, g_lwRoomWhy, sizeof g_lwRoomWhy);
 }
+/* 1 when squads a and b ask for room in the same bubble (always, under the one budget for the map). */
+static int LwHoldBubble(int a, int b)
+{
+    if (a < 0 || b < 0 || a >= g_lwWorld.count || b >= g_lwWorld.count) return 1;
+    return LwDensitySameBubble(&g_lwSquads[a], &g_lwSquads[b]);
+}
+/* A refusal for units (the bubble's budget, the map's cap, the game's 70 room): the kind a swap makes room for. */
+static int LwRoomIsUnits(const char* why) { return strncmp(why, "the game's 70 room", 18) == 0 || strncmp(why, "the cap", 7) == 0; }
+/* The units held against a request of squad `requester`. A hold is room in its squad's bubble: counted against
+ * another bubble's requests it kept their squads out. The patrols' holds are one a bubble (living_world_patrols.c). */
+static uint32_t LwHoldsAgainst(int requester)
+{
+    const uint32_t held = g_lwHold.idx >= 0 && g_lwHold.idx != requester && GetTickCount64() < g_lwHold.until && LwHoldBubble(g_lwHold.idx, requester) ? g_lwHold.units : 0;
+    return held + LwMeetHeld(requester);
+}
 static int LwRoomFor(uint32_t members)
 {
-    uint32_t held = g_lwHold.idx >= 0 && g_lwHold.idx != g_lwRequester && GetTickCount64() < g_lwHold.until ? g_lwHold.units : 0;
+    uint32_t held = LwHoldsAgainst(g_lwRequester);
     uintptr_t chars, jobs, dir = g_lwWorld.dir;
     if (!LwRoomPlayers()) return 0;
     if (!EvpPtr(g_lw.game + 0x3326D18u, &chars) || !EvpPtr(g_lw.game + LW_AIJOB, &jobs)) { snprintf(g_lwRoomWhy, sizeof g_lwRoomWhy, "no character or job table"); return 0; }
@@ -878,10 +896,9 @@ static int LwPlace(uintptr_t slot, float* pos);
 static int g_lwPlaceWide; /* set by LwPlace and LwMembersFit (below) */
 static int LwHidden(const float* p);
 static int LwHiddenFar(const float* p);
-static int LwSlotsHiddenFar(const float* p, uint32_t n);
 static int LwSeenFromView(int i, const float* point);
 static int g_lwFarSpawn; /* LwOnline: a far (sightline) squad's request */
-static int g_lwMeetSpawn; /* LwOnline: a road patrol waiting at the ring's edge: the far squads' sight test, asked again in 1 s */
+static int g_lwMeetSpawn; /* LwOnline: a patrol on its way to a player: placed and sight-tested before room, asked again in 1 s */
 static int LwMembersFit(uintptr_t slot, const float* pos, uint32_t n);
 static const char* g_lwFitWhy = "a member would not reach its slot"; /* which of LwMembersFit's tests refused */
 static int LwSlotsHidden(const float* p, uint32_t n);
@@ -976,7 +993,7 @@ static int LwFillerCandidate(const LwSquad* q, const LwSquad* except, float* at)
     if (q == except || q->state != LW_ONLINE || q->farOn || q->forceOff || q->alive == 0 || q->intent != LW_PATROL) return 0; /* a squad on an intent is busy (Phase 2) */
     if (except && !LwDensitySameBubble(q, except)) return 0; /* room in another bubble is no room for this one */
     if (GetTickCount64() - q->since < 60000) return 0; /* just online: it has not had the time to walk into view */
-    if (co_lw_meet_keeps(LwRoadSquad((int)(q - g_lwSquads)), LwNearestPlayer2(q->pos[0], q->pos[1]), LW_R_ON)) return 0; /* a road patrol near a player is what a road is for */
+    if (LwMeetKeeps(q)) return 0; /* a road patrol near a player is what a road is for (living_world_patrols.c) */
     uint32_t members[32]; int n = LwMembers(q->squad, members);
     if (n <= 0 || !LwLeader(members, n, at)) return 0;
     for (int k = 0; k < n; k++) if (LwAlert(members[k]) != 0) return 0;
@@ -1083,8 +1100,8 @@ static int LwOnlinePlace(LwSquad* q, uintptr_t slot, uint32_t cap, float* pos, f
     q->wide = (uint8_t)g_lwPlaceWide;
     /* sight is asked where the members will stand: on the ground, not at a face under it */
     float see[3] = {pos[0], pos[1], ground > pos[2] ? ground : pos[2]};
-    const int farTest = g_lwFarSpawn || g_lwMeetSpawn;
-    if (g_lwTestVisible ? !LwSeenByAny(see, LW_SIGHT) && (++g_lwTestUnseen, 1) : !(farTest ? LwHiddenFar(see) && (!g_lwMeetSpawn || LwSlotsHiddenFar(see, cap)) : LwHidden(see) && (!LwSlotsChecked(q, GetTickCount64()) || LwSlotsHidden(see, cap))))
+    const int farTest = g_lwFarSpawn;
+    if (g_lwTestVisible ? !LwSeenByAny(see, LW_SIGHT) && (++g_lwTestUnseen, 1) : !(farTest ? LwHiddenFar(see) : LwHidden(see) && (!LwSlotsChecked(q, GetTickCount64()) || LwSlotsHidden(see, cap))))
     { g_lwOnlineWhy = farTest ? "sight: seen on the host's screen (or no off-screen read)" : "sight: seen"; q->retry = GetTickCount64() + (g_lwMeetSpawn ? 1000 : 3000); LwHoldNext(q); return 0; }
     return 1;
 }
@@ -1095,7 +1112,7 @@ static int LwOnlinePlace(LwSquad* q, uintptr_t slot, uint32_t cap, float* pos, f
 static struct { int (*place)(LwSquad*, uintptr_t, uint32_t, float*, float*); int (*room)(uint32_t); } g_lwGates = {LwOnlinePlace, LwRoomFor};
 static int LwOnlineGates(LwSquad* q, uintptr_t slot, uint32_t cap, float* pos, float* target)
 {
-    int placeFirst = q->held && !g_lwFarSpawn;
+    int placeFirst = (q->held && !g_lwFarSpawn) || g_lwMeetSpawn; /* a swap for a patrol only once its point stands */
     if (placeFirst && !g_lwGates.place(q, slot, cap, pos, target)) return 0;
     if (!g_lwGates.room(cap))
     {
@@ -1485,13 +1502,22 @@ static uint32_t LwTopOwner(float x, float y, float top, float* hitZ)
  * all blocked, measured from the higher of the navmesh face and the ground ray's top surface: members stand on the
  * drawn ground, which LwPlace allows up to 2 m over the face (audit 1b criterion 4: on XL, whose faces lie on a 4 m
  * grid, members appeared 1-2.3 m over the requested face height and in a player's sight). */
+static int LwViewRead(void);
+/* How far player i's sight counts. A patrol's own request and looks (LwMeetSight) set it to what that player could
+ * draw of the squad; a player 1700 m away with a line to a point nobody draws refused it. 0: LW_SIGHT. */
+static float g_lwSightHost, g_lwSightPeer;
+static float LwSightRange2(int i)
+{
+    const float r = g_lwSightPeer > 0 ? (g_lwSightHost > 0 && LwViewRead() == i ? g_lwSightHost : g_lwSightPeer) : LW_SIGHT;
+    return r * r;
+}
 static int LwHidden(const float* p)
 {
     float top = NAN, base = p[2];
     if (LwGround(p[0], p[1], &top) && isfinite(top) && top > base) base = top;
     for (int i = 0; i < g_lwWorld.playersAt; i++)
     {
-        if (LwDist2(g_lwWorld.players[i], p[0], p[1]) > LW_SIGHT * LW_SIGHT) continue;
+        if (LwDist2(g_lwWorld.players[i], p[0], p[1]) > LwSightRange2(i)) continue;
         for (int h = 0; h < 3; h++)
         {
             float t[3] = {p[0], p[1], base + (h == 0 ? 1.0f : h == 1 ? 2.5f : 4.5f)};
@@ -1512,7 +1538,7 @@ static int LwSlotsHidden(const float* p, uint32_t n)
         LwMemberSlot(p, m, n, t);
         t[2] = (LwGround(t[0], t[1], &top) && isfinite(top) && top > p[2] ? top : p[2]) + 1.0f;
         for (int i = 0; i < g_lwWorld.playersAt; i++)
-            if (LwDist2(g_lwWorld.players[i], t[0], t[1]) <= LW_SIGHT * LW_SIGHT && LwSeenFromView(i, t) != 0) { g_lwWorld.seenSlot++; return 0; }
+            if (LwDist2(g_lwWorld.players[i], t[0], t[1]) <= LwSightRange2(i) && LwSeenFromView(i, t) != 0) { g_lwWorld.seenSlot++; return 0; }
     }
     return 1;
 }
@@ -1624,25 +1650,6 @@ static int LwHiddenFar(const float* p)
     return 1;
 }
 
-/* LwSlotsHidden by the far rule, for a road patrol waiting at the ring's edge: 155 m away a member that appears at
- * the edge of cover is seen, so each slot is unseen or off the screen of the player who has the line to it. */
-static int LwSlotsHiddenFar(const float* p, uint32_t n)
-{
-    for (uint32_t m = 0; n > 1 && m < n; m++)
-    {
-        float t[3], top = NAN;
-        LwMemberSlot(p, m, n, t);
-        t[2] = (LwGround(t[0], t[1], &top) && isfinite(top) && top > p[2] ? top : p[2]) + 1.0f;
-        for (int i = 0; i < g_lwWorld.playersAt; i++)
-        {
-            if (LwDist2(g_lwWorld.players[i], t[0], t[1]) > LW_SIGHT * LW_SIGHT) continue;
-            const int seen = LwSeenFromView(i, t);
-            if (seen != 0 && !(seen == 1 && LwOffScreen(i, t))) { g_lwWorld.seenSlot++; return 0; }
-        }
-    }
-    return 1;
-}
-
 /* 1 when a player within `range` sees the point's chest height (1.0 m over it). */
 static int LwSeenByAny(const float* p, float range)
 {
@@ -1658,9 +1665,9 @@ static int LwSeenByAny(const float* p, float range)
  * the band assumes the farthest drawing, F = 45 / 4 deg and the high preset (near 350, far 1000, msf 0.05), m0 = 0.
  * Solved by bisection (the angle falls, the threshold rises with d). r 1 / 2 / 4 / 8 m: about 701 / 811 / 952 / 1630 m. */
 static float g_lwBandFov = 45.0f * 3.14159265f / 180.0f; /* the narrowest view any player has now (LwBandTick) */
-static float LwFarBand(float r)
+static float LwFarBandFov(float r, float F)
 {
-    const float F = g_lwBandFov, nearD = 350.0f, farD = 1000.0f, msf = 0.05f;
+    const float nearD = 350.0f, farD = 1000.0f, msf = 0.05f;
     if (!(r > 0.05f)) r = 0.05f;
     float lo = nearD, hi = 6000.0f;
     for (int k = 0; k < 40; k++)
@@ -1672,6 +1679,7 @@ static float LwFarBand(float r)
     }
     return lo;
 }
+static float LwFarBand(float r) { return LwFarBandFov(r, g_lwBandFov); }
 /* A unit's bounding radius: half its box's diagonal (the Unit box, exe vtable +0x238 (unit, out[0x58], flag), min at
  * +0x40, max at +0x4C, as the Lua Unit box API 0x2059A0 calls it; the object found as EvpUnitPosition finds it). 0 when
  * it does not read or is outside 0.1-30 m. */
@@ -2083,6 +2091,7 @@ static void LwOnlineTick(LwSquad* q, int* removals)
         /* offline only once it has been beyond R_off of every player, every member at alert 0, for LW_FAR_MS without a break */
         float d2 = LwNearestPlayer2(at[0], at[1]);
         int calm = g_lwWorld.playersAt > 0 && d2 > LW_R_OFF * LW_R_OFF && !g_lwTestHold;
+        if (calm && LwMeetStays(q, d2, now)) calm = 0; /* on its way in to a player (living_world_patrols.c) */
         float keep = LwSquadBand(q) + LW_FAR_MARGIN;
         if (calm && d2 < keep * keep) /* in view range: it stays while a player sees it (sightlines), checked once a second */
         {
@@ -2987,6 +2996,9 @@ static void LwTestCommands(void)
         else if (sscanf(cmds[c], "patrols old %d", &idx) == 1) LwPatrolsOldCmd(idx);
         else if (sscanf(cmds[c], "travel %f %f", &d, &deg) == 2) LwTravelCmd(seq, d, deg);
         else if (sscanf(cmds[c], "travelback %f", &d) == 1) LwTravelBackCmd(seq, d);
+        else if (sscanf(cmds[c], "meet %d", &idx) == 1) LwMeetCmd(idx);
+        else if (sscanf(cmds[c], "beside %f", &d) == 1) LwBesideCmd(seq, d);
+        else if (strcmp(cmds[c], "wayon") == 0) LwWayOnCmd(seq);
         else if (sscanf(cmds[c], "roadpatrols %d", &idx) == 1) LwRoadPatrolsCmd(idx);
         else if (sscanf(cmds[c], "offline %d", &idx) == 1 && idx >= 0 && idx < g_lwWorld.count && g_lwSquads[idx].state == LW_ONLINE) g_lwSquads[idx].forceOff = 1;
         else if (strncmp(cmds[c], "kill garrison", 13) == 0) LwKillArm();
@@ -3077,13 +3089,14 @@ static void LwTickScans(void)
 static int LwTickSums(int* units, int* waiting)
 {
     int farSum = 0, farStand = 0;
+    LwMeetFarCount(-1, 0);
     for (int i = 0; i < g_lwWorld.count; i++)
     {
         const LwSquad* q = &g_lwSquads[i];
         if (!g_lwEvery[i]) continue;
         int n = q->state == LW_PENDING ? q->cap : q->state == LW_ONLINE ? q->alive : 0;
         *units += n;
-        if (n) { int place = LwPatrolFar(q); if (place == CO_LW_VIEW_FAR_WALKS) farSum += n; else if (place == CO_LW_VIEW_FAR_STANDS) farStand += n; }
+        if (n) { int place = LwPatrolFar(q); if (place == CO_LW_VIEW_FAR_WALKS) farSum += n; else if (place == CO_LW_VIEW_FAR_STANDS) farStand += n; if (place != CO_LW_VIEW_FAR_NONE) LwMeetFarCount(i, n); }
         *waiting |= q->state == LW_OFFLINE && q->cycled == 1;
     }
     farSum = LwPatrolFarSum(farSum, farStand); /* standing far squads count past their own share (living_world_patrols.c) */
@@ -3160,13 +3173,14 @@ static void LwSquadsTick(void)
             const char* why = NULL; char whyBuf[128]; /* test notes for a staged squad (pulled 2): the gate it fails */
             LwWalk(q, dt);
             if (q->state != LW_OFFLINE) continue; /* it became a garrison (2c) */
+            const int meet = LwMeetApproach(q, now, requested || (q->retry && now < q->retry)); /* how a patrol on its way to a player asks (living_world_patrols.c) */
             float near2 = LwLeadNear2(q); /* the band looks ahead of a vehicle (living_world_patrols.c) */
             float rMin = g_lwWorld.rMin > 0 ? g_lwWorld.rMin : LW_R_MIN;
             int back = q->cycled == 1 && near2 >= rMin * rMin; /* test cycle: back at once (the budget still applies) */
             if (waiting && !back) { why = "a test-cycle squad is served first"; goto offlineDone; }
             if (q->retry && now < q->retry) continue; /* its point was refused (placement or sight) a moment ago */
-            int nearBand = near2 < LW_R_ON * LW_R_ON && near2 >= rMin * rMin, farBand = !nearBand && near2 >= LW_R_ON * LW_R_ON && near2 < LwSquadBand(q) * LwSquadBand(q);
-            if (!(!requested && (farBand && !back ? farTries < 2 : attempts < 4) && q->pos[0] * q->pos[0] + q->pos[1] * q->pos[1] < r * r && (nearBand || back || farBand)))
+            int nearBand = near2 < LW_R_ON * LW_R_ON && near2 >= rMin * rMin, farBand = !nearBand && near2 >= LW_R_ON * LW_R_ON && (near2 < LwSquadBand(q) * LwSquadBand(q) || meet); /* beyond the band on an open road, or within its margin */
+            if (!(!requested && (farBand && !back ? farTries < 2 || meet : attempts < 4) && q->pos[0] * q->pos[0] + q->pos[1] * q->pos[1] < r * r && (nearBand || back || farBand)))
             {
                 if (q->held && !(nearBand || farBand) && near2 < rMin * rMin)
                 { snprintf(whyBuf, sizeof whyBuf, "nearer a player than the spawn band's %.0f m", (double)rMin); why = whyBuf; }
@@ -3184,16 +3198,18 @@ static void LwSquadsTick(void)
                 if (!back && LwRecentNear(q->pos)) { why = g_lwSpacedWhy; g_lwWorld.spaced++; q->retry = now + 3000; goto offlineDone; } /* spaced from online squads and recent requests (audit 1, 11) */
                 if (farBand && !back)
                 {
-                    if ((float)(farUnits + q->survivors) > LwFarShareLimit())
+                    if (!LwMeetFarRoom(q, meet, farUnits))
                     { snprintf(whyBuf, sizeof whyBuf, "the far share: %d far units + %u over %.0f", farUnits, q->survivors, (double)LwFarShareLimit()); why = whyBuf; q->retry = now + 3000; goto offlineDone; }
                     farTries++;
                     float here[3] = {q->pos[0], q->pos[1], 0};
-                    int inView = LwGround(here[0], here[1], &here[2]) && LwSeenByAny(here, LwSquadBand(q));
+                    int inView = meet || (LwGround(here[0], here[1], &here[2]) && LwSeenByAny(here, LwSquadBand(q))); /* a patrol on its way in asks by its own rule */
                     if (!inView && !LwAboutToBeSeen(q)) { why = "not in a player's sight (nor its way ahead)"; q->retry = now + 3000; goto offlineDone; }
                 }
                 uint32_t off0 = g_lwOffScreen;
-                g_lwFarSpawn = farBand && !back; g_lwMeetSpawn = !g_lwFarSpawn && !back && LwMeetWaits(q);
+                g_lwFarSpawn = farBand && !back && !meet; g_lwMeetSpawn = !g_lwFarSpawn && !back && (meet || LwMeetPriority(q));
+                if (!g_lwFarSpawn && !back) LwMeetSight(q); /* only the players who could draw it may refuse */
                 LwOnline(q); requested = q->state == LW_PENDING;
+                LwMeetSight(NULL);
                 if (requested && q->pulled) { q->pulled = 0; q->node = (uint16_t)LwNearestNode(q->pos[0], q->pos[1]); q->pathLen = q->pathAt = 0; } /* back onto the routes */
                 g_lwFarSpawn = g_lwMeetSpawn = 0;
                 if (farBand && !back) farTries++; else attempts++;
@@ -3201,16 +3217,15 @@ static void LwSquadsTick(void)
                 {
                     q->farOn = 1; farUnits += q->cap; g_lwWorld.farSpawned++;
                     Note("living world: squad %d comes online %.0f m from the nearest player by sightline: %s", (int)(q - g_lwSquads), (double)sqrtf(near2),
-                        g_lwOffScreen != off0 ? "in a player's line of sight, off the host's screen" : "out of sight, it or its way ahead in a player's view");
+                        meet == CO_LW_MEET_ASK_BEYOND ? "on a player's road, beyond what is drawn" : meet ? "out of sight, at the last hidden point of its way to a player" : g_lwOffScreen != off0 ? "in a player's line of sight, off the host's screen" : "out of sight, it or its way ahead in a player's view");
                 }
                 if (back && requested) { q->cycled = 2; Note("living world: test: squad %d comes back with its %u survivors", (int)(q - g_lwSquads), q->cap); }
                 if (q->state == LW_OFFLINE) why = g_lwOnlineWhy ? g_lwOnlineWhy : "the request was not taken";
                 LwPatrolAsked(q); /* living_world_patrols.c: its notes count a sight refusal at the edge of cover */
-                if (q->state == LW_OFFLINE && farBand && !back && g_lwOnlineWhy == g_lwRoomWhy &&
-                    (strncmp(g_lwRoomWhy, "the game's 70 room", 18) == 0 || strncmp(g_lwRoomWhy, "the cap", 7) == 0))
+                LwMeetAsked(q, meet, farBand && !back);
+                if (q->state == LW_OFFLINE && farBand && !back && !meet && g_lwOnlineWhy == g_lwRoomWhy && LwRoomIsUnits(g_lwRoomWhy))
                 { if (LwIntentHoldOther(-1)) LwSwapWaits(q); else if (!LwPatrolHolds(g_lwHold.idx)) LwSwapForFar(q); } /* nor a second filler for a place a patrol was given */
-                if (q->state == LW_OFFLINE && q->held && g_lwOnlineWhy == g_lwRoomWhy &&
-                    (strncmp(g_lwRoomWhy, "the game's 70 room", 18) == 0 || strncmp(g_lwRoomWhy, "the cap", 7) == 0))
+                if (q->state == LW_OFFLINE && q->held && g_lwOnlineWhy == g_lwRoomWhy && LwRoomIsUnits(g_lwRoomWhy))
                     LwHoldForIntent(q);
                 if (q->state != LW_OFFLINE && g_lwHold.idx == (int)(q - g_lwSquads)) g_lwHold.idx = -1; /* served */
             }
