@@ -4381,6 +4381,14 @@ static void WorldMemoryTick(void)
  * keeps its op), and locations-<level>.tsv after op 0x2B: index, op, position in world metres (the generator's less half
  * the world; x east, y north), type (+0xD8) and flags (+0xD4) of each 0xE0 record. */
 static uint8_t g_locationOp[CO_LOCATIONS_MAX];
+/* What WriteFile may take of a line: snprintf returns the length it wanted, so a line of wild values is cut to its
+ * buffer and still ends in a newline; 0 when snprintf failed. */
+static DWORD TsvLength(char* line, size_t size, int len)
+{
+    if (len < 0) return 0;
+    if ((size_t)len >= size) { len = (int)size - 1; line[len - 1] = '\n'; }
+    return (DWORD)len;
+}
 static void WorldLocationsNote(uintptr_t block, uint32_t total)
 {
     uint32_t offset = 0;
@@ -4390,7 +4398,7 @@ static void WorldLocationsNote(uintptr_t block, uint32_t total)
     HANDLE file = OpenLog(name);
     if (file == INVALID_HANDLE_VALUE) return;
     float half = 1024.0f * g_world.current;
-    char line[128];
+    char line[192];
     DWORD wrote;
     uint32_t n = total < DIF_LOCATIONS ? total : DIF_LOCATIONS, written = 0, important = 0;
     SafeRead(block + 0x11A715Cu, &important, 4);
@@ -4407,13 +4415,13 @@ static void WorldLocationsNote(uintptr_t block, uint32_t total)
             SafeRead(block + g_importantList + 0x108ull * i + 0xD8, &objective, 4);
         int len = snprintf(line, sizeof line, "%u\t0x%X\t%.1f\t%.1f\t%u\t0x%X\t%08x\n", i, g_locationOp[i], (double)(xy[0] - half), (double)(xy[1] - half),
             type, flags, objective);
-        WriteFile(file, line, (DWORD)len, &wrote, NULL);
+        WriteFile(file, line, TsvLength(line, sizeof line, len), &wrote, NULL);
         written++;
     }
     CloseHandle(file);
     Note("difficulty: extra large maps: locations-%ld.tsv written (%u locations)", (long)g_world.levels, written);
     /* edges-<level>.tsv: each route edge (0x48: ends +0 / +8 in generator metres, cells +0x20 / +0x28, width +0x30, type
-     * +0x34, flags +0x44) with the type index of the subregion on each side (subregion +0x18 = its route cell, +0xC its
+     * +0x34, points +0x38 / +0x3C, flags +0x44) with the type index of the subregion on each side (subregion +0x18 = its route cell, +0xC its
      * type); types-<level>.tsv: the first 0x240 bytes of each used type descriptor ([[level+0x2D0]] + 8 t), as hex. */
     uint32_t subs = 0, edges = 0, types = 0;
     uint64_t ts = 0, table = 0;
@@ -4441,9 +4449,11 @@ static void WorldLocationsNote(uintptr_t block, uint32_t total)
             if (c1 && cellOf[i] == c1) t1 = typeOf[i];
         }
         if (t0 >= 0 && t0 < 256) used[t0] = 1; if (t1 >= 0 && t1 < 256) used[t1] = 1;
-        int len = snprintf(line, sizeof line, "%u\t%.1f\t%.1f\t%.1f\t%.1f\t%.2f\t%u\t0x%X\t%d\t%d\n", e, (double)(a[0] - half), (double)(a[1] - half),
-            (double)(b[0] - half), (double)(b[1] - half), (double)width, rec[0x34], flags, t0, t1);
-        WriteFile(file, line, (DWORD)len, &wrote, NULL);
+        uint32_t range[2]; /* the edge's road points [first, end), the last columns */
+        memcpy(range, rec + 0x38, 8);
+        int len = snprintf(line, sizeof line, "%u\t%.1f\t%.1f\t%.1f\t%.1f\t%.2f\t%u\t0x%X\t%d\t%d\t%u\t%u\n", e, (double)(a[0] - half), (double)(a[1] - half),
+            (double)(b[0] - half), (double)(b[1] - half), (double)width, rec[0x34], flags, t0, t1, range[0], range[1]);
+        WriteFile(file, line, TsvLength(line, sizeof line, len), &wrote, NULL);
     }
     CloseHandle(file);
     for (uint32_t i = 0; i < subs; i++) if (typeOf[i] >= 0 && typeOf[i] < 256) used[typeOf[i]] = 1;
@@ -4904,6 +4914,18 @@ static void HiveLordNote(uint64_t b)
     Note("difficulty: extra large maps: Hive Lord graph past 255 regions on a normal level: %u nodes with label 0", first);
 }
 
+static void RoadsAfterOp(uintptr_t block, uint64_t context, uint64_t record, uint32_t op, uint32_t before, int counted); /* difficulty_world_roads.c */
+static void RoadsSpacingBegin(uintptr_t block, uint64_t record); /* difficulty_world_roadbuild.c */
+static void RoadsSpacingEnd(void);
+static void RoadsToleranceBegin(void);
+static void RoadsToleranceEnd(void);
+static void RoadsArterialsApply(uintptr_t block, const uint8_t* ops, uint32_t total);
+static void RoadsArterialsPoints(uintptr_t block);
+static void RoadsSpursBuild(uintptr_t block, uint64_t context);
+static void RoadsCorridorNote(uintptr_t block, const uint8_t* ops, uint32_t before, uint32_t total);
+static void RoadsSlopeNote(uintptr_t block);
+static void RoadsIndexNote(uint64_t context, const char* when);
+static void RoadsPointsWatch(uintptr_t block, uint32_t op);
 static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
 {
     WorldDispatchBegins(records, index, (uint32_t)d);
@@ -5099,7 +5121,13 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
      * lock, their order) */
     const int objCaps = watch && op == 0x16 && g_world.current > 1.0f && g_difficulty.missions > 1 && g_world.values != NULL;
     if (objCaps) { AcquireSRWLockExclusive(&g_explorationLock); g_world.values->capMul = g_difficulty.missions; }
+    /* the arterials are chosen on the edges op 0x0E reads: the zone passes after op 0x86 close some (flag 2) */
+    if (watch && op == 0x0E) { uint32_t placed = 0; SafeRead(block + 0x11A7108, &placed, 4); RoadsArterialsApply(block, g_locationOp, placed < DIF_LOCATIONS ? placed : DIF_LOCATIONS); }
+    if (watch && op == 0x0E) RoadsSpacingBegin(block, records + (uint64_t)at * 0x19B0u); /* the level's own op 0x0E only */
+    if (watch && op == 0x2B) RoadsToleranceBegin();
     uint64_t r = g_worldDispatch(records, b, index, d, e, f, g, h);
+    if (watch && op == 0x0E) RoadsSpacingEnd();
+    if (watch && op == 0x2B) RoadsToleranceEnd();
     if (objCaps) { g_world.values->capMul = 1; ReleaseSRWLockExclusive(&g_explorationLock); }
     if (sortLock) ReleaseSRWLockExclusive(&g_sortContextLock);
     if (vanilla2B && vanillaOp == 0xB5) HiveLordNote(b);
@@ -5132,6 +5160,22 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
     {
         uint32_t now = at;
         if (!SafeRead(index, &now, 4) && now != at) TerrainStamps(records, (uint32_t)d, at, b, g, h, block);
+    }
+    if (watch || vanilla2B) /* the roads' evidence lines on every level, after TerrainStamps has made the plan */
+    {
+        const uint32_t ranAt = watch ? at : vanillaAt;
+        uint32_t now = ranAt;
+        if (!SafeRead(index, &now, 4) && now != ranAt)
+        {
+            RoadsAfterOp(watch ? block : vanillaBlock, b, records + (uint64_t)ranAt * 0x19B0u, watch ? op : vanillaOp, watch ? before : vanillaBefore, watch);
+            /* a complex level's arterials, before op 0x0E gives the edges points and op 0x0F their corridors */
+            if (watch && op == 0x0E) RoadsArterialsPoints(block);
+            if (watch && op == 0x0F) RoadsSpursBuild(block, b); /* before op 0x2B places a stamp */
+            if (watch) RoadsSlopeNote(block); /* once the level's height capture is kept */
+            if (watch) RoadsPointsWatch(block, op);
+            if (watch && op == 0x2B) RoadsIndexNote(b, "after op 0x2B");
+            if (watch && op == 0x2B) { uint32_t placed = 0; SafeRead(block + 0x11A7108, &placed, 4); RoadsCorridorNote(block, g_locationOp, before, placed); }
+        }
     }
     TerrainDiagAfter(records, index, diagAt, diagOp);
     if (mergeSet) *(volatile uint32_t*)(uintptr_t)(mergeSettings + 0x2C) = mergeSize;
@@ -5626,6 +5670,7 @@ static void WorldLevel(uintptr_t level, uintptr_t preview)
         g_worldIndexFullSeen = full;
     }
     InterlockedIncrement(&g_world.levels);
+    memset(g_locationOp, 0, sizeof g_locationOp); /* a host's earlier level must not name a place a fresh client has not */
     if (preview == 0) { g_worldLevelLive = level; g_world.liveLevels = g_world.levels; co_spawners_mission(complex); } /* before the mission's first spawner is appended */
 }
 
@@ -5911,6 +5956,8 @@ static void RouteWidthBuild(uint8_t* stub, uintptr_t flag, uintptr_t back)
     rel = (int32_t)((stub + 0x30) - (stub + 26)); memcpy(stub + 22, &rel, 4);
     rel = (int32_t)((int64_t)back - (int64_t)(uintptr_t)(stub + 36)); memcpy(stub + 32, &rel, 4);
 }
+static const char* InstallRoadSpacing(uintptr_t game); /* difficulty_world_roadbuild.c */
+static const char* InstallRoadTolerance(uintptr_t game);
 static const char* InstallRouteWidth(uintptr_t game)
 {
     if (!ApiCodeMatches(game + 0xF53086u, "F3 0F 10 B2 20 01 00 00") || !ApiCodeMatches(game + 0xF530A2u, "F3 0F 5E F0") ||
@@ -6677,6 +6724,10 @@ static const char* InstallWorld(DifficultyInstall* d)
     if (attach != NULL) Note("difficulty: extra large maps: %s", attach);
     const char* routeWidth = InstallRouteWidth(game);
     if (routeWidth != NULL) Note("difficulty: extra large maps: %s", routeWidth);
+    const char* roadSpacing = InstallRoadSpacing(game);
+    if (roadSpacing != NULL) Note("difficulty: extra large maps: %s", roadSpacing);
+    const char* roadTolerance = InstallRoadTolerance(game);
+    if (roadTolerance != NULL) Note("difficulty: extra large maps: %s", roadTolerance);
     const char* towns = InstallTowns(game);
     if (ApiCodeMatches(game + 0xFB8F08u, "41 0F 28 C4 F3 0F 59 C3"))
     {
