@@ -640,7 +640,8 @@ void CoXlTestTileReset(void)
     for (int k = 0; k < NEAR_TILES_MAX; k++) { g_tiles[k].handle = 0; g_tiles[k].tex[0] = g_tiles[k].tex[1] = g_tiles[k].band = 0; g_tiles[k].bandPixels = NULL; g_tiles[k].live = 0; }
     g_near.handle = 0; g_near.tex[0] = g_near.tex[1] = 0; g_near.state = NEAR_IN; g_near.world = 0; g_matband.tex = 0; g_matband.pixels = NULL;
     g_move.state = MV_IDLE; g_move.stashed = 0; g_move.dropHandle = 0; g_move.dropTex[0] = g_move.dropTex[1] = g_move.dropBand = 0; g_move.dropBandPixels = NULL;
-    memset(g_move.freeing, 0, sizeof g_move.freeing);
+    memset(g_move.freeing, 0, sizeof g_move.freeing); memset(g_nearLeft, 0, sizeof g_nearLeft);
+    g_move.stTemp = g_move.stGone = 0; g_move.merge = g_move.acquired = g_move.pkgPending = 0; g_nearStampOffset[0] = g_nearStampOffset[1] = 0.0f;
 }
 void CoXlTestTileTerrain(int k, uint64_t handle, uint64_t tex0, uint64_t tex1, uint64_t band)
 {
@@ -654,6 +655,25 @@ void CoXlTestTileBuild(int move, uint64_t dropHandle, uint64_t dropTex, int near
     g_move.dropTex[0] = dropTex; g_near.state = nearState ? NEAR_READY : NEAR_IN;
 }
 uint64_t CoXlTestTileHandle(int k) { return k == -2 ? g_move.dropHandle : k < 0 ? g_near.handle : g_tiles[k].handle; }
+uint64_t CoXlTestTileLeft(int i) { return g_nearLeft[i]; } /* a terrain the last replay found still in the world */
+/* A tile build the level's end cuts short (proto/xl_free.c MoveBuildLeft): the level object, the mover's step, whether
+ * the merge is up and the package held, the stamp units already destroyed, the level's 0x66 record; then what is left
+ * of it (0 units, 1 merge, 2 package held, 3 its release pending, 4 the stamp pass's camera offset on), and the
+ * build's own teardown. */
+void CoXlTestBuildCut(uintptr_t level, int state, int merge, int held, uint32_t gone, uint64_t records, uint32_t at66)
+{
+    g_move.levelPtr = level; g_move.state = state; g_move.merge = merge; g_move.acquired = held; g_move.pkgPending = 0; g_move.stGone = gone;
+    g_move.stamped = g_move.stTemp != 0; g_near.records = records; g_move.at66 = at66;
+    g_nearStampOffset[0] = 0.0f; g_nearStampOffset[1] = g_move.stTemp != 0 ? MOVE_STAMP_OFFSET : 0.0f;
+    memset(g_move.ctx, 0, 8); /* no arena to reset */
+}
+void CoXlTestBuildEnv(uint64_t env) { memcpy(g_move.ctx + 0x98, &env, 8); }
+int CoXlTestBuildLeft(int what)
+{
+    return what == 0 ? (int)(g_move.stTemp - g_move.stGone) : what == 1 ? g_move.merge : what == 2 ? g_move.acquired : what == 3 ? g_move.pkgPending :
+        g_nearStampOffset[0] != 0.0f || g_nearStampOffset[1] != 0.0f;
+}
+int CoXlTestTeardown(void) { return MoveTeardown(0); }
 uint64_t CoXlTestTileTex(int k) { return k == -2 ? g_move.dropTex[0] : k < 0 ? g_near.tex[0] : g_tiles[k].tex[0]; }
 void CoXlTestLevelGone(void) { MoveLevelGone(); }
 /* The game code a replayed tile step runs under (proto/difficulty_world_terrain.c NearStepPatch): 1 when patched. */

@@ -201,7 +201,8 @@ static void MoveRestoreDrop(void)
 }
 
 /* A new level starts (TerrainNearReplay's first call): the last level's tile terrains went at its end (NearTilesDestroy),
- * so their maps go now; one still in the world keeps them (NearTilesLeft). */
+ * so their maps go now; one still in the world keeps them (NearTilesLeft). A build that end cut short was ended there
+ * too (MoveBuildLeft); what is reset here is the mod's own state. */
 static void MoveLevelGone(void)
 {
     NearLayerSettle();
@@ -218,7 +219,8 @@ static void MoveLevelGone(void)
             g_tiles[k].tex[0] = g_tiles[k].tex[1] = g_tiles[k].band = 0; g_tiles[k].bandPixels = NULL;
         }
     g_move.state = MV_IDLE; g_move.level = -1; g_move.on = 0;
-    g_move.stTemp = g_move.stGone = 0; g_move.stamped = 0; /* their levels went with the world */
+    g_move.stTemp = g_move.stGone = 0; g_move.stamped = 0;
+    g_nearStampOffset[0] = g_nearStampOffset[1] = 0.0f; /* else this level's own 0x63 would look 20 km off */
     g_moveReplace.on = 0;
     InterlockedExchange(&g_moveBuilding, 0);
     MoveHold(0);
@@ -496,18 +498,29 @@ static void MoveMergeBegin(void)
     TdScatterMergeOpen();
 }
 
-/* The merge as the level's 0x66 and 0x67 leave it (the parts this build re-created). */
-static void MoveTeardown(void)
+/* The merge object R is part of the level object (level+0x2B30: level init stores that at [G], 0xF71508, and the
+ * level's destructor passes it to 0xFCF2F0, 0xF6F88E), so it is there after the level's teardown has cleared G. */
+static uintptr_t MoveMergeObject(void)
 {
-    if (!g_move.merge) return;
+    const uintptr_t level = g_move.levelPtr != 0 ? g_move.levelPtr : g_worldLevel;
+    uintptr_t gen = 0, R = 0;
+    if (level == 0 || SafeRead(level + 0x2C8, &gen, 8) || gen == 0 || SafeRead(gen, &R, 8) || (R != 0 && R != level + 0x2B30u)) return 0;
+    return level + 0x2B30u;
+}
+
+/* The merge as the level's 0x66 and 0x67 leave it (the parts this build re-created); 1 when torn down. `left`: the
+ * level has ended; its own teardown (0xF6FF60) releases the 0x94 lookup, and its records may be the next generation's. */
+static int MoveTeardown(int left)
+{
+    if (!g_move.merge) return 0;
     g_move.merge = 0;
     TdScatterMergeClose(); /* its camera units go below; the scatter cut ends once their queued renders ran */
-    uintptr_t gen = 0, R = 0, api = 0, t8 = 0, t10 = 0;
+    uintptr_t R = MoveMergeObject(), api = 0, t8 = 0, t10 = 0;
     uint64_t world = MoveWorld(), env = 0;
     memcpy(&env, g_move.ctx + 0x98, 8);
-    if (SafeRead(g_worldLevel + 0x2C8, &gen, 8) || gen == 0 || SafeRead(gen, &R, 8) || R == 0 || SafeRead(g_world.game + 0x3326308u, &api, 8) || api == 0 ||
+    if (R == 0 || SafeRead(g_world.game + 0x3326308u, &api, 8) || api == 0 ||
         SafeRead(api + 8, &t8, 8) || t8 == 0 || SafeRead(api + 0x10, &t10, 8) || t10 == 0 || world == 0)
-    { Note("difficulty: moving tiles: the merge could not be torn down (no merge object or engine tables)"); return; }
+    { Note("difficulty: moving tiles: the merge could not be torn down (no merge object or engine tables)"); return 0; }
     typedef void (*NodeFn)(uint64_t world, uint32_t node);
     typedef void (*UnitFn)(uint64_t world, uint64_t unit);
     typedef void (*PtrFn)(uint64_t p);
@@ -516,7 +529,7 @@ static void MoveTeardown(void)
     NodeFn destroyNode = NULL; UnitFn destroyUnit = NULL; PtrFn releaseRead = NULL, release = NULL; NameFn unpublish = NULL; PkgFn pkgRelease = NULL;
     SafeRead(t8 + 0x60, &destroyNode, 8); SafeRead(t8 + 0x478, &destroyUnit, 8); SafeRead(t10 + 0x1E0, &releaseRead, 8); SafeRead(t10 + 0x190, &release, 8);
     SafeRead(t10 + 0x218, &unpublish, 8); SafeRead(t10 + 0x300, &pkgRelease, 8);
-    if (destroyNode == NULL || destroyUnit == NULL || releaseRead == NULL || release == NULL || unpublish == NULL || pkgRelease == NULL) return;
+    if (destroyNode == NULL || destroyUnit == NULL || releaseRead == NULL || release == NULL || unpublish == NULL || pkgRelease == NULL) return 0;
     /* 0x66: the cameras, R+0x108 */
     uint32_t n0 = 0, n1 = 0; uint64_t r108 = 0;
     SafeRead(R + 8, &n0, 4); SafeRead(R + 0x18, &n1, 4); SafeRead(R + 0x108, &r108, 8);
@@ -526,7 +539,7 @@ static void MoveTeardown(void)
     *(volatile uint32_t*)(R + 8) = 0; *(volatile uint64_t*)(R + 0x108) = 0;
     /* 0x66: 0x94's lookup ([record+0x18]: its readback +0x10, its texture +0x18 under 0xDBCD240D) */
     uint64_t lookup = 0, rd = 0, tex = 0;
-    if (!SafeRead(g_near.records + (uint64_t)g_move.at66 * 0x19B0u + 0x18, &lookup, 8) && lookup != 0)
+    if (!left && !SafeRead(g_near.records + (uint64_t)g_move.at66 * 0x19B0u + 0x18, &lookup, 8) && lookup != 0)
     {
         if (!SafeRead(lookup + 0x10, &rd, 8) && rd != 0) releaseRead(lookup);
         if (!SafeRead(lookup + 0x18, &tex, 8) && tex != 0) { unpublish(0xDBCD240Du); release(tex); *(volatile uint64_t*)(lookup + 0x18) = 0; }
@@ -549,6 +562,7 @@ static void MoveTeardown(void)
     memcpy(&arena, g_move.ctx, 8);
     typedef void (*ArenaFn)(uint64_t arena);
     if (arena != 0) ((ArenaFn)(g_world.game + 0x173BAB0u))(arena);
+    return 1;
 }
 
 /* 0x65's cleanup queues one destroy per live layer unit (exe 0xE1200 -> 0x12D2D0) and up to 0x1000 stamp levels a call;
@@ -560,7 +574,7 @@ static void MoveTeardown(void)
 static void MoveFailRest(void)
 {
     MoveStampUnitsDestroy(1e30);
-    MoveTeardown();
+    MoveTeardown(0);
     if (g_move.failState >= MV_SPAWN && g_near.handle != 0 && g_near.handle != g_move.dropHandle)
     {
         typedef void (*DestroyFn)(uint64_t world, uint64_t handle);
@@ -1261,7 +1275,7 @@ static void MoveTick(uint64_t level)
             g_move.waits = 0; g_move.state = MV_UNSTAMP;
             return;
         }
-        MoveTeardown();
+        MoveTeardown(0);
         memcpy(g_near.one69, g_near.keep69, sizeof g_near.one69); memcpy(g_near.one6B, g_near.keep6B, sizeof g_near.one6B);
         g_move.state = MV_SPAWN;
         return;
@@ -1293,7 +1307,7 @@ static void MoveTick(uint64_t level)
         }
         if (g_move.stGone == 0 && !MoveStampUnitsReady()) return;
         if (!MoveStampUnitsDestroy(MOVE_UNSTAMP_MS)) return;
-        MoveTeardown();
+        MoveTeardown(0);
         memcpy(g_near.one69, g_near.keep69, sizeof g_near.one69); memcpy(g_near.one6B, g_near.keep6B, sizeof g_near.one6B);
         g_move.state = MV_SPAWN;
         return;
@@ -1416,7 +1430,9 @@ static void MoveInstall(uintptr_t game)
 static void NearLevelLeft(int ship)
 {
     NearLayerSettle();
-    NearTilesDestroy(ship ? "the ship" : "a level init"); /* the world outlives the level: its tiles go with the level */
+    MovePackageTick(1); /* a release an earlier teardown left pending: before this level init's own acquire */
+    MoveBuildLeft(ship ? "the ship" : "a level init"); /* the merge cameras go before the terrains they draw */
+    NearTilesDestroy(ship); /* the world outlives the level: its tiles go with the level */
     NearOneMipDisarm();
     InterlockedExchange(&g_nearActive, 0);
     MoveHold(0);

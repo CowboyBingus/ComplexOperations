@@ -14,6 +14,7 @@ void CoXlTestTileReset(void);
 void CoXlTestTileTerrain(int k, uint64_t handle, uint64_t tex0, uint64_t tex1, uint64_t band);
 void CoXlTestTileBuild(int move, uint64_t dropHandle, uint64_t dropTex, int nearState);
 uint64_t CoXlTestTileHandle(int k);
+uint64_t CoXlTestTileLeft(int i);
 uint64_t CoXlTestTileTex(int k);
 void CoXlTestLevelGone(void);
 
@@ -215,14 +216,61 @@ int main(void)
     CoXlTestWorldShip();
     CHECK(g_destroyCount == 3 && Destroyed(H0) == 1 && Destroyed(H1) == 1 && Destroyed(H2) == 1 && NoHandles());
 
-    Start("the drop tile the generation may still finalize stays, and the replay keeps every map of that level", 1);
+    Start("the drop tile between its 0x69 and 0x6B stays at the ship (its 0x6A may still run) and goes at the next level init", 1);
+    CoXlTestWorldLevel((uintptr_t)lg, 0);
     Tiles();
     CoXlTestTileBuild(0, 0, 0, 1); /* no build; g_near ready, not yet in */
     CoXlTestWorldShip();
     CHECK(Destroyed(H0) == 0 && Destroyed(H1) == 1 && Destroyed(H3) == 1 && MapHas(H0));
     CHECK(CoXlTestTileHandle(-1) == H0 && CoXlTestTileHandle(0) == H0 && CoXlTestTileHandle(1) == 0);
+    CoXlTestWorldLevel((uintptr_t)lg, 0x44); /* the generator's job has left by now: nothing finalizes it any more */
+    CHECK(g_destroyCount == 4 && Destroyed(H0) == 1 && !MapHas(H0) && NoHandles());
     CoXlTestLevelGone();
-    CHECK(g_freeCount == 0 && CoXlTestTileTex(-1) == 0 && CoXlTestTileTex(1) == 0 && NoHandles());
+    CHECK(Freed(0xB0) > DestroySeq(H1) && Freed(0xD2) > 0 && CoXlTestTileTex(-1) == 0xA0 && CoXlTestTileLeft(0) == 0);
+    CHECK(fake_host_logged("0 tile terrains left from the last level"));
+
+    Start("the generator's job still runs at the ship: every terrain stays (no wait on its lock), the level init takes them", 1);
+    CoXlTestWorldLevel((uintptr_t)lg, 0);
+    Tiles();
+    static uint8_t job[0x10];
+    { const uint64_t at = (uint64_t)(uintptr_t)job; memcpy(lg + 0xF718, &at, 8); }
+    job[8] = 1;
+    CoXlTestWorldShip();
+    CHECK(g_destroyCount == 0 && MapHas(H0) && MapHas(H3) && CoXlTestTileHandle(1) == H1 && CoXlTestTileHandle(-1) == H0);
+    CHECK(fake_host_logged("0 already gone, 4 kept (the generator's job still runs)"));
+    job[8] = 0;
+    CoXlTestWorldLevel((uintptr_t)lg, 0x44);
+    CHECK(g_destroyCount == 4 && !MapHas(H0) && !MapHas(H3) && NoHandles());
+    memset(lg + 0xF718, 0, 8);
+
+    Start("a level init alone destroys a drop tile between its 0x69 and 0x6B", 1);
+    CoXlTestWorldLevel((uintptr_t)lg, 0);
+    Tiles();
+    CoXlTestTileBuild(0, 0, 0, 1);
+    CoXlTestWorldLevel((uintptr_t)lg, 0x44);
+    CHECK(g_destroyCount == 4 && Destroyed(H0) == 1 && !MapHas(H0) && NoHandles());
+
+    Start("a terrain the level's end could not destroy keeps the level's maps and waits for the next level's end", 0);
+    Tiles();
+    CoXlTestWorldShip();
+    CHECK(g_destroyCount == 0);
+    CoXlTestLevelGone();
+    CHECK(g_freeCount == 0 && CoXlTestTileTex(-1) == 0 && CoXlTestTileTex(2) == 0 && NoHandles());
+    /* each once (the drop tile is slot 0's and g_near's), in the mod's order */
+    CHECK(CoXlTestTileLeft(0) == H0 && CoXlTestTileLeft(1) == H1 && CoXlTestTileLeft(2) == H2 && CoXlTestTileLeft(3) == H3 && CoXlTestTileLeft(4) == 0);
+    CHECK(fake_host_logged("4 tile terrain(s) left in the world from the last level"));
+    FakeDestroy((uint64_t)(uintptr_t)g_world, H1); /* gone some other way before the next replay */
+    g_destroyCount = 0;
+    CoXlTestTileTerrain(2, 0x7100ull, 0xE0, 0xE1, 0xE2); /* the new level's tile in a slot one of them had; not in the world */
+    CoXlTestLevelGone();
+    CHECK(CoXlTestTileLeft(0) == H0 && CoXlTestTileLeft(1) == H2 && CoXlTestTileLeft(2) == H3 && CoXlTestTileLeft(3) == 0);
+    CHECK(g_freeCount == 0 && CoXlTestTileTex(2) == 0); /* one is still drawn: this level's maps stay too */
+    { const uintptr_t destroy = (uintptr_t)FakeDestroy; memcpy(g_fake.image + TABLE8 + 0x1E0, &destroy, 8); } /* the call reads again */
+    CoXlTestWorldShip();
+    CHECK(g_destroyCount == 3 && Destroyed(H0) == 1 && Destroyed(H2) == 1 && Destroyed(H3) == 1 && Destroyed(H1) == 0);
+    CHECK(!MapHas(H0) && !MapHas(H2) && !MapHas(H3) && MapHas(HX) && CoXlTestTileLeft(0) == 0 && CoXlTestTileLeft(2) == 0);
+    CoXlTestWorldShip();
+    CHECK(g_destroyCount == 3); /* forgotten: not again */
 
     Start("no destroy call: nothing is destroyed and no map is freed", 0);
     Tiles();
