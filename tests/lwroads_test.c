@@ -91,13 +91,15 @@ int main(void)
         CHECK(co_lw_roads_step(next, 5, kind, CO_LW_ROADS_ARTERIAL, 3, 0) == -1 && co_lw_roads_step(next, 5, kind, CO_LW_ROADS_SPUR, 5, 0) == -1);
     }
 
-    g_case = "a road patrol's plan goes on along the road, and turns round at its end";
-    CHECK(CoXlTestLwRoadPlan(5, 2, 1, -1) == 3 && CoXlTestLwRoadPlan(5, 2, 3, -1) == 1);
-    CHECK(CoXlTestLwRoadPlan(5, 4, 3, -1) == 3 && CoXlTestLwRoadPlan(5, 0, 1, -1) == 1);
+    g_case = "a road patrol's plan goes on along the road, and turns round at its end";  /* node 0 off the roads, 1..5 a road */
+    CHECK(CoXlTestLwRoadPlan(5, 3, 2, -1) == 4 && CoXlTestLwRoadPlan(5, 3, 4, -1) == 2);
+    CHECK(CoXlTestLwRoadPlan(5, 5, 4, -1) == 4 && CoXlTestLwRoadPlan(5, 1, 2, -1) == 2);
     g_case = "a plan whose first node was refused (no navmesh there) takes the other way, never the same node again";
-    CHECK(CoXlTestLwRoadPlan(5, 2, 1, 3) == 1 && CoXlTestLwRoadPlan(5, 2, 3, 1) == 3 && CoXlTestLwRoadPlan(5, 2, -1, 3) == 1);
-    g_case = "refused with no other way on the roads, or off the roads: no road plan, the grid's plan draws a goal";
-    CHECK(CoXlTestLwRoadPlan(5, 4, 3, 3) == -1 && CoXlTestLwRoadPlan(5, 0, -1, 1) == -1 && CoXlTestLwRoadPlan(5, 10, -1, 4) == -1);
+    CHECK(CoXlTestLwRoadPlan(5, 3, 2, 4) == 2 && CoXlTestLwRoadPlan(5, 3, 4, 2) == 4 && CoXlTestLwRoadPlan(5, 3, -1, 4) == 2);
+    g_case = "refused with no other way on the roads: no road plan, the grid's plan draws a goal";
+    CHECK(CoXlTestLwRoadPlan(5, 5, 4, 4) == -1 && CoXlTestLwRoadPlan(5, 1, -1, 2) == -1);
+    g_case = "from off the roads: to the nearest road node, and no road plan once that way was refused";
+    CHECK(CoXlTestLwRoadPlan(5, 0, -1, -1) == 1 && CoXlTestLwRoadPlan(5, 0, -1, 1) == -1);
     g_case = "road patrols are on in a build that reads no research switch";
     CHECK(CoXlTestLwRoadPatrolsOn() == 1);
 

@@ -257,10 +257,18 @@ int main(void)
         co_lw_move_gone(&m[4]);
         for (int k = 31; k <= 60; k++) for (int i = 0; i < 6; i++) if (i != 1) { at[0] = 22.0f + ways[i] / 30.0f * (float)k; co_lw_move_sample(&m[3 + i], at, states[i], &way5); }
         at[0] = 500.0f; co_lw_move_sample(&m[4], at, CO_LW_MOVE_GOAL, &way5);
+        CHECK(m[4].way == 0 && m[4].on == 1); /* no way from where it stood before it left */
         co_lw_move_note(m, 16, line, sizeof line);
         CHECK(strcmp(line, "patrol goals (30 s): 3 squads calm with a goal throughout, their way least 40 m, median 60 m; 0 under 9 m; "
             "1 calm without a goal throughout: squads 6; 1 calm at their goal throughout: squads 7") == 0);
         CHECK(m[4].way == 0 && m[4].whole == CO_LW_MOVE_GOAL);
+        g_case = "the median of two is the longer way";
+        memset(m, 0, sizeof m);
+        for (int i = 0; i < 2; i++) { at[0] = 0; co_lw_move_sample(&m[i], at, CO_LW_MOVE_GOAL, &way5); }
+        co_lw_move_note(m, 16, line, sizeof line);
+        for (int i = 0; i < 2; i++) { at[0] = i ? 50.0f : 10.0f; co_lw_move_sample(&m[i], at, CO_LW_MOVE_GOAL, &way5); }
+        co_lw_move_note(m, 16, line, sizeof line);
+        CHECK(strstr(line, "2 squads calm with a goal throughout, their way least 10 m, median 50 m; 0 under 9 m;") != NULL);
         g_case = "a list names eight squads and counts them all";
         memset(m, 0, sizeof m);
         for (int i = 0; i < 12; i++) { at[0] = 0; co_lw_move_sample(&m[i], at, CO_LW_MOVE_NO_GOAL, &way5); }

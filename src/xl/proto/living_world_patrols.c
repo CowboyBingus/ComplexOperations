@@ -498,20 +498,22 @@ static void LwPatrolsTick(void)
 }
 
 #ifdef CO_TEST
-/* Squad 0 as a road patrol on a line of `n` road nodes 100 m apart, standing at node `at`, come from `prev` (-1: from
- * nowhere), with an unwalked plan that begins at `refused` (-1: none). The new plan's first node, -1 with no road plan. */
+/* Squad 0 as a road patrol on a line of road nodes 1..n, 100 m apart, node 0 off the roads and joined to node 1. It
+ * stands at node `at`, come from `prev` (-1: from nowhere), with an unwalked plan that begins at `refused` (-1:
+ * none). The new plan's first node, -1 with no road plan. */
 int CoXlTestLwRoadPlan(int n, int at, int prev, int refused)
 {
     LwSquad* q = &g_lwSquads[0];
     memset(q, 0, sizeof *q); memset(g_lwNodeKind, 0, sizeof g_lwNodeKind);
-    g_lwNodeCount = g_lwRoadNodes = LW_ROAD_NODES_MIN; g_lwArtNodes = 0; g_lwWorld.radius = 1.0e6f;
-    for (int i = 0; i < n; i++)
+    g_lwRoadNodes = LW_ROAD_NODES_MIN; g_lwNodeCount = g_lwRoadNodes + 1; g_lwArtNodes = 0; g_lwWorld.radius = 1.0e6f;
+    for (int i = 0; i < g_lwNodeCount; i++)
     {
         LwNode* node = &g_lwNodes[i];
-        memset(node, 0, sizeof *node); node->x = 100.0f * (float)i;
+        memset(node, 0, sizeof *node); node->x = i <= n ? 100.0f * (float)i : 1.0e7f; /* the rest lie outside the level */
+        if (i > n) continue;
         if (i > 0) node->next[node->degree++] = (uint16_t)(i - 1);
-        if (i + 1 < n) node->next[node->degree++] = (uint16_t)(i + 1);
-        g_lwNodeKind[i] = i == 0 || i == n - 1 ? CO_LW_ROADS_END : CO_LW_ROADS_POINT;
+        if (i < n) node->next[node->degree++] = (uint16_t)(i + 1);
+        g_lwNodeKind[i] = i == 0 ? 0 : i == 1 || i == n ? CO_LW_ROADS_END : CO_LW_ROADS_POINT;
     }
     q->node = (uint16_t)at; q->pos[0] = g_lwNodes[at].x; q->prevValid = prev >= 0; q->prevNode = (uint16_t)(prev >= 0 ? prev : 0);
     if (refused >= 0) { q->path[0] = (uint16_t)refused; q->pathLen = 1; }
