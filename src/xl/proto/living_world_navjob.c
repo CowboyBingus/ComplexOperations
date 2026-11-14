@@ -346,13 +346,21 @@ static void LwNjEndT(uintptr_t heap, uintptr_t data, uintptr_t elem, uintptr_t c
 static uintptr_t LwNjStart(uintptr_t grid, uintptr_t cellId, uintptr_t dest, uintptr_t buf)
 {
     LwNjPassFn orig = (LwNjPassFn)g_lwNj.start;
-    if (!LwLive() || !LwNjOnMain() || g_lwNj.dead || dest == 0) return orig(grid, cellId, dest, buf); /* any other level: the game's call */
+    if (!LwLive() || !LwNjOnMain() || g_lwNj.dead || dest == 0) /* any other level: the game's call */
+    {
+        uintptr_t r0 = orig(grid, cellId, dest, buf);
+#ifdef CO_RESEARCH /* the tilt probe's baseline: what a normal mission's cell builds are handed */
+        if (!LwLive() && !g_lwNj.dead && dest != 0) LwTnCellStart(grid, (uint32_t)cellId);
+#endif
+        return r0;
+    }
     int64_t sum[2] = {0, 0};
     if (g_lwNj.mode >= 1 && !LwNjSum(grid, (uint32_t)cellId, buf, sum)) g_lwNj.c.skips++;
     else if (g_lwNj.mode >= 1) { LwNjReserveArr(dest + 0x18, sum[0]); LwNjReserveArr(dest + 0x28, sum[1]); }
     uintptr_t r = orig(grid, cellId, dest, buf);
     g_lwNj.c.jobs++;
     LwNjJobStart(dest);
+    LwTnCellStart(grid, (uint32_t)cellId);
     return r;
 }
 

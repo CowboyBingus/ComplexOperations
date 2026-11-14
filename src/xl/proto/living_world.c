@@ -2550,7 +2550,8 @@ static void LwTestCommands(void)
 
 /* With the 30 s notes: the obstacle smashes spared, and where the members stood against the drawn ground; the
  * counts start again. */
-static void LwTiltScan(void); static void LwTiltNote(void); /* living_world_tilt.c */
+static void LwTiltScan(void); static void LwTiltNote(void); static void LwTiltBaseline(void); /* living_world_tilt.c */
+static void LwTnCellStart(uintptr_t grid, uint32_t cellId); /* living_world_tiltnav.c */
 static void LwGroundNote(void)
 {
     { LONG spared = InterlockedExchange(&g_lwSpared, 0); if (spared) Note("living world: obstacle smashes (30 s): squad mates kept out of the zones %ld times (a mate is tested again every frame of a zone)", (long)spared); }
@@ -4225,7 +4226,8 @@ static void LwSlowTickNote(double ms, uint64_t tsc, const uint64_t* sect0, ULONG
 static void LivingTickBody(void);
 static void LivingTick(void)
 {
-    if (!LwEnabled() || !LwLive()) return;
+    if (!LwEnabled()) return;
+    if (!LwLive()) { LwTiltBaseline(); return; }
     LARGE_INTEGER a, b, f;
     uint64_t sect0[LW_S_COUNT], tsc0 = __builtin_ia32_rdtsc();
     memcpy(sect0, g_lwSect.ticks, sizeof sect0); memset(g_lwJobTicks, 0, sizeof g_lwJobTicks);
@@ -4330,6 +4332,7 @@ static void LwRmCmd(const char* a) { (void)a; } /* the render phase timer and th
 #include "living_world_tasks.c" /* test instrument: the physics task queue's timeline (KB physics-step-task-graph) */
 #include "living_world_records.c" /* test fix: the destruction records' room and hash (KB xl-destruction-record-map-full) */
 #include "living_world_mover.c" /* the 256 navmesh boundary requests a frame (KB living-world-mover-query-overflow) */
+#include "living_world_tiltnav.c" /* diagnostic: the nav objects, faces and cell builds at a prop a tilted unit stands on */
 #include "living_world_tilt.c" /* diagnostic: units tilted past the ground under them, and what their rays meet */
 #include "living_world_defer.c" /* mission locations' loose entities spawned near the players (KB living-world-density) */
 #include "living_world_skin.c" /* the skin palette levers' instrument: render worlds, frames, palette-job waits */
