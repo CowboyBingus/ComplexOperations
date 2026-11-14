@@ -20,6 +20,19 @@ void CoXlTestLayerTile(int slot, int in, float cx, float cy);
 void CoXlTestLayerTileLater(int slot, int in, float cx, float cy);
 int CoXlTestLayerBusy(void);
 void CoXlTestNearLevelLeft(int ship);
+int CoXlTestStreamLayerBusy(void);
+int CoXlTestLayerThreadDone(void);
+uint32_t CoXlTestLayerFills(void);
+
+/* Two pollers of one finished change, started together. */
+static volatile LONG g_go;
+static DWORD WINAPI Poller(LPVOID unused)
+{
+    (void)unused;
+    while (!g_go) YieldProcessor();
+    CoXlTestLayerBusy();
+    return 0;
+}
 uint64_t CoXlTestLayerField(uint64_t unit, uint64_t field);
 int CoXlTestLayerHeight(uint64_t desc, float x, float y, float* h);
 void CoXlTestStreamSetup(uintptr_t game, uint8_t* context, uint8_t* array, uint32_t count);
@@ -38,6 +51,8 @@ int CoXlTestStreamQueued(uint32_t i);
 void CoXlTestStreamScan(void);
 uint32_t CoXlTestStreamScanFrames(int frames);
 uint32_t CoXlTestStreamDrain(double ms, uint32_t* waiting);
+void CoXlTestStreamTick(void);
+void CoXlTestMission(uintptr_t level, int complex);
 void CoXlTestStreamOutSince(uint32_t i, unsigned long long since);
 uint32_t CoXlTestWindowEvictFar(uint32_t base, uint32_t high);
 void CoXlTestStreamSlotState(uint32_t i, int* live, int* due, uint64_t* unit);
@@ -48,6 +63,14 @@ void CoXlTestProbe(char kind, float x, float y, float used, int why);
 void CoXlTestProbeCounts(long* reads, long* off, long* written);
 uint64_t CoXlTestLayerSpawn(uint64_t unit, uint64_t count, uint64_t field);
 uint64_t CoXlTestThunk(int which, float* out, uint64_t* r9, uint64_t* fifth);
+int CoXlTestUnwind(uintptr_t site, int pre, uint64_t out[10]);
+int CoXlTestUnwindWith(uintptr_t site, uintptr_t handler, int kind, int pre, uint64_t out[10]);
+void CoXlTestLayerChosen(void (*fn)(uint64_t));
+void CoXlTestGridReady(int slot, LONG ready);
+void CoXlTestLayerCounts(long* grids, long* spawns, uint32_t* pending);
+float CoXlTestSeen2(uint32_t i);
+float CoXlTestSeen2Of(float side);
+int CoXlTestThunkUnwind(uint64_t out[2], uint64_t* stackTop);
 uint64_t CoXlTestLayerSnap(uint64_t unit, uint64_t field);
 void CoXlTestLayerSpawnInstall(uintptr_t exe);
 uintptr_t CoXlTestLayerSpawnDetour(void);
@@ -159,6 +182,7 @@ static void Start(const char* name)
     g_coMod = (HfMod*)&g_fake;
     CoXlTestGame((uintptr_t)g_fake.image);
     CoXlTestWorldLevel((uintptr_t)g_lg, 0);
+    { const uint32_t play = 3; memcpy(g_lg + 0x1E4, &play, 4); } /* the level generator's state: finished, in play */
     CoXlTestGenLevel(8.0f);
     for (int k = 0; k < 4; k++) { g_coarse[k] = U16(40.0f); g_tileA[k] = U16(45.0f); g_tileB[k] = U16(30.0f); g_tileC[k] = U16(20.0f); }
     CoXlTestCoarse(g_coarse, 2, 16383.5f);
@@ -205,6 +229,23 @@ static void Slot(uint32_t i, float x, float y, float side, uint64_t unit, int mi
     CoXlTestStreamSlot(i, x, y, unit, mission);
 }
 
+static int Lines(const char* text)
+{
+    int n = 0;
+    for (const char* at = g_fake.log; (at = strstr(at, text)) != NULL; at++) n++;
+    return n;
+}
+static void Generator(uint32_t state) { memcpy(g_lg + 0x1E4, &state, 4); }
+/* The game's state as WorldStreamTick asks it: [game+0x3326340]+0xAC21C, 4 in a mission (and through its unload). */
+static void InMission(void)
+{
+    static uint8_t* object;
+    if (object == NULL) object = (uint8_t*)VirtualAlloc(NULL, 0xAD000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    const uint64_t at = (uint64_t)(uintptr_t)object; const uint32_t mission = 4;
+    memcpy(g_fake.image + 0x3326340u, &at, 8);
+    memcpy(object + 0xAC21Cu, &mission, 4);
+}
+
 /* The mission world's physics bodies in use of 1048576 and its navmesh cutters of 1000 (the readers'
  * [exe+0x27BA890+0x160]+0x4C/+0x40 and [exe+0x27C6330+16]+0x20/+0x24). */
 static void Budgets(uint32_t bodies, uint32_t cutters)
@@ -216,6 +257,51 @@ static void Budgets(uint32_t bodies, uint32_t cutters)
     memcpy(exe + 0x27E0000u + 0x40, &slots, 4); memcpy(exe + 0x27E0000u + 0x4C, &bodies, 4);
     memcpy(exe + 0x27C6330u + 16u, &pool, 8);
     memcpy(exe + 0x27F0000u + 0x20, &cutters, 4); memcpy(exe + 0x27F0000u + 0x24, &room, 4);
+}
+
+/* The race the spawn guards against: a refill takes the chosen grid out of use before the spawn enters it. */
+static int g_refillSlots[2] = {-1, -1};
+static void RefillBetween(uint64_t grid)
+{
+    (void)grid;
+    for (int k = 0; k < 2; k++) if (g_refillSlots[k] >= 0) CoXlTestGridReady(g_refillSlots[k], 0);
+}
+
+/* A function with the save codes the game's hosts use (a push, an allocation, a saved register and a saved xmm at
+ * offsets from the frame), standing for the game function a stub is laid over; UnwindHostBody is past its prologue. */
+void UnwindHost(void);
+extern const uint8_t UnwindHostBody[];
+__asm__(".text\n.p2align 4\n.globl UnwindHost\n.globl UnwindHostBody\nUnwindHost:\n"
+        "  .seh_proc UnwindHost\n"
+        "  pushq %rbx\n  .seh_pushreg %rbx\n"
+        "  subq $0x60, %rsp\n  .seh_stackalloc 0x60\n"
+        "  movq %r12, 0x20(%rsp)\n  .seh_savereg %r12, 0x20\n"
+        "  movaps %xmm6, 0x30(%rsp)\n  .seh_savexmm %xmm6, 0x30\n"
+        "  .seh_endprologue\n"
+        "UnwindHostBody:\n  nop\n  nop\n  nop\n  nop\n  nop\n  nop\n  nop\n  nop\n"
+        "  movaps 0x30(%rsp), %xmm6\n  movq 0x20(%rsp), %r12\n  addq $0x60, %rsp\n  popq %rbx\n  retq\n"
+        "  .seh_endproc\n");
+
+/* A host laid out as the game's: a fragment past the root's code whose data saves xmm6 and chains to the root (a push,
+ * 0x60, r12 saved), the root naming a handler when `handler`. Registered as a table of its own. Returns a site in the
+ * fragment's body. */
+static uintptr_t ChainedHost(int handler)
+{
+    uint8_t* h = (uint8_t*)VirtualAlloc(NULL, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (h == NULL) return 0;
+    memset(h, 0xCC, 0x800);
+    static const uint8_t root[12] = {1u | 0u, 0x10, 4, 0, 0x10, 0x04 | (12 << 4), 4, 0, 0x08, 0x02 | (11 << 4), 0x02, 0x00 | (3 << 4)};
+    memcpy(h + 0x800, root, sizeof root);
+    if (handler) { h[0x800] = 1u | (UNW_FLAG_EHANDLER << 3); uint32_t at = 0x300; memcpy(h + 0x80C, &at, 4); }
+    static const uint8_t frag[8] = {1u | (UNW_FLAG_CHAININFO << 3), 0x08, 2, 0, 0x08, 0x08 | (6 << 4), 3, 0};
+    memcpy(h + 0x840, frag, sizeof frag);
+    RUNTIME_FUNCTION chain = {0x000, 0x100, 0x800};
+    memcpy(h + 0x848, &chain, sizeof chain);
+    RUNTIME_FUNCTION* table = (RUNTIME_FUNCTION*)(h + 0x900);
+    table[0] = (RUNTIME_FUNCTION){0x000, 0x100, 0x800};
+    table[1] = (RUNTIME_FUNCTION){0x100, 0x200, 0x840};
+    if (!RtlAddFunctionTable(table, 2, (DWORD64)(uintptr_t)h)) return 0;
+    return (uintptr_t)h + 0x180;
 }
 
 int main(void)
@@ -278,6 +364,44 @@ int main(void)
     CHECK(CoXlTestLayerBusy());
     CoXlTestNearLevelLeft(0);
     CHECK(!CoXlTestLayerBusy());
+
+    Start("the stream's spawns wait on their own poll: a change nothing else polls is finished by it");
+    a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);
+    CoXlTestLayerTile(a, 1, AX, AY);
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTileLater(b, 1, BX, AY);
+    {
+        int polls = 0;
+        while (CoXlTestStreamLayerBusy() && polls < 20000) { Sleep(1); polls++; }
+        CHECK(polls < 20000);
+    }
+    fb = Field(1900.0f, AY);
+    CHECK(fb != 0 && fb != Field(2100.0f, AY) && Near(Read(fb, 1900.0f, AY), 30.0f)); /* the new grid in use */
+
+    Start("two pollers of one finished change: it is finished once (one flip of the grid's descriptor)");
+    a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);
+    CoXlTestLayerTile(a, 1, AX, AY);
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    {
+        int once = 1;
+        for (int round = 0; round < 12; round++)
+        {
+            uint32_t before = CoXlTestLayerFills();
+            CoXlTestLayerTileLater(b, 1, BX, AY);
+            int polls = 0;
+            while (!CoXlTestLayerThreadDone() && polls < 20000) { Sleep(1); polls++; }
+            g_go = 0;
+            HANDLE t[2] = {CreateThread(NULL, 0, Poller, NULL, 0, NULL), CreateThread(NULL, 0, Poller, NULL, 0, NULL)};
+            Sleep(2);
+            InterlockedExchange(&g_go, 1);
+            WaitForMultipleObjects(2, t, TRUE, INFINITE);
+            CloseHandle(t[0]); CloseHandle(t[1]);
+            once &= CoXlTestLayerFills() == before + 1 && !CoXlTestLayerBusy();
+        }
+        CHECK(once);
+        fb = Field(1900.0f, AY);
+        CHECK(fb != 0 && Near(Read(fb, 1900.0f, AY), 30.0f));
+    }
 
     Start("a tile goes: the other grids hold the coarse ground there again, and its own grid is out of use");
     a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);
@@ -528,8 +652,28 @@ int main(void)
     int pLive = 0, pDue = 0; uint64_t pUnit = 0;
     CoXlTestStreamSlotState(0, &pLive, &pDue, &pUnit);
     CHECK(g_destroys == destroys + 1 && !pLive && pDue);
+    CHECK(CoXlTestSeen2(0) == CoXlTestSeen2Of(20.0f) && CoXlTestSeen2Of(20.0f) > 1.0f); /* ranked by how far its 20 m footprint is seen */
     CoXlTestLayerTile(b, 1, BX, AY);
     CHECK(fake_host_logged("1 spawned on the level's heights by a tile, 1 of them since put back on a grid, 0 kept (not the streamer's to put back), 0 waiting"));
+
+    g_case = "a refill between the grid's choice and the spawn's entry: the level's heights, not counted on a grid, listed once";
+    {
+        static uint8_t race[0x400];
+        float at2[2] = {2100.0f, AY};
+        memcpy(race + 0x50, at2, 8);
+        const uint64_t unit2 = (uint64_t)(uintptr_t)race;
+        long grids0 = 0, spawns0 = 0, grids1 = 0, spawns1 = 0; uint32_t pending0 = 0, pending1 = 0;
+        CoXlTestLayerCounts(&grids0, &spawns0, &pending0);
+        g_refillSlots[0] = a; g_refillSlots[1] = b; /* every live grid: the second choice finds none */
+        CoXlTestLayerChosen(RefillBetween);
+        CHECK(CoXlTestLayerSpawn(unit2, 3, level) == level);
+        CHECK(CoXlTestLayerSpawn(unit2, 3, level) == level); /* spawned again before its grid came */
+        CoXlTestLayerChosen(NULL);
+        g_refillSlots[0] = g_refillSlots[1] = -1;
+        CoXlTestGridReady(a, 1); CoXlTestGridReady(b, 1);
+        CoXlTestLayerCounts(&grids1, &spawns1, &pending1);
+        CHECK(spawns1 == spawns0 + 2 && grids1 == grids0 && pending1 == pending0 + 1);
+    }
 
     g_case = "a grid write waits for the spawns reading it and says when one is still reading";
     uint64_t current = Field(2100.0f, AY);
@@ -553,6 +697,45 @@ int main(void)
     CHECK(CoXlTestLayerSnap(SpawnUnit(2100.0f, AY, 0, 0), level) == Field(2100.0f, AY)); /* a placed-unit call on its own still gets the grid */
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
     CoXlTestProbePlayer(0, 0.0f, 0.0f);
+
+    /* The mission's unload (game 0xAB36F0) steps the generator to 0 and destroys every unit of the world itself while
+     * the game state still says mission: from then on the streamer destroys nothing and scans nothing. */
+    Start("the level leaves play: the streamer's tick does nothing and no removal destroys a unit");
+    CoXlTestMission((uintptr_t)g_lg, 1);
+    StreamGame();
+    InMission();
+    Stream(4); /* the fourth holds no unit */
+    a = CoXlTestTileAddAt(AX, AY, g_tileA, 2, SPAN);
+    CoXlTestLayerTile(a, 1, AX, AY);
+    b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
+    CoXlTestLayerTile(b, 1, BX, AY);
+    Slot(0, BX + 500.0f, AY, 20.0f, 0x1000, 0);
+    Slot(1, BX + 1600.0f, AY, 20.0f, 0x2000, 0);
+    Slot(2, BX + 400.0f, AY, 20.0f, 0x3000, 0);
+    CoXlTestStreamTick(); /* in play, nothing to take out */
+    CHECK(g_destroys == 0 && Lines("the level is no longer in play") == 0);
+    CHECK(CoXlTestStampsReplace(b, BX, AY) == 2 && CoXlTestStreamFlag(0) && CoXlTestStreamFlag(2));
+    Generator(0); /* the unload's reset */
+    CoXlTestStreamTick();
+    CHECK(g_destroys == 0 && !CoXlTestStreamQueued(0) && !CoXlTestStreamQueued(2)); /* no scan either */
+    CHECK(fake_host_logged("the level is no longer in play (generator state 0): streaming stops with 3 stamp units held and 0 removals queued; none is destroyed here"));
+    CoXlTestStreamTick();
+    CHECK(g_destroys == 0 && Lines("the level is no longer in play") == 1);
+    uint32_t left = 9;
+    CHECK(CoXlTestStreamScanFrames(1) == 0 && g_destroys == 0); /* a removal reached past the tick's test: its own */
+    Generator(4); /* cancelling */
+    CoXlTestStreamTick();
+    CHECK(CoXlTestStreamScanFrames(1) == 0 && CoXlTestStreamDrain(1.0e9, &left) == 0 && g_destroys == 0);
+    int goneLive = 0, goneDue = 0; uint64_t goneUnit = 0;
+    CoXlTestStreamSlotState(0, &goneLive, &goneDue, &goneUnit);
+    CHECK(goneLive && goneUnit == 0x1000 && CoXlTestStreamFlag(0)); /* held as it was */
+    Generator(3); /* the same level in play: the removals go as before */
+    CoXlTestStreamTick();
+    CHECK(g_destroys == 2);
+    CoXlTestStreamSlotState(0, &goneLive, &goneDue, &goneUnit);
+    CHECK(!goneLive && goneUnit == 0);
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestMission(0, 0);
 
     Start("the layer spawn's two callers with a heightfield go through it, only on the reviewed code");
     uint8_t* exe = fake_host_exe();
@@ -615,6 +798,29 @@ int main(void)
     CHECK(CoXlTestThunk(1, out, &r9, &fifth) == 77);
     CHECK(out[0] == 0.5f && out[1] == 1.0f && out[2] == 2.0f && out[3] == 3.0f && out[4] == 4.0f && out[5] == 5.0f);
     CHECK(r9 == 0x44 && fifth == 0x5555);
+
+    Start("a stub over a game function's body unwinds as that function at the site, and the thunks have unwind data");
+    {
+        uintptr_t site = (uintptr_t)UnwindHostBody + 4u; /* past its prologue */
+        uint64_t u[10] = {0};
+        CHECK(CoXlTestUnwind(site, 0, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0 && u[0] >= 0x1000u && u[0] < 0x1400u);
+        CHECK(u[3] != 0 && u[4] != 0); /* r12 and xmm6 came off the stack: the save offsets were applied */
+        CHECK(CoXlTestUnwind(site, 1, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0);
+        CHECK(CoXlTestUnwindWith(site, 0, 1, 0, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0); /* four pushes and 0x80: 0xA0 */
+        CHECK(CoXlTestUnwindWith(site, 0, 1, 1, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0);
+        uintptr_t chained = ChainedHost(0), guarded = ChainedHost(1);
+        CHECK(chained != 0 && guarded != 0);
+        if (chained != 0 && guarded != 0)
+        {
+            CHECK(CoXlTestUnwindWith(chained, 0, 1, 0, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0 && u[3] != 0 && u[4] != 0);
+            CHECK(CoXlTestUnwindWith(chained, 0, 0, 0, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0);
+            CHECK(CoXlTestUnwindWith(chained, 0, 1, 1, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0); /* 3 bytes in: every game code */
+            CHECK(CoXlTestUnwindWith(guarded, 0, 0, 0, u) == -12);                        /* a handler not named: refused */
+            CHECK(CoXlTestUnwindWith(guarded, (guarded & ~(uintptr_t)0xFFF) + 0x300, 0, 0, u) == 0 && memcmp(u, u + 5, 5 * sizeof u[0]) == 0);
+        }
+        uint64_t t[2] = {0}, top = 0;
+        CHECK(CoXlTestThunkUnwind(t, &top) == 0 && t[1] == top + 0x98u + 8u && t[0] == 0x2000u + 0x98u / 8u);
+    }
 
     if (g_failed) { printf("layergrid: %d checks failed\n", g_failed); return 1; }
     printf("layergrid: all cases passed\n");

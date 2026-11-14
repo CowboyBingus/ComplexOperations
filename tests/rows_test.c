@@ -1,6 +1,7 @@
 /* The row readers' copies and the distance row: HellForge's row and table are never written, a level that is not
- * complex reads what it read without the mod, a complex one gets three missions' outposts and objectives and the
- * radii and distance of a 16384 m world, and a refused install leaves every site as it was. */
+ * complex reads what it read without the mod, a complex one gets three missions' outposts and objectives, an empty
+ * outpost draw taken again under every class, and the radii and distance of a 16384 m world, and a refused install
+ * leaves every site as it was. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,8 +61,8 @@ int main(void)
     DWORD old;
     CHECK(co_rows_check(game) == NULL && g_fake.writes == 0 && co_rows_city_ratio() == 1.0f);
     {
-        const uint32_t readers[3] = {CO_ROW_RADII_SITE, CO_ROW_OUTPOSTS_SITE + 7u, CO_ROW_OBJECTIVES_SITE + 5u};
-        for (int i = 0; i < 3; i++)
+        const uint32_t readers[4] = {CO_ROW_RADII_SITE, CO_ROW_OUTPOSTS_SITE + 7u, CO_ROW_OBJECTIVES_SITE + 5u, CO_ROW_EMPTY_SITE + 2u};
+        for (int i = 0; i < 4; i++)
         {
             image = Reset("a reader is another game's");
             image[readers[i]] ^= 0x10;
@@ -91,11 +92,12 @@ int main(void)
     image = Reset("the install");
     uint8_t* before = (uint8_t*)malloc(FAKE_IMAGE_SIZE);
     memcpy(before, image, FAKE_IMAGE_SIZE);
-    CHECK(co_rows_install(game) == NULL && g_fake.writes == CO_DISTANCE_SITES + 3);
+    CHECK(co_rows_install(game) == NULL && g_fake.writes == CO_DISTANCE_SITES + 4);
     const uintptr_t code = co_rows_test_code();
     const float* distance = co_rows_test_distance();
     CHECK(code != 0 && distance != NULL);
-    CHECK(Jumps(image, CO_ROW_RADII_SITE, code, 8) && Jumps(image, CO_ROW_OUTPOSTS_SITE, code + 0x80u, 8) && Jumps(image, CO_ROW_OBJECTIVES_SITE, code + 0x100u, 6));
+    CHECK(Jumps(image, CO_ROW_RADII_SITE, code, 8) && Jumps(image, CO_ROW_OUTPOSTS_SITE, code + 0x80u, 8) && Jumps(image, CO_ROW_OBJECTIVES_SITE, code + 0x100u, 6) &&
+        Jumps(image, CO_ROW_EMPTY_SITE, code + 0x180u, 9));
     for (int i = 0; i < CO_DISTANCE_SITES; i++)
     {
         int32_t disp; memcpy(&disp, image + sites[i].rva + sites[i].at, 4);
@@ -104,7 +106,7 @@ int main(void)
     /* HellForge's table and level 10's row are read, never written; the copy is its eleven rows */
     CHECK(memcmp(image + FAKE_STOCK_DISTANCE, before + FAKE_STOCK_DISTANCE, 0x1000) == 0 && memcmp(image + FAKE_STOCK_ROW_TEN, before + FAKE_STOCK_ROW_TEN, 0x330) == 0);
     CHECK(memcmp(distance, image + FAKE_STOCK_DISTANCE, 33 * sizeof(float)) == 0);
-    CHECK(co_rows_install(game) == NULL && g_fake.writes == CO_DISTANCE_SITES + 3); /* once */
+    CHECK(co_rows_install(game) == NULL && g_fake.writes == CO_DISTANCE_SITES + 4); /* once */
     /* level 10's city factor by the map's growth, over the complex row's */
     CHECK(co_rows_city_ratio() == 0.85f * 2.5f / (0.95f / 0.38f));
 
@@ -173,9 +175,73 @@ int main(void)
         }
         co_rows_honours(0);
     }
+    {
+        g_case = "an empty outpost draw, run";
+        /* the game's two ways on: the candidates again (returns 0x1000 + r12d) and the next size (0x2000 + edi + r12d) */
+        static const uint8_t build[9] = {0xB8, 0x00, 0x10, 0x00, 0x00, 0x44, 0x01, 0xE0, 0xC3};               /* mov eax, 0x1000; add eax, r12d; ret */
+        static const uint8_t back[11] = {0xB8, 0x00, 0x20, 0x00, 0x00, 0x01, 0xF8, 0x44, 0x01, 0xE0, 0xC3};   /* ...; add eax, edi; add eax, r12d; ret */
+        memcpy(image + CO_ROW_EMPTY_BUILD, build, sizeof build);
+        memcpy(image + CO_ROW_EMPTY_BACK, back, sizeof back);
+        /* rbp the pass's frame, [rsp+0x60] the pass; r12d and edi hold what the game's loop left in them */
+        static const uint8_t draw[] = {
+            0x55, 0x41, 0x54, 0x57, 0x53,                   /* push rbp; push r12; push rdi; push rbx */
+            0x48, 0x81, 0xEC, 0x88, 0x00, 0x00, 0x00,       /* sub rsp, 0x88 */
+            0x48, 0x8B, 0x29,                               /* mov rbp, [rcx] */
+            0x48, 0x8B, 0x41, 0x08, 0x48, 0x89, 0x44, 0x24, 0x58, /* mov rax, [rcx+8]; mov [rsp+0x58], rax: [rsp+0x60] behind the call */
+            0x41, 0xBC, 0x55, 0x55, 0x00, 0x00,             /* mov r12d, 0x5555 */
+            0xBF, 0x77, 0x77, 0x00, 0x00,                   /* mov edi, 0x7777 */
+            0xFF, 0x51, 0x10,                               /* call [rcx+0x10] */
+            0x48, 0x81, 0xC4, 0x88, 0x00, 0x00, 0x00,       /* add rsp, 0x88 */
+            0x5B, 0x5F, 0x41, 0x5C, 0x5D, 0xC3};            /* pop rbx; pop rdi; pop r12; pop rbp; ret */
+        memcpy(image + RUN + 0x100u, draw, sizeof draw);
+        typedef struct Draw { uint8_t* frame; void* pass; uintptr_t stub; } Draw;
+        float map[0x108 / 4];                              /* the map's class weights at +0xF0, 6 read */
+        uint8_t settings[0xC8];
+        uint8_t* weights = (uint8_t*)calloc(1, 0x500);
+        void* settingsAt = map;
+        memset(map, 0, sizeof map); memset(settings, 0, sizeof settings);
+        for (int c = 0; c < 6; c++) map[0xF0 / 4 + c] = 1.0f + (float)c;
+        memcpy(settings + 0xC0, &settingsAt, 8);
+        void* pass[4] = {0, settings, 0, level};
+        uint32_t placed = 3;
+        memcpy(weights + 0xC8, &placed, 4);
+        /* {complex, the class kept (0: all the map's), a class zeroed (-1: none)} -> where on */
+        static const int cases[][4] = {
+            {1, 1, -1, 0x1000},  /* one class, empty: again under every class */
+            {1, 5, -1, 0x1000},
+            {1, 3, -1, 0x1000},
+            {1, 0, -1, 0x2003},  /* every class already: the size is dropped, as the game does */
+            {1, 0, 4, 0x1000},   /* a first draw without class 5's quota: again with it */
+            {1, 0, 2, 0x1000},   /* ... class 3's */
+            {1, 0, 0, 0x1000},   /* ... class 1's */
+            {0, 1, -1, 0x2003}}; /* HellForge's level 11: the game's own */
+        long before = co_rows_retries();
+        long taken = 0;
+        for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++)
+        {
+            float w[6];
+            for (int c = 0; c < 6; c++) w[c] = cases[i][1] == 0 || cases[i][1] == c + 1 ? map[0xF0 / 4 + c] : 0.0f;
+            if (cases[i][2] >= 0) w[cases[i][2]] = 0.0f;
+            w[5] = -7.0f;                                  /* +0x414 is not a class: not compared, but copied as the game's 8 bytes */
+            memcpy(weights + 0x400, w, sizeof w);
+            memcpy(level + 0x2D7C, cases[i][0] ? &key : &hellforge, 4);
+            Draw d = {weights, pass, code + 0x180u};
+            const uint32_t got = ((uint32_t (*)(Draw*))(void*)(image + RUN + 0x100u))(&d);
+            if (got != (uint32_t)cases[i][3]) printf("  case %zu: 0x%X\n", i, got);
+            CHECK(got == (uint32_t)cases[i][3]);
+            if (got == 0x1000u)
+            {
+                taken++;
+                CHECK(memcmp(weights + 0x400, map + 0xF0 / 4, 24) == 0); /* the map's five, and the game's sixth float */
+            }
+            else CHECK(memcmp(weights + 0x400, w, sizeof w) == 0);
+        }
+        CHECK(co_rows_retries() - before == taken && taken == 6);
+        free(weights);
+    }
     free(level);
 
-    for (int fail = 0; fail < CO_DISTANCE_SITES + 3; fail++)
+    for (int fail = 0; fail < CO_DISTANCE_SITES + 4; fail++)
     {
         image = Reset("a site that cannot be written");
         memcpy(before, image, FAKE_IMAGE_SIZE);

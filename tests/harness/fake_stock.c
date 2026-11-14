@@ -131,6 +131,7 @@ void fake_stock_rows(uint8_t* image)
     memcpy(image + CO_ROW_RADII_SITE, kCoRowRadii, sizeof kCoRowRadii);
     memcpy(image + CO_ROW_OUTPOSTS_SITE, kCoRowOutposts, sizeof kCoRowOutposts);
     memcpy(image + CO_ROW_OBJECTIVES_SITE, kCoRowObjectives, sizeof kCoRowObjectives);
+    memcpy(image + CO_ROW_EMPTY_SITE, kCoRowEmpty, sizeof kCoRowEmpty);
     memcpy(image + FAKE_STOCK_ROW_TEN + 0xF0u, radii, sizeof radii);
     g_fake.levelTen = (uintptr_t)image + FAKE_STOCK_ROW_TEN;
 }
