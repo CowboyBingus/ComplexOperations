@@ -456,6 +456,40 @@ static void RoadsPointsWatch(uintptr_t block, uint32_t op)
     Note("roads: level %ld road points after op 0x%02X: %u (the spurs left %u)%s", (long)g_world.levels, op, now, g_spurs.points, now == g_spurs.points ? "" : ": CHANGED");
 }
 
+/* roadlines-<level>.tsv, so a run can stand on the roads: a row per point in path order, world metres (the generator's
+ * less half the world): "a", edge, width, x, y for an arterial's; "s", spur, the edge it joins, x, y for a spur's,
+ * from its place to the arterial. */
+static void RoadsLinesFile(uintptr_t block)
+{
+    const RoadsLayout L = {g_routeEdges, g_routePoints, 0};
+    RoadEdge* e = NULL; uint32_t points = 0, rows = 0;
+    const uint32_t n = RoadsReadEdges(block, &L, &e);
+    float* pts = RoadsReadPoints(block, &L, &points);
+    wchar_t name[48];
+    swprintf(name, 48, L"roadlines-%ld.tsv", (long)g_world.levels);
+    HANDLE file = pts != NULL ? OpenLog(name) : INVALID_HANDLE_VALUE;
+    const float half = 1024.0f * g_world.current;
+    char line[96]; DWORD wrote;
+    for (uint32_t i = 0; file != INVALID_HANDLE_VALUE && i < n; i++)
+    {
+        if (!((g_arterials.bits[i >> 3] >> (i & 7)) & 1) || !RoadEdgeHasPoints(&e[i], points)) continue;
+        for (uint32_t p = e[i].first; p < e[i].end; p++, rows++)
+        {
+            const int len = snprintf(line, sizeof line, "a\t%u\t%.1f\t%.1f\t%.1f\n", i, (double)e[i].width, (double)(pts[2 * p] - half), (double)(pts[2 * p + 1] - half));
+            WriteFile(file, line, TsvLength(line, sizeof line, len), &wrote, NULL);
+        }
+    }
+    for (uint32_t k = 0; file != INVALID_HANDLE_VALUE && k < g_spurs.count; k++)
+        for (uint32_t p = g_spurs.spur[k].first; p < g_spurs.spur[k].end && p < points; p++, rows++)
+        {
+            const int len = snprintf(line, sizeof line, "s\t%u\t%u\t%.1f\t%.1f\n", k, g_spurs.spur[k].edge, (double)(pts[2 * p] - half), (double)(pts[2 * p + 1] - half));
+            WriteFile(file, line, TsvLength(line, sizeof line, len), &wrote, NULL);
+        }
+    if (file != INVALID_HANDLE_VALUE) { CloseHandle(file); Note("roads: level %ld roadlines-%ld.tsv written (%u points)", (long)g_world.levels, (long)g_world.levels, rows); }
+    RoadsFreeEdges(e, n);
+    if (pts != NULL) VirtualFree(pts, 0, MEM_RELEASE);
+}
+
 /* After the level's op 0x0F: the spurs' points and their capsules in the level's index, before any stamp is placed. */
 static void RoadsSpursBuild(uintptr_t block, uint64_t context)
 {
@@ -507,6 +541,7 @@ static void RoadsSpursBuild(uintptr_t block, uint64_t context)
         g_spurs.terms, km, (double)longest, at - points, g_spurs.reserve, onRoad, tooFar, noRoom, noIndex, RoadsIndexFree(index, ROADS_INDEX_COUNT));
     RoadsFreeEdges(e, n);
     VirtualFree(pts, 0, MEM_RELEASE);
+    RoadsLinesFile(block);
 }
 
 /* ---- The corridor census (log only) ----
