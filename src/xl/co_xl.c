@@ -1132,6 +1132,7 @@ uint32_t CoXlTestRoadsLeftOut(const uint8_t* recs, uint32_t n, const uint8_t* ta
 { RoadEdge e[64]; n = RoadsTestEdges(recs, n, e); return RoadsSpacingLeftOut(e, n, taken, used, capacity, spacing, total); }
 float CoXlTestRoadsSpacing(const uint8_t* recs, uint32_t n, const uint8_t* taken, uint32_t used, uint32_t capacity, uint32_t* total, uint32_t* left)
 { RoadEdge e[64]; n = RoadsTestEdges(recs, n, e); return RoadsSpacingChoose(e, n, taken, used, capacity, total, left); }
+const char* CoXlTestInstallRoadSpacing(uintptr_t game, uint8_t** stub) { const char* why = InstallRoadSpacing(game); *stub = (uint8_t*)g_roadSpacing.key - 0x30; return why; }
 void CoXlTestRoadSpacingBuild(uint8_t* stub, uintptr_t constant, uintptr_t back) { RoadSpacingBuild(stub, constant, back); }
 void CoXlTestRoadSpacingAt(uint8_t* stub) { g_roadSpacing.key = (volatile uint64_t*)(stub + 0x30); g_roadSpacing.spacing = (volatile float*)(stub + 0x38); g_roadSpacing.level = -1; }
 void CoXlTestRoadsSpacingBegin(uintptr_t block, uint64_t record) { RoadsSpacingBegin(block, record); }
