@@ -9,6 +9,7 @@
 #define CO_CUTTERS_H
 
 #include "co.h"
+#include "co_cutset.h"
 
 #define CO_CUTTERS_DESTROY 0x8127A0u /* exe: (rcx handles, edx count), no result */
 #define CO_CUTTERS_MAKE 0x812CC0u    /* exe: (rcx description) -> handle, 0 when none was made */
@@ -30,8 +31,42 @@ const char* co_cutters_install(uintptr_t exe);
 typedef struct CoCuttersSeen { uint64_t dropped, failed; uint32_t usedAtFail, roomAtFail; } CoCuttersSeen;
 void co_cutters_seen(CoCuttersSeen* out);
 
+
+/* The trees' cutters, record only (co_cutset.h): with this armed, on a complex level the make hook records each
+ * cutter the forest makes (the call that returns to CO_CUTTERS_FOREST_RETURN, type 3, world 2) and the destroy hook
+ * drops it. The description is read, never written: the game adds every cutter as before. */
+#define CO_CUTTERS_FOREST_RETURN 0x8155F8u /* exe: after the forest's call of the make (0x8155F3) */
+#define CO_CUTTERS_AI_WORLDS 0x190D4A0u    /* exe: a physics world's AI world, 0x80 bytes a world (0x812BB4) */
+#define CO_CUTTERS_MASK 0x28u              /* pool: the handle's slot bits (0x7D7F9F, read at 0x812B47) */
+#define CO_CUTTERS_DESC_TYPE 0x0u          /* description: 3 is a cutter bound to a physics body (0x812D1B) */
+#define CO_CUTTERS_DESC_WORLD 0x4u         /* (0x812CDF) */
+#define CO_CUTTERS_DESC_ADD 0xCu           /* "add to the AI world now" (0x8132F8; the forest's store 0x815508) */
+#define CO_CUTTERS_DESC_MATRIX 0x10u       /* pointer to a 4x4 matrix; the place is its +0x30, +0x34 (0x8154AB, 0x815521) */
+
+/* Arms the record with `cap` cutters on and `adds` a tick at most. NULL, or why not: the engine's code at the
+ * sites above and at the switch 0x812AE0 is not the code this was made for, or no memory. */
+const char* co_cutters_record_arm(uintptr_t exe, uint32_t cap, uint32_t adds);
+/* A complex level is live, or no longer: leaving drops every record. Returns the records dropped. */
+uint32_t co_cutters_live(int complex);
+typedef struct CoCuttersTick
+{
+    int bound, hooked, capped;
+    uint32_t records, wanted, on, cap, adds, removes, shed, waiting, over;
+    uint64_t trees, others, unbound, refused, replaced, stale, destroyed, binds;
+    uintptr_t world;
+    double us;
+} CoCuttersTick;
+/* One tick of the set over these centres, game thread: what it would add and remove, counted as done and not sent
+ * to the engine. 0 when not armed or no complex level is live. */
+int co_cutters_tick(const CoCutCentre* centres, uint32_t count, uint32_t nowMs, uint32_t removes, CoCuttersTick* out);
+
 #ifdef CO_TEST
 void co_cutters_test_reset(void);
+/* The make hook as a call that returns to `from`. */
+uint32_t co_cutters_test_make(const void* description, uintptr_t from);
+typedef struct CoCuttersPin { uint32_t rva; const char* pin; } CoCuttersPin;
+const CoCuttersPin* co_cutters_test_record_pins(size_t* count);
+const CoCutSet* co_cutters_test_set(void);
 #endif
 
 #endif

@@ -4750,6 +4750,7 @@ static void LwSlowTickNote(double ms, uint64_t tsc, const uint64_t* sect0, ULONG
 }
 
 static void LivingTickBody(void);
+static void LwCutFrame(int mission, int host); /* living_world_cutters.c */
 static void LivingTick(void)
 {
     if (!LwEnabled()) return;
@@ -4790,12 +4791,13 @@ static void LivingTickBody(void)
     LwPatrolsOff();
     int host = 0, mission = ActMission(g_lw.game, &host, NULL);
     LwPfFrame(mission); /* every peer, before this frame's physics step */
-    if (!mission || !host) return;
+    if (!mission || !host) { LwCutFrame(mission, 0); return; } /* a client's trees have cutters too */
     LwTraceTick();
     uintptr_t dir;
     if (EvpPtr(g_lw.game + LW_DIRECTOR, &dir)) LwNavTick(dir);
     LwGarrisonsTick();
     LwSquadsTick();
+    LwCutFrame(1, 1); /* after the squads' tick: their places are this frame's */
     LwTiltScan();
 }
 
@@ -4805,6 +4807,7 @@ static void LwInstallZeroBox(void); static void LwNjLive(int complex); /* living
 static void SunFarRetry(void); /* xl_sun_slice.c: far shadows' site, if a thread was inside it */
 static uintptr_t LwZbSite(void); static LONG LwNjWanted(void);
 static void LwVboxLeave(void); static void LwBpLeave(void); static void LwCorpseLeave(void); static void LwAibLeave(void);
+static void LwCutLive(int complex);
 static void LwLiveSet(int complex)
 {
     /* the frame-time levers: on for a complex level, the game's state again before any other level's first frame */
@@ -4812,6 +4815,7 @@ static void LwLiveSet(int complex)
     co_switch_live(CO_SWITCH_XL, complex);
     LwNjLive(complex);
     if (!complex) { LwVboxLeave(); LwBpLeave(); LwCorpseLeave(); LwAibLeave(); }
+    LwCutLive(complex);
     static int noted = -1; /* one line a change of kind, so a run shows each lever on and off */
     if (noted != (complex != 0))
     {
@@ -4846,6 +4850,7 @@ static void LwLiveSet(int complex)
 #include "living_world_corpse.c" /* settled ring corpses frozen as in disposal */
 #include "living_world_pairs.c" /* after living_world_corpse.c: dead ragdoll bones keep only ground and trigger pairs */
 #include "living_world_aibudget.c" /* the AI path threads' time a step, raised while requests wait */
+#include "living_world_cutters.c" /* research: the trees' navmesh cutters near players and squads, record only */
 #include "living_world_semcap.c" /* test: the worker wake tokens capped at the worker count */
 #include "living_world_srwwake.c" /* Wine's shared SRW release without the needless wake (KB frame-cost-swarm-cap2) */
 #include "living_world_registry.c" /* the unit registry lookup without its lock; old arrays kept */

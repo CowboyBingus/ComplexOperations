@@ -78,6 +78,7 @@ The tactical map's types (`HfScreen`, `HfDraw`, `HfInput`) are the mod SDK's own
 | `living_world_navjob.c`, `living_world_vbox.c` | On by default. Their hooks pass straight to the game's code unless the mission is complex. Leaving one, the nav job returns to mode 0 with the game's vtable, and the vehicle boxes drop their copies. The nav job's completion sites are research only. |
 | `difficulty_tacmap.c` | The screen goes in through the SDK's `add_screen` on M. The fork loaded `hellforge_overlay.dll` itself, from beside the loader, and started it with fonts from other mods' folders. Refused, it logs why and the session has no map screen. |
 | `living_world_corpse.c`, `living_world_aibudget.c` | Their leave clears the mod's own state. The AI budget's leave also writes the game's budget back: one AI world serves the session. |
+| `living_world_cutters.c` | Research only (`HELLFORGE_LW_CUTTERS=1`), record only: the hooks of `../co_cutters.c` record the trees' cutters on a complex level into `../co_cutset.c`, and the tick counts what it would switch on and off. Nothing is written to the game. |
 | `living_world_bp.c` | Research only (`HELLFORGE_LW_BP=1`); its hooks act only on a complex mission. |
 | `living_world_defer.c` | Every research install of the levers and instruments is under `CO_RESEARCH`. |
 | `living_world_render.c` | The render thread's test delay is research only. |
