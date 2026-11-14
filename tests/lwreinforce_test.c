@@ -24,6 +24,14 @@ void CoXlTestLwStallLines(uint32_t n);
 int CoXlTestLwGates(int held, int placeOk, int roomOk, int* places, int* rooms, int* retryMs);
 void CoXlTestLwMissionClear(void);
 uint32_t CoXlTestLwStallOther(void);
+uint32_t CoXlTestLwStallNoGoal(void);
+int CoXlTestLwSlotsChecked(int held, uint32_t waited);
+int CoXlTestLwJobSettled(int state, uint32_t waited);
+int CoXlTestLwNodeReached(int intent, float nodeX, float goalX, int goalNode, float atX);
+int CoXlTestLwGoalNode(void);
+uint64_t CoXlTestLwHeldFrom(void);
+int CoXlTestLwStallTries(int set);
+int CoXlTestLwStallStep(int intent, int tries, int action, int busy, int snapOff, int* after);
 
 static int g_failed;
 static const char* g_case;
@@ -50,6 +58,8 @@ static void BandEdge(void)
         CHECK(stage == 0 && held == 1);
     }
     CHECK(pos[0] == edge[0] && pos[1] == edge[1]); /* the hold keeps it where it waits */
+    const uint64_t heldFrom = CoXlTestLwHeldFrom();
+    CHECK(heldFrom != 0 && heldFrom + 2000 > GetTickCount64());
     CHECK(Count("reached the fight") == 0);
 
     g_case = "a player stepping up pushes it out to the edge; still stage 0, no arrival";
@@ -67,10 +77,10 @@ static void BandEdge(void)
     CHECK(stage == 1 && Count("reached the fight") == 1);
     const uint64_t first = at;
     CHECK(first + 2000 > GetTickCount64());
+    Sleep(20); /* a second wait and a second arrival come at a later millisecond than the first */
     CoXlTestLwPlayerAt(fight); /* the player walks up to it: inside the band, back to stage 0 and out to the edge */
     CoXlTestLwWalk(0.1f, &stage, &held, pos, &at);
-    CHECK(stage == 0);
-    Sleep(20); /* a second arrival comes at a later millisecond than the first */
+    CHECK(stage == 0 && held == 1 && CoXlTestLwHeldFrom() == heldFrom); /* waiting again in the same intent: its wait is not started again */
     CoXlTestLwPlayerAt(away);
     for (int k = 0; k < 4000 && stage == 0; k++) CoXlTestLwWalk(0.1f, &stage, &held, pos, &at);
     CHECK(stage == 1 && at == first && Count("reached the fight") == 1); /* the 120 s wait still counts from the first */
@@ -131,6 +141,10 @@ static void Refusals(void)
 static void Gates(void)
 {
     int places, rooms, retry;
+    g_case = "member slots are sight-checked for every near squad, for a waiting one only in its first 40 s at the edge";
+    CHECK(CoXlTestLwSlotsChecked(0, 0) == 1 && CoXlTestLwSlotsChecked(0, 600000) == 1);
+    CHECK(CoXlTestLwSlotsChecked(1, 0) == 1 && CoXlTestLwSlotsChecked(1, 39000) == 1);
+    CHECK(CoXlTestLwSlotsChecked(1, 40000) == 0 && CoXlTestLwSlotsChecked(1, 200000) == 0);
     g_case = "a waiting squad is placed first; placed and refused room, it asks again in a second, not next tick";
     CHECK(CoXlTestLwGates(1, 1, 0, &places, &rooms, &retry) == 0 && places == 1 && rooms == 1 && retry > 900 && retry <= 1000);
     g_case = "a waiting squad refused placement is not asked about room (the 3 s retry is placement's own)";
@@ -194,6 +208,44 @@ static void HeldWhy(void)
     CHECK(Count("waiting at the spawn band's edge,") == 80 && Count("(the last such line this mission)") == 1);
 }
 
+/* LW_STALL_*: 1 left to a brain action, 2 waits, 3 goal again, 4 goal moved onto the leader's layer, 5 new goal;
+ * intents: 0 patrol, 1 investigate, 2 reinforce, 3 retake. */
+static void StallStep(void)
+{
+    int after = -1;
+    g_case = "a brain action on the leader, or a path request in flight: nothing is done and no try is used";
+    CHECK(CoXlTestLwStallStep(0, 0, 1, 0, 1, &after) == 1 && after == 0);
+    CHECK(CoXlTestLwStallStep(0, 3, 1, 1, 0, &after) == 1 && after == 3);
+    CHECK(CoXlTestLwStallStep(2, 1, 0, 1, 1, &after) == 2 && after == 1);
+    g_case = "the first try sends the goal again, whatever the snap says";
+    CHECK(CoXlTestLwStallStep(0, 0, 0, 0, 0, &after) == 3 && after == 1);
+    CHECK(CoXlTestLwStallStep(2, 0, 0, 0, 1, &after) == 3 && after == 1);
+    g_case = "later tries: an event squad's goal moves onto the leader's layer when that is off it, else a new goal";
+    CHECK(CoXlTestLwStallStep(2, 1, 0, 0, 1, &after) == 4 && after == 2);
+    CHECK(CoXlTestLwStallStep(1, 2, 0, 0, 1, &after) == 4 && after == 3);
+    CHECK(CoXlTestLwStallStep(2, 1, 0, 0, 0, &after) == 5 && after == 2);
+    g_case = "a patrol never takes the moved goal (its node is reached at the node): a new goal";
+    CHECK(CoXlTestLwStallStep(0, 1, 0, 0, 1, &after) == 5 && after == 2);
+    g_case = "the tries stop counting at 255";
+    CHECK(CoXlTestLwStallStep(0, 255, 0, 0, 0, &after) == 5 && after == 255);
+}
+
+static void Goals(void)
+{
+    g_case = "goals wait for the job's state entry: state 10, or 2 s when the state stays another or unread";
+    CHECK(CoXlTestLwJobSettled(10, 0) == 1 && CoXlTestLwJobSettled(9, 0) == 0 && CoXlTestLwJobSettled(11, 1999) == 0);
+    CHECK(CoXlTestLwJobSettled(-1, 1999) == 0 && CoXlTestLwJobSettled(-1, 2000) == 1 && CoXlTestLwJobSettled(4, 2000) == 1);
+    g_case = "a patrol's node is reached within 15 m of it, or of the goal sent for it";
+    CHECK(CoXlTestLwNodeReached(0, 500, 480, 0, 486) == 1 && CoXlTestLwNodeReached(0, 500, 480, 0, 514) == 1);
+    CHECK(CoXlTestLwNodeReached(0, 500, 480, 0, 484) == 1 && CoXlTestLwNodeReached(0, 500, 480, 0, 466) == 1); /* by the goal only */
+    CHECK(CoXlTestLwNodeReached(0, 500, 480, 0, 464) == 0 && CoXlTestLwNodeReached(0, 500, 480, 0, 516) == 0);
+    g_case = "a goal sent for another node, for none, or none at all does not reach this node";
+    CHECK(CoXlTestLwNodeReached(0, 500, 480, 3, 470) == 0 && CoXlTestLwNodeReached(0, 500, 480, -1, 470) == 0);
+    CHECK(CoXlTestLwNodeReached(0, 500, 0, -2, 5) == 0 && CoXlTestLwNodeReached(0, 500, 0, -2, 490) == 1);
+    g_case = "an event squad reaches no patrol node; a goal sent names no node until the patrol send sets it";
+    CHECK(CoXlTestLwNodeReached(2, 500, 480, 0, 500) == 0 && CoXlTestLwNodeReached(1, 500, 480, 0, 480) == 0);
+    CHECK(CoXlTestLwGoalNode() == -1);
+}
 static void Stall(void)
 {
     const float goal[2] = {500, 0}, at[2] = {0, 0}, byGoal[2] = {490, 0};
@@ -202,30 +254,58 @@ static void Stall(void)
     g_case = "an online squad still for 30 s with a goal 500 m away: one line, counted";
     CoXlTestLwStall(1, at, goal, 1000);
     CoXlTestLwStall(0, at, goal, 1000);
-    CHECK(CoXlTestLwStall(0, at, goal, 30000) == 0 && Count("still for 30 s") == 0);
-    CHECK(CoXlTestLwStall(0, at, goal, 31001) == 1 && Count("still for 30 s") == 1);
-    CHECK(Count("still for 30 s (calm), 500 m from its goal (500, 0, 0.0)") == 1);
+    CHECK(CoXlTestLwStall(0, at, goal, 30000) == 0 && Count("made no way for 30 s") == 0);
+    CHECK(CoXlTestLwStall(0, at, goal, 31001) == 1 && Count("made no way for 30 s") == 1);
+    CHECK(Count("made no way for 30 s (calm), 500 m from its goal (500, 0, 0.0)") == 1);
     g_case = "still for another 30 s: counted again, no second line in the same stretch";
-    CHECK(CoXlTestLwStall(0, at, goal, 61001) == 2 && Count("still for 30 s") == 1);
-    g_case = "a walking squad (4 m per 10 s) is never still";
+    CHECK(CoXlTestLwStall(0, at, goal, 61001) == 2 && Count("made no way for 30 s") == 1);
+    g_case = "a walking squad (15 m per 10 s toward its goal) is never stalled";
     CoXlTestLwStall(1, walk, goal, 1000);
-    for (int k = 1; k <= 12; k++) { walk[0] = 4.0f * k; CoXlTestLwStall(0, walk, goal, 1000 + 10000u * k); }
-    CHECK(CoXlTestLwStall(0, walk, goal, 1000 + 10000u * 12) == 0 && Count("still for 30 s") == 1);
+    for (int k = 1; k <= 12; k++) { walk[0] = 15.0f * k; CoXlTestLwStall(0, walk, goal, 1000 + 10000u * k); }
+    CHECK(CoXlTestLwStall(0, walk, goal, 1000 + 10000u * 12) == 0 && Count("made no way for 30 s") == 1);
+    g_case = "a squad milling 8 m to and fro across its way for 30 s moves, but is stalled";
+    const float mill[3][2] = {{0, 0}, {0, 8}, {0, -8}};
+    CoXlTestLwStall(1, mill[0], goal, 1000);
+    for (int k = 1; k <= 30; k++) CoXlTestLwStall(0, mill[k % 3], goal, 1000 + 1000u * k);
+    CHECK(CoXlTestLwStall(0, mill[1], goal, 31001) == 1 && Count("made no way for 30 s") == 2);
+    g_case = "a stalled squad's tries start again once it makes 20 m of way, and are kept while it mills";
+    CoXlTestLwStall(1, mill[0], goal, 1000);
+    CoXlTestLwStall(0, mill[0], goal, 1000);
+    CoXlTestLwStallTries(2);
+    CoXlTestLwStall(0, mill[1], goal, 11000);
+    CHECK(CoXlTestLwStallTries(-1) == 2);
+    const float nearer[2] = {19, 0}, way[2] = {21, 0};
+    CoXlTestLwStall(0, nearer, goal, 12000);
+    CHECK(CoXlTestLwStallTries(-1) == 2);
+    CoXlTestLwStall(0, way, goal, 13000);
+    CHECK(CoXlTestLwStallTries(-1) == 0);
     g_case = "within 15 m of its goal it has arrived, not stalled";
     CoXlTestLwStall(1, byGoal, goal, 1000);
     CoXlTestLwStall(0, byGoal, goal, 1000);
-    CHECK(CoXlTestLwStall(0, byGoal, goal, 40000) == 0 && Count("still for 30 s") == 1);
+    CHECK(CoXlTestLwStall(0, byGoal, goal, 40000) == 0 && Count("made no way for 30 s") == 2);
+    CoXlTestLwStallTries(3);
+    CHECK(CoXlTestLwStall(0, byGoal, goal, 41000) == 0 && CoXlTestLwStallTries(-1) == 0); /* there: its tries start again */
     g_case = "goal-less and rushing squads standing still are noted apart, not counted as calm stalls";
     CoXlTestLwStall(2, at, goal, 1000);
-    CHECK(CoXlTestLwStall(0, at, goal, 32000) == 0 && CoXlTestLwStallOther() == 1 && Count("still for 30 s (calm, no goal sent), no goal sent") == 1);
+    CHECK(CoXlTestLwStall(0, at, goal, 32000) == 0 && CoXlTestLwStallOther() == 1 && Count("made no way for 30 s (calm, no goal sent), no goal sent") == 1);
     CoXlTestLwStall(3, at, goal, 1000);
-    CHECK(CoXlTestLwStall(0, at, goal, 32000) == 0 && CoXlTestLwStallOther() == 1 && Count("still for 30 s (rushing)") == 1);
+    CHECK(CoXlTestLwStall(0, at, goal, 32000) == 0 && CoXlTestLwStallOther() == 1 && Count("made no way for 30 s (rushing)") == 1);
+    g_case = "a patrol left goal-less by its last send is asked for a goal again once per 30 s still; other goal-less squads are not";
+    CHECK(CoXlTestLwStallNoGoal() == 0);
+    CoXlTestLwStall(4, at, goal, 1000);
+    CoXlTestLwStall(0, at, goal, 1000);
+    CHECK(CoXlTestLwStall(0, at, goal, 30000) == 0 && CoXlTestLwStallNoGoal() == 0);
+    CHECK(CoXlTestLwStall(0, at, goal, 31001) == 0 && CoXlTestLwStallNoGoal() == 1);
+    CHECK(CoXlTestLwStall(0, at, goal, 61002) == 0 && CoXlTestLwStallNoGoal() == 2);
+    CoXlTestLwStall(5, at, goal, 1000);
+    CoXlTestLwStall(0, at, goal, 1000);
+    CHECK(CoXlTestLwStall(0, at, goal, 31001) == 0 && CoXlTestLwStallNoGoal() == 2); /* an event squad's goal is its intent's */
     g_case = "at most 20 such lines a mission, apart from the calm ones' 40";
     for (int k = 0; k < 30; k++) { CoXlTestLwStall(2, at, goal, 1000); CoXlTestLwStall(0, at, goal, 1000); CoXlTestLwStall(0, at, goal, 32000); }
-    CHECK(Count("still for 30 s (calm, no goal sent)") + Count("still for 30 s (rushing)") == 20);
+    CHECK(Count("made no way for 30 s (calm, no goal sent)") + Count("made no way for 30 s (rushing)") == 20);
     g_case = "at most 40 lines a mission";
     for (int k = 0; k < 60; k++) { CoXlTestLwStall(1, at, goal, 1000); CoXlTestLwStall(0, at, goal, 1000); CoXlTestLwStall(0, at, goal, 32000); }
-    CHECK(Count("still for 30 s (calm)") == 40);
+    CHECK(Count("made no way for 30 s (calm)") == 40);
     CHECK(Count("(the last such line this mission)") == 3); /* the held-why's, the other stalls' and this one */
 }
 
@@ -241,6 +321,8 @@ int main(void)
     Slots();
     Budget();
     HeldWhy();
+    Goals();
+    StallStep();
     Stall();
     if (g_failed) { printf("lwreinforce: %d checks failed\n", g_failed); return 1; }
     printf("lwreinforce: all cases passed\n");
