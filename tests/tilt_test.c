@@ -301,6 +301,11 @@ int main(void)
     const float o1[3] = {104.0f, -200.0f, 15.5f}, down[3] = {0, 0, -2.0f}, flat[3] = {0.87f, 0, -0.49f};
     CHECK(CoXlTestTiltGroundAlong(o1, down, &t) && fabsf(t - 1.5f) < 0.02f);
     CHECK(!CoXlTestTiltGroundAlong(o1, flat, &t)); /* 60.6 deg from straight down */
+    CoXlTestLeanTile(100.0f, -200.0f, 12.0f, 0.0f, 0.0f); /* level ground: only the ray's angle decides */
+    const float o2[3] = {104.0f, -200.0f, 13.0f}, near60[3] = {0.85f, 0, -0.53f};
+    CHECK(!CoXlTestTiltGroundAlong(o2, flat, &t));
+    CHECK(CoXlTestTiltGroundAlong(o2, near60, &t) && fabsf(t - 1.0f / 0.5291f) < 0.02f); /* 58 deg: 1 m down along a ray of length 1.0017 */
+    CoXlTestLeanTile(100.0f, -200.0f, 12.0f, 0.5f, 0.0f);
 
     g_case = "the 30 s line";
     CoXlTestTiltNote();

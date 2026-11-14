@@ -315,13 +315,13 @@ static float LwTiltRead(uintptr_t mgr, uint32_t i, uintptr_t rays, uint32_t requ
 #if defined(CO_RESEARCH) || defined(CO_TEST)
         LARGE_INTEGER a, b;
         QueryPerformanceCounter(&a);
-        const float read = LwTiltOverProp(mgr, i, rays + 0x40ull * (request - 1), o, d);
+#endif
+        d = LwTiltOverProp(mgr, i, rays + 0x40ull * (request - 1), o, d);
+#if defined(CO_RESEARCH) || defined(CO_TEST)
         QueryPerformanceCounter(&b);
         LwTiltCost(b.QuadPart - a.QuadPart);
-        return read;
-#else
-        return LwTiltOverProp(mgr, i, rays + 0x40ull * (request - 1), o, d);
 #endif
+        return d;
     }
     float ground = LwTiltTileGround(o[0], o[1]);
     if (!(ground > -9000.0f)) return d;
