@@ -358,6 +358,17 @@ int co_cutters_cut(float x, float y, float r, uint32_t* waiting)
     return cut;
 }
 
+float co_cutters_tree(float x, float y, float r, int* on)
+{
+    float d = -1.0f;
+    *on = 0;
+    if (!g_rec.armed || !g_rec.live) return d;
+    AcquireSRWLockExclusive(&g_rec.lock);
+    if (g_rec.set.world != 0) d = co_cutset_tree(&g_rec.set, x, y, r, on);
+    ReleaseSRWLockExclusive(&g_rec.lock);
+    return d;
+}
+
 #ifdef CO_TEST
 void co_cutters_test_reset(void)
 {

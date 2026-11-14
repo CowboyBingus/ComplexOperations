@@ -591,6 +591,8 @@ int main(void)
         AiWorld((uint64_t)(uintptr_t)scene);
         block[2] = 5; co_cutters_swap((uintptr_t)scene); /* not armed: not counted */
         CHECK(co_cutters_cut(40.0f, -70.0f, 32.0f, &waiting) == -1 && waiting == 0);
+        int on = 9;
+        CHECK(co_cutters_tree(40.0f, -70.0f, 32.0f, &on) == -1.0f && on == 0); /* nothing recorded */
         CHECK(co_cutters_record_arm((uintptr_t)g_exe, CO_CUTSET_SLOTS, CO_CUTSET_ADDS) == NULL);
         co_cutters_test_switch(EngineSwitch);
         co_cutters_live(1);
@@ -602,9 +604,13 @@ int main(void)
         g_makeAnswer = 0x81010401u;
         CHECK(co_cutters_test_make(&d, forest) == 0x81010401u && g_addSeen == 0);
         CHECK(co_cutters_cut(40.0f, -70.0f, 32.0f, &waiting) == 0 && waiting == 1);
+        on = 9;
+        { const float off = co_cutters_tree(40.0f, -70.0f, 32.0f, &on); CHECK(off >= 0.0f && off <= 32.0f && on == 0); }
+        CHECK(co_cutters_tree(40.0f, -70.0f - 33.0f, 32.0f, &on) == -1.0f);
         CHECK(co_cutters_cut(40.0f, -70.0f - 33.0f, 32.0f, &waiting) == 1 && waiting == 0);
         CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1 && t.adds == 1);
         CHECK(co_cutters_cut(40.0f, -70.0f, 32.0f, &waiting) == 0 && waiting == 0); /* sent, no run yet */
+        CHECK(co_cutters_tree(40.0f, -70.0f, 32.0f, &on) >= 0.0f && on == 1);
         /* swaps that take nothing of this world's: an empty queue, another world's, none */
         block[2] = 0; queue[7] = 0; co_cutters_swap((uintptr_t)scene);
         block[2] = 5; co_cutters_swap((uintptr_t)other); co_cutters_swap(0);

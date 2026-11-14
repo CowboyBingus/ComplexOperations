@@ -65,6 +65,8 @@ void co_cutters_swap(uintptr_t scene);
  * steps: 1 yes, 0 not yet (`waiting` wanted cutters there are not on), -1 the mod holds no make back now (not
  * switching, no tick in the last second, not bound), so the cutters there are the game's. */
 int co_cutters_cut(float x, float y, float r, uint32_t* waiting);
+/* The nearest recorded tree within `r` of a place (co_cutset_tree), any mode: -1 with none or nothing recorded. */
+float co_cutters_tree(float x, float y, float r, int* on);
 typedef struct CoCuttersTick
 {
     int bound, hooked, capped;

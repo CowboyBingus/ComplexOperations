@@ -11,7 +11,7 @@
 enum { LW_CUT_WAITS, LW_CUT_IS_CUT, LW_CUT_GAMES, LW_CUT_LATE };
 static struct
 {
-    int on, mode, client; uint32_t removes; ULONGLONG tickAt, notedAt;
+    int on, mode, client, body; uint32_t removes; ULONGLONG tickAt, notedAt;
     double holdSum, holdWorst;
     uint32_t ticks, adds, removed, shed, capped, waiting, over, players, last, squads, beside, left; double usSum, usWorst;
     CoCutHeld held[EVT_MAX_PLAYERS];
@@ -108,11 +108,157 @@ static void LwCutInit(void)
     g_lwCut.client = LwCutClient(cl);
     const char* why = co_cutters_record_arm(ApiModuleBase("helldivers2.exe", NULL), cap, adds);
     if (why != NULL) { Note("living world: tree cutters: %s; not recorded", why); return; }
+    char body[8] = "";
+    GetEnvironmentVariableA("HELLFORGE_LW_CUTTERS_BODY", body, sizeof body);
+    g_lwCut.body = body[0] != '0';
     g_lwCut.on = 1; g_lwCut.mode = (int)mode; g_lwCut.removes = removes; g_lwCut.notedAt = GetTickCount64();
     co_cutters_switch(mode >= 2);
     if (mode == 1) Note("living world: tree cutters: record only on complex levels (the game adds every cutter as before): cap %u on, %u adds and %u removes a tick at most", cap, adds, removes);
     else Note("living world: tree cutters: switching on complex levels (mode %u): the game makes each tree's cutter and the mod adds those in reach: cap %u on, %u adds and %u removes a tick at most; a client %s",
         mode, cap, adds, removes, g_lwCut.client == 0 ? "is left to the game" : g_lwCut.client == 1 ? "adds around its players" : "adds none");
+}
+
+/* Launch measurements, HELLFORGE_LW_CUTTERS_BODY=0 turns them off: what a squad member placed beside a tree does
+ * (a second apart for 20 s), and the navigators' repaths against the navmesh runs that take cutter changes. */
+#define LW_CUT_BODY_TREE_M 6.0f   /* "beside a tree": a trunk's hole and the agent's radius are well inside this */
+#define LW_CUT_BODY_ENROL_MS 5000 /* a squad's members appear within this of its coming online */
+#define LW_CUT_BODY_S 20
+#define LW_CUT_BODY_MAX 32
+#define LW_CUT_BODY_LEVEL 96      /* members watched a level: 20 lines each */
+#define LW_CUT_BODY_STUCK 5       /* seconds with a goal and no way made */
+#define LW_CUT_NAVS 1024
+typedef struct LwCutBody { uint32_t unit; int squad; ULONGLONG at; float spot[2]; uint8_t used, samples, still, busy, stuck; } LwCutBody;
+static struct
+{
+    LwCutBody unit[LW_CUT_BODY_MAX]; uint32_t squadOf[LW_SQUADS_MAX]; ULONGLONG until[LW_SQUADS_MAX];
+    uint32_t watched, stuck, gone;
+    struct { uint32_t handle, count; } nav[LW_CUT_NAVS];
+    uint32_t took, sinceRun, after, afterTicks, other, otherTicks, navs, unread;
+} g_lwCutBody;
+
+/* A navigator handle's place in its pool, as the engine's lookup 0x7DF8D0: `form` is the pool's +0x1C (the slot's
+ * size, where its own handle is, where its navigator pointer is). 0 for a handle the pool does not hold. */
+static int LwCutNavSlot(uint32_t handle, uint32_t count, uint32_t mask, uint32_t live, uint32_t form, uint32_t* key, uint32_t* at)
+{
+    const uint32_t i = handle & mask, base = (form & 0xFFFFu) * i;
+    if (handle == 0xFFFFFFFFu || i >= count || (live & handle) == 0) return 0;
+    *key = base + ((form >> 16) & 0xFFu); *at = base + (form >> 24);
+    return 1;
+}
+static uintptr_t LwCutNavigator(uintptr_t exe, uint32_t handle)
+{
+    uintptr_t pool = 0, base = 0, nav = 0; uint32_t head[7], key = 0, at = 0, own = 0; /* the pool's +0x1C .. +0x34 */
+    if (handle == 0xFFFFFFFFu || !EvpPtr(exe + 0x27C5A60u + 0x28ull * (handle >> 30), &pool) || !EvpPtr(pool, &base) || SafeRead(pool + 0x1C, head, sizeof head)) return 0;
+    if (!LwCutNavSlot(handle, head[2], head[3], head[6], head[0], &key, &at) || SafeRead(base + key, &own, 4) || own != handle || !EvpPtr(base + at, &nav)) return 0;
+    return nav;
+}
+/* An entity's navigation record ([game+0x3326418]: hash +0x30, its component at [+0x48][i] with the entity at +8,
+ * records +0x50 of 0xA8 as 0x5397EA..0x53985A adds one); 0 with none. */
+static uintptr_t LwCutNavRecord(uint32_t unit)
+{
+    uintptr_t mgr = 0, recs = 0, descs = 0, d = 0; uint32_t i = 0;
+    if (!EvpPtr(g_lw.game + 0x3326418u, &mgr) || !EvpHash(mgr + 0x30, unit, 8, 4, &i) || !EvpPtr(mgr + 0x48, &descs) || !EvpPtr(descs + 8ull * i, &d) ||
+        EvpU32(d + 8, 0) != unit || !EvpPtr(mgr + 0x50, &recs)) return 0;
+    return recs + 0xA8ull * i;
+}
+/* The mover's last clip status of an entity (its 0xA4-byte work record's +0x60, which 0x59EA72 tests for 4). */
+static uint32_t LwCutMotion(uint32_t unit)
+{
+    uintptr_t mgr = 0, descs = 0, d = 0, recs = 0; uint32_t i = 0, status = 0xFFFFFFFFu;
+    if (!EvpPtr(g_lw.game + 0x3326558u, &mgr) || !EvpHash(mgr + 0x48A0, unit, 8, 4, &i) || !EvpPtr(mgr + 0x48B8, &descs) || !EvpPtr(descs + 8ull * i, &d) ||
+        EvpU32(d + 8, 0) != unit || !EvpPtr(mgr + 0x48D0, &recs) || SafeRead(recs + 0xA4ull * i + 0x60, &status, 4)) return 0xFFFFFFFFu;
+    return status;
+}
+/* One second's sample of a watched member: 1 when it has a goal and for LW_CUT_BODY_STUCK samples in a row either
+ * stayed within 0.5 m of one spot or its navigator's state was not 0 (following its path). */
+static int LwCutBodyStep(LwCutBody* b, const float* p, uint32_t goals, uint32_t state)
+{
+    const float dx = p[0] - b->spot[0], dy = p[1] - b->spot[1];
+    if (dx * dx + dy * dy >= 0.5f * 0.5f) { b->spot[0] = p[0]; b->spot[1] = p[1]; b->still = 0; }
+    else if (b->still < 255) b->still++;
+    b->busy = state == 0 ? 0 : b->busy < 255 ? (uint8_t)(b->busy + 1) : 255;
+    if (goals == 0) b->still = b->busy = 0;
+    return b->still >= LW_CUT_BODY_STUCK || b->busy >= LW_CUT_BODY_STUCK;
+}
+/* Navigation record `i` holds navigator `handle` whose repath count reads `count`: the repaths since the last read
+ * of the same navigator there (a record's slot is reused, so another handle starts afresh). */
+static uint32_t LwCutRepathStep(uint32_t i, uint32_t handle, uint32_t count)
+{
+    const uint32_t d = g_lwCutBody.nav[i].handle == handle && count >= g_lwCutBody.nav[i].count ? count - g_lwCutBody.nav[i].count : 0;
+    g_lwCutBody.nav[i].handle = handle; g_lwCutBody.nav[i].count = count;
+    return d;
+}
+/* A tick's repaths (navigator +0x204, which 0xBDD8BC raises), counted apart for the second after a navmesh run
+ * that began with changes: `took` is the count of such runs. */
+static void LwCutRepaths(uintptr_t exe, uint32_t took)
+{
+    uintptr_t mgr = 0, recs = 0; uint32_t n = 0, sum = 0, read = 0, unread = 0;
+    if (took != g_lwCutBody.took) { g_lwCutBody.took = took; g_lwCutBody.sinceRun = 0; }
+    else if (g_lwCutBody.sinceRun < 1000) g_lwCutBody.sinceRun++;
+    if (!EvpPtr(g_lw.game + 0x3326418u, &mgr) || SafeRead(mgr + 0x18, &n, 4) || !EvpPtr(mgr + 0x50, &recs)) return;
+    if (n > LW_CUT_NAVS) { unread = n - LW_CUT_NAVS; n = LW_CUT_NAVS; }
+    for (uint32_t i = 0; i < n; i++)
+    {
+        uint32_t handle = 0xFFFFFFFFu, count = 0; uintptr_t nav;
+        if (SafeRead(recs + 0xA8ull * i + 8, &handle, 4) || handle == 0xFFFFFFFFu) continue; /* no navigator yet */
+        if (!(nav = LwCutNavigator(exe, handle)) || SafeRead(nav + 0x204, &count, 4)) { unread++; continue; }
+        sum += LwCutRepathStep(i, handle, count); read++;
+    }
+    g_lwCutBody.navs = read; g_lwCutBody.unread = unread;
+    if (g_lwCutBody.sinceRun < 1000 / CO_CUTSET_TICK_MS) { g_lwCutBody.after += sum; g_lwCutBody.afterTicks++; }
+    else { g_lwCutBody.other += sum; g_lwCutBody.otherTicks++; }
+}
+static void LwCutBodySample(uintptr_t exe, LwCutBody* b, ULONGLONG now)
+{
+    ActHealth h; float p[3], ray = NAN; int tile = 0, on = 0;
+    if (!ActHealthOf(g_lw.game, b->unit, &h) || !h.unit || !EvpUnitPosition(h.unit, p))
+    {
+        Note("living world: tree cutters: body: unit %08X of squad %d is gone %u s after it was placed", b->unit, b->squad, (unsigned)b->samples);
+        b->used = 0; g_lwCutBody.gone++;
+        return;
+    }
+    const uintptr_t rec = LwCutNavRecord(b->unit);
+    uint32_t state = 0xFFFFFFFFu, handle = 0xFFFFFFFFu, goals = 0, repaths = 0; uint8_t stale = 0xFF;
+    if (rec) { SafeRead(rec + 8, &handle, 4); SafeRead(rec + 0xC, &state, 4); SafeRead(rec + 0x14, &stale, 1); }
+    const uintptr_t nav = LwCutNavigator(exe, handle);
+    if (nav) { SafeRead(nav + 0x28, &goals, 4); SafeRead(nav + 0x204, &repaths, 4); }
+    if (b->samples == 0) { b->spot[0] = p[0]; b->spot[1] = p[1]; }
+    const float from = sqrtf((p[0] - b->spot[0]) * (p[0] - b->spot[0]) + (p[1] - b->spot[1]) * (p[1] - b->spot[1]));
+    const float tree = co_cutters_tree(p[0], p[1], LW_CUT_PLACE_M, &on), drawn = MoveDrawnGround(p[0], p[1], &tile);
+    const int stuck = b->samples != 0 && nav && rec && LwCutBodyStep(b, p, goals, state);
+    if (stuck && !b->stuck) { b->stuck = 1; g_lwCutBody.stuck++; }
+    LwGround(p[0], p[1], &ray);
+    Note("living world: tree cutters: body: unit %08X of squad %d, %u s: at (%.1f, %.1f, %.2f), %.2f over the ground ray, %.2f over the drawn ground; nearest tree %.1f m (cutter %s); %.2f m from its last spot; navigation state %u, stale %u, goals %u, repaths %u; motion status %u%s%s",
+        b->unit, b->squad, (unsigned)b->samples, (double)p[0], (double)p[1], (double)p[2], (double)(p[2] - ray), (double)(p[2] - drawn), (double)tree, on ? "on" : "off",
+        (double)from, state, (unsigned)stale, goals, repaths, LwCutMotion(b->unit), rec && nav ? "" : "; its navigation record or navigator did not read",
+        stuck ? "; STUCK: a goal, and 5 s within 0.5 m of one spot or with a state other than 0" : "");
+    b->at = now;
+    if (++b->samples > LW_CUT_BODY_S) b->used = 0;
+}
+/* Host: the members of a squad that came online in the last 5 s and stand beside a recorded tree are watched. */
+static void LwCutBodies(uintptr_t exe, ULONGLONG now)
+{
+    for (int i = 0; i < g_lwWorld.count; i++)
+    {
+        const LwSquad* q = &g_lwSquads[i];
+        if (q->state != LW_ONLINE) { g_lwCutBody.squadOf[i] = 0; continue; }
+        if (q->squad != g_lwCutBody.squadOf[i]) { g_lwCutBody.squadOf[i] = q->squad; g_lwCutBody.until[i] = now + LW_CUT_BODY_ENROL_MS; }
+        if (now >= g_lwCutBody.until[i]) continue;
+        for (int k = 0; k < q->seenCount && g_lwCutBody.watched < LW_CUT_BODY_LEVEL; k++)
+        {
+            int on = 0, slot = -1, known = 0;
+            for (int u = 0; u < LW_CUT_BODY_MAX; u++)
+                if (!g_lwCutBody.unit[u].used) { if (slot < 0) slot = u; }
+                else if (g_lwCutBody.unit[u].unit == q->seen[k]) known = 1;
+            if (known || slot < 0 || (q->seenAt[k][0] == 0.0f && q->seenAt[k][1] == 0.0f)) continue;
+            if (co_cutters_tree(q->seenAt[k][0], q->seenAt[k][1], LW_CUT_BODY_TREE_M, &on) < 0.0f) continue;
+            memset(&g_lwCutBody.unit[slot], 0, sizeof g_lwCutBody.unit[slot]);
+            g_lwCutBody.unit[slot].unit = q->seen[k]; g_lwCutBody.unit[slot].squad = i; g_lwCutBody.unit[slot].used = 1;
+            g_lwCutBody.watched++;
+        }
+    }
+    for (int u = 0; u < LW_CUT_BODY_MAX; u++)
+        if (g_lwCutBody.unit[u].used && now - g_lwCutBody.unit[u].at >= 1000) LwCutBodySample(exe, &g_lwCutBody.unit[u], now);
 }
 
 static void LwCutNote(ULONGLONG now, const CoCuttersTick* t)
@@ -133,6 +279,10 @@ static void LwCutNote(ULONGLONG now, const CoCuttersTick* t)
         Note("living world: tree cutters (switching): since the start: %llu makes held back, %llu added by the game with no tick in the last second, %llu added at once (not recorded), %llu not added (the AI world or the pool had gone); %llu switched on, %llu switched off; %llu ticks skipped with the AI step in flight; the set's lock held mean %.0f us, worst %.0f us a tick; %u navmesh runs began with changes; squads' requests: %u placed with their trees cut in (longest wait %u ms), %u where the cutters are the game's, %u let through uncut after %u ms, %u asks made to wait",
             (unsigned long long)t->held, (unsigned long long)t->stock, (unsigned long long)t->atOnce, (unsigned long long)t->noWorld, (unsigned long long)t->sentOn, (unsigned long long)t->sentOff, (unsigned long long)t->skips, g_lwCut.holdSum / g_lwCut.ticks, g_lwCut.holdWorst,
             t->took, g_lwCut.gate[LW_CUT_IS_CUT], g_lwCut.gateLongest, g_lwCut.gate[LW_CUT_GAMES], g_lwCut.gate[LW_CUT_LATE], LW_CUT_WAIT_MS, g_lwCut.gate[LW_CUT_WAITS]);
+    if (g_lwCut.body)
+        Note("living world: tree cutters: bodies: %u squad members watched beside a tree since the level's start (%u gone while watched, %u STUCK); navigators' repaths: %u in %u ticks within a second after a navmesh run that began with changes, %u in %u other ticks; %u navigators read at the last tick, %u not",
+            g_lwCutBody.watched, g_lwCutBody.gone, g_lwCutBody.stuck, g_lwCutBody.after, g_lwCutBody.afterTicks, g_lwCutBody.other, g_lwCutBody.otherTicks, g_lwCutBody.navs, g_lwCutBody.unread);
+    g_lwCutBody.after = g_lwCutBody.afterTicks = g_lwCutBody.other = g_lwCutBody.otherTicks = 0;
     g_lwCut.ticks = g_lwCut.adds = g_lwCut.removed = g_lwCut.shed = g_lwCut.capped = g_lwCut.waiting = g_lwCut.over = 0;
     g_lwCut.usSum = g_lwCut.usWorst = g_lwCut.holdSum = g_lwCut.holdWorst = 0; g_lwCut.notedAt = now;
 }
@@ -171,6 +321,12 @@ static void LwCutFrame(int mission, int host)
     g_lwCut.players = counts[0]; g_lwCut.last = counts[1]; g_lwCut.squads = counts[2]; g_lwCut.beside = counts[3]; g_lwCut.left = counts[4];
     g_lwCut.usSum += t.us; if (t.us > g_lwCut.usWorst) g_lwCut.usWorst = t.us;
     g_lwCut.holdSum += t.holdUs; if (t.holdUs > g_lwCut.holdWorst) g_lwCut.holdWorst = t.holdUs;
+    if (g_lwCut.body)
+    {
+        const uintptr_t exe = ApiModuleBase("helldivers2.exe", NULL);
+        LwCutRepaths(exe, t.took);
+        if (host) LwCutBodies(exe, now);
+    }
     LwCutNote(now, &t);
 }
 
@@ -181,5 +337,6 @@ static void LwCutLive(int complex)
     uint32_t dropped = co_cutters_live(complex);
     memset(g_lwCut.held, 0, sizeof g_lwCut.held); /* a last place is of its own level */
     memset(g_lwCutAsk, 0, sizeof g_lwCutAsk);
+    memset(&g_lwCutBody, 0, sizeof g_lwCutBody);
     if (g_lwCut.on && !complex && dropped) Note("living world: tree cutters: %u records dropped at the level's end", dropped);
 }

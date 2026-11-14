@@ -508,6 +508,16 @@ void CoXlTestLwCutMode(int mode) { g_lwCut.on = mode != 0; g_lwCut.mode = mode; 
 void CoXlTestLwCutWaited(int i, uint32_t ms) { g_lwCutAsk[i].first -= ms; }
 void CoXlTestLwCutGate(uint32_t* five) { memcpy(five, g_lwCut.gate, sizeof g_lwCut.gate); five[4] = g_lwCut.gateLongest; }
 int CoXlTestLwCutVerdict(int cut, uint32_t waitedMs) { return LwCutVerdict(cut, waitedMs); }
+/* The launch measurements: a navigator handle's place in its pool, a watched member's samples a second apart (`reset`
+ * starts a new member at the origin), and the repaths between two reads of a navigation record's navigator. */
+int CoXlTestLwCutNavSlot(uint32_t handle, uint32_t count, uint32_t mask, uint32_t live, uint32_t form, uint32_t* key, uint32_t* at) { return LwCutNavSlot(handle, count, mask, live, form, key, at); }
+int CoXlTestLwCutBodyStep(int reset, float x, float y, uint32_t goals, uint32_t state)
+{
+    static LwCutBody b; float p[3] = {x, y, 0};
+    if (reset) memset(&b, 0, sizeof b);
+    return LwCutBodyStep(&b, p, goals, state);
+}
+uint32_t CoXlTestLwCutRepathStep(uint32_t i, uint32_t handle, uint32_t count) { return LwCutRepathStep(i, handle, count); }
 uint32_t CoXlTestLwCutCentres(const uint64_t* players, int count, const uint64_t* peer, float (*place)[2], int streamed, int host, int none, uint64_t now, CoCutCentre* c, uint32_t* out)
 {
     EvpPlayer list[EVT_MAX_PLAYERS + 2];

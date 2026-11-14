@@ -297,6 +297,22 @@ int co_cutset_cut(const CoCutSet* s, float x, float y, float r, uint32_t epoch, 
     return *waiting == 0 && (runs >= 2 || (runs == 1 && !inFlight));
 }
 
+float co_cutset_tree(const CoCutSet* s, float x, float y, float r, int* on)
+{
+    const int x0 = Axis(x - r), x1 = Axis(x + r), y0 = Axis(y - r), y1 = Axis(y + r);
+    float best = r * r; int found = 0;
+    *on = 0;
+    for (int cy = y0; cy <= y1; cy++)
+        for (int cx = x0; cx <= x1; cx++)
+            for (uint32_t k = s->cell[(uint32_t)cy * CO_CUTSET_GRID + (uint32_t)cx].head; k != 0; k = s->rec[k - 1].next)
+            {
+                const float dx = s->rec[k - 1].x - x, dy = s->rec[k - 1].y - y, d2 = dx * dx + dy * dy;
+                if (d2 > best) continue;
+                best = d2; found = 1; *on = (s->flag[k - 1] & F_ON) != 0;
+            }
+    return found ? sqrtf(best) : -1.0f;
+}
+
 int co_cutset_covered(const CoCutCentre* centres, uint32_t count, const CoCutCentre* c)
 {
     for (uint32_t i = 0; i < count; i++)

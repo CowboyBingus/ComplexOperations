@@ -824,10 +824,22 @@ static void CutIn(void)
     CHECK(co_cutset_cut(&g_set, 110.0f, 90.0f, 32.0f, 7, 0, &waiting) == 0 && waiting == 1);
     CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 33.0f, 7, 0, &waiting) == 0 && waiting == 3);
     CHECK(co_cutset_cut(&g_set, -500.0f, 100.0f, 32.0f, 7, 0, &waiting) == 1 && waiting == 0);
+    /* the nearest recorded tree, wanted or not, and whether its cutter is on */
+    int on = 9;
+    CHECK(co_cutset_tree(&g_set, 100.0f, 100.0f, 6.0f, &on) == 5.0f && on == 0);
+    on = 9;
+    CHECK(co_cutset_tree(&g_set, 100.0f, 100.0f, 4.9f, &on) == -1.0f && on == 0);
+    CHECK(co_cutset_tree(&g_set, 108.0f, 100.0f, 6.0f, &on) == 2.0f && on == 0);
+    CHECK(co_cutset_tree(&g_set, 126.0f, 100.0f, 16.0f, &on) == 16.0f); /* at the radius, from another cell */
+    CHECK(co_cutset_tree(&g_set, 94.0f, 100.0f, 16.0f, &on) == 11.0f && co_cutset_tree(&g_set, 100.0f, 116.0f, 16.5f, &on) == 16.0f);
+    CHECK(co_cutset_tree(&g_set, 100.0f, 148.0f, 16.0f, &on) == 15.5f && co_cutset_tree(&g_set, -500.0f, 100.0f, 32.0f, &on) == -1.0f);
     /* the tick's adds carry the set's epoch: no run has begun since */
     g_set.epoch = 7;
     Tick(&squad, 1, 1000, 0);
     CHECK(g_out.adds == 4 && co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 7, 0, &waiting) == 0 && waiting == 0);
+    CHECK(co_cutset_tree(&g_set, 108.0f, 100.0f, 6.0f, &on) == 2.0f && on == 1);
+    CHECK(co_cutset_tree(&g_set, 107.0f, 100.0f, 6.0f, &on) == 2.0f && on == 0); /* the nearer one is the game's, never on */
+    CHECK(co_cutset_tree(&g_set, 108.0f, 100.0f, 6.0f, &on) == 2.0f && on == 1);
     /* one more made beside those that are on: it alone waits */
     co_cutset_made(&g_set, H(9), 111.0f, 100.0f, 1);
     CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 9, 0, &waiting) == 0 && waiting == 1);

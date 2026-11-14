@@ -83,6 +83,8 @@ void co_cutset_tick(CoCutSet* s, const CoCutCentre* centres, uint32_t count, uin
  * begun now, `inFlight` whether one is out: a run takes every change queued before it began, so the first to begin
  * after an add holds it, and it has ended once none is out or a second has begun. */
 int co_cutset_cut(const CoCutSet* s, float x, float y, float r, uint32_t epoch, int inFlight, uint32_t* waiting);
+/* The nearest record within `r` of a place: its distance in metres and whether its cutter is on; -1 with none. */
+float co_cutset_tree(const CoCutSet* s, float x, float y, float r, int* on);
 /* 1 when one of these centres reaches everything `c` does (its `in` disc and its `out` square): `c` would add no
  * cutter and keep none, so a squad beside a player takes no centre. Only the order of adds and sheds can differ. */
 int co_cutset_covered(const CoCutCentre* centres, uint32_t count, const CoCutCentre* c);

@@ -27,6 +27,53 @@ void CoXlTestLwCutMode(int mode);
 void CoXlTestLwCutWaited(int i, uint32_t ms);
 void CoXlTestLwCutGate(uint32_t* five);
 int CoXlTestLwGates(int held, int placeOk, int roomOk, int* places, int* rooms, int* retryMs);
+/* The launch measurements (LwCutNavSlot, LwCutBodyStep, LwCutRepathStep). */
+int CoXlTestLwCutNavSlot(uint32_t handle, uint32_t count, uint32_t mask, uint32_t live, uint32_t form, uint32_t* key, uint32_t* at);
+int CoXlTestLwCutBodyStep(int reset, float x, float y, uint32_t goals, uint32_t state);
+uint32_t CoXlTestLwCutRepathStep(uint32_t i, uint32_t handle, uint32_t count);
+
+static void Measures(void)
+{
+    uint32_t key = 0, at = 0;
+    g_case = "a navigator handle's slot, as the engine's lookup";
+    /* slots of 0x18 bytes, the handle at +0x10, the pointer at +0x08; index mask 0xFFFF; live bit 0x10000 */
+    CHECK(CoXlTestLwCutNavSlot(0x80010003u, 8, 0xFFFFu, 0x10000u, 0x08100018u, &key, &at) == 1 && key == 3 * 0x18 + 0x10 && at == 3 * 0x18 + 0x08);
+    CHECK(CoXlTestLwCutNavSlot(0x80010007u, 8, 0xFFFFu, 0x10000u, 0x08100018u, &key, &at) == 1 && key == 7 * 0x18 + 0x10);
+    CHECK(CoXlTestLwCutNavSlot(0x80010008u, 8, 0xFFFFu, 0x10000u, 0x08100018u, &key, &at) == 0); /* past the pool's count */
+    CHECK(CoXlTestLwCutNavSlot(0x80000003u, 8, 0xFFFFu, 0x10000u, 0x08100018u, &key, &at) == 0); /* not a live handle */
+    CHECK(CoXlTestLwCutNavSlot(0xFFFFFFFFu, 0x10000, 0xFFFFu, 0x10000u, 0x08100018u, &key, &at) == 0); /* none */
+    CHECK(CoXlTestLwCutNavSlot(0x80010103u, 8, 0xFFu, 0x10000u, 0x00040008u, &key, &at) == 1 && key == 3 * 8 + 4 && at == 3 * 8);
+
+    g_case = "a watched member is stuck after 5 s with a goal and no way made";
+    CHECK(CoXlTestLwCutBodyStep(1, 0.3f, 0.0f, 1, 0) == 0);
+    for (int i = 0; i < 3; i++) CHECK(CoXlTestLwCutBodyStep(0, 0.3f, 0.3f, 1, 0) == 0);
+    CHECK(CoXlTestLwCutBodyStep(0, 0.0f, 0.49f, 1, 0) == 1); /* the fifth second within 0.5 m of the spot */
+    CHECK(CoXlTestLwCutBodyStep(0, 0.5f, 0.0f, 1, 0) == 0);  /* 0.5 m off: a new spot */
+    for (int i = 0; i < 4; i++) CHECK(CoXlTestLwCutBodyStep(0, 0.5f, 0.4f, 1, 0) == 0);
+    CHECK(CoXlTestLwCutBodyStep(0, 0.5f, 0.4f, 1, 0) == 1);  /* measured from the new spot, on both axes */
+    g_case = "a member with no goal is never stuck, and its seconds start afresh";
+    CHECK(CoXlTestLwCutBodyStep(1, 0.0f, 0.0f, 0, 0) == 0);
+    for (int i = 0; i < 8; i++) CHECK(CoXlTestLwCutBodyStep(0, 0.0f, 0.0f, 0, 2) == 0);
+    for (int i = 0; i < 4; i++) CHECK(CoXlTestLwCutBodyStep(0, 0.0f, 0.0f, 1, 0) == 0);
+    CHECK(CoXlTestLwCutBodyStep(0, 0.0f, 0.0f, 1, 0) == 1);
+    g_case = "a moving member whose navigator stays in another state for 5 s is stuck";
+    CHECK(CoXlTestLwCutBodyStep(1, 0.0f, 0.0f, 1, 0) == 0);
+    for (int i = 1; i <= 4; i++) CHECK(CoXlTestLwCutBodyStep(0, 2.0f * (float)i, 0.0f, 1, 2) == 0);
+    CHECK(CoXlTestLwCutBodyStep(0, 10.0f, 0.0f, 1, 1) == 1);
+    CHECK(CoXlTestLwCutBodyStep(0, 12.0f, 0.0f, 1, 0) == 0); /* state 0 ends it */
+    for (int i = 1; i <= 4; i++) CHECK(CoXlTestLwCutBodyStep(0, 12.0f + 2.0f * (float)i, 0.0f, 1, 2) == 0);
+    for (int i = 0; i < 300; i++) CoXlTestLwCutBodyStep(0, 0.0f, 0.0f, 1, 2); /* the counts hold at their top */
+    CHECK(CoXlTestLwCutBodyStep(0, 0.0f, 0.0f, 1, 2) == 1);
+
+    g_case = "repaths between two reads of a record's navigator";
+    CHECK(CoXlTestLwCutRepathStep(5, 0x80010005u, 7) == 0);  /* the first read of it */
+    CHECK(CoXlTestLwCutRepathStep(5, 0x80010005u, 10) == 3);
+    CHECK(CoXlTestLwCutRepathStep(5, 0x80010005u, 10) == 0);
+    CHECK(CoXlTestLwCutRepathStep(6, 0x80010006u, 4) == 0 && CoXlTestLwCutRepathStep(5, 0x80010005u, 11) == 1); /* each record its own */
+    CHECK(CoXlTestLwCutRepathStep(5, 0x80010009u, 30) == 0); /* another navigator in the record */
+    CHECK(CoXlTestLwCutRepathStep(5, 0x80010009u, 2) == 0);  /* a count that fell is a new navigator */
+    CHECK(CoXlTestLwCutRepathStep(5, 0x80010009u, 3) == 1);
+}
 
 /* The engine as the cutters' hooks need it (cutters_test.c has the whole of it). */
 static uint8_t g_pool[0x40];
@@ -230,6 +277,7 @@ int main(void)
     CHECK(c[CO_CUTSET_CENTRES - 1].x == 3000.0f + 200.0f * (float)((CO_CUTSET_CENTRES - 3) % 16));
 
     Gate();
+    Measures();
     if (g_failed) { printf("lwcutters: %d check(s) failed\n", g_failed); return 1; }
     printf("lwcutters: all checks passed\n");
     return 0;
