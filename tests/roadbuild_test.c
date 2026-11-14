@@ -29,6 +29,12 @@ uint32_t CoXlTestRoadsSpurs(uint32_t* reserve, const float** table);
 float CoXlTestStampSegmentBox(const float* s, const float* lo, const float* hi);
 void CoXlTestRoadsSpurTerminals(const float* xy, const float* gap, uint32_t terms);
 int CoXlTestRoadsArterial(uint32_t edge);
+void CoXlTestGradePads(const float* pads, uint32_t n);
+uint32_t CoXlTestTrackBuild(uintptr_t level, uint32_t* pieces);
+uint32_t CoXlTestTrackBuiltAt(double x, double y, double texel, uint32_t ground, uint32_t* tally);
+void CoXlTestTrackThinBlock(uintptr_t block);
+int CoXlTestTrackGround(uintptr_t block, uint32_t* side);
+uint32_t CoXlTestTrackEncode(const uint32_t* src, double x, double y, double texel, uint32_t* tally);
 void CoXlTestRoadsCorridor(uintptr_t block, const uint8_t* ops, uint32_t before, uint32_t total);
 uint32_t CoXlTestStampCandidateSize(void);
 void CoXlTestRoadsStamps(uint32_t first, void* cand, uint32_t planned);
@@ -236,6 +242,126 @@ static void Layout(void)
     CoXlTestGame((uintptr_t)g_fake.image);
 }
 static void Edges(uint32_t n) { Put32(g_block + 0x11A71CCu, n); memcpy(g_block + EDGES_AT, g_recs, n * 0x48u); }
+
+/* ---- the worn track over the fake level: three arterial edges with points and two spurs (ArterialsGlue) ---- */
+#define TRACK_PATH 0x8448ABC93DDACF85ull
+#define TRACK_FILL 0xD45834942A4A5581ull
+#define LG_GROUND (0x8758A8u + 0x108u)
+static struct { uint8_t desc[0x70], painter[2 * 0x18], var[2 * 0x1C]; } g_zone[3];
+/* A zone type's descriptor: a path painter on slot `path` and a fill on slot `fill` (0: none). */
+static void Zone(int t, float path, float fill)
+{
+    const uint32_t material = 0xEAC0B497u; uint32_t n = 0;
+    memset(&g_zone[t], 0, sizeof g_zone[t]);
+    for (int q = 0; q < 2; q++)
+    {
+        const float slot = q ? fill : path; const uint64_t resource = q ? TRACK_FILL : TRACK_PATH, vars = (uint64_t)(uintptr_t)(g_zone[t].var + 0x1Cu * n); const uint32_t one = 1;
+        if (slot == 0.0f) continue;
+        memcpy(g_zone[t].var + 0x1Cu * n, &material, 4); memcpy(g_zone[t].var + 0x1Cu * n + 4, &slot, 4);
+        memcpy(g_zone[t].painter + 0x18u * n, &resource, 8); memcpy(g_zone[t].painter + 0x18u * n + 8, &vars, 8); memcpy(g_zone[t].painter + 0x18u * n + 0x10, &one, 4);
+        n++;
+    }
+    const uint64_t list = (uint64_t)(uintptr_t)g_zone[t].painter;
+    memcpy(g_zone[t].desc + 0x60, &list, 8); memcpy(g_zone[t].desc + 0x68, &n, 4);
+}
+static uint32_t Soil(void) { return 9u << 26 | 13u << 21 | 77u << 8; }
+static void TrackGlue(void)
+{
+    static uint8_t level[0x2D80], set[0xA8]; static uint64_t table[3];
+    const uintptr_t block = (uintptr_t)g_block;
+    const double h = 8192.0;
+    g_case = "track: the level's pieces, slot and flat pads from the fake level";
+    Zone(0, 1.0f, 13.0f); Zone(1, 6.0f, 1.0f); Zone(2, 0.0f, 13.0f);
+    for (int t = 0; t < 3; t++) table[t] = (uint64_t)(uintptr_t)g_zone[t].desc;
+    { const uint64_t at = (uint64_t)(uintptr_t)table, gen = block, types = (uint64_t)(uintptr_t)set; const float all = 2.0f;
+      memcpy(set, &at, 8); Put32(set + 0xA0, 3); memcpy(level + 0x2C8, &gen, 8); memcpy(level + 0x2D0, &types, 8);
+      Put32(level + 0x2D20 + 0x2C, 16384); memcpy(level + 0x2D20 + 0x50, &all, 4); }
+    Put32(g_block + 0x11A71C4u, 3);
+    for (uint32_t i = 0; i < 3; i++) { const uint64_t cell = 0x1000u + i; memcpy(g_block + 0x92F328u + 0x20u * i + 0x18, &cell, 8); Put32(g_block + 0x92F328u + 0x20u * i + 0xC, i); }
+    /* edge 0 between types 0 and 1, edge 1 inside type 1, edge 2 with type 0 on its one side */
+    { const uint64_t cells[6] = {0x1000, 0x1001, 0x1001, 0x1001, 0x1000, 0}; for (uint32_t i = 0; i < 3; i++) memcpy(g_block + EDGES_AT + 0x48u * i + 0x20, &cells[2 * i], 16); }
+    /* a flat pad on the objective's spur, a stamp's footprint on the outpost's, a weak pad on edge 0: only the first is level ground */
+    static const float pads[6 * 3] = {990 - 8192, 1010 - 8192, 10, 60, 1, 0, 2010 - 8192, 5 - 8192, 10, 60, 1, 1, 500 - 8192, 0 - 8192, 10, 60, 0.5f, 0};
+    CoXlTestGradePads(pads, 3);
+    uint32_t pieces = 0, tally[32] = {0};
+    g_fake.log[0] = 0;
+    CHECK(CoXlTestTrackBuild((uintptr_t)level, &pieces) == 6 && pieces == 8);
+    CHECK(Lines("track: slot 6 (ground on neither side along 3.0 of 3.0 km of arterials); 8 pieces on 3 arterial edges and 2 spurs; edges by slot: 6:3; "
+        "0 edges took their own slot (the level's is ground on both sides), 0 edges without a zone type, 0 zone types not the reviewed shape; 1 flat pads, "
+        "14 m of track left to their ground or the rim; roadtrack-") == 1 && Lines("no track is drawn") == 0);
+    /* the level's 4 m texel 1 m off edge 0, under the weak pad: the slot alone */
+    CHECK(CoXlTestTrackBuiltAt(500 - h, 1 - h, 4.0, Soil(), tally) == 6u << 26 && tally[6] == 1);
+    CHECK(CoXlTestTrackBuiltAt(2005 - h, 2.5 - h, 4.0, Soil(), tally) == 6u << 26 && tally[6] == 2); /* a spur, on a footprint */
+    CHECK(CoXlTestTrackBuiltAt(992.5 - h, 1007.5 - h, 4.0, Soil(), tally) == Soil() && tally[0] == 1 && tally[6] == 2); /* the flat pad keeps its ground */
+    CHECK(CoXlTestTrackBuiltAt(500 - h, 100 - h, 4.0, Soil(), tally) == Soil() && tally[0] == 1 && tally[6] == 2);
+    { const uint32_t t = CoXlTestTrackBuiltAt(250 - h, 0.5 - h, 0.5, Soil() | 0x80000000u, tally); /* a tile's texel on the core */
+      CHECK((t >> 26) == (0x20u | 6u) && ((t >> 21) & 31) == 9 && 255 - ((t >> 8) & 255) - (t & 255) >= 128 && tally[6] == 3); }
+
+    g_case = "track: the plants' density along the pieces, in the image op 0xBB handed over";
+    uint32_t* image = (uint32_t*)VirtualAlloc(NULL, 4096u * 4096u * 4u, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    uint8_t* small = (uint8_t*)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (image == NULL || small == NULL) { CHECK(image != NULL && small != NULL); return; }
+    /* the encoder of the level's map and of a tile's band takes the track: over plain slot-9 ground */
+    for (size_t k = 0; k < (size_t)4096 * 4096; k++) image[k] = 9u << 26;
+    { uint32_t wrote[32] = {0};
+      CHECK(CoXlTestTrackEncode(image, 500 - h, 1 - h, 4.0, wrote) == 6u << 26 && CoXlTestTrackEncode(image, 500 - h, 100 - h, 4.0, wrote) == 9u << 26 && wrote[6] == 1);
+      const uint32_t t = CoXlTestTrackEncode(image, 250 - h, 0.5 - h, 0.5, wrote);
+      CHECK((t >> 26) == 6 && ((t >> 21) & 31) == 9 && 255 - ((t >> 8) & 255) - (t & 255) >= 128 && wrote[6] == 2); }
+    for (size_t k = 0; k < (size_t)4096 * 4096; k++) image[k] = 0x12345600u | 100u;
+    uint8_t* lg = g_block + LG_GROUND;
+    const uint64_t handed = (uint64_t)(uintptr_t)lg, data = (uint64_t)(uintptr_t)image, none = 0, little = (uint64_t)(uintptr_t)small;
+    uint32_t side = 0;
+    Put32(lg, 4096); Put32(lg + 4, 4096); Put32(lg + 8, 0x2A); Put32(lg + 0xC, 3); memcpy(lg + 0x10, &data, 8);
+    CHECK(CoXlTestTrackGround(block, &side) == 1); /* the callback's globals do not hold this image */
+    memcpy(g_fake.image + 0x3328F60u + 0x20, &handed, 8);
+    CHECK(CoXlTestTrackGround(block, &side) == 0 && side == 4096);
+    Put32(lg + 4, 2048); CHECK(CoXlTestTrackGround(block, &side) == 2); Put32(lg + 4, 4096);
+    Put32(lg + 8, 0x16); CHECK(CoXlTestTrackGround(block, &side) == 2); Put32(lg + 8, 0x2A);
+    Put32(lg, 128); Put32(lg + 4, 128); CHECK(CoXlTestTrackGround(block, &side) == 2);
+    Put32(lg, 16384); Put32(lg + 4, 16384); CHECK(CoXlTestTrackGround(block, &side) == 2);
+    Put32(lg, 4096); Put32(lg + 4, 4096);
+    memcpy(lg + 0x10, &none, 8); CHECK(CoXlTestTrackGround(block, &side) == 2);
+    memcpy(lg + 0x10, &little, 8); Put32(lg, 256); Put32(lg + 4, 256); CHECK(CoXlTestTrackGround(block, &side) == 2); /* 4096 bytes for 256 x 256 texels */
+    Put32(lg, 4096); Put32(lg + 4, 4096); memcpy(lg + 0x10, &data, 8);
+    { DWORD was; VirtualProtect(image, 4096u * 4096u * 4u, PAGE_READONLY, &was); CHECK(CoXlTestTrackGround(block, &side) == 2); VirtualProtect(image, 4096u * 4096u * 4u, was, &was); }
+    g_fake.log[0] = 0;
+    CoXlTestTrackThinBlock(block);
+    /* the texel 2 m off edge 0 at x 250 loses its plants and keeps its ids; the next row (6 m) and the flat pad keep theirs */
+    CHECK(Lines("track: plants thinned on ") == 1 && Lines("thinned on 0 texels") == 0 && Lines("of the 4096 x 4096 ground-id image") == 1);
+    CHECK(image[(size_t)4095 * 4096 + 62] == 0x12345600u && image[(size_t)4094 * 4096 + 62] == (0x12345600u | 100u) && image[(size_t)(4095 - 251) * 4096 + 248] == (0x12345600u | 100u));
+    CHECK(image[(size_t)2000 * 4096 + 2000] == (0x12345600u | 100u));
+    image[(size_t)4095 * 4096 + 62] = 0x12345600u | 100u;
+    CoXlTestTrackThinBlock(block); /* once a level */
+    CHECK(Lines("plants thinned on ") == 1 && image[(size_t)4095 * 4096 + 62] == (0x12345600u | 100u));
+    VirtualFree(small, 0, MEM_RELEASE);
+
+    g_case = "track: a spur whose edge is no arterial takes the level's slot";
+    { uint32_t reserve = 0, edge = 3; const float* table = NULL;
+      CoXlTestRoadsSpurs(&reserve, &table);
+      memcpy((uint8_t*)(uintptr_t)table + 16, &edge, 4);
+      CHECK(CoXlTestTrackBuild((uintptr_t)level, &pieces) == 6 && pieces == 8);
+      edge = 2; memcpy((uint8_t*)(uintptr_t)table + 16, &edge, 4); }
+
+    g_case = "track: no path painter beside any road, and a level that is not readable";
+    for (uint32_t i = 0; i < 3; i++) Put32(g_block + 0x92F328u + 0x20u * i + 0xC, 2);
+    g_fake.log[0] = 0;
+    CHECK(CoXlTestTrackBuild((uintptr_t)level, &pieces) == 0 && pieces == 0 && Lines("track: no zone beside a road has a path painter; no track is drawn") == 1);
+    CHECK(CoXlTestTrackBuiltAt(500 - h, 1 - h, 4.0, Soil(), tally) == Soil());
+    for (uint32_t i = 0; i < 3; i++) Put32(g_block + 0x92F328u + 0x20u * i + 0xC, 0xFFFFFFFEu); /* no subregion type: -2 */
+    g_fake.log[0] = 0;
+    CHECK(CoXlTestTrackBuild((uintptr_t)level, &pieces) == 0 && Lines("3 edges without a zone type") == 1 && Lines("no track is drawn") == 1);
+    Put32(level + 0x2D20 + 0x2C, 4096);
+    g_fake.log[0] = 0;
+    CHECK(CoXlTestTrackBuild((uintptr_t)level, &pieces) == 0 && Lines("the world's size are not readable; no track is drawn") == 1);
+    Put32(level + 0x2D20 + 0x2C, 16384);
+    Put32(g_block + 0x11A71C4u, 9000); /* more subregions than the game has room for */
+    g_fake.log[0] = 0;
+    CHECK(CoXlTestTrackBuild((uintptr_t)level, &pieces) == 0 && Lines("not readable; no track is drawn") == 1);
+    Put32(g_block + 0x11A71C4u, 0); memset(g_block + 0x92F328u, 0, 0x60); memset(lg, 0, 0x18); memset(g_fake.image + 0x3328F60u + 0x20, 0, 8);
+    for (uint32_t i = 0; i < 3; i++) memset(g_block + EDGES_AT + 0x48u * i + 0x20, 0, 16);
+    CoXlTestGradePads(pads, 0);
+    VirtualFree(image, 0, MEM_RELEASE);
+}
 
 /* The install on the fake image: op 0x0E's site jumps into the stub, and the stub's page is code (the game faulted
  * executing a data page there). */
@@ -602,6 +728,7 @@ static void ArterialsGlue(void)
     CoXlTestRoadsPointsWatch(block, 0x41);
     CHECK(Lines("road points after op 0x41: 9 (the spurs left 15): CHANGED") == 1);
     Put32(g_block + 0x11A71D4u, 15);
+    TrackGlue();
     g_case = "spurs: each place's straight way to the nearest arterial point, as points and index capsules";
 
     g_case = "tolerance: the switch is on for the op 0x2B of a level with arterials";

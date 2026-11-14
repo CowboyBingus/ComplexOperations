@@ -3585,12 +3585,25 @@ static int NearMatMix(const uint32_t* src, double x, double y, uint32_t* id, dou
 
 static void NearRoadStampAt(const uint32_t* src, double x, double y, uint32_t* id, double* w, int* n);
 
-static uint32_t NearMatPack(uint32_t* id, double* w, int n, uint32_t hole);
-static uint32_t NearMatEncodeAt(const uint32_t* src, double x, double y)
+/* The roads' worn track (difficulty_world_roadtracklevel.c) mixed over id[] / w[] (room places) for a texel `texel`
+ * metres wide; tally[slot] counts the texels written, tally[0] those a pad or the rim kept. */
+#define NEAR_MAT_IDS 14 /* 12 of four native texels, a city path's and the track's */
+static void RoadTrackAt(double x, double y, double texel, uint32_t* id, double* w, int* n, int room, uint32_t* tally);
+static void RoadTrackBuild(void);
+static void RoadTrackNote(const char* what, const volatile LONG* tally);
+static void RoadTrackTally(volatile LONG* to, const uint32_t* tally)
 {
-    uint32_t id[13]; double w[13], tx, ty;
+    for (int k = 0; k < 32; k++) if (tally[k] != 0) InterlockedExchangeAdd(&to[k], (LONG)tally[k]);
+}
+
+static uint32_t NearMatPack(uint32_t* id, double* w, int n, uint32_t hole);
+/* texel: the width of the texel the result stands for (the level's 4 m, or a tile's own inside its band). */
+static uint32_t NearMatEncodeAt(const uint32_t* src, double x, double y, double texel, uint32_t* tally)
+{
+    uint32_t id[NEAR_MAT_IDS]; double w[NEAR_MAT_IDS], tx, ty;
     int n = NearMatMix(src, x, y, id, w, &tx, &ty);
     NearRoadStampAt(src, x, y, id, w, &n);
+    RoadTrackAt(x, y, texel, id, w, &n, NEAR_MAT_IDS, tally);
     int hc = (int)floor(tx + 0.5), hr = (int)floor(ty + 0.5);
     uint32_t hole = src[(size_t)(2 * (hr > 2047 ? 2047 : hr)) * 4096 + (size_t)(2 * (hc > 2047 ? 2047 : hc))] & 0x80000000u;
     return NearMatPack(id, w, n, hole);
@@ -3749,13 +3762,15 @@ static int NearCoarseMatOn(void)
     return on;
 }
 
-typedef struct { const uint32_t* src; uint32_t* out; } NearEncodeJob;
+typedef struct { const uint32_t* src; uint32_t* out; volatile LONG track[32]; } NearEncodeJob;
 static void NearEncodeRows(void* ctx, int r0, int r1)
 {
     NearEncodeJob* job = (NearEncodeJob*)ctx;
+    uint32_t tally[32] = {0};
     for (int r = r0; r < r1; r++)
         for (int c = 0; c < 4096; c++)
-            job->out[(size_t)r * 4096 + c] = NearMatEncodeAt(job->src, -8191.75 + c * NEAR_MAT_STEP, 8191.75 - r * NEAR_MAT_STEP);
+            job->out[(size_t)r * 4096 + c] = NearMatEncodeAt(job->src, -8191.75 + c * NEAR_MAT_STEP, 8191.75 - r * NEAR_MAT_STEP, NEAR_MAT_STEP, tally);
+    RoadTrackTally(job->track, tally);
 }
 
 /* The share of coarse texels at (wx, wy): 1 from NEAR_MAT_EDGE inside the hidden square outward, 0 past the band. */
@@ -3905,7 +3920,7 @@ static int NearMixTile(const void* ctx, double x, double y, uint32_t* id, double
     return n;
 }
 
-typedef struct { uint32_t* tile; const uint32_t* coarse; const NearMatCdf* cdf; int reach, encoded; float x0, y0; volatile LONG taken; const uint32_t* own; volatile LONG paths; } NearBandJob;
+typedef struct { uint32_t* tile; const uint32_t* coarse; const NearMatCdf* cdf; int reach, encoded; float x0, y0; volatile LONG taken; const uint32_t* own; volatile LONG paths, track[32]; } NearBandJob;
 #define NEAR_BAND_SCALE 6.0f
 #define NEAR_BAND_SEED 23u
 #define NEAR_BAND_OCT 3
@@ -3913,6 +3928,7 @@ static void NearMatBandRows(void* ctx, int r0, int r1)
 {
     NearBandJob* job = (NearBandJob*)ctx;
     LONG taken = 0, paths = 0;
+    uint32_t tally[32] = {0};
     NearTileSrc own = {job->own, job->x0, job->y0};
     for (int r = r0; r < r1; r++)
         for (int c = 0; c < 4096; c++)
@@ -3929,15 +3945,17 @@ static void NearMatBandRows(void* ctx, int r0, int r1)
                  * + 0.5)), with one mip on XL, so every patch border drew as a staircase of 1.125 m steps (audit 12
                  * criterion 8; static, subagent surfacing). Mixed, the blend varies smoothly and the cut is a curve. */
                 if (job->own == NULL) continue;
-                uint32_t id[13]; double w[13];
+                uint32_t id[NEAR_MAT_IDS]; double w[NEAR_MAT_IDS];
                 int n = NearMixTile(&own, wx, wy, id, w);
                 double qx, qy;
                 if (g_road.on && g_road.level == g_world.levels && NearRoadDistance(wx, wy, &qx, &qy) < ROAD_CORRIDOR)
                 { NearRoadStampWith(NearMixTile, &own, 1.0, wx, wy, id, w, &n); paths++; }
+                RoadTrackAt(wx, wy, NEAR_TEXEL, id, w, &n, NEAR_MAT_IDS, tally);
                 job->tile[(size_t)r * 4096 + c] = NearMatPack(id, w, n, job->own[(size_t)r * 4096 + c] & 0x80000000u);
                 continue;
             }
-            if (job->encoded) job->tile[(size_t)r * 4096 + c] = NearMatEncodeAt(job->coarse, wx, wy);
+            /* the tile's texel width: the track is as sharp in the band as on the tile's own texels beside it */
+            if (job->encoded) job->tile[(size_t)r * 4096 + c] = NearMatEncodeAt(job->coarse, wx, wy, NEAR_TEXEL, tally);
             else /* the coarse terrain draws the level's own map: its nearest texel */
             {
                 int ic = (int)floorf((wx + 8191.75f) / (float)NEAR_MAT_STEP + 0.5f), ir = (int)floorf((8191.75f - wy) / (float)NEAR_MAT_STEP + 0.5f);
@@ -3948,6 +3966,7 @@ static void NearMatBandRows(void* ctx, int r0, int r1)
         }
     InterlockedExchangeAdd(&job->taken, taken);
     InterlockedExchangeAdd(&job->paths, paths);
+    RoadTrackTally(job->track, tally);
 }
 
 static uint32_t NearMatBand(uint32_t* tile, const uint32_t* coarse)
@@ -3980,11 +3999,15 @@ static uint32_t NearMatBand(uint32_t* tile, const uint32_t* coarse)
     }
     job.own = own;
     NearRows(NearMatBandRows, &job, 4096);
+    const int mixed = own != NULL;
     if (own != NULL)
     {
         VirtualFree(own, 0, MEM_RELEASE);
         Note("difficulty: near terrain: the tile's own map mixed from its weight texels; its paths drawn from their vectors: %ld texels", (long)job.paths);
     }
+    char what[96];
+    snprintf(what, sizeof what, "the near tile at (%.0f, %.0f)%s", (double)g_near.centre[0], (double)g_near.centre[1], mixed ? "" : " (no memory for its own map: its band only)");
+    RoadTrackNote(what, job.track);
     return (uint32_t)job.taken;
 }
 
@@ -4201,13 +4224,15 @@ static void NearRoadStampBuild(const uint32_t* level)
 static void NearCoarseMatBuild(const uint32_t* level)
 {
     NearRoadStampBuild(level);
+    RoadTrackBuild(); /* before the first map is encoded: the level's here, then every tile's */
     NearCoarseMatDrop();
     if (!NearCoarseMatOn()) return;
     ULONGLONG t0 = GetTickCount64();
     g_coarseMat.pixels = (uint32_t*)VirtualAlloc(NULL, (size_t)4096 * 4096 * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (g_coarseMat.pixels == NULL) { Note("difficulty: near terrain: no memory for the coarse terrain's material map; it keeps the level's"); return; }
-    NearEncodeJob job = {level, g_coarseMat.pixels};
+    NearEncodeJob job = {level, g_coarseMat.pixels, {0}};
     NearRows(NearEncodeRows, &job, 4096);
+    RoadTrackNote("the level's material map (4 m texels)", job.track);
     typedef uint64_t (*CreateFn)(uint32_t w, uint32_t h, uint32_t format, void* pixels);
     CreateFn create = (CreateFn)NearApi(0x10, 0x6A8);
     uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);

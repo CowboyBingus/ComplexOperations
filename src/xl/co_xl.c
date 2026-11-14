@@ -75,9 +75,11 @@ static double HitchNow(void)
 #include "proto/difficulty_world_macro.c"
 #include "proto/difficulty_world_roads.c"
 #include "proto/difficulty_world_roadbuild.c"
+#include "proto/difficulty_world_roadtrack.c"
 #include "proto/difficulty_world_roadgrade.c"
 #include "proto/difficulty_world_roadfield.c"
 #include "proto/difficulty_world_roadlevel.c"
+#include "proto/difficulty_world_roadtracklevel.c"
 #include "proto/difficulty_status.c"
 #include "proto/difficulty_map_hud.c"
 #include "proto/difficulty_world_arcs.c"
@@ -1376,6 +1378,118 @@ void CoXlTestRoadsSpursBuild(uintptr_t block, uint64_t context, void (*capsule)(
 void CoXlTestRoadsSpurTerminals(const float* xy, const float* gap, uint32_t terms) { RoadsSpurTerminals(xy, gap, terms); }
 uint32_t CoXlTestRoadsSpurs(uint32_t* reserve, const float** table) { *reserve = RoadsSpurReserve(); *table = (const float*)g_spurs.spur; return g_spurs.level == g_world.levels ? g_spurs.count : 0; }
 int CoXlTestRoadsArterial(uint32_t edge) { return g_arterials.level == g_world.levels && (g_arterials.bits[edge >> 3] >> (edge & 7)) & 1; }
+/* The roads' worn track (proto/difficulty_world_roadtrack.c, difficulty_world_roadtracklevel.c). */
+double CoXlTestTrackWeight(double d, double x, double y) { return TrackWeight(d, x, y); }
+double CoXlTestTrackCoarse(double d) { return TrackCoarse(d); }
+void CoXlTestTrackWarp(double x, double y, double* wx, double* wy) { TrackWarp(x, y, wx, wy); }
+/* The slot between two zone type descriptors (b 0: one type); *state: bit 0 / 1 a / b read whole, a's path count
+ * << 8, a's ground slot count << 16. */
+uint32_t CoXlTestTrackSlot(uintptr_t a, uintptr_t b, uint32_t* state)
+{
+    TrackPainters pa, pb;
+    const int readA = TrackTypePainters(a, &pa), readB = b != 0 ? TrackTypePainters(b, &pb) : 1;
+    *state = (uint32_t)readA | (uint32_t)readB << 1 | (uint32_t)pa.paths << 8 | (uint32_t)pa.fills << 16;
+    return TrackSlotChoose(&pa, b != 0 ? &pb : NULL);
+}
+/* The level's slot over n roads (descriptors a[i], b[i] or 0, lengths) and each road's own under it; 16 roads at most. */
+uint32_t CoXlTestTrackLevel(const uintptr_t* a, const uintptr_t* b, const double* metres, uint32_t n, uint32_t* road, double* clear)
+{
+    static TrackPainters pa[16], pb[16];
+    const TrackPainters* sa[16]; const TrackPainters* sb[16];
+    if (n > 16) n = 16;
+    for (uint32_t i = 0; i < n; i++)
+    {
+        sa[i] = a[i] != 0 ? &pa[i] : NULL; sb[i] = b[i] != 0 ? &pb[i] : NULL;
+        if (a[i] != 0) TrackTypePainters(a[i], &pa[i]);
+        if (b[i] != 0) TrackTypePainters(b[i], &pb[i]);
+    }
+    const uint32_t level = TrackLevelSlot(sa, sb, metres, n, clear);
+    for (uint32_t i = 0; i < n; i++) road[i] = TrackRoadSlot(sa[i], sb[i], level);
+    return level;
+}
+/* n ids and weights (12 at most) with the track mixed in, packed as a texel; *sum: the weights' sum after the mix. */
+uint32_t CoXlTestTrackMix(const uint32_t* id, const double* w, int n, int room, uint32_t slot, double c, uint32_t hole, double* sum)
+{
+    uint32_t ids[NEAR_MAT_IDS]; double ws[NEAR_MAT_IDS];
+    memcpy(ids, id, sizeof(uint32_t) * (size_t)n); memcpy(ws, w, sizeof(double) * (size_t)n);
+    TrackMix(ids, ws, &n, room, slot, c);
+    *sum = 0.0;
+    for (int k = 0; k < n; k++) *sum += ws[k];
+    return NearMatPack(ids, ws, n, hole);
+}
+static TrackIndex g_testTrack;
+static TrackFlats g_testFlats;
+/* n pieces (ax, ay, bx, by from the world's centre) with their slots, indexed for a world `world` metres wide. */
+int CoXlTestTrackIndex(const float* segs, const uint32_t* slots, uint32_t n, double world)
+{
+    TrackIndexFree(&g_testTrack);
+    for (uint32_t k = 0; k < n; k++) TrackIndexAdd(&g_testTrack, segs[4 * k], segs[4 * k + 1], segs[4 * k + 2], segs[4 * k + 3], slots[k]);
+    return TrackIndexBuild(&g_testTrack, world);
+}
+int CoXlTestTrackNearest(double x, double y, double reach, double* d, uint32_t* slot, uint32_t* tests) { return TrackNearest(&g_testTrack, x, y, reach, d, slot, tests); }
+/* n flat parts (cx, cy, a, b, angle, 1 for a rectangle; 6 floats each) and what they leave of the track at a point. */
+int CoXlTestTrackFlats(const float* flats, uint32_t n, double world)
+{
+    TrackFlatsFree(&g_testFlats);
+    for (uint32_t k = 0; k < n; k++, flats += 6)
+    {
+        const TrackFlat f = {flats[0], flats[1], cosf(flats[4]), sinf(flats[4]), flats[2], flats[3], flats[5] != 0.0f};
+        TrackFlatsAdd(&g_testFlats, &f);
+    }
+    return TrackFlatsBuild(&g_testFlats, world);
+}
+double CoXlTestTrackFlatShare(double x, double y) { return TrackFlatShare(&g_testFlats, x, y); }
+static void TestTrackLend(double world, double playable, int on)
+{
+    g_track.ix = g_testTrack; g_track.flats = g_testFlats; /* lent */
+    g_track.on = on; g_track.level = g_world.levels; g_track.half = world / 2; g_track.playable = playable;
+}
+static void TestTrackBack(void) { memset(&g_track.ix, 0, sizeof g_track.ix); memset(&g_track.flats, 0, sizeof g_track.flats); g_track.on = 0; g_track.level = -1; }
+/* The level's step for one texel (RoadTrackAt) over the test index and flats: `ground` with the track at (x, y) from
+ * the world's centre, packed; tally: 32 counts. on 0: the track is off. */
+uint32_t CoXlTestTrackAt(double world, double playable, int on, double x, double y, double texel, uint32_t ground, uint32_t* tally)
+{
+    uint32_t id[NEAR_MAT_IDS] = {(ground >> 26) & 31, (ground >> 21) & 31, (ground >> 16) & 31};
+    double w[NEAR_MAT_IDS] = {1.0 - ((ground >> 8) & 255) / 255.0 - (ground & 255) / 255.0, ((ground >> 8) & 255) / 255.0, (ground & 255) / 255.0};
+    int n = id[2] ? 3 : id[1] ? 2 : 1;
+    TestTrackLend(world, playable, on);
+    RoadTrackAt(x, y, texel, id, w, &n, NEAR_MAT_IDS, tally);
+    TestTrackBack();
+    return NearMatPack(id, w, n, ground & 0x80000000u);
+}
+/* The plants' density scaled along the test index on a side x side ground-id image; returns the texels changed. */
+uint32_t CoXlTestTrackThin(double world, double playable, uint32_t* image, uint32_t side, uint32_t* bare)
+{
+    uint64_t before = 0, after = 0;
+    TestTrackLend(world, playable, 1);
+    *bare = 0;
+    const uint32_t thinned = RoadTrackThinImage(image, side, bare, &before, &after);
+    TestTrackBack();
+    return thinned;
+}
+/* The level's own build over a fake level (RoadTrackBuild): the slot when the track is on, 0 when not; *pieces. */
+uint32_t CoXlTestTrackBuild(uintptr_t level, uint32_t* pieces)
+{
+    g_worldLevel = level;
+    RoadTrackBuild();
+    g_worldLevel = 0;
+    *pieces = g_track.ix.n;
+    return g_track.on ? g_track.slot : 0;
+}
+/* As CoXlTestTrackAt, over what CoXlTestTrackBuild made. */
+uint32_t CoXlTestTrackBuiltAt(double x, double y, double texel, uint32_t ground, uint32_t* tally)
+{
+    uint32_t id[NEAR_MAT_IDS] = {(ground >> 26) & 31, (ground >> 21) & 31, (ground >> 16) & 31};
+    double w[NEAR_MAT_IDS] = {1.0 - ((ground >> 8) & 255) / 255.0 - (ground & 255) / 255.0, ((ground >> 8) & 255) / 255.0, (ground & 255) / 255.0};
+    int n = id[2] ? 3 : id[1] ? 2 : 1;
+    RoadTrackAt(x, y, texel, id, w, &n, NEAR_MAT_IDS, tally);
+    return NearMatPack(id, w, n, ground & 0x80000000u);
+}
+/* A texel of a material map as the level's and a tile's band encode it (NearMatEncodeAt) from a 4096 x 4096 map. */
+uint32_t CoXlTestTrackEncode(const uint32_t* src, double x, double y, double texel, uint32_t* tally) { return NearMatEncodeAt(src, x, y, texel, tally); }
+void CoXlTestTrackThinBlock(uintptr_t block) { RoadTrackThin(block); }
+/* RoadTrackGround's verdict on a block's ground-id image, with its side. */
+int CoXlTestTrackGround(uintptr_t block, uint32_t* side) { uint32_t d[4]; uint64_t data; const int why = RoadTrackGround(block, d, &data); *side = d[0]; return why; }
 /* The stamp packages a level requested early (EarlyPackages): held as a level that ended before its record 94 leaves them. */
 void CoXlTestEarlyHeld(const uint64_t* ids, uint32_t count)
 {
