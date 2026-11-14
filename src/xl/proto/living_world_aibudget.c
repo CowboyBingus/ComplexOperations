@@ -33,7 +33,7 @@ static float LwAibLatency(uintptr_t h)
 static void LwAibNote(ULONGLONG now)
 {
     if (now - g_lwAib.notedAt < 30000) return;
-    if ((g_lwAib.verbose || LwTestTraceOn()) && g_lwAib.frames)
+    if (g_lwAib.frames) /* every build: a request wait that stays high means paths reach squads late (online squads standing) */
         Note("living world: AI path budget %s %d us: stock %.0f us on %u of %u frames, request wait mean %.0f ms, worst %.0f ms", g_lwAib.on ? "on" : "off",
             g_lwAib.lowUs, (double)g_lwAib.stock * 1e6, g_lwAib.raisedFrames, g_lwAib.frames, 1000.0 * g_lwAib.latSum / g_lwAib.frames, (double)g_lwAib.worst * 1000.0);
     g_lwAib.frames = g_lwAib.raisedFrames = 0; g_lwAib.worst = 0; g_lwAib.latSum = 0; g_lwAib.notedAt = now;
