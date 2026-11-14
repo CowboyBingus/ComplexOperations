@@ -6,7 +6,7 @@
  * 0x622D70) only; the bone-ray modes' call (0x621EAF) and every other level keep the game's. The pose reads one corner
  * ray on the same thread just before (0x6227A8): its start is where the unit stands. On the rotation's job threads
  * (0x571100): the slot is the thread's own, the counts atomic, the tiles tried for and never waited on.
- * Research builds: HELLFORGE_XL_LEAN_CAP=<degrees> over the slope, 0 none. */
+ * Research builds: HELLFORGE_XL_LEAN_CAP=<degrees> over the slope, 0 none; xl-lean.txt in the logs changes it in play. */
 #define LW_LEAN_LIMIT 0x624750u
 #define LW_LEAN_FOUR 0x622D70u    /* where the four-corner pose's call returns */
 #define LW_LEAN_BONE 0x621EB4u    /* and the bone-ray modes' */
@@ -18,11 +18,13 @@
 typedef float* (*LwLeanFn)(uintptr_t mgr, float* out, float* up);
 static struct
 {
-    LwLeanFn orig; uintptr_t four, bone; const float* world; float deg;
+    LwLeanFn orig; uintptr_t four, bone; const float* world;
+    volatile LONG deg; /* a float's bits: research builds change it while the job threads pose */
     volatile LONG poses, game, ours, blind, boneCalls, otherCalls;
 } g_lwLean;
 static _Thread_local struct { float x, y; int set; } t_lwLean;
 
+static float LwLeanDeg(void) { LONG b = g_lwLean.deg; float f; memcpy(&f, &b, 4); return f; }
 static float LwLeanDot(const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
 
 /* From the ray reader's hook: the corner ray this thread's unit just read starts here; NULL when it did not read. */
@@ -38,7 +40,8 @@ static void LwLeanSet(float deg)
     if (!(deg > 0.0f)) deg = 0.0f;
     else if (deg < 5.0f) deg = 5.0f;
     else if (deg > 45.0f) deg = 45.0f;
-    g_lwLean.deg = deg;
+    LONG b; memcpy(&b, &deg, 4);
+    InterlockedExchange(&g_lwLean.deg, b);
 }
 
 /* The drawn ground's slope at (x, y) in degrees, from a live tile's heights 1 m either side. 0 when the tiles are
@@ -90,10 +93,11 @@ static float* LwLeanLimit(uintptr_t mgr, float* out, float* up)
     }
     float* held = g_lwLean.orig(mgr, out, up);
     float slope;
-    if (!four || g_lwLean.deg == 0.0f || !LwLive()) return held;
+    const float deg = LwLeanDeg(); /* read once: the pose keeps one value */
+    if (!four || deg == 0.0f || !LwLive()) return held;
     if (!set || !LwLeanSlope(t_lwLean.x, t_lwLean.y, &slope)) { InterlockedIncrement(&g_lwLean.blind); return held; }
     /* the game writes its answer to both, and its caller reads the one returned (0x622D7A) */
-    if (LwLeanHold(out, g_lwLean.world, LwLeanAllowed(slope, g_lwLean.deg)))
+    if (LwLeanHold(out, g_lwLean.world, LwLeanAllowed(slope, deg)))
     {
         memcpy(up, out, 12);
         InterlockedIncrement(&g_lwLean.ours);
@@ -109,7 +113,7 @@ static void LwLeanNote(void)
     if (poses || bone || other)
         Note("living world: lean (30 s): %ld four-corner poses, %ld held at the game's 45.6 deg, %ld at their ground's slope and %.0f deg (0: none), "
             "%ld left with no drawn ground read; the limit's other calls: %ld bone-ray, %ld from elsewhere",
-            (long)poses, (long)game, (long)ours, (double)(LwLive() ? g_lwLean.deg : 0.0f), (long)blind, (long)bone, (long)other);
+            (long)poses, (long)game, (long)ours, (double)(LwLive() ? LwLeanDeg() : 0.0f), (long)blind, (long)bone, (long)other);
 }
 
 /* The pins: the limit's entry, its test against 0.7 and that float, the one reference to the angle's double and the
@@ -140,7 +144,7 @@ static void LwInstallLeanCap(void)
              : g_coApi->hook_ex(g_coMod, g + LW_LEAN_LIMIT, (void*)LwLeanLimit, (void**)&g_lwLean.orig, 0x7FFFFFFF)) || g_lwLean.orig == NULL)
     { g_lwLean.orig = NULL; Note("living world: the rotation's lean limit could not be hooked; four-corner units keep the game's 45.6 deg"); return; }
     Note("living world: four-corner units lean at most their ground's slope and %.0f deg from upright on complex levels (0: the game's 45.6 deg), the game's 45.6 deg on any other",
-        (double)g_lwLean.deg);
+        (double)LwLeanDeg());
 }
 
 #if defined(CO_RESEARCH) || defined(CO_TEST)
@@ -157,7 +161,7 @@ static struct
 
 static void LwLpLevel(void) { memset(&g_lwLp, 0, sizeof g_lwLp); }
 static void LwLpScan(void) { g_lwLp.scan++; }
-static float LwLpOver(void) { return g_lwLean.deg > 0.0f ? g_lwLean.deg : LW_LEAN_CAP; }
+static float LwLpOver(void) { return LwLeanDeg() > 0.0f ? LwLeanDeg() : LW_LEAN_CAP; }
 
 /* A corner's reading by kind: 0 a hit, 1 under a surface, 2 a miss (the full length). */
 static uint8_t LwLpKind(float d, float len) { return d < 0.0f ? 1 : fabsf(d - len) < 0.001f ? 2 : 0; }
@@ -208,6 +212,28 @@ static void LwLpNote(void)
             g_lwLp.samples, g_lwLp.over, (double)LwLpOver(), g_lwLp.at, g_lwLp.off30, g_lwLp.off30Steep, g_lwLp.pairs,
             g_lwLp.pairs ? (double)(g_lwLp.turnSum / (float)g_lwLp.pairs) : 0.0, (double)g_lwLp.turnMax, g_lwLp.flips);
     g_lwLp.samples = g_lwLp.over = g_lwLp.at = g_lwLp.off30 = g_lwLp.off30Steep = g_lwLp.pairs = g_lwLp.flips = 0; g_lwLp.turnSum = g_lwLp.turnMax = 0;
+}
+
+/* The degrees from a file, read when it changes, so one mission measures the same units with and without the limit.
+ * The 30 s lines are written first: no count spans two values. 1 when the degrees were taken. */
+static int LwLeanWatch(const wchar_t* path)
+{
+    static FILETIME stamp;
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &a) || CompareFileTime(&a.ftLastWriteTime, &stamp) == 0) return 0;
+    char text[32] = "", *end; DWORD got = 0;
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return 0; /* still being written: next time */
+    stamp = a.ftLastWriteTime;
+    ReadFile(f, text, sizeof text - 1, &got, NULL); CloseHandle(f);
+    text[got] = 0;
+    const float deg = strtof(text, &end);
+    if (end == text || !(deg >= 0.0f)) { Note("living world: lean: xl-lean.txt \"%.20s\" is not degrees; still %.0f", text, (double)LwLeanDeg()); return 0; }
+    LwTiltNote(); LwLeanNote();
+    LwLeanSet(deg);
+    g_lwLp.lines = 0;
+    Note("living world: lean: now %.0f deg over the slope (0: none), from xl-lean.txt", (double)LwLeanDeg());
+    return 1;
 }
 #endif
 
@@ -268,7 +294,7 @@ void CoXlTestLeanBehind(float cx, float cy)
 void CoXlTestLeanTilesOff(void) { g_move.on = 0; }
 int CoXlTestLeanInstall(uintptr_t game) { g_lw.game = game; g_lwLeanDone = 0; memset(&g_lwLean, 0, sizeof g_lwLean); LwInstallLeanCap(); return g_lwLean.orig != NULL; }
 void CoXlTestLeanSet(float deg) { LwLeanSet(deg); }
-float CoXlTestLeanDeg(void) { return g_lwLean.deg; }
+float CoXlTestLeanDeg(void) { return LwLeanDeg(); }
 int CoXlTestLeanHold(float* up, const float* w, float deg) { return LwLeanHold(up, w, deg); }
 float CoXlTestLeanAllowed(float slope, float over) { return LwLeanAllowed(slope, over); }
 int CoXlTestLeanSlope(float x, float y, float* deg) { return LwLeanSlope(x, y, deg); }
@@ -280,6 +306,7 @@ void CoXlTestLeanCounts(long* c)
     c[3] = InterlockedExchange(&g_lwLean.blind, 0); c[4] = InterlockedExchange(&g_lwLean.boneCalls, 0); c[5] = InterlockedExchange(&g_lwLean.otherCalls, 0);
 }
 void CoXlTestLeanNote(void) { LwLeanNote(); }
+int CoXlTestLeanWatch(const wchar_t* path) { return LwLeanWatch(path); }
 void CoXlTestLpLevel(void) { LwLpLevel(); }
 void CoXlTestLpScan(void) { LwLpScan(); }
 int CoXlTestLpSample(uint32_t id, const float* up, float tilt, float ground, float off, const float* last, float len) { return LwLpSample(id, up, tilt, ground, off, last, len) != NULL; }

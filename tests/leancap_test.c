@@ -28,6 +28,7 @@ void CoXlTestTiltTile(float cx, float cy, float z);
 void CoXlTestTiltHold(int on);
 void CoXlTestLpLevel(void);
 void CoXlTestLpScan(void);
+int CoXlTestLeanWatch(const wchar_t* path);
 int CoXlTestLpSample(uint32_t id, const float* up, float tilt, float ground, float off, const float* last, float len);
 void CoXlTestLpNote(void);
 void CoXlTestFgWorld(float live);
@@ -127,6 +128,17 @@ static int Through(LimitFn site, float deg, float az)
     Lean(g_up, deg, az);
     float* r = site(0x1234, g_out, g_up);
     return r == g_out && g_limit.calls == 1 && g_limit.mgr == 0x1234 && g_limit.out == g_out && g_limit.up == g_up;
+}
+
+/* The file with this text and a write time of its own: the watch reads on a new time only. */
+static void Put(const wchar_t* path, const char* text)
+{
+    static FILETIME t = {0, 0x01DC0000};
+    DWORD put;
+    HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    WriteFile(f, text, (DWORD)strlen(text), &put, NULL);
+    t.dwLowDateTime += 20000000; SetFileTime(f, NULL, NULL, &t);
+    CloseHandle(f);
 }
 
 int main(void)
@@ -372,6 +384,34 @@ int main(void)
     CHECK(CoXlTestLpSample(20, a, 30.0f, 0.0f, 30.0f, hit, 4.0f) == 1);
     CoXlTestLpNote();
     CHECK(fake_host_logged("lean probe (30 s): 1 four-corner samples on read ground, 1 over their limit by 2 deg or more (ground slope + 25, at most 45.6), 1 at it; 30 deg or more off their ground 1, 0 of them"));
+
+    g_case = "research: the degrees from a file, in play";
+    wchar_t file[MAX_PATH];
+    GetTempPathW(MAX_PATH, file); wcscat(file, L"xl-lean-test.txt");
+    DeleteFileW(file);
+    CoXlTestFgWorld(8.0f);
+    CoXlTestLeanSet(25.0f);
+    CoXlTestLeanCounts(c);
+    CHECK(!CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 25.0f); /* no file: as it was */
+    CHECK(Through(four, 40.0f, 15.0f) && Is(g_out, 25.0f, 15.0f));
+    Put(file, "0\n");
+    CHECK(CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 0.0f);
+    CHECK(fake_host_logged("lean (30 s): 1 four-corner poses, 0 held at the game's 45.6 deg, 1 at their ground's slope and 25 deg")); /* the counts under 25, before */
+    CHECK(fake_host_logged("lean: now 0 deg over the slope (0: none), from xl-lean.txt"));
+    CHECK(Through(four, 40.0f, 15.0f) && Is(g_out, 40.0f, 15.0f)); /* the game's answer, untouched */
+    CHECK(!CoXlTestLeanWatch(file)); /* not written again: not read again */
+    Put(file, "twelve");
+    CHECK(!CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 0.0f);
+    CHECK(fake_host_logged("lean: xl-lean.txt \"twelve\" is not degrees; still 0"));
+    Put(file, "-3");
+    CHECK(!CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 0.0f);
+    Put(file, "12");
+    CHECK(CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 12.0f);
+    CHECK(fake_host_logged("lean (30 s): 1 four-corner poses, 0 held at the game's 45.6 deg, 0 at their ground's slope and 0 deg"));
+    CHECK(fake_host_logged("lean: now 12 deg over the slope"));
+    CHECK(Through(four, 40.0f, 15.0f) && Is(g_out, 12.0f, 15.0f));
+    DeleteFileW(file);
+    CHECK(!CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 12.0f); /* taken away: the last degrees stay */
 
     if (g_failed) { printf("%d check(s) failed\n", g_failed); return 1; }
     printf("leancap: all checks passed\n");

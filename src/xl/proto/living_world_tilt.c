@@ -112,6 +112,7 @@ static void LwTiltColumn(uintptr_t mgr, float x, float y, float z, char* buf, si
 
 #ifdef CO_RESEARCH
 static void LwLpLevel(void); static void LwLpScan(void); static void LwLpNote(void); /* living_world_leancap.c: the lean limit's probe */
+static int LwLeanWatch(const wchar_t* path);
 static void LwLpUnitScan(uintptr_t mgr, uintptr_t R, uint32_t id, const float* q, const float* p, const float* up, float tilt, float ground, float off, ULONGLONG now);
 #endif
 #if defined(CO_RESEARCH) || defined(CO_TEST)
@@ -296,6 +297,11 @@ static void LwTiltScan(void)
     ULONGLONG now = GetTickCount64();
     if (now - g_lwTilt.at < 500) return;
     g_lwTilt.at = now;
+#ifdef CO_RESEARCH
+    static wchar_t lean[MAX_PATH];
+    if (!lean[0] && g_logs[0]) swprintf(lean, MAX_PATH, L"%ls\\xl-lean.txt", g_logs);
+    if (lean[0]) LwLeanWatch(lean);
+#endif
     if (g_lwTilt.level != g_world.levels)
     {
         memset(&g_lwTilt, 0, sizeof g_lwTilt); g_lwTilt.level = g_world.levels; g_lwTilt.at = now;
