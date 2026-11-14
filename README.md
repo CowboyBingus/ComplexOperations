@@ -467,7 +467,7 @@ Open items:
 The game cuts each navmesh face by the obstacles on it, and one cut holds at most 8192 edges. A face of the extra
 large map can lie under more trees than that. The mod bounds every cut:
 
-- A face takes obstacles up to 3584 outline segments. Later ones are left out, and enemies may walk through them.
+- A face takes obstacles up to 2048 outline segments. Later ones are left out, and enemies may walk through them.
 - A cut that still passes 8192 edges is done again with no obstacles, so the face stays whole.
 - Log, every 10 s: `navmesh cuts: the largest N half-edges of 8192; U left uncut ...`.
 - A research build reads `HELLFORGE_XL_NAVCUT=<edges>,<segments>` for lower limits.

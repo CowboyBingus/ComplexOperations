@@ -19,8 +19,13 @@ typedef struct Slot
 {
     volatile LONG thread;
     void* state; void* instance; void* vertices;
-    uint32_t key, adds; /* adds: the silhouettes this face took */
+    uint32_t key, adds, own; /* adds: the silhouettes this face took; own: the face's own edges */
     uint8_t flip, redone, partial;
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+    uint8_t gone;        /* stopped twice: its 0 polygons are the reset's, not a sweep's */
+    uint32_t segments;   /* the segments the sweep begins with */
+    uint64_t print;      /* the face add's input, hashed */
+#endif
     _Alignas(16) uint8_t up[16]; /* the face add reads it with movaps (0x133C695) */
 } Slot;
 
@@ -33,8 +38,10 @@ static struct
     HeapFn heap;
     ResetFn reset;
     uint32_t maxEdges, maxSegments;
-    volatile LONG64 uncut, hidden, partial, leftOut, againEnded, againOdd, aloneEnded, aloneOdd;
-    volatile LONG largest, worstEdges, worstSegments, worstX, worstY, oddFaces, oddEdges;
+    volatile LONG64 uncut, hidden, partial, leftOut, againEnded, againNone, againMany, aloneEnded, aloneNone, aloneMany;
+    /* one stopped cut's four numbers, and one odd end's three, each in one word: two threads' cuts never mix */
+    volatile LONG64 worst, odd;
+    volatile LONG largest;
     Slot slots[NAVCUT_SLOTS];
 } g_nc = {.maxEdges = CO_NAVCUT_MAX, .maxSegments = CO_NAVCUT_BUDGET};
 
@@ -76,6 +83,89 @@ static uint32_t Count(const void* state, uint32_t at)
     return v;
 }
 
+static LONG64 Pack(uint32_t a, uint32_t b, uint32_t c, uint32_t d)
+{
+    const uint64_t v = (uint64_t)(a & 0xFFFFu) | (uint64_t)(b & 0xFFFFu) << 16 | (uint64_t)(c & 0xFFFFu) << 32 | (uint64_t)(d & 0xFFFFu) << 48;
+    return (LONG64)v;
+}
+static uint32_t Short(uint32_t v) { return v > 0xFFFFu ? 0xFFFFu : v; }
+static uint32_t Metres(float v) { return (uint32_t)(int32_t)(v < -32767.0f ? -32767.0f : v > 32767.0f ? 32767.0f : v); }
+
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+/* Research only. The redo's claim is that a face added again comes to what the engine makes of that face alone, so
+ * the two ends are kept by the face add's whole input and compared. The table is fixed: a face with no free row
+ * within 8 of its place is counted and not kept. */
+#define NAVCUT_SAME 16384u
+static struct
+{
+    SRWLOCK lock;
+    struct { uint64_t print; uint16_t alone, again; } rows[NAVCUT_SAME]; /* polygons + 1; 0 for not seen */
+    volatile LONG64 same, differ, notKept, last;
+    volatile LONG64 ended[3], stopped[3], steep[3];
+    volatile LONG most[3];
+} g_study;
+
+static uint64_t Mix(uint64_t h, const void* bytes, size_t n)
+{
+    for (size_t i = 0; i < n; i++) h = (h ^ ((const uint8_t*)bytes)[i]) * 1099511628211ull;
+    return h;
+}
+
+/* Key, flip, up, the frame's tolerance (+0x1D4, 0x133C732) and every own edge's two points and ordinal: what the
+ * face add builds the face-alone state from. Another section's face of the same key has other points. */
+static uint64_t Print(const void* state, const Slot* s)
+{
+    const uint8_t* edges;
+    const uint32_t n = Count(state, CO_NAVCUT_OWN);
+    uint64_t h = 1469598103934665603ull;
+    memcpy(&edges, (const uint8_t*)state + CO_NAVCUT_OWN_EDGES, sizeof edges);
+    h = Mix(h, &s->key, 4); h = Mix(h, &s->flip, 1); h = Mix(h, s->up, 16);
+    h = Mix(h, (const uint8_t*)state + 0x1D4u, 4); h = Mix(h, &n, 4);
+    for (uint32_t i = 0; edges != NULL && i < n && i < 4096u; i++) h = Mix(h, edges + (size_t)i * 0x30u, 0x22u);
+    return h != 0 ? h : 1;
+}
+
+static void Same(const Slot* s, uint32_t faces, int again)
+{
+    const uint16_t now = (uint16_t)(faces >= 0xFFFEu ? 0xFFFFu : faces + 1);
+    uint16_t other = 0;
+    int kept = 0;
+    AcquireSRWLockExclusive(&g_study.lock);
+    for (uint32_t i = 0; i < 8 && !kept; i++)
+    {
+        const uint32_t at = (uint32_t)(s->print + i) & (NAVCUT_SAME - 1);
+        if (g_study.rows[at].print != s->print && g_study.rows[at].print != 0) continue;
+        g_study.rows[at].print = s->print;
+        if (again) { g_study.rows[at].again = now; other = g_study.rows[at].alone; }
+        else { g_study.rows[at].alone = now; other = g_study.rows[at].again; }
+        kept = 1;
+    }
+    ReleaseSRWLockExclusive(&g_study.lock);
+    if (!kept) { InterlockedIncrement64(&g_study.notKept); return; }
+    if (other == 0) return;
+    if (other == now) { InterlockedIncrement64(&g_study.same); return; }
+    InterlockedIncrement64(&g_study.differ);
+    InterlockedExchange64(&g_study.last, again ? Pack((uint32_t)other - 1, faces, s->own, 0) : Pack(faces, (uint32_t)other - 1, s->own, 0));
+}
+
+/* The budget's ground: half-edges a segment of whole cuts, by the segments they began with. */
+static void Whole(const Slot* s, uint32_t edges, int stopped)
+{
+    const int band = s->segments >= 2048u ? 2 : s->segments >= 1024u ? 1 : s->segments >= 512u ? 0 : -1;
+    if (band < 0) return;
+    if (stopped) { InterlockedIncrement64(&g_study.stopped[band]); return; }
+    const LONG rate = (LONG)((uint64_t)edges * 100u / s->segments);
+    InterlockedIncrement64(&g_study.ended[band]);
+    if (rate > 229) InterlockedIncrement64(&g_study.steep[band]);
+    for (LONG seen = g_study.most[band]; seen < rate;)
+    {
+        const LONG was = InterlockedCompareExchange(&g_study.most[band], rate, seen);
+        if (was == seen) break;
+        seen = was;
+    }
+}
+#endif
+
 static Slot* SlotOf(int claim)
 {
     const LONG me = (LONG)GetCurrentThreadId();
@@ -102,6 +192,11 @@ static void Face(void* state, void* instance, const void* up, uint8_t flip, uint
         memcpy(s->up, up, 16);
     }
     g_nc.face(state, instance, up, flip, key, vertices);
+    if (s == NULL) return;
+    s->own = Count(state, CO_NAVCUT_OWN);
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+    s->gone = 0; s->segments = Count(state, CO_NAVCUT_SEGMENTS); s->print = Print(state, s);
+#endif
 }
 
 /* A cut that starts with no face (0x133C620) must not find the face this thread cut before: the callers' states are
@@ -125,7 +220,13 @@ static uint32_t Add(void* state, const void* points, int32_t count, int32_t mate
         if (s != NULL && s->state == state && !s->partial) { s->partial = 1; InterlockedIncrement64(&g_nc.partial); }
         return 1;
     }
-    if (s != NULL && s->state == state) s->adds++;
+    if (s != NULL && s->state == state)
+    {
+        s->adds++;
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+        s->segments += n;
+#endif
+    }
     return g_nc.add(state, points, count, material);
 }
 
@@ -141,18 +242,21 @@ static void Over(void* state, uint32_t edges, uint32_t segments)
     Slot* s = SlotOf(0);
     memcpy((uint8_t*)state + CO_NAVCUT_STATUS, kNone, sizeof kNone);
     memcpy(origin, (const uint8_t*)state + CO_NAVCUT_ORIGIN, 8);
-    InterlockedExchange(&g_nc.worstEdges, (LONG)edges);
-    InterlockedExchange(&g_nc.worstSegments, (LONG)segments);
-    InterlockedExchange(&g_nc.worstX, (LONG)origin[0]);
-    InterlockedExchange(&g_nc.worstY, (LONG)origin[1]);
+    InterlockedExchange64(&g_nc.worst, Pack(Short(edges), Short(segments), Metres(origin[0]), Metres(origin[1])));
     if (s != NULL && s->state == state && !s->redone)
     {
         s->redone = 1;
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+        Whole(s, edges, 1);
+#endif
         InterlockedIncrement64(&g_nc.uncut);
         g_nc.face(state, s->instance, s->up, s->flip, s->key, s->vertices);
         g_nc.heap((uint8_t*)state + CO_NAVCUT_QUEUE);
         return;
     }
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+    if (s != NULL && s->state == state) s->gone = 1;
+#endif
     InterlockedIncrement64(&g_nc.hidden);
     g_nc.reset(state);
 }
@@ -168,16 +272,21 @@ static void Ended(void* state)
     if (s->redone)
     {
         InterlockedIncrement64(&g_nc.againEnded);
-        if (faces == 1) return;
-        InterlockedIncrement64(&g_nc.againOdd);
-        InterlockedExchange(&g_nc.oddFaces, (LONG)faces);
-        InterlockedExchange(&g_nc.oddEdges, (LONG)Count(state, CO_NAVCUT_EDGES));
+        if (faces != 1)
+        {
+            InterlockedIncrement64(faces == 0 ? &g_nc.againNone : &g_nc.againMany);
+            InterlockedExchange64(&g_nc.odd, Pack(Short(faces), Short(Count(state, CO_NAVCUT_EDGES)), Short(s->own), 0));
+        }
     }
     else if (s->adds == 0)
     {
         InterlockedIncrement64(&g_nc.aloneEnded);
-        if (faces != 1) InterlockedIncrement64(&g_nc.aloneOdd);
+        if (faces != 1) InterlockedIncrement64(faces == 0 ? &g_nc.aloneNone : &g_nc.aloneMany);
     }
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+    if (s->redone ? !s->gone : s->adds == 0) Same(s, faces, s->redone);
+    if (!s->redone && s->adds != 0) Whole(s, Count(state, CO_NAVCUT_EDGES), 0);
+#endif
 }
 
 static uint8_t Step(void* state)
@@ -224,11 +333,12 @@ void co_navcut_seen(CoNavCutSeen* out)
     out->uncut = (uint64_t)g_nc.uncut; out->hidden = (uint64_t)g_nc.hidden;
     out->partial = (uint64_t)g_nc.partial; out->leftOut = (uint64_t)g_nc.leftOut;
     out->largest = (uint32_t)g_nc.largest;
-    out->worstEdges = (uint32_t)g_nc.worstEdges; out->worstSegments = (uint32_t)g_nc.worstSegments;
-    out->worstAt[0] = (float)g_nc.worstX; out->worstAt[1] = (float)g_nc.worstY;
-    out->againEnded = (uint64_t)g_nc.againEnded; out->againOdd = (uint64_t)g_nc.againOdd;
-    out->aloneEnded = (uint64_t)g_nc.aloneEnded; out->aloneOdd = (uint64_t)g_nc.aloneOdd;
-    out->oddFaces = (uint32_t)g_nc.oddFaces; out->oddEdges = (uint32_t)g_nc.oddEdges;
+    const uint64_t worst = (uint64_t)g_nc.worst, odd = (uint64_t)g_nc.odd;
+    out->worstEdges = (uint32_t)(worst & 0xFFFFu); out->worstSegments = (uint32_t)(worst >> 16 & 0xFFFFu);
+    out->worstAt[0] = (float)(int16_t)(worst >> 32 & 0xFFFFu); out->worstAt[1] = (float)(int16_t)(worst >> 48);
+    out->againEnded = (uint64_t)g_nc.againEnded; out->againNone = (uint64_t)g_nc.againNone; out->againMany = (uint64_t)g_nc.againMany;
+    out->aloneEnded = (uint64_t)g_nc.aloneEnded; out->aloneNone = (uint64_t)g_nc.aloneNone; out->aloneMany = (uint64_t)g_nc.aloneMany;
+    out->oddFaces = (uint32_t)(odd & 0xFFFFu); out->oddEdges = (uint32_t)(odd >> 16 & 0xFFFFu); out->oddOwn = (uint32_t)(odd >> 32 & 0xFFFFu);
 }
 
 #if defined(CO_RESEARCH) || defined(CO_TEST)
@@ -237,12 +347,25 @@ void co_navcut_limits(uint32_t edges, uint32_t segments)
     g_nc.maxEdges = edges < 16 ? 16 : edges > CO_NAVCUT_MAX ? CO_NAVCUT_MAX : edges;
     g_nc.maxSegments = segments < 16 ? 16 : segments > CO_NAVCUT_MAX ? CO_NAVCUT_MAX : segments;
 }
+
+void co_navcut_study(CoNavCutStudy* out)
+{
+    const uint64_t last = (uint64_t)g_study.last;
+    out->same = (uint64_t)g_study.same; out->differ = (uint64_t)g_study.differ; out->notKept = (uint64_t)g_study.notKept;
+    out->differAlone = (uint32_t)(last & 0xFFFFu); out->differAgain = (uint32_t)(last >> 16 & 0xFFFFu); out->differOwn = (uint32_t)(last >> 32 & 0xFFFFu);
+    for (int i = 0; i < 3; i++)
+    {
+        out->ended[i] = (uint64_t)g_study.ended[i]; out->stopped[i] = (uint64_t)g_study.stopped[i];
+        out->steep[i] = (uint64_t)g_study.steep[i]; out->most[i] = (uint32_t)g_study.most[i];
+    }
+}
 #endif
 
 #ifdef CO_TEST
 void co_navcut_test_reset(void)
 {
     memset((void*)&g_nc, 0, sizeof g_nc);
+    memset((void*)&g_study, 0, sizeof g_study);
     g_nc.maxEdges = CO_NAVCUT_MAX; g_nc.maxSegments = CO_NAVCUT_BUDGET;
 }
 void co_navcut_test_calls(void (*heap)(void* queue), void (*reset)(void* state)) { g_nc.heap = heap; g_nc.reset = reset; }

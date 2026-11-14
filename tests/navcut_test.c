@@ -39,6 +39,8 @@ static struct
     uint32_t facesOnFirst; /* polygons the first step after a face add makes (the sweep opens them at its first event) */
     uint32_t fresh;        /* a face or key call since the last step: the next step is a sweep's first */
     uint32_t staleStatus;  /* sweeps whose first step found the status of an earlier, stopped sweep */
+    uint32_t own;          /* the face's own edges, listed at +0x1D8 as the game's face add does (0x30 bytes each) */
+    _Alignas(16) uint8_t ownEdges[8 * 0x30];
 } E;
 
 #define STATUS CO_NAVCUT_STATUS
@@ -66,6 +68,8 @@ static void EngineFace(void* state, void* instance, const void* up, uint8_t flip
     Set(s, QUEUE_SIZE, 1 + E.faceEvents);
     E.unsorted = E.faceEvents;
     E.fresh = 1;
+    const uint8_t* edges = E.ownEdges;
+    Set(s, CO_NAVCUT_OWN, E.own); memcpy(s->b + CO_NAVCUT_OWN_EDGES, &edges, sizeof edges);
 }
 
 static void EngineKey(void* state, uint32_t key)
@@ -233,8 +237,8 @@ int main(void)
         E.faceSegments = 4; E.faceEvents = 4; E.perStep = 2;
         face(&s, &g_instance, kUp, 0, 1, &g_vertices);
         CHECK(add(&s, points, (int32_t)CO_NAVCUT_BUDGET - 4 - 8, 0) == 1);
-        CHECK(add(&s, points, 9, 0) == 1 && E.addCalls == 1);       /* 3576 + 9 > 3584: left out, the answer still 1 */
-        CHECK(add(&s, points, 8, 0) == 1 && E.addCalls == 2);       /* 3576 + 8 = the budget: in */
+        CHECK(add(&s, points, 9, 0) == 1 && E.addCalls == 1);       /* 9 would pass the budget: left out, the answer still 1 */
+        CHECK(add(&s, points, 8, 0) == 1 && E.addCalls == 2);       /* 8 reach the budget: in */
         CHECK(Get(&s, CO_NAVCUT_SEGMENTS) == CO_NAVCUT_BUDGET);
         CHECK(add(&s, points, 1, 0) == 1 && add(&s, points, 6, 0) == 1 && E.addCalls == 2);
         CHECK(add(&s, points, 0x7FFFFFFF, 0) == 1 && E.addCalls == 2); /* no wrap of segments + count */
@@ -259,7 +263,7 @@ int main(void)
     {
         Construct(&s);
         const float origin[2] = {2440.0f, 3259.0f};
-        E.faceSegments = 11; E.faceEvents = 11; E.perStep = 2; E.perStepAlone = 2; E.facesOnFirst = 1;
+        E.faceSegments = 11; E.faceEvents = 11; E.perStep = 2; E.perStepAlone = 2; E.facesOnFirst = 1; E.own = 7;
         face(&s, &g_instance, kUp, 1, 0x00B502D4u, &g_vertices);
         memcpy(s.b + CO_NAVCUT_ORIGIN, origin, 8);
         for (int i = 0; i < 635; i++) add(&s, points, 8, 1);
@@ -277,14 +281,15 @@ int main(void)
         CHECK(seen.worstAt[0] == 2440.0f && seen.worstAt[1] == 3259.0f);
         /* the stopped sweep held a segment in the status; the face's own sweep began on an empty one and left 1 polygon */
         CHECK(E.staleStatus == 0 && Get16(&s, STATUS) == 0xFFFFu && Get16(&s, STATUS + 2) == 0xFFFFu && Get(&s, CO_NAVCUT_FACES) == 1);
-        CHECK(seen.againEnded == 1 && seen.againOdd == 0 && seen.aloneEnded == 0 && seen.aloneOdd == 0);
+        CHECK(seen.againEnded == 1 && seen.againNone == 0 && seen.againMany == 0 && seen.aloneEnded == 0 && seen.aloneNone == 0 && seen.aloneMany == 0);
         /* the same face cut again and ending as 2 polygons is told apart */
         E.facesOnFirst = 2;
         face(&s, &g_instance, kUp, 1, 0x00B502D4u, &g_vertices);
         add(&s, points, 5000, 1);
         CHECK(Sweep(&s) == 1);
         co_navcut_seen(&seen);
-        CHECK(seen.uncut == 2 && seen.againEnded == 2 && seen.againOdd == 1 && seen.oddFaces == 2 && seen.oddEdges == 22);
+        CHECK(seen.uncut == 2 && seen.againEnded == 2 && seen.againMany == 1 && seen.againNone == 0);
+        CHECK(seen.oddFaces == 2 && seen.oddEdges == 22 && seen.oddOwn == 7);
         /* faces with no silhouette are the engine's own measure; one that took a silhouette and fitted is neither */
         face(&s, &g_instance, kUp, 1, 1, &g_vertices);
         CHECK(Sweep(&s) == 1);
@@ -295,7 +300,26 @@ int main(void)
         add(&s, points, 8, 1);
         CHECK(Sweep(&s) == 1);
         co_navcut_seen(&seen);
-        CHECK(seen.uncut == 2 && seen.againEnded == 2 && seen.againOdd == 1 && seen.aloneEnded == 2 && seen.aloneOdd == 1);
+        CHECK(seen.uncut == 2 && seen.againEnded == 2 && seen.againMany == 1 && seen.aloneEnded == 2 && seen.aloneMany == 1 && seen.aloneNone == 0);
+        /* a face alone that ends with no polygon is its own count, in both pairs */
+        E.facesOnFirst = 0;
+        face(&s, &g_instance, kUp, 1, 4, &g_vertices);
+        CHECK(Sweep(&s) == 1);
+        face(&s, &g_instance, kUp, 1, 5, &g_vertices);
+        add(&s, points, 5000, 1);
+        CHECK(Sweep(&s) == 1);
+        co_navcut_seen(&seen);
+        CHECK(seen.aloneEnded == 3 && seen.aloneMany == 1 && seen.aloneNone == 1 && seen.againEnded == 3 && seen.againMany == 1 && seen.againNone == 1);
+        CHECK(seen.oddFaces == 0 && seen.oddEdges == 22 && seen.oddOwn == 7);
+        /* a stop west and south of the origin keeps its signs, and its four numbers are one cut's */
+        const float west[2] = {-3771.0f, -2740.0f};
+        E.facesOnFirst = 1;
+        face(&s, &g_instance, kUp, 1, 6, &g_vertices);
+        memcpy(s.b + CO_NAVCUT_ORIGIN, west, 8);
+        add(&s, points, 4200, 1);
+        CHECK(Sweep(&s) == 1);
+        co_navcut_seen(&seen);
+        CHECK(seen.worstEdges == 8194 && seen.worstSegments == 4211 && seen.worstAt[0] == -3771.0f && seen.worstAt[1] == -2740.0f);
     }
 
     Reset("exactly 8192 half-edges is a whole cut");
@@ -330,7 +354,7 @@ int main(void)
         CHECK(Sweep(&s) == 1);
         CHECK(E.faceCalls == 2 && E.resetCalls == 1 && Get(&s, CO_NAVCUT_EDGES) == 0 && Get(&s, QUEUE_SIZE) == 1);
         co_navcut_seen(&seen);
-        CHECK(seen.uncut == 1 && seen.hidden == 1 && seen.againEnded == 1 && seen.againOdd == 1 && seen.oddFaces == 0);
+        CHECK(seen.uncut == 1 && seen.hidden == 1 && seen.againEnded == 1 && seen.againNone == 1 && seen.againMany == 0 && seen.oddFaces == 0);
         CHECK(Get16(&s, STATUS) == 0xFFFFu && Get16(&s, STATUS + 2) == 0xFFFFu); /* the second stop empties it too */
         E.perStepAlone = 1; E.aloneLater = 2; /* the next face has its own second chance */
         face(&s, &g_instance, kUp, 0, 10, &g_vertices);
@@ -460,6 +484,134 @@ int main(void)
         CHECK(add(&s, points, 8192, 0) == 1 && E.addCalls == 3 && add(&s, points, 1, 0) == 1 && E.addCalls == 3);
         E.perStep = 1; E.perStepAlone = 1;
         CHECK(Sweep(&s) == 1 && E.faceCalls == 5 && Get(&s, CO_NAVCUT_EDGES) == 1); /* 8193 half-edges: stopped */
+    }
+
+    Reset("the release budget holds a cut of 4 half-edges a segment under the limit");
+    CHECK(co_navcut_install((uintptr_t)g_exe) == NULL);
+    face = (FaceFn)Detour(CO_NAVCUT_FACE); add = (AddFn)Detour(CO_NAVCUT_ADD);
+    if (face != NULL && add != NULL)
+    {
+        Construct(&s);
+        E.faceSegments = 4; E.faceEvents = 4; E.perStep = 4;
+        face(&s, &g_instance, kUp, 0, 1, &g_vertices);
+        for (int i = 0; i < 1400; i++) add(&s, points, 4, 0); /* run 4's 5599 segments and more, four a silhouette */
+        co_navcut_seen(&seen);
+        CHECK(Get(&s, CO_NAVCUT_SEGMENTS) == CO_NAVCUT_BUDGET && seen.partial == 1 && seen.leftOut == 1400 - (CO_NAVCUT_BUDGET - 4) / 4);
+        CHECK(Sweep(&s) == 1 && E.faceCalls == 1 && Get(&s, CO_NAVCUT_EDGES) <= CO_NAVCUT_MAX);
+        co_navcut_seen(&seen);
+        CHECK(seen.uncut == 0 && seen.hidden == 0 && seen.largest == 4 * CO_NAVCUT_BUDGET);
+    }
+
+    Reset("research: one face alone and done again is compared by its own edges, not by its key");
+    CHECK(co_navcut_install((uintptr_t)g_exe) == NULL);
+    co_navcut_limits(CO_NAVCUT_MAX, CO_NAVCUT_MAX);
+    face = (FaceFn)Detour(CO_NAVCUT_FACE); add = (AddFn)Detour(CO_NAVCUT_ADD);
+    if (face != NULL && add != NULL)
+    {
+        CoNavCutStudy study;
+        Construct(&s);
+        E.faceSegments = 5; E.faceEvents = 5; E.perStep = 2; E.perStepAlone = 2; E.facesOnFirst = 3; E.own = 5;
+        memset(E.ownEdges, 0x11, sizeof E.ownEdges);
+        face(&s, &g_instance, kUp, 0, 0x424u, &g_vertices); /* alone: 3 polygons */
+        CHECK(Sweep(&s) == 1);
+        co_navcut_study(&study);
+        CHECK(study.same == 0 && study.differ == 0);
+        face(&s, &g_instance, kUp, 0, 0x424u, &g_vertices); /* the same face stopped and done again: 3 polygons */
+        add(&s, points, 5000, 1);
+        CHECK(Sweep(&s) == 1 && E.faceCalls == 3);
+        co_navcut_study(&study);
+        CHECK(study.same == 1 && study.differ == 0);
+        E.ownEdges[0x30 + 0x21] ^= 1; /* the same key in another section: other points, so another face */
+        E.facesOnFirst = 2;
+        face(&s, &g_instance, kUp, 0, 0x424u, &g_vertices);
+        add(&s, points, 5000, 1);
+        CHECK(Sweep(&s) == 1);
+        co_navcut_study(&study);
+        CHECK(study.same == 1 && study.differ == 0);
+        face(&s, &g_instance, kUp, 0, 0x424u, &g_vertices); /* that face alone after its redo: 2 and 2 */
+        CHECK(Sweep(&s) == 1);
+        co_navcut_study(&study);
+        CHECK(study.same == 2 && study.differ == 0);
+        E.ownEdges[0x30 + 0x21] ^= 1; /* the first face again, done again as 2 where alone it was 3 */
+        face(&s, &g_instance, kUp, 0, 0x424u, &g_vertices);
+        add(&s, points, 5000, 1);
+        CHECK(Sweep(&s) == 1);
+        co_navcut_study(&study);
+        CHECK(study.same == 2 && study.differ == 1 && study.differAlone == 3 && study.differAgain == 2 && study.differOwn == 5);
+        E.ownEdges[0x22] ^= 1; /* a byte the face add does not write is not part of the face */
+        E.facesOnFirst = 3;
+        face(&s, &g_instance, kUp, 0, 0x424u, &g_vertices);
+        add(&s, points, 5000, 1);
+        CHECK(Sweep(&s) == 1);
+        co_navcut_study(&study);
+        CHECK(study.same == 3 && study.differ == 1);
+        E.ownEdges[0x22] ^= 1;
+        /* a face stopped twice has the reset's 0 polygons, which is no sweep's end: not compared, and the next is */
+        E.facesOnFirst = 0;
+        face(&s, &g_instance, kUp, 0, 0x425u, &g_vertices);
+        CHECK(Sweep(&s) == 1);
+        E.perStepAlone = 5000; E.aloneLater = E.faceCalls;
+        face(&s, &g_instance, kUp, 0, 0x425u, &g_vertices);
+        add(&s, points, 5000, 1);
+        CHECK(Sweep(&s) == 1);
+        co_navcut_seen(&seen);
+        co_navcut_study(&study);
+        CHECK(seen.hidden == 1 && study.same == 3 && study.differ == 1);
+        E.perStepAlone = 2; E.aloneLater = 0;
+        face(&s, &g_instance, kUp, 0, 0x425u, &g_vertices);
+        add(&s, points, 5000, 1);
+        CHECK(Sweep(&s) == 1);
+        co_navcut_study(&study);
+        CHECK(study.same == 4 && study.differ == 1 && study.notKept == 0);
+        /* more faces than rows: the rest are counted, none takes another's row */
+        E.facesOnFirst = 1;
+        for (uint32_t k = 0; k < 20000; k++) { face(&s, &g_instance, kUp, 0, 0x10000u + k, &g_vertices); Sweep(&s); }
+        co_navcut_study(&study);
+        CHECK(study.notKept >= 20000 - 16384 && study.notKept < 20000 - 8192 && study.same == 4 && study.differ == 1);
+    }
+
+    Reset("research: whole cuts by the segments they began with");
+    CHECK(co_navcut_install((uintptr_t)g_exe) == NULL);
+    co_navcut_limits(CO_NAVCUT_MAX, CO_NAVCUT_MAX);
+    face = (FaceFn)Detour(CO_NAVCUT_FACE); add = (AddFn)Detour(CO_NAVCUT_ADD);
+    if (face != NULL && add != NULL)
+    {
+        CoNavCutStudy study;
+        Construct(&s);
+        E.faceSegments = 11; E.faceEvents = 11; E.perStep = 5;
+        face(&s, &g_instance, kUp, 0, 1, &g_vertices); /* 511 segments: under every band */
+        add(&s, points, 500, 0);
+        CHECK(Sweep(&s) == 1);
+        face(&s, &g_instance, kUp, 0, 1, &g_vertices); /* 512 segments at 5 a segment */
+        add(&s, points, 501, 0);
+        CHECK(Sweep(&s) == 1);
+        E.perStep = 1; E.faceSegments = 599; E.faceEvents = 1373;
+        face(&s, &g_instance, kUp, 0, 1, &g_vertices); /* 600 segments, 1374 half-edges: 2.29, not over it */
+        add(&s, points, 1, 0);
+        CHECK(Sweep(&s) == 1 && Get(&s, CO_NAVCUT_EDGES) == 1374);
+        E.perStep = 3; E.faceSegments = 11; E.faceEvents = 11;
+        face(&s, &g_instance, kUp, 0, 1, &g_vertices); /* 1024 segments at 3 */
+        add(&s, points, 1013, 0);
+        CHECK(Sweep(&s) == 1);
+        E.perStep = 2;
+        face(&s, &g_instance, kUp, 0, 1, &g_vertices); /* 2047 segments at 2: still the middle band */
+        add(&s, points, 2036, 0);
+        CHECK(Sweep(&s) == 1);
+        face(&s, &g_instance, kUp, 0, 1, &g_vertices); /* 2048 at 2 */
+        add(&s, points, 2037, 0);
+        CHECK(Sweep(&s) == 1);
+        E.perStep = 5;
+        face(&s, &g_instance, kUp, 0, 1, &g_vertices); /* 3000 at 5: stopped, so no rate */
+        add(&s, points, 2989, 0);
+        CHECK(Sweep(&s) == 1);
+        E.faceSegments = 600; E.faceEvents = 600;
+        face(&s, &g_instance, kUp, 0, 1, &g_vertices); /* a face alone, of 600 edges even, is no cut by silhouettes */
+        CHECK(Sweep(&s) == 1);
+        co_navcut_study(&study);
+        CHECK(study.ended[0] == 2 && study.ended[1] == 2 && study.ended[2] == 1);
+        CHECK(study.stopped[0] == 0 && study.stopped[1] == 0 && study.stopped[2] == 1);
+        CHECK(study.steep[0] == 1 && study.steep[1] == 1 && study.steep[2] == 0);
+        CHECK(study.most[0] == 500 && study.most[1] == 300 && study.most[2] == 200);
     }
 
     static const uint32_t kPinned[] = {CO_NAVCUT_FACE + 3, 0x133C67Au + 1, CO_NAVCUT_ADD + 2, CO_NAVCUT_STEP + 12, CO_NAVCUT_HEAP + 7,
