@@ -18,9 +18,9 @@ static uintptr_t LwFpJoin(uintptr_t a)
 }
 static uintptr_t LwFpWorld(uintptr_t w, float a, float b)
 {
-    int64_t t = co_framecost_now();
+    co_framecost_world(1);
     uintptr_t out = ((LwFpWorldFn)g_lwFp.world)(w, a, b);
-    co_framecost_extra(CO_FX_WORLD, t);
+    co_framecost_world(0);
     return out;
 }
 /* The joins' time on the calling thread since its last call, in ms: the budget lever asks once a frame. */

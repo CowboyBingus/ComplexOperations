@@ -19,6 +19,7 @@ enum
 
 #define CO_FC_WINDOW_MS 10000.0
 #define CO_FC_FRAMES 4096                /* frame times kept a window: 400 fps for 10 s */
+#define CO_FC_TARGET_MS 16.7             /* a frame longer than this is under 60 fps: the count the target is judged by */
 #define CO_FC_SLOW_MS 25.0               /* a visible stutter at the 60 fps target */
 #define CO_FC_HITCH_MS 33.3
 #define CO_FC_LONG_MS 1000.0             /* a frame of a second or more in play: a build or a stall */
@@ -47,6 +48,14 @@ void co_framecost_nested(int inner, int outer, int64_t since);
  * thread's waits for the AI step, the engine's world update, and whether a far-grass bake job was out. */
 enum { CO_FX_JOIN, CO_FX_WORLD, CO_FX_COUNT };
 void co_framecost_extra(int which, int64_t since);
+/* Around the engine's world update, on the game thread: its time is CO_FX_WORLD's, and what is timed inside it (a
+ * part, a join) comes off it for the causes below. A frame that starts inside it gets its share on each side. */
+void co_framecost_world(int enter);
+/* What a frame over CO_FC_TARGET_MS is counted under, a window: the timed parts, then the AI joins, the world update
+ * less what was timed inside it, and the rest of the frame. Two slow-frame lines a window cannot show a cause that
+ * costs the third slowest frame or one of 17 to 25 ms; these counters hold every such frame. */
+enum { CO_FC_CAUSE_JOIN = CO_FC_PARTS, CO_FC_CAUSE_WORLD, CO_FC_CAUSE_REST, CO_FC_CAUSES };
+#define CO_FC_CAUSE_OTHERS 2             /* parts named in the causes line beside the four it always names */
 void co_framecost_grass(int out);
 
 #ifdef CO_TEST
@@ -58,6 +67,10 @@ void co_framecost_test_mark(int part, int64_t now);
 int64_t co_framecost_test_add(int part, int64_t since, int64_t now);
 void co_framecost_test_nested(int inner, int outer, int64_t since, int64_t now);
 void co_framecost_test_extra(int which, int64_t since, int64_t now);
+void co_framecost_test_world(int enter, int64_t now);
+/* The last closed window: frames over 16.7 ms, how many each cause led (the largest), and how many were over only
+ * with it (16.7 ms or less without it; not kept for the rest). */
+void co_framecost_test_causes(uint32_t* over, uint32_t led[CO_FC_CAUSES], uint32_t only[CO_FC_CAUSES]);
 /* The window being filled, its slow frame `k` (0 the slowest): its ms beside the AI joins, the world update and the far-grass flag. */
 double co_framecost_test_slow(int k, double* join, double* world, int* grass);
 int co_framecost_test_window_lines(void);

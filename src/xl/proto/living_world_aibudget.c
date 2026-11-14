@@ -16,7 +16,7 @@ static struct
     uint32_t drainFrames, drainStarts, drainRun, drainLines; int drainMost; ULONGLONG drainAt;
     uint32_t applied, appliedFrames; int appliedMost; uintptr_t unknown;
     uint32_t sinceApplied; int runApplied;       /* frames since the run in flight applied a change; its count so far */
-    int wasDraining;                             /* the last frame's step ran at the drain's budget */
+    int wasDraining;                             /* the last frame's step ran at the drain's budget: it was the largest */
     uint32_t drainJoins; double drainJoinSum, drainJoinWorst, runJoinSum, runJoinWorst;
 } g_lwAib = {.on = 1, .lowUs = LW_AIB_LOW_US, .raiseMs = LW_AIB_RAISE_MS, .drain = {CO_AIB_DRAIN_US, CO_AIB_DRAIN_RUN_MS, CO_AIB_DRAIN_QUEUE}};
 
@@ -172,7 +172,22 @@ static void LwAibSteer(uintptr_t h, float cur, float lat, float runS, ULONGLONG 
     float more = (float)LwNavHoldRaiseUs(h, now) / 1000000.0f;
     float want = co_aibudget_step(&g_lwAib.b, &g_lwAib.drain, lever, lat, g_lwAib.lowUs, g_lwAib.raiseMs, task != 0, runS, queued, more);
     LwAibDrainNote(was, task != 0, runS, queued);
+    LwNavHoldRan(g_lwAib.b.ran == CO_AIB_RAN_MORE);
+    g_lwAib.wasDraining = g_lwAib.b.draining && g_lwAib.b.ran == CO_AIB_RAN_DRAIN; /* the drain's value was the one written */
     if (want > 0 && cur != want) { *(volatile float*)(h + 0x47C) = want; co_aibudget_wrote(&g_lwAib.b, want); }
+}
+
+/* The joins since the last frame go to the statistic of the budget the step ran with: the hold's raise or the AI
+ * drain's. A frame whose world did not read has no known budget: its joins are dropped, not left for the next
+ * frame's sum, which made one "worst" out of many frames. */
+static void LwAibJoin(double join, int known)
+{
+    if (!known) { g_lwNavHold.wasRaised = 0; g_lwAib.wasDraining = 0; return; }
+    LwNavHoldJoin(join);
+    if (!g_lwAib.wasDraining) return;
+    g_lwAib.drainJoins++; g_lwAib.drainJoinSum += join; g_lwAib.runJoinSum += join;
+    if (join > g_lwAib.drainJoinWorst) g_lwAib.drainJoinWorst = join;
+    if (join > g_lwAib.runJoinWorst) g_lwAib.runJoinWorst = join;
 }
 
 /* Game thread, once a frame. A new level makes a new AI world, whose stock value is read before the first write.
@@ -181,23 +196,18 @@ static void LwAibFrame(void)
 {
     if (g_lwAib.failed || (!g_lwAib.on && !g_lwAib.verbose && g_lwAib.drain.us <= 0 && !g_lwNavHold.worlds)) return;
     uintptr_t h = LwAibWorld(); float cur = 0;
-    if (!h || SafeRead(h + 0x47C, &cur, 4) || !(cur > 0.00001f && cur < 0.1f)) return;
+    double join = LwFpJoinTake();
+    if (!h || SafeRead(h + 0x47C, &cur, 4) || !(cur > 0.00001f && cur < 0.1f)) { LwAibJoin(join, 0); return; }
     if (!(co_aibudget_stock(&g_lwAib.b, h, cur) > 0))
     {
+        LwAibJoin(join, 0);
         /* another instance of the mod lowered this world (a DLL swapped into a held session): no stock to return to */
         if (g_lwAib.unknown != h) Note("living world: AI path budget: AI world %p holds %.0f us, not a game value; left alone until it reads %.0f to %.0f us", (void*)h, (double)cur * 1e6, (double)CO_AIB_STOCK_LEAST * 1e6, (double)CO_AIB_STOCK_MOST * 1e6);
         g_lwAib.unknown = h; return;
     }
     /* the step the last frame's budget ran in was joined before this tick: its wait is what a drain frame, or one
      * of the nav hold's raise, costs. One hook times the join (living_world_fparts.c); both statistics get the value. */
-    double join = LwFpJoinTake();
-    LwNavHoldJoin(join);
-    if (g_lwAib.wasDraining)
-    {
-        g_lwAib.drainJoins++; g_lwAib.drainJoinSum += join; g_lwAib.runJoinSum += join;
-        if (join > g_lwAib.drainJoinWorst) g_lwAib.drainJoinWorst = join;
-        if (join > g_lwAib.runJoinWorst) g_lwAib.runJoinWorst = join;
-    }
+    LwAibJoin(join, 1);
     uintptr_t run = 0; int sum = LwAibApplied(h, &run), did = co_aibudget_applied(&g_lwAib.b, run, sum);
     if (did) { g_lwAib.applied += (uint32_t)did; g_lwAib.appliedFrames++; if (did > g_lwAib.appliedMost) g_lwAib.appliedMost = did; }
     g_lwAib.runApplied = run ? sum : 0; g_lwAib.sinceApplied = did ? 0 : g_lwAib.sinceApplied + 1;
@@ -207,7 +217,6 @@ static void LwAibFrame(void)
     LwAibWatch(h, t[0], t[1]);
 #endif
     LwAibSteer(h, cur, lat, t[1], GetTickCount64());
-    g_lwAib.wasDraining = g_lwAib.b.draining;
     g_lwAib.frames++; g_lwAib.raisedFrames += (uint32_t)(g_lwAib.b.raised || !g_lwAib.on);
     if (lat > g_lwAib.worst) g_lwAib.worst = lat;
     g_lwAib.latSum += lat;

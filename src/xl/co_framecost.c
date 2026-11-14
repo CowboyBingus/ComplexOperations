@@ -20,6 +20,7 @@ static struct
     long mission, budgetMission;
     int64_t part[CO_FC_PARTS]; /* the frame being closed: its parts so far */
     int64_t extra[CO_FX_COUNT]; int grass;
+    int64_t worldAt, inside; /* the world update under way since; ticks of parts and joins timed inside it this frame */
     volatile LONG64 offThread; /* ticks timed on other threads since the window began */
     CoFcContextFn context;
     /* the window */
@@ -27,6 +28,7 @@ static struct
     uint64_t sysBusy, sysAll, proc; /* CPU times at the window's start, 100 ns */
     float ms[CO_FC_FRAMES];
     uint32_t frames, kept, over25, over33, over1s, slowNoted;
+    uint32_t over16, led[CO_FC_CAUSES], only[CO_FC_CAUSES]; /* frames over CO_FC_TARGET_MS, by cause */
     double sum, worst, worstTimed, worstTop, timedSum;
     int worstTopPart;
     int windowLines, detailLines;
@@ -34,6 +36,7 @@ static struct
     struct { double ms, timed, top, at, extra[CO_FX_COUNT]; int part, grass; const char* front; } slow[CO_FC_SLOW_LINES_WINDOW];
     /* the last window, for the tests */
     double low1, low01; uint32_t lastOver25, lastOver33, lastOver1s; int lastStarved;
+    uint32_t lastOver16, lastLed[CO_FC_CAUSES], lastOnly[CO_FC_CAUSES];
 #ifdef CO_TEST
     uint64_t testBusy, testAll, testProc;
 #endif
@@ -86,9 +89,41 @@ static void WindowStart(int64_t now)
     g_fc.windowAt = now;
     CpuTimes(&g_fc.sysBusy, &g_fc.sysAll, &g_fc.proc);
     InterlockedExchange64(&g_fc.offThread, 0);
-    g_fc.frames = g_fc.kept = g_fc.over25 = g_fc.over33 = g_fc.over1s = g_fc.slowNoted = 0;
+    g_fc.frames = g_fc.kept = g_fc.over25 = g_fc.over33 = g_fc.over1s = g_fc.slowNoted = g_fc.over16 = 0;
+    memset(g_fc.led, 0, sizeof g_fc.led); memset(g_fc.only, 0, sizeof g_fc.only);
     memset(g_fc.slow, 0, sizeof g_fc.slow);
     g_fc.sum = g_fc.worst = g_fc.worstTimed = g_fc.worstTop = g_fc.timedSum = 0; g_fc.worstTopPart = 0;
+}
+
+/* `count`'s parts beside the nav ones, the most first, CO_FC_CAUSE_OTHERS at most: the line stays under the log's 512. */
+static void CauseOthers(const uint32_t* count, char* out, size_t room)
+{
+    uint8_t used[CO_FC_PARTS] = {0}; size_t o = 0; uint32_t more = 0;
+    out[0] = 0;
+    for (int n = 0; n < CO_FC_CAUSE_OTHERS; n++)
+    {
+        int best = -1;
+        for (int p = 0; p < CO_FC_PARTS; p++)
+            if (p != CO_FC_NAVSWAP && p != CO_FC_NAVTICK && !used[p] && count[p] > 0 && (best < 0 || count[p] > count[best])) best = p;
+        if (best < 0) break;
+        used[best] = 1;
+        o += (size_t)snprintf(out + o, room - o, ", %s %u", kPartNames[best], count[best]);
+    }
+    for (int p = 0; p < CO_FC_PARTS; p++) if (p != CO_FC_NAVSWAP && p != CO_FC_NAVTICK && !used[p]) more += count[p];
+    if (more > 0) snprintf(out + o, room - o, ", other parts %u", more);
+}
+/* The window's frames over the target by cause, one line, when it had one. The nav parts, the joins and the world
+ * update are always named, so a 0 is read and not taken from a missing word. */
+static void CausesLine(double wallMs)
+{
+    memcpy(g_fc.lastLed, g_fc.led, sizeof g_fc.led); memcpy(g_fc.lastOnly, g_fc.only, sizeof g_fc.only); g_fc.lastOver16 = g_fc.over16;
+    if (g_fc.over16 == 0) return;
+    char led[96], only[96];
+    CauseOthers(g_fc.led, led, sizeof led); CauseOthers(g_fc.only, only, sizeof only);
+    co_log("frame times, causes (%.1f s of play): %u frame(s) over %.1f ms; led by (the largest of the timed parts, AI joins, the world update's own time, "
+        "the rest): nav swaps %u, nav tick %u, AI joins %u, world update %u, the rest %u%s; over only with (within %.1f ms without it): nav swaps %u, nav tick %u, AI joins %u, world update %u%s", wallMs / 1000.0, g_fc.over16, CO_FC_TARGET_MS, g_fc.led[CO_FC_NAVSWAP],
+        g_fc.led[CO_FC_NAVTICK], g_fc.led[CO_FC_CAUSE_JOIN], g_fc.led[CO_FC_CAUSE_WORLD], g_fc.led[CO_FC_CAUSE_REST], led, CO_FC_TARGET_MS,
+        g_fc.only[CO_FC_NAVSWAP], g_fc.only[CO_FC_NAVTICK], g_fc.only[CO_FC_CAUSE_JOIN], g_fc.only[CO_FC_CAUSE_WORLD], only);
 }
 
 static void SlowLines(void);
@@ -97,6 +132,7 @@ static void WindowClose(int64_t now)
     double wallMs = Ms(now - g_fc.windowAt), offMs = Ms(InterlockedExchange64(&g_fc.offThread, 0));
     if (g_fc.frames == 0) return;
     SlowLines();
+    CausesLine(wallMs);
     if (g_fc.budgetMission != g_fc.mission) { g_fc.budgetMission = g_fc.mission; g_fc.windowLines = 0; }
     if (g_fc.windowLines > CO_FC_WINDOW_LINES_MISSION) return;
     if (++g_fc.windowLines > CO_FC_WINDOW_LINES_MISSION)
@@ -120,9 +156,9 @@ static void WindowClose(int64_t now)
     if (g_fc.lastStarved) snprintf(starved, sizeof starved, "; STARVED: everything else took %.1f of the %.1f cores the game left free", elseCores, freeCores);
     /* two lines: the loader's log takes 512 characters a line */
     co_log("frame times (%.1f s of play, QPC): %u frames, %.1f fps, 1%% low %.1f, 0.1%% low %.1f; worst %.1f ms (timed parts %.2f ms, the most: %s %.2f ms); "
-        "%u over %.0f ms, %u over %.1f ms, %u of 1 s or more; timed parts (CoXlTick, the level update) %.2f ms a frame, off the game thread %.1f ms",
+        "%u over %.1f ms, %u over %.0f ms, %u over %.1f ms, %u of 1 s or more; timed parts (CoXlTick, the level update) %.2f ms a frame, off the game thread %.1f ms",
         wallMs / 1000.0, g_fc.frames, g_fc.sum > 0 ? 1000.0 * g_fc.frames / g_fc.sum : 0.0, g_fc.low1, g_fc.low01, g_fc.worst, g_fc.worstTimed,
-        kPartNames[g_fc.worstTopPart], g_fc.worstTop, g_fc.over25, CO_FC_SLOW_MS, g_fc.over33, CO_FC_HITCH_MS, g_fc.over1s, g_fc.timedSum / g_fc.frames, offMs);
+        kPartNames[g_fc.worstTopPart], g_fc.worstTop, g_fc.over16, CO_FC_TARGET_MS, g_fc.over25, CO_FC_SLOW_MS, g_fc.over33, CO_FC_HITCH_MS, g_fc.over1s, g_fc.timedSum / g_fc.frames, offMs);
     co_log("frame times, CPU: the PC %.0f%% busy (%.1f of %d cores), the game %.1f cores, everything else %.1f%s; AI %d; the nearest garrison with living spawners %s",
         busyPct, sysCores, g_fc.cores, gameCores, elseCores, starved, ai, nestText);
 }
@@ -156,6 +192,25 @@ static void SlowLines(void)
     memset(g_fc.slow, 0, sizeof g_fc.slow);
 }
 
+/* A frame over the target, counted under the cause that led it and under each one it would have been inside the
+ * target without. The world update holds what is timed inside it; that comes off, so a nav tick in it is not hidden. */
+static void FrameCause(double ms, double timed)
+{
+    double cost[CO_FC_CAUSES], inside = Ms(g_fc.inside); int lead = 0;
+    for (int p = 0; p < CO_FC_PARTS; p++) cost[p] = Ms(g_fc.part[p]);
+    cost[CO_FC_CAUSE_JOIN] = Ms(g_fc.extra[CO_FX_JOIN]);
+    cost[CO_FC_CAUSE_WORLD] = Ms(g_fc.extra[CO_FX_WORLD]) > inside ? Ms(g_fc.extra[CO_FX_WORLD]) - inside : 0.0;
+    double rest = ms - timed - cost[CO_FC_CAUSE_JOIN] - cost[CO_FC_CAUSE_WORLD];
+    cost[CO_FC_CAUSE_REST] = rest > 0 ? rest : 0.0;
+    g_fc.over16++;
+    for (int c = 0; c < CO_FC_CAUSES; c++)
+    {
+        if (cost[c] > cost[lead]) lead = c;
+        if (c != CO_FC_CAUSE_REST && cost[c] > 0 && ms - cost[c] <= CO_FC_TARGET_MS) g_fc.only[c]++;
+    }
+    g_fc.led[lead]++;
+}
+
 /* The frame from the last tick's start to `now`, with its parts. */
 static void FrameClose(int64_t now)
 {
@@ -171,6 +226,7 @@ static void FrameClose(int64_t now)
     if (g_fc.kept < CO_FC_FRAMES) g_fc.ms[g_fc.kept++] = (float)ms;
     g_fc.frames++; g_fc.sum += ms; g_fc.timedSum += timed;
     if (ms > g_fc.worst) { g_fc.worst = ms; g_fc.worstTimed = timed; g_fc.worstTop = top; g_fc.worstTopPart = topPart; }
+    if (ms > CO_FC_TARGET_MS) FrameCause(ms, timed);
     if (ms >= CO_FC_LONG_MS) g_fc.over1s++;
     if (ms > CO_FC_HITCH_MS) g_fc.over33++;
     if (!(ms > CO_FC_SLOW_MS)) return;
@@ -181,7 +237,10 @@ static void FrameClose(int64_t now)
 static void Begin(int64_t now, int play, long mission)
 {
     g_fc.thread = GetCurrentThreadId();
-    if (g_fc.lastPlay && (!play || mission != g_fc.mission)) SlowLines(); /* a window cut short still names its stalls */
+    /* a frame that starts inside the world update: the update's time so far is the closing frame's */
+    if (g_fc.worldAt) { g_fc.extra[CO_FX_WORLD] += now - g_fc.worldAt; g_fc.worldAt = now; }
+    if (g_fc.lastPlay && (!play || mission != g_fc.mission) && g_fc.frames > 0)
+    { SlowLines(); CausesLine(Ms(now - g_fc.windowAt)); } /* a window cut short still names its stalls and their causes */
     if (play && (!g_fc.lastPlay || g_fc.windowAt == 0 || mission != g_fc.mission)) WindowStart(now); /* windows count play only */
     else if (play)
     {
@@ -189,7 +248,7 @@ static void Begin(int64_t now, int play, long mission)
         if (Ms(now - g_fc.windowAt) >= CO_FC_WINDOW_MS) { WindowClose(now); WindowStart(now); }
     }
     for (int p = 0; p < CO_FC_PARTS; p++) g_fc.part[p] = 0;
-    memset(g_fc.extra, 0, sizeof g_fc.extra); g_fc.grass = 0;
+    memset(g_fc.extra, 0, sizeof g_fc.extra); g_fc.grass = 0; g_fc.inside = 0;
     g_fc.last = g_fc.at = now; g_fc.lastPlay = play; g_fc.mission = mission;
 }
 
@@ -197,6 +256,7 @@ static void Mark(int part, int64_t now)
 {
     if (part < 0 || part >= CO_FC_PARTS || g_fc.at == 0) return;
     g_fc.part[part] += now - g_fc.at;
+    if (g_fc.worldAt) g_fc.inside += now - g_fc.at;
     g_fc.at = now;
 }
 
@@ -204,7 +264,7 @@ static int64_t Add(int part, int64_t since, int64_t now)
 {
     int64_t ticks = now - since;
     if (part < 0 || part >= CO_FC_PARTS || since == 0) return 0;
-    if (GetCurrentThreadId() == g_fc.thread) g_fc.part[part] += ticks;
+    if (GetCurrentThreadId() == g_fc.thread) { g_fc.part[part] += ticks; if (g_fc.worldAt) g_fc.inside += ticks; }
     else InterlockedExchangeAdd64(&g_fc.offThread, ticks);
     return ticks;
 }
@@ -212,7 +272,8 @@ static int64_t Add(int part, int64_t since, int64_t now)
 static void Nested(int inner, int outer, int64_t since, int64_t now)
 {
     int64_t ticks = Add(inner, since, now);
-    if (outer >= 0 && outer < CO_FC_PARTS && GetCurrentThreadId() == g_fc.thread) g_fc.part[outer] -= ticks;
+    if (outer >= 0 && outer < CO_FC_PARTS && GetCurrentThreadId() == g_fc.thread)
+    { g_fc.part[outer] -= ticks; if (g_fc.worldAt) g_fc.inside -= ticks; } /* the outer part's own add holds them again */
 }
 
 /* The game thread's only: another thread's wait or update is not this frame's. */
@@ -220,6 +281,15 @@ static void Extra(int which, int64_t since, int64_t now)
 {
     if (which < 0 || which >= CO_FX_COUNT || since == 0 || g_fc.at == 0 || GetCurrentThreadId() != g_fc.thread) return;
     g_fc.extra[which] += now - since;
+    if (which == CO_FX_JOIN && g_fc.worldAt) g_fc.inside += now - since;
+}
+
+static void World(int enter, int64_t now)
+{
+    if (g_fc.at == 0 || GetCurrentThreadId() != g_fc.thread) return;
+    if (enter) { g_fc.worldAt = now; return; }
+    if (g_fc.worldAt) g_fc.extra[CO_FX_WORLD] += now - g_fc.worldAt;
+    g_fc.worldAt = 0;
 }
 
 int64_t co_framecost_now(void)
@@ -235,6 +305,7 @@ void co_framecost_mark(int part) { Mark(part, co_framecost_now()); }
 int64_t co_framecost_add(int part, int64_t since) { return Add(part, since, co_framecost_now()); }
 void co_framecost_nested(int inner, int outer, int64_t since) { Nested(inner, outer, since, co_framecost_now()); }
 void co_framecost_extra(int which, int64_t since) { Extra(which, since, co_framecost_now()); }
+void co_framecost_world(int enter) { World(enter, co_framecost_now()); }
 void co_framecost_grass(int out) { if (out && GetCurrentThreadId() == g_fc.thread) g_fc.grass = 1; }
 
 #ifdef CO_TEST
@@ -246,6 +317,9 @@ void co_framecost_test_mark(int part, int64_t now) { Mark(part, now); }
 int64_t co_framecost_test_add(int part, int64_t since, int64_t now) { return Add(part, since, now); }
 void co_framecost_test_nested(int inner, int outer, int64_t since, int64_t now) { Nested(inner, outer, since, now); }
 void co_framecost_test_extra(int which, int64_t since, int64_t now) { Extra(which, since, now); }
+void co_framecost_test_world(int enter, int64_t now) { World(enter, now); }
+void co_framecost_test_causes(uint32_t* over, uint32_t led[CO_FC_CAUSES], uint32_t only[CO_FC_CAUSES])
+{ *over = g_fc.lastOver16; memcpy(led, g_fc.lastLed, sizeof g_fc.lastLed); memcpy(only, g_fc.lastOnly, sizeof g_fc.lastOnly); }
 double co_framecost_test_slow(int k, double* join, double* world, int* grass)
 { *join = g_fc.slow[k].extra[CO_FX_JOIN]; *world = g_fc.slow[k].extra[CO_FX_WORLD]; *grass = g_fc.slow[k].grass; return g_fc.slow[k].ms; }
 int co_framecost_test_window_lines(void) { return g_fc.windowLines; }

@@ -6,7 +6,10 @@
 
 #include "co.h"
 
-typedef struct CoAiBudget { uintptr_t world; float stock, wrote; int raised, draining; uintptr_t run; int applied; } CoAiBudget;
+typedef struct CoAiBudget { uintptr_t world; float stock, wrote; int raised, draining; uintptr_t run; int applied, ran; } CoAiBudget;
+/* Whose value co_aibudget_step returned last (`ran`): the join statistics name the budget a step ran with, and the
+ * largest of three wins, so the part that asked is not always the one that was written. */
+enum { CO_AIB_RAN_LEVER, CO_AIB_RAN_DRAIN, CO_AIB_RAN_MORE };
 /* The game's budget is 0.002 (game.dll's constant) and the world's own default 0.003 (exe 0xBB0CCD); the mod's
  * lowered one is under this range and its raised ones over it, so a read outside it is never taken as the game's. */
 #define CO_AIB_STOCK_LEAST 0.001f

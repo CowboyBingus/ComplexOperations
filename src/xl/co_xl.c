@@ -496,6 +496,8 @@ void CoXlTestLwNavHoldCounts(uint32_t* v)
     v[5] = g_lwNavHold.sumBack; v[6] = g_lwNavHold.sumBreaks; v[7] = g_lwNavHold.longNoted[0] + g_lwNavHold.longNoted[1] + g_lwNavHold.longNoted[2] + g_lwNavHold.longNoted[3];
 }
 int CoXlTestLwNavLeft(int read, uint32_t state) { return LwNavLeftAt(read, state); }
+int CoXlTestLwPeerParts(int mission, int host) { return LwPeerParts(mission, host); }
+int CoXlTestLwNavWriteStart(uintptr_t at, const uint8_t* call) { return LwNavWriteStart(at, call); }
 /* The scheduler's call on a fake scheduler, list variable and nav count; the first builds' budget and the time this
  * tick's have taken; the tick summary's counts (paused ticks, pauses, budget waits, lag ms, queue most, the oldest
  * waiting built cell's ms and ring distance, one call's starts). */
@@ -505,6 +507,8 @@ void CoXlTestLwNavSched(uint32_t flush, ULONGLONG now) { LwNavSchedAt(flush, now
 void CoXlTestLwNavDrive(void (*drive)(uintptr_t, float)) { g_lwSwap.drive = drive; }
 uint32_t CoXlTestLwNavBounded(void) { return g_lwSwap.bounded; }
 void CoXlTestLwNavFirstBudget(uint32_t us, uint32_t spentUs) { g_lwNavHold.budgetUs = us; g_lwNavHold.tickFirstUs += spentUs; }
+/* A tick `us` after the one before; the first builds' budget it gives. */
+uint32_t CoXlTestLwNavTickGap(uint32_t us) { LwNavTickGap(us); return g_lwNavHold.tickBudgetUs; }
 void CoXlTestLwNavTickCounts(uint32_t* v)
 {
     v[0] = g_lwNavHold.sum.paused; v[1] = g_lwNavHold.sum.pauses; v[2] = g_lwNavHold.sum.over; v[3] = g_lwNavHold.sum.lag; v[4] = g_lwNavHold.sum.queueMost;
@@ -523,6 +527,13 @@ void CoXlTestLwNavMoreCounts(uint32_t* v)
     v[4] = g_lwSwap.sumUnsync[LW_UNSYNC_TICK]; v[5] = g_lwSwap.sumUnsync[LW_UNSYNC_DUE]; v[6] = g_lwSwap.sumUnsync[LW_UNSYNC_END];
     v[7] = g_lwNavHold.sum.pastBound; v[8] = (uint32_t)g_lwSwap.unsafe; v[9] = g_lwNavHold.sum.marksHeld;
 }
+/* The span's: the oldest first build's wait, the frames the hold asked and a larger budget ran, path requests' wait
+ * for a start and the oldest run in flight (ms). */
+void CoXlTestLwNavSpanCounts(uint32_t* v)
+{
+    v[0] = g_lwNavHold.sum.firstOldest; v[1] = g_lwNavHold.sumOver; v[2] = g_lwNavHold.sum.reqWait; v[3] = g_lwNavHold.sum.runAge;
+    v[4] = g_lwNavHold.sum.skips; v[5] = g_lwNavHold.sum.skipped; v[6] = g_lwNavHold.sum.dense; v[7] = g_lwNavHold.sum.dueWaits;
+}
 double CoXlTestLwNavEndMs(double set) { if (set >= 0) g_lwSwap.endMs = set; return g_lwSwap.endMs; }
 void CoXlTestLwNavSchedInstall(uintptr_t exe, uintptr_t stub) { LwInstallNavSched(exe, stub); }
 int CoXlTestLwNavMarksHeld(void) { return LwNavMarksHeld(); }
@@ -534,11 +545,21 @@ float CoXlTestLwAibWorld(uintptr_t w, float stock, float lat, int on, ULONGLONG 
 {
     float cur = *(float*)(w + 0x47C);
     g_lwAib.b.world = w; g_lwAib.b.stock = stock; g_lwAib.b.raised = 0; g_lwAib.on = on;
-    LwNavHoldJoin(LwFpJoinTake());
+    LwAibJoin(LwFpJoinTake(), 1);
     LwAibSteer(w, cur, lat, *(float*)(w + 0x484), now);
     return *(float*)(w + 0x47C);
 }
-void CoXlTestLwAibReset(void) { memset(&g_lwAib.b, 0, sizeof g_lwAib.b); g_lwAib.on = 1; g_lwAib.wasDraining = 0; }
+/* A frame whose AI world did not read, as LwAibFrame leaves it: the joins so far are taken and dropped. */
+void CoXlTestLwAibUnread(void) { LwAibJoin(LwFpJoinTake(), 0); }
+/* The AI drain as the tests set it, and the joins counted for its frames: count, sum and worst in ms. */
+void CoXlTestLwAibDrain(int us, int runMs, int queue) { g_lwAib.drain.us = us; g_lwAib.drain.runMs = runMs; g_lwAib.drain.queue = queue; }
+void CoXlTestLwAibDrainJoins(uint32_t* n, double* sum, double* worst) { *n = g_lwAib.drainJoins; *sum = g_lwAib.drainJoinSum; *worst = g_lwAib.drainJoinWorst; }
+void CoXlTestLwAibReset(void)
+{
+    memset(&g_lwAib.b, 0, sizeof g_lwAib.b); g_lwAib.on = 1; g_lwAib.wasDraining = 0;
+    g_lwAib.drainJoins = 0; g_lwAib.drainJoinSum = g_lwAib.drainJoinWorst = 0;
+    g_lwAib.drain = (CoAiDrain){CO_AIB_DRAIN_US, CO_AIB_DRAIN_RUN_MS, CO_AIB_DRAIN_QUEUE};
+}
 int CoXlTestLwNavWatch(uint16_t cx, uint16_t cy, uint32_t flags, uint32_t section) { LwNavWatch(cx, cy, flags, section, 1); return g_lwNav.watching; }
 /* The AI budget lever's choice for a step: the budget it leaves at H+0x47C from `cur`, with requests `lat` s old. */
 float CoXlTestLwAibSteer(float stock, float cur, float lat)

@@ -29,11 +29,13 @@ float co_aibudget_drain(CoAiBudget* b, const CoAiDrain* d, int inFlight, float r
 
 float co_aibudget_step(CoAiBudget* b, const CoAiDrain* d, int leverOn, float waitS, int lowUs, int raiseMs, int inFlight, float runS, int queued, float moreS)
 {
+    b->ran = CO_AIB_RAN_LEVER;
     if (!(b->stock > 0)) return 0.0f;
     float want = leverOn ? co_aibudget_want(b, waitS, lowUs, raiseMs) : b->stock;
     float drain = co_aibudget_drain(b, d, inFlight, runS, queued);
-    if (drain > want) want = drain;
-    return moreS > want ? moreS : want;
+    if (drain > want) { want = drain; b->ran = CO_AIB_RAN_DRAIN; }
+    if (moreS > want) { want = moreS; b->ran = CO_AIB_RAN_MORE; }
+    return want;
 }
 
 void co_aibudget_wrote(CoAiBudget* b, float value) { b->wrote = value; }
