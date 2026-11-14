@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define CO_LW_VIEW_SQUADS 8192     /* the squad table's size (LW_SQUADS_MAX) */
+#define CO_LW_VIEW_SQUADS 9216     /* the squad table's size (LW_SQUADS_MAX) */
 #define CO_LW_VIEW_PLAYERS 8
 #define CO_LW_VIEW_NEAR 300.0f     /* m: a squad nearer is read at a glance; farther it is a few pixels */
 #define CO_LW_VIEW_WALK 0.3f       /* m/s over CO_LW_VIEW_WALK_MS: slower is standing (a formation shuffles) */

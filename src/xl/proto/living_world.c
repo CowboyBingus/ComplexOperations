@@ -193,7 +193,7 @@ static int g_lwNodeCount;
  * there are, and whether the path being searched is a road patrol's. */
 static uint8_t g_lwNodeKind[LW_NODES_MAX];
 static int g_lwRoadNodes, g_lwPathRoad;
-static float LwRoadCost(int a, int b); static int LwRoadSquad(int index); static int LwRoadStart(int index, int node); static void LwRoadRoutes(uintptr_t lg);
+static float LwRoadCost(int a, int b); static int LwRoadSquad(int index); static int LwRoadTailSet(int base); static int LwRoadMembers(int index, int size); static int LwRoadStart(int index, int node); static void LwRoadRoutes(uintptr_t lg);
 
 /* Why the squads wait, noted once per mission (a reason that keeps them from starting is never silent). */
 static char g_lwWhy[160];
@@ -454,7 +454,8 @@ static uintptr_t LwSlotOf(uintptr_t dir, uintptr_t def)
  * cap in units (0x959650(dir, the row's saved cap): it counts job-1 units, 0x9513A1) / the mean group size, so the
  * expected number of squads within R_on of a player matches vanilla's. Online within R_on of a player and inside the
  * playable disc (R = u32 [S+0x2C] x f32 [S+0x50] / 2, S = [[lg+0x2A8]+0x19B010]); offline beyond R_off at alert 0. */
-#define LW_SQUADS_MAX 8192
+#define LW_SQUADS_BASE 8192 /* the world's squads at most */
+#define LW_SQUADS_MAX 9216  /* and the road patrols added for their smaller size (living_world_patrols.c) */
 #define LW_PATH_MAX 32
 #define LW_R_ON 250.0f
 #define LW_R_OFF 350.0f
@@ -515,7 +516,7 @@ static void LwDensityOnline(const float* pos, uint32_t members); static int LwDe
 static int LwMeetWaits(const LwSquad* q); static int LwMeetHold(LwSquad* q, float nx, float ny); static void LwMeetWhy(LwSquad* q, const char* why); static void LwNoFaceNote(const LwSquad* q); /* living_world_patrols.c */
 static int LwMeetKeeps(const LwSquad* q); static uint32_t LwMeetHeld(int requester); static int LwMeetApproach(LwSquad* q, ULONGLONG now, int busy); static int LwMeetPriority(const LwSquad* q);
 static int LwMeetFarRoom(const LwSquad* q, int meet, int farUnits); static void LwMeetAsked(LwSquad* q, int meet, int farAsk); static int LwMeetStays(LwSquad* q, float d2, ULONGLONG now); static void LwMeetFarCount(int idx, int units);
-static void LwMeetSight(LwSquad* q); static float LwMeetDrawn(LwSquad* q, int i); static void LwMeetCmd(int on); static void LwBesideCmd(int seq, float d); static void LwWayOnCmd(int seq);
+static void LwMeetFarNo(const LwSquad* q, ULONGLONG now); static void LwMeetSight(LwSquad* q); static float LwMeetDrawn(LwSquad* q, int i); static void LwMeetCmd(int on); static void LwBesideCmd(int seq, float d); static void LwWayOnCmd(int seq);
 static int LwPatrolFar(const LwSquad* q); static int LwPatrolFarSum(int walking, int standing); static float LwLeadNear2(const LwSquad* q); static void LwPatrolAsked(const LwSquad* q); static int LwPatrolHolds(int idx); static void LwPatrolHoldTaken(void); static int LwPatrolYields(const LwSquad* q); static int LwRoadPlan(LwSquad* q, int home); static void LwPatrolsOldCmd(int on); static void LwTravelCmd(int seq, float v, float s); static void LwTravelBackCmd(int seq, float v); static void LwRoadPatrolsCmd(int on); static void LwPatrolsTick(void); /* living_world_patrols.c */
 static void LwLodTick(void); static void LwLodNote(void); static void LwLodCmd(int on); static int LwLodFullUnits(void); /* living_world_lod.c */
 static void LwDeferTick(uintptr_t lg, uint32_t seed); static void LwDeferNote(void); static void LwSpawnSourcesNote(int seq); /* living_world_defer.c */
@@ -719,7 +720,9 @@ static void LwPopulate(void)
     float mean = sum / weight, patrols = LwDensityPopulateUnits(eff) / mean, ratio = g_lwWorld.radius / LW_R_ON;
     int n = (int)(patrols * ratio * ratio + 0.5f);
     if (n < 1) n = 1;
-    if (n > LW_SQUADS_MAX) n = LW_SQUADS_MAX;
+    if (n > LW_SQUADS_BASE) n = LW_SQUADS_BASE;
+    const int roadMore = LwRoadTailSet(n); /* road patrols are half-size squads: as many again, after the others */
+    n += roadMore;
     /* Spread over ticks (audit 1f pass caveat 10: 6981 squads in one tick made a 56-67 ms frame after the landing):
      * placement goes on where the last tick stopped until LW_POP_MS is spent. The squads are drawn uniformly, and the
      * world stays unpopulated (no squad ticks) until the last is placed, so nothing sees a part of it. */
@@ -766,15 +769,16 @@ static void LwPopulate(void)
         LwSquad* q = &g_lwSquads[made++];
         memset(q, 0, sizeof *q);
         q->state = LW_OFFLINE; q->node = (uint16_t)node; q->pos[0] = x; q->pos[1] = y; q->definition = def;
-        q->survivors = (uint8_t)LwGroupSize(slot); q->speed = LW_SPEED_DEFAULT * (0.75f + 0.5f * LwUnit()); /* own pace: no lockstep (audit 1, 11) */
+        q->survivors = (uint8_t)LwRoadMembers(made - 1, (int)LwGroupSize(slot)); q->speed = LW_SPEED_DEFAULT * (0.75f + 0.5f * LwUnit()); /* own pace: no lockstep (audit 1, 11) */
         q->path[0] = (uint16_t)to; q->pathLen = 1; q->pathAt = 0;
         if (LwNearestPlayer2(x, y) < nearest) nearest = LwNearestPlayer2(x, y);
     }
     QueryPerformanceCounter(&t1);
     g_lwWorld.popMs += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
     g_lwWorld.count = made; g_lwWorld.eff = eff; g_lwWorld.populated = 1;
-    Note("living world: %d squads on %d route nodes (patrol cap %d units, mean group %.1f, playable radius %.0f m, online within %.0f m); the nearest starts %.0f m from a player; placed over %d ticks, %.1f ms",
-        made, g_lwNodeCount, eff, (double)mean, (double)g_lwWorld.radius, (double)LW_R_ON, (double)sqrtf(nearest), g_lwWorld.popTicks, g_lwWorld.popMs);
+    Note("living world: %d squads on %d route nodes (patrol cap %d units, mean group %.1f, playable radius %.0f m, online within %.0f m); the nearest starts %.0f m from a player; placed over %d ticks, %.1f ms; "
+        "%d of them added as road patrols, a road patrol of %d units at most", made, g_lwNodeCount, eff, (double)mean, (double)g_lwWorld.radius, (double)LW_R_ON, (double)sqrtf(nearest), g_lwWorld.popTicks, g_lwWorld.popMs,
+        roadMore, CO_LW_MEET_ROAD_MEMBERS);
 }
 
 /* Offline walking along the path at the squad's speed; a new destination at the end. A staged squad (pulled 2) stays
@@ -1121,6 +1125,7 @@ static int LwOnlineGates(LwSquad* q, uintptr_t slot, uint32_t cap, float* pos, f
     }
     return placeFirst || g_lwGates.place(q, slot, cap, pos, target);
 }
+static int g_lwOnlineScoped; /* the request's sight counts only the players who could draw the squad (LwMeetSight) */
 static void LwOnline(LwSquad* q)
 {
     g_lwOnlineWhy = NULL; g_lwRequester = (int)(q - g_lwSquads);
@@ -1131,6 +1136,7 @@ static void LwOnline(LwSquad* q)
         slot = q->definition ? LwSlotOf(g_lwWorld.dir, q->definition) : 0;
         if (slot == 0) { g_lwOnlineWhy = "no group slot"; return; }
     }
+    if (g_lwOnlineScoped) LwMeetSight(q); /* after the group is settled: a new group has its own band */
     uint32_t cap = q->survivors, size = LwGroupSize(slot);
     if (cap > size) cap = size;
     if (cap == 0) { g_lwOnlineWhy = "no survivors"; LwRefuseCount(g_lwOnlineWhy); g_lwWorld.refused++; return; }
@@ -1713,7 +1719,8 @@ static float LwUnitRadius(uint32_t unit)
 }
 /* Each group definition's largest measured unit radius (learned from its online members), and so its band. */
 #define LW_RADII 256
-static struct { uintptr_t definition; float radius, band; } g_lwRadii[LW_RADII];
+#define LW_SCOPED_FOV (11.25f * 3.14159265f / 180.0f)
+static struct { uintptr_t definition; float radius, band, scoped; } g_lwRadii[LW_RADII]; /* scoped: through a 4x scope, whatever the host's view */
 static uint32_t g_lwRadiiGen = 1; /* bumped on every change: a squad's cached band is recomputed (audit 1c criterion 7:
                                    * the band per offline squad per tick cost 6.4-6.9 ms a tick on XL's 6144 squads) */
 static void LwGroupRadiusSeen(uintptr_t definition, float r)
@@ -1723,27 +1730,27 @@ static void LwGroupRadiusSeen(uintptr_t definition, float r)
     {
         if (g_lwRadii[k].definition == definition)
         {
-            if (r > g_lwRadii[k].radius) { g_lwRadii[k].radius = r; g_lwRadii[k].band = LwFarBand(r); g_lwRadiiGen++;
+            if (r > g_lwRadii[k].radius) { g_lwRadii[k].radius = r; g_lwRadii[k].band = LwFarBand(r); g_lwRadii[k].scoped = LwFarBandFov(r, LW_SCOPED_FOV); g_lwRadiiGen++;
                 Note("living world: group 0x%llx: units up to %.2f m radius: drawn to %.0f m in a %.0f deg view", (unsigned long long)definition, (double)r, (double)g_lwRadii[k].band, (double)(g_lwBandFov * 57.29578f)); }
             return;
         }
         if (empty < 0 && g_lwRadii[k].definition == 0) empty = k;
     }
-    if (empty >= 0) { g_lwRadii[empty].definition = definition; g_lwRadii[empty].radius = r; g_lwRadii[empty].band = LwFarBand(r); g_lwRadiiGen++;
+    if (empty >= 0) { g_lwRadii[empty].definition = definition; g_lwRadii[empty].radius = r; g_lwRadii[empty].band = LwFarBand(r); g_lwRadii[empty].scoped = LwFarBandFov(r, LW_SCOPED_FOV); g_lwRadiiGen++;
         Note("living world: group 0x%llx: units up to %.2f m radius: drawn to %.0f m in a %.0f deg view", (unsigned long long)definition, (double)r, (double)g_lwRadii[empty].band, (double)(g_lwBandFov * 57.29578f)); }
 }
 /* A squad's band, cached per squad: recomputed only when its group changes or any group's radius is learned. A
  * group none of whose units has been online has the default radius: a guess (measured 0). */
-#define LW_SCOPED_FOV (11.25f * 3.14159265f / 180.0f)
 static float LwSquadBand(LwSquad* q)
 {
     if (q->bandGen != g_lwRadiiGen || q->bandDef != q->definition)
     {
         static float defaultBand, defaultScoped; static uint32_t defaultGen;
-        if (defaultGen != g_lwRadiiGen) { defaultBand = LwFarBand(LW_RADIUS_DEFAULT); defaultScoped = LwFarBandFov(LW_RADIUS_DEFAULT, LW_SCOPED_FOV); defaultGen = g_lwRadiiGen; }
+        if (!(defaultScoped > 0)) defaultScoped = LwFarBandFov(LW_RADIUS_DEFAULT, LW_SCOPED_FOV); /* no view changes it */
+        if (defaultGen != g_lwRadiiGen) { defaultBand = LwFarBand(LW_RADIUS_DEFAULT); defaultGen = g_lwRadiiGen; }
         q->band = defaultBand; q->scoped = defaultScoped; q->measured = 0;
         for (int k = 0; q->definition && k < LW_RADII; k++) /* 0 is an empty slot's, not a group */
-            if (g_lwRadii[k].definition == q->definition) { q->band = g_lwRadii[k].band; q->scoped = LwFarBandFov(g_lwRadii[k].radius, LW_SCOPED_FOV); q->measured = 1; break; }
+            if (g_lwRadii[k].definition == q->definition) { q->band = g_lwRadii[k].band; q->scoped = g_lwRadii[k].scoped; q->measured = 1; break; }
         q->bandGen = g_lwRadiiGen; q->bandDef = q->definition;
     }
     return q->band;
@@ -3204,7 +3211,11 @@ static void LwSquadsTick(void)
                 if (farBand && !back)
                 {
                     if (!LwMeetFarRoom(q, meet, farUnits))
-                    { snprintf(whyBuf, sizeof whyBuf, "the far share: %d far units + %u over %.0f", farUnits, q->survivors, (double)LwFarShareLimit()); why = whyBuf; q->retry = now + 3000; goto offlineDone; }
+                    {
+                        snprintf(whyBuf, sizeof whyBuf, "the far share: %d far units + %u over %.0f", farUnits, q->survivors, (double)LwFarShareLimit()); why = whyBuf; q->retry = now + 3000;
+                        if (meet == CO_LW_MEET_ASK_BEYOND) LwMeetFarNo(q, now); /* it stands beyond the band for room (living_world_patrols.c) */
+                        goto offlineDone;
+                    }
                     farTries++;
                     float here[3] = {q->pos[0], q->pos[1], 0};
                     int inView = meet || (LwGround(here[0], here[1], &here[2]) && LwSeenByAny(here, LwSquadBand(q))); /* a patrol on its way in asks by its own rule */
@@ -3212,9 +3223,9 @@ static void LwSquadsTick(void)
                 }
                 uint32_t off0 = g_lwOffScreen;
                 g_lwFarSpawn = farBand && !back && !meet; g_lwMeetSpawn = !g_lwFarSpawn && !back && (meet || LwMeetPriority(q));
-                if (!g_lwFarSpawn && !back) LwMeetSight(q); /* only the players who could draw it may refuse */
+                g_lwOnlineScoped = !g_lwFarSpawn && !back; /* only the players who could draw it may refuse */
                 LwOnline(q); requested = q->state == LW_PENDING;
-                LwMeetSight(NULL);
+                g_lwOnlineScoped = 0; LwMeetSight(NULL);
                 if (requested && q->pulled) { q->pulled = 0; q->node = (uint16_t)LwNearestNode(q->pos[0], q->pos[1]); q->pathLen = q->pathAt = 0; } /* back onto the routes */
                 g_lwFarSpawn = g_lwMeetSpawn = 0;
                 if (farBand && !back) farTries++; else attempts++;

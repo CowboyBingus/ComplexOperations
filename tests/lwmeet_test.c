@@ -56,6 +56,23 @@ int main(void)
     g_case = "a filler squad leaves for a road patrol only within that half";
     CHECK(co_lw_meet_road_room(0, 8, 23) == 1 && co_lw_meet_road_room(8, 8, 23) == 0 && co_lw_meet_road_room(28, 8, 72) == 1 && co_lw_meet_road_room(29, 8, 72) == 0);
 
+    g_case = "the time between two calls: a far walk over the squads the kept half of the far share holds, for each player on a road";
+    CHECK(co_lw_meet_call_ms(18.0f, 4, 1, 465.0f) == 103333u && co_lw_meet_call_ms(46.0f, 4, 8, 661.0f) > 459000u && co_lw_meet_call_ms(46.0f, 4, 8, 661.0f) < 460500u);
+    CHECK(co_lw_meet_call_ms(18.0f, 8, 1, 465.0f) > 206000u && co_lw_meet_call_ms(18.0f, 4, 0, 465.0f) == 103333u);
+    g_case = "never under a minute or over ten; a share too small for one squad still passes one at a time";
+    CHECK(co_lw_meet_call_ms(72.0f, 4, 1, 100.0f) == CO_LW_MEET_CALL_MIN_MS && co_lw_meet_call_ms(18.0f, 4, 8, 3000.0f) == CO_LW_MEET_CALL_MAX_MS);
+    CHECK(co_lw_meet_call_ms(4.0f, 4, 1, 465.0f) == 232500u);
+    g_case = "the patrol to call: the wanted side first, then the nearer";
+    CHECK(co_lw_meet_call_better(5, 1, -1, 0) == 1 && co_lw_meet_call_better(5, 0, -1, 1) == 1);
+    CHECK(co_lw_meet_call_better(9, 1, 3, 0) == 1 && co_lw_meet_call_better(3, 0, 9, 1) == 0);
+    CHECK(co_lw_meet_call_better(3, 1, 9, 1) == 1 && co_lw_meet_call_better(9, 1, 3, 1) == 0 && co_lw_meet_call_better(3, 0, 3, 0) == 0 && co_lw_meet_call_better(3, 0, 9, 0) == 1);
+    g_case = "a patrol refused the far share stands while its refusal is fresh, 90 s at most";
+    CHECK(co_lw_meet_zone_waits(1000, 5000, 6000) == 1 && co_lw_meet_zone_waits(1000, 5000, 5000 + CO_LW_MEET_ZONE_ASK_MS - 1) == 1);
+    CHECK(co_lw_meet_zone_waits(1000, 5000, 5000 + CO_LW_MEET_ZONE_ASK_MS) == 0 && co_lw_meet_zone_waits(1000, 0, 1500) == 0);
+    CHECK(co_lw_meet_zone_waits(1000, 90500, 1000 + CO_LW_MEET_ZONE_WAIT_MS - 1) == 1 && co_lw_meet_zone_waits(1000, 90500, 1000 + CO_LW_MEET_ZONE_WAIT_MS) == 0);
+    g_case = "a road patrol has 4 units of a larger group, and a small group's own";
+    CHECK(co_lw_meet_road_members(9) == 4 && co_lw_meet_road_members(4) == 4 && co_lw_meet_road_members(3) == 3 && co_lw_meet_road_members(1) == 1);
+
     g_case = "a player on a road patrol's way: within the width of a stretch, its ends and a single point";
     { const float way[3][2] = {{0, 0}, {100, 0}, {100, 200}}, on[2] = {10, 79}, off[2] = {10, 81}, corner[2] = {150, 250}, past[2] = {-60, -60}, by[2] = {160, 100};
       CHECK(co_lw_meet_on_way(way, 3, on, 80.0f) == 1 && co_lw_meet_on_way(way, 3, off, 80.0f) == 0);

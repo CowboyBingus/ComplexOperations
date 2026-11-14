@@ -33,6 +33,17 @@
 #define CO_LW_MEET_HOLDS 8           /* one hold a bubble at most */
 #define CO_LW_MEET_SEEN_GAP 5        /* samples (seconds) out of view before the next sight of a squad is a new sighting */
 #define CO_LW_MEET_PLAYERS 8
+/* More patrols on a player's road at no unit cost: road patrols are small, and the nearest one out of sight is
+ * called along the road to each player there, as often as the far share's kept half lets one walk in. */
+#define CO_LW_MEET_ROAD_MEMBERS 4    /* a road patrol's units: two squads walk in on the kept half of a solo far share (9 of 18) */
+#define CO_LW_MEET_PACE 2.0f         /* m/s: a patrol's walk (the squads' default speed; 1.97 measured online) */
+#define CO_LW_MEET_CALL_NEAR 150.0f  /* m: a player this near a road node is on or by that road */
+#define CO_LW_MEET_CALL_HOPS 26      /* road nodes out from the player a called patrol may stand: 2.6 km, 31 of a plan's 32 nodes with the way past */
+#define CO_LW_MEET_CALL_PAST 4       /* nodes of road past the player a called patrol walks on, so it passes by */
+#define CO_LW_MEET_CALL_MIN_MS 60000u  /* never more than a patrol a minute for one player */
+#define CO_LW_MEET_CALL_MAX_MS 600000u /* and one in ten minutes at least, however small that player's part of the share */
+#define CO_LW_MEET_ZONE_WAIT_MS 90000u /* a patrol refused the far share stands beyond the band this long at most, then walks on */
+#define CO_LW_MEET_ZONE_ASK_MS 4000u   /* its refusal is this fresh: it asks every 3 s */
 #define CO_LW_MEET_RINGS 3          /* 50, 100 and 150 m */
 
 enum { CO_LW_MEET_WAITS, CO_LW_MEET_BACK, CO_LW_MEET_TURNS };
@@ -79,6 +90,18 @@ int co_lw_meet_road_room(int roadUnits, int members, int budget);
 /* 1 when a far squad of `members` fits the far share `limit`: `farUnits` far units now, `roadFar` of them patrols on
  * a player's road. With `reserve` the others leave limit / CO_LW_MEET_FAR_RESERVE to those patrols. */
 int co_lw_meet_far_room(int farUnits, int roadFar, int members, int limit, int onRoad, int reserve);
+/* The time between two patrols called to one player's road: the walk `walk` m from where a patrol comes online to
+ * the online radius, over the squads of `members` the far share's kept half (`farLimit` / CO_LW_MEET_FAR_RESERVE)
+ * holds at once, for each of the `roadPlayers` players on a road. Faster, the share would refuse them. */
+uint32_t co_lw_meet_call_ms(float farLimit, int members, int roadPlayers, float walk);
+/* 1 when a patrol `hops` road nodes from the player, on the wanted side of them or not, is the better one to call
+ * than the best so far (`bestHops` < 0: none): the wanted side first, then the nearer. */
+int co_lw_meet_call_better(int hops, int onSide, int bestHops, int bestOnSide);
+/* 1 while a patrol beyond the band, refused for the far share at `refusedMs`, stands where it is: its refusal is
+ * fresh and it has stood less than CO_LW_MEET_ZONE_WAIT_MS since `sinceMs`. */
+int co_lw_meet_zone_waits(uint64_t sinceMs, uint64_t refusedMs, uint64_t nowMs);
+/* A road patrol's units of a group of `size`. */
+int co_lw_meet_road_members(int size);
 /* The beside command's point: the first of the `n` candidates (nearest first) with a clear line to the road and no
  * enemy near. -1 with none; `least` then gets the clear one with the fewest enemies, -1 when none is clear. */
 int co_lw_meet_beside(const uint8_t* clear, const uint16_t* foes, int n, int* least);
