@@ -23,7 +23,7 @@ static struct
     volatile LONG deg; /* a float's bits: research builds change it in play */
     volatile LONG poses, game, ours, blind, boneCalls, otherCalls;
 } g_lwLean;
-static _Thread_local struct { float x, y; int set; } t_lwLean;
+static _Thread_local struct { float x, y; int set, prop; } t_lwLean;
 
 static float LwLeanDeg(void) { LONG b = g_lwLean.deg; float f; memcpy(&f, &b, 4); return f; }
 static float LwLeanDot(const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
@@ -31,9 +31,12 @@ static float LwLeanDot(const float* a, const float* b) { return a[0] * b[0] + a[
 /* From the ray reader's hook: the corner ray this thread's unit just read starts here; NULL when it did not read. */
 static void LwLeanAt(const float* origin)
 {
-    t_lwLean.set = origin != NULL;
+    t_lwLean.set = origin != NULL; t_lwLean.prop = 0;
     if (origin != NULL) { t_lwLean.x = origin[0]; t_lwLean.y = origin[1]; }
 }
+
+/* From the same hook, after the reading: whether that unit has a corner on a prop. */
+static void LwLeanOnProp(int on) { t_lwLean.prop = on; }
 
 /* The degrees over the slope: 0 is none, and one at or past the game's own limit would never act. */
 static void LwLeanSet(float deg)
@@ -84,8 +87,8 @@ static int LwLeanHold(float* up, const float* w, float deg)
 static float* LwLeanLimit(uintptr_t mgr, float* out, float* up)
 {
     const uintptr_t back = (uintptr_t)__builtin_return_address(0);
-    const int four = back == g_lwLean.four, set = t_lwLean.set;
-    t_lwLean.set = 0; /* one pose, one reading: never another unit's */
+    const int four = back == g_lwLean.four, set = t_lwLean.set, prop = t_lwLean.prop;
+    t_lwLean.set = t_lwLean.prop = 0; /* one pose, one reading: never another unit's */
     if (!four) InterlockedIncrement(back == g_lwLean.bone ? &g_lwLean.boneCalls : &g_lwLean.otherCalls);
     else
     {
@@ -98,7 +101,8 @@ static float* LwLeanLimit(uintptr_t mgr, float* out, float* up)
     if (!four || deg == 0.0f || !LwLive()) return held;
     if (!set || !LwLeanSlope(t_lwLean.x, t_lwLean.y, &slope)) { InterlockedIncrement(&g_lwLean.blind); return held; }
     /* the game writes its answer to both, and its caller reads the one returned (0x622D7A) */
-    if (LwLeanHold(out, g_lwLean.world, LwLeanAllowed(slope, deg)))
+    /* on a prop the slope read is the hidden ground's under it, not what the unit stands on: no slope is added */
+    if (LwLeanHold(out, g_lwLean.world, LwLeanAllowed(prop ? 0.0f : slope, deg)))
     {
         memcpy(up, out, 12);
         InterlockedIncrement(&g_lwLean.ours);
@@ -157,7 +161,7 @@ static void LwInstallLeanCap(void)
 typedef struct LwLpUnit { uint32_t id, scan; float up[3]; uint8_t kind[4]; ULONGLONG lineAt; } LwLpUnit;
 static struct
 {
-    uint32_t scan, samples, over, at, off30, off30Steep, pairs, flips; float turnSum, turnMax; int lines, steepLines;
+    uint32_t scan, samples, over, at, off30, off30Steep, steepBy[3], pairs, flips; float turnSum, turnMax; int lines, steepLines;
     LwLpUnit units[LW_LP_UNITS];
 } g_lwLp;
 
@@ -206,14 +210,20 @@ static LwLpUnit* LwLpSample(uint32_t id, const float* up, float tilt, float grou
     return u;
 }
 
+/* A sample 30 deg off steep ground by what is under its centre (-1 nothing, 0 the ground, 1 a prop): on a prop
+ * the angle is against the hidden ground, and a unit kept on a rock counts there by design. */
+static void LwLpSteep(int under) { g_lwLp.steepBy[under < 0 ? 2 : under ? 1 : 0]++; }
+
 static void LwLpNote(void)
 {
     if (g_lwLp.samples)
         Note("living world: lean probe (30 s): %u four-corner samples on read ground, %u over their limit by 2 deg or more (ground slope + %.0f, at most 45.6), %u at it; "
-            "30 deg or more off their ground %u, %u of them on ground of 30 deg or more; at their limit two scans running %u: up turned %.1f deg on average, %.1f at most, %u corner readings changed kind",
+            "30 deg or more off their ground %u, %u of them on ground of 30 deg or more; at their limit two scans running %u: up turned %.1f deg on average, %.1f at most, %u corner readings changed kind; "
+            "the ones on ground of 30 deg or more by what is under them: %u the ground, %u a prop, %u nothing",
             g_lwLp.samples, g_lwLp.over, (double)LwLpOver(), g_lwLp.at, g_lwLp.off30, g_lwLp.off30Steep, g_lwLp.pairs,
-            g_lwLp.pairs ? (double)(g_lwLp.turnSum / (float)g_lwLp.pairs) : 0.0, (double)g_lwLp.turnMax, g_lwLp.flips);
+            g_lwLp.pairs ? (double)(g_lwLp.turnSum / (float)g_lwLp.pairs) : 0.0, (double)g_lwLp.turnMax, g_lwLp.flips, g_lwLp.steepBy[0], g_lwLp.steepBy[1], g_lwLp.steepBy[2]);
     g_lwLp.samples = g_lwLp.over = g_lwLp.at = g_lwLp.off30 = g_lwLp.off30Steep = g_lwLp.pairs = g_lwLp.flips = 0; g_lwLp.turnSum = g_lwLp.turnMax = 0;
+    memset(g_lwLp.steepBy, 0, sizeof g_lwLp.steepBy);
 }
 
 /* The degrees from a file, read when it changes, so one mission measures the same units with and without the limit.
@@ -237,7 +247,7 @@ static int LwLeanWatch(const wchar_t* path)
     LwLeanSet(deg);
     if (rest != end) InterlockedExchange(&g_lwTiltPropsOn, props != 0);
     if (more != rest) InterlockedExchange(&g_lwTiltFooting, footing >= 0 && footing <= 2 ? footing : LW_TILT_FOOTING);
-    g_lwLp.lines = g_lwLp.steepLines = 0; g_lwTiltSunkLines = 0;
+    g_lwLp.lines = g_lwLp.steepLines = 0; g_lwTiltSunkLines = g_lwTiltTallLines = 0;
     Note("living world: lean: now %.0f deg over the slope (0: none), prop hits read %s, footing %ld (0: the ground under any prop, 1: one balanced body keeps the game's, "
         "2: by height), from xl-lean.txt", (double)LwLeanDeg(), g_lwTiltPropsOn ? "the drawn ground" : "as the game reads them", (long)g_lwTiltFooting);
     return 1;
@@ -253,9 +263,11 @@ static void LwLpUnitScan(uintptr_t mgr, uintptr_t R, uint32_t id, const float* q
     SafeRead(R + 0x48, &len, 4);
     for (int k = 0; k < 4; k++) SafeRead(R + 0x58 + 0x18u * k + 0x10, &last[k], 4);
     LwLpUnit* u = LwLpSample(id, up, tilt, ground, off, last, len);
+    const int under = off >= 30.0f && ground >= 30.0f ? LwTiltOnProp(mgr, p, &z) : -1;
+    if (off >= 30.0f && ground >= 30.0f) LwLpSteep(under);
     if (off >= 30.0f && ground >= 30.0f && g_lwLp.steepLines < LW_LP_STEEP)
     {
-        float drawn = -1.0f; const int tile = LwLeanSlope(p[0], p[1], &drawn), under = LwTiltOnProp(mgr, p, &z);
+        float drawn = -1.0f; const int tile = LwLeanSlope(p[0], p[1], &drawn);
         g_lwLp.steepLines++;
         Note("living world: lean probe: steep: unit %08X at (%.1f, %.1f, %.2f): %.1f deg from upright, %.1f off its ground; the ground's slope %.1f deg by the game's read, "
             "%.1f by the drawn tile (-1: none read); limit %.1f; under it %s; readings %.2f %.2f %.2f %.2f of %.2f",
@@ -316,6 +328,9 @@ int CoXlTestLeanHold(float* up, const float* w, float deg) { return LwLeanHold(u
 float CoXlTestLeanAllowed(float slope, float over) { return LwLeanAllowed(slope, over); }
 int CoXlTestLeanSlope(float x, float y, float* deg) { return LwLeanSlope(x, y, deg); }
 void CoXlTestLeanAt(const float* origin) { LwLeanAt(origin); }
+void CoXlTestLeanOnProp(int on) { LwLeanOnProp(on); }
+int CoXlTestLeanProp(void) { return t_lwLean.prop; }
+void CoXlTestLpSteep(int under) { LwLpSteep(under); }
 int CoXlTestLeanSlot(float* xy) { xy[0] = t_lwLean.x; xy[1] = t_lwLean.y; return t_lwLean.set; }
 void CoXlTestLeanCounts(long* c)
 {

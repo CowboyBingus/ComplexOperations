@@ -141,22 +141,25 @@ static uint64_t LwTiltUnitName(uint32_t unit)
 /* Research: how a four-corner unit stands on a prop, to compare levels and the prop rule's states. The rule poses a
  * unit by the ground under a prop, so each sample on a prop is measured against what is really under its corners:
  * the angle to that footing, the deepest and the highest corner, by the footing's height over the drawn ground. */
-#define LW_TILT_SUNK_LINES 16 /* unit lines a level and a value of xl-lean.txt */
-#define LW_TILT_BUCKETS 4     /* the footing's height over the drawn ground: under 1 m, to 2.5, to 3.5, over */
+#define LW_TILT_SUNK_LINES 16  /* unit lines a level and a value of xl-lean.txt */
+#define LW_TILT_BANDS 3        /* the share of the game's reading the footing rule gives: none, part, all */
+#define LW_TILT_COLUMN_UP 1.0f /* m over a point its column starts: a surface higher is over the unit, not under it */
+#define LW_TILT_FOOT_NEAR 0.75f /* m between a corner and the prop under it for the unit to stand on that prop */
 #define LW_TILT_TURNS 256
-typedef struct LwTiltBucket { uint32_t n, lean, angled, sink05, sink10, float05; float angle, sink, air; } LwTiltBucket;
-static struct { uint32_t samples, prop, propLean, bareLean, flat, pairs, turned; float turnSum, turnMax; LwTiltBucket b[LW_TILT_BUCKETS]; } g_lwTiltProp;
+typedef struct LwTiltBucket { uint32_t n, lean, angled, sink05, float05; float angle, sink, air; } LwTiltBucket;
+static struct { uint32_t samples, prop, propLean, bareLean, flat, pairs, turned; float turnSum, turnMax; LwTiltBucket b[LW_TILT_BANDS][2]; } g_lwTiltProp;
 typedef struct LwTiltSeenUp { uint32_t id, scan; float up[3]; } LwTiltSeenUp;
 static struct { uint32_t scan; LwTiltSeenUp u[LW_TILT_TURNS]; } g_lwTiltTurn;
-static int g_lwTiltSunkLines;
+static int g_lwTiltSunkLines, g_lwTiltTallLines;
+static float LwTiltFootShare(float mean, float len, float* top);
 
-/* The closest hit of the rotation's own ray type from 4 m over p, 12 m down: 1 a prop, 0 not, -1 no hit; *z the
- * hit's height, ids its owner and body. */
+/* The closest hit of the rotation's own ray type from 1 m over p, 12 m down: 1 a prop, 0 not, -1 no hit; *z the
+ * hit's height, ids its owner and body. A column from higher up would take a roof or an overhang for the footing. */
 static int LwTiltUnderAt(uintptr_t mgr, const float* p, float* z, uint32_t* ids)
 {
     uintptr_t phys = 0, fn = 0, settings = 0; uint32_t type = 0, terrain = 0;
     uint8_t hits[8 * 0x2C];
-    const float origin[3] = {p[0], p[1], p[2] + 4.0f}, down[3] = {0, 0, -1};
+    const float origin[3] = {p[0], p[1], p[2] + LW_TILT_COLUMN_UP}, down[3] = {0, 0, -1};
     if (!EvpPtr(g_lw.game + LW_TILT_PHYS, &phys) || !EvpPtr(phys + 0x68, &fn) || !fn || !EvpPtr(mgr + 8, &settings) ||
         SafeRead(settings + 0xD4, &type, 4) || SafeRead(mgr + 0x18, &terrain, 4)) return -1;
     if (((LwTiltRayFn)fn)(type, origin, down, 12.0f, 0, hits, 8) == 0) return -1;
@@ -164,8 +167,6 @@ static int LwTiltUnderAt(uintptr_t mgr, const float* p, float* z, uint32_t* ids)
     return LwTiltIsProp(ids[0], ids[1], terrain);
 }
 static int LwTiltOnProp(uintptr_t mgr, const float* p, float* z) { uint32_t ids[2]; return LwTiltUnderAt(mgr, p, z, ids); }
-
-static int LwTiltBucketOf(float over) { return over < 1.0f ? 0 : over < 2.5f ? 1 : over < 3.5f ? 2 : 3; }
 
 /* The plane through the corners' column hits (least squares, three at least): its unit normal; 0 when they do not
  * span one. */
@@ -209,37 +210,48 @@ static void LwTiltTurn(uint32_t id, const float* up)
     u->id = id; u->scan = g_lwTiltTurn.scan; memcpy(u->up, up, 12);
 }
 
-/* A unit on a prop against what is under its corners (the unit's plane at its corner offsets, R+0x60): counted by the
- * footing's height; a unit line for a corner over 1 m under or over the surface, or 30 deg off the footing. */
-static void LwTiltFooting(uint32_t id, const float* p, const float* up, float fromUpright, float c[4][3], const float* z, const int* on, uint32_t ids[4][2], float centreOver)
+/* A unit on a prop against what is under its corners (the unit's plane at its corner offsets, R+0x60), counted as
+ * the footing rule sees it: the mean height of the four corners over the drawn ground, the ground and a hole as 0,
+ * gives the share of the game's reading. Footed: three or more corners within 0.75 m of a prop under them; a unit
+ * beside a rock is not. A unit line for a corner over 0.5 m under or 1 m over the surface, or 30 deg off the footing. */
+static void LwTiltFooting(uint32_t id, const float* p, const float* up, float fromUpright, float c[4][3], const float* z, const int* on, uint32_t ids[4][2], float len)
 {
-    float n[3], sink = -1e9f, air = -1e9f, under[4] = {NAN, NAN, NAN, NAN}, over = 0; uint32_t deep[2] = {0, 0}; int props = 0, tile;
+    float n[3], sink = -1e9f, air = -1e9f, under[4] = {NAN, NAN, NAN, NAN}, sum = 0, top = 0; uint32_t deep[2] = {0, 0}; int corners = 0, onIt = 0, tile;
+    LwTiltFootShare(0, len, &top);
     for (int k = 0; k < 4; k++)
     {
-        if (on[k] < 0) continue;
+        if (on[k] < 0) { corners++; continue; }
         under[k] = z[k] - c[k][2];
         if (under[k] > sink) { sink = under[k]; memcpy(deep, ids[k], sizeof deep); }
         if (-under[k] > air) air = -under[k];
-        const float drawn = on[k] == 1 ? MoveDrawnGround(c[k][0], c[k][1], &tile) : -9999.0f;
-        if (on[k] == 1 && drawn > -9000.0f && tile >= 0) { over += z[k] - drawn; props++; }
+        if (on[k] != 1) { corners++; continue; }
+        const float drawn = MoveDrawnGround(c[k][0], c[k][1], &tile), h = z[k] - drawn;
+        if (!(drawn > -9000.0f) || tile < 0) continue; /* no ground to measure from: left out, as the rule leaves it */
+        sum += h < 0 ? 0 : h > top ? top : h; corners++;
+        if (fabsf(under[k]) <= LW_TILT_FOOT_NEAR) onIt++;
     }
-    if (props) over /= (float)props; else if (centreOver > -9000.0f) over = centreOver; else return;
+    if (!corners) return;
     if (!LwTiltPlane(c, z, on, n)) { g_lwTiltProp.flat++; return; }
-    const float angle = LwTiltAngle(up, n);
-    LwTiltBucket* b = &g_lwTiltProp.b[LwTiltBucketOf(over)];
+    const float mean = sum / (float)corners, share = LwTiltFootShare(mean, len, &top), angle = LwTiltAngle(up, n); const int footed = onIt >= 3;
+    LwTiltBucket* b = &g_lwTiltProp.b[share <= 0.0f ? 0 : share < 1.0f ? 1 : 2][footed];
     b->n++; b->angle += angle; b->sink += sink > 0 ? sink : 0; b->air += air > 0 ? air : 0;
     if (fromUpright >= 30.0f) b->lean++;
     if (angle >= 20.0f) b->angled++;
     if (sink > 0.5f) b->sink05++;
-    if (sink > 1.0f) b->sink10++;
     if (air > 0.5f) b->float05++;
-    if (!(sink > 1.0f || air > 1.0f || angle >= 30.0f) || g_lwTiltSunkLines >= LW_TILT_SUNK_LINES) return;
+    if (footed && share > 0.0f && g_lwTiltTallLines < LW_TILT_SUNK_LINES)
+    {
+        g_lwTiltTallLines++; /* where a run's Helldiver is to stand: a footing the rule keeps */
+        Note("living world: tilt props: tall: unit %08X at (%.1f, %.1f, %.2f) stands on a prop %.2f m over the drawn ground, share %.2f of the game's reading", id, (double)p[0], (double)p[1],
+            (double)p[2], (double)mean, (double)share);
+    }
+    if (!(sink > 0.5f || air > 1.0f || angle >= 30.0f) || g_lwTiltSunkLines >= LW_TILT_SUNK_LINES) return;
     g_lwTiltSunkLines++;
     uint32_t unit = 0; EvpEntityResource(g_lw.game, id, &unit);
-    Note("living world: tilt props: sunk: unit %08X (resource %016llX) at (%.1f, %.1f, %.2f): %.1f deg from upright, %.1f deg off its footing, footing %.2f m over the drawn ground; "
+    Note("living world: tilt props: sunk: unit %08X (resource %016llX) at (%.1f, %.1f, %.2f): %.1f deg from upright, %.1f deg off its footing, footing %.2f m over the drawn ground (share %.2f, %s); "
         "corners under the surface over them (m, nan: none): %+.2f %+.2f %+.2f %+.2f; the deepest under owner %08X (resource %016llX), body %08X",
-        id, (unsigned long long)LwTiltUnitName(unit), (double)p[0], (double)p[1], (double)p[2], (double)fromUpright, (double)angle, (double)over, (double)under[0], (double)under[1],
-        (double)under[2], (double)under[3], deep[0], (unsigned long long)LwTiltUnitName(deep[0]), deep[1]);
+        id, (unsigned long long)LwTiltUnitName(unit), (double)p[0], (double)p[1], (double)p[2], (double)fromUpright, (double)angle, (double)mean, (double)share, footed ? "footed" : "not footed",
+        (double)under[0], (double)under[1], (double)under[2], (double)under[3], deep[0], (unsigned long long)LwTiltUnitName(deep[0]), deep[1]);
 }
 
 /* One four-corner unit of this scan: on a prop when the column under its centre or under any corner meets one first
@@ -247,7 +259,7 @@ static void LwTiltFooting(uint32_t id, const float* p, const float* up, float fr
 static void LwTiltPropSample(uintptr_t mgr, uintptr_t R, uint32_t id, const float* q, const float* p, float fromUpright)
 {
     const float lx[3] = {1, 0, 0}, ly[3] = {0, 1, 0}, lz[3] = {0, 0, 1}; float ax[3], ay[3], up[3], c[4][3], z[4] = {0, 0, 0, 0}, cz = 0;
-    uint32_t ids[4][2], centreIds[2]; int on[4] = {-1, -1, -1, -1}, hits = 0, props = 0, tile;
+    uint32_t ids[4][2], centreIds[2]; int on[4] = {-1, -1, -1, -1}, hits = 0, props = 0; float len = 0;
     const int centre = LwTiltUnderAt(mgr, p, &cz, centreIds);
     LwTiltRotate(q, lx, ax); LwTiltRotate(q, ly, ay); LwTiltRotate(q, lz, up);
     for (int k = 0; k < 4; k++)
@@ -264,25 +276,24 @@ static void LwTiltPropSample(uintptr_t mgr, uintptr_t R, uint32_t id, const floa
     g_lwTiltProp.prop++;
     if (fromUpright >= 30.0f) g_lwTiltProp.propLean++;
     LwTiltTurn(id, up);
-    const float drawn = centre == 1 ? MoveDrawnGround(p[0], p[1], &tile) : -9999.0f;
-    LwTiltFooting(id, p, up, fromUpright, c, z, on, ids, centre == 1 && drawn > -9000.0f && tile >= 0 ? cz - drawn : -9999.0f);
+    if (!SafeRead(R + 0x48, &len, 4)) LwTiltFooting(id, p, up, fromUpright, c, z, on, ids, len);
 }
 
 static void LwTiltPropNote(void)
 {
-    static const char* const kName[LW_TILT_BUCKETS] = {"under 1 m", "1 to 2.5 m", "2.5 to 3.5 m", "over 3.5 m"};
+    static const char* const kName[LW_TILT_BANDS] = {"with none", "with part", "with all"};
     if (g_lwTiltProp.samples)
         Note("living world: tilt props (30 s): %u four-corner samples with a hit under them, %u on a prop (%.2f %%); 30 deg or more from upright: %u of those on a prop, %u of the others; "
             "on a prop two scans running %u: up turned %.1f deg on average, %.1f at most, %u over 10 deg; %u with corners that span no plane",
             g_lwTiltProp.samples, g_lwTiltProp.prop, 100.0 * g_lwTiltProp.prop / g_lwTiltProp.samples, g_lwTiltProp.propLean, g_lwTiltProp.bareLean, g_lwTiltProp.pairs,
             g_lwTiltProp.pairs ? (double)(g_lwTiltProp.turnSum / (float)g_lwTiltProp.pairs) : 0.0, (double)g_lwTiltProp.turnMax, g_lwTiltProp.turned, g_lwTiltProp.flat);
-    for (int k = 0; k < LW_TILT_BUCKETS; k++)
+    for (int k = 0; k < LW_TILT_BANDS * 2; k++)
     {
-        const LwTiltBucket* b = &g_lwTiltProp.b[k];
+        const LwTiltBucket* b = &g_lwTiltProp.b[k / 2][k % 2];
         if (b->n)
-            Note("living world: tilt footing (30 s): footing %s over the drawn ground: %u samples, %u of them 30 deg or more from upright; off their footing %.1f deg on average, %u 20 deg or more; "
-                "the deepest corner %.2f m under the surface on average, %u over 0.5 m, %u over 1.0 m; the highest corner %.2f m over it on average, %u over 0.5 m",
-                kName[k], b->n, b->lean, (double)(b->angle / (float)b->n), b->angled, (double)(b->sink / (float)b->n), b->sink05, b->sink10, (double)(b->air / (float)b->n), b->float05);
+            Note("living world: tilt footing (30 s): footing %s of the game's reading, %s: %u samples, %u of them 30 deg or more from upright; off their footing %.1f deg on average, %u 20 deg or more; "
+                "the deepest corner %.2f m under the surface on average, %u over 0.5 m; the highest corner %.2f m over it on average, %u over 0.5 m",
+                kName[k / 2], k % 2 ? "footed" : "not footed", b->n, b->lean, (double)(b->angle / (float)b->n), b->angled, (double)(b->sink / (float)b->n), b->sink05, (double)(b->air / (float)b->n), b->float05);
     }
     memset(&g_lwTiltProp, 0, sizeof g_lwTiltProp);
 }
@@ -313,6 +324,22 @@ static void LwTiltCost(LONG64 ticks)
         w = was;
     }
 }
+/* Research: what a scan costs its frame, the columns under every four-corner unit included; frame-time evidence
+ * of the same run is to be read with it. */
+static struct { LONG64 ticks, worst; LONG scans; } g_lwTiltScanCost;
+static void LwTiltScanCost(LONG64 ticks)
+{
+    g_lwTiltScanCost.ticks += ticks; g_lwTiltScanCost.scans++;
+    if (ticks > g_lwTiltScanCost.worst) g_lwTiltScanCost.worst = ticks;
+}
+static void LwTiltScanCostNote(LONG64 perSecond)
+{
+    if (g_lwTiltScanCost.scans && perSecond > 0)
+        Note("living world: tilt scan (30 s): %ld scans took %.2f ms, %.3f ms a scan on average, %.3f ms at worst (each in one frame, the research columns in it)", (long)g_lwTiltScanCost.scans,
+            1000.0 * (double)g_lwTiltScanCost.ticks / (double)perSecond, 1000.0 * (double)g_lwTiltScanCost.ticks / (double)perSecond / g_lwTiltScanCost.scans,
+            1000.0 * (double)g_lwTiltScanCost.worst / (double)perSecond);
+    memset(&g_lwTiltScanCost, 0, sizeof g_lwTiltScanCost);
+}
 static void LwTiltCostNote(LONG64 perSecond)
 {
     const LONG64 ticks = InterlockedExchange64(&g_lwTiltCost.ticks, 0), worst = InterlockedExchange64(&g_lwTiltCost.worst, 0);
@@ -339,6 +366,7 @@ static volatile LONG g_lwTiltUnder, g_lwTiltReads;
 static volatile LONG g_lwTiltInside;
 #endif
 static void LwLeanAt(const float* origin); /* living_world_leancap.c: where this thread's unit stands, for its limit */
+static void LwLeanOnProp(int on);
 
 /* A miss that started under the ground: minus its depth; anything else as the game read it. */
 static float LwTiltUnder(float d, uint32_t count, float originZ, float ground) { return count == 0 && ground > originZ ? originZ - ground : d; }
@@ -401,10 +429,12 @@ static float LwTiltPropRead(float t, float len) { return t > len ? len : t < -le
 #define LW_TILT_FOOT_FRESH 500u   /* ms a corner's hit counts: four frames at 8 fps */
 #define LW_TILT_FOOT_FAR 10.0f    /* m from the slot's last ray: another unit took the slot */
 #define LW_TILT_FOOT_LOW 2.0f     /* m over the drawn ground where the game's reading starts to count, at most */
+#define LW_TILT_FOOT_LEAST 1.5f   /* and at least: lower rocks are the ones units are laid along the ground on */
+#define LW_TILT_FOOT_BAND 1.5f    /* m from there to all of the game's reading, less where the reach is nearer */
 #define LW_TILT_FOOT_EVEN 0.25f   /* m between the four raw readings of a unit that lies along its prop */
 enum { LW_FOOT_NONE, LW_FOOT_GROUND, LW_FOOT_PROP, LW_FOOT_MISS };
 typedef struct LwTiltFoot { float h, d; uint32_t body, at; uint8_t kind; } LwTiltFoot;
-typedef struct LwTiltFeet { float x, y; LwTiltFoot c[4]; } LwTiltFeet;
+typedef struct LwTiltFeet { float x, y; uint32_t id; LwTiltFoot c[4]; } LwTiltFeet;
 static LwTiltFeet g_lwTiltFoot[LW_TILT_FOOT_UNITS];
 static volatile LONG g_lwTiltFooting = LW_TILT_FOOTING;
 #ifdef CO_TEST
@@ -419,35 +449,65 @@ static uint32_t LwTiltFootNow(void)
     return (uint32_t)GetTickCount64();
 }
 
+/* The entity in the rotation's slot i ([mgr+0x50] instances, +8 its id); 0 when it does not read. */
+static uint32_t LwTiltSlotId(uintptr_t mgr, uint32_t i)
+{
+    uintptr_t inst = 0, e = 0; uint32_t id = 0;
+    return EvpPtr(mgr + 0x50, &inst) && EvpPtr(inst + 8ull * i, &e) && !SafeRead(e + 8, &id, 4) ? id : 0;
+}
+
 /* Unit i's corner (frame & 3) met this: a prop h over the drawn ground with the game's reading d, the ground, or
- * nothing. A ray far from the slot's last one is another unit's: its corners start again. */
-static void LwTiltFootNote(uint32_t i, uint32_t frame, uint8_t kind, float h, float d, uint32_t body, const float* o, uint32_t now)
+ * nothing. Another entity in the slot, or a ray far from the slot's last one, is another unit: its corners start
+ * again, so it never stands on what a dead neighbour stood on. */
+static void LwTiltFootNote(uint32_t i, uint32_t id, uint32_t frame, uint8_t kind, float h, float d, uint32_t body, const float* o, uint32_t now)
 {
     if (i >= LW_TILT_FOOT_UNITS) return;
     LwTiltFeet* f = &g_lwTiltFoot[i];
-    if (fabsf(o[0] - f->x) > LW_TILT_FOOT_FAR || fabsf(o[1] - f->y) > LW_TILT_FOOT_FAR) memset(f->c, 0, sizeof f->c);
-    f->x = o[0]; f->y = o[1];
+    if (id != f->id || fabsf(o[0] - f->x) > LW_TILT_FOOT_FAR || fabsf(o[1] - f->y) > LW_TILT_FOOT_FAR) memset(f->c, 0, sizeof f->c);
+    f->x = o[0]; f->y = o[1]; f->id = id;
     f->c[frame & 3] = (LwTiltFoot){h > 0 ? h : 0, d, body, now, kind};
 }
 
 static float LwTiltSmooth(float x) { x = x < 0.0f ? 0.0f : x > 1.0f ? 1.0f : x; return x * x * (3.0f - 2.0f * x); }
 
+/* The share of the game's reading for corners `mean` m over the drawn ground on average, by the unit's ray length:
+ * none up to `low`, all of it from *top. The reach is the length less the ray's 0.5 m head start; past it the ground
+ * reads as a hole anyway. Lengths in the units' data are 2, 3, 4, 10 and 15 m: a short unit has no band (it stands upright from
+ * its reach), a long one's ends 1.5 m over its start, not at a reach of 14.5 m. */
+static float LwTiltFootShare(float mean, float len, float* top)
+{
+    const float reach = len - 0.5f, low = fminf(LW_TILT_FOOT_LOW, fmaxf(LW_TILT_FOOT_LEAST, 0.6f * reach));
+    *top = fminf(reach, low + LW_TILT_FOOT_BAND);
+    return *top - low > 0.01f ? LwTiltSmooth((mean - low) / (*top - low)) : 0.0f;
+}
+
 /* By height: the share of the game's reading for unit i, from the mean height of its corners' hits over the drawn
- * ground (a corner on the ground or over a hole counts 0): none up to 2 m, all of it from the unit's reach, the
- * full length less the ray's 0.5 m head start. A unit half on a tall rock stays with the ground. */
+ * ground (a corner on the ground or over a hole counts 0). A corner counts at most the band's top, so one corner
+ * over a pit in the ground hidden under a rock cannot stand for the other three. A unit half on a tall rock stays
+ * with the ground. */
 static float LwTiltFootHigh(uint32_t i, float len, uint32_t now)
 {
-    const float reach = len - 0.5f, low = fminf(LW_TILT_FOOT_LOW, 0.6f * reach);
-    float sum = 0; int n = 0;
-    if (i >= LW_TILT_FOOT_UNITS || !(reach - low > 0.01f)) return 0.0f;
+    float sum = 0, top = 0; int n = 0;
+    if (i >= LW_TILT_FOOT_UNITS) return 0.0f;
+    LwTiltFootShare(0, len, &top);
     for (int k = 0; k < 4; k++)
     {
         const LwTiltFoot* c = &g_lwTiltFoot[i].c[k];
         if (c->kind == LW_FOOT_NONE || now - c->at > LW_TILT_FOOT_FRESH) continue;
         n++;
-        if (c->kind == LW_FOOT_PROP) sum += c->h;
+        if (c->kind == LW_FOOT_PROP) sum += c->h > top ? top : c->h;
     }
-    return n ? LwTiltSmooth((sum / (float)n - low) / (reach - low)) : 0.0f;
+    return n ? LwTiltFootShare(sum / (float)n, len, &top) : 0.0f;
+}
+
+/* Whether unit i has a corner on a prop now: its lean is then held without the ground's slope (the ground hidden
+ * under a prop is broken, slopes to 79 deg were read there, and would lift the limit to the game's own). */
+static int LwTiltFootOnProp(uint32_t i, uint32_t now)
+{
+    if (i >= LW_TILT_FOOT_UNITS) return 0;
+    for (int k = 0; k < 4; k++)
+        if (g_lwTiltFoot[i].c[k].kind == LW_FOOT_PROP && now - g_lwTiltFoot[i].c[k].at <= LW_TILT_FOOT_FRESH) return 1;
+    return 0;
 }
 
 /* One body: the share of the game's reading for unit i when all four corners met the same body and the game's four
@@ -475,13 +535,13 @@ static float LwTiltOverProp(uintptr_t mgr, uint32_t i, uintptr_t rec, const floa
         !EvpPtr(mgr + 0x58, &recs) || SafeRead(recs + 0x298ull * i + 0x54, &mode, 4) || mode != 4 ||
         SafeRead(recs + 0x298ull * i + 0x48, &len, 4) || SafeRead(rec + 0x1C, dir, sizeof dir) || SafeRead(mgr, &frame, 4)) return d;
     memcpy(at, h, sizeof at); memcpy(ids, h + 0x1C, sizeof ids);
-    const uint32_t now = LwTiltFootNow();
-    if (!LwTiltIsProp(ids[0], ids[1], terrain)) { LwTiltFootNote(i, frame, LW_FOOT_GROUND, 0, d, ids[1], o, now); return d; }
+    const uint32_t now = LwTiltFootNow(), id = LwTiltSlotId(mgr, i);
+    if (!LwTiltIsProp(ids[0], ids[1], terrain)) { LwTiltFootNote(i, id, frame, LW_FOOT_GROUND, 0, d, ids[1], o, now); return d; }
     int why = LwTiltGroundAlong(o, dir, &t);
     const float under = why ? -9999.0f : LwTiltTileGround(at[0], at[1]); /* the hit's own place (hit +0): d is not its distance under the level terrain */
     if (!why && !(under > -9000.0f)) why = LW_KEPT_TILE;
-    if (why) { InterlockedIncrement(&g_lwTiltPropKept[why]); LwTiltFootNote(i, frame, LW_FOOT_NONE, 0, d, ids[1], o, now); return d; }
-    LwTiltFootNote(i, frame, LW_FOOT_PROP, at[2] - under, d, ids[1], o, now);
+    if (why) { InterlockedIncrement(&g_lwTiltPropKept[why]); LwTiltFootNote(i, id, frame, LW_FOOT_NONE, 0, d, ids[1], o, now); return d; }
+    LwTiltFootNote(i, id, frame, LW_FOOT_PROP, at[2] - under, d, ids[1], o, now);
     const float plain = LwTiltPropRead(t, len);
     const LONG footing = g_lwTiltFooting;
     const float w = footing == 1 ? LwTiltFootSame(i, now) : footing == 2 ? LwTiltFootHigh(i, len, now) : 0.0f;
@@ -511,9 +571,11 @@ static float LwTiltRead(uintptr_t mgr, uint32_t i, uintptr_t rays, uint32_t requ
         QueryPerformanceCounter(&b);
         LwTiltCost(b.QuadPart - a.QuadPart);
 #endif
+        LwLeanOnProp(LwTiltFootOnProp(i, LwTiltFootNow()));
         return d;
     }
-    if (!SafeRead(mgr, &frame, 4)) LwTiltFootNote(i, frame, LW_FOOT_MISS, 0, d, 0, o, LwTiltFootNow()); /* a corner over a hole stands on nothing */
+    if (!SafeRead(mgr, &frame, 4)) LwTiltFootNote(i, LwTiltSlotId(mgr, i), frame, LW_FOOT_MISS, 0, d, 0, o, LwTiltFootNow()); /* a corner over a hole stands on nothing */
+    LwLeanOnProp(LwTiltFootOnProp(i, LwTiltFootNow()));
     float ground = LwTiltTileGround(o[0], o[1]);
     if (!(ground > -9000.0f)) return d;
     InterlockedIncrement(&g_lwTiltReads);
@@ -610,13 +672,14 @@ static int LwTiltLong(uintptr_t R)
     return hi - lo >= 3.0f;
 }
 
-static void LwTiltScan(void)
+/* 1 when this call scanned. */
+static int LwTiltScanBody(void)
 {
     ULONGLONG now = GetTickCount64();
 #if defined(CO_RESEARCH) || defined(CO_TEST)
     g_lwTiltCost.frames++;
 #endif
-    if (now - g_lwTilt.at < 500) return;
+    if (now - g_lwTilt.at < 500) return 0;
     g_lwTilt.at = now;
 #ifdef CO_RESEARCH
     static wchar_t lean[MAX_PATH];
@@ -627,12 +690,12 @@ static void LwTiltScan(void)
     {
         memset(&g_lwTilt, 0, sizeof g_lwTilt); g_lwTilt.level = g_world.levels; g_lwTilt.at = now;
 #ifdef CO_RESEARCH
-        LwLpLevel(); g_lwTiltSunkLines = 0; g_lwTiltKind.n = 0;
+        LwLpLevel(); g_lwTiltSunkLines = g_lwTiltTallLines = 0; g_lwTiltKind.n = 0;
 #endif
     }
     uintptr_t mgr = 0, inst = 0, recs = 0, ctl = 0, units = 0, urecs = 0;
     if (!EvpPtr(g_lw.game + LW_TILT_ROT, &mgr) || !EvpPtr(mgr + 0x50, &inst) || !EvpPtr(mgr + 0x58, &recs) || !EvpPtr(mgr + 0x60, &ctl) ||
-        !EvpPtr(g_lw.game + LW_TILT_UNITS, &units) || !EvpPtr(units + 0x68, &urecs)) return;
+        !EvpPtr(g_lw.game + LW_TILT_UNITS, &units) || !EvpPtr(units + 0x68, &urecs)) return 0;
     uint32_t n = EvpU32(mgr + 0x2C, 0);
     if (n > 1024) n = 1024;
     g_lwTilt.scans++;
@@ -669,6 +732,20 @@ static void LwTiltScan(void)
         if (off > g_lwTilt.worst) { g_lwTilt.worst = off; g_lwTilt.worstId = id; g_lwTilt.worstMode = mode; }
         if (g_lwTilt.lines < LW_TILT_LINES && !LwTiltSeen(id, now)) { g_lwTilt.lines++; LwTiltLine(mgr, R, id, mode, q, p, tilt, ground, off); }
     }
+    return 1;
+}
+
+static void LwTiltScan(void)
+{
+#ifdef CO_RESEARCH
+    LARGE_INTEGER a, b;
+    QueryPerformanceCounter(&a);
+    if (!LwTiltScanBody()) return;
+    QueryPerformanceCounter(&b);
+    LwTiltScanCost(b.QuadPart - a.QuadPart);
+#else
+    LwTiltScanBody();
+#endif
 }
 
 /* With the 30 s notes: the units scanned by mode and those off their ground; the counts start again. */
@@ -685,7 +762,7 @@ static void LwTiltNote(void)
 #ifdef CO_RESEARCH
     LARGE_INTEGER perSecond;
     QueryPerformanceFrequency(&perSecond);
-    LwTiltCostNote(perSecond.QuadPart);
+    LwTiltCostNote(perSecond.QuadPart); LwTiltScanCostNote(perSecond.QuadPart);
     LwTiltPropNote(); LwLpNote();
     Note("living world: tilt rays (30 s): %ld corner readings started inside a body", (long)InterlockedExchange(&g_lwTiltInside, 0));
 #endif
@@ -741,10 +818,16 @@ void CoXlTestTiltNow(uint32_t ms) { g_lwTiltTestNow = ms; }
 void CoXlTestTiltFeetClear(void) { memset(g_lwTiltFoot, 0, sizeof g_lwTiltFoot); }
 float CoXlTestTiltFootHigh(uint32_t i, float len, uint32_t now) { return LwTiltFootHigh(i, len, now); }
 float CoXlTestTiltFootSame(uint32_t i, uint32_t now) { return LwTiltFootSame(i, now); }
-void CoXlTestTiltFootNote(uint32_t i, uint32_t frame, int kind, float h, float d, uint32_t body, const float* o, uint32_t now) { LwTiltFootNote(i, frame, (uint8_t)kind, h, d, body, o, now); }
+void CoXlTestTiltFootNote(uint32_t i, uint32_t frame, int kind, float h, float d, uint32_t body, const float* o, uint32_t now) { LwTiltFootNote(i, 0, frame, (uint8_t)kind, h, d, body, o, now); }
+void CoXlTestTiltFootNoteOf(uint32_t i, uint32_t id, uint32_t frame, int kind, float h, const float* o, uint32_t now) { LwTiltFootNote(i, id, frame, (uint8_t)kind, h, 0.5f, 7, o, now); }
+int CoXlTestTiltFootOnProp(uint32_t i, uint32_t now) { return LwTiltFootOnProp(i, now); }
+float CoXlTestTiltFootShare(float mean, float len, float* top) { return LwTiltFootShare(mean, len, top); }
+void CoXlTestTiltScanCost(long long ticks) { LwTiltScanCost(ticks); }
+void CoXlTestTiltScanCostNote(long long perSecond) { LwTiltScanCostNote(perSecond); }
+int CoXlTestTiltTallLines(void) { return g_lwTiltTallLines; }
 void CoXlTestTiltKept(long* by) { for (int k = 1; k < LW_KEPT_KINDS; k++) by[k - 1] = g_lwTiltPropKept[k]; }
 void CoXlTestTiltFooted(long* footed, long* part) { *footed = InterlockedExchange(&g_lwTiltPropFooted, 0); *part = InterlockedExchange(&g_lwTiltPropPart, 0); }
-void CoXlTestTiltSunkLines(int n) { g_lwTiltSunkLines = n; }
+void CoXlTestTiltSunkLines(int n) { g_lwTiltSunkLines = n; g_lwTiltTallLines = 0; }
 int CoXlTestTiltSunkLinesNow(void) { return g_lwTiltSunkLines; }
 void CoXlTestTiltCost(long long ticks) { LwTiltCost(ticks); }
 void CoXlTestTiltCostNote(long long perSecond, long frames) { g_lwTiltCost.frames = frames; LwTiltCostNote(perSecond); }

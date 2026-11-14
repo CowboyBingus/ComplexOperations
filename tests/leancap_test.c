@@ -35,6 +35,8 @@ int CoXlTestTiltPropsOn(void);
 int CoXlTestTiltFootingNow(void);
 int CoXlTestLpSample(uint32_t id, const float* up, float tilt, float ground, float off, const float* last, float len);
 void CoXlTestLpNote(void);
+void CoXlTestLpSteep(int under);
+void CoXlTestLeanOnProp(int on);
 void CoXlTestFgWorld(float live);
 
 static int g_failed;
@@ -273,6 +275,20 @@ int main(void)
     CoXlTestLeanCounts(c);
     CHECK(c[0] == 3 && c[2] == 1 && c[3] == 0);
 
+    g_case = "a corner on a prop: no slope is added";
+    CoXlTestLeanAt(g_at); CoXlTestLeanOnProp(1); /* the ground hidden under the rock is 30 deg steep here */
+    memset(&g_limit, 0, sizeof g_limit); Lean(g_up, 45.5f, 0.0f);
+    CHECK(four(0x1234, g_out, g_up) == g_out && g_limit.calls == 1 && About(g_out, 25.0f, 0.0f) && About(g_up, 25.0f, 0.0f));
+    CoXlTestLeanAt(g_at); CoXlTestLeanOnProp(1);
+    memset(&g_limit, 0, sizeof g_limit); Lean(g_up, 24.0f, 0.0f);
+    CHECK(four(0x1234, g_out, g_up) == g_out && Is(g_up, 24.0f, 0.0f)); /* under it: as it was */
+    CHECK(Through(four, 45.5f, 0.0f) && Is(g_out, 45.5f, 0.0f)); /* the next pose, no prop: its slope again; one pose, one answer */
+    CoXlTestLeanAt(g_at); CoXlTestLeanOnProp(1); CoXlTestLeanAt(g_at); /* a new reading starts without it */
+    memset(&g_limit, 0, sizeof g_limit); Lean(g_up, 45.5f, 0.0f);
+    CHECK(four(0x1234, g_out, g_up) == g_out && Is(g_out, 45.5f, 0.0f));
+    CoXlTestLeanCounts(c);
+    CHECK(c[0] == 4 && c[2] == 1 && c[3] == 0);
+
     g_case = "not a unit vector: the game's";
     CoXlTestLeanTile(100.0f, -200.0f, 60.0f, 0.0f, 0.0f);
     CoXlTestLeanAt(g_at);
@@ -393,14 +409,17 @@ int main(void)
     CoXlTestLpScan();
     CoXlTestLpScan();
     CHECK(CoXlTestLpSample(7, a, 25.0f, 0.0f, 25.0f, hit, 4.0f) == 1);     /* not seen last scan: no pair */
+    CoXlTestLpSteep(0); CoXlTestLpSteep(1); CoXlTestLpSteep(1); CoXlTestLpSteep(1); CoXlTestLpSteep(-1); CoXlTestLpSteep(-1);
     CoXlTestLpNote();
     CHECK(fake_host_logged("lean probe (30 s): 11 four-corner samples on read ground, 1 over their limit by 2 deg or more (ground slope + 25, at most 45.6), 8 at it; "
-        "30 deg or more off their ground 2, 1 of them on ground of 30 deg or more; at their limit two scans running 1: up turned 34.8 deg on average, 34.8 at most, 2 corner readings changed kind"));
+        "30 deg or more off their ground 2, 1 of them on ground of 30 deg or more; at their limit two scans running 1: up turned 34.8 deg on average, 34.8 at most, 2 corner readings changed kind; "
+        "the ones on ground of 30 deg or more by what is under them: 1 the ground, 3 a prop, 2 nothing"));
     CoXlTestLeanSet(0.0f); /* a control run measures against the default */
     CoXlTestLpScan();
     CHECK(CoXlTestLpSample(20, a, 30.0f, 0.0f, 30.0f, hit, 4.0f) == 1);
     CoXlTestLpNote();
     CHECK(fake_host_logged("lean probe (30 s): 1 four-corner samples on read ground, 1 over their limit by 2 deg or more (ground slope + 25, at most 45.6), 1 at it; 30 deg or more off their ground 1, 0 of them"));
+    CHECK(fake_host_logged("by what is under them: 0 the ground, 0 a prop, 0 nothing")); /* the counts start again */
 
     g_case = "research: the degrees from a file, in play";
     wchar_t file[MAX_PATH];

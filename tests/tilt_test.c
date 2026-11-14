@@ -41,6 +41,13 @@ float CoXlTestTiltFootHigh(uint32_t i, float len, uint32_t now);
 float CoXlTestTiltFootSame(uint32_t i, uint32_t now);
 void CoXlTestTiltFootNote(uint32_t i, uint32_t frame, int kind, float h, float d, uint32_t body, const float* o, uint32_t now);
 void CoXlTestTiltKept(long* by);
+void CoXlTestTiltFootNoteOf(uint32_t i, uint32_t id, uint32_t frame, int kind, float h, const float* o, uint32_t now);
+int CoXlTestTiltFootOnProp(uint32_t i, uint32_t now);
+float CoXlTestTiltFootShare(float mean, float len, float* top);
+void CoXlTestTiltScanCost(long long ticks);
+void CoXlTestTiltScanCostNote(long long perSecond);
+int CoXlTestTiltTallLines(void);
+int CoXlTestLeanProp(void);
 void CoXlTestTiltFooted(long* footed, long* part);
 int CoXlTestTiltWhy(const float* o, const float* dir);
 void CoXlTestLeanTile(float cx, float cy, float z, float gx, float gy);
@@ -103,7 +110,15 @@ static int Passed(float got, float answer, uint32_t request, uint32_t coarse)
 
 /* A four-corner unit's ray that hit: record 2 of unit 7 (mode at R+0x54, full length at R+0x48), from (x, y, z) along
  * dir, its hit naming owner and body; the level terrain's body is 0x80300067. */
-static uint8_t g_units[8][0x298], g_hit[0x2C], g_mgr[0x60];
+static uint8_t g_units[8][0x298], g_hit[0x2C], g_mgr[0x60], g_entity[0x10];
+static uintptr_t g_inst[8];
+/* The entity in slot i ([mgr+0x50] instances, +8 its id); 0: the slot does not read. */
+static void Entity(int i, uint32_t id)
+{
+    const uintptr_t inst = (uintptr_t)g_inst;
+    memcpy(g_mgr + 0x50, &inst, 8); memcpy(g_entity + 8, &id, 4);
+    g_inst[i] = id ? (uintptr_t)g_entity : 0;
+}
 static void HitAt(float x, float y, float z) { const float at[3] = {x, y, z}; memcpy(g_hit, at, sizeof at); } /* the hit's place, hit +0 */
 static void Frame(uint32_t frame) { memcpy(g_mgr, &frame, 4); } /* [mgr]: its low two bits are the corner read */
 static void PropRay(float x, float y, float z, float dx, float dy, float dz, uint32_t owner, uint32_t body)
@@ -381,8 +396,8 @@ int main(void)
     CHECK(CoXlTestTiltFootHigh(3, 0.4f, 1000) == 0.0f && CoXlTestTiltFootHigh(3, 0.5f, 1000) == 0.0f && CoXlTestTiltFootHigh(2000, 4.0f, 1000) == 0.0f); /* no reach, no slot: the rule alone */
     FEET(3, 6.0f, 6.0f, 6.0f, 6.0f, 0.5f, 0.5f, 0.5f, 0.5f, 7, 7, 7, 7);
     CHECK(CoXlTestTiltFootHigh(3, 4.0f, 1400) == 1.0f && CoXlTestTiltFootHigh(3, 4.0f, 1501) == 0.0f); /* hits older than 0.5 s say nothing */
-    CoXlTestTiltFootNote(3, 5, 3, 0, 4.0f, 0, o0, 1000); /* one corner over a hole: three of four at 6 m */
-    CHECK(CoXlTestTiltFootHigh(3, 4.0f, 1000) == 1.0f);
+    CoXlTestTiltFootNote(3, 5, 3, 0, 4.0f, 0, o0, 1000); /* one corner over a hole, at a rock's edge: three of four count 3.5 m, 2.63 on average */
+    CHECK(fabsf(CoXlTestTiltFootHigh(3, 4.0f, 1000) - 0.376f) < 0.002f);
     CoXlTestTiltFootNote(3, 6, 3, 0, 4.0f, 0, o0, 1000); CoXlTestTiltFootNote(3, 7, 3, 0, 4.0f, 0, o0, 1000); /* three over a hole: 1.5 m on average */
     CHECK(CoXlTestTiltFootHigh(3, 4.0f, 1000) == 0.0f);
     FEET(3, 3.0f, 3.0f, 3.0f, 3.0f, 0.5f, 0.5f, 0.5f, 0.5f, 7, 7, 7, 7);
@@ -398,11 +413,48 @@ int main(void)
     CoXlTestTiltFootNote(3, 6, 2, 0.2f, 0.5f, 9, far1, 1000); /* 10.5 m north of it: the same */
     CHECK(CoXlTestTiltFootHigh(3, 4.0f, 1000) == 0.0f);
     CoXlTestTiltFootNote(3, 7, 2, 5.0f, 0.5f, 9, near1, 1000); /* 9.5 m on: the same unit's far corner, its 0.2 m corner kept */
-    CHECK(fabsf(CoXlTestTiltFootHigh(3, 4.0f, 1000) - 0.352f) < 0.002f); /* (0.2 + 5.0) / 2 = 2.6 m */
+    CHECK(CoXlTestTiltFootHigh(3, 4.0f, 1000) == 0.0f); /* the same slot: 5.0 counts as the band's top, (0.2 + 3.5) / 2 = 1.85 m */
+    CoXlTestTiltFootNote(3, 4, 2, 5.0f, 0.5f, 9, near1, 1000);
+    CHECK(fabsf(CoXlTestTiltFootHigh(3, 4.0f, 1000) - 0.175f) < 0.002f); /* a second one: (0.2 + 3.5 + 3.5) / 3 = 2.4 m, so the 0.2 m corner was kept */
     CoXlTestTiltFootNote(3, 4, 2, 0.2f, 0.5f, 9, far0, 1000);
     CoXlTestTiltFootNote(3, 5, 2, -3.0f, 0.5f, 9, far0, 1000); /* a hit under the drawn ground counts 0, not less */
     CoXlTestTiltFootNote(3, 6, 2, 9.4f, 0.5f, 9, far0, 1000);
-    CHECK(fabsf(CoXlTestTiltFootHigh(3, 4.0f, 1000) - 0.896f) < 0.002f); /* (0.2 + 0 + 9.4) / 3 = 3.2 m */
+    CHECK(CoXlTestTiltFootHigh(3, 4.0f, 1000) == 0.0f);  /* one corner over a pit counts 3.5, not 9.4: (0.2 + 0 + 3.5) / 3 = 1.23 m */
+    CHECK(CoXlTestTiltFootHigh(3, 15.0f, 1000) == 0.0f); /* a long unit too: its corners count 3.5 at most, not its reach */
+    CoXlTestTiltFootNote(3, 5, 2, 0.0f, 0.5f, 9, far0, 1000);
+    CoXlTestTiltFootNote(3, 4, 2, 9.4f, 0.5f, 9, far0, 1000);
+    CHECK(fabsf(CoXlTestTiltFootHigh(3, 4.0f, 1000) - 0.126f) < 0.002f); /* two of three over it: (3.5 + 0 + 3.5) / 3 = 2.33 m */
+
+    g_case = "footing by height: every ray length in the units' data";
+    float top = 0;
+    CHECK(CoXlTestTiltFootShare(9.0f, 2.0f, &top) == 0.0f && top == 1.5f);  /* length 2: reach 1.5, no band, the rule alone at any height */
+    CHECK(CoXlTestTiltFootShare(1.2f, 2.0f, &top) == 0.0f && CoXlTestTiltFootShare(1.5f, 2.0f, &top) == 0.0f); /* not from 0.9 m, where low rocks are */
+    CHECK(CoXlTestTiltFootShare(1.5f, 3.0f, &top) == 0.0f && top == 2.5f && fabsf(CoXlTestTiltFootShare(2.0f, 3.0f, &top) - 0.5f) < 0.001f && CoXlTestTiltFootShare(2.5f, 3.0f, &top) == 1.0f);
+    CHECK(CoXlTestTiltFootShare(2.0f, 4.0f, &top) == 0.0f && top == 3.5f && fabsf(CoXlTestTiltFootShare(2.75f, 4.0f, &top) - 0.5f) < 0.001f && CoXlTestTiltFootShare(3.5f, 4.0f, &top) == 1.0f);
+    CHECK(CoXlTestTiltFootShare(2.0f, 10.0f, &top) == 0.0f && top == 3.5f && fabsf(CoXlTestTiltFootShare(2.75f, 10.0f, &top) - 0.5f) < 0.001f && CoXlTestTiltFootShare(3.5f, 10.0f, &top) == 1.0f);
+    CHECK(CoXlTestTiltFootShare(2.0f, 15.0f, &top) == 0.0f && top == 3.5f && fabsf(CoXlTestTiltFootShare(2.75f, 15.0f, &top) - 0.5f) < 0.001f && CoXlTestTiltFootShare(3.5f, 15.0f, &top) == 1.0f); /* not 2.0 to 14.5 */
+    CHECK(CoXlTestTiltFootShare(1.9f, 3.6f, &top) > 0.0f && CoXlTestTiltFootShare(1.86f, 3.6f, &top) == 0.0f && fabsf(top - 3.1f) < 0.001f); /* between: 0.6 of the reach to the reach */
+    CHECK(CoXlTestTiltFootShare(1.5f, 2.6f, &top) == 0.0f && fabsf(top - 2.1f) < 0.001f && CoXlTestTiltFootShare(1.6f, 2.6f, &top) > 0.0f); /* never under 1.5 m */
+    FEET(3, 6.0f, 6.0f, 6.0f, 6.0f, 0.5f, 0.5f, 0.5f, 0.5f, 7, 7, 7, 7); /* wholly on a plateau 6 m up */
+    CHECK(CoXlTestTiltFootHigh(3, 15.0f, 1000) == 1.0f && CoXlTestTiltFootHigh(3, 10.0f, 1000) == 1.0f && CoXlTestTiltFootHigh(3, 2.0f, 1000) == 0.0f);
+    FEET(3, 0.9f, 0.9f, 0.9f, 0.9f, 0.5f, 0.5f, 0.5f, 0.5f, 7, 7, 7, 7); /* a short unit wholly on a 0.9 m rock: along the ground */
+    CHECK(CoXlTestTiltFootHigh(3, 2.0f, 1000) == 0.0f);
+
+    g_case = "footing: another entity in the slot starts again";
+    CoXlTestTiltFeetClear();
+    for (uint32_t k = 0; k < 4; k++) CoXlTestTiltFootNoteOf(3, 0x711, 4 + k, 2, 6.0f, o0, 1000);
+    CHECK(CoXlTestTiltFootHigh(3, 4.0f, 1000) == 1.0f && CoXlTestTiltFootOnProp(3, 1000) == 1);
+    CoXlTestTiltFootNoteOf(3, 0x711, 4, 2, 6.0f, o0, 1000); /* the same entity: its other corners stay */
+    CHECK(CoXlTestTiltFootHigh(3, 4.0f, 1000) == 1.0f);
+    CoXlTestTiltFootNoteOf(3, 0x712, 4, 1, 0.0f, o0, 1000); /* another at the same place, on the ground: nothing of the first's */
+    CHECK(CoXlTestTiltFootHigh(3, 4.0f, 1000) == 0.0f && CoXlTestTiltFootOnProp(3, 1000) == 0);
+    CoXlTestTiltFootNoteOf(3, 0x712, 5, 2, 0.3f, o0, 1000);
+    CHECK(CoXlTestTiltFootOnProp(3, 1000) == 1 && CoXlTestTiltFootOnProp(3, 1500) == 1 && CoXlTestTiltFootOnProp(3, 1501) == 0); /* a corner on a prop, while it is fresh */
+    CHECK(CoXlTestTiltFootOnProp(4, 1000) == 0 && CoXlTestTiltFootOnProp(2000, 1000) == 0);
+    CoXlTestTiltFootNoteOf(3, 0x712, 5, 3, 0.0f, o0, 1000); /* that corner over a hole now */
+    CHECK(CoXlTestTiltFootOnProp(3, 1000) == 0);
+    CoXlTestTiltFootNoteOf(3, 0x712, 5, 0, 0.0f, o0, 1000); /* or on a prop with no ground to measure from */
+    CHECK(CoXlTestTiltFootOnProp(3, 1000) == 0);
 
     g_case = "footing by one body: balanced readings only";
     FEET(3, 0.4f, 0.4f, 0.4f, 0.4f, 0.50f, 0.60f, 0.74f, 0.55f, 7, 7, 7, 7); /* 0.24 m apart: lying along it */
@@ -468,6 +520,18 @@ int main(void)
     PropRay(104.0f, -200.0f, 15.25f, 0, 0, -1.0f, rock, rockBody);
     HitAt(104.0f, -200.0f, 14.75f);
     CHECK(fabsf(PropCall(read, 7, 0.5f) - 3.25f) < 0.01f); /* one corner on the rock, one on the ground: 1.4 m on average, the ground's reading */
+    CHECK(CoXlTestLeanProp() == 1); /* the limit is told the unit has a corner on a prop */
+    Entity(7, 0x7A1); Frame(5);
+    CHECK(fabsf(PropCall(read, 7, 0.5f) - (3.25f + (0.5f - 3.25f) * 0.5f)) < 0.01f); /* another entity in the slot, same place: the ground corner is not its own */
+    Frame(6);
+    CHECK(fabsf(PropCall(read, 7, 0.5f) - (3.25f + (0.5f - 3.25f) * 0.5f)) < 0.01f); /* the same entity: its corners add up */
+    Entity(7, 0x7A2); Frame(7);
+    PropRay(104.0f, -201.0f, 12.5f, 0, 0, -1.0f, 0, 0x80300099u); HitAt(104.0f, -201.0f, 12.0f);
+    CHECK(PropCall(read, 7, 0.5f) == 0.5f && CoXlTestLeanProp() == 0); /* a third, on the ground: no prop corner is its own */
+    Frame(8); Ray(2, 104.0f, -200.0f, 15.25f, 0);
+    Entity(7, 0x7A3);
+    CHECK(Call(read, 2, 3, 4.0f) == 4.0f && CoXlTestLeanProp() == 0); /* a miss by a fourth */
+    Entity(7, 0);
     Frame(0); CoXlTestTiltFeetClear();
     PropRay(104.0f, -200.0f, 18.2f, 0, 0, -1.0f, rock, rockBody); /* the roof again, 5.7 m up */
     HitAt(104.0f, -200.0f, 17.7f);
@@ -477,14 +541,14 @@ int main(void)
     CHECK(PropCall(read, 7, 4.0f) == 4.0f);
     Frame(4);
     memcpy(g_rays[1] + 0x30, &(uint32_t){1}, 4);
-    CHECK(fabsf(PropCall(read, 7, 0.5f) - (4.0f + (0.5f - 4.0f) * 0.5994f)) < 0.02f); /* 2.85 m on average: 0.6 of the roof's reading */
+    CHECK(PropCall(read, 7, 0.5f) == 4.0f); /* the roof counts 3.5 m, the hole 0: 1.75 m on average, the hole the ground under it reads */
     PropRay(104.0f, -200.0f, 18.2f, 0.9f, 0, -0.43f, rock, rockBody); /* the same corner on a ray that cannot be read: what it met before no longer counts */
     CHECK(PropCall(read, 7, 0.5f) == 0.5f && CoXlTestTiltFootHigh(7, 4.0f, 1000) == 0.0f);
     Unit(6, 3, 4.0f); Frame(8); CoXlTestTiltFeetClear();
     PropRay(104.0f, -200.0f, 18.2f, 0, 0, -1.0f, rock, rockBody);
     CHECK(PropCall(read, 6, 0.3f) == 0.3f && CoXlTestTiltFootHigh(6, 4.0f, 1000) == 0.0f); /* a bone-ray unit: the game's, nothing noted */
     CoXlTestTiltFooted(&footed, &part); CoXlTestTiltPropCounts(&pg, &pk);
-    CHECK(footed == 1 && part == 2 && pg == 1 && pk == 1);
+    CHECK(footed == 1 && part == 3 && pg == 2 && pk == 1);
     Frame(0); CoXlTestTiltFeetClear();
     PropRay(104.0f, -200.0f, 18.2f, 0, 0, -1.0f, rock, rockBody);
     HitAt(104.0f, -200.0f, 17.7f);
@@ -519,7 +583,7 @@ int main(void)
     g_ray.hits = 1; g_ray.owner = 0x1188B; g_ray.body = 0x801122A3u; g_ray.z = 31.25f;
     CHECK(CoXlTestTiltOnProp((uintptr_t)g_fake.image, (uintptr_t)mgr, at, &hz) == 1 && hz == 31.25f);
     CHECK(g_ray.calls == 1 && g_ray.type == type && g_ray.filter == 0 && g_ray.max == 8 && g_ray.length == 12.0f);
-    CHECK(g_ray.origin[0] == 10.0f && g_ray.origin[1] == -20.0f && g_ray.origin[2] == 34.0f && g_ray.dir[0] == 0 && g_ray.dir[1] == 0 && g_ray.dir[2] == -1.0f);
+    CHECK(g_ray.origin[0] == 10.0f && g_ray.origin[1] == -20.0f && g_ray.origin[2] == 31.0f && g_ray.dir[0] == 0 && g_ray.dir[1] == 0 && g_ray.dir[2] == -1.0f);
     g_ray.owner = 0; g_ray.body = terrain;
     CHECK(CoXlTestTiltOnProp((uintptr_t)g_fake.image, (uintptr_t)mgr, at, &hz) == 0);
     g_ray.hits = 0;
@@ -529,6 +593,7 @@ int main(void)
     static uint8_t R[0x298], R2[0x298]; const float q0[4] = {0, 0, 0, 1}, corners[4][2] = {{0.5f, 0.7f}, {0.5f, -0.7f}, {-0.5f, -0.7f}, {-0.5f, 0.7f}};
     const uintptr_t Rp = (uintptr_t)R, mp = (uintptr_t)mgr;
     for (int k = 0; k < 4; k++) { memcpy(R + 0x58 + 0x18 * k + 8, corners[k], 8); memcpy(R2 + 0x58 + 0x18 * k + 8, corners[0], 8); }
+    const float len4 = 4.0f; memcpy(R + 0x48, &len4, 4); memcpy(R2 + 0x48, &len4, 4); /* the band: 2.0 to 3.5 m */
     CoXlTestLeanTile(10.0f, -20.0f, 28.0f, 0.0f, 0.0f); /* the drawn ground under the unit: level at 27.99, the nearest height a tile holds */
     CoXlTestTiltPropNote();
     CHECK(!fake_host_logged("tilt props (30 s)")); /* no sample: no line */
@@ -552,8 +617,11 @@ int main(void)
     CoXlTestTiltPropNote();
     CHECK(fake_host_logged("tilt props (30 s): 8 four-corner samples with a hit under them, 3 on a prop (37.50 %); 30 deg or more from upright: 2 of those on a prop, 1 of the others; "
         "on a prop two scans running 0: up turned 0.0 deg on average, 0.0 at most, 0 over 10 deg; 0 with corners that span no plane"));
-    CHECK(fake_host_logged("tilt footing (30 s): footing 1 to 2.5 m over the drawn ground: 3 samples, 2 of them 30 deg or more from upright; off their footing 0.0 deg on average, 0 20 deg or more; "
-        "the deepest corner 0.00 m under the surface on average, 0 over 0.5 m, 0 over 1.0 m; the highest corner 0.00 m over it on average, 0 over 0.5 m"));
+    CHECK(fake_host_logged("tilt footing (30 s): footing with part of the game's reading, footed: 2 samples, 1 of them 30 deg or more from upright; off their footing 0.0 deg on average, 0 20 deg or more; "
+        "the deepest corner 0.00 m under the surface on average, 0 over 0.5 m; the highest corner 0.00 m over it on average, 0 over 0.5 m"));
+    CHECK(fake_host_logged("tilt footing (30 s): footing with none of the game's reading, not footed: 1 samples, 1 of them 30 deg or more from upright")); /* one corner on the rock: 0.5 m on average, as the rule counts it */
+    CHECK(fake_host_logged("tilt props: tall: unit 00000700 at (10.0, -20.0, 30.00) stands on a prop 2.01 m over the drawn ground, share 0.00 of the game's reading"));
+    CHECK(!fake_host_logged("tall: unit 00000702") && CoXlTestTiltTallLines() == 2);
     CoXlTestTiltPropSample(mp, Rp, 0x704, q0, at, 2.0f);
     CoXlTestTiltPropNote();
     CHECK(fake_host_logged("tilt props (30 s): 1 four-corner samples with a hit under them, 0 on a prop")); /* the counts start again */
@@ -564,7 +632,7 @@ int main(void)
     g_ray.seq = 0; g_ray.owner = 0; g_ray.body = terrain;
     CoXlTestTiltPropNote();
     CHECK(fake_host_logged("tilt props (30 s): 1 four-corner samples with a hit under them, 1 on a prop (100.00 %)"));
-    CHECK(fake_host_logged("tilt footing (30 s): footing 2.5 to 3.5 m over the drawn ground: 1 samples, 0 of them")); /* by the centre's height when no corner is on it */
+    CHECK(fake_host_logged("tilt footing (30 s): footing with none of the game's reading, not footed: 1 samples, 0 of them")); /* a unit beside a tall rock does not stand on it */
     CHECK(!fake_host_logged(": 0 samples, 0 of them")); /* a height with no sample has no line */
 
     g_case = "research: a unit against its footing";
@@ -574,24 +642,45 @@ int main(void)
     CHECK(g_ray.calls == 5 && fabsf(g_ray.at[1][0] - 10.5f) < 0.001f && fabsf(g_ray.at[1][1] + 19.3f) < 0.001f && fabsf(g_ray.at[3][0] - 9.5f) < 0.001f && fabsf(g_ray.at[3][1] + 20.7f) < 0.001f); /* at the corner offsets */
     memcpy(g_ray.zs, (float[5]){31.0f, 31.0f, 31.0f, 31.0f, 31.0f}, sizeof g_ray.zs); /* 3 m up, the unit 1 m in it */
     CoXlTestTiltPropSample(mp, Rp, 0x711, q0, at, 5.0f);
-    CHECK(!fake_host_logged("sunk: unit")); /* 26.6 deg off, 1.0 m under: neither makes a line */
+    CHECK(!fake_host_logged("sunk: unit")); /* the lines are used up */
+    CHECK(!fake_host_logged("tall: unit 00000711")); /* 1 m in a rock is not standing on it */
     CoXlTestTiltSunkLines(15);
     memcpy(g_ray.zs, (float[5]){32.0f, 32.2f, 32.2f, 32.2f, 32.2f}, sizeof g_ray.zs); /* 4.2 m up, 2.2 m in it */
     CoXlTestTiltPropSample(mp, Rp, 0x712, q0, at, 5.0f);
-    CHECK(fake_host_logged("tilt props: sunk: unit 00000712 (resource 0000000000000000) at (10.0, -20.0, 30.00): 5.0 deg from upright, 0.0 deg off its footing, footing 4.21 m over the drawn ground; "
+    CHECK(fake_host_logged("tilt props: sunk: unit 00000712 (resource 0000000000000000) at (10.0, -20.0, 30.00): 5.0 deg from upright, 0.0 deg off its footing, footing 3.50 m over the drawn ground (share 1.00, not footed); "
         "corners under the surface over them (m, nan: none): +2.20 +2.20 +2.20 +2.20; the deepest under owner 0001188B (resource AB0000000001188B), body 801122A3"));
     memcpy(g_ray.zs, (float[5]){28.5f, 28.4f, 28.4f, 28.4f, 28.4f}, sizeof g_ray.zs); /* 0.4 m up, the unit 1.6 m over it */
     CoXlTestTiltPropSample(mp, Rp, 0x713, q0, at, 5.0f);
     CHECK(!fake_host_logged("sunk: unit 00000713")); /* the lines are used up */
     CoXlTestTiltPropNote();
-    CHECK(fake_host_logged("footing under 1 m over the drawn ground: 1 samples, 0 of them 30 deg or more from upright; off their footing 0.0 deg on average, 0 20 deg or more; "
-        "the deepest corner 0.00 m under the surface on average, 0 over 0.5 m, 0 over 1.0 m; the highest corner 1.60 m over it on average, 1 over 0.5 m"));
-    CHECK(fake_host_logged("footing 1 to 2.5 m over the drawn ground: 1 samples, 0 of them 30 deg or more from upright; off their footing 26.6 deg on average, 1 20 deg or more; "
-        "the deepest corner 0.25 m under the surface on average, 0 over 0.5 m, 0 over 1.0 m; the highest corner 0.25 m over it on average, 0 over 0.5 m"));
-    CHECK(fake_host_logged("footing 2.5 to 3.5 m over the drawn ground: 1 samples, 0 of them 30 deg or more from upright; off their footing 0.0 deg on average, 0 20 deg or more; "
-        "the deepest corner 1.00 m under the surface on average, 1 over 0.5 m, 0 over 1.0 m; the highest corner 0.00 m over it on average, 0 over 0.5 m"));
-    CHECK(fake_host_logged("footing over 3.5 m over the drawn ground: 1 samples, 0 of them 30 deg or more from upright; off their footing 0.0 deg on average, 0 20 deg or more; "
-        "the deepest corner 2.20 m under the surface on average, 1 over 0.5 m, 1 over 1.0 m; the highest corner 0.00 m over it on average, 0 over 0.5 m"));
+    CHECK(fake_host_logged("footing with none of the game's reading, not footed: 1 samples, 0 of them 30 deg or more from upright; off their footing 0.0 deg on average, 0 20 deg or more; "
+        "the deepest corner 0.00 m under the surface on average, 0 over 0.5 m; the highest corner 1.60 m over it on average, 1 over 0.5 m"));
+    CHECK(fake_host_logged("footing with part of the game's reading, footed: 1 samples, 0 of them 30 deg or more from upright; off their footing 26.6 deg on average, 1 20 deg or more; "
+        "the deepest corner 0.25 m under the surface on average, 0 over 0.5 m; the highest corner 0.25 m over it on average, 0 over 0.5 m"));
+    CHECK(fake_host_logged("footing with part of the game's reading, not footed: 1 samples, 0 of them 30 deg or more from upright; off their footing 0.0 deg on average, 0 20 deg or more; "
+        "the deepest corner 1.00 m under the surface on average, 1 over 0.5 m; the highest corner 0.00 m over it on average, 0 over 0.5 m"));
+    CHECK(fake_host_logged("footing with all of the game's reading, not footed: 1 samples, 0 of them 30 deg or more from upright; off their footing 0.0 deg on average, 0 20 deg or more; "
+        "the deepest corner 2.20 m under the surface on average, 1 over 0.5 m; the highest corner 0.00 m over it on average, 0 over 0.5 m"));
+    CoXlTestTiltSunkLines(16);
+    memcpy(g_ray.zs, (float[5]){30.75f, 30.75f, 30.75f, 30.75f, 30.75f}, sizeof g_ray.zs); /* 0.75 m in a rock 2.76 m up: still its footing */
+    CoXlTestTiltPropSample(mp, Rp, 0x718, q0, at, 5.0f);
+    memcpy(g_ray.zs, (float[5]){30.75f, 30.75f, 30.75f, 30.75f, 30.80f}, sizeof g_ray.zs); /* one corner deeper: three are enough */
+    CoXlTestTiltPropSample(mp, Rp, 0x719, q0, at, 5.0f);
+    memcpy(g_ray.zs, (float[5]){30.75f, 30.75f, 30.75f, 30.80f, 30.80f}, sizeof g_ray.zs); /* two: not footed */
+    CoXlTestTiltPropSample(mp, Rp, 0x71A, q0, at, 5.0f);
+    g_ray.seq = 2; g_ray.calls = 0; /* three corners on the rock, one on the ground beside it: footed, 2.07 m on average */
+    memcpy(g_ray.zs, (float[5]){30.75f, 30.75f, 30.75f, 30.75f, 28.0f}, sizeof g_ray.zs);
+    for (int k = 0; k < 5; k++) g_ray.owners[k] = k == 4 ? 0 : 0x1188B;
+    CoXlTestTiltPropSample(mp, Rp, 0x71B, q0, at, 5.0f);
+    g_ray.owners[4] = 0xFFFFFFFFu; g_ray.calls = 0; /* that corner over a hole: the same, a hole counts 0 */
+    CoXlTestTiltPropSample(mp, Rp, 0x71C, q0, at, 5.0f);
+    g_ray.seq = 1; g_ray.owner = 0x1188B; g_ray.calls = 0;
+    CoXlTestTiltPropNote();
+    CHECK(fake_host_logged("footing with part of the game's reading, footed: 4 samples") && fake_host_logged("footing with part of the game's reading, not footed: 1 samples"));
+    CHECK(fake_host_logged("tall: unit 00000718") && fake_host_logged("tall: unit 00000719") && !fake_host_logged("tall: unit 0000071A"));
+    CHECK(fake_host_logged("tall: unit 0000071B at (10.0, -20.0, 30.00) stands on a prop 2.07 m over the drawn ground") && fake_host_logged("tall: unit 0000071C at (10.0, -20.0, 30.00) stands on a prop 2.07 m"));
+    CoXlTestTiltSunkLines(15);
+    memcpy(g_ray.zs, (float[5]){28.5f, 28.4f, 28.4f, 28.4f, 28.4f}, sizeof g_ray.zs);
     const float qz[4] = {0, 0, 0.70710678f, 0.70710678f}; /* a quarter turn about up: forward is north */
     g_ray.calls = 0;
     CoXlTestTiltPropSample(mp, Rp, 0x714, qz, at, 5.0f);
@@ -602,14 +691,25 @@ int main(void)
     CHECK(fake_host_logged("sunk: unit 00000715 (resource 0000000000000000) at (10.0, -20.0, 30.00): 5.0 deg from upright, 38.7 deg off its footing, footing 2.01 m over the drawn ground")); /* 30 deg off its footing makes a line too */
     memcpy(g_ray.zs, (float[5]){28.5f, 28.4f, 28.4f, 28.4f, 28.4f}, sizeof g_ray.zs);
     CoXlTestTiltPropSample(mp, Rp, 0x716, q0, at, 5.0f);
-    CHECK(fake_host_logged("sunk: unit 00000716 (resource 0000000000000000) at (10.0, -20.0, 30.00): 5.0 deg from upright, 0.0 deg off its footing, footing 0.41 m over the drawn ground; "
+    CHECK(fake_host_logged("sunk: unit 00000716 (resource 0000000000000000) at (10.0, -20.0, 30.00): 5.0 deg from upright, 0.0 deg off its footing, footing 0.41 m over the drawn ground (share 0.00, not footed); "
         "corners under the surface over them (m, nan: none): -1.60 -1.60 -1.60 -1.60")); /* and so does a corner over 1 m in the air */
+    CoXlTestTiltSunkLines(15);
+    memcpy(g_ray.zs, (float[5]){30.6f, 30.6f, 30.6f, 30.6f, 30.6f}, sizeof g_ray.zs);
+    CoXlTestTiltPropSample(mp, Rp, 0x71D, q0, at, 5.0f);
+    CHECK(fake_host_logged("sunk: unit 0000071D") && fake_host_logged("(share 0.36, footed); corners under the surface over them (m, nan: none): +0.60")); /* and a corner over 0.5 m under the surface */
+    CoXlTestTiltSunkLines(15);
+    memcpy(g_ray.zs, (float[5]){30.5f, 30.5f, 30.5f, 30.5f, 30.5f}, sizeof g_ray.zs);
+    CoXlTestTiltPropSample(mp, Rp, 0x71E, q0, at, 5.0f);
+    CHECK(!fake_host_logged("sunk: unit 0000071E")); /* 0.5 m is not over it */
+    for (int k = 0; k < 20; k++) CoXlTestTiltPropSample(mp, Rp, 0x730 + (uint32_t)k, q0, at, 5.0f);
+    CHECK(CoXlTestTiltTallLines() == 16 && fake_host_logged("tall: unit 0000073E") && !fake_host_logged("tall: unit 0000073F")); /* 16 places a level are enough */
+    memcpy(g_ray.zs, (float[5]){28.5f, 28.4f, 28.4f, 28.4f, 28.4f}, sizeof g_ray.zs);
     CoXlTestTiltPropNote();
     const float qx[4] = {0.17364818f, 0, 0, 0.98480775f}; /* 20 deg about the unit's x: its north side up */
     memcpy(g_ray.zs, (float[5]){30.0f, 30.2394f, 29.7606f, 29.7606f, 30.2394f}, sizeof g_ray.zs); /* a face rising north by the same 20 deg */
     CoXlTestTiltPropSample(mp, Rp, 0x717, qx, at, 20.0f);
     CoXlTestTiltPropNote();
-    CHECK(fake_host_logged("footing 1 to 2.5 m over the drawn ground: 1 samples, 0 of them 30 deg or more from upright; off their footing 0.0 deg on average, 0 20 deg or more")); /* it lies along its footing */
+    CHECK(fake_host_logged("footing with part of the game's reading, footed: 1 samples, 0 of them 30 deg or more from upright; off their footing 0.0 deg on average, 0 20 deg or more")); /* it lies along its footing */
     g_ray.seq = 0;
 
     g_case = "research: the turn of units on a prop";
@@ -643,6 +743,16 @@ int main(void)
     CoXlTestTiltCost(50);
     CoXlTestTiltCostNote(1000000, 4);
     CHECK(fake_host_logged("took 0.050 ms in 1 calls over 4 frames (0.0125 ms a frame), 50.0 us at worst")); /* the worst starts again */
+
+    g_case = "research: what a scan costs";
+    CoXlTestTiltScanCostNote(1000000);
+    CHECK(!fake_host_logged("tilt scan (30 s)")); /* no scan: no line */
+    CoXlTestTiltScanCost(1500); CoXlTestTiltScanCost(4500); CoXlTestTiltScanCost(3000);
+    CoXlTestTiltScanCostNote(1000000);
+    CHECK(fake_host_logged("tilt scan (30 s): 3 scans took 9.00 ms, 3.000 ms a scan on average, 4.500 ms at worst (each in one frame, the research columns in it)"));
+    CoXlTestTiltScanCost(500);
+    CoXlTestTiltScanCostNote(1000000);
+    CHECK(fake_host_logged("tilt scan (30 s): 1 scans took 0.50 ms, 0.500 ms a scan on average, 0.500 ms at worst")); /* the sums start again */
 
     if (g_failed) { printf("%d check(s) failed\n", g_failed); return 1; }
     printf("tilt: all checks passed\n");
