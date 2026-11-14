@@ -383,6 +383,35 @@ int CoXlTestLwSettle(uint32_t i, uint64_t peer, const float* at, uint64_t now, f
 int CoXlTestLwSightVerdict(const uint8_t* hits, uint32_t n, uint32_t target, const float* eye, const float* tpos, float nearR, float folR, int* at)
 { return LwSightVerdict(hits, n, target, eye, tpos, nearR, folR, at); }
 int CoXlTestLwStaticKind(float z, float drawn, float coarse, int tile) { return LwStaticKind(z, drawn, coarse, tile); }
+int CoXlTestLwSenseRule(uint32_t alert, float body, float reach, uint32_t code, int clear) { return LwSenseRule(alert, body, reach, code, clear); }
+float CoXlTestLwSightMod(float range, uint32_t op, float value) { return LwSightMod(range, op, value); }
+float CoXlTestLwSenseReach(float visibility, float base, uint32_t op, float value) { return LwSenseReach(visibility, base, op, value); }
+float CoXlTestLwBodyDist(float d, float radius) { return LwBodyDist(d, radius); }
+int CoXlTestLwSenseGate(uint8_t entity, uint64_t tags) { return LwSenseGate(entity, tags); }
+int CoXlTestLwPlaceHeld(const float* live, const float* held) { return LwPlaceHeld(live, held); }
+int CoXlTestLwSenseNextPlayer(int last, const uint8_t* ok, int n) { return LwSenseNextPlayer(last, ok, n); }
+/* The unit checked next against `player` among n candidates (checked at, metres, player, taken). */
+int CoXlTestLwSensePick(const uint64_t* checkedAt, const float* d, const uint8_t* player, const uint8_t* taken, int n, int who)
+{
+    LwSenseCand c[16] = {0};
+    for (int i = 0; i < n && i < 16; i++) c[i] = (LwSenseCand){.d = d[i], .checkedAt = checkedAt[i], .player = player[i], .taken = taken[i]};
+    return LwSensePick(c, n < 16 ? n : 16, who);
+}
+/* The notice table of `n` detectors (at most 8), driven by a script: op 'n' notices `det` through `unit` (-1: no slot,
+ * -2: waiting, else its notice count), 's' marks one of its units seen (arg: 1 when it left alert 0), 'c' confirms it. */
+int CoXlTestLwSenseDet(int reset, int n, char op, uint32_t det, int arg, uint64_t now)
+{
+    static LwSenseDet t[8];
+    if (reset) memset(t, 0, sizeof t);
+    LwSenseDet* e = LwSenseDetOf(t, n, det, now, op == 'n');
+    if (!e) return -1;
+    if (op == 'n') { if (e->pending || now < e->waitAt) return -2; LwSenseNoticed(e, (uint32_t)arg, 0, now); return e->tries; }
+    if (op == 's') { e->present = 1; if (arg) e->left = 1; return 0; }
+    return LwSenseConfirm(e, now);
+}
+int CoXlTestLwHostileRule(uint8_t entity, uint8_t on, uint8_t always, int avatar, uint32_t lists, uint32_t faction, uint32_t mask) { return LwHostileRule(entity, on, always, avatar, lists, faction, mask); }
+int CoXlTestLwSenseRoute(float awareness) { return LwSenseRoute(awareness); }
+int CoXlTestLwSenseLost(uint32_t flags, uint32_t state) { return LwSenseLost(flags, state); }
 /* The living world's navmesh pins (all in the exe) written into a fake exe, and a complex level's nav tick with no
  * director: 1 when it got past the pins, -1 when they refused. */
 void CoXlTestLwNavPins(uint8_t* exe)
@@ -631,12 +660,34 @@ void CoXlTestNearCraterMaps(uint64_t source, uint64_t offset, uint64_t scorch)
 }
 void CoXlTestNearCraterMapsEarlier(void) { g_nearCraterMaps.level = g_world.levels - 1; }
 int CoXlTestNearCraterMapsMake(int newLevel) { if (newLevel) g_nearCraterMaps.level = -1; return NearCraterMapsMake(); }
+void CoXlTestNearAtmosMaps(uint64_t color, uint64_t transmittance)
+{
+    g_nearAtmosMaps.tex[0] = color; g_nearAtmosMaps.tex[1] = transmittance; g_nearAtmosMaps.level = g_world.levels;
+}
+int CoXlTestNearAtmosMapsMake(int newLevel)
+{
+    if (newLevel) g_nearAtmosMaps.level = -1;
+    NearAtmosMapsMake();
+    return (g_nearAtmosMaps.tex[0] != 0) + (g_nearAtmosMaps.tex[1] != 0);
+}
+/* The replay's end as NearReplayEnd leaves the bracket's state: its queue forgotten, leaked captures noted. */
+void CoXlTestNearReplayEnd(void) { NearReplayEnd(1); }
+void CoXlTestNearConsumeQueue(uint64_t queue, void* original) { g_nearConsume = (NearConsumeFn)original; NearConsume(queue); }
+uint64_t CoXlTestNearNamesQueue(void) { return g_nearNames.queue; }
+uint32_t CoXlTestNearProbeOutside(void) { return g_probeRun.outside; }
 void CoXlTestNearNamesClose(int opened) { NearNamesClose(opened); }
 uint64_t CoXlTestNearProbe(void* original) { g_nearProbe = (NearProbeFn)original; return NearProbe(1, 2, 3, 4, 5, 6, 7, 8, 9); }
 void CoXlTestNearProbeCounts(uint32_t* replay, uint32_t* tile) { *replay = g_probeRun.replay; *tile = g_probeRun.tile; }
 void CoXlTestNearProbeClear(void) { memset(&g_probeRun, 0, sizeof g_probeRun); }
 LONG CoXlTestNearResetState(void) { return g_nearReset.state; }
-void CoXlTestNearReset(LONG state, int pins) { g_nearReset.state = state; g_nearReset.pins = pins; }
+void CoXlTestNearReset(LONG state, int pins)
+{
+    g_nearReset.state = state; g_nearReset.pins = pins; g_nearReset.level = g_world.levels; g_nearReset.bare = 0;
+}
+void CoXlTestNearResetEarlier(void) { g_nearReset.level = g_world.levels - 1; }
+LONG CoXlTestNearNamesSky(void) { return g_nearNames.sky; }
+void CoXlTestNearResetDone(LONG done) { g_nearReset.done = done; }
+void CoXlTestNearAtmosMapsEarlier(void) { g_nearAtmosMaps.level = g_world.levels - 1; }
 void CoXlTestNearResetTick(void) { NearResetTick(); }
 /* The paths the frees rest on: a dispatcher call's start, the band's stash and take, the pins asked again, the render
  * hook's order and its pins. */

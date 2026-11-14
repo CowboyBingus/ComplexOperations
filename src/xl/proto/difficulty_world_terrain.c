@@ -1508,6 +1508,14 @@ static int TerrainNearCamShift(uint64_t camera, uintptr_t at, const float* v, fl
 static const uint32_t kNearCraterNames[3] = {0xFDF5405Bu, 0x4758A80Au, 0xB1AA630Du}; /* source, offset, scorch */
 static struct { LONG level; uint64_t tex[3]; } g_nearCraterMaps = {.level = -1};
 
+/* The finalize's layers [10] and [11] clear play's sky LUTs (3D, 32 x 32 x 96), which the atmosphere CS renews one face of
+ * six a frame: the sky lost its in-scatter for those frames. The layer executor (exe 0x53E970) binds each layer's targets
+ * by name from the call's map, published names over the config's (0x52C690), and clears them (command 0xE) without a draw,
+ * so a 2D target of the format takes the clear. No terrain generator shader samples these names. */
+static const uint32_t kNearAtmosNames[2] = {0x5E058EEFu, 0xEA1A2316u}; /* atmospheric_scattering_color, _transmittance */
+static struct { LONG level; uint64_t tex[2]; } g_nearAtmosMaps = {.level = -1};
+static int NearAtmosKept(void) { return g_nearAtmosMaps.level == g_world.levels && g_nearAtmosMaps.tex[0] != 0 && g_nearAtmosMaps.tex[1] != 0; }
+
 /* The names a replay publishes, as the replay's jobs need them (tile) or as play has them (level: NearReplayEnd's state). */
 static void NearNamesTile(void)
 {
@@ -1517,6 +1525,8 @@ static void NearNamesTile(void)
     publish(kNearRoadAlias, g_near.tex[0]);
     if (g_nearCraterMaps.level == g_world.levels)
         for (int k = 0; k < 3; k++) if (g_nearCraterMaps.tex[k] != 0) publish(kNearCraterNames[k], g_nearCraterMaps.tex[k]);
+    if (g_nearAtmosMaps.level == g_world.levels)
+        for (int k = 0; k < 2; k++) if (g_nearAtmosMaps.tex[k] != 0) publish(kNearAtmosNames[k], g_nearAtmosMaps.tex[k]);
 }
 
 static void NearNamesLevel(void)
@@ -1526,6 +1536,7 @@ static void NearNamesLevel(void)
     for (int k = 0; k < 2; k++) unpublish(kNearNames[k]);
     unpublish(kNearRoadAlias);
     for (int k = 0; k < 3; k++) if (g_nearCraterMaps.tex[k] != 0) unpublish(kNearCraterNames[k]);
+    for (int k = 0; k < 2; k++) if (g_nearAtmosMaps.tex[k] != 0) unpublish(kNearAtmosNames[k]);
     NearOneMipPublish();
 }
 
@@ -1555,6 +1566,33 @@ static int NearCraterMapsMake(void)
     return 1;
 }
 
+/* The sky LUTs' stand-ins, once a level like the craters'. Without them a tile is still built: the clear costs a few
+ * frames of sky, which the history reset after the finalize repairs. */
+static void NearAtmosMapsMake(void)
+{
+    if (g_nearAtmosMaps.level == g_world.levels) return;
+    NearFindFn find = (NearFindFn)NearApi(0x10, 0x158);
+    NearCreateFn create = (NearCreateFn)NearApi(0x10, 0x170);
+    NearReleaseFn release = (NearReleaseFn)NearApi(0x10, 0x198);
+    for (int k = 0; k < 2; k++) { if (g_nearAtmosMaps.tex[k] != 0 && release != NULL) release(g_nearAtmosMaps.tex[k]); g_nearAtmosMaps.tex[k] = 0; }
+    g_nearAtmosMaps.level = g_world.levels;
+    if (find == NULL || create == NULL) return;
+    for (int k = 0; k < 2; k++)
+    {
+        uint64_t config = find(kNearAtmosNames[k]);
+        uint32_t format = 0, w = 0, h = 0, depth = 0; uint8_t f60 = 0, f63 = 0, f64 = 0;
+        if (config == 0 || SafeRead(config + 0x8, &format, 4) || SafeRead(config + 0x14, &w, 4) || SafeRead(config + 0x18, &h, 4) ||
+            SafeRead(config + 0x1C, &depth, 4) || SafeRead(config + 0x60, &f60, 1) || SafeRead(config + 0x63, &f63, 1) ||
+            SafeRead(config + 0x64, &f64, 1) || w != 32 || h != 32 || depth != 96)
+        { Note("difficulty: near terrain: the sky LUT 0x%08X is not the reviewed one (%u x %u x %u); a tile's finalize clears it", kNearAtmosNames[k], w, h, depth); continue; }
+        uint32_t flags = (f63 == 1 ? 1u : 0u) | (f60 == 1 ? 2u : 0u) | (f60 == 8 ? 4u : 0u) | (f64 == 0x20 ? 8u : 0u);
+        g_nearAtmosMaps.tex[k] = create(w, h, 1, format, 0x48460030u + (uint32_t)k, flags);
+        if (g_nearAtmosMaps.tex[k] == 0) Note("difficulty: near terrain: the sky LUT stand-in %d was not created; a tile's finalize clears the LUT", k);
+        else Note("difficulty: near terrain: sky LUT stand-in %d for 0x%08X: 0x%llX, 32 x 32 of format %u, flags %u (the LUT: %u x %u x %u, bytes "
+            "+0x60 %u, +0x63 %u, +0x64 %u)", k, kNearAtmosNames[k], (unsigned long long)g_nearAtmosMaps.tex[k], format, flags, w, h, depth, f60, f63, f64);
+    }
+}
+
 /* The tile's names are published only around the replay's own work: each step's dispatch (game thread) and the merge's
  * job consumer while it holds the replay's jobs. A publish posts message 0x1F behind the render calls made before it
  * (exe 0x109090), so the light probe (game 0xAB7868 -> exe 0x110C40) and the view, drawn before the consumer in the
@@ -1563,14 +1601,14 @@ static struct
 {
     volatile LONG open;            /* brackets holding the tile's names now */
     uint64_t queue;                /* the replay's job queue ([context+0x50] at NEAR_START) */
-    LONG steps, consumers;         /* brackets this replay */
+    LONG steps, consumers, sky;    /* brackets this replay; those with both sky LUT stand-ins published */
     DWORD stepThread, consumerThread;
 } g_nearNames;
 
 static int NearNamesOpen(void)
 {
     if (!g_nearActive || g_near.tex[0] == 0 || g_near.tex[1] == 0) return 0;
-    if (InterlockedIncrement(&g_nearNames.open) == 1) NearNamesTile();
+    if (InterlockedIncrement(&g_nearNames.open) == 1) { NearNamesTile(); if (NearAtmosKept()) g_nearNames.sky++; }
     return 1;
 }
 
@@ -1579,11 +1617,24 @@ static void NearNamesClose(int opened)
     if (opened && InterlockedDecrement(&g_nearNames.open) == 0) NearNamesLevel();
 }
 
-/* A replayed op 0x64 (terrain_generator_finalize) clears play's global atmosphere LUTs, fog, cloud and TAA histories.
- * The game's reset after its own finalize (0x102F329) follows once its jobs ran: G+0x10C4 frames of
- * frame_history_invalidation (set each frame at 0xAB9369), the camera cut, a six-face light probe capture at weight 1. */
-#define NEAR_RESET_FRAMES 8 /* atmospheric_scattering_calculate (CS f8dae03a) renews one of six faces a frame */
-static struct { volatile LONG state; int pins; LONG done; } g_nearReset; /* state: 1 a 0x64 queued, 2 its jobs ran */
+/* A replayed op 0x64 (terrain_generator_finalize) still clears play's fog, cloud and TAA histories and its clear_buffers
+ * zeroes atmospheric_lookup, a buffer no stand-in can take; the sky LUTs have stand-ins. The game's reset after its own
+ * finalize (0x102F322) follows on the first level update after its jobs ran, all in one tick as the game writes it:
+ *  - G+0x10C4 frames of frame_history_invalidation (set each frame at 0xAB9369) and the camera cut;
+ *  - the probe's weight at 1 and its six-face flag. The probe update (0xACD7A1) runs after the level update (0xAB519E)
+ *    in the frame's update, so this frame's view takes the lookup's surrounding luminance, which bounds the exposure, whole;
+ *  - G+0x79384A2: this frame's render skips its probe capture (0xAB7704) and keeps the flag, so the six faces are
+ *    captured a frame later, after the view refilled the lookup, and no face is lit from the zeroed one. */
+#define NEAR_RESET_FRAMES 3     /* the game's own count after a finalize; its temporal filters are off meanwhile */
+#define NEAR_RESET_FRAMES_LUT 8 /* the LUTs cleared: atmospheric_scattering_calculate (CS f8dae03a) renews one of six faces a frame */
+#define NEAR_RESET_NOTES 256    /* resets logged a session, two a tile build */
+static struct
+{
+    volatile LONG state; /* 1 a 0x64 queued, 2 its jobs ran */
+    int pins;
+    LONG done, level;    /* resets applied; g_world.levels when the 0x64 was queued */
+    int bare;            /* its jobs ran with no bracket open: the real LUTs took the clear */
+} g_nearReset;
 typedef void (*NearConsumeFn)(uint64_t queue);
 static NearConsumeFn g_nearConsume;
 
@@ -1595,22 +1646,34 @@ static void NearConsume(uint64_t queue)
     if (opened) { g_nearNames.consumers++; g_nearNames.consumerThread = GetCurrentThreadId(); }
     g_nearConsume(queue);
     NearNamesClose(opened);
-    if (mine) InterlockedCompareExchange(&g_nearReset.state, 2, 1);
+    if (!mine) return;
+    /* a finalize left queued by a failed replay runs here under the level's names, or never if its level ended */
+    LONG was = g_nearReset.level == g_world.levels ? InterlockedCompareExchange(&g_nearReset.state, 2, 1) : InterlockedCompareExchange(&g_nearReset.state, 0, 1);
+    if (was != 1) return;
+    g_nearReset.bare = !opened;
+    if (!g_nearActive) g_nearNames.queue = 0;
 }
 
 /* On the game thread after the level update's start (MoveLevelUpdate): the reset asked for, applied once. */
 static void NearResetTick(void)
 {
-    if (g_nearReset.state != 2 || g_nearReset.pins <= 0) return;
+    if (g_nearReset.pins <= 0 || g_nearReset.state != 2) return;
     uintptr_t G = 0;
     if (SafeRead(g_world.game + 0x3326340u, &G, 8) || G == 0) return;
     volatile int32_t* frames = (volatile int32_t*)(G + 0x10C4u);
-    if (*frames < NEAR_RESET_FRAMES) *frames = NEAR_RESET_FRAMES;
+    int kept = NearAtmosKept() && !g_nearReset.bare;
+    int want = kept ? NEAR_RESET_FRAMES : NEAR_RESET_FRAMES_LUT;
+    if (*frames < want) *frames = want;
     *(volatile uint8_t*)(G + 0x78AC014u) = 1; /* the camera cut: the view copies it and clears it (0xAB5B04, 0xAB5B21) */
+    *(volatile uint8_t*)(G + 0x79384A2u) = 1;            /* no probe capture in this frame's render */
     *(volatile uint64_t*)(G + 0x7938498u) = 0x3F800000u; /* weight 1.0, and the face counter that picks six faces at 0 */
     *(volatile uint8_t*)(G + 0x7938494u) = 1;
     InterlockedExchange(&g_nearReset.state, 0);
-    g_nearReset.done++;
+    if (++g_nearReset.done > NEAR_RESET_NOTES) return;
+    Note("difficulty: near terrain: history reset %ld after a replayed finalize: %d frames of history invalidation from this frame, camera cut, "
+        "probe capture skipped for one frame, then six faces at weight 1; the sky LUTs were %s%s", (long)g_nearReset.done, (int)*frames,
+        kept ? "kept by their stand-ins" : g_nearReset.bare ? "cleared: its jobs ran outside the replay" : "cleared",
+        g_nearReset.done == NEAR_RESET_NOTES ? "; later resets are not logged" : "");
 }
 
 /* Every light probe capture (exe 0x110C40, called from render interface slot 0x268): runs made while the tile's names
@@ -1618,7 +1681,7 @@ static void NearResetTick(void)
 #define NEAR_PROBE_NOTES 4
 typedef uint64_t (*NearProbeFn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 static NearProbeFn g_nearProbe;
-static struct { LONG mask; uint32_t n; LARGE_INTEGER first; DWORD thread; uint32_t replay, tile, notes; } g_probeRun;
+static struct { LONG mask; uint32_t n; LARGE_INTEGER first; DWORD thread; uint32_t replay, tile, notes, outside; } g_probeRun;
 
 static void NearProbeRunEnd(void)
 {
@@ -1634,6 +1697,7 @@ static void NearProbeSeen(void)
 {
     LONG mask = g_nearNames.open > 0 ? 1 : 0;
     if (g_nearActive) { g_probeRun.replay++; g_probeRun.tile += (uint32_t)mask; }
+    else if (mask) g_probeRun.outside++; /* the tile's names out with no replay: a leak, counted so it shows */
     if (mask == g_probeRun.mask) { if (mask) g_probeRun.n++; return; }
     NearProbeRunEnd();
     g_probeRun.mask = mask; g_probeRun.n = mask ? 1 : 0; g_probeRun.thread = GetCurrentThreadId();
@@ -1648,7 +1712,7 @@ static uint64_t NearProbe(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64
 
 static const char kNearConsumePin[] = "4C 8B DC 55 53 49 8D AB B8 FE FF FF 48 81 EC 38 02 00 00";
 static const char kNearProbePin[] = "48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 4C 89 64 24 20 55 41 56 41 57 48 8D AC 24 40 FF FF FF 48 81 EC C0 01 00 00";
-static const char kNearResetPin[] = "C7 83 C4 10 00 00 03 00 00 00 C6 83 14 C0 8A 07 01 48 C7 83 98 84 93 07 00 00 80 3F C6 83 94 84 93 07 01";
+static const char kNearResetPin[] = "C6 83 A2 84 93 07 01 C7 83 C4 10 00 00 03 00 00 00 C6 83 14 C0 8A 07 01 48 C7 83 98 84 93 07 00 00 80 3F C6 83 94 84 93 07 01";
 
 /* At install: without the consumer's bracket a replay cannot run (NEAR_START checks g_nearConsume). */
 static void NearNamesInstall(uintptr_t game)
@@ -1661,8 +1725,9 @@ static void NearNamesInstall(uintptr_t game)
         LoaderHook("extra large maps' light probe watch", exe + 0x110C40u, (void*)NearProbe, (void**)&g_nearProbe)))
     { g_nearProbe = NULL; Note("difficulty: near terrain: the light probe capture is not the reviewed code; its captures are not counted"); }
     if (g_nearReset.pins == 0)
-        g_nearReset.pins = ApiCodeMatches(game + 0x102F329u, kNearResetPin) == 1 && ApiCodeMatches(game + 0xAB9369u, "83 BF C4 10 00 00 00 0F 8E") == 1 &&
+        g_nearReset.pins = ApiCodeMatches(game + 0x102F322u, kNearResetPin) == 1 && ApiCodeMatches(game + 0xAB9369u, "83 BF C4 10 00 00 00 0F 8E") == 1 &&
             ApiCodeMatches(game + 0xAB5B1Au, "0F 10 8A 08 C0 8A 07 44 88 BA 14 C0 8A 07") == 1 &&
+            ApiCodeMatches(game + 0xAB7704u, "40 38 B3 A2 84 93 07 74 0C 40 88 B3 A2 84 93 07 E9 70 01 00 00") == 1 &&
             ApiCodeMatches(game + 0xAB771Eu, "40 38 B3 94 84 93 07 74 0E 39 B3 9C 84 93 07 B8 06 00 00 00 0F 44 E8") == 1 ? 1 : -1;
     if (g_nearReset.pins < 0) Note("difficulty: near terrain: the game's history reset is not the reviewed code; a tile's finalize leaves the ambient to refill");
 }
@@ -1949,9 +2014,13 @@ static void NearCameras(float half0, float half1, float cx, float cy)
 static void NearReplayEnd(int ok)
 {
     InterlockedExchange(&g_nearActive, 0);
+    /* the level's queue is drained every frame: no later drain is the replay's, but for a finalize still queued */
+    if (g_nearReset.state != 1) g_nearNames.queue = 0;
     Note("difficulty: near terrain: the light probe captured %u times while the tile replayed, %u with the tile's maps published (consumer brackets "
-        "%ld on thread %lu, step brackets %ld on thread %lu)", g_probeRun.replay, g_probeRun.tile, (long)g_nearNames.consumers,
-        (unsigned long)g_nearNames.consumerThread, (long)g_nearNames.steps, (unsigned long)g_nearNames.stepThread);
+        "%ld on thread %lu, step brackets %ld on thread %lu); %u captures saw them with no replay running since the last replay; %ld "
+        "brackets had both sky LUT stand-ins published", g_probeRun.replay, g_probeRun.tile, (long)g_nearNames.consumers,
+        (unsigned long)g_nearNames.consumerThread, (long)g_nearNames.steps, (unsigned long)g_nearNames.stepThread, g_probeRun.outside, (long)g_nearNames.sky);
+    g_probeRun.outside = 0;
     if (g_mat.on && g_mat.owner == MAT_TILE) InterlockedExchange(&g_mat.on, 0); /* the cameras go back below */
     g_near.matLeave = 0;
     if (g_near.R != 0)
@@ -2192,7 +2261,8 @@ static int NearRunStep(uint64_t records, uint32_t end, uint64_t context, uint64_
     if (opened) { g_nearNames.steps++; g_nearNames.stepThread = GetCurrentThreadId(); }
     int r = NearRunStepIn(records, end, context, g, h);
     NearNamesClose(opened);
-    if (r > 0 && g_near.stepKind[s] == NEAR_RECORD && g_near.stepOp[s] == 0x64) InterlockedCompareExchange(&g_nearReset.state, 1, 0);
+    if (r > 0 && g_near.stepKind[s] == NEAR_RECORD && g_near.stepOp[s] == 0x64 && InterlockedCompareExchange(&g_nearReset.state, 1, 0) == 0)
+        g_nearReset.level = g_world.levels;
     return r;
 }
 
@@ -5824,6 +5894,7 @@ static int TerrainNearReplay(uint64_t records, uint32_t end, uint32_t at, uint64
         NearPublishFn publish = (NearPublishFn)NearApi(0x10, 0x210);
         if (find == NULL || create == NULL || publish == NULL) { g_near.state = NEAR_FAILED; return 0; }
         if (!NearCraterMapsMake()) { NearReplayEnd(0); return 0; }
+        NearAtmosMapsMake();
         for (int k = 0; k < 2; k++)
         {
             uint64_t config = find(kNearNames[k]);
@@ -5844,7 +5915,7 @@ static int TerrainNearReplay(uint64_t records, uint32_t end, uint32_t at, uint64
         }
         /* published around each step and consumer run (NearNamesOpen), the alias too: 0x40 must not write the level's map */
         if (SafeRead(context + 0x50, &g_nearNames.queue, 8) || g_nearNames.queue == 0) { Note("difficulty: near terrain: no job queue; no tile"); NearReplayEnd(0); return 0; }
-        g_nearNames.steps = g_nearNames.consumers = 0; g_probeRun.replay = g_probeRun.tile = g_probeRun.notes = 0;
+        g_nearNames.steps = g_nearNames.consumers = g_nearNames.sky = 0; g_probeRun.replay = g_probeRun.tile = g_probeRun.notes = 0;
         NearCameras(NEAR_SIDE / 2, NEAR_SIDE / 2, g_near.centre[0], g_near.centre[1]);
         MemoryBarrier();
         InterlockedExchange(&g_nearActive, 1);

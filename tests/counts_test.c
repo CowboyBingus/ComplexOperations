@@ -166,6 +166,8 @@ int co_counts_test_host_scores(const void* arguments);
 #define CLAN_ROW_AGAIN 0xFEC3E8u
 #define SUMMARY_SIZE 0x14989FBu     /* mov edx,size: the mission summary screen's allocation */
 #define SUMMARY_ROWS 0x1498A3Bu     /* mov ebp,4: the rows of both row blocks */
+#define SUMMARY_LINK 0x199443Au     /* add rsi,0x938: the row block's tail, where the link text goes */
+#define SUMMARY_FLAG 0x1993DD8u     /* cmp byte [rax+0x1139],0: the flag behind the text, by a block pointer */
 #define SUMMARY_GUARD 0x199422Cu    /* imul rdx,rax,0x24C: the own row by player index */
 #define SUMMARY_CARDS 0x1993578u    /* cmp [rsi+card 0 + 0x12538],1: four card stores written out */    /* mov eax,r8d; lea r9,[rax+rax*4]: the same row, inside the function */
 
@@ -716,10 +718,16 @@ int main(void)
         static char line[96];
         uint32_t value;
         snprintf(line, sizeof line, "players: the mission summary has eight rows and cards (%u code sites changed)", co_counts_test_summary());
-        CHECK(co_counts_test_summary() == 63u && fake_host_logged(line) == (players == 8));
+        CHECK(co_counts_test_summary() == 66u && fake_host_logged(line) == (players == 8));
         memcpy(&value, image + SUMMARY_SIZE + 1, 4);
         CHECK(image[SUMMARY_SIZE] == 0xBA && value == (players == 8 ? 0x120C70u : 0x8A540u));
         CHECK(image[SUMMARY_ROWS] == 0xBD && image[SUMMARY_ROWS + 1] == players);
+        /* The link text and the flag behind it follow the tail: eight rows end where four rows' tail began, so the
+         * text at its old place would be row 4's count and that card's list would run past its widgets. */
+        memcpy(&value, image + SUMMARY_LINK + 3, 4);
+        CHECK(image[SUMMARY_LINK + 1] == 0x81 && value == (players == 8 ? 0x8u + 8u * 0x24Cu : 0x8u + 4u * 0x24Cu));
+        memcpy(&value, image + SUMMARY_FLAG + 2, 4);
+        CHECK(image[SUMMARY_FLAG] == 0x80 && value == (players == 8 ? 0x8u + 8u * 0x24Cu + 0x801u : 0x1139u));
         /* cmp eax,4 or 8; jae the row's skip; the replaced imul rdx,rax,0x24C; jmp back */
         static const uint8_t kImul[] = {0x48, 0x69, 0xD0, 0x4C, 0x02, 0x00, 0x00, 0xE9};
         const uint8_t* cave = Cave(SUMMARY_GUARD, 7);
