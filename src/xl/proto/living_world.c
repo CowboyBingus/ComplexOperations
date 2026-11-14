@@ -516,6 +516,7 @@ static void LwBpCmd(int on); static void LwBpFrame(void); static void LwPcFrame(
 static void LwBbFrame(void); /* living_world_bpbuild.c, test instrument */
 static void LwInstallNavTime(void); /* living_world_navtime.c, test instrument */
 static void LwInstallNavJob(void); static void LwNavJobCmd(int mode); static void LwNjFrame(void); /* living_world_navjob.c */
+static void LwInstallNavHeight(void); static void LwNhNote(void); /* living_world_navheight.c */
 static void LwAibFrame(void); static void LwAibInit(void); static void LwAibCmd(int us, int raiseMs); /* living_world_aibudget.c */
 static void LwSemFrame(void); static void LwInstallSemCap(void); static void LwSemCapCmd(int on); /* living_world_semcap.c */
 static void LwRhFrame(void); static void LwInstallRenderHelp(void); static void LwRenderHelpCmd(int on); /* living_world_renderhelp.c */
@@ -2567,7 +2568,8 @@ static void LwTestCommands(void)
 
 /* With the 30 s notes: the obstacle smashes spared, and where the members stood against the drawn ground; the
  * counts start again. */
-static void LwTiltScan(void); static void LwTiltNote(void); /* living_world_tilt.c */
+static void LwTiltScan(void); static void LwTiltNote(void); static void LwTiltBaseline(void); /* living_world_tilt.c */
+static void LwTnCellStart(uintptr_t grid, uint32_t cellId); /* living_world_tiltnav.c */
 static void LwGroundNote(void)
 {
     { LONG spared = InterlockedExchange(&g_lwSpared, 0); if (spared) Note("living world: obstacle smashes (30 s): squad mates kept out of the zones %ld times (a mate is tested again every frame of a zone)", (long)spared); }
@@ -2770,7 +2772,7 @@ static void LwSquadsTick(void)
         g_lwWorld.goals = g_lwWorld.goalNoFace = g_lwWorld.goalReplans = g_lwWorld.goalStuck = 0;
         LwNavTypeDump(); /* test (HELLFORGE_LW_TEST_NAV=1): agent types and obstacle areas, twice a level */
         LwHearNote(); LwRushNote();
-        LwGroundNote(); LwTiltNote();
+        LwGroundNote(); LwNhNote(); LwTiltNote();
         Note("living world: %d squads, %d online (%d units of %d), %u spawned, %u taken offline, %u destroyed, %u request frames refused; job-1 units %u, AI %u; "
             "player 1 at (%.0f, %.0f); by sightline: %u spawned (%u in sight, off the host's screen), %d units now", g_lwWorld.count, online, g_lwWorld.onlineUnits, g_lwWorld.eff, g_lwWorld.spawned, g_lwWorld.offlined, g_lwWorld.died,
             g_lwWorld.refused, EvpU32(dir + 0x614, 0), LwAiCount(), (double)(g_lwWorld.playersAt ? g_lwWorld.players[0][0] : 0),
@@ -3858,6 +3860,7 @@ static void LwInstallWallReach(uintptr_t game)
     LwInstallNavSwapSync();
     LwInstallNavTime(); /* test instrument; after the swap sync, whose pins read 0xBB19B0 */
     LwInstallNavJob(); /* after the nav time instrument, which it refuses to share 0x7B8A10 and 0x7B7590 with */
+    LwInstallNavHeight();
     if (g_lwWallReach != NULL) return;
     if (!ApiCodeMatches(game + LW_WALL_SITE, "F3 0F 58 C8 0F 28 C5 F3 0F 59 CE 0F 28 F2") ||
         !ApiCodeMatches(game + 0x59CCFEu, "C7 44 24 78 00 00 80 40"))
@@ -4253,7 +4256,8 @@ static void LwSlowTickNote(double ms, uint64_t tsc, const uint64_t* sect0, ULONG
 static void LivingTickBody(void);
 static void LivingTick(void)
 {
-    if (!LwEnabled() || !LwLive()) return;
+    if (!LwEnabled()) return;
+    if (!LwLive()) { LwTiltBaseline(); return; }
     LARGE_INTEGER a, b, f;
     uint64_t sect0[LW_S_COUNT], tsc0 = __builtin_ia32_rdtsc();
     memcpy(sect0, g_lwSect.ticks, sizeof sect0); memset(g_lwJobTicks, 0, sizeof g_lwJobTicks);
@@ -4342,6 +4346,7 @@ static void LwLiveSet(int complex)
 #include "living_world_bpbuild.c" /* test instrument: whole-layer builds of the broad phase and what marked them */
 #include "living_world_navtime.c" /* test instrument: the parts of the main thread's nav cell tick */
 #include "living_world_navjob.c" /* the nav job start's arrays reserved once, huge blocks kept (KB lever-navjob-registry) */
+#include "living_world_navheight.c" /* extra large levels: the navmesh's terrain at a 0.5 m cell height, not 4 m */
 #include "living_world_corpse.c" /* settled ring corpses frozen as in disposal */
 #include "living_world_pairs.c" /* after living_world_corpse.c: dead ragdoll bones keep only ground and trigger pairs */
 #include "living_world_aibudget.c" /* the AI path threads' time a step, raised while requests wait */
@@ -4359,6 +4364,7 @@ static void LwRmCmd(const char* a) { (void)a; } /* the render phase timer and th
 #include "living_world_tasks.c" /* test instrument: the physics task queue's timeline (KB physics-step-task-graph) */
 #include "living_world_records.c" /* test fix: the destruction records' room and hash (KB xl-destruction-record-map-full) */
 #include "living_world_mover.c" /* the 256 navmesh boundary requests a frame (KB living-world-mover-query-overflow) */
+#include "living_world_tiltnav.c" /* diagnostic: the nav objects, faces and cell builds at a prop a tilted unit stands on */
 #include "living_world_tilt.c" /* diagnostic: units tilted past the ground under them, and what their rays meet */
 #include "living_world_defer.c" /* mission locations' loose entities spawned near the players (KB living-world-density) */
 #include "living_world_skin.c" /* the skin palette levers' instrument: render worlds, frames, palette-job waits */
