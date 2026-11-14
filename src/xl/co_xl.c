@@ -376,7 +376,9 @@ int CoXlTestLwSightVerdict(const uint8_t* hits, uint32_t n, uint32_t target, con
 { return LwSightVerdict(hits, n, target, eye, tpos, nearR, folR, at); }
 int CoXlTestLwStaticKind(float z, float drawn, float coarse, int tile) { return LwStaticKind(z, drawn, coarse, tile); }
 int CoXlTestLwSenseRule(uint32_t alert, float d, float visibility, uint32_t code, int clear) { return LwSenseRule(alert, d, visibility, code, clear); }
-int CoXlTestLwHostileRule(uint8_t always, int avatar, uint32_t lists, uint32_t faction, uint32_t mask) { return LwHostileRule(always, avatar, lists, faction, mask); }
+int CoXlTestLwHostileRule(uint8_t entity, uint8_t on, uint8_t always, int avatar, uint32_t lists, uint32_t faction, uint32_t mask) { return LwHostileRule(entity, on, always, avatar, lists, faction, mask); }
+int CoXlTestLwSenseRoute(float awareness) { return LwSenseRoute(awareness); }
+int CoXlTestLwSenseLost(uint32_t flags, uint32_t state) { return LwSenseLost(flags, state); }
 /* The living world's navmesh pins (all in the exe) written into a fake exe, and a complex level's nav tick with no
  * director: 1 when it got past the pins, -1 when they refused. */
 void CoXlTestLwNavPins(uint8_t* exe)

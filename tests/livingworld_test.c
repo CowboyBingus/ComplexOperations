@@ -15,7 +15,9 @@ int CoXlTestLwSettle(uint32_t i, uint64_t peer, const float* at, uint64_t now, f
 int CoXlTestLwSightVerdict(const uint8_t* hits, uint32_t n, uint32_t target, const float* eye, const float* tpos, float nearR, float folR, int* at);
 int CoXlTestLwStaticKind(float z, float drawn, float coarse, int tile);
 int CoXlTestLwSenseRule(uint32_t alert, float d, float visibility, uint32_t code, int clear);
-int CoXlTestLwHostileRule(uint8_t always, int avatar, uint32_t lists, uint32_t faction, uint32_t mask);
+int CoXlTestLwHostileRule(uint8_t entity, uint8_t on, uint8_t always, int avatar, uint32_t lists, uint32_t faction, uint32_t mask);
+int CoXlTestLwSenseRoute(float awareness);
+int CoXlTestLwSenseLost(uint32_t flags, uint32_t state);
 
 static int g_failed;
 static const char* g_case;
@@ -100,13 +102,32 @@ static void SightVerdict(void)
     CHECK(CoXlTestLwSenseRule(0, 7.4f, 0.5f, 0, 1) == 0);   /* a hidden player: half the reach */
     CHECK(CoXlTestLwSenseRule(0, 7.6f, 0.5f, 0, 1) == 3);
     CHECK(CoXlTestLwSenseRule(0, 1.0f, 0.0f, 0, 1) == 3);   /* invisible */
-    g_case = "the game's hostility test";
-    CHECK(CoXlTestLwHostileRule(0, 1, 1, 0x2, 0x4) == 1);   /* no shared faction bit */
-    CHECK(CoXlTestLwHostileRule(0, 1, 1, 0x6, 0x4) == 0);   /* a shared faction bit: an ally */
-    CHECK(CoXlTestLwHostileRule(0, 1, 0, 0x2, 0x4) == 0);   /* the list off */
-    CHECK(CoXlTestLwHostileRule(0, 1, 1, 0x2, 0x0) == 0);   /* no mask */
-    CHECK(CoXlTestLwHostileRule(1, 1, 0, 0x6, 0x4) == 1);   /* every avatar an enemy */
-    CHECK(CoXlTestLwHostileRule(1, 0, 0, 0x6, 0x4) == 0);   /* ... but the target is not an avatar */
+    g_case = "the game's hostility test"; /* entity +0x14, +0x13F0, always, avatar, lists, faction, mask */
+    CHECK(CoXlTestLwHostileRule(0, 1, 0, 1, 1, 0x2, 0x4) == 1);   /* no shared faction bit */
+    CHECK(CoXlTestLwHostileRule(0, 1, 0, 1, 1, 0x6, 0x4) == 0);   /* a shared faction bit: an ally */
+    CHECK(CoXlTestLwHostileRule(0, 1, 0, 1, 0, 0x2, 0x4) == 0);   /* the list off */
+    CHECK(CoXlTestLwHostileRule(0, 1, 0, 1, 1, 0x2, 0x0) == 0);   /* no mask */
+    CHECK(CoXlTestLwHostileRule(0, 1, 1, 1, 0, 0x6, 0x4) == 1);   /* every avatar an enemy */
+    CHECK(CoXlTestLwHostileRule(0, 1, 1, 0, 0, 0x6, 0x4) == 0);   /* ... but the target is not an avatar */
+    CHECK(CoXlTestLwHostileRule(2, 1, 1, 1, 1, 0x2, 0x4) == 0);   /* the detector entity's bit 1: it scans nothing */
+    CHECK(CoXlTestLwHostileRule(1, 1, 0, 1, 1, 0x2, 0x4) == 1);   /* its bit 0 alone */
+    CHECK(CoXlTestLwHostileRule(0, 1, 1, 1, 1, 0x0, 0x4) == 0);   /* faction 0 */
+    CHECK(CoXlTestLwHostileRule(0, 0, 1, 1, 1, 0x2, 0x4) == 0);   /* +0x13F0 off */
+    g_case = "a notice takes the route the game reads"; /* 0 hearing, 1 flag 0x10 */
+    CHECK(CoXlTestLwSenseRoute(0.0f) == 0);
+    CHECK(CoXlTestLwSenseRoute(0.99f) == 0);
+    CHECK(CoXlTestLwSenseRoute(1.0f) == 1);  /* the game's comiss/jb: 1.0 is the eye's case */
+    CHECK(CoXlTestLwSenseRoute(3.0f) == 1);
+    g_case = "a unit the awareness update skips is not noticed"; /* 0 yes, 10 state 16, 11 flags */
+    CHECK(CoXlTestLwSenseLost(0, 0) == 0);
+    CHECK(CoXlTestLwSenseLost(0x1, 3) == 0);   /* bit 0 is not one of them */
+    CHECK(CoXlTestLwSenseLost(0x10, 3) == 0);  /* nor bit 4 */
+    CHECK(CoXlTestLwSenseLost(0x2, 3) == 11);
+    CHECK(CoXlTestLwSenseLost(0x4, 3) == 11);
+    CHECK(CoXlTestLwSenseLost(0x8, 3) == 11);
+    CHECK(CoXlTestLwSenseLost(0x20, 3) == 11);
+    CHECK(CoXlTestLwSenseLost(0, 0x10) == 10);
+    CHECK(CoXlTestLwSenseLost(0x2, 0x10) == 10); /* state 16 is tested first (0x7EB136) */
 }
 
 int main(void)
