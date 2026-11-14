@@ -164,8 +164,11 @@ int co_counts_test_host_scores(const void* arguments);
 #define CLAN_OWN_NAME 0x1291C7Fu    /* cmp ecx,-1; je: the own clan record's second string */
 #define CLAN_ROW 0xB65880u          /* a function: the clan station's row by the player index in edx */
 #define CLAN_ROW_AGAIN 0xFEC3E8u
+#define SUMMARY_LAYOUT 0x1497ABCu   /* lea rcx,[rdi+0x2298] in front of the summary widget's update: the row's layout */
 #define SUMMARY_SIZE 0x14989FBu     /* mov edx,size: the mission summary screen's allocation */
 #define SUMMARY_ROWS 0x1498A3Bu     /* mov ebp,4: the rows of both row blocks */
+#define SUMMARY_LINK 0x199443Au     /* add rsi,0x938: the row block's tail, where the link text goes */
+#define SUMMARY_FLAG 0x1993DD8u     /* cmp byte [rax+0x1139],0: the flag behind the text, by a block pointer */
 #define SUMMARY_GUARD 0x199422Cu    /* imul rdx,rax,0x24C: the own row by player index */
 #define SUMMARY_CARDS 0x1993578u    /* cmp [rsi+card 0 + 0x12538],1: four card stores written out */    /* mov eax,r8d; lea r9,[rax+rax*4]: the same row, inside the function */
 
@@ -716,10 +719,16 @@ int main(void)
         static char line[96];
         uint32_t value;
         snprintf(line, sizeof line, "players: the mission summary has eight rows and cards (%u code sites changed)", co_counts_test_summary());
-        CHECK(co_counts_test_summary() == 63u && fake_host_logged(line) == (players == 8));
+        CHECK(co_counts_test_summary() == 67u && fake_host_logged(line) == (players == 8));
         memcpy(&value, image + SUMMARY_SIZE + 1, 4);
         CHECK(image[SUMMARY_SIZE] == 0xBA && value == (players == 8 ? 0x120C70u : 0x8A540u));
         CHECK(image[SUMMARY_ROWS] == 0xBD && image[SUMMARY_ROWS + 1] == players);
+        /* The link text and the flag behind it follow the tail: eight rows end where four rows' tail began, so the
+         * text at its old place would be row 4's count and that card's list would run past its widgets. */
+        memcpy(&value, image + SUMMARY_LINK + 3, 4);
+        CHECK(image[SUMMARY_LINK + 1] == 0x81 && value == (players == 8 ? 0x8u + 8u * 0x24Cu : 0x8u + 4u * 0x24Cu));
+        memcpy(&value, image + SUMMARY_FLAG + 2, 4);
+        CHECK(image[SUMMARY_FLAG] == 0x80 && value == (players == 8 ? 0x8u + 8u * 0x24Cu + 0x801u : 0x1139u));
         /* cmp eax,4 or 8; jae the row's skip; the replaced imul rdx,rax,0x24C; jmp back */
         static const uint8_t kImul[] = {0x48, 0x69, 0xD0, 0x4C, 0x02, 0x00, 0x00, 0xE9};
         const uint8_t* cave = Cave(SUMMARY_GUARD, 7);
@@ -729,6 +738,75 @@ int main(void)
                   memcmp(cave + 9, kImul, sizeof kImul) == 0 && Leads(cave + 17, 0x1994233u));
         CHECK((Cave(SUMMARY_CARDS, 7) != NULL) == (players == 8));
         if (players != 8) CHECK(image[SUMMARY_CARDS] == 0x83);
+
+        /* Run: the row's layout in front of W's update, as the screen-set update reaches it (rdi = the screen). A stub
+         * loads rdi and calls the site; where the site goes on the test returns rcx. One player, on card 1: a build
+         * for eight takes cards 5 to 8 out of the row and asks for a layout pass; a build for four runs the game's lea
+         * and nothing else. */
+        static const uint8_t kLayoutIn[] = {0x57, 0x48, 0x89, 0xD7, 0x41, 0xFF, 0xD0, 0x5F, 0xC3}; /* push rdi; mov rdi,rdx; call r8; pop rdi; ret */
+        static const uint8_t kLayoutBack[] = {0x48, 0x89, 0xC8, 0xC3};                              /* mov rax,rcx; ret */
+        static const uint8_t kPairAt4[] = {0x48, 0x89, 0x51, 0x04, 0xC3}, kPairAt14[] = {0x48, 0x89, 0x51, 0x14, 0xC3};
+        /* mov eax,[rcx]; and eax,~0x10; test dl,dl; je +3; or eax,0x10; mov [rcx],eax; ret */
+        static const uint8_t kShown[] = {0x8B, 0x01, 0x83, 0xE0, 0xEF, 0x84, 0xD2, 0x74, 0x03, 0x83, 0xC8, 0x10, 0x89, 0x01, 0xC3};
+        static const uint8_t kLea[] = {0x48, 0x8D, 0x8F, 0x98, 0x22, 0x00, 0x00};
+        typedef uint64_t (*LayoutFn)(void*, void*, void*);
+        static uint8_t set[0x300], manager[0x100];
+        static uint32_t pairs[16];
+        uint8_t* screen = VirtualAlloc(NULL, 0x120C70, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        const float one[2] = {1.0f, 1.0f}, canvas = 1920.0f, x = 56.0f;
+        const uint32_t id = 0x21u, none = 0xFFFFFFFEu, unset = 0xFFFFFFFDu, shownBit = 0x10u;
+        cave = Cave(SUMMARY_LAYOUT, 7);
+        CHECK((cave != NULL) == (players == 8) && screen != NULL);
+        if (cave != NULL) CHECK(cave[0] == 0x9C && memcmp(cave + 134, kLea, sizeof kLea) == 0 && cave[141] == 0xE9 && Leads(cave + 142, 0x1497AC3u));
+        else CHECK(memcmp(image + SUMMARY_LAYOUT, kLea, sizeof kLea) == 0);
+        if (screen != NULL)
+        {
+            Landing(0x1497AC3u, kLayoutBack, sizeof kLayoutBack);
+            Landing(0x14476A0u, kPairAt4, sizeof kPairAt4);
+            Landing(0x1447ED0u, kPairAt14, sizeof kPairAt14);
+            Landing(0x14508E0u, kShown, sizeof kShown);
+            Landing(ENTER + 0xF00u, kLayoutIn, sizeof kLayoutIn);
+            DWORD before;
+            CHECK(VirtualProtect(g_fake.image + SUMMARY_LAYOUT, 7, PAGE_EXECUTE_READWRITE, &before));
+            for (uint32_t i = 0; i < 16; i++) pairs[i] = i % 2 ? 0xFFFFFFFFu : 0xFFFFFFFCu;
+            pairs[2 * (id & 7u)] = id;
+            pairs[2 * (id & 7u) + 1] = 0;
+            const uint64_t table = (uint64_t)(uintptr_t)pairs, players8 = 8ull | 0xFFFFFFFCull << 32, where = (uint64_t)(uintptr_t)manager;
+            memcpy(manager + 0xD0, &table, 8);
+            memcpy(manager + 0xD8, &players8, 8);
+            manager[0xE0] = 1;
+            memcpy(g_fake.image + 0x3326468u, &where, 8);
+            memcpy(g_fake.image + 0x3483C20u, &none, 4);
+            memcpy(g_fake.image + 0x348498Cu, &unset, 4);
+            memcpy(set + 0x294, &canvas, 4);
+            const uint64_t root = (uint64_t)(uintptr_t)set;
+            memcpy(g_fake.image + 0x347CE38u, &root, 8);
+            memcpy(screen + 0x23A8 + 0x4, &x, 4);
+            for (uint32_t i = 0; i < 8; i++)
+            {
+                uint8_t* card = screen + 0x8DA28u + i * 0x125C8u;
+                const uint64_t row = (uint64_t)(uintptr_t)(screen + 0x8A548u + 8u + i * 0x24Cu);
+                memcpy(card, &shownBit, 4);
+                memcpy(card + 0x14, one, 8);
+                memcpy(card + 0x12528, &row, 8);
+            }
+            memcpy(screen + 0x8A548u + 8u, &id, 4);
+            co_summary_install((uintptr_t)g_fake.image);
+            co_summary_test_reset();
+            const uint64_t got = ((LayoutFn)(uintptr_t)(g_fake.image + ENTER + 0xF00u))(set, screen, g_fake.image + SUMMARY_LAYOUT);
+            CHECK(got == (uint64_t)(uintptr_t)(screen + 0x2298));
+            for (uint32_t i = 0; i < 8; i++)
+            {
+                uint32_t flags;
+                memcpy(&flags, screen + 0x8DA28u + i * 0x125C8u, 4);
+                CHECK(((flags & 0x10u) != 0) == (players != 8 || i < 4));
+                CHECK(memcmp(screen + 0x8DA28u + i * 0x125C8u + 0x14, one, 8) == 0);
+            }
+            CHECK(screen[0x8A280 + 0x28] == (players == 8) && memcmp(screen + 0x23A8 + 0x4, &x, 4) == 0);
+            CHECK(fake_host_logged("mission summary: no player on cards 5 to 8: the game's four cards") == (players == 8));
+            co_summary_install(0);
+            VirtualFree(screen, 0, MEM_RELEASE);
+        }
     }
     {
         /* The per-peer loadout table. A build for eight leads its pointer and its three registry entries to the mod's

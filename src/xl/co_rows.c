@@ -9,6 +9,7 @@
 const uint8_t kCoRowRadii[8] = {0x0F, 0x11, 0x40, 0x20, 0x40, 0x80, 0xFF, 0x02};     /* movups [rax+0x20], xmm0; cmp dil, 2 */
 const uint8_t kCoRowOutposts[8] = {0x0F, 0x11, 0x40, 0x20, 0x41, 0x80, 0xFF, 0x02};  /* ...; cmp r15b, 2 */
 const uint8_t kCoRowObjectives[6] = {0x0F, 0x11, 0x40, 0x20, 0x33, 0xC0};            /* ...; xor eax, eax */
+const uint8_t kCoRowEmpty[9] = {0x8B, 0xBD, 0xC8, 0x00, 0x00, 0x00, 0x45, 0x33, 0xE4};  /* mov edi, [rbp+0xc8]; xor r12d, r12d */
 
 static const CoDistanceSite kDistance[CO_DISTANCE_SITES] = {
     {0xF417C8u, 5, {0xF3, 0x0F, 0x10, 0x84, 0x8B}},       /* movss xmm0, [rbx+rcx*4+table] */
@@ -23,6 +24,9 @@ static struct
 {
     uintptr_t game;
     uint8_t* code;            /* the stubs' page */
+    volatile LONG* retries;   /* the empty-draw stub's count */
+    LONG noted;
+    int lines;
     volatile uint8_t* honours;
     float* distance;          /* eleven rows of three */
     float stock[3];           /* HellForge's row 11 */
@@ -119,6 +123,47 @@ size_t co_row_objectives_stub(uint8_t* out, uintptr_t code, uintptr_t game, uint
     return sizeof stub;
 }
 
+size_t co_row_empty_stub(uint8_t* out, uintptr_t code, uintptr_t game, uintptr_t retries)
+{
+    static const uint8_t stub[CO_ROW_EMPTY_STUB] = {
+        0x50, 0x51,                                       /*   0 push rax; push rcx */
+        0x48, 0x8B, 0x44, 0x24, 0x70,                     /*   2 mov rax, [rsp+0x70] (the pass: the game's [rsp+0x60]) */
+        0x48, 0x8B, 0x48, 0x18,                           /*   7 mov rcx, [rax+0x18] (the level) */
+        0x81, 0xB9, 0x7C, 0x2D, 0x00, 0x00, 0, 0, 0, 0,   /*  11 cmp dword [rcx+0x2d7c], key (at 17) */
+        0x75, 0x74,                                       /*  21 jne 139 */
+        0x48, 0x8B, 0x40, 0x08,                           /*  23 mov rax, [rax+8] */
+        0x48, 0x8B, 0x80, 0xC0, 0x00, 0x00, 0x00,         /*  27 mov rax, [rax+0xc0] (the map's class weights at +0xF0) */
+        /* the draw's weights already the map's (a first draw with every class in quota, or a draw taken again): dropped */
+        0x48, 0x8B, 0x8D, 0x00, 0x04, 0x00, 0x00,         /*  34 mov rcx, [rbp+0x400] */
+        0x48, 0x3B, 0x88, 0xF0, 0x00, 0x00, 0x00,         /*  41 cmp rcx, [rax+0xf0] */
+        0x75, 0x1E,                                       /*  48 jne 80 */
+        0x48, 0x8B, 0x8D, 0x08, 0x04, 0x00, 0x00,         /*  50 mov rcx, [rbp+0x408] */
+        0x48, 0x3B, 0x88, 0xF8, 0x00, 0x00, 0x00,         /*  57 cmp rcx, [rax+0xf8] */
+        0x75, 0x0E,                                       /*  64 jne 80 */
+        0x8B, 0x8D, 0x10, 0x04, 0x00, 0x00,               /*  66 mov ecx, [rbp+0x410] */
+        0x3B, 0x88, 0x00, 0x01, 0x00, 0x00,               /*  72 cmp ecx, [rax+0x100] */
+        0x74, 0x3B,                                       /*  78 je 139 */
+        /* 80: the game's weights for a draw with no class in quota (0xF7EFF0: 16 bytes and 8) */
+        0x48, 0x8B, 0x88, 0xF0, 0x00, 0x00, 0x00, 0x48, 0x89, 0x8D, 0x00, 0x04, 0x00, 0x00, /*  80 [rbp+0x400] = [rax+0xf0] */
+        0x48, 0x8B, 0x88, 0xF8, 0x00, 0x00, 0x00, 0x48, 0x89, 0x8D, 0x08, 0x04, 0x00, 0x00, /*  94 [rbp+0x408] = [rax+0xf8] */
+        0x48, 0x8B, 0x88, 0x00, 0x01, 0x00, 0x00, 0x48, 0x89, 0x8D, 0x10, 0x04, 0x00, 0x00, /* 108 [rbp+0x410] = [rax+0x100] */
+        0xF0, 0xFF, 0x05, 0, 0, 0, 0,                     /* 122 lock inc dword [retries] (rel32 at 125) */
+        0x59, 0x58,                                       /* 129 pop rcx; pop rax */
+        0x45, 0x33, 0xE4,                                 /* 131 xor r12d, r12d (0xF7F014 starts its group loop at r12d) */
+        0xE9, 0, 0, 0, 0,                                 /* 134 jmp 0xF7F010 */
+        0x59, 0x58,                                       /* 139 pop rcx; pop rax */
+        0x8B, 0xBD, 0xC8, 0x00, 0x00, 0x00,               /* 141 mov edi, [rbp+0xc8] */
+        0x45, 0x33, 0xE4,                                 /* 147 xor r12d, r12d */
+        0xE9, 0, 0, 0, 0};                                /* 150 jmp 0xF7F87F */
+    const float key = co_disk_key();
+    memcpy(out, stub, sizeof stub);
+    memcpy(out + 17, &key, 4);
+    Rel(out, 125, code, retries);
+    Rel(out, 135, code, game + CO_ROW_EMPTY_BUILD);
+    Rel(out, 151, code, game + CO_ROW_EMPTY_BACK);
+    return sizeof stub;
+}
+
 static int Same(uintptr_t at, const uint8_t* bytes, size_t size)
 {
     uint8_t now[16];
@@ -145,6 +190,7 @@ const char* co_rows_code_check(uintptr_t game)
     if (!Same(game + CO_ROW_RADII_SITE, kCoRowRadii, sizeof kCoRowRadii)) return "the level's radius read is not the game's code this mod was made for";
     if (!Same(game + CO_ROW_OUTPOSTS_SITE, kCoRowOutposts, sizeof kCoRowOutposts)) return "the outposts' count read is not the game's code this mod was made for";
     if (!Same(game + CO_ROW_OBJECTIVES_SITE, kCoRowObjectives, sizeof kCoRowObjectives)) return "the objectives' count read is not the game's code this mod was made for";
+    if (!Same(game + CO_ROW_EMPTY_SITE, kCoRowEmpty, sizeof kCoRowEmpty)) return "the outposts' empty draw is not the game's code this mod was made for";
     return DistanceTable(game) == 0 ? "the mission distance reads are not the game's code this mod was made for" : NULL;
 }
 
@@ -166,6 +212,7 @@ const char* co_rows_check(uintptr_t game)
     if (!Same(game + CO_ROW_RADII_SITE, kCoRowRadii, sizeof kCoRowRadii)) return "the level's radius read is not the game's code this mod was made for";
     if (!Same(game + CO_ROW_OUTPOSTS_SITE, kCoRowOutposts, sizeof kCoRowOutposts)) return "the outposts' count read is not the game's code this mod was made for";
     if (!Same(game + CO_ROW_OBJECTIVES_SITE, kCoRowObjectives, sizeof kCoRowObjectives)) return "the objectives' count read is not the game's code this mod was made for";
+    if (!Same(game + CO_ROW_EMPTY_SITE, kCoRowEmpty, sizeof kCoRowEmpty)) return "the outposts' empty draw is not the game's code this mod was made for";
     const uintptr_t table = DistanceTable(game);
     if (table == 0) return "the mission distance reads are not the game's code this mod was made for";
     /* the game's own table has ten rows: an eleventh is read only from HellForge's, whose first ten are the game's */
@@ -178,14 +225,24 @@ void co_rows_level(int complex)
 {
     const float factor = CO_XL_PLAYABLE / 0.38f;
     if (g_rows.distance == NULL) return;
+    /* the levels made since the last one: at most one line each, 32 a session */
+    const LONG retries = g_rows.retries != NULL ? *g_rows.retries : 0;
+    if (retries != g_rows.noted && g_rows.lines < 32)
+    {
+        g_rows.lines++;
+        co_log("complex operations: %ld outpost draws taken again under every class since the last level (%ld so far)", (long)(retries - g_rows.noted), (long)retries);
+    }
+    g_rows.noted = retries;
     for (int k = 0; k < 3; k++) g_rows.distance[10 * 3 + k] = complex ? factor : g_rows.stock[k];
 }
+
+long co_rows_retries(void) { return g_rows.retries != NULL ? (long)*g_rows.retries : 0; }
 
 void co_rows_honours(int on) { if (g_rows.honours != NULL) *g_rows.honours = on != 0; }
 
 static int Jump(uintptr_t site, size_t length, uintptr_t stub)
 {
-    uint8_t jump[8] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90};
+    uint8_t jump[16] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
     Rel(jump, 1, site, stub);
     return g_coApi->write(site, jump, length);
 }
@@ -212,6 +269,7 @@ const char* co_rows_install(uintptr_t game)
     co_row_radii_stub(page, (uintptr_t)page, game, radii);
     co_row_outposts_stub(page + 0x80, (uintptr_t)page + 0x80, game);
     co_row_objectives_stub(page + 0x100, (uintptr_t)page + 0x100, game, (uintptr_t)g_rows.honours);
+    co_row_empty_stub(page + 0x180, (uintptr_t)page + 0x180, game, (uintptr_t)(page + CO_ROW_RETRIES));
     if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &old)) { g_rows.honours = NULL; g_rows.distance = NULL; return "the level row's readers could not be made to run"; }
     FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
     const int32_t own = (int32_t)reach, stock = (int32_t)((int64_t)table - (int64_t)game);
@@ -221,14 +279,18 @@ const char* co_rows_install(uintptr_t game)
     if (moved == CO_DISTANCE_SITES &&
         (jumps++, Jump(game + CO_ROW_RADII_SITE, 8, (uintptr_t)page) == 0) &&
         (jumps++, Jump(game + CO_ROW_OUTPOSTS_SITE, 8, (uintptr_t)page + 0x80) == 0) &&
-        (jumps++, Jump(game + CO_ROW_OBJECTIVES_SITE, 6, (uintptr_t)page + 0x100) == 0))
+        (jumps++, Jump(game + CO_ROW_OBJECTIVES_SITE, 6, (uintptr_t)page + 0x100) == 0) &&
+        (jumps++, Jump(game + CO_ROW_EMPTY_SITE, 9, (uintptr_t)page + 0x180) == 0))
     {
-        g_rows.game = game; g_rows.code = page;
+        g_rows.game = game; g_rows.code = page; g_rows.retries = (volatile LONG*)(page + CO_ROW_RETRIES);
         /* level 10's city factor, by the same growth, over the complex one's */
         g_rows.cityRatio = rows[27] * CO_RADIUS_SCALE / (CO_XL_PLAYABLE / 0.38f);
+        co_log("complex operations: an outpost draw of a complex mission that finds no item in its one class is taken again under every class the map weights "
+            "(three missions' Mega Nests and fortresses)");
         return NULL;
     }
     /* back: the copy holds HellForge's rows, so a read left on it reads what it read before */
+    if (jumps > 3) g_coApi->write(game + CO_ROW_OBJECTIVES_SITE, kCoRowObjectives, sizeof kCoRowObjectives);
     if (jumps > 2) g_coApi->write(game + CO_ROW_OUTPOSTS_SITE, kCoRowOutposts, sizeof kCoRowOutposts);
     if (jumps > 1) g_coApi->write(game + CO_ROW_RADII_SITE, kCoRowRadii, sizeof kCoRowRadii);
     while (moved-- > 0) g_coApi->write(game + kDistance[moved].rva + kDistance[moved].at, &stock, 4);

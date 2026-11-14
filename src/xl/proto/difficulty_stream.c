@@ -144,7 +144,7 @@ typedef struct WorldStreamState
     uint32_t replaced;       /* removals because a tile changed the ground under them (cumulative) */
     uint32_t respawnHeld;    /* spawn passes that held a level location's new unit over the window's budgets (cumulative) */
     uint32_t orderCount, orderCursor;     /* the due locations, nearest first */
-    int captured, failed, generatorDone;  /* state, the capture was refused, the generator's op is at its count */
+    int captured, failed, generatorDone, played;  /* state, the capture was refused, the generator's op is at its count */
     int playerCount;
     int resumeBad, passBad, recordBad, heightBad, destroyBad, respawnBad; /* one note per failure */
     uint32_t bodyBefore;                  /* the physics bodies before the first removal (bodyBeforeSeen) */
@@ -216,6 +216,7 @@ static void WorldStreamClearLocked(void)
     g_stream.orderCount = 0;
     g_stream.orderCursor = 0;
     g_stream.captured = 0;
+    g_stream.played = 0;
     g_stream.failed = 0;
     g_stream.generatorDone = 0;
     g_stream.playerCount = 0;
@@ -415,12 +416,22 @@ static int WorldStreamTrees(uint32_t* trees, uint32_t* room)
     return 0;
 }
 
+/* The captured level is in play (state 3, as MoveTick asks). The mission's unload (game 0xAB36F0, once a frame) steps
+ * the generator to 0 (0xAB3CAE..0xAB3CED) and then destroys every unit of the main world itself, 20 a call
+ * (0xAB3CF3..0xAB3DCB), while the game state still says mission. A stamp unit kept here is freed memory from then on,
+ * and DestroyUnit frees whatever ends the world's list when it does not find its unit (exe 0x3389C3..0x3389F2). */
+static int WorldStreamInPlay(void)
+{
+    uint32_t state = 0;
+    return g_stream.level != 0 && !SafeRead(g_stream.level + 0x1E4, &state, 4) && state == 3;
+}
+
 /* Remove one streamed location: DestroyUnit (the table's +0x388) takes its stamp unit and the layer units go; the real
  * record's +0xA8 is zeroed and the location waits for a new stamp unit. Only a location this streamer queued
  * (g_streamLive) is ever passed here. */
 static int WorldStreamRemoveLocked(uint32_t i)
 {
-    if (g_stream.destroyBad || g_streamInside) return 0;
+    if (g_stream.destroyBad || g_streamInside || !WorldStreamInPlay()) return 0;
     uint64_t world = 0;
     uintptr_t wi = 0, table = 0, destroy = 0;
     if (SafeRead((uintptr_t)g_stream.context + 0x40, &world, 8) || world == 0 ||
@@ -851,6 +862,8 @@ static void WorldStreamReplacePick(uint32_t* pick, float* key, uint32_t* picks, 
 /* The stamps whose layers spawned on the level's heights by a live tile (NearLayerPendingAdd): once a grid covers one,
  * a stamp the streamer may take out goes out and comes back on it, as after a tile's change; any other is counted
  * (the start area's and the mission's stamps stay). One with no grid after 60 s is dropped. */
+static float MoveStampFootprint(uint32_t i, float f[4]); /* difficulty_world_move.c */
+static float MoveStampSeen2(float side);
 static void WorldStreamPendingLocked(ULONGLONG now)
 {
     AcquireSRWLockExclusive(&g_layerPending.lock);
@@ -871,7 +884,8 @@ static void WorldStreamPendingLocked(ULONGLONG now)
             !g_streamMission[i])
         {
             g_streamReplace[i] = 1;
-            g_streamSeen2[i] = 1.0f;
+            float f[4];
+            g_streamSeen2[i] = MoveStampSeen2(MoveStampFootprint(i, f)); /* ranked by how far it is seen, as MoveStampsReplace */
             g_layerPending.replaced++;
         }
         else g_layerPending.kept++;
@@ -926,7 +940,8 @@ static void WorldStreamScanLocked(ULONGLONG now)
         }
         if (g_streamLive[i] && g_streamReplace[i]) /* its ground changed: picked below */
         {
-            if (g_streamPoseGood[i] && !g_streamNeedsUnit[i] && g_streamUnit[i] != 0 && !g_streamDrop[i])
+            /* not while a layer fill runs: its respawn waits for the fill, and the stamp would be missing until then */
+            if (g_streamPoseGood[i] && !g_streamNeedsUnit[i] && g_streamUnit[i] != 0 && !g_streamDrop[i] && !g_layerJob.running)
                 WorldStreamReplacePick(pick, pickKey, &picks, i, best / g_streamSeen2[i]);
             continue;
         }
@@ -1182,6 +1197,10 @@ static int WorldStreamInMission(void)
     return !SafeRead(g_stream.game + 0x3326340u, &gameObj, 8) && gameObj != 0 && !SafeRead(gameObj + 0xAC21Cu, &state, 4) && state == 4;
 }
 
+/* A tile's layer change still filling; polled here too (it finishes the change), so the spawns never wait on another
+ * caller's poll. Outside the stream lock: the change's end writes notes and descriptors. */
+static int WorldStreamLayerBusy(void) { return NearLayerBusy(); }
+
 /* Called from TickDetour (packages.c) every frame: nothing until a level is captured and the generator's op is done,
  * nothing once g_worldLevel is another level (all state is dropped), nothing while the world is back to vanilla. */
 static void WorldStreamTick(float dt)
@@ -1191,6 +1210,7 @@ static void WorldStreamTick(float dt)
     DestroyTick(); /* destroys that waited for their unit (difficulty_world_destroy.c) */
     if (dt > 0 && dt < 10.0f) { g_streamFrames++; g_streamFrameSum += dt; if (dt > g_streamFrameMax) g_streamFrameMax = dt; }
     if (g_streamInside) return; /* a generator call is inside: it owns the pass */
+    const int layerBusy = WorldStreamLayerBusy();
     AcquireSRWLockExclusive(&g_streamLock);
     if (!g_stream.captured)
     {
@@ -1203,11 +1223,27 @@ static void WorldStreamTick(float dt)
         ReleaseSRWLockExclusive(&g_streamLock);
         return;
     }
+    if (!WorldStreamInPlay()) /* no scan, removal, window work or spawn; nothing is destroyed */
+    {
+        if (g_stream.played)
+        {
+            uint32_t units = 0, state = 0xFFFFFFFFu;
+            for (uint32_t i = 0; i < g_stream.count && i < kStreamMaxLocations; i++) units += g_streamLive[i] && g_streamUnit[i] != 0;
+            SafeRead(g_stream.level + 0x1E4, &state, 4);
+            g_stream.played = 0;
+            if (units != 0)
+                Note("difficulty: extra large maps: content streaming: the level is no longer in play (generator state %u): streaming stops with %u stamp units "
+                    "held and %u removals queued; none is destroyed here", state, units, g_streamDropCount);
+        }
+        ReleaseSRWLockExclusive(&g_streamLock);
+        return;
+    }
     if (g_stream.deferred == 0 || g_streamInside || !g_stream.generatorDone || !(g_world.live > 1.0f) || !WorldStreamInMission())
     {
         ReleaseSRWLockExclusive(&g_streamLock);
         return;
     }
+    g_stream.played = 1;
     ULONGLONG now = GetTickCount64();
     const uint32_t removed = g_stream.removed, entered = WindowEntered();
     const double t0 = HitchNow();
@@ -1218,7 +1254,7 @@ static void WorldStreamTick(float dt)
     const double t2 = HitchNow();
     /* a tile's layer fill takes grids out of use while it writes them (NearLayerChangeFill): a stamp spawned then would
      * miss its grid and stand on the coarse heights, so the spawns wait the few frames until it is done */
-    if (!g_layerJob.running) WorldStreamSpawnDueLocked();
+    if (!layerBusy) WorldStreamSpawnDueLocked();
     const double t3 = HitchNow();
     g_hitchCost.stream += (float)(t1 - t0); g_hitchCost.window += (float)(t2 - t1); g_hitchCost.spawn += (float)(t3 - t2);
     g_hitchCost.removed += (uint16_t)(g_stream.removed - removed); g_hitchCost.entered += (uint16_t)(WindowEntered() - entered);
