@@ -520,7 +520,10 @@ void CoXlTestLwNavMoreCounts(uint32_t* v)
 /* The span's: the oldest first build's wait, the frames the hold asked and a larger budget ran, path requests' wait
  * for a start and the oldest run in flight (ms). */
 void CoXlTestLwNavSpanCounts(uint32_t* v)
-{ v[0] = g_lwNavHold.sum.firstOldest; v[1] = g_lwNavHold.sumOver; v[2] = g_lwNavHold.sum.reqWait; v[3] = g_lwNavHold.sum.runAge; }
+{
+    v[0] = g_lwNavHold.sum.firstOldest; v[1] = g_lwNavHold.sumOver; v[2] = g_lwNavHold.sum.reqWait; v[3] = g_lwNavHold.sum.runAge;
+    v[4] = g_lwNavHold.sum.skips; v[5] = g_lwNavHold.sum.skipped; v[6] = g_lwNavHold.sum.dense; v[7] = g_lwNavHold.sum.dueWaits;
+}
 double CoXlTestLwNavEndMs(double set) { if (set >= 0) g_lwSwap.endMs = set; return g_lwSwap.endMs; }
 void CoXlTestLwNavSchedInstall(uintptr_t exe, uintptr_t stub) { LwInstallNavSched(exe, stub); }
 int CoXlTestLwNavMarksHeld(void) { return LwNavMarksHeld(); }
