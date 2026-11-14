@@ -32,6 +32,11 @@ float CoXlTestGradeStationCap(uint32_t i, int* pinned);
 float CoXlTestGradeMove(float x, float y);
 void CoXlTestGradeShoulder(float (*height)(void*, float, float), const float* pts, uint32_t n, double out[6]);
 int CoXlTestGradeInPlace(float world, float playable, float x, float y, float* open);
+int CoXlTestGradeStationOn(uint32_t i);
+void CoXlTestGradeRect(float cx, float cy, float a, float b, float ba, float bb);
+void CoXlTestGradeMeasures(float (*height)(void*, float, float), float (*base)(void*, float, float), const float* pts, uint32_t n, double out[8]);
+float CoXlTestGradeDetail(float world, float playable, float wx, float wy);
+float CoXlTestNearFine(const float* heights, int side, int c, int r);
 
 static int g_failed, g_checked;
 static const char* g_case = "";
@@ -355,6 +360,7 @@ static float g_road[2 * 512];
 static float GroundFlat(float x, float y) { (void)x; (void)y; return 40.0f; }
 static float GroundStep(float x, float y) { (void)y; return x < 1000.0f ? 0.0f : 20.0f; }
 static float GroundTilt(float x, float y) { (void)y; return 0.05f * x; }
+static float GroundRise(float x, float y) { (void)x; return 0.05f * y; }
 static uint32_t Line(float* out, float x0, float y0, float x1, float y1, uint32_t n)
 {
     for (uint32_t k = 0; k < n; k++) { out[2 * k] = x0 + (x1 - x0) * (float)k / (float)(n - 1); out[2 * k + 1] = y0 + (y1 - y0) * (float)k / (float)(n - 1); }
@@ -417,6 +423,13 @@ static void Field(void)
     CHECK(CoXlTestGradeField(g_road, counts, ends, 2, 1, GroundTilt, FAR_BACK, SLOPE, 0, WORLD, &torn) == 201 + 40);
     CHECK(fabsf(CoXlTestGradeFieldAt(1000.0f, 984.0f, &z, &d) - 1.0f) < 1.0e-6f && fabsf(z - 50.0f) < 0.02f);
     CHECK(CoXlTestGradeFieldAt(1016.0f, 1000.0f, &z, &d) == 1.0f && fabsf(z - 50.8f) < 0.02f); /* 16 m from the spur, inside its band */
+    g_case = "a road whose band ends short of a point has no share of its height, though the cell lists it";
+    counts[0] = Line(g_road, 200.0f, 1000.0f, 1800.0f, 1000.0f, 201);
+    counts[1] = Line(g_road + 402, 200.0f, 1060.0f, 1800.0f, 1060.0f, 201);
+    CHECK(CoXlTestGradeField(g_road, counts, ends, 2, 0, GroundRise, FAR_BACK, SLOPE, 0, WORLD, &torn) == 402);
+    CHECK(CoXlTestGradeFieldAt(1003.0f, 1036.0f, &z, &d) > 0.2f && fabsf(z - 53.0f) < 1.0e-4f && fabsf(d - 24.0f) < 1.0e-3f); /* 36 m from the first, 24 from the second */
+    CHECK(CoXlTestGradeFieldAt(1003.0f, 1030.0f, &z, &d) > 0.0f && z > 50.0f && z < 53.0f);                               /* both reach: between their heights */
+    g_case = "on a road's line its own height holds, though another road's band reaches there";
     counts[0] = Line(g_road, 200.0f, 1000.0f, 1000.0f, 1000.0f, 101);
     counts[1] = Line(g_road + 202, 1000.3f, 1000.2f, 1000.0f, 1800.0f, 101);
     counts[2] = Line(g_road + 404, 604.0f, 600.0f, 604.0f, 1000.0f, 41);
@@ -479,6 +492,9 @@ static void Tri(uint64_t gui, const float* p0, const float* p1, const float* p2,
         const float rim = away >= 700.0f ? 0.0f : away <= 636.0f ? 1.0f : (700.0f - away) / 64.0f;
         g_bad += !(w >= 0.0f && w <= 1.0f) || fabsf(w - field * rim) > 1.0e-4f || uv[k][1] != 0.0f || !isfinite(p[k][2]);
         if (w > 0.0f) g_bad += fabsf(p[k][2] - z) > 1.0e-3f;
+        /* a corner without a share takes a height from the cell's corners that have one: among the roads' own (0 to
+         * 20 m here; at a band's end a far piece's height may be the only one with weight, so not the nearest's) */
+        for (int q = 0; q < 3 && !(w > 0.0f); q++) if (uv[q][0] > 0.0f) g_bad += fabsf(p[k][2] - p[q][2]) > 25.0f;
         if (d <= 10.0f && rim == 1.0f) { g_full++; g_bad += w != 1.0f; }
         if (away >= 700.0f) { g_rim++; g_bad += w != 0.0f; }
         if (w > g_cellMost) g_cellMost = w;
@@ -505,29 +521,36 @@ static void Draw(void)
     CHECK(CoXlTestGradeDraw(WORLD, 700.0f, Tri, g_px, 2, &cells) == first && g_twice == 0 && g_bad == 0);
 }
 
-/* Only a pad's flat ground pins a road and keeps it off: its band is graded like any ground, up to a short skirt
- * before the flat part. A stamp's footprint and a weak pad do neither. The rim pins where the share falls. */
+/* Only a pad's flat ground pins a road. The road is whole up to its first station on the flat part and gone from the
+ * next one on, where every station stands at the pad's height. A stamp's footprint and a weak pad do neither. The
+ * rim pins where the share falls. */
 static void Pins(void)
 {
-    const float world = 2048.0f, playable = 1000.0f, mid = 1024.0f;
+    const float world = 2048.0f, playable = 696.0f, mid = 1024.0f;
     float pad[6] = {0.0f, 0.0f, 20.0f, 40.0f, 1.0f, 0.0f};
-    int pinned = -1;
-    g_case = "a flatten pad: no road on its flat ground, the whole road on its band, a short skirt between";
+    double out[6]; int pinned = -1;
+    const uint32_t n = Line(g_road, 200.0f, mid, 1792.0f, mid, N); /* a station every 8 m, 103 at the pad's centre */
+    g_case = "a flatten pad: no road where its stations and their neighbours stand on the flat part, the whole road up to the first of them";
     CoXlTestGradePads(pad, 1);
-    CHECK(CoXlTestGradeFree(world, playable, mid + 10.0f, mid, &pinned) == 0.0f && pinned == 1);
-    CHECK(CoXlTestGradeFree(world, playable, mid + 22.0f, mid, &pinned) == 0.0f && pinned == 1); /* weight 0.99275 */
-    CHECK(fabsf(CoXlTestGradeFree(world, playable, mid, mid + 24.0f, &pinned) - 0.028f) < 1.0e-3f && pinned == 0); /* weight 0.972 */
-    CHECK(CoXlTestGradeFree(world, playable, mid, mid + 30.0f, &pinned) == 1.0f && pinned == 0);  /* weight 0.84375 */
-    CHECK(CoXlTestGradeFree(world, playable, mid + 40.0f, mid, &pinned) == 1.0f && pinned == 0);
+    CHECK(CoXlTestGradeLevel(g_road, n, GroundFlat, world, playable, out) == 0);
+    for (uint32_t i = 98; i <= 108; i++) CHECK(CoXlTestGradeStationOn(i) == (i >= 102 && i <= 104 ? 3 : i >= 101 && i <= 105 ? 1 : 0));
+    CHECK(CoXlTestGradeFree(world, playable, mid, mid, &pinned) < 1.0e-6f && pinned == 1);
+    CHECK(CoXlTestGradeFree(world, playable, mid + 8.0f, mid + 6.0f, &pinned) < 0.02f && pinned == 1); /* beside the line the pieces further out count a little */
+    CHECK(fabsf(CoXlTestGradeFree(world, playable, mid + 12.0f, mid, &pinned) - 0.5f) < 1.0e-3f && pinned == 1); /* halfway to the last station on the flat part */
+    CHECK(fabsf(CoXlTestGradeFree(world, playable, mid + 16.0f, mid, &pinned) - 1.0f) < 1.0e-4f && pinned == 1);
+    CHECK(fabsf(CoXlTestGradeFree(world, playable, mid + 22.0f, mid, &pinned) - 1.0f) < 1.0e-3f && pinned == 1); /* weight 0.99275: the road, to its pin */
+    CHECK(fabsf(CoXlTestGradeFree(world, playable, mid + 40.0f, mid, &pinned) - 1.0f) < 1.0e-4f && pinned == 0);
     CHECK(CoXlTestGradeFree(world, playable, mid + 61.0f, mid, &pinned) == 1.0f && pinned == 0);
     g_case = "a stamp's footprint: the road is whole on it and no station is pinned";
     pad[5] = 1.0f;
     CoXlTestGradePads(pad, 1);
-    CHECK(CoXlTestGradeFree(world, playable, mid + 10.0f, mid, &pinned) == 1.0f && pinned == 0);
+    CHECK(CoXlTestGradeLevel(g_road, n, GroundFlat, world, playable, out) == 0);
+    CHECK(CoXlTestGradeFree(world, playable, mid + 10.0f, mid, &pinned) == 1.0f && pinned == 0 && CoXlTestGradeStationOn(103) == 0);
     g_case = "a weak pad never pins; the rim does";
     pad[4] = 0.4f; pad[5] = 0.0f;
     CoXlTestGradePads(pad, 1);
-    CHECK(CoXlTestGradeFree(world, playable, mid, mid, &pinned) == 1.0f && pinned == 0);
+    CHECK(CoXlTestGradeLevel(g_road, n, GroundFlat, world, playable, out) == 0);
+    CHECK(fabsf(CoXlTestGradeFree(world, playable, mid, mid, &pinned) - 1.0f) < 1.0e-4f && pinned == 0 && CoXlTestGradeStationOn(103) == 0);
     CHECK(fabsf(CoXlTestGradeFree(world, playable, mid + playable - 32.0f, mid, &pinned) - 0.5f) < 1.0e-4f && pinned == 1);
     CHECK(CoXlTestGradeFree(world, playable, mid + playable, mid, &pinned) == 0.0f && pinned == 1);
     CHECK(CoXlTestGradeFree(world, playable, mid + playable - 65.0f, mid, &pinned) == 1.0f && pinned == 0);
@@ -686,17 +709,23 @@ static void Together(void)
     CHECK(CoXlTestGradeField(g_road, counts, ends, 1, 0, GroundTilt, FAR_BACK, SLOPE, 4, WORLD, &torn) == 201);
     CHECK(CoXlTestGradeTies(&untied) == 0 && untied == 0);
 
-    g_case = "a pad's band is graded up to its flat ground: the whole road at weight 0.78 of the pad, none on the flat part";
+    g_case = "the draw at a pad: the whole road on its band (weight 0.78) and to its first station on the flat part, none at its centre";
     const float pad[6] = {0.0f, 0.0f, 20.0f, 40.0f, 1.0f, 0.0f};
+    double level[6];
     counts[0] = Line(g_road, 200.0f, 1024.0f, 1800.0f, 1024.0f, 201);
-    CoXlTestGradeField(g_road, counts, ends, 1, 0, GroundTilt, FAR_BACK, SLOPE, 4, WORLD, &torn);
     CoXlTestGradePads(pad, 1);
+    CHECK(CoXlTestGradeLevel(g_road, counts[0], GroundTilt, WORLD, 1000.0f, level) == 0);
     g_px = 0.25f;
-    g_probe[0][0] = 1056.0f; g_probe[0][1] = 1024.0f; g_probe[1][0] = 1044.0f; g_probe[1][1] = 1024.0f; /* on the flat part, a corner of a cell the skirt reaches */
+    g_probe[0][0] = 1056.0f; g_probe[0][1] = 1024.0f; g_probe[1][0] = 1024.0f; g_probe[1][1] = 1024.0f;
     g_probeW[0] = g_probeW[1] = -1.0f;
     CoXlTestGradeDraw(WORLD, 1000.0f, TriProbe, g_px, 4096, &cells);
-    CHECK(g_probeW[0] == 1.0f && fabsf(g_probeZ[0] - 0.05f * 1056.0f) < 0.05f);
-    CHECK(g_probeW[1] == 0.0f);
+    CHECK(fabsf(g_probeW[0] - 1.0f) < 1.0e-4f && fabsf(g_probeZ[0] - 0.05f * 1056.0f) < 0.05f);
+    CHECK(g_probeW[1] >= 0.0f && g_probeW[1] < 1.0e-6f && isfinite(g_probeZ[1]));
+    g_probe[0][0] = 1044.0f; g_probeW[0] = -1.0f; /* on the flat part, before the road's first station there */
+    CoXlTestGradeDraw(WORLD, 1000.0f, TriProbe, g_px, 4096, &cells);
+    CHECK(fabsf(g_probeW[0] - 1.0f) < 1.0e-4f);
+    /* a near tile's core takes the road by the same share: half of it halfway between the two stations */
+    CHECK(fabsf(CoXlTestGradeSharpen(WORLD, 1000.0f, 12.0f, 0.0f, 0.05f * 1036.0f + 0.3f) - (0.05f * 1036.0f + 0.3f - 0.5f * 0.784f * 0.3f)) < 2.0e-3f);
     CoXlTestGradePads(pad, 0);
 
     g_case = "a near tile's core takes the roads' height, but not where the level stands a metre off it (a stamp's terrain)";
@@ -872,9 +901,11 @@ static void Zone(void)
     CHECK(CoXlTestGradeFree(world, 696.0f, 624.0f, mid, &pinned) == 1.0f && pinned == 0);
     CHECK(CoXlTestGradeStationCap(140, &pinned) == 0.0f && pinned == 1);
     CHECK(CoXlTestGradeStationCap(142, &pinned) == 0.0f && pinned == 1);
-    CHECK(CoXlTestGradeStationCap(143, &pinned) > 0.0f && CoXlTestGradeStationCap(143, &pinned) < 0.01f && pinned == 0); /* weight 0.972 */
-    CHECK(fabsf(CoXlTestGradeStationCap(145, &pinned) - 1.9388f) < 1.0e-3f && pinned == 0); /* weight 0.5: 4 (1 - smoothstep(0.5 / 0.98)) */
-    CHECK(CoXlTestGradeStationCap(148, &pinned) == 4.0f && pinned == 0);
+    /* the cap takes the largest pad weight within 10 m, the pad's band 48 m wide at least: 4 (1 - smoothstep(weight / 0.98)) */
+    CHECK(CoXlTestGradeStationCap(143, &pinned) == 0.0f && pinned == 0);                        /* 24 m out: the flat part is within the bed */
+    CHECK(fabsf(CoXlTestGradeStationCap(145, &pinned) - 0.0996f) < 5.0e-3f && pinned == 0);     /* 40 m out: weight 0.888 at 30 m */
+    CHECK(fabsf(CoXlTestGradeStationCap(148, &pinned) - 3.5456f) < 5.0e-3f && pinned == 0);     /* 64 m out: weight 0.206 at 54 m */
+    CHECK(CoXlTestGradeStationCap(150, &pinned) == 4.0f && pinned == 0);
     CHECK(fabsf(CoXlTestGradeStationCap(186, &pinned) - 2.0f) < 1.0e-4f && pinned == 1); /* 32 m inside the playable radius */
     CHECK(CoXlTestGradeStationCap(24, &pinned) == 4.0f && pinned == 0 && CoXlTestGradeStationCap(23, &pinned) == 3.5f && pinned == 1);
     CHECK(fabsf(CoXlTestGradeStation(53, xy, &band, &links) - 0.05f * 624.0f) < 1.0e-3f && xy[0] == 624.0f);
@@ -911,14 +942,154 @@ static void Zone(void)
     const float across[4] = {920.0f, mid, 922.0f, mid};
     CoXlTestGradeShoulder(MoveAt, across, 2, out);
     CHECK(out[0] > 11.0 && out[0] <= 12.0 * 1.05 && out[3] > 3.0 && out[3] < 10.0);
-    /* a small pad on the bed between two stations: the level keeps the pad's ground there, so nothing is added */
+    /* a small pad whose flat part lies on the bed, 6 m off the line: nothing is added on it, the stations beside it
+     * lose their cap, and the cut comes up to it along the road and across: no wall stands at the pad's edge */
     const float small[6] = {-100.0f, 6.0f, 3.0f, 1.0f, 1.0f, 0.0f};
     CoXlTestGradePads(small, 1);
-    CHECK(CoXlTestGradeMove(924.0f, mid + 6.0f) == 0.0f && fabsf(CoXlTestGradeMove(924.0f, mid - 6.0f) + 4.0f) < 0.05f);
+    CHECK(CoXlTestGradeLevel(g_road, n, GroundMound, world, 1000.0f, out) == 0);
+    CHECK(CoXlTestGradeStationCap(90, &pinned) == 0.0f && pinned == 0 && CoXlTestGradeStationCap(91, &pinned) == 0.0f);
+    CHECK(CoXlTestGradeStationCap(84, &pinned) > 3.0f && CoXlTestGradeStationCap(80, &pinned) == 4.0f);
+    CHECK(fabsf(CoXlTestGradeMove(924.0f, mid + 6.0f)) < 1.0e-4f && fabsf(CoXlTestGradeMove(925.5f, mid + 7.5f)) < 1.0e-4f);
+    CHECK(fabsf(CoXlTestGradeMove(924.0f, mid)) < 2.5f); /* what 7 degrees still takes beside the pad; 4 m without the cap's fall */
+    float step = 0.0f;
+    for (float x = 880.0f; x <= 968.0f; x += 4.0f)
+        for (float y = mid - 44.0f; y < mid + 44.0f; y += 0.5f)
+        {
+            const float rise = fabsf(CoXlTestGradeMove(x, y + 2.0f) - CoXlTestGradeMove(x, y));
+            if (rise > step) step = rise;
+        }
+    CHECK(step < 0.45f); /* a 4 m cut's own shoulder is 0.425 m in 2 m (tan 12 degrees); the pillar was 4 m */
     CoXlTestGradePads(small, 0);
 }
 
-/* ---- a road's shoulders: 4 m spans from 6 m out to 58 m, both sides, a section every 8 m ---- */
+/* A pad beside a road and a road onto a pad, on sloping land: the ground is the land eased to the pad's height by
+ * the pad's weight, as op 0x3F leaves it. */
+static struct { float x, y, r, band, alongX, alongY; } g_site;
+static float SiteWeight(float x, float y)
+{
+    float t = (sqrtf((x - g_site.x) * (x - g_site.x) + (y - g_site.y) * (y - g_site.y)) - g_site.r) / g_site.band;
+    t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+    return 1.0f - t * t * (3.0f - 2.0f * t);
+}
+static float GroundSite(float x, float y) { return (g_site.alongX * (x - g_site.x) + g_site.alongY * (y - g_site.y)) * (1.0f - SiteWeight(x, y)) + 60.0f; }
+static void Site(void)
+{
+    const float world = 2048.0f, mid = 1024.0f;
+    double out[6]; int pinned = -1; uint32_t links; float xy[2], band;
+    g_case = "a pad's flat ground 20 m beside a road on a side-hill of 11.3 degrees, its band 16 m: no wall at its edge";
+    g_site.x = 1000.0f; g_site.y = mid + 30.0f; g_site.r = 10.0f; g_site.band = 16.0f; g_site.alongX = 0.0f; g_site.alongY = 0.2f;
+    const float beside[6] = {1000.0f - mid, 30.0f, 10.0f, 16.0f, 1.0f, 0.0f};
+    uint32_t n = Line(g_road, 200.0f, mid, 1792.0f, mid, N);
+    CoXlTestGradePads(beside, 1);
+    CHECK(CoXlTestGradeLevel(g_road, n, GroundSite, world, 1000.0f, out) == 0 && out[0] == 0.0);
+    CHECK(fabsf(CoXlTestGradeMove(1000.0f, mid + 30.0f)) < 1.0e-4f && fabsf(CoXlTestGradeMove(1004.0f, mid + 24.0f)) < 1.0e-4f); /* the flat part */
+    CHECK(CoXlTestGradeMove(1000.0f, mid - 9.0f) > 1.0f); /* the bed is level across the hill: filled on its low side */
+    float wall = 0.0f;
+    for (float x = 960.0f; x <= 1040.0f; x += 4.0f)
+        for (float y = mid - 60.0f; y < mid + 60.0f; y += 0.5f)
+        {
+            /* over what a level bed (the hill's 0.2 a metre) and a 12 degree shoulder change the move in 2 m */
+            const float rise = fabsf(CoXlTestGradeMove(x, y + 2.0f) - CoXlTestGradeMove(x, y)) - 2.0f * (0.2f + 0.2125566f);
+            if (rise > wall) wall = rise;
+        }
+    CHECK(wall < 0.35f); /* the road drawn whole to the pad's skirt left 8 m in 2 m here */
+    CoXlTestGradePads(beside, 0);
+
+    g_case = "a rectangle pad with 8 m bands 30 m ahead of a road's end: its band counts 48 m wide, so the cap falls before it";
+    n = Line(g_road, 200.0f, mid, 960.0f, mid, 96);
+    CoXlTestGradePads(beside, 0);
+    CoXlTestGradeRect(1000.0f - mid, 0.0f, 10.0f, 30.0f, 8.0f, 8.0f);
+    CHECK(CoXlTestGradeLevel(g_road, n, GroundFlat, world, 1000.0f, out) == 0 && out[0] == 0.0);
+    CHECK(fabsf(CoXlTestGradeStationCap(95, &pinned) - 1.2f) < 0.1f && pinned == 0 && CoXlTestGradeStationCap(85, &pinned) == 4.0f); /* weight 0.62 at 30 m */
+    CoXlTestGradePads(beside, 0);
+
+    g_case = "a road onto a pad on land that falls 11.3 degrees along it: 7 degrees to the pad's first station, no step, the pad met";
+    g_site.x = mid; g_site.y = mid; g_site.r = 20.0f; g_site.band = 97.0f; g_site.alongX = 0.2f; g_site.alongY = 0.0f;
+    const float onto[6] = {0.0f, 0.0f, 20.0f, 97.0f, 1.0f, 0.0f};
+    n = Line(g_road, 200.0f, mid, mid, mid, 104); /* a station every 8 m, the last at the pad's centre */
+    CoXlTestGradePads(onto, 1);
+    CHECK(CoXlTestGradeLevel(g_road, n, GroundSite, world, 1000.0f, out) == 0);
+    CHECK(CoXlTestGradeStation(103, xy, &band, &links) == 60.0f && CoXlTestGradeStationOn(103) == 3 && CoXlTestGradeStationOn(100) == 1);
+    CHECK(fabsf(CoXlTestGradeStation(100, xy, &band, &links) - GroundSite(1000.0f, mid)) < 1.0e-3f);
+    float steepest = 0.0f, beside2 = 0.0f;
+    for (float x = 940.0f; x <= 1010.0f; x += 0.5f)
+        for (int side = 0; side < 3; side++)
+        {
+            const float y = mid + 4.5f * (float)side;
+            const float rise = fabsf(GroundSite(x + 2.0f, y) + CoXlTestGradeMove(x + 2.0f, y) - GroundSite(x, y) - CoXlTestGradeMove(x, y)) / 2.0f;
+            if (side == 0 && rise > steepest) steepest = rise;
+            if (side != 0 && rise > beside2) beside2 = rise;
+        }
+    CHECK(steepest < 0.137f && steepest > 0.11f); /* 7 degrees and the stations' rounding; the skirt left 20 degrees here */
+    CHECK(beside2 < 0.165f);
+    CHECK(fabsf(CoXlTestGradeMove(mid, mid)) < 1.0e-6f && CoXlTestGradeFree(world, 1000.0f, 998.0f, mid, &pinned) > 0.99f);
+    CoXlTestGradePads(onto, 0);
+}
+
+/* ---- the measures the checker reads ---- */
+static float WallAcross(void* c, float x, float y) { (void)c; (void)y; return x < 500.0f ? 3.0f : 4.2f; }
+static float StepBeside(void* c, float x, float y) { (void)c; (void)x; return y > 304.5f ? 1.0f : 0.0f; }
+static float HillGround(void* c, float x, float y) { (void)c; (void)x; return 0.3f * (y - 300.0f); }
+/* a level bed across the hill, eased back to the ground over 40 m on either side */
+static float HillMove(void* c, float x, float y)
+{
+    const float out = fabsf(y - 300.0f), edge = y > 300.0f ? -3.0f : 3.0f;
+    return out <= 10.0f ? -HillGround(c, x, y) : out >= 50.0f ? 0.0f : edge * (50.0f - out) / 40.0f;
+}
+static void Measures(void)
+{
+    double out[8];
+    const uint32_t n = Line(g_road, 100.0f, 300.0f, 1100.0f, 300.0f, 126);
+    g_case = "a 1.2 m wall across the road: 31 degrees between neighbouring samples, 6.8 on the 10 m baseline";
+    CoXlTestGradeMeasures(WallAcross, NULL, g_road, n, out);
+    CHECK(fabs(out[2] - 30.96) < 0.05 && out[3] >= 500.0 && out[3] <= 502.0 && out[4] == 300.0 && out[5] == 0.0);
+    double road[9];
+    CoXlTestGradeRoad(WallAcross, g_road, n, road);
+    CHECK(fabs(road[6] - 6.84) < 0.05);
+    g_case = "a 1 m step 4.5 m beside the line: seen across the bed between 3 and 6 m, by neither the cross slope nor the shoulder";
+    CoXlTestGradeMeasures(StepBeside, NULL, g_road, n, out);
+    CHECK(fabs(out[5] - 18.43) < 0.05 && out[6] == 100.0 && out[2] == 0.0 && out[0] == 0.0);
+    CoXlTestGradeRoad(StepBeside, g_road, n, road);
+    CHECK(road[8] == 0.0);
+    g_case = "a level bed on a side-hill of 16.7 degrees: the move alone reads the hill, over the ground it reads what the blend adds";
+    CoXlTestGradeMeasures(HillMove, NULL, g_road, n, out);
+    CHECK(fabs(out[0] - 16.70) < 0.05);
+    CoXlTestGradeMeasures(HillMove, HillGround, g_road, n, out);
+    CHECK(fabs(out[0] - 3.86) < 0.05 && fabs(out[1] - 16.70 - 4.29) < 0.1); /* atan 0.375 - atan 0.3; the crease is the move's own */
+}
+
+/* The fine relief a road keeps on a near tile: none on the worn core, a part of it from there to the bed's edge. */
+static void Detail(void)
+{
+    uint32_t torn = 0, counts[1], ends[2] = {~0u, ~0u};
+    g_case = "a road's share of a tile's fine relief: none to 4 m, 0.35 at the bed's edge, with the tile's share to the band's end";
+    counts[0] = Line(g_road, 200.0f, 1000.0f, 1800.0f, 1000.0f, 201);
+    CoXlTestGradeField(g_road, counts, ends, 1, 0, GroundFlat, FAR_BACK, SLOPE, 4, WORLD, &torn);
+    CHECK(CoXlTestGradeDetail(WORLD, 1000.0f, 0.0f, -24.0f) == 0.0f && CoXlTestGradeDetail(WORLD, 1000.0f, 0.0f, -21.0f) == 0.0f);
+    CHECK(CoXlTestGradeDetail(WORLD, 1000.0f, 0.0f, -20.0f) == 0.0f && CoXlTestGradeDetail(WORLD, 1000.0f, 0.0f, -28.0f) == 0.0f); /* 4 m out, either side */
+    CHECK(fabsf(CoXlTestGradeDetail(WORLD, 1000.0f, 0.0f, -17.0f) - 0.175f) < 1.0e-3f);  /* 7 m out: halfway */
+    CHECK(fabsf(CoXlTestGradeDetail(WORLD, 1000.0f, 0.0f, -14.0f) - 0.35f) < 1.0e-3f);   /* the bed's edge */
+    CHECK(fabsf(CoXlTestGradeDetail(WORLD, 1000.0f, 0.0f, -13.9f) - 0.35f) < 1.0e-3f);   /* no crease there */
+    CHECK(fabsf(CoXlTestGradeDetail(WORLD, 1000.0f, 0.0f, -2.0f) - 0.175f) < 1.0e-3f);   /* 22 m out: the level's share is a half */
+    CHECK(CoXlTestGradeDetail(WORLD, 1000.0f, 0.0f, 10.5f) == 0.0f && CoXlTestGradeDetail(WORLD, 1000.0f, 0.0f, 300.0f) == 0.0f);
+    g_case = "fine relief: a texel's height over the mean of the 15 x 15 about it, a metre at most; a plane has none";
+    static float h[32 * 32];
+    for (int r = 0; r < 32; r++) for (int c = 0; c < 32; c++) h[r * 32 + c] = 0.5f + 0.0003f * (float)c - 0.0002f * (float)r;
+    CHECK(fabsf(CoXlTestNearFine(h, 32, 16, 16)) < 1.0e-3f);
+    h[16 * 32 + 16] += 0.0005f; /* half a metre */
+    CHECK(fabsf(CoXlTestNearFine(h, 32, 16, 16) - 0.5f * 224.0f / 225.0f) < 2.0e-3f);
+    CHECK(fabsf(CoXlTestNearFine(h, 32, 12, 13) + 0.5f / 225.0f) < 2.0e-3f); /* a neighbour within the window */
+    CHECK(fabsf(CoXlTestNearFine(h, 32, 16, 8)) < 1.0e-3f);                   /* 8 texels away: outside it */
+    h[16 * 32 + 16] += 0.005f;
+    CHECK(CoXlTestNearFine(h, 32, 16, 16) == 1.0f);
+    h[16 * 32 + 16] -= 0.02f;
+    CHECK(CoXlTestNearFine(h, 32, 16, 16) == -1.0f);
+    h[24 * 32 + 7] += 0.0005f; /* the last texel with a whole window */
+    CHECK(CoXlTestNearFine(h, 32, 6, 16) == 0.0f && CoXlTestNearFine(h, 32, 16, 25) == 0.0f && CoXlTestNearFine(NULL, 32, 16, 16) == 0.0f);
+    CHECK(fabsf(CoXlTestNearFine(h, 32, 7, 24) - 0.5f * 224.0f / 225.0f) < 2.0e-3f);
+}
+
+/* ---- a road's shoulders: 4 m spans from 6 m out to 170 m, both sides, a section every 8 m ---- */
 #define TAN20 0.3639702f
 static struct { float from; int left, right; float x0, x1; } g_bank;
 static float Bank(void* c, float x, float y)
@@ -937,7 +1108,7 @@ static void Shoulder(void)
     BankIs(10.0f, 1, 1, 0.0f, 2000.0f);
     CoXlTestGradeShoulder(Bank, g_road, n, out);
     CHECK(fabs(out[0] - 20.0) < 0.2 && fabs(out[3] - 20.0) < 0.2);
-    CHECK(out[4] == 100.0 && fabs(fabs(out[5] - 300.0) - 14.0) < 0.01 && fabs(out[2] - 300.0) > 13.99 && fabs(out[2] - 300.0) < 58.01);
+    CHECK(out[4] == 100.0 && fabs(fabs(out[5] - 300.0) - 14.0) < 0.01 && fabs(out[2] - 300.0) > 13.99 && fabs(out[2] - 300.0) < 170.01);
     g_case = "a bank on one side only is read on that side, whichever it is";
     BankIs(10.0f, 1, 0, 0.0f, 2000.0f);
     CoXlTestGradeShoulder(Bank, g_road, n, out);
@@ -948,11 +1119,11 @@ static void Shoulder(void)
     g_case = "one plane across the road: its slope is the side slope and there is no crease";
     CoXlTestGradeShoulder(PlaneAcross, g_road, n, out);
     CHECK(fabs(out[0] - 2.8624) < 0.01 && out[3] < 1.0e-3);
-    g_case = "the last span ends 58 m out: a bank from 54 m is read, one from 58 m is not";
-    BankIs(54.0f, 1, 1, 0.0f, 2000.0f);
+    g_case = "the last span ends 170 m out, the widest band's end: a bank from 166 m is read, one from 170 m is not";
+    BankIs(166.0f, 1, 1, 0.0f, 2000.0f);
     CoXlTestGradeShoulder(Bank, g_road, n, out);
-    CHECK(fabs(out[0] - 20.0) < 0.2 && fabs(out[3] - 20.0) < 0.2 && fabs(fabs(out[5] - 300.0) - 58.0) < 0.01);
-    BankIs(58.0f, 1, 1, 0.0f, 2000.0f);
+    CHECK(fabs(out[0] - 20.0) < 0.2 && fabs(out[3] - 20.0) < 0.2 && fabs(fabs(out[5] - 300.0) - 170.0) < 0.01);
+    BankIs(170.0f, 1, 1, 0.0f, 2000.0f);
     CoXlTestGradeShoulder(Bank, g_road, n, out);
     CHECK(out[0] == 0.0 && out[3] == 0.0);
     g_case = "a section every fourth sample: a bank between two sections is not read, one at a section is";
@@ -1006,6 +1177,9 @@ int main(void)
     Capped();
     CappedPins();
     Zone();
+    Site();
+    Measures();
+    Detail();
     Shoulder();
     InPlace();
     if (g_failed) { printf("roadgrade: %d of %d check(s) failed\n", g_failed, g_checked); return 1; }

@@ -24,6 +24,8 @@ typedef struct GradeStation
     float gap[GRADE_LINKS];
     uint32_t link[GRADE_LINKS];
     uint8_t links, pinned;
+    uint8_t flat; /* it stands on a pad's flat part */
+    uint8_t held; /* so do all the stations it is linked to: the pad's own ground holds there */
 } GradeStation;
 
 static int GradeLink(GradeStation* s, uint32_t a, uint32_t b, float metres)

@@ -2903,20 +2903,50 @@ static float NearPadWeight(float wx, float wy)
 /* The target at a tile texel (t its height, low the lowpass of C - T there, coarse C there): inside the hidden square
  * the coarse surface at its edge and the tile's own shape from 160 m in; past it the coarse surface for NEAR_BAND_FLAT,
  * then NearBand under it. */
-static float NearTileShare(float wx, float wy, float e)
+static float NearInside(float e)
 {
     if (e > 0) return 0.0f;
     float u = (-e - 16.0f) / 144.0f; u = u < 0 ? 0 : u > 1 ? 1 : u;
-    return (1.0f - NearPadWeight(wx, wy)) * u * u * (3 - 2 * u); /* under the level's pads: the level's surface */
+    return u * u * (3 - 2 * u);
+}
+static float NearTileShare(float wx, float wy, float e)
+{
+    return e > 0 ? 0.0f : (1.0f - NearPadWeight(wx, wy)) * NearInside(e); /* under the level's pads: the level's surface */
+}
+
+/* The tile's own fine relief at a point: its texel's height over the mean of the 15 x 15 texels about it (8 m), a
+ * metre at most. A plane has none, so a hillside is not relief; nor has the tile's outermost 4 m, which is the coarse
+ * surface anyway. */
+#define NEAR_FINE_TEXELS 7
+static float NearFineOf(const float* h, int side, int c, int r)
+{
+    if (h == NULL || c < NEAR_FINE_TEXELS || r < NEAR_FINE_TEXELS || c > side - 1 - NEAR_FINE_TEXELS || r > side - 1 - NEAR_FINE_TEXELS) return 0.0f;
+    double sum = 0;
+    for (int j = r - NEAR_FINE_TEXELS; j <= r + NEAR_FINE_TEXELS; j++)
+        for (int i = c - NEAR_FINE_TEXELS; i <= c + NEAR_FINE_TEXELS; i++) sum += h[(size_t)j * side + i];
+    const float n = 2 * NEAR_FINE_TEXELS + 1, fine = (h[(size_t)r * side + c] - (float)(sum / (n * n))) * 1000.0f;
+    return fine < -1.0f ? -1.0f : fine > 1.0f ? 1.0f : fine;
+}
+static float NearFine(float wx, float wy)
+{
+    const float x0 = g_near.centre[0] - NEAR_SIDE / 2 + NEAR_TEXEL / 2, y0 = g_near.centre[1] + NEAR_SIDE / 2 - NEAR_TEXEL / 2;
+    return NearFineOf(g_near.heights, 4096, (int)floorf((wx - x0) / NEAR_TEXEL + 0.5f), (int)floorf((y0 - wy) / NEAR_TEXEL + 0.5f));
 }
 
 static float RoadGradeSharpen(float wx, float wy, float coarse); /* difficulty_world_roadlevel.c */
+static float RoadGradeDetail(float wx, float wy);
 static float NearTarget(float wx, float wy, float t, float low, float coarse)
 {
     float e = NearOutside(wx, wy);
     if (e > 0) return NearCoarseTri(wx, wy) - NearBand(e); /* the drawn triangles (equal to the bilinear on the edge line) */
     const float share = NearTileShare(wx, wy, e);
-    if (share < 1.0f) coarse = RoadGradeSharpen(wx, wy, coarse); /* a graded road's core at the tile's own detail */
+    if (share < 1.0f)
+    {
+        coarse = RoadGradeSharpen(wx, wy, coarse); /* a graded road's core at the tile's own detail */
+        /* off the worn core a road keeps a part of the ground's fine relief (RoadGradeDetail): a path, not a bench */
+        const float rough = RoadGradeDetail(wx, wy) * NearInside(e);
+        if (rough > 0.0f) coarse += rough * NearFine(wx, wy);
+    }
     return coarse + share * (t + low - coarse);
 }
 
