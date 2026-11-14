@@ -504,6 +504,9 @@ void CoXlTestLwCutSquad(int i, int state, int every, float x, float y)
     if (g_lwWorld.count <= i) g_lwWorld.count = i + 1;
 }
 uint32_t CoXlTestLwCutAsked(int i, uint64_t now) { return LwCutAsked(i, now); }
+void CoXlTestLwCutMode(int mode) { g_lwCut.on = mode != 0; g_lwCut.mode = mode; memset(g_lwCut.gate, 0, sizeof g_lwCut.gate); g_lwCut.gateLongest = 0; }
+void CoXlTestLwCutWaited(int i, uint32_t ms) { g_lwCutAsk[i].first -= ms; }
+void CoXlTestLwCutGate(uint32_t* five) { memcpy(five, g_lwCut.gate, sizeof g_lwCut.gate); five[4] = g_lwCut.gateLongest; }
 int CoXlTestLwCutVerdict(int cut, uint32_t waitedMs) { return LwCutVerdict(cut, waitedMs); }
 uint32_t CoXlTestLwCutCentres(const uint64_t* players, int count, const uint64_t* peer, float (*place)[2], int streamed, int host, int none, uint64_t now, CoCutCentre* c, uint32_t* out)
 {

@@ -622,8 +622,19 @@ int main(void)
         scene[CO_CUTTERS_RUN / 8] = 0x7777; block[2] = 1; queue[7] = 0; co_cutters_swap((uintptr_t)scene);
         CHECK(co_cutters_cut(40.0f, -70.0f, 32.0f, &waiting) == 1);
         CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1 && t.took == 2);
-        /* a cutter the game added itself with no tick alive waits for its run as well */
+        /* an add after those runs waits for a run of its own */
+        g_makeAnswer = 0x81010404u; co_cutters_test_make(&d, forest);
+        CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1 && t.adds == 1);
+        scene[CO_CUTTERS_RUN / 8] = 0;
+        CHECK(co_cutters_cut(40.0f, -70.0f, 32.0f, &waiting) == 0 && waiting == 0);
+        co_cutters_swap((uintptr_t)scene);
+        CHECK(co_cutters_cut(40.0f, -70.0f, 32.0f, &waiting) == 1);
+        /* a level said live again: no tick of it yet, so the cutters are the game's */
+        co_cutters_live(1);
+        CHECK(co_cutters_cut(40.0f, -70.0f, 32.0f, &waiting) == -1);
+        /* a cutter the game added itself with no tick alive waits for its run as well, counted from its make */
         CHECK(co_cutters_tick(&c, 1, GetTickCount() - 1500u, 0, &t) == 1);
+        co_cutters_swap((uintptr_t)scene);
         g_makeAnswer = 0x81010402u;
         CHECK(co_cutters_test_make(&d, forest) == 0x81010402u && g_addSeen == 1);
         CHECK(co_cutters_cut(40.0f, -70.0f, 32.0f, &waiting) == -1); /* the last tick is over a second old */
@@ -632,12 +643,20 @@ int main(void)
         CHECK(co_cutters_cut(40.0f, -70.0f, 32.0f, &waiting) == 0 && waiting == 0);
         co_cutters_swap((uintptr_t)scene);
         CHECK(co_cutters_cut(40.0f, -70.0f, 32.0f, &waiting) == 1);
-        /* an AI world that does not read is a run in flight; none at all is the game's */
-        AiWorld(0x5000);
+        /* an AI world whose run does not read counts as a run in flight; no AI world at all is the game's */
+        uint8_t* pages = VirtualAlloc(NULL, 0x2000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        DWORD was = 0;
+        CHECK(pages != NULL && VirtualProtect(pages + 0x1000, 0x1000, PAGE_NOACCESS, &was));
+        uint8_t* edge = pages + 0x1000 - CO_CUTTERS_RUN; /* its queue reads, its run is on the page that does not */
+        { const uint64_t at = (uint64_t)(uintptr_t)queue; memcpy(edge + CO_CUTTERS_QUEUE, &at, 8); }
+        AiWorld((uint64_t)(uintptr_t)edge);
         CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1);
         g_makeAnswer = 0x81010403u; co_cutters_test_make(&d, forest);
         CHECK(co_cutters_tick(&c, 1, GetTickCount(), 0, &t) == 1 && t.adds == 1);
-        CHECK(co_cutters_cut(40.0f, -70.0f, 32.0f, &waiting) == 0);
+        co_cutters_swap((uintptr_t)edge);
+        CHECK(co_cutters_cut(40.0f, -70.0f, 32.0f, &waiting) == 0 && waiting == 0);
+        co_cutters_swap((uintptr_t)edge);
+        CHECK(co_cutters_cut(40.0f, -70.0f, 32.0f, &waiting) == 1);
         AiWorld(0);
         CHECK(co_cutters_cut(40.0f, -70.0f, 32.0f, &waiting) == -1);
         /* the level's end */

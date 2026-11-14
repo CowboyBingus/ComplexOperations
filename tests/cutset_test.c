@@ -815,13 +815,23 @@ static void CutIn(void)
     co_cutset_made(&g_set, H(3), 100.0f, 132.5f, 1);  /* past it, in a cell the disc touches */
     co_cutset_made(&g_set, H(4), 60.0f, 60.0f, 1);    /* in the disc's square, 56 m off */
     co_cutset_made(&g_set, H(5), 3000.0f, 3000.0f, 1);
+    co_cutset_made(&g_set, H(10), 105.0f, 100.0f, 0); /* never added by the game: nothing to wait for */
     CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 7, 0, &waiting) == 0 && waiting == 2);
+    /* the cells on every side of the place's own */
+    CHECK(co_cutset_cut(&g_set, 130.0f, 100.0f, 32.0f, 7, 0, &waiting) == 0 && waiting == 1);
+    CHECK(co_cutset_cut(&g_set, 110.0f, 130.0f, 32.0f, 7, 0, &waiting) == 0 && waiting == 3);
+    CHECK(co_cutset_cut(&g_set, 90.0f, 100.0f, 32.0f, 7, 0, &waiting) == 0 && waiting == 1);
+    CHECK(co_cutset_cut(&g_set, 110.0f, 90.0f, 32.0f, 7, 0, &waiting) == 0 && waiting == 1);
     CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 33.0f, 7, 0, &waiting) == 0 && waiting == 3);
     CHECK(co_cutset_cut(&g_set, -500.0f, 100.0f, 32.0f, 7, 0, &waiting) == 1 && waiting == 0);
     /* the tick's adds carry the set's epoch: no run has begun since */
     g_set.epoch = 7;
     Tick(&squad, 1, 1000, 0);
     CHECK(g_out.adds == 4 && co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 7, 0, &waiting) == 0 && waiting == 0);
+    /* one more made beside those that are on: it alone waits */
+    co_cutset_made(&g_set, H(9), 111.0f, 100.0f, 1);
+    CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 9, 0, &waiting) == 0 && waiting == 1);
+    { const uint32_t back[1] = {H(9)}; co_cutset_gone(&g_set, back, 1); }
     /* one began: cut in once it is not in flight; a second began: the first has ended */
     CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 8, 1, &waiting) == 0);
     CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 8, 0, &waiting) == 1);
