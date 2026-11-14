@@ -683,7 +683,7 @@ static int LwDensityRoom(const float* pos, uint32_t members, uint32_t held, char
     if (g_lwDensity.fullMax > 0 && full >= g_lwDensity.fullMax) /* C9: the host's AI time grows with these units */
     { g_lwDensity.refusedFull++; snprintf(why, whyLen, "the full-update cap: %d units of %d", full, g_lwDensity.fullMax); return 0; }
     if (g_lwDensity.units[b] + (int)members + (int)held > g_lwDensity.budget[b])
-    { snprintf(why, whyLen, "the cap: bubble %d online + %u over %d (%d players)", g_lwDensity.units[b], members, g_lwDensity.budget[b], g_lwDensity.players[b]); return 0; }
+    { snprintf(why, whyLen, "the cap: bubble %d online + %u + %u held over %d (%d players)", g_lwDensity.units[b], members, held, g_lwDensity.budget[b], g_lwDensity.players[b]); return 0; }
     return 1;
 }
 
@@ -704,14 +704,22 @@ static float LwDensityPopulateUnits(int eff)
     return g_lwDensity.factor * (float)(eff < 48 ? eff : 48);
 }
 
+/* The units the loader may have online: every bubble's budget under the density rules, else the effective cap (the
+ * old ceiling's own limit, LwRoomCap). */
+static int LwUnitBudget(void)
+{
+    if (g_lwDensity.on != 1) return g_lwWorld.eff;
+    int total = 0;
+    for (int b = 0; b < g_lwDensity.count; b++) total += g_lwDensity.budget[b];
+    return total;
+}
+
 /* Far squads take a quarter of the budgets under the density rules (D: the extra units go to 150-250 m, where players
  * meet them), half of the effective cap otherwise. */
 static float LwFarShareLimit(void)
 {
     if (g_lwDensity.on != 1) return LW_FAR_SHARE * (float)g_lwWorld.eff;
-    int total = 0;
-    for (int b = 0; b < g_lwDensity.count; b++) total += g_lwDensity.budget[b];
-    return 0.25f * (float)total;
+    return 0.25f * (float)LwUnitBudget();
 }
 
 static int LwDensitySameBubble(const LwSquad* a, const LwSquad* b)

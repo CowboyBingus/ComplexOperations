@@ -34,6 +34,12 @@ float CoXlTestLwAibSteer(float stock, float cur, float lat);
 float CoXlTestLwAibWorld(uintptr_t w, float stock, float lat, int on, ULONGLONG now);
 int CoXlTestLwNavLeft(int read, uint32_t state);
 void CoXlTestLwFpJoin(double ms);
+void CoXlTestLwAibReset(void);
+void CoXlTestLwNavWindow(uint8_t (*ask)(uintptr_t, void*), uint32_t ms);
+int CoXlTestLwNavStartAsk(uintptr_t w);
+void CoXlTestLwNavMoreCounts(uint32_t* v);
+double CoXlTestLwNavEndMs(double set);
+int CoXlTestLwNavMarksHeld(void);
 void CoXlTestLwNavSchedFakes(void (*sched)(void), volatile uintptr_t* listVar, volatile uint32_t* navCount, int pauseOff);
 void CoXlTestLwNavSched(uint32_t flush, ULONGLONG now);
 void CoXlTestLwNavFirstBudget(uint32_t us, uint32_t spentUs);
@@ -76,7 +82,8 @@ static uint8_t FakeInFlight(uintptr_t w) { (void)w; if (g_locked) g_lockedCalls+
 static int g_stepDone, g_drives, g_driveEnds; static float g_driveSec;
 static uint8_t FakeStepDone(uintptr_t w) { (void)w; return (uint8_t)g_stepDone; }
 /* 0xBD04A0: the run driven for `seconds`; it ends in that time when g_driveEnds */
-static void FakeDrive(uintptr_t w, float seconds) { (void)w; g_drives++; g_driveSec = seconds; if (g_driveEnds) g_stepDone = 1; }
+static DWORD g_driveMs;
+static void FakeDrive(uintptr_t w, float seconds) { (void)w; g_drives++; g_driveSec = seconds; if (g_driveMs) Sleep(g_driveMs); if (g_driveEnds) g_stepDone = 1; }
 static void FakeWait(uintptr_t w) { (void)w; g_waits++; if (g_locked) g_lockedCalls++; }
 static void FakeCommit(uintptr_t w, void* p, int n) { (void)w; (void)p; (void)n; g_commits++; Flight(0); if (g_took) Took(IDX); g_took = 0; if (g_locked) g_lockedCalls++; }
 static uintptr_t FakeStep(uintptr_t w, void* block, void* runner, int threads)
@@ -121,7 +128,7 @@ static void Reset(const char* name, int32_t threads, uintptr_t tasks, uintptr_t 
     memset(g_step, 0, sizeof g_step);
     g_permits = g_joins = g_unloads = g_loads = g_makes = g_frees = g_steps = g_waits = g_commits = g_inFlight = 0;
     g_model = g_queued2 = g_locked = g_enters = g_leaves = g_lockedCalls = 0;
-    g_queued = 3; g_grant = 1; g_made = NULL; g_stepDone = 1; g_drives = g_driveEnds = 0; g_driveSec = 0;
+    g_queued = 3; g_grant = 1; g_made = NULL; g_stepDone = 1; g_drives = g_driveEnds = 0; g_driveSec = 0; g_driveMs = 0;
     Put(g_table + 0x80 * IDX, (uintptr_t)g_aiw);
     Put(g_table + 0x80 * IDX + 0x20, 1);
     Put(g_table + 0x80 * IDX + 0x28, RUNNER);
@@ -384,6 +391,7 @@ static void ResetHold(const char* name)
     g_navsVar = (uintptr_t)g_navs;
     CoXlTestLwNavHold((uintptr_t)&g_navsVar, FakeEnter, FakeLeave);
     CoXlTestLwNavRing(0, 0);
+    CoXlTestLwAibReset();
 }
 /* The game's work on a popped record: a built cell's unload, then every cell's load. In play it must never meet a swap
  * of its world that is not applied yet, and a built cell's must find no step in flight and no section command of its
@@ -695,6 +703,17 @@ static void TestSchedPause(void)
     CoXlTestLwNavSched(0, 40); CHECK(g_scheds == 4); /* 0 starts away, 1 can start: left out */
     g_ringNext = 99;
     CoXlTestLwNavSched(0, 50); CHECK(g_scheds == 5); /* 1 away: that one start does not reach it */
+    ResetHold("one call's starts are not cut: budgets over the ring's half still count, and with no record waiting the scheduler runs");
+    SchedOn(0); JobBudget(IDX, 400, 0); JobBudget(IDX2, 300, 0);
+    CoXlTestLwNavSched(0, 0); CoXlTestLwNavTickCounts(v); CHECK(v[7] == 700 && g_scheds == 1);
+    Flight(1); Ring(100, 312);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 0);
+    CoXlTestLwNavSched(0, 10); CHECK(g_scheds == 1); /* 300 starts away, 700 can start: left out */
+    JobBudget(IDX2, 0, 0); JobBudget(IDX, 300, 0);
+    CoXlTestLwNavSched(0, 20); CHECK(g_scheds == 2); /* 300 away, 300 can start: the last one stops short of it */
+    JobBudget(IDX, 301, 0);
+    CoXlTestLwNavSched(0, 30); CHECK(g_scheds == 2);
     ResetHold("a record of no world's rules does not hold the scheduler");
     SchedOn(0); JobBudget(IDX, 8, 2);
     Ring(100, 100);
@@ -863,6 +882,260 @@ static void TestTickSummary(void)
     CoXlTestLwNavTickCounts(v); CHECK(v[10] == 1); /* a pop with no scheduler call before it is no timed tick */
     CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
     CHECK(fake_host_logged("living world: nav tick (30 s): 1 tick(s) timed") && fake_host_logged("first builds: 2 in ") && fake_host_logged("at most 2 a tick"));
+}
+
+static void Budget(float v); static void RunAge(float s);
+/* A drain that did nothing and left its record on the list made no swap: no marks are held for it. The swaps that do
+ * go on unsynchronised are counted by where. */
+static void TestUnsynced(void)
+{
+    uint32_t m[10], swaps, steps, parallel, refused, noLoad;
+    ResetHold("a due record's drain meets the run's bound: the record stays, nothing is refused, marks go on");
+    SchedOn(0); JobBudget(IDX, 8, 2); CoXlTestLwNavDrive(FakeDrive);
+    Section(IDX, 3, 40); Flight(1); g_stepDone = 0; Ring(100, 95);
+    Push(0, IDX, 3, 0);
+    CoXlTestLwNavSched(0, 10); CHECK(Tick(0, 10) == 0);
+    CoXlTestLwNavSched(0, 5010);
+    CHECK(Tick(0, 5010) == 0 && g_drives == 1 && CoXlTestLwNavBounded() == 1);
+    Counts(&swaps, &steps, &parallel, &refused, &noLoad); CoXlTestLwNavMoreCounts(m);
+    CHECK(refused == 0 && m[8] == 0 && m[4] + m[5] + m[6] == 0);
+    CHECK(CoXlTestLwNavMarksHeld() == 0 && !fake_host_logged("idle again"));
+    ResetHold("a due record's drain meets the queue's bound: nothing refused either");
+    SchedOn(0); JobBudget(IDX, 8, 2); CoXlTestLwNavDrive(FakeDrive);
+    Section(IDX, 3, 40); Flight(1); g_queued = 33; Ring(100, 95);
+    Push(0, IDX, 3, 0);
+    CoXlTestLwNavSched(0, 10); CHECK(Tick(0, 10) == 0);
+    CoXlTestLwNavSched(0, 5010);
+    /* the drain committed the run that was over, so the record then leaves by the hold's own rule, with no step */
+    CHECK(Tick(0, 5010) == 1 && g_commits == 1 && g_steps == 0 && CoXlTestLwNavBounded() == 1 && g_broken == 0);
+    CHECK(fake_host_logged(" and more is queued than its step may apply, nothing done") && fake_host_logged("swapped in with the world idle, for its next step"));
+    Counts(&swaps, &steps, &parallel, &refused, &noLoad); CoXlTestLwNavMoreCounts(m);
+    CHECK(refused == 0 && m[8] == 0 && CoXlTestLwNavMarksHeld() == 0);
+    CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
+    CHECK(fake_host_logged("unsynchronised swaps: 0 at a tick repeated with no game frame, 0 at a completion the pop did not let through, 0 at a level's end; "
+        "rebuild marks held on 0 frame(s) after one"));
+    ResetHold("without the scheduler in hand the due record leaves beside the run: that one is unsynchronised");
+    CoXlTestLwNavDrive(FakeDrive);
+    Flight(1); g_stepDone = 0; Ring(100, 90);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 1);
+    Counts(&swaps, &steps, &parallel, &refused, &noLoad); CoXlTestLwNavMoreCounts(m);
+    CHECK(refused == 1 && m[8] == 1 && m[5] == 1 && m[4] == 0 && m[6] == 0);
+    ResetHold("a tick repeated with no game frame: its swap goes on beside the run, counted as that");
+    CoXlTestLwNavDrive(FakeDrive);
+    Section(IDX, 3, 40); Flight(1); g_stepDone = 0;
+    Push(0, IDX, 3, 0);
+    CHECK(CoXlTestLwNavPop((uintptr_t)g_list, 0, 0) == 0);
+    uintptr_t again = CoXlTestLwNavPop((uintptr_t)g_list, 0, 0);
+    CHECK(again == (uintptr_t)g_rec[0]); Process(again, 0);
+    Counts(&swaps, &steps, &parallel, &refused, &noLoad); CoXlTestLwNavMoreCounts(m);
+    CHECK(refused == 1 && m[4] == 1 && m[5] == 0 && m[6] == 0 && m[8] == 1);
+    CHECK(CoXlTestLwNavMarksHeld() == 1 && CoXlTestLwNavMarksHeld() == 1); /* the run is in flight: marks wait */
+    CoXlTestLwNavMoreCounts(m); CHECK(m[9] == 2);
+    Flight(0); g_queued = 0;
+    CHECK(CoXlTestLwNavMarksHeld() == 0);
+    CHECK(fake_host_logged("living world: nav: the world is idle again after 1 unsynchronised swap(s); rebuild marks go on"));
+    CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
+    CHECK(fake_host_logged("unsynchronised swaps: 1 at a tick repeated with no game frame, 0 at a completion the pop did not let through, 0 at a level's end; "
+        "rebuild marks held on 2 frame(s) after one"));
+    CoXlTestLwNavMoreCounts(m); CHECK(m[4] == 0 && m[9] == 0); /* the span's counts start again */
+    ResetHold("a due built cell with a query job reading: let out with no permit, counted as that");
+    SchedOn(0); JobBudget(IDX, 8, 2); CoXlTestLwNavDrive(FakeDrive);
+    Section(IDX, 3, 40); g_grant = 0; Ring(100, 95);
+    Push(0, IDX, 3, 0);
+    CoXlTestLwNavSched(0, 10); CHECK(Tick(0, 10) == 0);
+    CoXlTestLwNavSched(0, 5010);
+    CHECK(Tick(0, 5010) == 1 && g_unloads == 1 && g_loads == 1);
+    Counts(&swaps, &steps, &parallel, &refused, &noLoad); CoXlTestLwNavMoreCounts(m);
+    CHECK(refused == 1 && m[5] == 1 && m[4] == 0 && m[6] == 0 && m[8] == 1);
+    ResetHold("a level's end: counted as that");
+    CoXlTestLwNavDrive(FakeDrive);
+    Section(IDX, 3, 40); Flight(1); g_stepDone = 0;
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(1, 0) == 1);
+    Counts(&swaps, &steps, &parallel, &refused, &noLoad); CoXlTestLwNavMoreCounts(m);
+    CHECK(refused == 1 && m[6] == 1 && m[4] == 0 && m[5] == 0);
+    ResetHold("a stopped nav's record behind an unapplied swap whose drain does nothing: a level's end");
+    CoXlTestLwNavDrive(FakeDrive);
+    Section(IDX, 3, 40);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 1);          /* the swap, left to the next run */
+    Driver(); g_stepDone = 0;        /* which is in flight and not over */
+    NavState(IDX, 1);
+    Push(1, IDX, 5, 0);
+    CHECK(Tick(0, 10) == 1);
+    CoXlTestLwNavMoreCounts(m); CHECK(m[6] == 1 && m[4] == 0 && m[5] == 0 && m[8] == 1);
+}
+
+/* The level's end: its drains' bounds are an attempt's, their sum is the level's. */
+static void TestEndAll(void)
+{
+    ResetHold("a level's end drain counts its time; with the level's time spent the next does nothing");
+    CoXlTestLwNavDrive(FakeDrive);
+    Section(IDX, 3, 40); Section(IDX, 4, 41); Flight(1); g_stepDone = 0; g_driveMs = 3;
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(1, 0) == 1 && g_drives == 1 && CoXlTestLwNavEndMs(-1) >= 2.0 && CoXlTestLwNavEndMs(-1) < 500.0);
+    g_driveMs = 0;
+    CoXlTestLwNavEndMs(999.0);
+    Push(1, IDX, 4, 0);
+    CHECK(Tick(1, 10) == 1 && g_drives > 1); /* under the level's time: tried */
+    CoXlTestLwNavEndMs(1000.0);
+    uint32_t bounded = CoXlTestLwNavBounded(); int drives = g_drives, permits = g_permits;
+    Section(IDX, 5, 42); Push(2, IDX, 5, 0);
+    CHECK(Tick(1, 20) == 1 && g_drives == drives && g_permits == permits && CoXlTestLwNavBounded() > bounded && g_unloads == 3);
+    CHECK(fake_host_logged(" and the level's end has had its drains' time, nothing done"));
+    ResetHold("the level's time is the end's only, and the next level's starts again");
+    SchedOn(0); JobBudget(IDX, 8, 2); CoXlTestLwNavDrive(FakeDrive);
+    Flight(1); g_stepDone = 0; Ring(100, 95);
+    Push(0, IDX, 3, 0);
+    CoXlTestLwNavSched(0, 10); CHECK(Tick(0, 10) == 0);
+    CoXlTestLwNavEndMs(5000.0);
+    CoXlTestLwNavSched(0, 5010);
+    CHECK(Tick(0, 5010) == 0 && g_drives == 1 && CoXlTestLwNavEndMs(-1) == 5000.0); /* play: driven, not counted */
+    CoXlTestLwNavLevel(2);
+    CHECK(Tick(1, 5020) == 1 && CoXlTestLwNavEndMs(-1) < 1000.0);
+    CoXlTestLwNavLevel(1);
+}
+
+static int g_asks, g_work;
+static uint8_t FakeAsk(uintptr_t w, void* block) { (void)w; (void)block; g_asks++; return (uint8_t)g_work; }
+/* The first builds' budget is a tick's; the window they leave in is kept open over the ticks after a run. */
+static void TestWindow(void)
+{
+    uint32_t m[10];
+    ResetHold("first builds waiting: how many and the oldest one's age, now and the span's most");
+    Flight(1);
+    Push(0, IDX, 4, 0);
+    CHECK(Tick(0, 100) == 0);
+    Push(1, IDX, 5, 0); Push(2, IDX, 6, 0);
+    CHECK(Tick(0, 800) == 0);
+    CoXlTestLwNavMoreCounts(m); CHECK(m[0] == 3 && m[1] == 700 && m[2] == 3);
+    Flight(0);
+    CHECK(Tick(0, 900) == 3);
+    CoXlTestLwNavMoreCounts(m); CHECK(m[0] == 0 && m[1] == 0 && m[2] == 3);
+    CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
+    CHECK(fake_host_logged("first builds waiting now 0, the oldest 0 ms (this span at most 3, 700 ms); a run's start put off 0 time(s) for them"));
+    ResetHold("a built cell's record is not a first build waiting");
+    Section(IDX, 3, 40); Flight(1);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 0);
+    CoXlTestLwNavMoreCounts(m); CHECK(m[0] == 0 && m[2] == 0);
+    ResetHold("the budget leaves first builds waiting: the world's next run is put off a step, once, and the next tick takes more");
+    g_asks = 0; g_work = 1; CoXlTestLwNavWindow(FakeAsk, 500);
+    Flight(1);
+    for (int k = 0; k < 6; k++) Push(k, IDX, 4 + k, 0);
+    CHECK(Tick(0, 0) == 0);
+    CHECK(CoXlTestLwNavStartAsk((uintptr_t)g_aiw) == 1 && g_asks == 1); /* nothing over its budget yet: the game's answer */
+    Flight(0);
+    CoXlTestLwNavFirstBudget(1000, 5000);
+    CHECK(Tick(0, 10) == 1);
+    CHECK(CoXlTestLwNavStartAsk((uintptr_t)g_aiw2) == 1 && g_asks == 2);   /* another world's run is its own */
+    CHECK(CoXlTestLwNavStartAsk(0x1234) == 1 && g_asks == 3);               /* and a world the table has not */
+    CHECK(CoXlTestLwNavStartAsk((uintptr_t)g_aiw) == 0 && g_asks == 3);    /* no run starts: the window stays */
+    CHECK(CoXlTestLwNavStartAsk((uintptr_t)g_aiw) == 1 && g_asks == 4);    /* once a tick's wish; this run's start ends the window's time */
+    StepAtOnce();
+    CoXlTestLwNavFirstBudget(1000, 5000);
+    CHECK(Tick(0, 26) == 1 && g_done[1] == 1 && g_broken == 0);
+    CHECK(CoXlTestLwNavStartAsk((uintptr_t)g_aiw) == 0);                   /* a window of its own, from 26 */
+    CoXlTestLwNavFirstBudget(1000, 5000);
+    CHECK(Tick(0, 525) == 1);
+    CHECK(CoXlTestLwNavStartAsk((uintptr_t)g_aiw) == 0);                   /* 499 ms of it */
+    CoXlTestLwNavFirstBudget(1000, 5000);
+    CHECK(Tick(0, 526) == 1);
+    g_asks = 0;
+    CHECK(CoXlTestLwNavStartAsk((uintptr_t)g_aiw) == 1 && g_asks == 1);    /* 500 ms: a run starts whatever waits */
+    StepAtOnce();
+    CoXlTestLwNavFirstBudget(1000, 5000);
+    CHECK(Tick(0, 542) == 1);
+    CHECK(CoXlTestLwNavStartAsk((uintptr_t)g_aiw) == 0);                   /* after that run: the next window */
+    CoXlTestLwNavMoreCounts(m); CHECK(m[3] == 4 && m[0] == 1);
+    CoXlTestLwNavFirstBudget(1000, 5000);
+    CHECK(Tick(0, 558) == 1);
+    CHECK(CoXlTestLwNavStartAsk((uintptr_t)g_aiw) == 1);                   /* none left waiting: no wish */
+    CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
+    CHECK(fake_host_logged("a run's start put off 4 time(s) for them"));
+    ResetHold("the world has no work: the game's no is not a start, and the window's time runs on");
+    g_asks = 0; g_work = 0; CoXlTestLwNavWindow(FakeAsk, 500);
+    Flight(1);
+    for (int k = 0; k < 3; k++) Push(k, IDX, 4 + k, 0);
+    CHECK(Tick(0, 0) == 0);
+    Flight(0);
+    CoXlTestLwNavFirstBudget(1000, 5000);
+    CHECK(Tick(0, 10) == 1 && CoXlTestLwNavStartAsk((uintptr_t)g_aiw) == 0);
+    CHECK(CoXlTestLwNavStartAsk((uintptr_t)g_aiw) == 0 && g_asks == 1);    /* the game's own answer */
+    CoXlTestLwNavFirstBudget(1000, 5000);
+    CHECK(Tick(0, 510) == 1);
+    CHECK(CoXlTestLwNavStartAsk((uintptr_t)g_aiw) == 0 && g_asks == 2);    /* past the bound: asked, not put off */
+    ResetHold("a level's end keeps no window: a wish made before it is dropped");
+    g_asks = 0; g_work = 1; CoXlTestLwNavWindow(FakeAsk, 500);
+    Flight(1);
+    for (int k = 0; k < 3; k++) Push(k, IDX, 4 + k, 0);
+    CHECK(Tick(0, 0) == 0);
+    Flight(0);
+    CoXlTestLwNavFirstBudget(1000, 5000);
+    CHECK(Tick(0, 10) == 1);
+    CHECK(Tick(1, 20) == 2);
+    CHECK(CoXlTestLwNavStartAsk((uintptr_t)g_aiw) == 1 && g_asks == 1);
+    ResetHold("the window switched off, or no hook: the budget's rest waits for the next run's end");
+    g_asks = 0; g_work = 1; CoXlTestLwNavWindow(FakeAsk, 0);
+    Flight(1);
+    for (int k = 0; k < 3; k++) Push(k, IDX, 4 + k, 0);
+    CHECK(Tick(0, 0) == 0);
+    Flight(0);
+    CoXlTestLwNavFirstBudget(1000, 5000);
+    CHECK(Tick(0, 10) == 1 && CoXlTestLwNavStartAsk((uintptr_t)g_aiw) == 1 && g_asks == 1);
+    CoXlTestLwNavWindow(NULL, 500);
+    CoXlTestLwNavFirstBudget(1000, 5000);
+    CHECK(Tick(0, 26) == 1);
+    CoXlTestLwNavWindow(FakeAsk, 500);
+    CHECK(CoXlTestLwNavStartAsk((uintptr_t)g_aiw) == 1);
+    ResetHold("first builds behind a swap not applied yet need that run: no window is kept for them");
+    g_asks = 0; g_work = 1; CoXlTestLwNavWindow(FakeAsk, 500);
+    Section(IDX, 3, 40);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 1);          /* the built cell's swap, queued for the next run */
+    Push(1, IDX, 5, 0); Push(2, IDX, 6, 0);
+    CoXlTestLwNavFirstBudget(1000, 5000);
+    CHECK(Tick(0, 10) == 0);
+    CHECK(CoXlTestLwNavStartAsk((uintptr_t)g_aiw) == 1 && g_asks == 1);
+}
+
+/* The hold has no forced end; past its bound it says what waits, each time the bound passes again. */
+static void TestHoldBound(void)
+{
+    uint32_t m[10];
+    ResetHold("a completion held 60 s: said once, with what waits; again at 120 s");
+    Section(IDX, 3, 40); Flight(1); Budget(0.008f); RunAge(42.5f); g_queued = 2000;
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 1000) == 0);
+    CHECK(Tick(0, 60999) == 0 && !fake_host_logged("HOLD BOUND"));
+    CHECK(Tick(0, 61000) == 0);
+    CHECK(fake_host_logged("living world: nav: HOLD BOUND: world 1's oldest completion has waited 60000 ms, over the hold's 60000 ms, with 1 waiting: nothing is "
+        "forced (a step finished here would hold the frame for the 2000 command(s) queued and the run in flight; a swap beside that run is the cutter's "
+        "fault); no new rebuild is marked meanwhile and the cells' navmesh stays as built; run in flight 1, 42.5 s old, budget 8000 us"));
+    g_fake.log[0] = 0;
+    CHECK(Tick(0, 90000) == 0 && Tick(0, 120999) == 0 && !fake_host_logged("HOLD BOUND"));
+    CHECK(Tick(0, 121000) == 0 && fake_host_logged("has waited 120000 ms, over the hold's 60000 ms"));
+    CoXlTestLwNavMoreCounts(m); CHECK(m[7] == 4);
+    CHECK(g_joins == 0 && g_waits == 0 && g_commits == 0 && g_steps == 0 && g_unloads == 0); /* nothing forced */
+    CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
+    CHECK(fake_host_logged("a completion past the hold's 60000 ms on 4 tick(s)"));
+    ResetHold("the next record's wait is its own; eight lines a level");
+    Section(IDX, 3, 40); Section(IDX, 4, 41); Flight(1);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 1000) == 0 && Tick(0, 61000) == 0 && fake_host_logged("HOLD BOUND"));
+    Flight(0);
+    CHECK(Tick(0, 61010) == 1);
+    Driver(); Tick(0, 61020); Driver(); Tick(0, 61030);
+    g_fake.log[0] = 0;
+    Flight(1); Push(1, IDX, 4, 0);
+    CHECK(Tick(0, 62000) == 0 && Tick(0, 121999) == 0 && !fake_host_logged("HOLD BOUND"));
+    CHECK(Tick(0, 122000) == 0 && fake_host_logged("has waited 60000 ms"));
+    for (int k = 2; k < 12; k++) Tick(0, 62000 + 60000ull * (ULONGLONG)k);
+    CHECK(fake_host_logged("has waited 420000 ms") && !fake_host_logged("has waited 480000 ms"));
+    CoXlTestLwNavLevel(2); g_fake.log[0] = 0;
+    CHECK(Tick(0, 900000) == 0 && Tick(0, 960000) == 0 && fake_host_logged("HOLD BOUND"));
+    CoXlTestLwNavLevel(1);
 }
 
 /* A fault in the cutter: what the note holds, and which faults it is written for. */
@@ -1259,6 +1532,21 @@ static void TestHoldRaise(void)
     CHECK(Aib(1, 2016) == 0.004f);
     CoXlTestLwNavSwapSummary(91000);
     CHECK(fake_host_logged("AI budget raised to 4000 us on 2 frame(s) (0 for a backlog, no completion held); the AI joins after them 2.00 ms on average, 2.00 ms at worst (1 frame(s)); 0 tick(s)"));
+    ResetHold("the largest of the lever's, the AI drain's and the hold's raise is written, never a sum");
+    Section(IDX, 3, 40); Flight(1); Budget(0.002f);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 1000) == 0 && Aib(1, 1100) == 0.004f);
+    RunAge(3.5f);
+    CHECK(Aib(1, 1200) == 0.008f && Aib(0, 1216) == 0.008f); /* a run 3 s old: the drain's 8 ms, over the hold's 4 */
+    RunAge(1.0f);
+    CHECK(Aib(1, 1300) == 0.004f);                           /* young again: the hold's alone */
+    Driver();
+    CHECK(Tick(0, 1316) == 1);
+    Driver(); Tick(0, 1332); Driver(); CHECK(Tick(0, 1348) == 0 && !CoXlTestLwNavHoldBusy());
+    Flight(1); RunAge(3.5f);
+    CHECK(Aib(1, 1400) == 0.008f);                           /* nothing held: the drain over the lever's low one */
+    RunAge(0.2f);
+    CHECK(Aib(1, 1416) == 0.0005f && Aib(0, 1432) == 0.002f);
     ResetHold("records the flush tick took are not held any more");
     Section(IDX, 3, 40); Flight(1); Budget(0.002f);
     Push(0, IDX, 3, 0);
@@ -1282,12 +1570,16 @@ static void TestHoldRaise(void)
     CHECK(v[2] == 2 && v[5] == 2);
     Flight(0);
     CHECK(Aib(1, 1000) == 0.002f);  /* no run to speed up: the game's own for the one that starts */
-    Flight(1); g_queued = 1; RunAge(4.999f);
+    Flight(1); g_queued = 1; RunAge(2.999f);
     CHECK(Aib(1, 1000) == 0.0005f);
+    RunAge(4.999f);
+    CHECK(Aib(1, 1000) == 0.008f);  /* a run 3 s old: the AI drain's budget, and no raise of the hold's yet */
+    HoldCounts(v);
+    CHECK(v[2] == 2);
     RunAge(5.0f);
-    CHECK(Aib(1, 1000) == 0.004f && Aib(0, 1000) == 0.004f);
+    CHECK(Aib(1, 1000) == 0.008f && Aib(0, 1000) == 0.008f); /* the hold's raise is counted; the drain's is the larger */
     g_queued = 0; RunAge(900.0f);
-    CHECK(Aib(1, 1000) == 0.0005f); /* an old run with nothing behind it */
+    CHECK(Aib(1, 1000) == 0.008f);  /* an old run with nothing behind it: the drain's alone */
     g_queued = 1; RunAge(__builtin_nanf(""));
     CHECK(Aib(1, 1000) == 0.0005f);
     RunAge(60.0f); Flight(0);
@@ -1298,7 +1590,7 @@ static void TestHoldRaise(void)
     CHECK(fake_host_logged("AI budget raised to 4000 us on 4 frame(s) (4 for a backlog, no completion held); "));
     g_fake.log[0] = 0;
     Flight(1);
-    CHECK(Aib(1, 32000) == 0.004f);
+    CHECK(Aib(1, 32000) == 0.008f);
     CoXlTestLwNavSwapSummary(61000);
     CHECK(fake_host_logged("AI budget raised to 4000 us on 1 frame(s) (1 for a backlog, no completion held); ")); /* counted since the last line */
     ResetHold("in play the summary is written with nothing to count: the queue, the run and the slots");
@@ -1579,6 +1871,10 @@ int main(void)
     TestDrainBounds();
     TestFirstBudget();
     TestTickSummary();
+    TestUnsynced();
+    TestEndAll();
+    TestWindow();
+    TestHoldBound();
     TestCutFault();
     TestHoldWaits();
     TestHoldOnePerRun();

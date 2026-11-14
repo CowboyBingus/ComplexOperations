@@ -25,6 +25,7 @@ static uint8_t* Reset(const char* name)
     g_coApi = fake_host_reset(CO_GAME_BUILD);
     g_coMod = (HfMod*)&g_fake;
     co_nav_test_reset();
+    co_exe_own_reset();
     fake_stock_nav(g_fake.image);
     VirtualProtect(g_fake.exe, FAKE_EXE_SIZE, PAGE_EXECUTE_READWRITE, &old);
     /* the host's check fails on the step, as it does on the jump the stubs write */
@@ -67,6 +68,42 @@ int main(void)
     g_case = "the host's own check passes";
     g_fake.noMatch[0] = 0;
     CHECK(co_exe_code_matches((uintptr_t)exe + CO_NAVTRIM_CELL, kPin) == 1);
+
+    /* The nav hold writes its own call over the nav tick's scheduler call, which the nav job lever pins. */
+    static const uint8_t engine[5] = {0xE8, 0x41, 0xF7, 0xFF, 0xFF}, hold[5] = {0xE8, 0x10, 0x20, 0x30, 0x00}, other[5] = {0xE8, 0x11, 0x20, 0x30, 0x00};
+    static const char kCall[] = "E8 41 F7 FF FF";
+    exe = Reset("the mod's own call over a pinned one reads as the engine's");
+    const uintptr_t site = (uintptr_t)exe + 0x7B8ABAu;
+    g_fake.noMatch[0] = site - (uintptr_t)g_fake.image; /* the host's check fails on any change there */
+    g_fake.noMatch[1] = site - 3 - (uintptr_t)g_fake.image; g_fake.noMatch[2] = site + 1 - (uintptr_t)g_fake.image;
+    memcpy((void*)site, engine, 5);
+    CHECK(co_exe_code_matches(site, kCall) == 1);
+    memcpy((void*)site, hold, 5);
+    CHECK(co_exe_code_matches(site, kCall) == 0);        /* not recorded: a change like any other */
+    CHECK(co_exe_own_write(site, engine, hold, 5) == 0);
+    CHECK(co_exe_code_matches(site, kCall) == 1);
+    CHECK(co_exe_code_matches(site - 3, "00 00 00 E8 41 F7 FF FF 00") == 1); /* a pin that only overlaps it */
+    CHECK(co_exe_code_matches(site + 1, "41 F7 FF FF") == 1);
+
+    g_case = "another call there, or a changed byte beside it, still fails";
+    memcpy((void*)site, other, 5);
+    CHECK(co_exe_code_matches(site, kCall) == 0);
+    memcpy((void*)site, hold, 5);
+    exe[0x7B8ABAu + 5] = 0x90;
+    CHECK(co_exe_code_matches(site, "E8 41 F7 FF FF 00") == 0 && co_exe_code_matches(site, kCall) == 1);
+    exe[0x7B8ABAu + 5] = 0;
+
+    g_case = "the engine's call put back reads as itself; a site is recorded once; more than 8 bytes are refused";
+    memcpy((void*)site, engine, 5);
+    CHECK(co_exe_code_matches(site, kCall) == 1);
+    CHECK(co_exe_own_write(site, engine, other, 5) == 0);
+    memcpy((void*)site, hold, 5);
+    CHECK(co_exe_code_matches(site, kCall) == 0);        /* the record is the newer write's */
+    CHECK(co_exe_own_write(site + 0x100, engine, hold, 9) == 1 && co_exe_own_write(site + 0x100, engine, hold, 0) == 1);
+    for (int k = 1; k < 8; k++) CHECK(co_exe_own_write(site + 0x10u * (uintptr_t)k, engine, hold, 5) == 0);
+    CHECK(co_exe_own_write(site + 0x200, engine, hold, 5) == 1); /* the table is full */
+    co_exe_own_reset();
+    CHECK(co_exe_code_matches(site, kCall) == 0);
 
     if (g_failed) { printf("exepins: %d check(s) failed\n", g_failed); return 1; }
     printf("exepins: all checks passed\n");

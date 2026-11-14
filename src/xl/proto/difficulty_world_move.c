@@ -532,6 +532,15 @@ static int MoveListed(uint64_t countAt, uint64_t listAt, uint64_t object)
     return 0;
 }
 
+/* A camera of the merge may be asked to go. After the level its handle may be gone already (the unload destroys every
+ * unit, 0xAB3D20..0xAB3DCB), and one that resolves to no unit ends the game in the destroy queue's drain when the
+ * queue's own filter is not in (exe 0x12E70E..0x12E71B). So it goes only while it resolves; with no unit table known
+ * it is left to the world. */
+static int MoveNodeGoes(uint32_t node, int left)
+{
+    return node != 0 && (!left || (g_destroyTableAt != 0 && DestroyHandleState(node) == 0));
+}
+
 /* The merge as the level's 0x66 and 0x67 leave it (the parts this build re-created); 1 when torn down. `left`: the
  * level has ended and its own teardown (0xF6FF60) has run: that released the 0x94 lookup and ended the environment's
  * slot 5 (0xF708AB), the records may be the next generation's, and the saved environment pointer may be gone. */
@@ -558,8 +567,8 @@ static int MoveTeardown(int left)
     /* 0x66: the cameras, R+0x108 */
     uint32_t n0 = 0, n1 = 0; uint64_t r108 = 0;
     SafeRead(R + 8, &n0, 4); SafeRead(R + 0x18, &n1, 4); SafeRead(R + 0x108, &r108, 8);
-    if (n0 != 0) destroyNode(world, n0);
-    if (n1 != 0 && n1 != g_move.nodeOld) destroyNode(world, n1);
+    if (MoveNodeGoes(n0, left)) destroyNode(world, n0);
+    if (n1 != g_move.nodeOld && MoveNodeGoes(n1, left)) destroyNode(world, n1);
     g_move.nodeOld = n1;
     /* after the level only one the world still lists is its to destroy; 0xFCF2F0 below skips a zero */
     const int listed = r108 != 0 && (!left || MoveListed(world + 0x230908u, world + 0x230910u, r108));
@@ -964,7 +973,7 @@ static void MoveTileIn(uint64_t world)
 #define MOVE_KEEP_UNDER 0.3f
 #define MOVE_KEEP_RECORDS 8192
 static uint8_t g_keepModes[MOVE_KEEP_RECORDS * 0x2C], g_keepPos[MOVE_KEEP_RECORDS * 0xA4];
-static struct { int pins; LONG level; uint32_t lifted, fromTile, fromCoarse, held, refused; uint64_t frame; } g_keep;
+static struct { int pins; LONG level; uint32_t lifted, fromTile, fromCoarse, held, refused, settled; uint64_t frame; } g_keep;
 /* Each unit put back, by entity: its lift count and whether the collision under it was found (for the notes).
  * KB living-world-tile-switch-falls section 6 (subagent; checked by me in game.dll): the game's teleport 0x5A2BB0 writes
  * the position but never the velocity, the 0x84 record at [mgr+0x48C8] (+8 vz: the no-hit branch adds gravity to it at
@@ -1035,6 +1044,44 @@ static int MoveCellBuilding(float x, float y)
     return MoveTilesOn() && g_move.state != MV_IDLE && fabsf(x - g_move.centre[0]) < NEAR_HIDE / 2 && fabsf(y - g_move.centre[1]) < NEAR_HIDE / 2;
 }
 
+/* Members started over the ground (living_world.c LwPlace: an extra large level's navmesh faces sit metres off the
+ * drawn ground, and the squad create starts each member at its face's height): the living world lists a new squad's
+ * members for a few seconds, and a listed unit whose ray missed more than MOVE_SETTLE_OVER over the ground is put on it
+ * as a buried one is, instead of falling there. Nothing else in the air is touched: jumps, drops and falls stay. */
+#define MOVE_SETTLE_OVER 0.5f
+#define MOVE_SETTLE_UNITS 64
+static struct { uint32_t entity; ULONGLONG until; } g_moveDown[MOVE_SETTLE_UNITS];
+static ULONGLONG g_moveDownUntil; /* the latest `until`: nothing is listed after it */
+static void MoveSettleAsk(uint32_t e, ULONGLONG until)
+{
+    int at = -1;
+    ULONGLONG now = GetTickCount64();
+    if (e == 0) return;
+    for (int k = 0; k < MOVE_SETTLE_UNITS; k++)
+    {
+        if (g_moveDown[k].entity == e) { at = k; break; }
+        if (at < 0 && (g_moveDown[k].entity == 0 || g_moveDown[k].until <= now)) at = k;
+    }
+    if (at < 0) return;
+    g_moveDown[at].entity = e; g_moveDown[at].until = until;
+    if (until > g_moveDownUntil) g_moveDownUntil = until;
+}
+static int MoveSettleListed(uint32_t e, ULONGLONG now)
+{
+    for (int k = 0; k < MOVE_SETTLE_UNITS; k++) if (g_moveDown[k].entity == e) return g_moveDown[k].until > now;
+    return 0;
+}
+/* What the keeper may do with a unit at z over `ground`: 1 put it back up (under the ground), 2 put it down (over it,
+ * only while units are listed), 0 nothing. Whether its ray missed and, for 2, whether it is listed are tested after. */
+static int MoveKeepWhich(float z, float ground, int listing)
+{
+    if (ground < -9000.0f) return 0;
+    if (z < ground - MOVE_KEEP_UNDER) return 1;
+    return listing && z > ground + MOVE_SETTLE_OVER ? 2 : 0;
+}
+/* The keeper is in: units left under the ground are put back on it. */
+static int MoveKeepOn(void) { return g_keep.pins > 0; }
+
 static void MoveGroundKeep(void)
 {
     static uintptr_t game;
@@ -1051,8 +1098,9 @@ static void MoveGroundKeep(void)
     }
     if (g_keep.pins < 0) return;
     if (g_keep.level != g_world.levels)
-    { g_keep.level = g_world.levels; g_keep.lifted = g_keep.fromTile = g_keep.fromCoarse = g_keep.held = g_keep.refused = 0; memset(g_keepTrack, 0, sizeof g_keepTrack); }
+    { g_keep.level = g_world.levels; g_keep.lifted = g_keep.fromTile = g_keep.fromCoarse = g_keep.held = g_keep.refused = g_keep.settled = 0; memset(g_moveDown, 0, sizeof g_moveDown); g_moveDownUntil = 0; memset(g_keepTrack, 0, sizeof g_keepTrack); }
     g_keep.frame++;
+    ULONGLONG now = GetTickCount64();
     uintptr_t mgr = 0, modes = 0, pos = 0, descs = 0, gsys = 0, grecs = 0, gen = 0, coarse = 0;
     uint32_t dims[3] = {0};
     if (!EvpPtr(game + 0x3326558u, &mgr) || !EvpPtr(mgr + 0x48D8, &modes) || !EvpPtr(mgr + 0x48D0, &pos) || !EvpPtr(mgr + 0x48B8, &descs) ||
@@ -1076,12 +1124,14 @@ static void MoveGroundKeep(void)
                 fabsf(p[0] - g_tiles[k].centre[0]) < NEAR_HIDE / 2 && fabsf(p[1] - g_tiles[k].centre[1]) < NEAR_HIDE / 2)
             { tile = k; ground = NearGroundAt(&g_tiles[k].ground, p[0], p[1]); break; }
         if (tile < 0 && coarse) ground = MoveCoarseHere(coarse, p[0], p[1]);
-        if (ground < -9000.0f || !(p[2] < ground - MOVE_KEEP_UNDER)) continue;
+        int which = MoveKeepWhich(p[2], ground, now < g_moveDownUntil);
+        if (which == 0) continue;
         uintptr_t d = 0; uint32_t e = 0, gi = 0; uint8_t flags = 0, hit = 1; float ray[2] = {0, 0};
         if (!EvpPtr(descs + 8u * i, &d) || d == 0 || SafeRead(d + 0x14, &flags, 1) || !(flags & 1) || (e = EvpU32(d + 8, 0)) == 0) continue;
         if (!EvpHash(gsys + 0x28, e, 8, 4, &gi) || gi >= 0x100000 || SafeRead(grecs + 0x3Cu * gi + 0x38, &hit, 1) || hit) continue;
         SafeRead(grecs + 0x3Cu * gi + 0x2C, ray, 8);
         if (((uint8_t (*)(void*, uint32_t))(game + 0x4A52B0u))(NULL, e)) continue; /* attached: the teleport stops half-way */
+        if (which == 2 && !MoveSettleListed(e, now)) continue;
         int tk = MoveKeepTrack(e);
         float to[3] = {p[0], p[1], ground + 0.1f}, floor_ = NAN;
         uintptr_t world = 0;
@@ -1096,6 +1146,13 @@ static void MoveGroundKeep(void)
         ((void (*)(void*, uint32_t, const float*))(game + 0x5A2BB0u))(NULL, e, to);
         uintptr_t vel = 0; float vz = NAN, zero = 0.0f;
         if (EvpPtr(mgr + 0x48C8, &vel) && !SafeRead(vel + 0x84u * i + 8, &vz, 4)) *(volatile float*)(vel + 0x84u * i + 8) = zero;
+        if (which == 2)
+        {
+            if (++g_keep.settled <= 100)
+                Note("difficulty: moving tiles: new squad member %08X started %.2f m over the %s at (%.1f, %.1f) (z %.2f, vz %.2f, its ray missed); the collision %s: put down at %.2f, vz 0 (%u this level)",
+                    e, (double)(p[2] - ground), tile >= 0 ? "tile's ground" : "coarse ground", (double)p[0], (double)p[1], (double)p[2], (double)vz, found ? "found" : "NOT found within 3 m", (double)to[2], g_keep.settled);
+            continue;
+        }
         g_keep.lifted++; if (tile >= 0) g_keep.fromTile++; else g_keep.fromCoarse++;
         if (!found) g_keep.held++;
         uint32_t lifts = 0;

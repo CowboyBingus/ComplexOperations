@@ -15,11 +15,20 @@
 #define DAY_SITE 0x102244Eu
 #define DAY_SPIN 0x1016C20u
 static volatile float* g_dayAngle; /* X, in the stub's data page; NULL when not installed */
+/* HELLFORGE_TEST_DAYLIGHT_MIN=<60..1380>: the minute of the day wanted in place of noon (a low sun shows a bank's
+ * shadow). The tick reads the game's clock back, so a time the linear guess misses is logged as not reached. */
+static float g_dayMinutes = 720.0f;
 
 static void InstallDaylight(uintptr_t game)
 {
     char t[4] = "";
     if (game == 0 || !(GetEnvironmentVariableA("HELLFORGE_TEST_DAYLIGHT", t, sizeof t) > 0 && t[0] == '1')) return;
+    char minutes[8] = "";
+    if (GetEnvironmentVariableA("HELLFORGE_TEST_DAYLIGHT_MIN", minutes, sizeof minutes) > 0)
+    {
+        const float want = (float)atof(minutes);
+        if (want >= 60.0f && want <= 1380.0f) g_dayMinutes = want;
+    }
     if (!ApiCodeMatches(game + DAY_SITE, "E8 CD 47 FF FF") ||
         !ApiCodeMatches(game + 0x1016C71u, "F2 44 0F 10 05 CE FF 3A 01 0F 28 CA F2 0F 10 84 24 20 01 00 00") ||
         !ApiCodeMatches(game + 0x1016CBAu, "45 0F 57 FF 66 0F 2F CE F2 44 0F 5A F8 76 04 44 0F 28 FF"))
@@ -64,12 +73,12 @@ static void DaylightTick(void)
     SafeRead(g + 0x78AE668u, &m, 4); SafeRead(g + 0x78AE5BCu, &night, 4);
     if (!(m >= 0 && m <= 1440)) return;
     const float tau = 6.2831853f;
-    if (step == 0) { m0 = m; x = (720.0f - m0) * tau / 1440.0f; *g_dayAngle = x; step = 1;
+    if (step == 0) { m0 = m; x = (g_dayMinutes - m0) * tau / 1440.0f; *g_dayAngle = x; step = 1;
         Note("test: daylight: the clock reads %.0f min at angle 0 (night %.2f); trying %.3f rad", (double)m0, (double)night, (double)x); }
     else if (step == 1)
     {
-        if (fabsf(m - 720.0f) < 30.0f) { step = 3; Note("test: daylight: %.0f min (night %.2f) at %.3f rad", (double)m, (double)night, (double)x); }
+        if (fabsf(m - g_dayMinutes) < 30.0f) { step = 3; Note("test: daylight: %.0f min (night %.2f) at %.3f rad", (double)m, (double)night, (double)x); }
         else { x = -x; *g_dayAngle = x; step = 2; Note("test: daylight: %.0f min with the first sign; trying %.3f rad", (double)m, (double)x); }
     }
-    else { step = 3; Note("test: daylight: %.0f min (night %.2f) at %.3f rad%s", (double)m, (double)night, (double)x, fabsf(m - 720.0f) < 30.0f ? "" : " (not noon)"); }
+    else { step = 3; Note("test: daylight: %.0f min (night %.2f) at %.3f rad%s", (double)m, (double)night, (double)x, fabsf(m - g_dayMinutes) < 30.0f ? "" : " (not the minute wanted)"); }
 }

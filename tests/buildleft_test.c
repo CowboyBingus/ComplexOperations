@@ -23,6 +23,7 @@ int CoXlTestBuildLeft(int what);
 int CoXlTestTeardown(void);
 void CoXlTestMergeBegin(void);
 void CoXlTestBuildCentre(float y);
+void CoXlTestDestroyTable(uintptr_t at, void* lock, void* unlock);
 
 static int g_failed;
 static const char* g_case;
@@ -146,8 +147,26 @@ static void Generator(uint32_t state, int runs)
     g_job[8] = (uint8_t)runs;
 }
 
+/* The engine's unit table (exe 0x12D310..0x12D359: pointers +0x88, count +0x98, generation bytes +0xA0): a camera's
+ * id is a unit handle, index in the low 22 bits and generation 0 here. Every id resolves until a case takes one out. */
+enum { HANDLES = 0x500 };
+static uint8_t g_unitTable[0x100], g_unitGens[HANDLES];
+static uint64_t g_unitPointers[HANDLES];
+static void FakeTableLock(void* lock) { (void)lock; }
+static void UnitTable(void)
+{
+    const uint64_t pointers = (uint64_t)(uintptr_t)g_unitPointers, gens = (uint64_t)(uintptr_t)g_unitGens;
+    const uint32_t count = HANDLES;
+    static uint64_t at;
+    at = (uint64_t)(uintptr_t)g_unitTable;
+    for (uint32_t k = 0; k < HANDLES; k++) { g_unitPointers[k] = 0x5000000ull + k; g_unitGens[k] = 0; }
+    memcpy(g_unitTable + 0x88, &pointers, 8); memcpy(g_unitTable + 0x98, &count, 4); memcpy(g_unitTable + 0xA0, &gens, 8);
+    CoXlTestDestroyTable((uintptr_t)&at, FakeTableLock, FakeTableLock);
+}
+
 static void Start(const char* name)
 {
+    UnitTable();
     g_case = name;
     g_coApi = fake_host_reset(CO_GAME_BUILD);
     g_coMod = (HfMod*)&g_fake;
@@ -423,6 +442,30 @@ int main(void)
     CoXlTestWorldShip();
     CoXlTestWorldLevel((uintptr_t)lg, 0);
     CHECK(Lines("was cut short") == 1);
+
+    /* The unload destroys every unit of the world, the merge's cameras with them: a camera id that resolves to no unit
+     * any more ends the game in the destroy queue's drain (exe 0x12E71B) unless the queue's filter drops it. */
+    Start("a camera the unload already destroyed is not asked to go at the ship; one that still resolves is");
+    Merge(1);
+    g_unitGens[0x222] = 1; /* destroyed: its slot's generation moved on */
+    CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 1, 1, 0, (uint64_t)(uintptr_t)g_records, 1);
+    CoXlTestWorldShip();
+    CHECK(Count(C_NODE, 0) == 0 && Count(C_MERGED, 0) == 1 && fake_host_logged("the merge torn down"));
+    Start("a camera whose slot in the unit table is empty is not asked to go at the ship");
+    Merge(1);
+    g_unitPointers[0x222] = 0;
+    CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 1, 1, 0, (uint64_t)(uintptr_t)g_records, 1);
+    CoXlTestWorldShip();
+    CHECK(Count(C_NODE, 0) == 0 && Count(C_MERGED, 0) == 1);
+    Start("with no unit table known a camera is not asked to go at the ship, and is in play");
+    Merge(1);
+    CoXlTestDestroyTable(0, NULL, NULL);
+    CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 1, 1, 0, (uint64_t)(uintptr_t)g_records, 1);
+    CoXlTestWorldShip();
+    CHECK(Count(C_NODE, 0) == 0 && Count(C_MERGED, 0) == 1);
+    Field(g_level + MERGE, 0x18, 0x444, 4);
+    CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 1, 0, 0, (uint64_t)(uintptr_t)g_records, 1);
+    CHECK(CoXlTestTeardown() == 1 && Count(C_NODE, 0x444) == 1); /* in play the level's units are alive */
 
     Start("R+0x108 the unload took out of the world's list is not handed to the destroy; the rest goes on");
     Merge(1);

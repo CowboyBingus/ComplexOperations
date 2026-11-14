@@ -49,6 +49,7 @@ The tactical map's types (`HfScreen`, `HfDraw`, `HfInput`) are the mod SDK's own
 | `living_world.c`, `living_world_intent.c` | The per-mission resets count missions (`g_lwMission`) instead of comparing level addresses. |
 | `difficulty_world.c` | Level init asks `co_generation_decision` where it asked for difficulty 11; the complex level's radii stub (`../co_normal.c`) goes in behind HellForge's. |
 | `living_world.c`, `difficulty_stream.c`, `difficulty_world_terrain.c` | `hellforge_lw_test` and `hellforge_research_stream_observer` are not exported. |
+| `difficulty_stream.c`, `safe_read.c` | A level that left play is forgotten whole (`WorldStreamLeftLocked`). A removal looks its unit up in the world's unit list first (`WorldStreamListed`, `SafeFind`). |
 | `difficulty_world.c` | The install ends with `../co_chain.c`: the mod's stubs in front of HellForge's keyed generator steps. |
 | `difficulty_world.c` | A level init whose decision is "leave" logs one line and sets up a normal level. |
 | `difficulty_world.c` | `WorldShip` is called from the ship's navigation step (`../co_nav.c`), which the mod chains in front of HellForge's. |
@@ -76,8 +77,8 @@ The tactical map's types (`HfScreen`, `HfDraw`, `HfInput`) are the mod SDK's own
 | `living_world_zerobox.c` | The absent SpeedTree cells' box is a switched site of group `CO_SWITCH_XL` (`../co_switch.c`), on by default. Its jump is written once with the other threads stopped, listed before any is. |
 | `living_world_navjob.c`, `living_world_vbox.c` | On by default. Their hooks pass straight to the game's code unless the mission is complex. Leaving one, the nav job returns to mode 0 with the game's vtable, and the vehicle boxes drop their copies. The nav job's completion sites are research only. |
 | `difficulty_tacmap.c` | The screen goes in through the SDK's `add_screen` on M. The fork loaded `hellforge_overlay.dll` itself, from beside the loader, and started it with fonts from other mods' folders. Refused, it logs why and the session has no map screen. |
-| `living_world_corpse.c`, `living_world_aibudget.c` | Their leave clears the mod's own state only; the AI budget writes nothing then. |
-| `living_world_fparts.c` | New with the mod: two hooks that only time the game's call (the AI step's joins, the engine's world update) for the slow-frame lines of `../co_framecost.c`. |
+| `living_world_corpse.c`, `living_world_aibudget.c` | Their leave clears the mod's own state. The AI budget's leave also writes the game's budget back: one AI world serves the session. |
+| `living_world_fparts.c` | New with the mod: two hooks that only time the game's call (the AI step's joins, the engine's world update) for the slow-frame lines of `../co_framecost.c`. The join's time also goes to the AI budget's and the nav hold's 30 s lines. |
 | `living_world_bp.c` | Research only (`HELLFORGE_LW_BP=1`); its hooks act only on a complex mission. |
 | `living_world_defer.c` | Every research install of the levers and instruments is under `CO_RESEARCH`. |
 | `living_world_render.c` | The render thread's test delay is research only. |

@@ -14,6 +14,7 @@
 
 void co_shim_install(void) { InstallSafeRead(); }
 int co_safe_read(uintptr_t address, void* buffer, size_t size) { return SafeRead(address, buffer, size); }
+int co_safe_find(uintptr_t list, size_t count, uint64_t value) { return SafeFind(list, count, value); }
 
 /* ---- logs ---------------------------------------------------------------------------------------------------------- */
 
@@ -318,6 +319,38 @@ static int Hex(char c)
     return -1;
 }
 
+/* The mod's own rewritten sites (co_exe_own_write): a lever that pins the engine's bytes there would refuse to install
+ * beside the part that wrote them. */
+#define OWN_SITES 8
+static struct { uintptr_t at; size_t n; uint8_t engine[8], wrote[8]; } g_own[OWN_SITES];
+int co_exe_own_write(uintptr_t at, const uint8_t* engine, const uint8_t* wrote, size_t n)
+{
+    if (n == 0 || n > sizeof g_own[0].engine) return 1;
+    for (int i = 0; i < OWN_SITES; i++)
+    {
+        if (g_own[i].at != 0 && g_own[i].at != at) continue;
+        g_own[i].at = at; g_own[i].n = n;
+        memcpy(g_own[i].engine, engine, n); memcpy(g_own[i].wrote, wrote, n);
+        return 0;
+    }
+    return 1;
+}
+static void OwnUnpatched(uintptr_t at, uint8_t* bytes, size_t size)
+{
+    for (int i = 0; i < OWN_SITES; i++)
+    {
+        const uintptr_t site = g_own[i].at;
+        uint8_t now[8];
+        if (site == 0 || site + g_own[i].n <= at || site >= at + size) continue;
+        if (g_coApi->read(site, now, g_own[i].n) != 0 || memcmp(now, g_own[i].wrote, g_own[i].n) != 0) continue;
+        for (size_t k = 0; k < g_own[i].n; k++)
+            if (site + k >= at && site + k < at + size) bytes[site + k - at] = g_own[i].engine[k];
+    }
+}
+#ifdef CO_TEST
+void co_exe_own_reset(void) { memset(g_own, 0, sizeof g_own); }
+#endif
+
 /* Whether code or data reads as `hex`, as it was before any hook: HellForge's own guards hook functions the pins name
  * (the spawn request), and a hooked function is still the reviewed one. Bytes the host rewrote still fail here. */
 static int ActBytes(uintptr_t at, const char* hex, int exe)
@@ -329,6 +362,7 @@ static int ActBytes(uintptr_t at, const char* hex, int exe)
     const int hooked = g_coApi != NULL && g_coApi->size >= offsetof(HfApi, read_code) + sizeof(void*) && g_coApi->read_code != NULL;
     if (hooked ? g_coApi->read_code(at, got, n) : SafeRead(at, got, n)) return 0;
     if (exe) co_navtrim_unpatched(at, got, n); /* the tile stubs' jumps read as the engine's code they lead to */
+    if (exe) OwnUnpatched(at, got, n);
     return !memcmp(got, want, n);
 }
 

@@ -41,11 +41,16 @@
 #include "co_framecost.h"
 #include "co_switch.h"
 #include "co_steer.h"
+#include "co_aibudget.h"
 #include "co_cutters.h"
+#include "co_navcut.h"
 #include "co_forest.h"
 #include "co_podstart.h"
 #include "co_settle.h"
 #include "co_hitch.h"
+#include "co_lw_view.h"
+#include "co_lw_roads.h"
+#include "co_lw_meet.h"
 #include "../co_watch.h"
 
 /* The mod's work in the game frame under way (co_hitch.h): the timed parts add to it, CoXlTick hands it on. */
@@ -73,6 +78,11 @@ static double HitchNow(void)
 #include "proto/difficulty_world_towns.c"
 #include "proto/difficulty_world_gates.c"
 #include "proto/difficulty_world_macro.c"
+#include "proto/difficulty_world_roads.c"
+#include "proto/difficulty_world_roadbuild.c"
+#include "proto/difficulty_world_roadgrade.c"
+#include "proto/difficulty_world_roadfield.c"
+#include "proto/difficulty_world_roadlevel.c"
 #include "proto/difficulty_status.c"
 #include "proto/difficulty_map_hud.c"
 #include "proto/difficulty_world_arcs.c"
@@ -311,6 +321,7 @@ static const char* CoXlGuards(uintptr_t game)
     LwInstallRender();
     LwInstallMover();
     LwInstallTilt(); /* rotation rays under a detailed tile's ground read it above them */
+    LwInstallLeanCap(); /* four-corner units' lean on complex levels */
     LwInstallTrees();
     LwInstallZeroBox(); /* absent SpeedTree cells: a switched site, the empty box on complex levels only */
     SunSliceInstall(game); /* the sun's last shadow slice: about the camera on a world over 2048 m, else dynamic */
@@ -345,6 +356,17 @@ const char* CoXlInstall(uintptr_t game)
     /* refused, a forest instance made while the cutter pool was full still crashes the destroy (co_cutters.h) */
     if ((why = co_cutters_install(g_coApi->module_base("helldivers2.exe", NULL))) != NULL) Note("navmesh cutters: %s; a handle of 0 is not left out", why);
     else Note("navmesh cutters: the engine's destroy leaves out handles of 0 (a cutter not made while its pool was full)");
+    /* refused, a face under more silhouettes than 8192 half-edges hold still crashes the cutter (co_navcut.h) */
+    if ((why = co_navcut_install(g_coApi->module_base("helldivers2.exe", NULL))) != NULL) Note("navmesh cuts: %s; a cut is not bounded", why);
+    else
+    {
+#ifdef CO_RESEARCH
+        char limits[32] = ""; unsigned edges = 0, segments = 0; /* HELLFORGE_XL_NAVCUT=<edges>,<segments>; no package reads it */
+        if (GetEnvironmentVariableA("HELLFORGE_XL_NAVCUT", limits, sizeof limits) > 0 && sscanf(limits, "%u,%u", &edges, &segments) == 2)
+        { co_navcut_limits(edges, segments); Note("navmesh cuts: research limits asked for: %u half-edges, %u segments a face", edges, segments); }
+#endif
+        Note("navmesh cuts: a face takes silhouettes up to %u segments, and a cut over %u half-edges is done again uncut", CO_NAVCUT_BUDGET, CO_NAVCUT_MAX);
+    }
     /* refused, a reinforcement pod still starts at the destroyer and crosses the map to its drop point */
     if ((why = co_podstart_install(game, PodStartScale)) != NULL) Note("complex operations: hellpod start: %s", why);
     if ((why = InstallWorld(&d)) != NULL || (why = InstallWorldStreamStep(&d)) != NULL || (why = InstallMapHud(&d)) != NULL) return why;
@@ -483,27 +505,438 @@ void CoXlTestLwNavTickCounts(uint32_t* v)
     v[5] = g_lwNavHold.builtAge; v[6] = g_lwNavHold.builtLeft; v[7] = g_lwNavHold.can; v[8] = g_lwNavHold.sum.first; v[9] = g_lwNavHold.sum.built;
     v[10] = g_lwNavHold.sum.ticks; v[11] = g_lwNavHold.sum.mostFirst;
 }
+/* The window's hook on a fake 0xBD11B0, with its bound; the driver's question for world `w`; the later counts (first
+ * builds waiting and the oldest one's ms, the span's most, starts put off, the unsynchronised swaps by where, ticks past
+ * the hold's bound, the marks' hold); the level's end drains' time, set when `set` is not negative; the scheduler
+ * call's install on a fake exe; a frame of the marks' hold. */
+void CoXlTestLwNavWindow(uint8_t (*ask)(uintptr_t, void*), uint32_t ms) { g_lwNavHold.startAsk = ask; g_lwNavHold.windowMs = ms; }
+int CoXlTestLwNavStartAsk(uintptr_t w) { return LwNavStartAsk(w, NULL); }
+void CoXlTestLwNavMoreCounts(uint32_t* v)
+{
+    v[0] = g_lwNavHold.firstNow; v[1] = g_lwNavHold.firstAge; v[2] = g_lwNavHold.sum.firstMost; v[3] = (uint32_t)g_lwNavHold.kept;
+    v[4] = g_lwSwap.sumUnsync[LW_UNSYNC_TICK]; v[5] = g_lwSwap.sumUnsync[LW_UNSYNC_DUE]; v[6] = g_lwSwap.sumUnsync[LW_UNSYNC_END];
+    v[7] = g_lwNavHold.sum.pastBound; v[8] = (uint32_t)g_lwSwap.unsafe; v[9] = g_lwNavHold.sum.marksHeld;
+}
+double CoXlTestLwNavEndMs(double set) { if (set >= 0) g_lwSwap.endMs = set; return g_lwSwap.endMs; }
+void CoXlTestLwNavSchedInstall(uintptr_t exe, uintptr_t stub) { LwInstallNavSched(exe, stub); }
+int CoXlTestLwNavMarksHeld(void) { return LwNavMarksHeld(); }
 /* An AI join of `ms` on this thread, as the hook counts it. */
 void CoXlTestLwFpJoin(double ms) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); g_lwFp.joinTicks += (int64_t)(ms * (double)f.QuadPart / 1000.0 + 0.5); }
-/* The lever on the AI world `w` at `now`: on, with requests `lat` s old, or off; the budget it leaves at w+0x47C. */
+/* One frame's budget choice on the AI world `w` at `now`, as LwAibFrame makes it once the game's value `stock` is
+ * known: the lever on or off, requests `lat` s old, the run's age as [w+0x484] has it; the budget it leaves at w+0x47C. */
 float CoXlTestLwAibWorld(uintptr_t w, float stock, float lat, int on, ULONGLONG now)
 {
     float cur = *(float*)(w + 0x47C);
-    g_lwAib.stock = stock; g_lwAib.raised = 0;
-    if (on) LwAibSteer(w, cur, lat, now);
-    else { float want = LwAibWant(w, 0, now); if (cur != want) *(volatile float*)(w + 0x47C) = want; }
+    g_lwAib.b.world = w; g_lwAib.b.stock = stock; g_lwAib.b.raised = 0; g_lwAib.on = on;
+    LwNavHoldJoin(LwFpJoinTake());
+    LwAibSteer(w, cur, lat, *(float*)(w + 0x484), now);
     return *(float*)(w + 0x47C);
 }
+void CoXlTestLwAibReset(void) { memset(&g_lwAib.b, 0, sizeof g_lwAib.b); g_lwAib.on = 1; g_lwAib.wasDraining = 0; }
 int CoXlTestLwNavWatch(uint16_t cx, uint16_t cy, uint32_t flags, uint32_t section) { LwNavWatch(cx, cy, flags, section, 1); return g_lwNav.watching; }
 /* The AI budget lever's choice for a step: the budget it leaves at H+0x47C from `cur`, with requests `lat` s old. */
 float CoXlTestLwAibSteer(float stock, float cur, float lat)
 {
     float h[0x130]; memset(h, 0, sizeof h);
-    g_lwAib.stock = stock; g_lwAib.raised = 0; h[0x47C / 4] = cur;
-    LwAibSteer((uintptr_t)h, cur, lat, 0);
-    return h[0x47C / 4];
+    h[0x47C / 4] = cur;
+    return CoXlTestLwAibWorld((uintptr_t)h, stock, lat, 1, 0);
 }
 LONG CoXlTestNoiseHead(void) { return g_lwNoiseHead; }
+/* An offline reinforcing squad (index 0) on the way to fight 0 at `t`, one player at `pl`, an extra large disc: the
+ * offline walk's arrival and band-edge hold (living_world_intent.c), without the game. */
+void CoXlTestLwReinforce(const float* pl, const float* at, const float* t)
+{
+    memset(&g_lwWorld, 0, sizeof g_lwWorld); memset(g_lwFights, 0, sizeof g_lwFights);
+    g_lwWorld.count = 1; g_lwWorld.playersAt = 1; g_lwWorld.rMin = 150.0f; g_lwWorld.radius = 7782.0f;
+    memcpy(g_lwWorld.players[0], pl, sizeof(float) * 2);
+    LwSquad* q = &g_lwSquads[0]; memset(q, 0, sizeof *q);
+    ULONGLONG now = GetTickCount64();
+    q->state = LW_OFFLINE; q->intent = LW_REINFORCE; q->speed = 2.0f; q->fight = 0; q->fightBorn = now - 2000; q->intentAt = now - 1000; q->intentStageAt = now - 60000;
+    q->pos[0] = at[0]; q->pos[1] = at[1]; q->target[0] = t[0]; q->target[1] = t[1];
+    g_lwFights[0].live = 1; g_lwFights[0].born = now - 2000;
+}
+/* The network vector3 types of a config at `cfg`, scanned once per config as at the first level init (a negative
+ * scale forgets it): the list (type, widened or not, fields), then each widened type written for `scale`. The count,
+ * the types written in the next byte; -1 when the scan fails. */
+int CoXlTestNetVec(uintptr_t cfg, float scale, uint32_t* types, uint8_t* widen, uint32_t* fields, int cap, int* pos, int* jobs)
+{
+    static NetVec v[NET_VEC_TYPES]; static float was[NET_VEC_TYPES]; static uintptr_t last; static int n, sp, sj;
+    int wrote = 0;
+    uintptr_t descs = 0;
+    if (scale < 0) { last = 0; return 0; }
+    if (last != cfg)
+    {
+        n = NetVecScan(cfg, v, NET_VEC_TYPES, &sp, &sj);
+        if (n < 0) return -1;
+        last = cfg;
+        for (int k = 0; k < n; k++) was[k] = v[k].high;
+    }
+    *pos = sp; *jobs = sj;
+    if (SafeRead(cfg + 0x18, &descs, 8)) return -1;
+    for (int k = 0; k < n; k++)
+    {
+        if (k < cap) { types[k] = v[k].type; widen[k] = v[k].widen; fields[k] = v[k].fields; }
+        if (v[k].widen) wrote += NetVecWrite(descs + 24u * v[k].type, &v[k], scale, &was[k]);
+    }
+    return (n < cap ? n : cap) | wrote << 8;
+}
+float CoXlTestLwFaceReach(int tilesOn, int keeper, float top, float drawn, float wall) { return LwFaceReach(tilesOn, keeper, top, drawn, wall); }
+float CoXlTestLwRequestZ(float top, float face) { return LwRequestZ(top, face); }
+/* A square grid of route nodes `step` apart over a disc of `radius`, no home regions. */
+static void LwTestGrid(float radius, float step)
+{
+    static int16_t at[128][128];
+    int side = (int)(2 * radius / step) + 1;
+    g_lwNodeCount = g_lwRoadNodes = 0; g_lwTerr.built = 0;
+    for (int j = 0; j < side && j < 128; j++) for (int i = 0; i < side && i < 128; i++)
+    {
+        float nx = -radius + step * (float)i, ny = -radius + step * (float)j;
+        at[j][i] = -1;
+        if (nx * nx + ny * ny > radius * radius || g_lwNodeCount >= LW_NODES_MAX) continue;
+        LwNode* n = &g_lwNodes[g_lwNodeCount]; memset(n, 0, sizeof *n); n->x = nx; n->y = ny; at[j][i] = (int16_t)g_lwNodeCount++;
+        if (i > 0 && at[j][i - 1] >= 0) LwLink(at[j][i], at[j][i - 1]);
+        if (j > 0 && at[j - 1][i] >= 0) LwLink(at[j][i], at[j - 1][i]);
+    }
+    g_lwWorld.radius = radius;
+}
+/* On that grid, squad 0 on the node nearest (x, y): `plans` new destinations. Returns the plans that found no route;
+ * `beyond` counts destinations over LW_ROAM away, `turned` routes that start with the node it came from (the one
+ * before in the last route). */
+int CoXlTestLwPlans(float radius, float step, float x, float y, int plans, int* beyond, int* turned)
+{
+    LwSquad* q = &g_lwSquads[0]; int failed = 0;
+    *beyond = *turned = 0;
+    LwTestGrid(radius, step);
+    memset(q, 0, sizeof *q);
+    q->node = (uint16_t)LwNearestNode(x, y); q->pos[0] = g_lwNodes[q->node].x; q->pos[1] = g_lwNodes[q->node].y;
+    for (int k = 0; k < plans; k++)
+    {
+        float from[2] = {q->pos[0], q->pos[1]};
+        LwPlan(q);
+        if (q->pathLen == 0) { failed++; continue; }
+        int goal = q->path[q->pathLen - 1];
+        if (LwDist2(from, g_lwNodes[goal].x, g_lwNodes[goal].y) > LW_ROAM * LW_ROAM) (*beyond)++;
+        if (q->prevValid && q->path[0] == q->prevNode) (*turned)++;
+        q->prevNode = q->node; q->prevValid = 1; q->node = q->path[0]; q->pos[0] = g_lwNodes[q->node].x; q->pos[1] = g_lwNodes[q->node].y;
+        q->pathLen = q->pathAt = 0;
+    }
+    return failed;
+}
+/* That grid with a road node beside every grid node within 1000 m of (x, y), joined to it: squad 1 (no road patrol)
+ * there plans `plans` times. Returns the plans whose destination is a road node; `failed` those without a route. */
+int CoXlTestLwPlansRoads(float radius, float step, float x, float y, int plans, int* failed)
+{
+    LwSquad* q = &g_lwSquads[1]; int onRoad = 0;
+    *failed = 0;
+    LwTestGrid(radius, step);
+    const int grid = g_lwNodeCount;
+    memset(g_lwNodeKind, 0, sizeof g_lwNodeKind);
+    for (int i = 0; i < grid && g_lwNodeCount < LW_NODES_MAX; i++)
+    {
+        const float at[2] = {x, y};
+        if (LwDist2(at, g_lwNodes[i].x, g_lwNodes[i].y) > 1000.0f * 1000.0f) continue;
+        LwNode* n = &g_lwNodes[g_lwNodeCount]; memset(n, 0, sizeof *n); n->x = g_lwNodes[i].x + 7.0f; n->y = g_lwNodes[i].y + 7.0f;
+        g_lwNodeKind[g_lwNodeCount] = CO_LW_ROADS_POINT; LwLink(i, g_lwNodeCount); g_lwNodeCount++; g_lwRoadNodes++;
+    }
+    memset(q, 0, sizeof *q);
+    q->node = (uint16_t)LwNearestNode(x, y); q->pos[0] = x; q->pos[1] = y;
+    for (int k = 0; k < plans; k++)
+    {
+        q->pathLen = q->pathAt = 0;
+        LwPlan(q);
+        if (q->pathLen == 0) { (*failed)++; continue; }
+        if (q->path[q->pathLen - 1] >= grid) onRoad++;
+    }
+    const int roads = g_lwRoadNodes;
+    g_lwNodeCount = g_lwRoadNodes = 0; memset(g_lwNodeKind, 0, sizeof g_lwNodeKind);
+    return roads > 0 ? onRoad : -1;
+}
+/* The same grid with squad 0 standing at `at` (not moved between plans), come from its node's first neighbour. With
+ * `home` {x, y, radius} the nodes inside that disc are its home region and the rest another that does not touch it.
+ * Returns the plans without a route; `inHome` counts destinations in the home region, `turned` routes that start back
+ * to that neighbour; each of the first `notes` routes is noted twice (one line a route). */
+int CoXlTestLwPlansAt(float radius, float step, const float* at, const float* home, int plans, int notes, int* inHome, int* turned)
+{
+    LwSquad* q = &g_lwSquads[0]; int failed = 0;
+    *inHome = *turned = 0;
+    LwTestGrid(radius, step);
+    memset(q, 0, sizeof *q);
+    q->node = (uint16_t)LwNearestNode(at[0], at[1]); q->pos[0] = at[0]; q->pos[1] = at[1];
+    if (g_lwNodes[q->node].degree) { q->prevNode = g_lwNodes[q->node].next[0]; q->prevValid = 1; }
+    if (home)
+    {
+        memset(g_lwRegionAdj, 0, sizeof g_lwRegionAdj);
+        for (int i = 0; i < g_lwNodeCount; i++) g_lwRegion[i] = LwDist2(home, g_lwNodes[i].x, g_lwNodes[i].y) <= home[2] * home[2] ? 1 : 2;
+        g_lwTerr.built = 1; q->home1 = 1;
+    }
+    for (int k = 0; k < plans; k++)
+    {
+        q->pathLen = q->pathAt = 0;
+        LwPlan(q);
+        if (q->pathLen == 0) { failed++; continue; }
+        if (LwRegionOfNode(q->path[q->pathLen - 1]) == 0) (*inHome)++;
+        if (q->prevValid && q->path[0] == q->prevNode) (*turned)++;
+        if (k < notes) { LwRouteNote(q); LwRouteNote(q); } /* the second call writes nothing: one line a route */
+    }
+    g_lwTerr.built = 0;
+    return failed;
+}
+int CoXlTestLwOnlineSteps(int online, uint64_t wideUntil, uint64_t now) { return LwOnlineSteps(online, wideUntil, now); }
+/* Squad 0 online with no game behind it: its tick finds the squad entity gone and frees it. 1 when it was ticked, +2
+ * when its keeper listing was closed, +4 when it was counted online. */
+int CoXlTestLwOnlineStep(uint64_t wideUntil, uint64_t now)
+{
+    LwSquad* q = &g_lwSquads[0]; int removals = 0, online = 0;
+    memset(q, 0, sizeof *q); q->state = LW_ONLINE; q->squad = 0x1234; q->wide = wideUntil != 0; q->wideUntil = wideUntil; q->cap = q->alive = 6;
+    if (g_lwWorld.count < 1) g_lwWorld.count = 1;
+    LwOnlineStep(q, &removals, &online, now);
+    int r = (q->state != LW_ONLINE ? 1 : 0) | (q->wideUntil == 0 ? 2 : 0) | (online == 1 ? 4 : 0);
+    memset(q, 0, sizeof *q);
+    return r;
+}
+int CoXlTestLwNoiseSkip(float playerDist, float reach, uint64_t sinceSent, float moved) { return LwNoiseSkip(playerDist, reach, sinceSent, moved); }
+/* Squad 0 with a goal sent at 5000: whether a goal can be sent now, and (*after) its goal time then. */
+int CoXlTestLwGoalCanSend(int route, int records, uint64_t* after)
+{
+    LwSquad* q = &g_lwSquads[0];
+    memset(q, 0, sizeof *q); q->goalAt = 5000;
+    int r = LwGoalCanSend(q, route, records);
+    *after = q->goalAt;
+    memset(q, 0, sizeof *q);
+    return r;
+}
+int CoXlTestLwOnProp(float top, float drawn, uint32_t owner, float hitZ) { return LwOnProp(top, drawn, owner, hitZ); }
+int CoXlTestLwPropTake(void) { return LW_PROP_TAKE; }
+void CoXlTestLwSpacedText(char* out, size_t size, int squad, float dist, uint64_t ago) { LwSpacedText(out, size, squad, dist, ago); }
+const char* CoXlTestLwFitText(int ends) { return LwFitText(ends); }
+int CoXlTestLwSlotHeightOk(float z, float top, float reach) { return LwSlotHeightOk(z, top, reach); }
+int CoXlTestMoveKeepWhich(float z, float ground, int listing) { return MoveKeepWhich(z, ground, listing); }
+int CoXlTestMoveSettle(uint32_t e, uint64_t until, uint32_t ask, uint64_t now) { if (ask) MoveSettleAsk(ask, until); return MoveSettleListed(e, now); }
+/* Fights for the rule's tests: slot f live at (x, y), born `age` ms ago, seen `seenAgo` ms ago, `engaged` units. */
+void CoXlTestLwFight(int f, float x, float y, uint32_t age, uint32_t seenAgo, int engaged, uint64_t now)
+{
+    LwFight* fi = &g_lwFights[f]; memset(fi, 0, sizeof *fi);
+    fi->live = 1; fi->pos[0] = x; fi->pos[1] = y; fi->born = now - age; fi->seen = now - seenAgo; fi->engaged = fi->peak = engaged;
+}
+void CoXlTestLwFightsClear(void) { memset(g_lwFights, 0, sizeof g_lwFights); g_lwWorld.count = 0; }
+int CoXlTestLwFightNearest(float x, float y, float within, int skip) { float at[2] = {x, y}; return LwFightNearest(at, within, skip); }
+/* Squad i reinforcing fight f (0: a patrol again, its fight cleared; 2: a patrol that still names the fight). */
+void CoXlTestLwFightSquad(int i, int f, int reinforcing)
+{
+    LwSquad* q = &g_lwSquads[i]; memset(q, 0, sizeof *q);
+    q->state = LW_OFFLINE; q->intent = reinforcing == 1 ? LW_REINFORCE : LW_PATROL; q->fight = (int8_t)(reinforcing ? f : -1); q->fightBorn = reinforcing ? g_lwFights[f].born : 0;
+    if (g_lwWorld.count <= i) g_lwWorld.count = i + 1;
+}
+int CoXlTestLwFightSends(int f, uint64_t now, uint64_t sentAgo) { g_lwFights[f].sentAt = sentAgo ? now - sentAgo : 0; return LwFightSends(f, now); }
+int CoXlTestLwFightHandOver(int f) { int to = LwFightHandOver(f); g_lwFights[f].live = 0; return to; }
+int CoXlTestLwFightOfSquad(int i) { return LwFightOf(&g_lwSquads[i]) ? g_lwSquads[i].fight : -1; }
+int CoXlTestLwAlertList(uint32_t id, uint32_t lv, float d, int note)
+{
+    if (note == 2) memset(&g_lwAlertList, 0, sizeof g_lwAlertList);
+    if (id) LwAlertListAdd(id, lv, d * d);
+    if (note == 1) LwAlertListNote();
+    return (int)g_lwAlertList.n;
+}
+int CoXlTestLwAlertFights(uint32_t lv) { return LwAlertFights(lv); }
+void CoXlTestLwPlayerAt(const float* pl) { memcpy(g_lwWorld.players[0], pl, sizeof(float) * 2); }
+/* One offline walk step of squad 0: its stage, held flag, position and stage time; the push timer is cleared first. */
+void CoXlTestLwWalk(float dt, int* stage, int* held, float* pos, uint64_t* stageAt)
+{
+    LwSquad* q = &g_lwSquads[0];
+    q->pushAt = 0;
+    LwWalk(q, dt);
+    *stage = q->intentStage; *held = q->held; pos[0] = q->pos[0]; pos[1] = q->pos[1]; *stageAt = q->intentStageAt;
+}
+int CoXlTestLwIntent(void) { return g_lwSquads[0].intent; }
+/* The refusal gates' counts as the 30 s note lists them (then cleared). */
+void CoXlTestLwRefuse(const char* why) { LwRefuseCount(why); }
+void CoXlTestLwRefuseList(char* out, size_t size) { LwRefuseList(out, size); }
+/* The squad a member belongs to: listed, or lost in the last 10 s. */
+void CoXlTestLwLostAdd(uint32_t id, int squad) { LwLostAdd(id, squad); }
+int CoXlTestLwSquadOf(uint32_t id, uint64_t later, int* dead) { g_lwWorld.count = 0; return LwSquadOfMember(id, GetTickCount64() + later, dead); }
+void CoXlTestLwSlot(const float* pos, uint32_t i, uint32_t n, float* to) { LwMemberSlot(pos, i, n, to); }
+/* The units the status note gives as the limit: the bubbles' budgets under the density rules, else the effective cap. */
+int CoXlTestLwBudget(int density, int eff, int b0, int b1)
+{
+    g_lwWorld.eff = eff; g_lwDensity.on = density; g_lwDensity.count = 2; g_lwDensity.budget[0] = b0; g_lwDensity.budget[1] = b1;
+    int r = LwUnitBudget(); g_lwDensity.on = -1; return r;
+}
+/* Every build's note of why a waiting event squad is not online: index 0 (reinforcing) with `why`. */
+void CoXlTestLwHeldWhy(const char* why) { g_lwSquads[0].intent = LW_REINFORCE; LwHeldWhy(&g_lwSquads[0], why, 160.0f * 160.0f); }
+/* Squad 0 online and calm with a goal (fresh: a new stretch sent at `now`; 2: no goal sent, 3: rushing, 4: a patrol
+ * left goal-less by its last send, 5: a retaking squad at its garrison likewise), its leader at
+ * `at` at `now` ms: the stall check; the 30 s count of calm still squads (the others' count in `other`). */
+uint32_t CoXlTestLwStallOther(void) { return g_lwWorld.stalledOther; }
+static float g_testStallPath = -1.0f;
+uint32_t CoXlTestLwStall(int fresh, const float* at, const float* goal, uint64_t now)
+{
+    LwSquad* q = &g_lwSquads[0];
+    if (fresh) { memset(q, 0, sizeof *q); q->state = LW_ONLINE; q->cap = 9; float g[3] = {goal[0], goal[1], 0}; LwGoalSent(q, g); q->goalAt = now; g_lwWorld.stalled = g_lwWorld.stalledOther = 0; }
+    if (fresh == 2) q->goalAt = 0; /* no goal sent */
+    if (fresh == 3) q->rushed = 1;
+    if (fresh) q->pathLen = 1; /* a route: a goal send plans none here */
+    if (fresh == 4 || fresh == 5 || fresh == 8) { q->goalAt = 0; q->jobSet = 1; } /* a goal send that found nothing */
+    if (fresh == 8) q->intent = LW_INVESTIGATE; /* on its way, goal-less */
+    if (fresh == 5) { q->intent = LW_RETAKE; q->intentStage = 1; }
+    if (fresh == 6 || fresh == 7) { q->intent = LW_REINFORCE; q->intentStage = fresh == 6; } /* at its point; on its way */
+    LwStallCheckAt(q, NULL, 0, at, now, 0, g_testStallPath);
+    return g_lwWorld.stalled;
+}
+/* What is left of squad 0's path at the next stall checks (under 0: unknown). */
+void CoXlTestLwStallPath(float left) { g_testStallPath = left; }
+/* Waiting squads' lanes and points: the lane of the rank-th waiting squad; the k-th point at bearing a from a player
+ * at the origin with a 150 m band; squad `idx` of two waiting at one point, 21 s there, moved by the hold. */
+int CoXlTestLwHoldLane(int rank) { return LwHoldLane(rank); }
+/* The lane a newly waiting squad 2 takes when squads 0 and 1 wait in lanes a and b (99: not waiting). */
+int CoXlTestLwHoldFree(int a, int b)
+{
+    memset(g_lwSquads, 0, 3 * sizeof g_lwSquads[0]); g_lwWorld.count = 3;
+    for (int i = 0; i < 3; i++) g_lwSquads[i].state = LW_OFFLINE; /* walking squads keep lane 0 in their record: not taken */
+    if (a != 99) { g_lwSquads[0].state = LW_OFFLINE; g_lwSquads[0].held = 1; g_lwSquads[0].holdLane = (int8_t)a; }
+    if (b != 99) { g_lwSquads[1].state = LW_OFFLINE; g_lwSquads[1].held = 1; g_lwSquads[1].holdLane = (int8_t)b; }
+    return LwHoldFreeLane(&g_lwSquads[2]);
+}
+void CoXlTestLwHoldPoint(float a, int k, float* out) { const float pl[2] = {0, 0}; LwHoldPoint(pl, a, 150.0f, k, out); }
+void CoXlTestLwHoldTwo(int idx, float* pos)
+{
+    LwSquad* q = &g_lwSquads[idx];
+    if (idx == 1) { *q = g_lwSquads[0]; g_lwWorld.count = 2; q->holdLane = (int8_t)LwHoldFreeLane(q); }
+    q->heldAt -= 21000; q->pushAt = 0;
+    LwIntentHoldAt(q, q->target[0], q->target[1], 1);
+    pos[0] = q->pos[0]; pos[1] = q->pos[1];
+}
+/* Squad 0 waiting in `lane` at bearing 1.0, squad 1 at bearing `other` (waiting 0: not, 1: yes, 2: online with the
+ * flag still set): squad 0's shift
+ * after n dead-end patches (all nine points refused n times); 99 when its bearing is not its lane's plus the shift. */
+float CoXlTestLwHoldTurns(int lane, int n, float other, int waiting)
+{
+    LwSquad* q = &g_lwSquads[0]; LwSquad* o = &g_lwSquads[1];
+    g_lwWorld.count = 2; memset(o, 0, sizeof *o); o->state = waiting == 2 ? LW_ONLINE : LW_OFFLINE; o->held = waiting != 0; o->holdA = other;
+    q->state = LW_OFFLINE; q->held = 1; q->holdLane = (int8_t)lane; q->holdA = 1.0f; q->holdShift = 0;
+    for (int k = 0; k < n; k++) { q->holdTry = 8; LwHoldNext(q); }
+    return fabsf(q->holdA - 1.0f - q->holdShift) < 0.0001f ? q->holdShift : 99.0f;
+}
+/* Squad 0's target moves (the fight's place from the player changes its lane's bearing). */
+void CoXlTestLwHoldTarget(float x, float y) { g_lwSquads[0].target[0] = x; g_lwSquads[0].target[1] = y; }
+/* After a refused request, squad 0's next point at the edge. */
+void CoXlTestLwHoldNext(float* pos) { LwHoldNext(&g_lwSquads[0]); pos[0] = g_lwSquads[0].pos[0]; pos[1] = g_lwSquads[0].pos[1]; }
+void CoXlTestLwStallLines(uint32_t n) { g_lwWorld.stallLines = n; }
+uint32_t CoXlTestLwStallNoGoal(void) { return g_lwWorld.stallNoGoal; }
+/* Squad 0's stall tries: set when `set` >= 0; what they are. */
+int CoXlTestLwStallTries(int set) { if (set >= 0) g_lwSquads[0].stallTries = (uint8_t)set; return g_lwSquads[0].stallTries; }
+/* A stalled squad's step (LW_STALL_*: 1 left to a brain action, 2 waits for its path request, 3 goal again, 4 goal
+ * moved onto the leader's layer, 5 new goal) from its intent, its tries so far and what the recovery read. */
+int CoXlTestLwStallStep(int intent, int tries, int action, int busy, int snapOff, int* after)
+{
+    LwSquad* q = &g_lwSquads[0]; q->intent = (uint8_t)intent; q->stallTries = (uint8_t)tries;
+    int r = LwStallStep(q, action, busy, snapOff); *after = q->stallTries; return r;
+}
+/* LwOnline's checks for squad 0 (held or not) with placement and room answered by the test: how often each ran, and the
+ * retry it left (ms from now, 0 = none). */
+static int g_testPlaceOk, g_testRoomOk, g_testPlaces, g_testRooms;
+static int TestPlace(LwSquad* q, uintptr_t slot, uint32_t cap, float* pos, float* target) { (void)q; (void)slot; (void)cap; (void)pos; (void)target; g_testPlaces++; return g_testPlaceOk; }
+static int TestRoom(uint32_t members) { (void)members; g_testRooms++; snprintf(g_lwRoomWhy, sizeof g_lwRoomWhy, "the cap: bubble 70 online + 9 over 72 (1 players)"); return g_testRoomOk; }
+int CoXlTestLwGates(int held, int placeOk, int roomOk, int* places, int* rooms, int* retryMs)
+{
+    LwSquad* q = &g_lwSquads[0]; float pos[3] = {0}, target[3] = {0};
+    q->held = (uint8_t)held; q->retry = 0; g_testPlaceOk = placeOk; g_testRoomOk = roomOk; g_testPlaces = g_testRooms = 0;
+    g_lwGates.place = TestPlace; g_lwGates.room = TestRoom;
+    int r = LwOnlineGates(q, 0, 9, pos, target);
+    g_lwGates.place = LwOnlinePlace; g_lwGates.room = LwRoomFor;
+    *places = g_testPlaces; *rooms = g_testRooms; *retryMs = q->retry ? (int)(q->retry - GetTickCount64()) : 0;
+    return r;
+}
+/* Whether squad 0's member slots are sight-checked: waiting at the band's edge or not, `waited` ms into its wait. */
+int CoXlTestLwSlotsChecked(int held, uint32_t waited) { LwSquad* q = &g_lwSquads[0]; ULONGLONG now = GetTickCount64(); q->held = (uint8_t)held; q->heldFrom = now - waited; return LwSlotsChecked(q, now); }
+uint64_t CoXlTestLwHeldFrom(void) { return g_lwSquads[0].heldFrom; }
+/* Goals wait for the job's state entry: the squad's state (-1 unread) and the ms since its job was asked for. */
+int CoXlTestLwJobSettled(int state, uint32_t waited) { return LwJobSettled(state, waited); }
+/* Squad 0 on its way to node 0 at (nodeX, 0), with a goal at (goalX, 0) sent for node `goalNode` (-2: no goal sent):
+ * whether the leader at (atX, 0) has reached the node. */
+int CoXlTestLwNodeReached(int intent, float nodeX, float goalX, int goalNode, float atX)
+{
+    LwSquad* q = &g_lwSquads[0]; float g[3] = {goalX, 0, 0}, at[2] = {atX, 0};
+    memset(q, 0, sizeof *q); q->state = LW_ONLINE; q->intent = (uint8_t)intent; q->pathLen = 1; g_lwNodes[0].x = nodeX; g_lwNodes[0].y = 0;
+    if (goalNode != -2) { LwGoalSent(q, g); q->goalNode = (int16_t)goalNode; }
+    return LwNodeReached(q, at);
+}
+/* A calm stalled squad's recovery (LwStallApply) with the game's calls counted: squad 0 at (atX, 0) with its goal at
+ * (goalX, 0); read[] = {ok, action, busy, held, nav record, leader-layer hit}, the snap at (snapX, 0). calls[] = goal
+ * sends, path requests, resumes; to[] = the last goal's and the last path request's x. */
+static int g_stallCalls[3]; static float g_stallTo[2];
+static void StallGoalStub(uint32_t squad, const float* pos) { (void)squad; g_stallCalls[0]++; g_stallTo[0] = pos[0]; }
+static void StallRepathStub(void* nav, uint32_t squad, const float* pos) { (void)nav; (void)squad; g_stallCalls[1]++; g_stallTo[1] = pos[0]; }
+static void StallResumeStub(void* squads, uint32_t squad) { (void)squads; (void)squad; g_stallCalls[2]++; }
+void CoXlTestLwStallApply(int intent, int tries, const int* read, float atX, float goalX, float snapX, int* calls, float* to, float* goalNow)
+{
+    LwSquad* q = &g_lwSquads[0]; float at[2] = {atX, 0};
+    LwStallRead r = {read[0], read[1], read[2], read[3], read[4], read[5], {snapX, 0, 0}};
+    q->intent = (uint8_t)intent; q->stallTries = (uint8_t)tries; q->goalTo[0] = goalX; q->goalTo[1] = 0; q->goalAt = 1; q->state = LW_ONLINE;
+    memset(g_stallCalls, 0, sizeof g_stallCalls); g_stallTo[0] = g_stallTo[1] = -1;
+    g_lw.goal = StallGoalStub; g_lw.repath = StallRepathStub; g_lw.resume = StallResumeStub;
+    LwStallApply(q, at, &r);
+    memcpy(calls, g_stallCalls, sizeof g_stallCalls); memcpy(to, g_stallTo, sizeof g_stallTo); *goalNow = q->goalTo[0];
+}
+uint32_t CoXlTestLwStallCount(int what) { return what == 0 ? g_lwWorld.stallResent : what == 1 ? g_lwWorld.stallSnapped : what == 2 ? g_lwWorld.stallNewGoal : what == 3 ? g_lwWorld.stallResumed : what == 4 ? g_lwWorld.stallAction : g_lwWorld.stallBusy; }
+int CoXlTestLwStallWaits(int set) { if (set >= 0) g_lwSquads[0].stallWaits = (uint8_t)set; return g_lwSquads[0].stallWaits; }
+/* The band-edge wait's clocks moved back by ms: 0 the intent's start, 1 the time at this point; 2: the fight ends. */
+void CoXlTestLwHoldAge(int what, uint32_t ms) { LwSquad* q = &g_lwSquads[0]; if (what == 0) { q->intentAt -= ms; g_lwFights[0].born -= ms; q->fightBorn -= ms; } else if (what == 1) q->heldAt -= ms; else if (what == 2) g_lwFights[0].live = 0; else if (what == 4) q->heldFrom -= ms; else { memset(&g_lwNodes[0], 0, sizeof g_lwNodes[0]); g_lwNodeCount = 1; } } /* 3: one route node, for an intent's end; 4: its wait in this intent */
+/* Squad 0 online on its way to fight 0 (live, at `fight`), sent `sentAgo` ms ago, with one route node for an end. A
+ * fight's target as the test gives it: live at `at`, or dead (at NULL); target 0 puts the game's read back. */
+static int g_testTargetLive; static float g_testTargetAt[3];
+static int TestTargetLive(uint32_t target, float* pos) { (void)target; if (g_testTargetLive) memcpy(pos, g_testTargetAt, sizeof g_testTargetAt); return g_testTargetLive; }
+void CoXlTestLwFightTarget(int f, uint32_t target, const float* at)
+{
+    g_lwTargetLive = target ? TestTargetLive : LwLiveTarget; g_lwFights[f].target = target; g_testTargetLive = at != NULL;
+    if (at) { g_testTargetAt[0] = at[0]; g_testTargetAt[1] = at[1]; g_testTargetAt[2] = 0; }
+}
+void CoXlTestLwReinforceOn(const float* fight, uint32_t sentAgo, int intent)
+{
+    const float pl[2] = {0, 0};
+    CoXlTestLwReinforce(pl, fight, fight);
+    LwSquad* q = &g_lwSquads[0];
+    q->state = LW_ONLINE; q->intent = (uint8_t)intent; q->intentAt = GetTickCount64() - sentAgo; q->fightBorn = g_lwFights[0].born;
+    memcpy(g_lwFights[0].pos, fight, sizeof(float) * 2);
+    memset(&g_lwNodes[0], 0, sizeof g_lwNodes[0]); g_lwNodeCount = 1;
+}
+/* One online tick of squad 0's reinforcement `later` ms from now, its leader at `at`, `engaged` members engaged: its
+ * intent after it; its stage, point and moves. */
+int CoXlTestLwReinforceTick(const float* at, int engaged, uint32_t later, int* stage, float* target, int* moves)
+{
+    LwSquad* q = &g_lwSquads[0]; const uint32_t members[1] = {0};
+    LwReinforceTick(q, members, 1, engaged, at, GetTickCount64() + later);
+    *stage = q->intentStage; target[0] = q->target[0]; target[1] = q->target[1]; *moves = q->moves;
+    return q->intent;
+}
+/* The limits of squad 0's intent `later` ms from now: bit 0 late online, bit 1 late at the band's edge. */
+int CoXlTestLwIntentLate(uint32_t later) { LwSquad* q = &g_lwSquads[0]; ULONGLONG now = GetTickCount64() + later; return LwIntentLate(q, now) | LwHoldLate(q, now) << 1; }
+/* Squad 0 goes offline with its intent and comes back: whether its online time starts again. */
+int CoXlTestLwIntentOffline(void) { LwSquad* q = &g_lwSquads[0]; q->state = LW_OFFLINE; LwIntentOffline(q); q->state = LW_ONLINE; return q->intentOnAt == 0; }
+/* A scan's cluster of `n` units at levels[] and points pts[] (x, y pairs): its centre, its placing units' centre and count. */
+int CoXlTestLwCluster(const float* pts, const uint32_t* levels, int n, float* pos, float* hot)
+{
+    LwCluster c; memset(&c, 0, sizeof c);
+    for (int k = 0; k < n; k++) { float p[3] = {pts[2 * k], pts[2 * k + 1], 0}; if (LwAlertFights(levels[k])) LwClusterAdd(&c, p, LwAlertPlaces(levels[k])); }
+    pos[0] = c.pos[0]; pos[1] = c.pos[1]; hot[0] = c.hot[0]; hot[1] = c.hot[1];
+    return c.n | c.hotN << 8;
+}
+/* A cluster at (x, y) into the fights at `now`: n units, `hot` of them at a placing level, a call or not, its target.
+ * The fight's slot (-1 none) and, for slot `read`, its point, units and last scan seen. */
+int CoXlTestLwFightTake(float x, float y, int n, int hot, int call, uint32_t target, uint64_t now, int read, float* pos, int* engaged, uint64_t* seen)
+{
+    LwCluster c; memset(&c, 0, sizeof c);
+    c.pos[0] = c.hot[0] = c.tpos[0] = x; c.pos[1] = c.hot[1] = c.tpos[1] = y; c.n = n; c.hotN = hot; c.call = (uint8_t)call; c.target = target;
+    int f = LwFightTake(&c, now);
+    pos[0] = g_lwFights[read].pos[0]; pos[1] = g_lwFights[read].pos[1]; *engaged = g_lwFights[read].engaged; *seen = g_lwFights[read].seen;
+    return f;
+}
+int CoXlTestLwTeleportUnder(float hit, float plan, float drawn) { return LwTeleportUnder(hit, plan, drawn); }
+void CoXlTestLwStallSet(int rushed, float dist) { g_lwSquads[0].rushed = (uint8_t)rushed; g_lwSquads[0].stallDist = dist; }
+/* An intent's end with no patrol goal set: whether the squad still has a goal. */
+int CoXlTestLwIntentEndGoal(void) { LwSquad* q = &g_lwSquads[0]; q->goalAt = 5; q->intent = LW_INVESTIGATE; LwIntentEnd(q, "test"); return q->goalAt != 0; }
+int CoXlTestLwGoalNode(void) { float g[3] = {1, 2, 3}; g_lwSquads[0].goalNode = 7; LwGoalSent(&g_lwSquads[0], g); return g_lwSquads[0].goalNode; }
+/* A refusal counted, then a new mission's clear: the first 30 s list is empty. */
+void CoXlTestLwMissionClear(void) { LwMissionClear(); }
 const char* CoXlTestGuards(uintptr_t game) { return CoXlGuards(game); }
 void CoXlTestRenderShrink(uintptr_t map, void (*rehash)(uintptr_t, uint32_t)) { g_lwRender.rehash = (uintptr_t)rehash; LwRenderShrink(map); }
 void CoXlTestRenderCopies(uintptr_t dev, void (*resize)(uintptr_t, uint32_t)) { g_lwRender.resize = (uintptr_t)resize; LwRenderCopiesFree(dev); }
@@ -691,6 +1124,8 @@ void CoXlTestSectionEnd(void) { SectionEnd(); }
 /* The destroy queue's hook (proto/difficulty_world_destroy.c) on a fake exe; a mission in play as level init sets it
  * (level 0: the ship, as WorldShip leaves it). */
 int CoXlTestDestroyInstall(void) { InstallDestroyQueue(); return g_destroyQueue != NULL; }
+/* The unit table alone, as the install leaves it (0 = not known). */
+void CoXlTestDestroyTable(uintptr_t at, void* lock, void* unlock) { g_destroyTableAt = at; g_destroyLock = (DestroyLockFn)lock; g_destroyUnlock = (DestroyLockFn)unlock; }
 void CoXlTestDestroyTick(void) { DestroyTick(); }
 LONG CoXlTestDestroyWaiting(void) { return g_destroyWaiting; }
 /* Level init and the ship's set-up as the stubs call them, and the near terrain's state they leave or clear
@@ -756,6 +1191,14 @@ void CoXlTestOneMipArm(uint64_t tex, uint64_t* renderSlot)
 int CoXlTestOneMipArmed(void) { return g_oneMip.armed; }
 uint64_t CoXlTestOneMipTex(void) { return g_oneMip.tex; }
 uint64_t CoXlTestOneMipSpawn(uint32_t type, uint32_t name) { return NearOneMipSpawn(NULL, NULL, 0, type, name, 0, 0, NULL, NULL, 0); }
+/* The next extra large level's op 0x38 and its first replay's drop, the last level's material map being `matTex`. */
+void CoXlTestMapsNextLevel(uint64_t matTex, uint64_t matMark)
+{
+    g_coarseMat.tex = matTex; g_coarseMat.terrain = g_oneMip.terrain; g_coarseMat.mark = matMark; /* as a spawn with the material map leaves them */
+    g_world.levels++;
+    NearOneMipLevel();
+    NearCoarseMatDrop();
+}
 void CoXlTestNearActive(LONG on, uint64_t cam) { g_nearActive = on; g_near.cam[0] = cam; }
 LONG CoXlTestNearActiveNow(void) { return g_nearActive; }
 int CoXlTestCamShift(uint64_t camera) { const float v[3] = {1, 2, 3}; float out[3]; return TerrainNearCamShift(camera, g_world.game + 0xAB0725u, v, out); }
@@ -1067,6 +1510,11 @@ void CoXlTestStreamTick(void)
     if (g_stream.deferred == 0) g_stream.deferred = g_stream.count;
     WorldStreamTick(0.016f);
 }
+/* The look before a removal: slots given up, searches of the world's unit list, the session's destroy calls. */
+void CoXlTestStreamBelt(uint32_t* gone, uint32_t* looks, long* destroys) { *gone = g_stream.gone; *looks = g_stream.looks; *destroys = g_streamDestroys; }
+/* The looks that did not read: in a row now and in all, and whether removal went off for the level. */
+void CoXlTestStreamLooks(uint32_t* bad, uint32_t* fails, int* off) { *bad = g_stream.lookBad; *fails = g_stream.lookFails; *off = g_stream.destroyBad; }
+uint32_t CoXlTestWindowEvictedFar(void) { return g_win.evictedFar; }
 void CoXlTestStreamOutSince(uint32_t i, ULONGLONG since) { g_streamOutSince[i] = since; }
 void co_capacity_test_places(int region, uint32_t places);
 /* Slots [base, high) as live far window stamps, then one eviction over the bodies' budget: the far removals queued. */
@@ -1118,6 +1566,302 @@ void CoXlTestMoveHold(int on) { MoveHold(on); }
 LONG64 CoXlTestMoveHoldSince(void) { return g_moveHoldSince; }
 /* A level init's effect on the generator's side alone: the next level, complex (8) or not (1). */
 void CoXlTestGenLevel(float current) { InterlockedIncrement(&g_world.levels); g_world.current = current; }
+/* The roads' evidence (proto/difficulty_world_roads.c), its parts over raw 0x48 edge records (64 at most) and its
+ * lines over a fake generation block. */
+static uint32_t RoadsTestEdges(const uint8_t* recs, uint32_t n, RoadEdge* e)
+{
+    if (n > 64) n = 64;
+    for (uint32_t i = 0; i < n; i++) RoadEdgeRead(recs + 0x48ull * i, &e[i]);
+    return n;
+}
+void CoXlTestRoadsWidths(const uint8_t* recs, uint32_t n, char* out, size_t size) { RoadEdge e[64]; n = RoadsTestEdges(recs, n, e); RoadsWidths(e, n, out, size); }
+void CoXlTestRoadsPoints(const uint8_t* recs, uint32_t n, uint32_t points, uint32_t counts[8], double km[2])
+{
+    RoadEdge e[64]; RoadsPoints c;
+    n = RoadsTestEdges(recs, n, e);
+    RoadsPointsCount(e, n, points, &c);
+    counts[0] = c.edges; counts[1] = c.drawable; counts[2] = c.empty; counts[3] = c.emptySkeleton; km[0] = c.drawableKm; km[1] = c.emptyKm;
+    counts[4] = c.none; counts[5] = c.one; counts[6] = c.bad; counts[7] = c.demand;
+}
+/* out: edges with points, their points; m: metres along the points and along the chords */
+void CoXlTestRoadsPaths(const uint8_t* recs, uint32_t n, const float* pts, uint32_t points, uint32_t out[2], double m[2])
+{
+    RoadEdge e[64]; RoadsPaths p;
+    n = RoadsTestEdges(recs, n, e);
+    RoadsPathsCount(e, n, pts, points, &p);
+    out[0] = p.edges; out[1] = p.points; m[0] = p.metres; m[1] = p.chords;
+}
+/* comp: each edge's part; largest: the largest part's id, its edges and its metres along the points. Returns the parts. */
+uint32_t CoXlTestRoadsParts(const uint8_t* recs, uint32_t n, const float* pts, uint32_t points, uint32_t comp[64], uint32_t largest[2], double* metres)
+{
+    RoadEdge e[64];
+    n = RoadsTestEdges(recs, n, e);
+    const uint32_t parts = RoadsComponents(e, n, points, comp);
+    largest[0] = RoadsLargest(e, n, pts, comp, parts, &largest[1], metres);
+    return parts;
+}
+/* out[7]: how many parts hold the places' nearest paths; part (or NULL): each place's */
+void CoXlTestRoadsReach(const float* xy, uint32_t n, const uint8_t* recs, uint32_t edges, const float* pts, uint32_t points, uint32_t* part, float out[8])
+{
+    RoadEdge e[64]; RoadsReach r; uint32_t comp[64];
+    edges = RoadsTestEdges(recs, edges, e);
+    RoadsComponents(e, edges, points, comp);
+    RoadsReachOf(xy, n, e, edges, pts, points, comp, part, &r);
+    out[0] = (float)r.n; out[1] = r.pathMedian; out[2] = r.pathMax; out[3] = r.skelMedian; out[4] = r.skelMax; out[5] = r.lineMedian; out[6] = r.lineMax;
+    out[7] = (float)r.components;
+}
+DWORD CoXlTestTsvLength(char* line, size_t size, int len) { return TsvLength(line, size, len); }
+double CoXlTestRoadsDisc(uint32_t world, float fraction, double* radius) { return RoadsDiscKm2(world, fraction, radius); }
+/* The locations' ops as the dispatcher records them, and the stamp plan's count, for the level set up last. */
+void CoXlTestRoadsLevel(const uint8_t* ops, uint32_t n, uint32_t planned)
+{
+    memcpy(g_locationOp, ops, n);
+    g_plan.level = g_world.levels; g_plan.count = planned;
+}
+void CoXlTestRoadsCorridor(uintptr_t block, const uint8_t* ops, uint32_t before, uint32_t total) { RoadsCorridorNote(block, ops, before, total); }
+void CoXlTestRoadsShape(uint8_t (*fn)(uint64_t, const float*, float, const float*, const float*, float, float*, float*)) { g_roadShape = fn; }
+const char* CoXlTestInstallRoadTolerance(uintptr_t game, uint8_t** stub) { const char* why = InstallRoadTolerance(game); *stub = g_roadTolerance != NULL ? (uint8_t*)g_roadTolerance - 0x38 : NULL; return why; }
+void CoXlTestRoadsTolerance(int begin) { if (begin) RoadsToleranceBegin(); else RoadsToleranceEnd(); }
+/* The mod's added locations from `first` on, and `planned` plan entries at cand (each CoXlTestStampCandidateSize bytes, the location first). */
+uint32_t CoXlTestStampCandidateSize(void) { return (uint32_t)sizeof(StampCandidate); }
+void CoXlTestRoadsStamps(uint32_t first, void* cand, uint32_t planned)
+{
+    g_stamps.ringLevel = g_world.levels; g_stamps.first = first; g_stamps.cand = (StampCandidate*)cand;
+    g_plan.level = g_world.levels; g_plan.count = planned;
+}
+/* The slope profile over a height grid (cols x rows cells of `step` m, row 0 at +y): out = metres, over the tank's
+ * grade, over the FRV's, wet, steepest grade, worst cross slope, lowest, highest. */
+void CoXlTestRoadsSlope(const float* h, uint32_t cols, uint32_t rows, float step, float water, const float* pts, uint32_t n, double* out)
+{
+    const RoadsGround g = {h, cols, rows, step, water};
+    RoadsSlope s; memset(&s, 0, sizeof s);
+    RoadsSlopeAlong(&g, pts, n, &s);
+    out[0] = s.metres; out[1] = s.overTank; out[2] = s.overFrv; out[3] = s.wet; out[4] = s.grade; out[5] = s.cross; out[6] = s.low; out[7] = s.high;
+}
+/* The level's height capture and water as the near terrain keeps them, and the note over them. */
+void CoXlTestRoadsGround(float* h, uint32_t cols, uint32_t rows, int bodies, float water)
+{
+    g_near.level = g_world.levels; g_near.global = h; g_near.columns = cols; g_near.rows = rows;
+    g_nearWater.level = g_world.levels; g_nearWater.count = bodies; g_nearWater.high = water;
+}
+void CoXlTestRoadsSlopeNote(uintptr_t block) { RoadsSlopeNote(block); }
+void CoXlTestRoadsIndexNote(uint64_t context, const char* when) { RoadsIndexNote(context, when); }
+void CoXlTestRoadsPointsWatch(uintptr_t block, uint32_t op) { RoadsPointsWatch(block, op); }
+uint8_t CoXlTestLocationOp(uint32_t i) { return g_locationOp[i]; }
+float CoXlTestStampSegmentBox(const float* s, const float* lo, const float* hi) { return StampSegmentBox(s, lo, hi); }
+void CoXlTestRoadsAfterOp(uintptr_t block, uint64_t context, uint64_t record, uint32_t op, uint32_t before, int counted)
+{ RoadsAfterOp(block, context, record, op, before, counted); }
+/* The roads' graded profile (proto/difficulty_world_roadgrade.c): links are station pairs, out the GradeStats fields
+ * as doubles (steepest, bend, cut, fill, metres, over 5, over 8, moved over 8, over 15). Returns the torn stations. */
+uint32_t CoXlTestGradeSolve(const float* ground, const uint8_t* pinned, uint32_t n, const uint32_t* links, const float* gaps, uint32_t count, float slope,
+    uint32_t passes, float* target, double out[9])
+{
+    GradeStation* s = (GradeStation*)calloc(n ? n : 1, sizeof *s);
+    if (s == NULL) return n;
+    for (uint32_t i = 0; i < n; i++) { s[i].ground = ground[i]; s[i].pinned = pinned != NULL && pinned[i]; s[i].floor = -GRADE_FAR; }
+    for (uint32_t k = 0; k < count; k++) GradeLink(s, links[2 * k], links[2 * k + 1], gaps[k]);
+    const uint32_t torn = GradeSolve(s, n, slope, passes);
+    GradeStats g; GradeMeasure(s, n, &g);
+    for (uint32_t i = 0; i < n; i++) target[i] = s[i].target;
+    out[0] = g.steepest; out[1] = g.bend; out[2] = g.cut; out[3] = g.fill; out[4] = g.metres; out[5] = g.over5; out[6] = g.over8; out[7] = g.cut8; out[8] = g.cut15;
+    free(s);
+    return torn;
+}
+/* The graded field (proto/difficulty_world_roadfield.c). chains: `counts[c]` points each, in `pts`; ends[2c], ends[2c+1]
+ * name the shared stations of chain c's ends (a number the test chooses; 0xFFFFFFFF: its own). spur: 1 when the last
+ * chain meets the others as a spur does. ground(x, y) and floor are given to every station. Returns the stations. */
+static GradeField g_testField;
+static float TestGradeGround(void* ground, float x, float y) { return ((float (*)(float, float))ground)(x, y); }
+uint32_t CoXlTestGradeField(const float* pts, const uint32_t* counts, const uint32_t* ends, uint32_t chains, int spur, float (*ground)(float, float), float floor,
+    float slope, uint32_t passes, float world, uint32_t* torn)
+{
+    static uint32_t shared[64];
+    GradeField* f = &g_testField;
+    GradeFieldFree(f);
+    memset(shared, 0xFF, sizeof shared);
+    for (uint32_t c = 0; c < chains; c++)
+    {
+        uint32_t own[2] = {GRADE_NONE, GRADE_NONE};
+        uint32_t* a = ends[2 * c] < 64 ? &shared[ends[2 * c]] : &own[0];
+        uint32_t* b = ends[2 * c + 1] < 64 ? &shared[ends[2 * c + 1]] : &own[1];
+        if (spur && c + 1 == chains) own[1] = GradeFieldAttach(f, pts[2 * (counts[c] - 1)], pts[2 * (counts[c] - 1) + 1], f->segs);
+        GradeFieldChain(f, pts, counts[c], a, b);
+        pts += 2 * (size_t)counts[c];
+    }
+    for (uint32_t i = 0; i < f->stations; i++) { f->s[i].ground = ground(f->xy[2 * i], f->xy[2 * i + 1]); f->s[i].floor = floor; }
+    GradeFieldLinks(f);
+    GradeFieldTies(f);
+    for (uint32_t i = 0; i < f->stations; i++) f->s[i].cross = GradeFieldCross(f, i, TestGradeGround, (void*)ground);
+    *torn = GradeSolve(f->s, f->stations, slope, passes);
+    GradeFieldIndex(f, world);
+    return f->stations;
+}
+float CoXlTestGradeBandRamp(float move, float cross) { return GradeBandRamp(move, cross); }
+float CoXlTestGradeBandWeight(float u, float ramp, float move, float cross) { return GradeBandWeight(u, ramp, move, cross); }
+/* The level's pads for the grading: n circles of (x, y from the world's centre, radius, band, strength, footprint). */
+void CoXlTestGradePads(const float* pads, uint32_t n)
+{
+    g_pads.level = g_world.levels; g_pads.count = 0;
+    for (uint32_t i = 0; i < n && i < NEAR_PADS; i++, pads += 6)
+        g_pads.pad[g_pads.count++] = (NearPad){.cx = pads[0], .cy = pads[1], .c = 1.0f, .a = pads[2], .ba = pads[3], .k = pads[4], .foot = pads[5] != 0.0f};
+}
+/* The road's share at a point (corner metres), as the level's heights and a near tile take it; *pinned: a station
+ * there keeps its ground. */
+float CoXlTestGradeFree(float world, float playable, float x, float y, int* pinned)
+{
+    g_grade.world = world; g_grade.playable = playable;
+    RoadGradePadIndex();
+    *pinned = RoadGradePinned(x, y);
+    return RoadGradeFree(x, y);
+}
+float CoXlTestGradeFieldAt(float x, float y, float* z, float* d) { return GradeFieldAt(&g_testField, x, y, z, d); }
+float CoXlTestGradeStation(uint32_t i, float* xy, float* band, uint32_t* links)
+{ xy[0] = g_testField.xy[2 * i]; xy[1] = g_testField.xy[2 * i + 1]; *band = g_testField.band[i]; *links = g_testField.s[i].links; return g_testField.s[i].target; }
+uint32_t CoXlTestGradeFieldPieces(uint32_t* unlinked, uint32_t* capped) { *unlinked = g_testField.unlinked; *capped = g_testField.capped; return g_testField.segs; }
+/* A road's slopes on a surface: out = metres, over 5, 8, 12, 18, rise, steepest, 95th percentile, cross. */
+void CoXlTestGradeRoad(float (*height)(void*, float, float), const float* pts, uint32_t n, double out[9])
+{
+    static GradeRoad g;
+    memset(&g, 0, sizeof g);
+    GradeRoadAlong(height, NULL, pts, n, &g);
+    out[0] = g.metres; for (int k = 0; k < 4; k++) out[1 + k] = g.over[k];
+    out[5] = g.rise; out[6] = g.steepest; out[7] = GradeRoad95(&g); out[8] = g.cross;
+}
+/* The level's draw over the test field: the playable radius, then every cell through `tri`. Returns the triangles. */
+uint32_t CoXlTestGradeDraw(float world, float playable, GradeTriFn tri, float px, uint32_t most, uint32_t* cells)
+{
+    GradeFieldFree(&g_grade.f);
+    g_grade.f = g_testField; /* lent: the test's callback reads the field through g_testField meanwhile */
+    g_grade.world = world; g_grade.playable = playable; g_grade.next = 0; g_grade.drawn = 0;
+    RoadGradePadIndex();
+    RoadGradeCells();
+    static const float colour[4] = {255.0f, 0.0f, 0.0f, 0.0f};
+    uint32_t given = 0, batch;
+    while ((batch = RoadGradeBatch(tri, 1, 2, colour, px, most)) != 0) given += batch;
+    *cells = g_grade.drawn;
+    memset(&g_grade.f, 0, sizeof g_grade.f);
+    return given;
+}
+uint32_t CoXlTestGradeTies(uint32_t* untied) { *untied = g_testField.untied; return g_testField.ties; }
+/* A near tile's texel on the test field: the level's height there, sharpened as the tile takes it. */
+float CoXlTestGradeSharpen(float world, float playable, float wx, float wy, float coarse)
+{
+    g_grade.f = g_testField; /* lent, as for the draw */
+    g_grade.world = world; g_grade.playable = playable; g_grade.ready = 1; g_grade.off = 0; g_grade.level = g_world.levels;
+    RoadGradePadIndex();
+    const float h = RoadGradeSharpen(wx, wy, coarse);
+    memset(&g_grade.f, 0, sizeof g_grade.f); g_grade.ready = 0; g_grade.level = -1;
+    return h;
+}
+/* The merge's first op on a level whose roads were graded (level) or not (-1): 1 when the roads will be graded again. */
+int CoXlTestGradeRestart(int graded)
+{
+    g_grade.level = graded ? g_world.levels : -1; g_grade.phase = graded ? 2 : 0; g_grade.ready = graded;
+    RoadGradeBegin();
+    const int again = graded && g_grade.level == -1 && g_grade.phase == 0 && !g_grade.ready;
+    g_grade.level = -1; g_grade.phase = 0; g_grade.ready = 0;
+    return again;
+}
+/* The capped profile (GradeSolveCapped) on links as CoXlTestGradeSolve takes them; earth NULL: no cap anywhere.
+ * out: the stations GradeOverCap counts past `by`, the furthest's metres past its cap, its index, the metres of road. */
+uint32_t CoXlTestGradeCapped(const float* ground, const uint8_t* pinned, const float* earth, uint32_t n, const uint32_t* links, const float* gaps, uint32_t count,
+    float soft, float hard, uint32_t passes, float by, float* target, double out[4])
+{
+    GradeStation* s = (GradeStation*)calloc(n ? n : 1, sizeof *s);
+    if (s == NULL) return n;
+    for (uint32_t i = 0; i < n; i++)
+    { s[i].ground = ground[i]; s[i].pinned = pinned != NULL && pinned[i]; s[i].floor = -GRADE_FAR; s[i].earth = earth != NULL ? earth[i] : GRADE_FAR; }
+    for (uint32_t k = 0; k < count; k++) GradeLink(s, links[2 * k], links[2 * k + 1], gaps[k]);
+    const uint32_t torn = GradeSolveCapped(s, n, soft, hard, passes);
+    float worst = 0.0f; uint32_t at = 0; double metres = 0.0;
+    out[0] = GradeOverCap(s, n, by, &worst, &at, &metres); out[1] = worst; out[2] = at; out[3] = metres;
+    for (uint32_t i = 0; i < n; i++) target[i] = s[i].target;
+    free(s);
+    return torn;
+}
+/* n flatten zones (op 0x3E) after the pads CoXlTestGradePads gave, as TerrainNearPads keeps them: boxes of x0, y0,
+ * x1, y1 from the world's centre. */
+void CoXlTestGradeZones(const float* boxes, uint32_t n)
+{
+    for (uint32_t i = 0; i < n && g_pads.count < NEAR_PADS; i++, boxes += 4)
+        g_pads.pad[g_pads.count++] = (NearPad){.cx = (boxes[0] + boxes[2]) / 2, .cy = (boxes[1] + boxes[3]) / 2, .c = 1.0f, .a = (boxes[2] - boxes[0]) / 2,
+            .b = (boxes[3] - boxes[1]) / 2, .ba = 16.0f, .bb = 16.0f, .k = 1.0f, .rect = 1, .zone = 1};
+}
+/* The level's own solve (RoadGradeSolve) on one road of n points: ground(x, y) stands for the capture, the pins and
+ * caps come from the pads and the rim. The stations stay in the test field. Returns the torn stations, -1 when not
+ * solved; out: the pinned stations, those past the cap, the furthest's metres past it, its x and y, the metres. */
+static float (*g_testGradeGround)(float, float);
+static uint64_t TestGradeSample(void* descriptor, float* uv, void* out, uint64_t unused)
+{ (void)descriptor; (void)unused; *(float*)out = g_testGradeGround(uv[0] * g_grade.world, uv[1] * g_grade.world); return 0; }
+int CoXlTestGradeLevel(const float* pts, uint32_t n, float (*ground)(float, float), float world, float playable, double out[6])
+{
+    uint32_t first = GRADE_NONE, last = GRADE_NONE;
+    GradeFieldFree(&g_testField);
+    GradeFieldChain(&g_testField, pts, n, &first, &last);
+    GradeFieldFree(&g_grade.f);
+    g_grade.f = g_testField; /* lent, and taken back with what the solve made */
+    g_grade.world = world; g_grade.playable = playable; g_grade.sample = TestGradeSample; g_grade.capture = 1; g_testGradeGround = ground;
+    RoadGradePadIndex();
+    const int solved = RoadGradeSolve();
+    g_testField = g_grade.f;
+    memset(&g_grade.f, 0, sizeof g_grade.f); g_grade.sample = NULL; g_grade.capture = 0;
+    out[0] = g_grade.pinned; out[1] = g_grade.deep; out[2] = g_grade.deepest; out[3] = g_grade.deepAt[0]; out[4] = g_grade.deepAt[1]; out[5] = g_grade.deepMetres;
+    return solved ? (int)g_grade.torn : -1;
+}
+/* A station of the test field after CoXlTestGradeLevel: its cap; *pinned: it keeps its ground. */
+float CoXlTestGradeStationCap(uint32_t i, int* pinned) { *pinned = g_testField.s[i].pinned; return g_testField.s[i].earth; }
+/* What the grading adds at a point (RoadGradeMove) on the field and the ground CoXlTestGradeLevel left. */
+float CoXlTestGradeMove(float x, float y)
+{
+    g_grade.f = g_testField; /* lent, as for the draw */
+    g_grade.sample = TestGradeSample; g_grade.capture = 1;
+    RoadGradePadIndex();
+    const float move = RoadGradeMove(NULL, x, y);
+    memset(&g_grade.f, 0, sizeof g_grade.f); g_grade.sample = NULL; g_grade.capture = 0;
+    return move;
+}
+/* A road's shoulders on a surface: out = the steepest span (degrees), its x and y, the sharpest crease, its x and y. */
+void CoXlTestGradeShoulder(float (*height)(void*, float, float), const float* pts, uint32_t n, double out[6])
+{
+    static GradeRoad g;
+    memset(&g, 0, sizeof g);
+    GradeRoadAlong(height, NULL, pts, n, &g);
+    out[0] = g.side; out[1] = g.sideAt[0]; out[2] = g.sideAt[1]; out[3] = g.crease; out[4] = g.creaseAt[0]; out[5] = g.creaseAt[1];
+}
+/* 1 inside a stamp's footprint (corner metres); *open: RoadGradeOpen there over a surface that is 7 m everywhere. */
+static float TestGradeSeven(void* ctx, float x, float y) { (void)ctx; (void)x; (void)y; return 7.0f; }
+int CoXlTestGradeInPlace(float world, float playable, float x, float y, float* open)
+{
+    g_grade.world = world; g_grade.playable = playable; g_grade.under = TestGradeSeven;
+    RoadGradePadIndex();
+    *open = RoadGradeOpen(NULL, x, y);
+    g_grade.under = NULL;
+    return RoadGradeInPlace(x, y);
+}
+/* The roads' build (proto/difficulty_world_roadbuild.c): the point spacing, its stub and the arterial choice. */
+uint32_t CoXlTestRoadsLeftOut(const uint8_t* recs, uint32_t n, const uint8_t* taken, uint32_t used, uint32_t capacity, float spacing, uint32_t* total)
+{ RoadEdge e[64]; n = RoadsTestEdges(recs, n, e); return RoadsSpacingLeftOut(e, n, taken, used, capacity, spacing, total); }
+float CoXlTestRoadsSpacing(const uint8_t* recs, uint32_t n, const uint8_t* taken, uint32_t used, uint32_t capacity, uint32_t* total, uint32_t* left)
+{ RoadEdge e[64]; n = RoadsTestEdges(recs, n, e); return RoadsSpacingChoose(e, n, taken, used, capacity, total, left); }
+const char* CoXlTestInstallRoadSpacing(uintptr_t game, uint8_t** stub) { const char* why = InstallRoadSpacing(game); *stub = (uint8_t*)g_roadSpacing.key - 0x30; return why; }
+void CoXlTestRoadSpacingBuild(uint8_t* stub, uintptr_t constant, uintptr_t back) { RoadSpacingBuild(stub, constant, back); }
+void CoXlTestRoadSpacingAt(uint8_t* stub) { g_roadSpacing.key = (volatile uint64_t*)(stub + 0x30); g_roadSpacing.spacing = (volatile float*)(stub + 0x38); g_roadSpacing.level = -1; }
+void CoXlTestRoadsSpacingBegin(uintptr_t block, uint64_t record) { RoadsSpacingBegin(block, record); }
+void CoXlTestRoadsSpacingEnd(void) { RoadsSpacingEnd(); }
+uint32_t CoXlTestRoadsArterials(const uint8_t* recs, uint32_t edges, const uint32_t* ends, const float* nodeXY, uint32_t nodes, const float* termXY, uint32_t terms,
+    uint8_t* chosen, uint32_t* unreached)
+{
+    RoadEdge e[64];
+    edges = RoadsTestEdges(recs, edges, e);
+    const RoadsGraph g = {e, ends, nodeXY, edges, nodes};
+    return RoadsArterials(&g, termXY, terms, chosen, unreached);
+}
+void CoXlTestRoadsArterialsApply(uintptr_t block, const uint8_t* ops, uint32_t total) { RoadsArterialsApply(block, ops, total); }
+void CoXlTestRoadsArterialsPoints(uintptr_t block) { RoadsArterialsPoints(block); }
+void CoXlTestRoadsSpursBuild(uintptr_t block, uint64_t context, void (*capsule)(uint64_t, const float*, uint32_t)) { g_roadCapsule = capsule; RoadsSpursBuild(block, context); }
+void CoXlTestRoadsSpurTerminals(const float* xy, const float* gap, uint32_t terms) { RoadsSpurTerminals(xy, gap, terms); }
+uint32_t CoXlTestRoadsSpurs(uint32_t* reserve, const float** table) { *reserve = RoadsSpurReserve(); *table = (const float*)g_spurs.spur; return g_spurs.level == g_world.levels ? g_spurs.count : 0; }
+int CoXlTestRoadsArterial(uint32_t edge) { return g_arterials.level == g_world.levels && (g_arterials.bits[edge >> 3] >> (edge & 7)) & 1; }
 /* The stamp packages a level requested early (EarlyPackages): held as a level that ended before its record 94 leaves them. */
 void CoXlTestEarlyHeld(const uint64_t* ids, uint32_t count)
 {
