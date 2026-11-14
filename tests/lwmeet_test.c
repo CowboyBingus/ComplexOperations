@@ -62,6 +62,9 @@ int main(void)
     g_case = "never under a minute or over ten; a share too small for one squad still passes one at a time";
     CHECK(co_lw_meet_call_ms(72.0f, 4, 1, 100.0f) == CO_LW_MEET_CALL_MIN_MS && co_lw_meet_call_ms(18.0f, 4, 8, 3000.0f) == CO_LW_MEET_CALL_MAX_MS);
     CHECK(co_lw_meet_call_ms(4.0f, 4, 1, 465.0f) == 232500u);
+    g_case = "a player's first call waits its part of the period: 8 players' calls fall an eighth of it apart";
+    CHECK(co_lw_meet_call_first(480000u, 0, 8) == 0 && co_lw_meet_call_first(480000u, 1, 8) == 60000u && co_lw_meet_call_first(480000u, 7, 8) == 420000u);
+    CHECK(co_lw_meet_call_first(480000u, 3, 1) == 0 && co_lw_meet_call_first(480000u, 1, 2) == 240000u);
     g_case = "the patrol to call: the wanted side first, then the nearer";
     CHECK(co_lw_meet_call_better(5, 1, -1, 0) == 1 && co_lw_meet_call_better(5, 0, -1, 1) == 1);
     CHECK(co_lw_meet_call_better(9, 1, 3, 0) == 1 && co_lw_meet_call_better(3, 0, 9, 1) == 0);

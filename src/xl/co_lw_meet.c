@@ -107,6 +107,11 @@ uint32_t co_lw_meet_call_ms(float farLimit, int members, int roadPlayers, float 
     return ms < (float)CO_LW_MEET_CALL_MIN_MS ? CO_LW_MEET_CALL_MIN_MS : ms > (float)CO_LW_MEET_CALL_MAX_MS ? CO_LW_MEET_CALL_MAX_MS : (uint32_t)ms;
 }
 
+uint32_t co_lw_meet_call_first(uint32_t periodMs, int slot, int players)
+{
+    return players > 1 && slot > 0 ? (uint32_t)((uint64_t)periodMs * (uint64_t)(slot % players) / (uint64_t)players) : 0;
+}
+
 int co_lw_meet_call_better(int hops, int onSide, int bestHops, int bestOnSide)
 {
     if (bestHops < 0) return 1;

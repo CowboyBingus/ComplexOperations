@@ -46,6 +46,8 @@ int CoXlTestLwCallOver(int idx, int how);
 int CoXlTestLwCallOf(int idx);
 int CoXlTestLwCallZone(float x, int to, float x2, int turn);
 void CoXlTestLwCallEnd(void);
+void CoXlTestLwCallGroup(int idx, int group);
+float CoXlTestLwSeenScopedOf(float radius);
 
 int main(void)
 {
@@ -399,6 +401,8 @@ int main(void)
         CoXlTestLwSeenSetup(1, 1, 0, 0, 0);
         g_case = "a 2 m unit's band through a 4x scope is 861 m, whatever the host's view";
         { const float S = CoXlTestLwSeenRange(1, 2); CHECK(S > 840.0f && S < 880.0f && S > B + 150.0f); }
+        g_case = "a group measured at 8 m has its own slot's scoped band, wider than a 2 m unit's";
+        { const float S2 = CoXlTestLwSeenScopedOf(2.0f), S8 = CoXlTestLwSeenScopedOf(8.0f); printf("scoped 2 m %.0f, 8 m %.0f\n", (double)S2, (double)S8); CHECK(S2 > 780.0f && S2 < 880.0f && S8 > S2 + 100.0f); }
         g_case = "a patrol is called to a player's road: the nearest one beyond the zone on the side whose turn it is, about turn";
         CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
         CHECK(CoXlTestLwCallOne(0, 0, o) == 30 && o[0] == 7 && o[1] == 13 && o[2] == 19 && o[3] == 6 && o[4] == 1);
@@ -452,10 +456,23 @@ int main(void)
         g_case = "two players on a road: each has its call in turn, and twice the time to its next";
         { const float pair[2][2] = {{1500, 20}, {1600, -20}}, wide[4] = {250, 450, 550, 2750}; const int d4[4] = {1, 1, -1, -1};
           const uint32_t period = co_lw_meet_call_ms(18.0f, 4, 1, B + 50.0f - 250.0f);
+          const uint32_t first = co_lw_meet_call_ms(18.0f, 4, 2, CoXlTestLwSeenScopedOf(2.0f) + 100.0f - 250.0f) / 2u;
           CoXlTestLwCallWorld(30, 0, pair, 2, wide, d4, none, 4);
-          CHECK(CoXlTestLwCallTick(1000000u) == 1 && CoXlTestLwCallTick(1000500u) == 1 && CoXlTestLwCallTick(1001000u) == 2 && CoXlTestLwCallTick(1002000u) == 2);
-          CHECK(CoXlTestLwCallOf(20) == 1 && CoXlTestLwCallOf(10) == 2);
-          CHECK(CoXlTestLwCallTick(1000000u + period + 2000u) == 2 && CoXlTestLwCallTick(1000000u + 2u * period + 2000u) == 3); }
+          /* the second player's first call is half its own period on (a peer's far walk is the scoped band's), from the other side */
+          CHECK(first > 140000u && first < 150000u && 2u * period > first + 50000u);
+          CHECK(CoXlTestLwCallTick(1000000u) == 1 && CoXlTestLwCallTick(1000500u) == 1 && CoXlTestLwCallTick(1001000u) == 1 && CoXlTestLwCallTick(1000000u + first - 2000u) == 1);
+          CHECK(CoXlTestLwCallOf(20) == 1 && CoXlTestLwCallOf(30) == 0);
+          CHECK(CoXlTestLwCallTick(1000000u + first + 2000u) == 2 && CoXlTestLwCallOf(30) == 2 && CoXlTestLwCallOf(10) == 0);
+          CHECK(CoXlTestLwCallTick(1000000u + 2u * period - 2000u) == 2 && CoXlTestLwCallTick(1000000u + 2u * period + 2000u) == 3); }
+        g_case = "three players all due in one tick: one call a tick, the others in the ticks after";
+        { const float three[3][2] = {{1500, 20}, {1600, -20}, {1700, 20}}, wide[4] = {250, 450, 550, 2750}; const int d4[4] = {1, 1, -1, -1};
+          CoXlTestLwCallWorld(30, 0, three, 3, wide, d4, none, 4);
+          CHECK(CoXlTestLwCallTick(1000000u) == 1);
+          CHECK(CoXlTestLwCallTick(3000000u) == 2 && CoXlTestLwCallTick(3001000u) == 3 && CoXlTestLwCallTick(3002000u) == 4); }
+        g_case = "a patrol of a group never measured is not called: the next one out is";
+        CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
+        CoXlTestLwCallGroup(30, 9);
+        CHECK(CoXlTestLwCallOne(0, 0, o) == 0 && CoXlTestLwCallOf(30) == 0);
         g_case = "meet 0: no patrol is called";
         CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
         CoXlTestLwSeenSwitch(0); CHECK(CoXlTestLwCallTick(1000000u) == 0); CoXlTestLwSeenSwitch(1);

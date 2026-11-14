@@ -94,6 +94,9 @@ int co_lw_meet_far_room(int farUnits, int roadFar, int members, int limit, int o
  * the online radius, over the squads of `members` the far share's kept half (`farLimit` / CO_LW_MEET_FAR_RESERVE)
  * holds at once, for each of the `roadPlayers` players on a road. Faster, the share would refuse them. */
 uint32_t co_lw_meet_call_ms(float farLimit, int members, int roadPlayers, float walk);
+/* How long player `slot` of `players` waits for its first call: its part of the period `periodMs`, so the players'
+ * calls fall evenly over it. */
+uint32_t co_lw_meet_call_first(uint32_t periodMs, int slot, int players);
 /* 1 when a patrol `hops` road nodes from the player, on the wanted side of them or not, is the better one to call
  * than the best so far (`bestHops` < 0: none): the wanted side first, then the nearer. */
 int co_lw_meet_call_better(int hops, int onSide, int bestHops, int bestOnSide);
