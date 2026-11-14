@@ -234,18 +234,27 @@ session's ready list with no bound:
 
 A build for eight gives the mission summary screen eight rows and cards. The game packs two row blocks of four rows,
 four cards and four navigation entries into one allocation of 0x8A540 bytes. The build allocates 0x120C70 bytes and
-puts copies with eight entries in the new part; the old places stay unused. 49 code sites address the new places or
-count to eight, and 10 more go through code beside the game's. The 4 guards on the rows by player index stop at eight
+puts copies with eight entries in the new part; the old places stay unused. 52 code sites address the new places or
+count to eight, and 11 more go through code beside the game's. The 4 guards on the rows by player index stop at eight
 instead of four. The screen exists only at a mission's end, long after the counts are written at startup. A build for
 four keeps the screen and its 4 guards.
+
+The summary shows its cards in one row (`src/co_summary.c`):
+
+- With no player on cards 5 to 8 the row is the game's: four cards at full size, cards 5 to 8 not shown.
+- With a player on one of cards 5 to 8 the row holds only the cards with a player. They are scaled as one so the
+  row fits the canvas with the game's 56 units either side, and the row is centred.
+- The scale for five to eight cards is 0.80, 0.66, 0.57 and 0.50 at 16:9, and 1.00, 0.91, 0.78 and 0.68 at 21:9.
+- The game's own layout places the cards, so a card's buttons are pressed where they are drawn.
+- A research build takes `HELLFORGE_CO_SUMMARY_FILL` (2 to 8) in a session of one. Cards 2 to that number then show
+  the local player, each with a figure of its own. The variable is read while the summary is open, so a script can
+  set it in the running game.
 
 Limits that remain:
 
 - The mission result's loot rows hold score slots 1 to 4 only.
 - A record of the game's second record function (0x12E6690) lists the four participants its caller hands it. No caller
   of that function was found in the game's code.
-- The summary's cards 5 to 8 use the game's layout for four (a layout mode, not a count): where they appear on screen
-  is not known.
 - The summary's list of best entries keeps four.
 
 ## Difficulty
@@ -718,6 +727,7 @@ leaves the whole mod out.
 | `scripts/sites/loadout_sites.py` | The loadout screen's sites and caves for eight, and the per-peer loadout table's move and bounds. |
 | `scripts/sites/figure_sites.py` | The figure records' move: its 228 fields, sites and caves, checked against the dump. |
 | `scripts/sites/summary_sites.py` | The mission summary's sites and caves for eight, and its guards for four. |
+| `src/co_summary.c` | The mission summary's row for eight: which cards are shown, their scale and the row's place. |
 | `scripts/gen_count_sites.py` | Writes `co_count_sites.h` and `tests/co_stack_code.h`; assembles the caves with GNU `as`. Holds the guards, the member lists' caps, the lobby's size and the loot rows' guards. |
 | `scripts/sites/difficulty_sites.py` | The HiveMind's difficulty sites and their caves for eight. |
 | `scripts/sites/extract_sites.py` | The Pelican's seat caves and seat block, and the booster cave, for eight. |
