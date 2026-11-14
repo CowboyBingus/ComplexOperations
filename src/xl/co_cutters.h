@@ -48,6 +48,8 @@ void co_cutters_seen(CoCuttersSeen* out);
 #define CO_CUTTERS_SWITCH 0x812AE0u   /* exe: (rcx handles, edx count, r8d on); skips 0, a stale handle, one added already */
 #define CO_CUTTERS_STEP_TASK 0x20u    /* AI world record: the step task's handle, 0 from the join to the kick (0x7D79F4, 0x7D865A) */
 #define CO_CUTTERS_ALIVE_MS 1000u     /* with no tick this long the game adds a new cutter itself, as it always did */
+#define CO_CUTTERS_QUEUE 0x4A0u       /* AI world: its queued changes; a navmesh run takes them all as it begins (0xBB1430) */
+#define CO_CUTTERS_RUN 0x4B0u         /* AI world: the navmesh run in flight, 0 from its commit to the next start (0xBD1190) */
 
 /* Arms the record with `cap` cutters on and `adds` a tick at most. NULL, or why not: the engine's code at the
  * sites above and at the switch 0x812AE0 is not the code this was made for, or no memory. */
@@ -56,6 +58,15 @@ const char* co_cutters_record_arm(uintptr_t exe, uint32_t cap, uint32_t adds);
 uint32_t co_cutters_live(int complex);
 /* 1: makes are held back and the tick switches cutters on (and off, when it is given removes). 0: record only. */
 void co_cutters_switch(int on);
+/* For the hook on the engine's swap of an AI world's queued changes (0xBB1430), before the original, any thread:
+ * counts a navmesh run that begins with changes of the mission's world. Nothing unless the record is armed. */
+void co_cutters_swap(uintptr_t scene);
+/* Whether the navmesh has the trees within `r` of a place cut in (co_cutset_cut), for the game thread between AI
+ * steps: 1 yes, 0 not yet (`waiting` wanted cutters there are not on), -1 the mod holds no make back now (not
+ * switching, no tick in the last second, not bound), so the cutters there are the game's. */
+int co_cutters_cut(float x, float y, float r, uint32_t* waiting);
+/* The nearest recorded tree within `r` of a place (co_cutset_tree), any mode: -1 with none or nothing recorded. */
+float co_cutters_tree(float x, float y, float r, int* on);
 typedef struct CoCuttersTick
 {
     int bound, hooked, capped;
@@ -63,11 +74,15 @@ typedef struct CoCuttersTick
     uint64_t trees, others, unbound, refused, replaced, stale, destroyed, binds;
     uintptr_t world;
     double us, holdUs; /* the tick, and the part of it under the set's lock (the engine's adds are inside it) */
-    uint64_t makesOff, destroysOff, stranded; /* makes and destroys on a thread other than the tick's; records dropped while they waited */
+    /* makes and destroys since the start on the threads other than the tick's, a level's first trees too, and how
+     * many such threads (the first 64); records dropped while they waited */
+    uint64_t makesOff, destroysOff, stranded; uint32_t threadsOff;
     /* switching: the tick was skipped with the AI step in flight; makes held back, added by the game with no tick
-     * alive, added at once because the record was refused; handles sent to the switch */
+     * alive, added at once because the record was refused, or not added (the AI world or the pool had gone); handles
+     * sent to the switch */
     int skipped;
-    uint64_t held, stock, atOnce, sentOn, sentOff, skips;
+    uint64_t held, stock, atOnce, noWorld, sentOn, sentOff, skips;
+    uint32_t took; /* navmesh runs that began with changes of the mission's world */
 } CoCuttersTick;
 /* One tick of the set over these centres, game thread: what it would add and remove, counted as done. Record only:
  * nothing is sent to the engine. Switching: sent to CO_CUTTERS_SWITCH in batches, unless the AI step is in flight

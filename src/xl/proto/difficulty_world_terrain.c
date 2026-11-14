@@ -6656,6 +6656,7 @@ static uintptr_t g_sceneSwapExe;
 static volatile LONG64 g_sceneSwapsLocked;
 static uint64_t SceneSwapDetour(uint64_t scene)
 {
+    co_cutters_swap((uintptr_t)scene); /* a navmesh run begins: the tree cutters wait for one that holds their adds */
     if (!(g_world.live > 1.0f) || g_nearTerrainLock[0] == NULL || g_nearTerrainLock[1] == NULL) return g_sceneSwapOriginal(scene);
     uint64_t lock = 0;
     for (uintptr_t w = 0; w < 4 && lock == 0; w++)

@@ -799,10 +799,98 @@ static void Centres(void)
     CHECK(co_cutset_player(held, 0, 3, 0, 0, 0, 0x300u, at) == 0);
 }
 
+/* The nearest tree's own cutter state, whatever the order the cell lists its records in. */
+static void Tree(void)
+{
+    int on = 9;
+    Fresh("nearest tree: a nearer one that is off, listed after one that is on");
+    const CoCutCentre squad = {100.0f, 100.0f, CO_CUTSET_SQUAD_IN, CO_CUTSET_SQUAD_OUT};
+    co_cutset_made(&g_set, H(1), 105.0f, 100.0f, 0);
+    co_cutset_made(&g_set, H(2), 112.0f, 100.0f, 1);
+    Tick(&squad, 1, 1000, 0);
+    CHECK(g_out.adds == 1 && co_cutset_tree(&g_set, 106.0f, 100.0f, 6.5f, &on) == 1.0f && on == 0);
+    CHECK(co_cutset_tree(&g_set, 110.0f, 100.0f, 6.5f, &on) == 2.0f && on == 1);
+}
+
+/* A squad's place is cut in when nothing wanted near it waits and a run that began after its last add has ended. */
+static void CutIn(void)
+{
+    uint32_t waiting = 9;
+    Fresh("cut in: nothing recorded near is cut in at once");
+    CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 0, 1, &waiting) == 1 && waiting == 0);
+    co_cutset_made(&g_set, H(1), 100.0f, 100.0f, 0); /* a tree the game never adds */
+    CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 0, 1, &waiting) == 1 && waiting == 0);
+
+    Fresh("cut in: a wanted one within the radius waits");
+    const CoCutCentre squad = {100.0f, 100.0f, CO_CUTSET_SQUAD_IN, CO_CUTSET_SQUAD_OUT};
+    co_cutset_made(&g_set, H(1), 110.0f, 100.0f, 1);
+    co_cutset_made(&g_set, H(2), 100.0f, 132.0f, 1);  /* at the radius: in */
+    co_cutset_made(&g_set, H(3), 100.0f, 132.5f, 1);  /* past it, in a cell the disc touches */
+    co_cutset_made(&g_set, H(4), 60.0f, 60.0f, 1);    /* in the disc's square, 56 m off */
+    co_cutset_made(&g_set, H(5), 3000.0f, 3000.0f, 1);
+    co_cutset_made(&g_set, H(10), 105.0f, 100.0f, 0); /* never added by the game: nothing to wait for */
+    CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 7, 0, &waiting) == 0 && waiting == 2);
+    /* the cells on every side of the place's own */
+    CHECK(co_cutset_cut(&g_set, 130.0f, 100.0f, 32.0f, 7, 0, &waiting) == 0 && waiting == 1);
+    CHECK(co_cutset_cut(&g_set, 110.0f, 130.0f, 32.0f, 7, 0, &waiting) == 0 && waiting == 3);
+    CHECK(co_cutset_cut(&g_set, 90.0f, 100.0f, 32.0f, 7, 0, &waiting) == 0 && waiting == 1);
+    CHECK(co_cutset_cut(&g_set, 110.0f, 90.0f, 32.0f, 7, 0, &waiting) == 0 && waiting == 1);
+    CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 33.0f, 7, 0, &waiting) == 0 && waiting == 3);
+    CHECK(co_cutset_cut(&g_set, -500.0f, 100.0f, 32.0f, 7, 0, &waiting) == 1 && waiting == 0);
+    /* the nearest recorded tree, wanted or not, and whether its cutter is on */
+    int on = 9;
+    CHECK(co_cutset_tree(&g_set, 100.0f, 100.0f, 6.0f, &on) == 5.0f && on == 0);
+    on = 9;
+    CHECK(co_cutset_tree(&g_set, 100.0f, 100.0f, 4.9f, &on) == -1.0f && on == 0);
+    CHECK(co_cutset_tree(&g_set, 108.0f, 100.0f, 6.0f, &on) == 2.0f && on == 0);
+    CHECK(co_cutset_tree(&g_set, 126.0f, 100.0f, 16.0f, &on) == 16.0f); /* at the radius, from another cell */
+    CHECK(co_cutset_tree(&g_set, 94.0f, 100.0f, 16.0f, &on) == 11.0f && co_cutset_tree(&g_set, 100.0f, 116.0f, 16.5f, &on) == 16.0f);
+    CHECK(co_cutset_tree(&g_set, 100.0f, 148.0f, 16.0f, &on) == 15.5f && co_cutset_tree(&g_set, -500.0f, 100.0f, 32.0f, &on) == -1.0f);
+    /* the tick's adds carry the set's epoch: no run has begun since */
+    g_set.epoch = 7;
+    Tick(&squad, 1, 1000, 0);
+    CHECK(g_out.adds == 4 && co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 7, 0, &waiting) == 0 && waiting == 0);
+    CHECK(co_cutset_tree(&g_set, 108.0f, 100.0f, 6.0f, &on) == 2.0f && on == 1);
+    CHECK(co_cutset_tree(&g_set, 107.0f, 100.0f, 6.0f, &on) == 2.0f && on == 0); /* the nearer one is the game's, never on */
+    CHECK(co_cutset_tree(&g_set, 108.0f, 100.0f, 6.0f, &on) == 2.0f && on == 1);
+    /* one more made beside those that are on: it alone waits */
+    co_cutset_made(&g_set, H(9), 111.0f, 100.0f, 1);
+    CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 9, 0, &waiting) == 0 && waiting == 1);
+    { const uint32_t back[1] = {H(9)}; co_cutset_gone(&g_set, back, 1); }
+    /* one began: cut in once it is not in flight; a second began: the first has ended */
+    CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 8, 1, &waiting) == 0);
+    CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 8, 0, &waiting) == 1);
+    CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 9, 1, &waiting) == 1);
+    CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 0x80000000u, 1, &waiting) == 1);
+    /* a count that ran back (it never does) is no run */
+    CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 6, 0, &waiting) == 0);
+    /* a later add in a cell the disc touches, itself outside the disc, makes the place wait for its run too */
+    co_cutset_made(&g_set, H(6), 139.0f, 100.0f, 1);
+    g_set.epoch = 9;
+    Tick(&squad, 1, 1250, 0);
+    CHECK(g_out.adds == 1 && co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 9, 0, &waiting) == 0 && waiting == 0);
+    CHECK(co_cutset_cut(&g_set, 100.0f, 100.0f, 32.0f, 10, 0, &waiting) == 1);
+    /* a place whose cells hold no add of that epoch does not wait for it */
+    CHECK(co_cutset_cut(&g_set, 60.0f, 60.0f, 20.0f, 9, 0, &waiting) == 1);
+    /* the far one, never in a centre's reach, waits for ever at its own place */
+    CHECK(co_cutset_cut(&g_set, 3000.0f, 3000.0f, 32.0f, 99, 0, &waiting) == 0 && waiting == 1);
+    /* a cutter the game added itself is stamped the same way */
+    g_set.epoch = 20;
+    CHECK(co_cutset_on(&g_set, H(5)) == 1);
+    CHECK(co_cutset_cut(&g_set, 3000.0f, 3000.0f, 32.0f, 20, 0, &waiting) == 0 && waiting == 0);
+    CHECK(co_cutset_cut(&g_set, 3000.0f, 3000.0f, 32.0f, 21, 0, &waiting) == 1);
+    Sound();
+    /* a destroyed cutter's cell holds none on: nothing to wait for */
+    const uint32_t gone[1] = {H(5)};
+    co_cutset_gone(&g_set, gone, 1);
+    CHECK(co_cutset_cut(&g_set, 3000.0f, 3000.0f, 32.0f, 20, 1, &waiting) == 1);
+    Sound();
+}
+
 int main(void)
 {
     /* unbuffered, and no group after a failed one: a set gone wrong can loop, and its failed checks must show */
-    void (*const groups[])(void) = {Binding, Records, AddsInReach, Leaving, Cap, Clock, Centres, Forest};
+    void (*const groups[])(void) = {Binding, Records, AddsInReach, Leaving, Cap, Clock, Centres, CutIn, Tree, Forest};
     setvbuf(stdout, NULL, _IONBF, 0);
     for (size_t i = 0; i < sizeof groups / sizeof groups[0] && g_failed == 0; i++) groups[i]();
     free(g_memory);

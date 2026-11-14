@@ -588,6 +588,40 @@ int CoXlTestNetVec(uintptr_t cfg, float scale, uint32_t* types, uint8_t* widen, 
 }
 float CoXlTestLwFaceReach(int tilesOn, int keeper, float top, float drawn, float wall) { return LwFaceReach(tilesOn, keeper, top, drawn, wall); }
 float CoXlTestLwRequestZ(float top, float face) { return LwRequestZ(top, face); }
+/* The tree cutters' glue (living_world_cutters.c): the switch's text, and a tick's centres from players (their
+ * peers; `peer` and `place` the streamer's list) and the squads set here (state as the LW_ enum: 3 online); a
+ * squad's ask to come online and what it gets (0 waits, 1 cut in, 2 the game's cutters, 3 let through late). */
+int CoXlTestLwCutParse(const char* text, unsigned* v) { return LwCutParse(text, v); }
+int CoXlTestLwCutClient(const char* text) { return LwCutClient(text); }
+void CoXlTestLwCutSquad(int i, int state, int every, float x, float y)
+{
+    if (i < 0) { g_lwWorld.count = 0; memset(g_lwCut.held, 0, sizeof g_lwCut.held); memset(g_lwCutAsk, 0, sizeof g_lwCutAsk); return; }
+    memset(&g_lwSquads[i], 0, sizeof g_lwSquads[i]);
+    g_lwSquads[i].state = (uint8_t)state; g_lwSquads[i].pos[0] = x; g_lwSquads[i].pos[1] = y; g_lwEvery[i] = (uint8_t)every;
+    if (g_lwWorld.count <= i) g_lwWorld.count = i + 1;
+}
+uint32_t CoXlTestLwCutAsked(int i, uint64_t now) { return LwCutAsked(i, now); }
+void CoXlTestLwCutMode(int mode) { g_lwCut.on = mode != 0; g_lwCut.mode = mode; memset(g_lwCut.gate, 0, sizeof g_lwCut.gate); g_lwCut.gateLongest = 0; }
+void CoXlTestLwCutWaited(int i, uint32_t ms) { g_lwCutAsk[i].first -= ms; }
+void CoXlTestLwCutGate(uint32_t* five) { memcpy(five, g_lwCut.gate, sizeof g_lwCut.gate); five[4] = g_lwCut.gateLongest; }
+int CoXlTestLwCutVerdict(int cut, uint32_t waitedMs) { return LwCutVerdict(cut, waitedMs); }
+/* The launch measurements: a navigator handle's place in its pool, a watched member's samples a second apart (`reset`
+ * starts a new member at the origin), and the repaths between two reads of a navigation record's navigator. */
+int CoXlTestLwCutNavSlot(uint32_t handle, uint32_t count, uint32_t mask, uint32_t live, uint32_t form, uint32_t* key, uint32_t* at) { return LwCutNavSlot(handle, count, mask, live, form, key, at); }
+int CoXlTestLwCutBodyStep(int reset, float x, float y, uint32_t goals, uint32_t state)
+{
+    static LwCutBody b; float p[3] = {x, y, 0};
+    if (reset) memset(&b, 0, sizeof b);
+    return LwCutBodyStep(&b, p, goals, state);
+}
+uint32_t CoXlTestLwCutRepathStep(uint32_t i, uint32_t handle, uint32_t count) { return LwCutRepathStep(i, handle, count); }
+uint32_t CoXlTestLwCutCentres(const uint64_t* players, int count, const uint64_t* peer, float (*place)[2], int streamed, int host, int none, uint64_t now, CoCutCentre* c, uint32_t* out)
+{
+    EvpPlayer list[EVT_MAX_PLAYERS + 2];
+    memset(list, 0, sizeof list);
+    for (int i = 0; i < count && i < EVT_MAX_PLAYERS + 2; i++) list[i].peer = players[i];
+    return LwCutCentres(list, count, peer, place, streamed, host, none, now, c, out);
+}
 /* A square grid of route nodes `step` apart over a disc of `radius`, no home regions. */
 static void LwTestGrid(float radius, float step)
 {
