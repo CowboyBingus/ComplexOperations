@@ -406,7 +406,10 @@ static void LwStallCheckAt(LwSquad* q, const uint32_t* members, int n, const flo
 #define LW_FIGHT_REACH 400.0f  /* squads sent from within this (D; x2 on extra large maps) */
 #define LW_FIGHT_JOIN 40.0f    /* arrived within this of the fight (D) */
 #define LW_FIGHT_HOLD 5000     /* ms a small fight lasts before it draws squads: alerts of a second or two end before help arrives (D) */
-typedef struct { float pos[3], tpos[3]; int engaged, peak; uint32_t target; ULONGLONG born, seen; uint8_t sent, call, live; } LwFight;
+#define LW_FIGHT_NEAR 100.0f   /* fights this close are one battle: a new one waits before it sends, an ended one's squads go on to the other (D) */
+#define LW_FIGHT_NEAR_HOLD 3000 /* ms a new fight beside an older one is seen before it sends: a cluster that split off for a scan sends nothing (D) */
+#define LW_FIGHT_RESEND 10000  /* ms between a fight's sends once it has sent: a squad that fails at once is not replaced every scan (D) */
+typedef struct { float pos[3], tpos[3]; int engaged, peak; uint32_t target, sent; ULONGLONG born, seen, sentAt; uint8_t call, live; } LwFight;
 static LwFight g_lwFights[16];
 static struct { uint32_t fights, calls, sent, joined, ended; } g_lwRush; /* 30 s counters */
 /* a target that still lives, and where it is now (the Behavior position +0x1C is only where it was last seen or heard) */
@@ -454,7 +457,61 @@ static void LwRushMembers(LwSquad* q, const uint32_t* members, int n, int on)
     if (on && done) Note("living world: squad %d runs to the fight at %.2f m/s (%d members)", (int)(q - g_lwSquads), (double)pace, done);
 }
 /* its fight still on: the slot is live and not reused since (a fight born after the squad was sent is another one) */
-static int LwFightOf(const LwSquad* q) { int f = q->fight; return f >= 0 && f < 16 && g_lwFights[f].live && g_lwFights[f].born <= q->intentAt; }
+/* The squad's fight while it lasts: the slot's fight is the one it was sent to (or moved to) while its birth matches. */
+static int LwFightOf(const LwSquad* q) { int f = q->fight; return f >= 0 && f < 16 && g_lwFights[f].live && g_lwFights[f].born == q->fightBorn; }
+/* The nearest live fight within `within` of a point, `skip` left out; -1 when none. */
+static int LwFightNearest(const float* at, float within, int skip)
+{
+    int best = -1; float bd = within * within;
+    for (int k = 0; k < 16; k++)
+    {
+        if (k == skip || !g_lwFights[k].live) continue;
+        float d = LwDist2(g_lwFights[k].pos, at[0], at[1]);
+        if (d < bd) { bd = d; best = k; }
+    }
+    return best;
+}
+/* The squads a fight has now: on their way to it or at it. A squad whose reinforcement ended (it waited too long, it
+ * was cancelled, its 180 s at the fight are over) no longer counts, so the fight may draw another in its place. */
+static int LwFightSquads(int f)
+{
+    int n = 0;
+    for (int i = 0; i < g_lwWorld.count; i++)
+        if (g_lwSquads[i].intent == LW_REINFORCE && g_lwSquads[i].fight == f && g_lwSquads[i].fightBorn == g_lwFights[f].born && g_lwSquads[i].state != LW_FREE) n++;
+    return n;
+}
+/* How many squads fight f may send in this scan (0 when none): it was seen in this scan, it is short of its want, it
+ * is old or large enough, a fight born beside an older live one has lasted LW_FIGHT_NEAR_HOLD, and its last send is
+ * LW_FIGHT_RESEND ago. */
+static int LwFightSends(int f, ULONGLONG now)
+{
+    const LwFight* fi = &g_lwFights[f];
+    int want = 1 + fi->engaged / 8;
+    if (want > 3) want = 3;
+    if (fi->seen != now || !(now - fi->born >= LW_FIGHT_HOLD || fi->engaged >= 3 || fi->call)) return 0;
+    if (fi->sentAt && now - fi->sentAt < LW_FIGHT_RESEND) return 0;
+    if (now - fi->born < LW_FIGHT_NEAR_HOLD)
+        for (int k = 0; k < 16; k++)
+            if (k != f && g_lwFights[k].live && g_lwFights[k].born < fi->born && LwDist2(g_lwFights[k].pos, fi->pos[0], fi->pos[1]) < LW_FIGHT_NEAR * LW_FIGHT_NEAR) return 0;
+    int have = LwFightSquads(f);
+    return have < want ? want - have : 0;
+}
+/* A fight that ended unseen beside another live one was that battle's split-off: its squads go on to the other fight
+ * instead of ending. The other fight's slot, -1 when there is none (its squads end by LwFightOf). */
+static int LwFightHandOver(int f)
+{
+    int to = LwFightNearest(g_lwFights[f].pos, LW_FIGHT_NEAR, f), moved = 0;
+    if (to < 0) return -1;
+    for (int i = 0; i < g_lwWorld.count; i++)
+    {
+        LwSquad* q = &g_lwSquads[i];
+        if (q->intent != LW_REINFORCE || q->fight != f || q->fightBorn != g_lwFights[f].born) continue;
+        q->fight = (int8_t)to; q->fightBorn = g_lwFights[to].born; q->retargetAt = 0; moved++;
+    }
+    Note("living world: fight %d at (%.0f, %.0f) ended unseen %.0f m from fight %d: its %d squad%s on to that fight", f, (double)g_lwFights[f].pos[0], (double)g_lwFights[f].pos[1],
+        (double)sqrtf(LwDist2(g_lwFights[to].pos, g_lwFights[f].pos[0], g_lwFights[f].pos[1])), to, moved, moved == 1 ? " goes" : "s go");
+    return to;
+}
 
 static void LwIntentEnd(LwSquad* q, const char* why)
 {
@@ -862,7 +919,7 @@ static void LwReinforce(int f, int want)
     {
         LwSquad* q = &g_lwSquads[pick[j]];
         uint8_t was = q->intent;
-        q->intent = LW_REINFORCE; q->intentStage = 0; q->intentSent = 0; q->intentAt = now; q->intentFrom = sqrtf(d2s[j]); q->fight = (int8_t)f; q->retargetAt = now + 10000;
+        q->intent = LW_REINFORCE; q->intentStage = 0; q->intentSent = 0; q->intentAt = now; q->intentFrom = sqrtf(d2s[j]); q->fight = (int8_t)f; q->fightBorn = fi->born; q->retargetAt = now + 10000;
         memcpy(q->target, fi->pos, sizeof q->target);
         if (q->state == LW_OFFLINE) { if (!LwIntentRoute(q)) { q->intent = was; q->fight = -1; continue; } }
         else if (q->jobSet)
@@ -872,12 +929,33 @@ static void LwReinforce(int f, int want)
             uint32_t ms[32]; int mn = LwMembers(q->squad, ms);
             if (mn > 0) LwRushMembers(q, ms, mn, 1);
         }
-        sent++; fi->sent++; g_lwRush.sent++;
+        sent++; fi->sent++; fi->sentAt = now; g_lwRush.sent++;
         len += (size_t)snprintf(list + len, sizeof list - len, "%s%d (%s%s, %.0f m%s)", len ? ", " : "", pick[j], q->state == LW_ONLINE ? "online" : "offline", was == LW_INVESTIGATE ? ", was investigating" : "", (double)sqrtf(d2s[j]),
             tiers[j] == 0 ? ", its region" : tiers[j] == 1 ? ", neighbour region" : "");
         if (len >= sizeof list) len = sizeof list - 1;
     }
     if (sent) Note("living world: fight %d at (%.0f, %.0f), %d engaged%s: squads sent %s", f, (double)fi->pos[0], (double)fi->pos[1], fi->engaged, fi->call ? " (a call for help)" : "", list);
+}
+/* An alert level that makes a fight (3, 5, 6, 7); the status line's "alerted" is any level but 0. */
+static int LwAlertFights(uint32_t lv) { return lv == 3 || (lv >= 5 && lv <= 7); }
+/* The alerted units within LW_ALERT_LIST_R of a player, by level, for the 30 s line: why units a player stands among
+ * make no fight (run 2: a fight "over after 0 s" with four alerted members 1 m from the player). */
+#define LW_ALERT_LIST_R 60.0f
+static struct { uint32_t byLevel[9], n; char text[400]; int len; } g_lwAlertList;
+static void LwAlertListAdd(uint32_t id, uint32_t lv, float d2)
+{
+    if (lv == 0 || !(d2 <= LW_ALERT_LIST_R * LW_ALERT_LIST_R)) return;
+    g_lwAlertList.byLevel[lv < 8 ? lv : 8]++; g_lwAlertList.n++;
+    if (g_lwAlertList.len < (int)sizeof g_lwAlertList.text - 40)
+        g_lwAlertList.len += snprintf(g_lwAlertList.text + g_lwAlertList.len, sizeof g_lwAlertList.text - g_lwAlertList.len, "%s%08X level %u at %.0f m", g_lwAlertList.len ? ", " : "", id, lv, (double)sqrtf(d2));
+}
+static void LwAlertListNote(void)
+{
+    if (g_lwAlertList.n == 0) return;
+    const uint32_t* b = g_lwAlertList.byLevel;
+    Note("living world: alert levels within %.0f m of a player (30 s): %u alerted units, by level 1-7 and over: %u %u %u %u %u %u %u %u; %u at a level that makes a fight (3, 5, 6, 7): %s%s",
+        (double)LW_ALERT_LIST_R, g_lwAlertList.n, b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[3] + b[5] + b[6] + b[7], g_lwAlertList.text,
+        g_lwAlertList.len >= (int)sizeof g_lwAlertList.text - 40 ? " (and more)" : "");
 }
 /* each squads tick: once a second, the fights from the engaged units and the calls for help */
 static void LwFightScan(void)
@@ -888,6 +966,9 @@ static void LwFightScan(void)
     if (now < next) return;
     next = now + 1000;
     float cx[32][3], ctp[32][3]; int cn[32], clusters = 0; uint8_t ccall[32]; uint32_t ct[32];
+    static ULONGLONG alertAt;
+    int alertList = now >= alertAt; /* once per 30 s: every alerted unit near a player with its level */
+    if (alertList) { alertAt = now + 30000; memset(&g_lwAlertList, 0, sizeof g_lwAlertList); }
     uintptr_t al = 0, ptrs = 0, levels = 0;
     if (EvpPtr(g_lw.game + 0x3326528u, &al) && EvpPtr(al + 0x38, &ptrs) && EvpPtr(al + 0x50, &levels))
     {
@@ -895,11 +976,14 @@ static void LwFightScan(void)
         for (uint32_t i = 0; i < count && i < 1024; i++)
         {
             uint32_t lv = EvpU32(levels + 4ull * i, 0);
-            if (lv != 3 && (lv < 5 || lv > 7)) continue;
+            int fights = LwAlertFights(lv);
+            if (!fights && (!alertList || lv == 0)) continue;
             uintptr_t ent = 0; ActHealth h; float p[3];
             if (!EvpPtr(ptrs + 8ull * i, &ent) || !ent) continue;
             uint32_t id = EvpU32(ent + 8, 0);
             if (!id || !ActHealthOf(g_lw.game, id, &h) || !h.unit || !EvpUnitPosition(h.unit, p) || !isfinite(p[0])) continue;
+            if (alertList) LwAlertListAdd(id, lv, LwNearestPlayer2(p[0], p[1]));
+            if (!fights) continue;
             int c = 0;
             for (; c < clusters; c++) if (LwDist2(cx[c], p[0], p[1]) < LW_FIGHT_CLUSTER * LW_FIGHT_CLUSTER) break;
             if (c == clusters) { if (clusters == 32) continue; clusters++; cx[c][0] = p[0]; cx[c][1] = p[1]; cx[c][2] = p[2]; cn[c] = 0; ccall[c] = 0; ct[c] = 0; }
@@ -908,6 +992,7 @@ static void LwFightScan(void)
             cn[c]++;
         }
     }
+    if (alertList) LwAlertListNote();
     uint32_t nowCalls = EvpU32(g_lwWorld.dir + 0x51950, calls);
     if (nowCalls != calls && clusters < 32) /* a call for reinforcements since the last scan: its point (the last one if several) */
     {
@@ -918,12 +1003,8 @@ static void LwFightScan(void)
     }
     for (int c = 0; c < clusters; c++)
     {
-        int f = -1, freeSlot = -1;
-        for (int k = 0; k < 16; k++)
-        {
-            if (g_lwFights[k].live && LwDist2(g_lwFights[k].pos, cx[c][0], cx[c][1]) < LW_FIGHT_MATCH * LW_FIGHT_MATCH) { f = k; break; }
-            if (!g_lwFights[k].live && freeSlot < 0) freeSlot = k;
-        }
+        int f = LwFightNearest(cx[c], LW_FIGHT_MATCH, -1), freeSlot = -1; /* the nearest fight, not the first by slot */
+        for (int k = 0; k < 16 && freeSlot < 0; k++) if (!g_lwFights[k].live) freeSlot = k;
         if (f < 0)
         {
             if (freeSlot < 0) continue;
@@ -951,14 +1032,14 @@ static void LwFightScan(void)
         if (!fi->live) continue;
         if (now - fi->seen > 30000)
         {
+            LwFightHandOver(f);
             fi->live = 0;
             Note("living world: fight %d at (%.0f, %.0f) is over after %.0f s (at most %d engaged, %u squads sent)", f, (double)fi->pos[0], (double)fi->pos[1],
                 (double)(fi->seen - fi->born) / 1000.0, fi->peak, fi->sent);
             continue;
         }
-        int want = 1 + fi->engaged / 8;
-        if (want > 3) want = 3;
-        if (fi->seen == now && fi->sent < want && (now - fi->born >= LW_FIGHT_HOLD || fi->engaged >= 3 || fi->call)) LwReinforce(f, want - fi->sent);
+        int sends = LwFightSends(f, now);
+        if (sends) LwReinforce(f, sends);
     }
 }
 static void LwRushNote(void)
