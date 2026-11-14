@@ -175,3 +175,63 @@ void co_lw_view_restart(CoLwView* v, uint64_t nowMs)
     }
     v->sinceMs = nowMs;
 }
+
+int co_lw_move_state(int patrol, int calm, int hasGoal, float left, float arrive)
+{
+    if (!patrol || !calm) return CO_LW_MOVE_OTHER;
+    return !hasGoal ? CO_LW_MOVE_NO_GOAL : left > arrive ? CO_LW_MOVE_GOAL : CO_LW_MOVE_THERE;
+}
+
+int co_lw_move_sample(CoLwMove* m, const float* at, int state, float* way5)
+{
+    if (!m->on) { m->on = 1; m->whole = CO_LW_MOVE_OTHER; m->way = m->way5 = 0; m->n5 = 0; }
+    else
+    {
+        const float dx = at[0] - m->last[0], dy = at[1] - m->last[1], d = sqrtf(dx * dx + dy * dy);
+        m->way += d; m->way5 += d;
+        if (m->whole != state) m->whole = CO_LW_MOVE_OTHER;
+    }
+    m->state = (uint8_t)state; m->last[0] = at[0]; m->last[1] = at[1];
+    if (++m->n5 < CO_LW_MOVE_EVERY) return 0;
+    *way5 = m->way5; m->n5 = 0; m->way5 = 0;
+    return 1;
+}
+
+void co_lw_move_gone(CoLwMove* m) { m->on = 0; m->whole = m->state = CO_LW_MOVE_OTHER; }
+
+static void MoveName(char* who, size_t size, int* at, int listed, uint32_t index)
+{
+    if (listed <= CO_LW_MOVE_NAMED && (size_t)*at < size) *at += snprintf(who + *at, size - (size_t)*at, " %u", index);
+}
+void co_lw_move_note(CoLwMove* m, uint32_t count, char* out, size_t size)
+{
+    int n = 0, low = 0, still = 0, noGoal = 0, there = 0, at = 0, at2 = 0, at3 = 0;
+    float least = 0; char who[80] = "", who2[80] = "", who3[80] = "";
+    for (uint32_t i = 0; i < count; i++)
+    {
+        if (!m[i].on) continue;
+        if (m[i].whole == CO_LW_MOVE_GOAL)
+        {
+            if (n++ == 0 || m[i].way < least) least = m[i].way;
+            if (m[i].way < CO_LW_MOVE_STILL) MoveName(who, sizeof who, &at, ++still, i);
+        }
+        else if (m[i].whole == CO_LW_MOVE_NO_GOAL) MoveName(who2, sizeof who2, &at2, ++noGoal, i);
+        else if (m[i].whole == CO_LW_MOVE_THERE) MoveName(who3, sizeof who3, &at3, ++there, i);
+    }
+    float median = 0;
+    for (uint32_t i = 0; i < count && n; i++) /* the median without a table: the ways under each candidate, counted */
+    {
+        if (!m[i].on || m[i].whole != CO_LW_MOVE_GOAL) continue;
+        low = 0;
+        int same = 0;
+        for (uint32_t k = 0; k < count; k++)
+            if (m[k].on && m[k].whole == CO_LW_MOVE_GOAL) { low += m[k].way < m[i].way; same += m[k].way == m[i].way; }
+        if (low <= n / 2 && n / 2 < low + same) { median = m[i].way; break; }
+    }
+    snprintf(out, size, "patrol goals (30 s): %d squads calm with a goal throughout, their way least %.0f m, median %.0f m; %d under %.0f m%s%s; "
+        "%d calm without a goal throughout%s%s; %d calm at their goal throughout%s%s", n, (double)least, (double)median, still, (double)CO_LW_MOVE_STILL,
+        still ? ": squads" : "", who, noGoal, noGoal ? ": squads" : "", who2, there, there ? ": squads" : "", who3);
+    for (uint32_t i = 0; i < count; i++) if (m[i].on) { m[i].whole = m[i].state; m[i].way = 0; }
+}
+
+int co_lw_view_switch(const char* text, unsigned long length, int fallback) { return length > 0 ? text[0] != '0' : fallback; }

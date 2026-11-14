@@ -221,6 +221,58 @@ int main(void)
     s = At(1, 8000, 0, 0, CO_LW_VIEW_SEEN_NEAR); co_lw_view_sample(&g_v, &s);
     CHECK(g_v.player[0].sightings == 0 && g_v.player[0].nearMs == 3000);
 
+    g_case = "a patrol's state: calm on its way, calm without a goal, calm at its goal; anything else is none of them";
+    CHECK(co_lw_move_state(1, 1, 1, 15.1f, 15.0f) == CO_LW_MOVE_GOAL && co_lw_move_state(1, 1, 1, 15.0f, 15.0f) == CO_LW_MOVE_THERE);
+    CHECK(co_lw_move_state(1, 1, 0, 500.0f, 15.0f) == CO_LW_MOVE_NO_GOAL && co_lw_move_state(1, 1, 0, 0.0f, 15.0f) == CO_LW_MOVE_NO_GOAL);
+    CHECK(co_lw_move_state(0, 1, 1, 500.0f, 15.0f) == CO_LW_MOVE_OTHER && co_lw_move_state(1, 0, 1, 500.0f, 15.0f) == CO_LW_MOVE_OTHER);
+    {
+        static CoLwMove m[16]; float way5 = -1, at[2] = {0, 0}; int lines = 0;
+        g_case = "a squad's own line comes with every fifth sample and carries the way since the last one";
+        for (int k = 0; k < 12; k++)
+        {
+            at[0] = 2.0f * (float)k;
+            if (co_lw_move_sample(&m[3], at, CO_LW_MOVE_GOAL, &way5)) { lines++; CHECK(NEAR(way5, k == 4 ? 8.0f : 10.0f)); CHECK(k == 4 || k == 9); }
+        }
+        CHECK(lines == 2 && NEAR(m[3].way, 22.0f) && m[3].whole == CO_LW_MOVE_OTHER); /* online inside the window: no whole one */
+        g_case = "the window's line: nobody was in one state throughout the first window";
+        co_lw_move_note(m, 16, line, sizeof line);
+        CHECK(strcmp(line, "patrol goals (30 s): 0 squads calm with a goal throughout, their way least 0 m, median 0 m; 0 under 9 m; "
+            "0 calm without a goal throughout; 0 calm at their goal throughout") == 0);
+        CHECK(m[3].whole == CO_LW_MOVE_GOAL && m[3].way == 0 && m[3].on == 1 && m[0].on == 0);
+        g_case = "the window's line: walkers, a stander with a goal, one without a goal, one at its goal, one that fought";
+        const float ways[6] = {40.0f, 8.9f, 90.0f, 0.0f, 0.0f, 60.0f}; /* squads 3..8 a second */
+        const int states[6] = {CO_LW_MOVE_GOAL, CO_LW_MOVE_GOAL, CO_LW_MOVE_GOAL, CO_LW_MOVE_NO_GOAL, CO_LW_MOVE_THERE, CO_LW_MOVE_GOAL};
+        for (int i = 0; i < 6; i++) { at[0] = 22.0f; if (i) co_lw_move_sample(&m[3 + i], at, states[i], &way5); }
+        co_lw_move_note(m, 16, line, sizeof line); /* squads 4..8 are whole from here */
+        for (int k = 1; k <= 30; k++)
+            for (int i = 0; i < 6; i++)
+            {
+                at[0] = 22.0f + ways[i] / 30.0f * (float)k;
+                co_lw_move_sample(&m[3 + i], at, i == 5 && k == 7 ? CO_LW_MOVE_OTHER : states[i], &way5);
+            }
+        co_lw_move_note(m, 16, line, sizeof line);
+        CHECK(strcmp(line, "patrol goals (30 s): 3 squads calm with a goal throughout, their way least 9 m, median 40 m; 1 under 9 m: squads 4; "
+            "1 calm without a goal throughout: squads 6; 1 calm at their goal throughout: squads 7") == 0);
+        g_case = "a squad that went offline is in no line, and its next sample starts afresh";
+        co_lw_move_gone(&m[4]);
+        for (int k = 31; k <= 60; k++) for (int i = 0; i < 6; i++) if (i != 1) { at[0] = 22.0f + ways[i] / 30.0f * (float)k; co_lw_move_sample(&m[3 + i], at, states[i], &way5); }
+        at[0] = 500.0f; co_lw_move_sample(&m[4], at, CO_LW_MOVE_GOAL, &way5);
+        co_lw_move_note(m, 16, line, sizeof line);
+        CHECK(strcmp(line, "patrol goals (30 s): 3 squads calm with a goal throughout, their way least 40 m, median 60 m; 0 under 9 m; "
+            "1 calm without a goal throughout: squads 6; 1 calm at their goal throughout: squads 7") == 0);
+        CHECK(m[4].way == 0 && m[4].whole == CO_LW_MOVE_GOAL);
+        g_case = "a list names eight squads and counts them all";
+        memset(m, 0, sizeof m);
+        for (int i = 0; i < 12; i++) { at[0] = 0; co_lw_move_sample(&m[i], at, CO_LW_MOVE_NO_GOAL, &way5); }
+        co_lw_move_note(m, 16, line, sizeof line);
+        for (int i = 0; i < 12; i++) co_lw_move_sample(&m[i], at, CO_LW_MOVE_NO_GOAL, &way5);
+        co_lw_move_note(m, 12, line, sizeof line);
+        CHECK(strstr(line, "; 12 calm without a goal throughout: squads 0 1 2 3 4 5 6 7; 0 calm at their goal") != NULL);
+    }
+    g_case = "a switch: unset takes the default, 0 is off, anything else on";
+    CHECK(co_lw_view_switch("", 0, 1) == 1 && co_lw_view_switch("", 0, 0) == 0 && co_lw_view_switch("0", 1, 1) == 0);
+    CHECK(co_lw_view_switch("1", 1, 0) == 1 && co_lw_view_switch("00", 2, 1) == 0 && co_lw_view_switch("on", 2, 0) == 1);
+
     if (g_failed) { printf("%d check(s) failed\n", g_failed); return 1; }
     return 0;
 }

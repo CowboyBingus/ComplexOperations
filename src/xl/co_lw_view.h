@@ -87,4 +87,26 @@ int co_lw_view_player_note(const CoLwView* v, uint32_t slot, uint64_t nowMs, cha
 /* After the notes: the sums start again. */
 void co_lw_view_restart(CoLwView* v, uint64_t nowMs);
 
+/* Whether a patrol with a goal walks: a goal sent does not always move a squad, and a squad at its goal is not always
+ * sent on. Per online squad, read about once a second: its way in the note's window and in the last few samples, and
+ * the one state it was in at every sample of the window. */
+#define CO_LW_MOVE_STILL 9.0f /* m in a 30 s window: under 0.3 m/s is standing */
+#define CO_LW_MOVE_EVERY 5    /* samples to a squad's own line */
+#define CO_LW_MOVE_NAMED 8    /* squads a list names */
+/* Not a calm patrol; calm and on its way to a goal; calm without a goal; calm within the arrival distance of its goal. */
+enum { CO_LW_MOVE_OTHER, CO_LW_MOVE_GOAL, CO_LW_MOVE_NO_GOAL, CO_LW_MOVE_THERE };
+typedef struct CoLwMove { float last[2], way, way5; uint8_t on, whole, state, n5; } CoLwMove;
+int co_lw_move_state(int patrol, int calm, int hasGoal, float left, float arrive);
+/* One sample. 1 on every CO_LW_MOVE_EVERY-th, with the way since the last such one in *way5. A squad's first sample
+ * (it came online inside the window) makes the window no whole one. */
+int co_lw_move_sample(CoLwMove* m, const float* at, int state, float* way5);
+/* The squad went offline or died. */
+void co_lw_move_gone(CoLwMove* m);
+/* The window's line for the first `count` squads into `out`, and the next window begins: each squad in the state of
+ * its last sample. */
+void co_lw_move_note(CoLwMove* m, uint32_t count, char* out, size_t size);
+/* A research switch that is on unless its text begins with 0: `length` as GetEnvironmentVariableA returns it (0 unset,
+ * and every build but a research build reads each switch as unset), `fallback` for unset. */
+int co_lw_view_switch(const char* text, unsigned long length, int fallback);
+
 #endif

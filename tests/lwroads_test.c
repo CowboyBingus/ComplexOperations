@@ -11,6 +11,8 @@ static const char* g_case;
 #define CHECK(what) do { if (!(what)) { printf("FAILED %s: %s\n", g_case, #what); g_failed++; } } while (0)
 
 static CoLwRoads g_r;
+int CoXlTestLwRoadPlan(int n, int at, int prev, int refused);
+int CoXlTestLwRoadPatrolsOn(void);
 
 int main(void)
 {
@@ -88,6 +90,16 @@ int main(void)
         }
         CHECK(co_lw_roads_step(next, 5, kind, CO_LW_ROADS_ARTERIAL, 3, 0) == -1 && co_lw_roads_step(next, 5, kind, CO_LW_ROADS_SPUR, 5, 0) == -1);
     }
+
+    g_case = "a road patrol's plan goes on along the road, and turns round at its end";
+    CHECK(CoXlTestLwRoadPlan(5, 2, 1, -1) == 3 && CoXlTestLwRoadPlan(5, 2, 3, -1) == 1);
+    CHECK(CoXlTestLwRoadPlan(5, 4, 3, -1) == 3 && CoXlTestLwRoadPlan(5, 0, 1, -1) == 1);
+    g_case = "a plan whose first node was refused (no navmesh there) takes the other way, never the same node again";
+    CHECK(CoXlTestLwRoadPlan(5, 2, 1, 3) == 1 && CoXlTestLwRoadPlan(5, 2, 3, 1) == 3 && CoXlTestLwRoadPlan(5, 2, -1, 3) == 1);
+    g_case = "refused with no other way on the roads, or off the roads: no road plan, the grid's plan draws a goal";
+    CHECK(CoXlTestLwRoadPlan(5, 4, 3, 3) == -1 && CoXlTestLwRoadPlan(5, 0, -1, 1) == -1 && CoXlTestLwRoadPlan(5, 10, -1, 4) == -1);
+    g_case = "road patrols are on in a build that reads no research switch";
+    CHECK(CoXlTestLwRoadPatrolsOn() == 1);
 
     if (g_failed) { printf("%d check(s) failed\n", g_failed); return 1; }
     return 0;

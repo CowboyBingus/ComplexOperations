@@ -30,12 +30,11 @@ static uint8_t g_lwPatrolLed[LW_SQUADS_MAX];     /* 1 in the spawn band only by 
 static ULONGLONG g_lwPatrolLookAt[LW_SQUADS_MAX]; /* a standing far squad's next sight test */
 static uint16_t g_lwRoadEdge[LW_NODES_MAX];       /* a road node's route edge (the spurs join an edge) */
 static int g_lwArtNodes;
-/* Whether each patrol with a goal walks (a goal sent does not always move a squad): its way in the 30 s window, in
- * the last 5 s, and whether it was calm with a goal (1) or calm without one (2) at every sample of the window. */
-#define LW_PATROL_TRACE 3000      /* 5 s lines a mission */
-#define LW_PATROL_STILL 9.0f      /* m in 30 s: under 0.3 m/s is standing */
-static struct { float last[2], way, way5; uint8_t on, whole, n5; } g_lwPatrolMove[LW_SQUADS_MAX];
+/* Whether each patrol with a goal walks (co_lw_view.h, co_lw_move_*), and its own line every 5 s. */
+#define LW_PATROL_TRACE 3000 /* 5 s lines a mission */
+static CoLwMove g_lwPatrolMove[LW_SQUADS_MAX];
 static uint32_t g_lwPatrolTraced;
+static int LwRoadPatrolsOn(void); static void LwPatrolMoved(const LwSquad* q, int idx, int calm, int fighting, ULONGLONG now);
 static int g_lwPatrolsOld; /* test command "patrols old 1": the rules before these, for a before value in the same run */
 
 static float LwRoadCost(int a, int b)
@@ -73,8 +72,13 @@ static int LwRoadPlan(LwSquad* q, int home)
 {
     const float r2 = g_lwWorld.radius * g_lwWorld.radius;
     const int road = LwRoadSquad((int)(q - g_lwSquads));
+    /* A plan asked for over one not yet walked: LwSendGoal found no navmesh at its first node. The same node again
+     * would leave the squad standing without a goal, so from a road the patrol takes another way (back, at most);
+     * off the roads, or with no other way, the grid's plan (0) draws a goal by chance. */
+    const int refused = q->pathAt < q->pathLen ? q->path[q->pathAt] : -1;
     if (!g_lwNodeKind[q->node])
     {
+        if (refused >= 0) return 0;
         int best = -1; float bd = 3.0e38f;
         for (int i = g_lwNodeCount - g_lwRoadNodes; i < g_lwNodeCount; i++)
         {
@@ -90,12 +94,12 @@ static int LwRoadPlan(LwSquad* q, int home)
     }
     for (int tries = 0; tries < 4; tries++)
     {
-        int hops = 4 + (int)(LwRand() % 9u), n = 0, at = q->node, from = q->prevValid ? q->prevNode : -1;
+        int hops = 4 + (int)(LwRand() % 9u), n = 0, at = q->node, from = refused >= 0 ? refused : q->prevValid ? q->prevNode : -1;
         uint16_t path[LW_PATH_MAX];
         while (n < hops)
         {
             int next = LwRoadStep(road, at, from);
-            if (next < 0 && n == 0 && from >= 0 && g_lwNodeKind[from]) next = from; /* a road's end: about turn */
+            if (next < 0 && n == 0 && refused < 0 && from >= 0 && g_lwNodeKind[from]) next = from; /* a road's end: about turn */
             if (next < 0 || g_lwNodes[next].x * g_lwNodes[next].x + g_lwNodes[next].y * g_lwNodes[next].y > r2) break;
             path[n++] = (uint16_t)next; from = at; at = next;
         }
@@ -222,7 +226,7 @@ static void LwRoadRoutes(uintptr_t lg)
 static int LwRoadPatrolsOn(void)
 {
     static int on = -1;
-    if (on < 0) { char t[4] = ""; on = GetEnvironmentVariableA("HELLFORGE_LW_ROAD_PATROLS", t, sizeof t) > 0 ? t[0] != '0' : LW_ROAD_PATROLS_DEFAULT; }
+    if (on < 0) { char t[4] = ""; const DWORD n = GetEnvironmentVariableA("HELLFORGE_LW_ROAD_PATROLS", t, sizeof t); on = co_lw_view_switch(t, n, LW_ROAD_PATROLS_DEFAULT); }
     return on;
 }
 
@@ -366,57 +370,25 @@ static void LwPatrolSample(LwSquad* q, ULONGLONG now)
 /* Once a second for an online squad: its way, and every 5 s a line with what tells a stander from a walker. */
 static void LwPatrolMoved(const LwSquad* q, int idx, int calm, int fighting, ULONGLONG now)
 {
-    __typeof__(g_lwPatrolMove[0])* m = &g_lwPatrolMove[idx];
-    const int patrol = q->intent == LW_PATROL && calm;
     const float left = sqrtf(LwDist2(q->pos, q->goalTo[0], q->goalTo[1]));
-    const int state = !patrol ? 0 : !q->goalAt ? 2 : left > LW_ARRIVE ? 1 : 0;
-    if (!m->on) { m->on = 1; m->whole = 0; m->way = m->way5 = 0; m->n5 = 0; } /* online inside this window: not a whole one */
-    else { const float d = sqrtf(LwDist2(m->last, q->pos[0], q->pos[1])); m->way += d; m->way5 += d; }
-    if (m->whole != state) m->whole = 0;
-    m->last[0] = q->pos[0]; m->last[1] = q->pos[1];
-    if (++m->n5 < 5) return;
-    if (q->intent == LW_PATROL && g_lwPatrolTraced < LW_PATROL_TRACE)
-    {
-        const uintptr_t nav = q->squad ? LwNavRecord(q->squad) : 0;
-        g_lwPatrolTraced++;
-        Note("living world: patrol %d: at (%.0f, %.0f), %.1f m in 5 s; %s; goal %s (%.0f, %.0f) %.0f m away, sent %.0f s ago, path left %.0f m, request pending %u, "
-            "stall tries %u; route %u of %u; %s; %u alive, %.0f m from the nearest player%s", idx, (double)q->pos[0], (double)q->pos[1], (double)m->way5,
-            fighting ? "fighting" : calm ? "calm" : "alert", q->goalAt ? "at" : "none, last", (double)q->goalTo[0], (double)q->goalTo[1], (double)left,
-            q->goalAt ? (double)(now - q->goalAt) / 1000.0 : -1.0, (double)LwStallPath(q, nav), nav ? EvpU32(nav + 0x90, 0) & 0xFF : 0, q->stallTries, q->pathAt, q->pathLen,
-            LwRoadSquad(idx) == 2 ? "arterial patrol" : LwRoadSquad(idx) ? "road patrol" : q->farOn ? "by sightline" : "near", q->alive,
-            (double)sqrtf(LwNearestPlayer2(q->pos[0], q->pos[1])), g_lwPatrolTraced == LW_PATROL_TRACE ? " (the last such line this mission)" : "");
-    }
-    m->n5 = 0; m->way5 = 0;
-}
-/* The 30 s line: the way of every squad that was calm with a goal for the whole window, and the standers by index. */
-static void LwPatrolMoveNote(void)
-{
-    static float ways[256];
-    int n = 0, still = 0, noGoal = 0, at = 0, at2 = 0; float least = 3.0e38f; char who[96] = "", who2[96] = "";
-    for (int i = 0; i < g_lwWorld.count; i++)
-    {
-        __typeof__(g_lwPatrolMove[0])* m = &g_lwPatrolMove[i];
-        if (!m->on) continue;
-        if (m->whole == 1)
-        {
-            if (n < 256) ways[n++] = m->way;
-            if (m->way < least) least = m->way;
-            if (m->way < LW_PATROL_STILL && ++still <= 8) at += snprintf(who + at, sizeof who - (size_t)at, " %d", i);
-        }
-        else if (m->whole == 2 && ++noGoal <= 8) at2 += snprintf(who2 + at2, sizeof who2 - (size_t)at2, " %d", i);
-        const LwSquad* q = &g_lwSquads[i];
-        m->whole = q->intent != LW_PATROL || !LwCalm(q) ? 0 : !q->goalAt ? 2 : 1; m->way = 0; /* the next window starts as the squad stands now */
-    }
-    for (int a = 1; a < n; a++) { float v = ways[a]; int b = a; for (; b > 0 && ways[b - 1] > v; b--) ways[b] = ways[b - 1]; ways[b] = v; }
-    Note("living world: patrol goals (30 s): %d squads calm with a goal throughout, their way least %.0f m, median %.0f m; %d under %.0f m%s%s; %d calm without a goal throughout%s%s",
-        n, n ? (double)least : 0.0, n ? (double)ways[n / 2] : 0.0, still, (double)LW_PATROL_STILL, still ? ": squads" : "", who, noGoal, noGoal ? ": squads" : "", who2);
+    float way5 = 0;
+    if (!co_lw_move_sample(&g_lwPatrolMove[idx], q->pos, co_lw_move_state(q->intent == LW_PATROL, calm, q->goalAt != 0, left, LW_ARRIVE), &way5)) return;
+    if (q->intent != LW_PATROL || g_lwPatrolTraced >= LW_PATROL_TRACE) return;
+    const uintptr_t nav = q->squad ? LwNavRecord(q->squad) : 0;
+    g_lwPatrolTraced++;
+    Note("living world: patrol %d: at (%.0f, %.0f), %.1f m in 5 s; %s; goal %s (%.0f, %.0f) %.0f m away, sent %.0f s ago, path left %.0f m, request pending %u, "
+        "stall tries %u; route %u of %u; %s; %u alive, %.0f m from the nearest player%s", idx, (double)q->pos[0], (double)q->pos[1], (double)way5,
+        fighting ? "fighting" : calm ? "calm" : "alert", q->goalAt ? "at" : "none, last", (double)q->goalTo[0], (double)q->goalTo[1], (double)left,
+        q->goalAt ? (double)(now - q->goalAt) / 1000.0 : -1.0, (double)LwStallPath(q, nav), nav ? EvpU32(nav + 0x90, 0) & 0xFF : 0, q->stallTries, q->pathAt, q->pathLen,
+        LwRoadSquad(idx) == 2 ? "arterial patrol" : LwRoadSquad(idx) ? "road patrol" : q->farOn ? "by sightline" : "near", q->alive,
+        (double)sqrtf(LwNearestPlayer2(q->pos[0], q->pos[1])), g_lwPatrolTraced == LW_PATROL_TRACE ? " (the last such line this mission)" : "");
 }
 /* The squad left the world's online ones: one that came online ahead of a vehicle and no player reached is counted. */
 static void LwPatrolGone(int i)
 {
     uint8_t* led = &g_lwPatrolLed[i];
     if (g_lwView.squad[i].known) co_lw_view_gone(&g_lwView, (uint32_t)i);
-    g_lwPatrolMove[i].on = 0;
+    co_lw_move_gone(&g_lwPatrolMove[i]);
     if ((*led & 2) && !(*led & 4)) g_lwPatrols.ledLeft++;
     *led &= 1;
 }
@@ -495,7 +467,7 @@ static void LwPatrolsNotes(ULONGLONG now)
             (double)(g_lwBandFov * 57.29578f), led, g_lwPatrolsOld ? "; the old rules (test)" : "");
     for (int i = 0; i < g_lwWorld.playersAt && i < CO_LW_VIEW_PLAYERS; i++)
         if (co_lw_view_player_note(&g_lwView, (uint32_t)i, now, line, sizeof line)) Note("living world: %s", line);
-    LwPatrolMoveNote();
+    co_lw_move_note(g_lwPatrolMove, (uint32_t)g_lwWorld.count, line, sizeof line); Note("living world: %s", line);
     co_lw_view_restart(&g_lwView, now);
     g_lwPatrols.gaveWay = g_lwPatrols.served = g_lwPatrols.stoodOff = g_lwPatrols.ledOn = g_lwPatrols.ledLeft = g_lwPatrols.sightRefused = g_lwPatrols.yielded = 0;
 }
@@ -524,3 +496,29 @@ static void LwPatrolsTick(void)
     LwPatrolGiveWay(now);
     if (now - g_lwPatrols.noteAt >= 30000) { g_lwPatrols.noteAt = now; LwPatrolsNotes(now); }
 }
+
+#ifdef CO_TEST
+/* Squad 0 as a road patrol on a line of `n` road nodes 100 m apart, standing at node `at`, come from `prev` (-1: from
+ * nowhere), with an unwalked plan that begins at `refused` (-1: none). The new plan's first node, -1 with no road plan. */
+int CoXlTestLwRoadPlan(int n, int at, int prev, int refused)
+{
+    LwSquad* q = &g_lwSquads[0];
+    memset(q, 0, sizeof *q); memset(g_lwNodeKind, 0, sizeof g_lwNodeKind);
+    g_lwNodeCount = g_lwRoadNodes = LW_ROAD_NODES_MIN; g_lwArtNodes = 0; g_lwWorld.radius = 1.0e6f;
+    for (int i = 0; i < n; i++)
+    {
+        LwNode* node = &g_lwNodes[i];
+        memset(node, 0, sizeof *node); node->x = 100.0f * (float)i;
+        if (i > 0) node->next[node->degree++] = (uint16_t)(i - 1);
+        if (i + 1 < n) node->next[node->degree++] = (uint16_t)(i + 1);
+        g_lwNodeKind[i] = i == 0 || i == n - 1 ? CO_LW_ROADS_END : CO_LW_ROADS_POINT;
+    }
+    q->node = (uint16_t)at; q->pos[0] = g_lwNodes[at].x; q->prevValid = prev >= 0; q->prevNode = (uint16_t)(prev >= 0 ? prev : 0);
+    if (refused >= 0) { q->path[0] = (uint16_t)refused; q->pathLen = 1; }
+    const int planned = LwRoadPlan(q, 0);
+    g_lwNodeCount = g_lwRoadNodes = 0;
+    return planned ? q->path[0] : -1;
+}
+/* The road patrols' switch as this build reads it. */
+int CoXlTestLwRoadPatrolsOn(void) { return LwRoadPatrolsOn(); }
+#endif
