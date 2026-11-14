@@ -217,9 +217,12 @@ static void LwIntentEnd(LwSquad* q, const char* why);
 #define LW_STALL_LINES 40u
 #define LW_STALL_OTHER_LINES 20u
 #define LW_STALL_FIX_LINES 60u
-static int LwStallMoved(const LwSquad* q, const float* at)
+/* Way made since the window began: nearer the goal in a straight line, or along its path (a detour walks away from
+ * the goal first). `path`: what is left of the path to the goal (LwStallPath), under 0 unknown. */
+static int LwStallMoved(const LwSquad* q, const float* at, float path)
 {
     if (!q->goalAt) return LwDist2(q->stillFrom, at[0], at[1]) > 3.0f * 3.0f;
+    if (path > 0 && q->stillPath - path >= LW_STALL_WAY) return 1;
     return q->stillWay - sqrtf(LwDist2(at, q->goalTo[0], q->goalTo[1])) >= LW_STALL_WAY;
 }
 static void LwStallFixNote(LwSquad* q, const char* what)
@@ -328,23 +331,42 @@ static void LwStallLine(LwSquad* q, const uint32_t* members, int n, const float*
         last ? " (the last such line this mission)" : "");
 }
 
+/* What is left of the squad's path (0x5B2A70: the sum of the path's corner-to-corner lengths, 0 without a path), while
+ * its destination is its goal or the tick's scatter point by it; -1 otherwise. */
+static float LwStallPath(const LwSquad* q, uintptr_t nav)
+{
+    uintptr_t navs = 0; float dest[3] = {0};
+    if (!nav || !q->goalAt || !EvpPtr(g_lw.game + 0x3326418u, &navs) || SafeRead(nav + 0x60, dest, sizeof dest)) return -1.0f;
+    if (LwDist2(dest, q->goalTo[0], q->goalTo[1]) > LW_ARRIVE * LW_ARRIVE) return -1.0f;
+    float left = g_lw.pathLeft(navs, q->squad);
+    return left > 0 && isfinite(left) ? left : -1.0f;
+}
+static void LwStallMark(LwSquad* q, const float* at, ULONGLONG now, float path)
+{
+    q->stillSince = now; q->stillFrom[0] = at[0]; q->stillFrom[1] = at[1]; q->stillWay = q->goalAt ? sqrtf(LwDist2(at, q->goalTo[0], q->goalTo[1])) : 0; q->stillPath = path;
+}
+static void LwStallCheckAt(LwSquad* q, const uint32_t* members, int n, const float* at, ULONGLONG now, uintptr_t nav, float path);
 static void LwStallCheck(LwSquad* q, const uint32_t* members, int n, const float* at, ULONGLONG now)
 {
     uintptr_t nav = q->squad ? LwNavRecord(q->squad) : 0;
+    LwStallCheckAt(q, members, n, at, now, nav, LwStallPath(q, nav));
+}
+static void LwStallCheckAt(LwSquad* q, const uint32_t* members, int n, const float* at, ULONGLONG now, uintptr_t nav, float path)
+{
     uint8_t pending = nav ? (uint8_t)EvpU32(nav + 0x90, 0) : 0;
     if (!pending) q->pendSince = 0; else if (!q->pendSince) q->pendSince = now;
     LwGoalLineLater(q, now);
     if (q->intent != LW_PATROL && q->intentStage != 0) { q->stillSince = 0; return; } /* at its point: standing there is its job */
     if (q->goalAt && LwDist2(at, q->goalTo[0], q->goalTo[1]) <= LW_ARRIVE * LW_ARRIVE) { q->stillSince = 0; q->stallTries = q->stallWaits = 0; return; } /* there */
-    int moved = q->stillSince && LwStallMoved(q, at);
+    int moved = q->stillSince && LwStallMoved(q, at, path);
     if (!q->stillSince || (moved && q->goalAt))
     {
         if (moved && q->stallDist - sqrtf(LwDist2(at, q->goalTo[0], q->goalTo[1])) >= LW_STALL_CLEAR) q->stallTries = q->stallWaits = 0; /* on its way again */
-        q->stillSince = now; q->stillFrom[0] = at[0]; q->stillFrom[1] = at[1]; q->stillWay = q->goalAt ? sqrtf(LwDist2(at, q->goalTo[0], q->goalTo[1])) : 0;
+        LwStallMark(q, at, now, path);
         return;
     }
     if (now - q->stillSince < LW_STALL_MS) return;
-    q->stillSince = now; q->stillFrom[0] = at[0]; q->stillFrom[1] = at[1]; q->stillWay = q->goalAt ? sqrtf(LwDist2(at, q->goalTo[0], q->goalTo[1])) : 0; /* once per 30 s */
+    LwStallMark(q, at, now, path); /* once per 30 s */
     /* no node with a face, or no ground under it, last time: nothing else asks again, standing or wandering */
     int ask = !q->rushed && !q->goalAt && q->intent == LW_PATROL && q->jobSet && LwSteerOk(q);
     if (moved) { if (ask) { g_lwWorld.stallNoGoal++; LwSendGoal(q); } return; }
@@ -1686,6 +1708,48 @@ static int LwTestTraceOn(void) { static int on = -1; if (on < 0) { char t[4] = "
  * a player stepping up to it pushes it back out to the edge. 1 = wait. The wait ends with the fight or after 240 s
  * (reinforcing), after 180 s (investigating). `keep`: a squad already waiting stays in the hold though neither it
  * nor its step is in the band, so the wait's ends and its moves along the edge still come. */
+/* Squads waiting at the edge each keep a lane: LW_HOLD_LANE x (0, +1, -1, +2, ...) round the player from the point's
+ * bearing, the first lane no other waiting squad has. Lanes are over LW_SPACING apart with the points tried in them,
+ * so one squad coming online does not refuse the next for a minute. */
+#define LW_HOLD_LANE 0.56f
+#define LW_HOLD_SHIFT 0.2618f
+static int LwHoldLane(int rank) { return rank == 0 ? 0 : (rank + 1) / 2 * (rank & 1 ? 1 : -1); }
+static int LwHoldFreeLane(const LwSquad* q)
+{
+    for (int rank = 0; rank < 16; rank++)
+    {
+        int lane = LwHoldLane(rank), taken = 0;
+        for (const LwSquad* o = g_lwSquads; o < g_lwSquads + g_lwWorld.count && !taken; o++) taken = o != q && o->state == LW_OFFLINE && o->held && o->holdLane == lane;
+        if (!taken) return lane;
+    }
+    return 0;
+}
+/* The k-th point a waiting squad tries at bearing a from the player: a refusal there depends only on the point (the
+ * navmesh, what stands over it, sight), and a patrol passes these checks by walking on to another one. Nine points:
+ * 8, 14 and 20 m outside the band's edge, on the bearing and 10 m to either side. */
+static void LwHoldPoint(const float* pl, float a, float rMin, int k, float* out)
+{
+    static const float side[3] = {0.0f, 10.0f, -10.0f};
+    float r = rMin + 8.0f + 6.0f * (float)(k % 3), b = a + side[k / 3 % 3] / r;
+    out[0] = pl[0] + r * cosf(b); out[1] = pl[1] + r * sinf(b);
+}
+/* After a refused request: a waiting squad's next point (LwOnlinePlace). All nine refused, its bearing moves on by
+ * LW_HOLD_SHIFT, away from the lower lanes, and stays moved (holdShift): the patch was a dead end. */
+static void LwHoldNext(LwSquad* q)
+{
+    if (!q->held || q->state != LW_OFFLINE || g_lwWorld.playersAt <= 0) return;
+    float rMin = g_lwWorld.rMin > 0 ? g_lwWorld.rMin : LW_R_MIN, best = 3e38f, p[2]; int pi = 0;
+    for (int i = 0; i < g_lwWorld.playersAt; i++) { float d2 = LwDist2(q->pos, g_lwWorld.players[i][0], g_lwWorld.players[i][1]); if (d2 < best) { best = d2; pi = i; } }
+    for (int t = 0; t < 18; t++)
+    {
+        q->holdTry = (uint8_t)((q->holdTry + 1) % 9);
+        if (q->holdTry == 0) { float turn = q->holdLane < 0 ? -LW_HOLD_SHIFT : LW_HOLD_SHIFT; q->holdShift += turn; q->holdA += turn; }
+        LwHoldPoint(g_lwWorld.players[pi], q->holdA, rMin, q->holdTry, p);
+        if (LwNearestPlayer2(p[0], p[1]) < rMin * rMin || p[0] * p[0] + p[1] * p[1] >= g_lwWorld.radius * g_lwWorld.radius) continue;
+        q->pos[0] = p[0]; q->pos[1] = p[1];
+        return;
+    }
+}
 static int LwIntentHoldAt(LwSquad* q, float nx, float ny, int keep)
 {
     if ((q->intent != LW_INVESTIGATE && q->intent != LW_REINFORCE) || q->intentStage != 0) { q->held = 0; return 0; }
@@ -1702,7 +1766,7 @@ static int LwIntentHoldAt(LwSquad* q, float nx, float ny, int keep)
     if (q->intent == LW_INVESTIGATE && now - q->intentAt > 180000) { LwIntentEnd(q, "180 s, waiting at the spawn band"); return 1; }
     if (!q->held)
     {
-        q->heldAt = now;
+        q->heldAt = now; q->holdA = atan2f(q->pos[1] - pl[1], q->pos[0] - pl[0]); q->holdTry = 0; q->holdShift = 0; q->holdLane = (int8_t)LwHoldFreeLane(q);
         if (q->heldFrom < q->intentAt) q->heldFrom = now; /* once per intent: a push in and out does not start it again */
         Note("living world: squad %d (%s) waits at the spawn band's edge at (%.0f, %.0f), %.0f m from the nearest player, to come online there", (int)(q - g_lwSquads),
             q->intent == LW_REINFORCE ? "reinforcing" : "investigating", (double)q->pos[0], (double)q->pos[1], (double)d0);
@@ -1712,21 +1776,21 @@ static int LwIntentHoldAt(LwSquad* q, float nx, float ny, int keep)
     int push = d0 < rMin && now - q->pushAt >= 3000;
     if (push || (d0 >= rMin && now - q->heldAt > 20000))
     {
-        /* inside: straight out. At the edge: up to 25 degrees toward the point's bearing from the player (audit 2d: always
-         * +25 degrees walked squads round the player); already on it, 25 degrees either way in turn, off the refused spot */
+        /* inside: straight out. At the edge: up to 25 degrees toward its lane by the point's bearing from the player
+         * (audit 2d: always +25 degrees walked squads round the player); in its lane, LwHoldNext tries the points there */
         float a = atan2f(q->pos[1] - pl[1], q->pos[0] - pl[0]), r = rMin + 8.0f;
         if (d0 >= rMin)
         {
-            float da = atan2f(q->target[1] - pl[1], q->target[0] - pl[0]) - a;
+            float da = atan2f(q->target[1] - pl[1], q->target[0] - pl[0]) + LW_HOLD_LANE * (float)q->holdLane + q->holdShift - q->holdA;
             while (da > 3.14159265f) da -= 6.2831853f;
             while (da < -3.14159265f) da += 6.2831853f;
-            a += fabsf(da) > 0.087f ? (da > 0.436f ? 0.436f : da < -0.436f ? -0.436f : da) : ((now / 20000) & 1 ? 0.436f : -0.436f);
+            a = q->holdA + (da > 0.436f ? 0.436f : da < -0.436f ? -0.436f : da);
         }
         float px = pl[0] + r * cosf(a), py = pl[1] + r * sinf(a);
         if (LwNearestPlayer2(px, py) >= rMin * rMin && px * px + py * py < g_lwWorld.radius * g_lwWorld.radius)
         {
             Note("living world: squad %d %s along the spawn band's edge to (%.0f, %.0f)", (int)(q - g_lwSquads), d0 < rMin ? "steps back out" : "moves", (double)px, (double)py);
-            q->pos[0] = px; q->pos[1] = py;
+            q->pos[0] = px; q->pos[1] = py; q->holdA = a; q->holdTry = 0; /* the bearing's first point */
             if (push) q->pushAt = now;
         }
         q->heldAt = now;

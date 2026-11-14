@@ -35,6 +35,13 @@ int CoXlTestLwStallWaits(int set);
 void CoXlTestLwHoldAge(int what, uint32_t ms);
 void CoXlTestLwStallSet(int rushed, float dist);
 int CoXlTestLwIntentEndGoal(void);
+void CoXlTestLwStallPath(float left);
+int CoXlTestLwHoldLane(int rank);
+int CoXlTestLwHoldFree(int a, int b);
+float CoXlTestLwHoldTurn(int lane);
+void CoXlTestLwHoldPoint(float a, int k, float* out);
+void CoXlTestLwHoldTwo(int idx, float* pos);
+void CoXlTestLwHoldNext(float* pos);
 uint64_t CoXlTestLwHeldFrom(void);
 int CoXlTestLwStallTries(int set);
 int CoXlTestLwStallStep(int intent, int tries, int action, int busy, int snapOff, int* after);
@@ -146,6 +153,61 @@ static void BandEdge(void)
         CoXlTestLwWalk(0.1f, &stage, &held, pos, &at);
         CHECK(CoXlTestLwIntent() == 0 && Count(why) == ended + 1);
     }
+}
+
+/* Waiting squads: lanes round the player and the points tried in each. */
+static void HoldPoints(void)
+{
+    float p[9][2], q[9][2], pos[2], pos1[2], next[2];
+    int stage, held; uint64_t at;
+    g_case = "the n-th waiting squad's lane: 0, +1, -1, +2, -2";
+    CHECK(CoXlTestLwHoldLane(0) == 0 && CoXlTestLwHoldLane(1) == 1 && CoXlTestLwHoldLane(2) == -1 && CoXlTestLwHoldLane(3) == 2 && CoXlTestLwHoldLane(4) == -2);
+    g_case = "nine different points per lane, 8 to 20 m outside the band, within 10 m of the bearing";
+    const float o[2] = {0, 0};
+    for (int k = 0; k < 9; k++) { CoXlTestLwHoldPoint(0.0f, k, p[k]); CoXlTestLwHoldPoint(0.56f, k, q[k]); }
+    CHECK(p[0][0] == 158.0f && p[0][1] == 0.0f);
+    for (int k = 0; k < 9; k++)
+    {
+        CHECK(Dist(p[k], o) >= 157.9f && Dist(p[k], o) <= 170.1f && p[k][1] > -10.1f && p[k][1] < 10.1f);
+        for (int j = 0; j < k; j++) CHECK(Dist(p[k], p[j]) > 5.0f);
+        g_case = "points of neighbouring lanes are over 60 m apart";
+        for (int j = 0; j < 9; j++) CHECK(Dist(p[k], q[j]) > 65.0f);
+    }
+    g_case = "two squads waiting at one point move to lanes over 60 m apart, the first on the fight's bearing";
+    const float pl[2] = {0, 0}, edge[2] = {158, 10}, fight[2] = {125, 0};
+    CoXlTestLwReinforce(pl, edge, fight);
+    CoXlTestLwWalk(0.1f, &stage, &held, pos, &at);
+    CHECK(held == 1);
+    CoXlTestLwHoldTwo(1, pos1);
+    CoXlTestLwHoldTwo(0, pos);
+    CHECK(Dist(pos, pos1) > 60.0f && fabsf(pos[1]) < 1.0f && Dist(pos, pl) > 157.0f && Dist(pos1, pl) > 157.0f);
+    g_case = "a refused request moves a waiting squad to its lane's next point, never into the band; others stay";
+    CoXlTestLwHoldNext(next);
+    CHECK(Dist(next, pos) > 5.0f && Dist(next, pos) < 25.0f && Dist(next, pl) >= 150.0f && Dist(next, pos1) > 60.0f);
+    CHECK(fabsf(next[0] - 164.0f) < 0.01f && fabsf(next[1]) < 0.01f); /* 6 m farther out on its lane's bearing */
+    float seen[9][2]; int distinct = 1;
+    seen[0][0] = next[0]; seen[0][1] = next[1];
+    for (int k = 1; k < 8; k++) { CoXlTestLwHoldNext(seen[k]); for (int j = 0; j < k; j++) distinct &= Dist(seen[k], seen[j]) > 5.0f; }
+    CHECK(distinct);
+    g_case = "all nine refused: the bearing moves on 15 degrees, away from the other lane, and the 20 s move keeps it there";
+    CoXlTestLwHoldNext(next); /* the ninth refusal: the first point of the new bearing */
+    CHECK(fabsf(Dist(next, pl) - 158.0f) < 0.01f && fabsf(atan2f(next[1], next[0]) - 0.2618f) < 0.001f);
+    for (int k = 0; k < 8; k++) CoXlTestLwHoldNext(seen[k]);
+    CoXlTestLwHoldNext(next);
+    CHECK(fabsf(atan2f(next[1], next[0]) - 0.5236f) < 0.001f);
+    for (int k = 0; k < 3; k++) CoXlTestLwHoldNext(next);
+    CoXlTestLwHoldTwo(0, pos);
+    CHECK(fabsf(atan2f(pos[1], pos[0]) - 0.5236f) < 0.001f && fabsf(Dist(pos, pl) - 158.0f) < 0.01f);
+    CoXlTestLwHoldNext(next); /* after the move the points start again: the second is 6 m farther out */
+    CHECK(fabsf(atan2f(next[1], next[0]) - 0.5236f) < 0.001f && fabsf(Dist(next, pl) - 164.0f) < 0.01f);
+    g_case = "a squad in a lower lane turns the other way";
+    CHECK(fabsf(CoXlTestLwHoldTurn(0) - 0.2618f) < 0.0001f && fabsf(CoXlTestLwHoldTurn(2) - 0.2618f) < 0.0001f && fabsf(CoXlTestLwHoldTurn(-1) + 0.2618f) < 0.0001f);
+    g_case = "a newly waiting squad takes the first lane no waiting squad has; a squad that ended frees its lane";
+    CHECK(CoXlTestLwHoldFree(99, 99) == 0 && CoXlTestLwHoldFree(0, 99) == 1 && CoXlTestLwHoldFree(0, 1) == -1 && CoXlTestLwHoldFree(99, 1) == 0 && CoXlTestLwHoldFree(1, 0) == -1);
+    const float far0[2] = {-300, 0};
+    CoXlTestLwReinforce(far0, edge, fight); /* not waiting: on its way, 458 m from the player */
+    CoXlTestLwHoldNext(next);
+    CHECK(next[0] == edge[0] && next[1] == edge[1]);
 }
 
 static void Refusals(void)
@@ -356,11 +418,30 @@ static void Stall(void)
     CoXlTestLwStall(1, at, goal, 1000);
     CoXlTestLwStall(0, at, goal, 1000);
     CHECK(CoXlTestLwStall(0, way20, goal, 31001) == 0);
+    g_case = "a detour: no nearer its goal, but 20 m less of its path left, is way made; 19 m is not";
+    const float aside[2] = {0, 40};
+    CoXlTestLwStallPath(300); CoXlTestLwStall(1, at, goal, 1000); CoXlTestLwStall(0, at, goal, 1000);
+    CoXlTestLwStallPath(280);
+    CHECK(CoXlTestLwStall(0, aside, goal, 31001) == 0);
+    CoXlTestLwStallPath(300); CoXlTestLwStall(1, at, goal, 1000); CoXlTestLwStall(0, at, goal, 1000);
+    CoXlTestLwStallPath(281);
+    CHECK(CoXlTestLwStall(0, aside, goal, 31001) == 1);
+    g_case = "a path that grew, or is unknown at either end of the window, is no way made";
+    CoXlTestLwStallPath(300); CoXlTestLwStall(1, at, goal, 1000); CoXlTestLwStall(0, at, goal, 1000);
+    CoXlTestLwStallPath(340);
+    CHECK(CoXlTestLwStall(0, aside, goal, 31001) == 1);
+    CoXlTestLwStallPath(-1); CoXlTestLwStall(1, at, goal, 1000); CoXlTestLwStall(0, at, goal, 1000);
+    CoXlTestLwStallPath(100);
+    CHECK(CoXlTestLwStall(0, aside, goal, 31001) == 1);
+    CoXlTestLwStallPath(300); CoXlTestLwStall(1, at, goal, 1000); CoXlTestLwStall(0, at, goal, 1000);
+    CoXlTestLwStallPath(-1);
+    CHECK(CoXlTestLwStall(0, aside, goal, 31001) == 1);
     g_case = "a squad milling 8 m to and fro across its way for 30 s moves, but is stalled";
     const float mill[3][2] = {{0, 0}, {0, 8}, {0, -8}};
+    const int millLines = Count("made no way for 30 s");
     CoXlTestLwStall(1, mill[0], goal, 1000);
     for (int k = 1; k <= 30; k++) CoXlTestLwStall(0, mill[k % 3], goal, 1000 + 1000u * k);
-    CHECK(CoXlTestLwStall(0, mill[1], goal, 31001) == 1 && Count("made no way for 30 s") == 3);
+    CHECK(CoXlTestLwStall(0, mill[1], goal, 31001) == 1 && Count("made no way for 30 s") == millLines + 1);
     g_case = "a stalled squad's tries start again once it makes 20 m of way, and are kept while it mills";
     CoXlTestLwStall(1, mill[0], goal, 1000);
     CoXlTestLwStall(0, mill[0], goal, 1000);
@@ -445,6 +526,7 @@ int main(void)
     Slots();
     Budget();
     HeldWhy();
+    HoldPoints();
     Goals();
     StallApply();
     StallStep();

@@ -438,6 +438,7 @@ void CoXlTestLwHeldWhy(const char* why) { g_lwSquads[0].intent = LW_REINFORCE; L
  * left goal-less by its last send, 5: a retaking squad at its garrison likewise), its leader at
  * `at` at `now` ms: the stall check; the 30 s count of calm still squads (the others' count in `other`). */
 uint32_t CoXlTestLwStallOther(void) { return g_lwWorld.stalledOther; }
+static float g_testStallPath = -1.0f;
 uint32_t CoXlTestLwStall(int fresh, const float* at, const float* goal, uint64_t now)
 {
     LwSquad* q = &g_lwSquads[0];
@@ -449,9 +450,41 @@ uint32_t CoXlTestLwStall(int fresh, const float* at, const float* goal, uint64_t
     if (fresh == 8) q->intent = LW_INVESTIGATE; /* on its way, goal-less */
     if (fresh == 5) { q->intent = LW_RETAKE; q->intentStage = 1; }
     if (fresh == 6 || fresh == 7) { q->intent = LW_REINFORCE; q->intentStage = fresh == 6; } /* at its point; on its way */
-    LwStallCheck(q, NULL, 0, at, now);
+    LwStallCheckAt(q, NULL, 0, at, now, 0, g_testStallPath);
     return g_lwWorld.stalled;
 }
+/* What is left of squad 0's path at the next stall checks (under 0: unknown). */
+void CoXlTestLwStallPath(float left) { g_testStallPath = left; }
+/* Waiting squads' lanes and points: the lane of the rank-th waiting squad; the k-th point at bearing a from a player
+ * at the origin with a 150 m band; squad `idx` of two waiting at one point, 21 s there, moved by the hold. */
+int CoXlTestLwHoldLane(int rank) { return LwHoldLane(rank); }
+/* The lane a newly waiting squad 2 takes when squads 0 and 1 wait in lanes a and b (99: not waiting). */
+int CoXlTestLwHoldFree(int a, int b)
+{
+    memset(g_lwSquads, 0, 3 * sizeof g_lwSquads[0]); g_lwWorld.count = 3;
+    for (int i = 0; i < 3; i++) g_lwSquads[i].state = LW_OFFLINE; /* walking squads keep lane 0 in their record: not taken */
+    if (a != 99) { g_lwSquads[0].state = LW_OFFLINE; g_lwSquads[0].held = 1; g_lwSquads[0].holdLane = (int8_t)a; }
+    if (b != 99) { g_lwSquads[1].state = LW_OFFLINE; g_lwSquads[1].held = 1; g_lwSquads[1].holdLane = (int8_t)b; }
+    return LwHoldFreeLane(&g_lwSquads[2]);
+}
+void CoXlTestLwHoldPoint(float a, int k, float* out) { const float pl[2] = {0, 0}; LwHoldPoint(pl, a, 150.0f, k, out); }
+void CoXlTestLwHoldTwo(int idx, float* pos)
+{
+    LwSquad* q = &g_lwSquads[idx];
+    if (idx == 1) { *q = g_lwSquads[0]; g_lwWorld.count = 2; q->holdLane = (int8_t)LwHoldFreeLane(q); }
+    q->heldAt -= 21000; q->pushAt = 0;
+    LwIntentHoldAt(q, q->target[0], q->target[1], 1);
+    pos[0] = q->pos[0]; pos[1] = q->pos[1];
+}
+/* Squad 0 waiting in `lane` with all nine points refused: how far its bearing turns. */
+float CoXlTestLwHoldTurn(int lane)
+{
+    LwSquad* q = &g_lwSquads[0]; q->state = LW_OFFLINE; q->held = 1; q->holdLane = (int8_t)lane; q->holdTry = 8; q->holdA = 1.0f; q->holdShift = 0;
+    LwHoldNext(q);
+    return fabsf(q->holdA - 1.0f - q->holdShift) < 0.0001f ? q->holdShift : 99.0f;
+}
+/* After a refused request, squad 0's next point at the edge. */
+void CoXlTestLwHoldNext(float* pos) { LwHoldNext(&g_lwSquads[0]); pos[0] = g_lwSquads[0].pos[0]; pos[1] = g_lwSquads[0].pos[1]; }
 void CoXlTestLwStallLines(uint32_t n) { g_lwWorld.stallLines = n; }
 uint32_t CoXlTestLwStallNoGoal(void) { return g_lwWorld.stallNoGoal; }
 /* Squad 0's stall tries: set when `set` >= 0; what they are. */
