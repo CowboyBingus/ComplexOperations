@@ -35,6 +35,7 @@ uint32_t CoXlTestTrackBuiltAt(double x, double y, double texel, uint32_t ground,
 void CoXlTestTrackThinBlock(uintptr_t block);
 int CoXlTestTrackGround(uintptr_t block, uint32_t* side);
 uint32_t CoXlTestTrackEncode(const uint32_t* src, double x, double y, double texel, uint32_t* tally);
+uint32_t CoXlTestTrackTexel(const uint32_t* src, int r, int c, uint32_t* plants);
 void CoXlTestRoadsCorridor(uintptr_t block, const uint8_t* ops, uint32_t before, uint32_t total);
 uint32_t CoXlTestStampCandidateSize(void);
 void CoXlTestRoadsStamps(uint32_t first, void* cand, uint32_t planned);
@@ -247,7 +248,7 @@ static void Edges(uint32_t n) { Put32(g_block + 0x11A71CCu, n); memcpy(g_block +
 #define TRACK_PATH 0x8448ABC93DDACF85ull
 #define TRACK_FILL 0xD45834942A4A5581ull
 #define LG_GROUND (0x8758A8u + 0x108u)
-static struct { uint8_t desc[0x70], painter[2 * 0x18], var[2 * 0x1C]; } g_zone[3];
+static struct { uint8_t desc[0x170], painter[2 * 0x18], var[2 * 0x1C]; } g_zone[3];
 /* A zone type's descriptor: a path painter on slot `path` and a fill on slot `fill` (0: none). */
 static void Zone(int t, float path, float fill)
 {
@@ -262,7 +263,8 @@ static void Zone(int t, float path, float fill)
         n++;
     }
     const uint64_t list = (uint64_t)(uintptr_t)g_zone[t].painter;
-    memcpy(g_zone[t].desc + 0x60, &list, 8); memcpy(g_zone[t].desc + 0x68, &n, 4);
+    static const char input[] = "Primordial_RegionInput"; const uint64_t named = (uint64_t)(uintptr_t)input;
+    memcpy(g_zone[t].desc + 0x60, &list, 8); memcpy(g_zone[t].desc + 0x68, &n, 4); memcpy(g_zone[t].desc + 0x100, &named, 8); /* a biome's own type */
 }
 static uint32_t Soil(void) { return 9u << 26 | 13u << 21 | 77u << 8; }
 static void TrackGlue(void)
@@ -307,6 +309,12 @@ static void TrackGlue(void)
       CHECK(CoXlTestTrackEncode(image, 500 - h, 1 - h, 4.0, wrote) == 6u << 26 && CoXlTestTrackEncode(image, 500 - h, 100 - h, 4.0, wrote) == 9u << 26 && wrote[6] == 1);
       const uint32_t t = CoXlTestTrackEncode(image, 250 - h, 0.5 - h, 0.5, wrote);
       CHECK((t >> 26) == 6 && ((t >> 21) & 31) == 9 && 255 - ((t >> 8) & 255) - (t & 255) >= 128 && wrote[6] == 2); }
+    /* edge 2 runs north at x 1000, between the points of columns 249 (3.5 m west) and 250 (0.5 m east): the drawn
+     * map has the track on column 250, the plants' copy on the cells whose centres are near (249: 1.75 m, 250: 2.25 m) */
+    { uint32_t plants = 0; const uint32_t west = CoXlTestTrackTexel(image, 3970, 249, &plants);
+      CHECK((west >> 26) == 6 && ((west >> 8) & 255) > 200 && plants == 6u << 26);
+      CHECK(CoXlTestTrackTexel(image, 3970, 250, &plants) == 6u << 26 && (plants >> 26) == 6 && ((plants >> 8) & 255) > 30 && ((plants >> 8) & 255) < 50);
+      CHECK(CoXlTestTrackTexel(image, 3970, 240, &plants) == 9u << 26 && plants == 9u << 26); }
     for (size_t k = 0; k < (size_t)4096 * 4096; k++) image[k] = 0x12345600u | 100u;
     uint8_t* lg = g_block + LG_GROUND;
     const uint64_t handed = (uint64_t)(uintptr_t)lg, data = (uint64_t)(uintptr_t)image, none = 0, little = (uint64_t)(uintptr_t)small;
@@ -342,10 +350,18 @@ static void TrackGlue(void)
       CHECK(CoXlTestTrackBuild((uintptr_t)level, &pieces) == 6 && pieces == 8);
       edge = 2; memcpy((uint8_t*)(uintptr_t)table + 16, &edge, 4); }
 
+    g_case = "track: a colony's path slot is no candidate; the log says when the audit file did not open";
+    { const uint64_t none = 0, named = (uint64_t)(uintptr_t)"Primordial_RegionInput";
+      memcpy(g_zone[1].desc + 0x100, &none, 8);
+      g_fake.log[0] = 0;
+      CHECK(CoXlTestTrackBuild((uintptr_t)level, &pieces) == 1 && Lines("track: slot 1 (ground on neither side along 1.0 of 3.0 km of arterials)") == 1);
+      CHECK(Lines("roadtrack-") == 1 && Lines(".tsv written") + Lines(".tsv not written (the file did not open)") == 1);
+      memcpy(g_zone[1].desc + 0x100, &named, 8); }
+
     g_case = "track: no path painter beside any road, and a level that is not readable";
     for (uint32_t i = 0; i < 3; i++) Put32(g_block + 0x92F328u + 0x20u * i + 0xC, 2);
     g_fake.log[0] = 0;
-    CHECK(CoXlTestTrackBuild((uintptr_t)level, &pieces) == 0 && pieces == 0 && Lines("track: no zone beside a road has a path painter; no track is drawn") == 1);
+    CHECK(CoXlTestTrackBuild((uintptr_t)level, &pieces) == 0 && pieces == 0 && Lines("track: no zone of the biome beside a road has a path painter; no track is drawn") == 1);
     CHECK(CoXlTestTrackBuiltAt(500 - h, 1 - h, 4.0, Soil(), tally) == Soil());
     for (uint32_t i = 0; i < 3; i++) Put32(g_block + 0x92F328u + 0x20u * i + 0xC, 0xFFFFFFFEu); /* no subregion type: -2 */
     g_fake.log[0] = 0;

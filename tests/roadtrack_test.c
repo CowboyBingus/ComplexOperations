@@ -196,7 +196,7 @@ static void Far(void)
 #define FILL 0xD45834942A4A5581ull
 #define SLOPE 0xB6E115979B70D004ull
 #define MATERIAL 0xEAC0B497u
-typedef struct Type { uint8_t desc[0x70]; uint8_t list[16 * 0x18]; uint8_t vars[16][2 * 0x1C]; uint32_t n; } Type;
+typedef struct Type { uint8_t desc[0x170]; uint8_t list[16 * 0x18]; uint8_t vars[16][2 * 0x1C]; uint32_t n; } Type;
 static void TypeAdd(Type* t, uint64_t resource, float material)
 {
     const uint64_t list = (uint64_t)(uintptr_t)t->list, vars = (uint64_t)(uintptr_t)t->vars[t->n];
@@ -207,6 +207,8 @@ static void TypeAdd(Type* t, uint64_t resource, float material)
     t->n++;
     memcpy(t->desc + 0x60, &list, 8); memcpy(t->desc + 0x68, &t->n, 4);
 }
+/* A biome's own type names its region input at +0x100; a faction's place has none. */
+static void Nature(Type* t) { static const char input[] = "Primordial_RegionInput"; const uint64_t at = (uint64_t)(uintptr_t)input; memcpy(t->desc + 0x100, &at, 8); }
 static Type g_t30, g_t65, g_t67, g_t68, g_bare, g_bad;
 static uintptr_t At(Type* t) { return (uintptr_t)t->desc; }
 static void Types(void)
@@ -219,13 +221,14 @@ static void Types(void)
     TypeAdd(&g_t67, SLOPE, 5); TypeAdd(&g_t67, PATH, 1);
     TypeAdd(&g_t68, FILL, 1); TypeAdd(&g_t68, SLOPE, 5); TypeAdd(&g_t68, FILL, 3); TypeAdd(&g_t68, SLOPE, 4); TypeAdd(&g_t68, PATH, 6);
     TypeAdd(&g_bare, FILL, 9); TypeAdd(&g_bare, SLOPE, 5);
+    Nature(&g_t65); Nature(&g_t67); Nature(&g_t68); Nature(&g_bare);
 }
 static void Slots(void)
 {
     uint32_t state = 0;
     Types();
     g_case = "a road's own slot: the first path slot that is ground on neither side (the run's seven side pairs)";
-    CHECK(CoXlTestTrackSlot(At(&g_t67), At(&g_t68), &state) == 6 && state == (3u | 1u << 8 | 6u << 16));
+    CHECK(CoXlTestTrackSlot(At(&g_t67), At(&g_t68), &state) == 6 && state == (7u | 1u << 8 | 6u << 16));
     CHECK(CoXlTestTrackSlot(At(&g_t68), 0, &state) == 6 && (state >> 16) == 4);
     CHECK(CoXlTestTrackSlot(At(&g_t67), 0, &state) == 1);
     CHECK(CoXlTestTrackSlot(At(&g_t65), At(&g_t67), &state) == 1);
@@ -261,8 +264,8 @@ static void Slots(void)
     for (int k = 0; k < 6; k++) CHECK(road[k] == 6);
     CHECK(road[6] == 1);
     { const uintptr_t a2[2] = {At(&g_t30), 0}, b2[2] = {At(&g_t68), 0}; const double m2[2] = {5, 3};
-      CHECK(CoXlTestTrackLevel(a2, b2, m2, 2, road, &clear) == 1 && road[0] == 1 && road[1] == 1); } /* 1 and 6 both ground on a side: the lower; a road without types takes the level's */
-    g_case = "slot 1 where it is the clear one for longer; no path painter anywhere: no slot";
+      CHECK(CoXlTestTrackLevel(a2, b2, m2, 2, road, &clear) == 6 && road[0] == 6 && road[1] == 6); } /* the colony's slot 1 is no candidate; a road without types takes the level's */
+    g_case = "a place's length does not count: on a tie of clear path length, the path slot along the most; no path painter anywhere: no slot";
     { const double m3[7] = {1, 1, 1, 1, 1, 1, 500}; CHECK(CoXlTestTrackLevel(a, b, m3, 7, road, &clear) == 1 && road[1] == 6 && road[2] == 1 && road[0] == 1); }
     { const uintptr_t a4[1] = {At(&g_bare)}, b4[1] = {0}; const double m4[1] = {9}; CHECK(CoXlTestTrackLevel(a4, b4, m4, 1, road, &clear) == 0 && road[0] == 0); }
 }
@@ -456,10 +459,22 @@ static void More(void)
     g_case = "the level's slot on a tie of clear length: the path slot along the most road";
     { static Type p1, p6, both; /* slots 1 and 6 are ground nowhere; 6 is a path slot along 30 m, 1 along 20 m */
       TypeAdd(&p1, PATH, 1); TypeAdd(&p6, PATH, 6); TypeAdd(&both, PATH, 1); TypeAdd(&both, PATH, 6);
+      Nature(&p1); Nature(&p6); Nature(&both);
       const uintptr_t a[3] = {At(&p1), At(&p6), At(&both)}, b[3] = {0, 0, 0}; const double m[3] = {10, 20, 10};
       CHECK(CoXlTestTrackLevel(a, b, m, 3, road, &clear) == 6 && clear == 40.0);
       const double m2[3] = {20, 10, 10};
       CHECK(CoXlTestTrackLevel(a, b, m2, 3, road, &clear) == 1); }
+    g_case = "the level's slot on ties: the path slot along the most road, then ground on neither side along the most, then the lower";
+    { static Type A, B, D, p1, p6; /* B's ground is slot 1; D's ground is its own path slot 6 */
+      TypeAdd(&A, FILL, 9); TypeAdd(&A, PATH, 1); TypeAdd(&B, FILL, 1); TypeAdd(&B, PATH, 6); TypeAdd(&D, FILL, 6); TypeAdd(&D, PATH, 6);
+      TypeAdd(&p1, PATH, 1); TypeAdd(&p6, PATH, 6);
+      Nature(&A); Nature(&B); Nature(&D); Nature(&p1); Nature(&p6);
+      const uintptr_t a[3] = {At(&A), At(&p6), At(&D)}, b[3] = {0, 0, 0}; const double m[3] = {10, 10, 5};
+      CHECK(CoXlTestTrackLevel(a, b, m, 3, road, &clear) == 6); /* 10 m each clear and a path slot; 6 a path slot along 15 m */
+      const uintptr_t a2[2] = {At(&A), At(&B)}; const double m2[2] = {10, 10};
+      CHECK(CoXlTestTrackLevel(a2, b, m2, 2, road, &clear) == 6 && clear == 20.0); /* 1 is ground beside B's road */
+      const uintptr_t a3[2] = {At(&p6), At(&p1)};
+      CHECK(CoXlTestTrackLevel(a3, b, m2, 2, road, &clear) == 1); }
     g_case = "a share over 1 is the whole texel, the weights still sum to 1";
     { const uint32_t id[2] = {9, 13}; const double w[2] = {0.7, 0.3};
       CHECK(CoXlTestTrackMix(id, w, 2, 14, 6, 2.5, 0, &sum) == Texel(6, 0, 0, 0, 0) && fabs(sum - 1.0) < 1e-12); }
@@ -485,6 +500,48 @@ static void More(void)
       CHECK(near1 >= 16 && near6 >= 16); }
 }
 
+/* The level's slot comes from the biome's own types, never from a faction's place beside a road. */
+static void Biomes(void)
+{
+    static Type conifer, colony, snowA, snowB, outpost, unnamed;
+    uint32_t road[16], state = 0; double clear = 0.0;
+    g_case = "Coniferous with a colony: the biome's slot 6, though the colony fills its ground with it";
+    TypeAdd(&conifer, FILL, 3); TypeAdd(&conifer, PATH, 6); Nature(&conifer);
+    TypeAdd(&colony, FILL, 20); TypeAdd(&colony, FILL, 6); TypeAdd(&colony, PATH, 1); TypeAdd(&colony, PATH, 1); TypeAdd(&colony, PATH, 6);
+    CHECK(CoXlTestTrackSlot(At(&conifer), 0, &state) == 6 && (state & 4) == 4 && CoXlTestTrackSlot(At(&colony), 0, &state) == 1 && (state & 4) == 0);
+    { const uintptr_t a[3] = {At(&conifer), At(&colony), At(&colony)}, b[3] = {0, At(&conifer), 0}; const double m[3] = {100, 10, 5};
+      CHECK(CoXlTestTrackLevel(a, b, m, 3, road, &clear) == 6 && clear == 100.0 && road[0] == 6 && road[1] == 6 && road[2] == 1);
+      const double most[3] = {1, 10, 500}; /* however much road lies in the colony */
+      CHECK(CoXlTestTrackLevel(a, b, most, 3, road, &clear) == 6); }
+    g_case = "Arctic with a bug outpost: a snow type's path slot, never the outpost's 23";
+    TypeAdd(&snowA, FILL, 9); TypeAdd(&snowA, PATH, 13); Nature(&snowA);
+    TypeAdd(&snowB, FILL, 1); TypeAdd(&snowB, PATH, 1); Nature(&snowB);
+    TypeAdd(&outpost, FILL, 20); TypeAdd(&outpost, PATH, 23);
+    { const uintptr_t a[4] = {At(&snowA), At(&snowB), At(&snowB), At(&snowA)}, b[4] = {At(&snowB), 0, At(&outpost), 0}; const double m[4] = {50, 60, 10, 30};
+      CHECK(CoXlTestTrackLevel(a, b, m, 4, road, &clear) == 13 && clear == 150.0 && road[0] == 13 && road[2] == 13);
+      const uintptr_t a2[2] = {At(&snowB), At(&outpost)}, b2[2] = {At(&outpost), 0}; const double m2[2] = {10, 90}; /* slot 1 is ground beside every road, still the biome's */
+      CHECK(CoXlTestTrackLevel(a2, b2, m2, 2, road, &clear) == 1 && road[0] == 1 && road[1] == 1);
+      const uintptr_t a3[1] = {At(&outpost)}, b3[1] = {0}; const double m3[1] = {40}; /* no type of the biome beside a road */
+      CHECK(CoXlTestTrackLevel(a3, b3, m3, 1, road, &clear) == 0 && road[0] == 0); }
+    g_case = "a type whose region input is an empty or unreadable string is no type of the biome";
+    TypeAdd(&unnamed, PATH, 9);
+    { static const char empty[] = ""; uint64_t at = (uint64_t)(uintptr_t)empty; memcpy(unnamed.desc + 0x100, &at, 8);
+      CHECK(CoXlTestTrackSlot(At(&unnamed), 0, &state) == 9 && (state & 4) == 0);
+      at = 0x10; memcpy(unnamed.desc + 0x100, &at, 8);
+      CHECK(CoXlTestTrackSlot(At(&unnamed), 0, &state) == 9 && (state & 5) == 1); }
+    g_case = "where three slots meet the nearest piece's slot or the next one's, never the third";
+    { static const float segs[12] = {-50, 0, 0, 0, 0, 0, 50, 0, 0, 0, 0, 50}; static const uint32_t slots[3] = {1, 6, 9}; int seen[32] = {0};
+      CHECK(CoXlTestTrackIndex(segs, slots, 3, WORLD) == 1);
+      for (int k = 0; k < 200; k++)
+      {
+          double d = 0.0; uint32_t slot = 0;
+          const double x = -3.0 + 6.0 * Rand(), y = -1.0 - 2.0 * Rand(); /* below the node: pieces 1 and 6 are nearer than 9 */
+          CHECK(CoXlTestTrackNearest(x, y, REACH, &d, &slot, NULL) && (slot == 1 || slot == 6 || slot == 9));
+          seen[slot]++;
+      }
+      CHECK(seen[1] > 20 && seen[6] > 20 && seen[9] < 40); }
+}
+
 int main(void)
 {
     Profile();
@@ -496,6 +553,7 @@ int main(void)
     Places();
     Plants();
     More();
+    Biomes();
     if (g_failed) { printf("roadtrack: %d of %d check(s) failed\n", g_failed, g_checked); return 1; }
     printf("roadtrack: all checks passed (%d)\n", g_checked);
     return 0;

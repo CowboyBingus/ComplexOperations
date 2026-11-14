@@ -77,11 +77,12 @@ static double TrackCoarse(double d)
  * 0xF4FC4E..0xF4FC8E); a painter is 0x18 bytes: material resource +0, variables +8, their count u32 +0x10; a variable
  * is 0x1C bytes: name hash +0, a float +4 for type 0 or +8 for type 1, the type u32 +0x18 (0xF48C76..0xF48D56).
  * The path painter's pixel shader writes weight channel `material`, and the weight merge names channel m as id m in
- * the map, so the variable's value is the slot. */
+ * the map, so the variable's value is the slot. A biome's own type names its region input (a string, descriptor
+ * +0x100); a faction's place (an outpost, a colony, a city) has none. */
 #define TRACK_PATH_PAINTER 0x8448ABC93DDACF85ull
 #define TRACK_MATERIAL 0xEAC0B497u
 #define TRACK_LIST_MOST 64u
-typedef struct TrackPainters { uint8_t path[16], fill[48], paths, fills, bad; } TrackPainters;
+typedef struct TrackPainters { uint8_t path[16], fill[48], paths, fills, bad, nature; } TrackPainters;
 
 /* A type's path slots and the slots its other painters (fills, slopes, heights, water) cover ground with, in list
  * order. 0 and no slots when the descriptor is not the reviewed shape. */
@@ -111,6 +112,8 @@ static int TrackTypePainters(uintptr_t descriptor, TrackPainters* out)
             break;
         }
     }
+    uint64_t input = 0; uint8_t first = 0;
+    found.nature = !SafeRead(descriptor + 0x100, &input, 8) && input != 0 && !SafeRead((uintptr_t)input, &first, 1) && first != 0;
     *out = found;
     return 1;
 }
@@ -136,29 +139,33 @@ static uint32_t TrackSlotChoose(const TrackPainters* a, const TrackPainters* b)
     }
     return first;
 }
-/* One slot a level, so a road is one surface from end to end: of the path slots beside the roads, the one that is
- * ground on neither side along the most road length (then the one that is a path slot along the most, then the
- * lower). a[i] / b[i] / metres[i]: a road's sides (b NULL as for TrackSlotChoose) and its length. 0: no path slot. */
+/* One slot a level, so a road is one surface from end to end. Only the biome's own types offer their path slots: a
+ * faction's place paints its paths with ground foreign to the biome. Of those, the slot that is a path slot beside
+ * the road and ground on neither side along the most road length; then a path slot along the most; then ground on
+ * neither side along the most; then the lower. a[i] / b[i] / metres[i]: a road's sides (b NULL as for
+ * TrackSlotChoose) and its length. *clear: the length the slot is ground on neither side. 0: no such slot. */
 static uint32_t TrackLevelSlot(const TrackPainters* const* a, const TrackPainters* const* b, const double* metres, uint32_t n, double* clear)
 {
-    double free_[TRACK_SLOTS] = {0}, own[TRACK_SLOTS] = {0}; uint8_t seen[TRACK_SLOTS] = {0};
+    double free_[TRACK_SLOTS] = {0}, own[TRACK_SLOTS] = {0}, both[TRACK_SLOTS] = {0}; uint8_t seen[TRACK_SLOTS] = {0};
     for (uint32_t i = 0; i < n; i++)
     {
         uint8_t path[TRACK_SLOTS] = {0};
         for (int side = 0; side < 2; side++)
         {
             const TrackPainters* p = side ? b[i] : a[i];
-            for (uint32_t k = 0; p != NULL && k < p->paths; k++) path[p->path[k]] = seen[p->path[k]] = 1;
+            for (uint32_t k = 0; p != NULL && p->nature && k < p->paths; k++) path[p->path[k]] = seen[p->path[k]] = 1;
         }
         for (uint32_t s = 1; s < TRACK_SLOTS; s++)
         {
+            const int clear_ = !TrackIsFill(a[i], (uint8_t)s) && !TrackIsFill(b[i], (uint8_t)s);
             if (path[s]) own[s] += metres[i];
-            if (!TrackIsFill(a[i], (uint8_t)s) && !TrackIsFill(b[i], (uint8_t)s)) free_[s] += metres[i];
+            if (clear_) free_[s] += metres[i];
+            if (path[s] && clear_) both[s] += metres[i];
         }
     }
     uint32_t best = 0;
     for (uint32_t s = 1; s < TRACK_SLOTS; s++)
-        if (seen[s] && (best == 0 || free_[s] > free_[best] || (free_[s] == free_[best] && own[s] > own[best]))) best = s;
+        if (seen[s] && (best == 0 || both[s] > both[best] || (both[s] == both[best] && (own[s] > own[best] || (own[s] == own[best] && free_[s] > free_[best]))))) best = s;
     *clear = best ? free_[best] : 0.0;
     return best;
 }

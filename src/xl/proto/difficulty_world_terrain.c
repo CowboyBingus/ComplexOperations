@@ -3589,7 +3589,7 @@ static void NearRoadStampAt(const uint32_t* src, double x, double y, uint32_t* i
  * metres wide; tally[slot] counts the texels written, tally[0] those a pad or the rim kept. */
 #define NEAR_MAT_IDS 14 /* 12 of four native texels, a city path's and the track's */
 static void RoadTrackAt(double x, double y, double texel, uint32_t* id, double* w, int* n, int room, uint32_t* tally);
-static void RoadTrackBuild(void);
+static int RoadTrackNear(double x, double y);
 static void RoadTrackNote(const char* what, const volatile LONG* tally);
 static void RoadTrackTally(volatile LONG* to, const uint32_t* tally)
 {
@@ -3597,17 +3597,19 @@ static void RoadTrackTally(volatile LONG* to, const uint32_t* tally)
 }
 
 static uint32_t NearMatPack(uint32_t* id, double* w, int n, uint32_t hole);
-/* texel: the width of the texel the result stands for (the level's 4 m, or a tile's own inside its band). */
-static uint32_t NearMatEncodeAt(const uint32_t* src, double x, double y, double texel, uint32_t* tally)
+/* The ground at (x, y) with the roads' track as it is at (rx, ry). texel: the width of the texel the result stands
+ * for (the level's 4 m, or a tile's own inside its band). */
+static uint32_t NearMatEncodeWith(const uint32_t* src, double x, double y, double rx, double ry, double texel, uint32_t* tally)
 {
     uint32_t id[NEAR_MAT_IDS]; double w[NEAR_MAT_IDS], tx, ty;
     int n = NearMatMix(src, x, y, id, w, &tx, &ty);
     NearRoadStampAt(src, x, y, id, w, &n);
-    RoadTrackAt(x, y, texel, id, w, &n, NEAR_MAT_IDS, tally);
+    RoadTrackAt(rx, ry, texel, id, w, &n, NEAR_MAT_IDS, tally);
     int hc = (int)floor(tx + 0.5), hr = (int)floor(ty + 0.5);
     uint32_t hole = src[(size_t)(2 * (hr > 2047 ? 2047 : hr)) * 4096 + (size_t)(2 * (hc > 2047 ? 2047 : hc))] & 0x80000000u;
     return NearMatPack(id, w, n, hole);
 }
+static uint32_t NearMatEncodeAt(const uint32_t* src, double x, double y, double texel, uint32_t* tally) { return NearMatEncodeWith(src, x, y, x, y, texel, tally); }
 
 /* per-id weights -> a texel: the 3 largest, ids ascending, the hole bit as given */
 static uint32_t NearMatPack(uint32_t* id, double* w, int n, uint32_t hole)
@@ -3762,6 +3764,26 @@ static int NearCoarseMatOn(void)
     return on;
 }
 
+/* The texels the plants' copy of the level's map holds in place of the drawn ones. The terrain mixes four texels
+ * about a texel's point; the scatter callback takes one texel for the 4 m cell that starts there (column
+ * trunc((w - 1) u), row h - 1 - trunc((h - 1) v), game 0x137A7DB..0x137A81A). So the drawn map has the track as it is
+ * at the texel's point and the plants' copy as it is at the cell's centre, or the plants' strip would lie 2 m east
+ * and north of the road. Pairs of index and texel, only where the two differ. */
+#define NEAR_STRIP_PAIRS (1 << 20)
+static struct { LONG level; uint32_t* pair; volatile LONG n; } g_matStrip = {.level = -1};
+/* Texel (r, c) of the level's interpolated map; *plants: the same ground with the track at the cell's centre. */
+static uint32_t NearEncodeTexel(const uint32_t* src, int r, int c, uint32_t* tally, uint32_t* plants)
+{
+    const double x = -8191.75 + c * NEAR_MAT_STEP, y = 8191.75 - r * NEAR_MAT_STEP;
+    const uint32_t drawn = NearMatEncodeWith(src, x, y, x, y, NEAR_MAT_STEP, tally);
+    *plants = drawn;
+    if (RoadTrackNear(x, y))
+    {
+        uint32_t none[32] = {0};
+        *plants = NearMatEncodeWith(src, x, y, ((c + 0.5) / 4095.0 - 0.5) * 16384.0, ((4095 - r + 0.5) / 4095.0 - 0.5) * 16384.0, NEAR_MAT_STEP, none);
+    }
+    return drawn;
+}
 typedef struct { const uint32_t* src; uint32_t* out; volatile LONG track[32]; } NearEncodeJob;
 static void NearEncodeRows(void* ctx, int r0, int r1)
 {
@@ -3769,7 +3791,13 @@ static void NearEncodeRows(void* ctx, int r0, int r1)
     uint32_t tally[32] = {0};
     for (int r = r0; r < r1; r++)
         for (int c = 0; c < 4096; c++)
-            job->out[(size_t)r * 4096 + c] = NearMatEncodeAt(job->src, -8191.75 + c * NEAR_MAT_STEP, 8191.75 - r * NEAR_MAT_STEP, NEAR_MAT_STEP, tally);
+        {
+            uint32_t plants;
+            const uint32_t drawn = job->out[(size_t)r * 4096 + c] = NearEncodeTexel(job->src, r, c, tally, &plants);
+            if (plants == drawn || g_matStrip.pair == NULL) continue;
+            const LONG at = InterlockedIncrement(&g_matStrip.n) - 1;
+            if (at < NEAR_STRIP_PAIRS) { g_matStrip.pair[2 * at] = (uint32_t)(r * 4096 + c); g_matStrip.pair[2 * at + 1] = plants; }
+        }
     RoadTrackTally(job->track, tally);
 }
 
@@ -3998,15 +4026,17 @@ static uint32_t NearMatBand(uint32_t* tile, const uint32_t* coarse)
         if (own != NULL) memcpy(own, tile, (size_t)4096 * 4096 * 4);
     }
     job.own = own;
+    const ULONGLONG began = GetTickCount64();
     NearRows(NearMatBandRows, &job, 4096);
+    const unsigned long took = (unsigned long)(GetTickCount64() - began);
     const int mixed = own != NULL;
     if (own != NULL)
     {
         VirtualFree(own, 0, MEM_RELEASE);
         Note("difficulty: near terrain: the tile's own map mixed from its weight texels; its paths drawn from their vectors: %ld texels", (long)job.paths);
     }
-    char what[96];
-    snprintf(what, sizeof what, "the near tile at (%.0f, %.0f)%s", (double)g_near.centre[0], (double)g_near.centre[1], mixed ? "" : " (no memory for its own map: its band only)");
+    char what[128];
+    snprintf(what, sizeof what, "the near tile at (%.0f, %.0f)%s, its map pass %lu ms", (double)g_near.centre[0], (double)g_near.centre[1], mixed ? "" : " (no memory for its own map: its band only)", took);
     RoadTrackNote(what, job.track);
     return (uint32_t)job.taken;
 }
@@ -4224,13 +4254,14 @@ static void NearRoadStampBuild(const uint32_t* level)
 static void NearCoarseMatBuild(const uint32_t* level)
 {
     NearRoadStampBuild(level);
-    RoadTrackBuild(); /* before the first map is encoded: the level's here, then every tile's */
     NearCoarseMatDrop();
     if (!NearCoarseMatOn()) return;
     ULONGLONG t0 = GetTickCount64();
     g_coarseMat.pixels = (uint32_t*)VirtualAlloc(NULL, (size_t)4096 * 4096 * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (g_coarseMat.pixels == NULL) { Note("difficulty: near terrain: no memory for the coarse terrain's material map; it keeps the level's"); return; }
     NearEncodeJob job = {level, g_coarseMat.pixels, {0}};
+    if (g_matStrip.pair == NULL) g_matStrip.pair = (uint32_t*)VirtualAlloc(NULL, (size_t)NEAR_STRIP_PAIRS * 8, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    g_matStrip.n = 0; g_matStrip.level = g_world.levels;
     NearRows(NearEncodeRows, &job, 4096);
     RoadTrackNote("the level's material map (4 m texels)", job.track);
     typedef uint64_t (*CreateFn)(uint32_t w, uint32_t h, uint32_t format, void* pixels);
@@ -4262,6 +4293,12 @@ static void NearCoarseMatScatter(void)
         (uintptr_t)mi.BaseAddress + mi.RegionSize < (uintptr_t)data + (size_t)4096 * 4096 * 4)
     { Note("difficulty: near terrain: the level's CPU material map is not writable memory; its scatter keeps the level's map"); return; }
     memcpy((void*)(uintptr_t)data, g_coarseMat.pixels, (size_t)4096 * 4096 * 4);
+    const LONG strip = g_matStrip.pair != NULL && g_matStrip.level == g_world.levels ? g_matStrip.n : 0;
+    for (LONG k = 0; k < strip && k < NEAR_STRIP_PAIRS; k++) ((volatile uint32_t*)(uintptr_t)data)[g_matStrip.pair[2 * k]] = g_matStrip.pair[2 * k + 1];
+    if (strip != 0)
+        Note("roads: level %ld track: the plants' copy of the material map has the track at each cell's centre: %ld texels differ from the drawn map%s", (long)g_world.levels,
+            (long)(strip < NEAR_STRIP_PAIRS ? strip : NEAR_STRIP_PAIRS), strip > NEAR_STRIP_PAIRS ? " (more did not fit: the rest keep the drawn texel)" : "");
+    if (g_matStrip.pair != NULL) { VirtualFree(g_matStrip.pair, 0, MEM_RELEASE); g_matStrip.pair = NULL; }
     g_coarseMat.scatter = 2;
     Note("difficulty: near terrain: the level's CPU material map (scatter, physics) is the interpolated one");
 }

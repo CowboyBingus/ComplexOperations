@@ -1,7 +1,8 @@
 /* ---- Roads: the level's worn track ---------------------------------------------------------------------------------
- * The pieces, the slot and the places' flat ground are made once a level, at its conform, before the level's
- * material map is encoded (NearCoarseMatBuild): the zones are final then and every later map (the level's, each near
- * tile's, also the tiles built in the mission) reads the same data. Everything the track depends on is generation
+ * The pieces, the slot and the places' flat ground are made once a level, as its op 0xB7 begins (where the grading
+ * reads the same road points): the zones, the spurs and the pads are final then, and no rendered map is needed, so a
+ * peer whose read-back fails still has the same track and thins the same plants. Every later map (the level's, each
+ * near tile's, also the tiles built in the mission) reads this data. Everything the track depends on is generation
  * data: the road points, the zone types beside the edges (an edge's cells +0x20 / +0x28, the subregion of each, the
  * type at subregion +0xC), the types' painter lists, the pads and the playable radius. No rendered map is read, so
  * every peer draws the same track. It has its own index, not the graded field's, so it is drawn with the grading off.
@@ -90,6 +91,7 @@ static void RoadTrackBuild(void)
     const RoadsLayout L = {g_routeEdges, g_routePoints, 0};
     RoadEdge* e = NULL; uint32_t points = 0, subs = 0, size = 0; float fraction = 0.0f;
     uintptr_t gen = 0; uint64_t ts = 0;
+    if (g_track.level == g_world.levels) return; /* once a level */
     g_track.on = 0; g_track.slot = 0; g_track.level = g_world.levels;
     TrackIndexFree(&g_track.ix);
     if (g_world.current != 8.0f || g_arterials.level != g_world.levels || g_arterials.count == 0 || g_worldLevel == 0 || SafeRead(g_worldLevel + 0x2C8, &gen, 8) || gen == 0) return;
@@ -172,17 +174,18 @@ static void RoadTrackBuild(void)
             snprintf(line, sizeof line, "a\t%u\t%d\t%d\t%u\t%u\t%u\t%.1f\n", k, side[place[k]][0], side[place[k]][1], slot[k], slot[k] != level, end - first - 1, length);
         WriteFile(file, line, TsvLength(line, sizeof line, len), &wrote, NULL);
     }
-    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    const int wrote_ = file != INVALID_HANDLE_VALUE;
+    if (wrote_) CloseHandle(file);
     free(slot); RoadsFreeEdges(e, n); VirtualFree(pts, 0, MEM_RELEASE);
     const int indexed = level != 0 && lost == 0 && TrackIndexBuild(&g_track.ix, 2.0 * g_track.half);
     char by[256];
     RoadTrackBySlot(by, sizeof by, bySlot);
     Note("roads: level %ld track: slot %u%s (ground on neither side along %.1f of %.1f km of arterials); %u pieces on %u arterial edges and %u spurs; edges by slot:%s; "
         "%u edges took their own slot (the level's is ground on both sides), %u edges without a zone type, %u zone types not the reviewed shape; %u flat pads, "
-        "%.0f m of track left to their ground or the rim; roadtrack-%ld.tsv written", (long)g_world.levels, level,
+        "%.0f m of track left to their ground or the rim; roadtrack-%ld.tsv %s", (long)g_world.levels, level,
         forced ? " (HELLFORGE_XL_ROAD_TRACK_SLOT, research)" : "", clear / 1000.0, all / 1000.0, g_track.ix.n, roads, spurs, by, other, typeless, types.bad,
-        g_track.flats.n, hidden, (long)g_world.levels);
-    if (level == 0) Note("roads: level %ld track: no zone beside a road has a path painter; no track is drawn", (long)g_world.levels);
+        g_track.flats.n, hidden, (long)g_world.levels, wrote_ ? "written" : "not written (the file did not open)");
+    if (level == 0) Note("roads: level %ld track: no zone of the biome beside a road has a path painter; no track is drawn", (long)g_world.levels);
     else if (!indexed || !flats) Note("roads: level %ld track: no memory for the pieces or the pads; no track is drawn", (long)g_world.levels);
     else if (!RoadTrackSwitch("HELLFORGE_XL_ROAD_TRACK")) Note("roads: level %ld track: off (HELLFORGE_XL_ROAD_TRACK=0, research): the material maps stay as they are", (long)g_world.levels);
     else { g_track.on = 1; g_track.slot = level; }
@@ -212,6 +215,9 @@ static void RoadTrackAt(double x, double y, double texel, uint32_t* id, double* 
     if (!(c > 0.0)) { tally[0]++; return; }
     if (TrackMix(id, w, n, room, slot, c)) tally[slot]++;
 }
+
+/* 1 when the track can differ between (x, y) and a point of the 4 m cell that starts there. */
+static int RoadTrackNear(double x, double y) { return g_track.on && g_track.level == g_world.levels && !TrackNoneNear(&g_track.ix, x, y); }
 
 /* A map's count after its rows: the texels the track was mixed into, by slot. */
 static void RoadTrackNote(const char* what, const volatile LONG* tally)

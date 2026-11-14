@@ -4929,6 +4929,7 @@ static void RoadGradeBegin(void);
 static void RoadGradeEmbankNote(uint64_t record);
 static void RoadGradeAfterNote(uintptr_t block);
 static void RoadTrackThin(uintptr_t block); /* difficulty_world_roadtracklevel.c */
+static void RoadTrackBuild(void);
 static void RoadsIndexNote(uint64_t context, const char* when);
 static void RoadsPointsWatch(uintptr_t block, uint32_t op);
 static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
@@ -4980,6 +4981,7 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
         /* the roads' ground: the level waits at its LevelRoutes while the graded field is drawn */
         if (o == 0x38 && g_world.current == 8.0f) RoadGradeBegin();
         if (o == 0xB8 && g_world.current == 8.0f) RoadGradeEmbankNote(records + (uint64_t)i * 0x19B0u);
+        if (o == 0xB7 && g_world.current == 8.0f) RoadTrackBuild(); /* the track from the points the grading reads; no rendered map */
         if (o == 0xB7 && RoadGradeStep(b)) { TerrainDiagAfter(records, index, diagAt, diagOp); return 0; }
         if (o == 0x0A && g_world.current == 8.0f) TerrainNearWater(records + (uint64_t)i * 0x19B0u);
         if (o == 0x6C && g_world.current == 8.0f) MacroStamps(); /* once a level, before its first call */

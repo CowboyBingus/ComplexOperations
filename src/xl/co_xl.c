@@ -1383,12 +1383,12 @@ double CoXlTestTrackWeight(double d, double x, double y) { return TrackWeight(d,
 double CoXlTestTrackCoarse(double d) { return TrackCoarse(d); }
 void CoXlTestTrackWarp(double x, double y, double* wx, double* wy) { TrackWarp(x, y, wx, wy); }
 /* The slot between two zone type descriptors (b 0: one type); *state: bit 0 / 1 a / b read whole, a's path count
- * << 8, a's ground slot count << 16. */
+ * << 8, a's ground slot count << 16, bit 2 a is a biome's own type. */
 uint32_t CoXlTestTrackSlot(uintptr_t a, uintptr_t b, uint32_t* state)
 {
     TrackPainters pa, pb;
     const int readA = TrackTypePainters(a, &pa), readB = b != 0 ? TrackTypePainters(b, &pb) : 1;
-    *state = (uint32_t)readA | (uint32_t)readB << 1 | (uint32_t)pa.paths << 8 | (uint32_t)pa.fills << 16;
+    *state = (uint32_t)readA | (uint32_t)readB << 1 | (uint32_t)pa.nature << 2 | (uint32_t)pa.paths << 8 | (uint32_t)pa.fills << 16;
     return TrackSlotChoose(&pa, b != 0 ? &pb : NULL);
 }
 /* The level's slot over n roads (descriptors a[i], b[i] or 0, lengths) and each road's own under it; 16 roads at most. */
@@ -1471,6 +1471,7 @@ uint32_t CoXlTestTrackThin(double world, double playable, uint32_t* image, uint3
 uint32_t CoXlTestTrackBuild(uintptr_t level, uint32_t* pieces)
 {
     g_worldLevel = level;
+    g_track.level = -1; /* the build is once a level */
     RoadTrackBuild();
     g_worldLevel = 0;
     *pieces = g_track.ix.n;
@@ -1486,6 +1487,8 @@ uint32_t CoXlTestTrackBuiltAt(double x, double y, double texel, uint32_t ground,
     return NearMatPack(id, w, n, ground & 0x80000000u);
 }
 /* A texel of a material map as the level's and a tile's band encode it (NearMatEncodeAt) from a 4096 x 4096 map. */
+/* Texel (r, c) of the level's interpolated map as drawn; *plants: as the plants' copy holds it (NearEncodeTexel). */
+uint32_t CoXlTestTrackTexel(const uint32_t* src, int r, int c, uint32_t* plants) { uint32_t tally[32] = {0}; return NearEncodeTexel(src, r, c, tally, plants); }
 uint32_t CoXlTestTrackEncode(const uint32_t* src, double x, double y, double texel, uint32_t* tally) { return NearMatEncodeAt(src, x, y, texel, tally); }
 void CoXlTestTrackThinBlock(uintptr_t block) { RoadTrackThin(block); }
 /* RoadTrackGround's verdict on a block's ground-id image, with its side. */
