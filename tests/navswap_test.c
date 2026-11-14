@@ -28,6 +28,8 @@ int CoXlTestLwNavHoldBusy(void);
 void CoXlTestLwNavHoldCounts(uint32_t* v);
 int CoXlTestLwNavWatch(uint16_t cx, uint16_t cy, uint32_t flags, uint32_t section);
 float CoXlTestLwAibSteer(float stock, float cur, float lat);
+float CoXlTestLwAibWorld(uintptr_t w, float stock, float lat, int on, ULONGLONG now);
+int CoXlTestLwNavLeft(int read, uint32_t state);
 
 static int g_failed;
 static const char* g_case;
@@ -293,6 +295,19 @@ static void TestLinesAndSummary(void)
     Reset("swap lines a level", 12, JOBS, JOBS, INLINE);
     for (int i = 0; i < 400; i++) { g_fake.log[0] = 0; Swap(5); }
     CHECK(fake_host_logged("section 5 swapped in at once") && fake_host_logged("living world: nav: 400 swap lines this level; the 30 s summaries go on"));
+    Reset("drain lines a level", 12, JOBS, JOBS, INLINE);
+    for (int i = 0; i < 31; i++) Swap(5);
+    CHECK(!fake_host_logged("drain lines this level"));
+    Swap(5);
+    CHECK(fake_host_logged("living world: nav: 64 drain lines this level; the 30 s summaries go on"));
+    g_fake.log[0] = 0;
+    Swap(5);
+    CHECK(!fake_host_logged("a step finished on the frame thread") && fake_host_logged("swapped in at once"));
+    CoXlTestLwNavLevel(2);
+    Swap(5);
+    CHECK(fake_host_logged("a step finished on the frame thread (before an unload")); /* a new level: its own lines */
+    Reset("swap lines a level", 12, JOBS, JOBS, INLINE);
+    for (int i = 0; i < 400; i++) { g_fake.log[0] = 0; Swap(5); }
     g_fake.log[0] = 0;
     Swap(9);
     CHECK(!fake_host_logged("swapped in at once"));
@@ -437,7 +452,7 @@ static void TestPopOrder(void)
 
 static void TestHoldIdle(void)
 {
-    uint32_t v[5], swaps, steps, parallel, refused, noLoad;
+    uint32_t v[8], swaps, steps, parallel, refused, noLoad;
     ResetHold("a built cell's completion with the world idle: taken at once, no drain");
     Section(IDX, 3, 40);
     Push(0, IDX, 3, 0);
@@ -463,7 +478,7 @@ static void TestHoldIdle(void)
 
 static void TestHoldWaits(void)
 {
-    uint32_t v[5];
+    uint32_t v[8];
     ResetHold("a step in flight: the built cell's completion waits for its commit");
     Section(IDX, 3, 40); Flight(1);
     Push(0, IDX, 3, 0);
@@ -477,7 +492,7 @@ static void TestHoldWaits(void)
     static uint8_t sections[0x48]; int32_t slots = 77;
     memcpy(sections + 0x40, &slots, 4); Put(g_aiw + 0x130, (uintptr_t)sections);
     CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
-    CHECK(fake_host_logged("1 completion(s) held, the longest 3 tick(s); 0 drain(s) on the frame thread (0 after 2000 ms held); 0 swap(s) let through with other changes queued; this level 1 swap(s) and 0 "
+    CHECK(fake_host_logged("1 completion(s) held, the longest 3 tick(s); 0 drain(s) on the frame thread; 0 swap(s) let through with other changes queued; AI budget raised on 0 frame(s) (0 at 8000 us); this level 1 swap(s) and 0 "
         "unload(s) with no load for 0 built cell(s) marked; 77 of 1024 section slots"));
     ResetHold("other changes queued (cutters): it waits for the step that takes them, then goes with nothing queued");
     Section(IDX, 3, 40); g_queued = 1;
@@ -494,7 +509,7 @@ static void TestHoldWaits(void)
     CHECK(g_joins == 0 && g_waits == 0 && g_commits == 0 && g_steps == 0 && g_leaves == 0);
     CHECK(fake_host_logged("swapped in with the world idle, for its next step") && fake_host_logged("held 2 tick(s), 7 other change(s) queued; 1 swaps"));
     CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
-    CHECK(fake_host_logged("0 drain(s) on the frame thread (0 after 2000 ms held); 1 swap(s) let through with other changes queued;"));
+    CHECK(fake_host_logged("0 drain(s) on the frame thread; 1 swap(s) let through with other changes queued;"));
     ResetHold("other changes queued and a step in flight: not after 100 ms either");
     Section(IDX, 3, 40); g_queued = 7; Flight(1);
     Push(0, IDX, 3, 0);
@@ -552,7 +567,7 @@ static void TestHoldWaits(void)
 
 static void TestHoldOnePerRun(void)
 {
-    uint32_t v[5];
+    uint32_t v[8];
     ResetHold("one swap a step: the next completion waits until the swap is applied and committed");
     Section(IDX, 3, 40); Section(IDX, 4, 41);
     Push(0, IDX, 3, 0); Push(1, IDX, 4, 0); Push(2, IDX, 5, 0); /* two built cells, then a first build */
@@ -628,7 +643,7 @@ static void TestHoldTwoWorlds(void)
  * frame thread as before the hold; a swap the hold left to the next step is finished before any other completion. */
 static void TestHoldLevelEnd(void)
 {
-    uint32_t v[5];
+    uint32_t v[8];
     ResetHold("the flush tick: the game's order and the drain");
     Section(IDX, 3, 40); Flight(1);
     Push(0, IDX, 3, 0); Push(1, IDX, 5, 0);
@@ -643,6 +658,7 @@ static void TestHoldLevelEnd(void)
     CHECK(Tick(0, 10) == 0);
     g_fake.log[0] = 0;
     CHECK(Tick(1, 20) == 1 && g_done[1] == 1);
+    CHECK(fake_host_logged("a step finished on the frame thread (the game's order, behind a swap not applied yet; flush 1, living world live, world 1, 2 queued before): "));
     CHECK(g_steps == 1 && g_queued == 1 && g_joins == 1 && g_leaves == 1 && g_enters == 1 && g_lockedCalls == 0); /* queued: the first build's own load */
     HoldCounts(v);
     CHECK(v[3] == 1 && v[2] == 0);
@@ -660,6 +676,7 @@ static void TestHoldLevelEnd(void)
     NavState(IDX, 5);
     Push(1, IDX, 5, 0);
     CHECK(Tick(0, 10) == 1 && g_steps == 1 && g_leaves == 1 && g_enters == 1 && g_lockedCalls == 0 && g_broken == 0);
+    CHECK(fake_host_logged("a step finished on the frame thread (a stopped nav's record, behind a swap not applied yet; flush 0, living world live, world 1, 2 queued before): "));
     ResetHold("a stopped nav: a built cell's completion drains as before the hold");
     Section(IDX, 3, 40); Flight(1); NavState(IDX, 5);
     Push(0, IDX, 3, 0);
@@ -689,111 +706,194 @@ static void TestHoldLevelEnd(void)
     CHECK(refused == 1 && g_steps == 0 && g_leaves == 1 && g_enters == 1);
 }
 
-/* Records that wait LW_NAV_HOLD_MS with none taken: the world's step is finished on the frame thread, once, noted. */
-static void TestHoldGiveWay(void)
+static void Budget(float v) { memcpy(g_aiw + 0x47C, &v, 4); }
+static float Aib(int on, ULONGLONG now) { return CoXlTestLwAibWorld((uintptr_t)g_aiw, 0.002f, 0.0f, on, now); }
+
+/* A run that stays in flight: the completion waits however long, no step is finished here, and 30 s is said once. */
+static void TestHoldLong(void)
 {
-    uint32_t v[5];
-    ResetHold("a world that is never idle: after 2000 ms its step is finished here");
-    Section(IDX, 3, 40); Flight(1);
+    uint32_t v[8];
+    ResetHold("a world whose run stays in flight: its completion waits on, nothing is finished on the frame thread");
+    Section(IDX, 3, 40); Flight(1); Budget(0.002f);
     Push(0, IDX, 3, 0);
     CHECK(Tick(0, 5000) == 0);
-    CHECK(Tick(0, 6999) == 0 && g_waits == 0 && g_leaves == 0);
-    CHECK(Tick(0, 7000) == 1 && g_broken == 0);
-    CHECK(g_joins == 1 && g_waits == 1 && g_commits == 1 && g_leaves == 1 && g_enters == 1 && g_lockedCalls == 0);
-    CHECK(fake_host_logged("living world: nav: 1 completion(s) of world 1 waited 2000 ms and it was never idle (step in flight 1, 0 queued, AI update 0, swap unapplied 0): "
-        "its step is finished here, "));
-    CHECK(fake_host_logged("ms on the frame thread (use 1 of 30 this level)"));
-    CHECK(fake_host_logged("swapped in with the world idle, for its next step")); /* the swap itself: no second drain */
+    CHECK(Tick(0, 7000) == 0 && Tick(0, 34999) == 0 && !fake_host_logged("LONG HOLD"));
+    CHECK(Tick(0, 35000) == 0);
+    CHECK(fake_host_logged("living world: nav: LONG HOLD: 1 completion(s) of world 1 have waited 30000 ms and wait on: run in flight 1, done 1, permit 1, "
+        "0 queued, AI update 0, section commands unapplied 0, budget 2000 us"));
     HoldCounts(v);
-    CHECK(v[2] == 1 && v[3] == 1);
+    CHECK(v[7] == 1);
+    g_fake.log[0] = 0;
+    CHECK(Tick(0, 70000) == 0 && Tick(0, 700000) == 0 && !fake_host_logged("LONG HOLD")); /* once a world and level */
+    CHECK(g_joins == 0 && g_waits == 0 && g_commits == 0 && g_steps == 0 && g_leaves == 0);
+    Driver();
+    CHECK(Tick(0, 700016) == 1 && g_broken == 0 && g_joins == 0 && g_waits == 0);
+    CHECK(fake_host_logged("swapped in with the world idle, for its next step"));
+    HoldCounts(v);
+    CHECK(v[3] == 0 && v[0] == 1);
     CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
-    CHECK(fake_host_logged("1 drain(s) on the frame thread (1 after 2000 ms held)"));
-    ResetHold("a taken record starts the wait again");
+    CHECK(fake_host_logged("0 drain(s) on the frame thread; 0 swap(s) let through") && !fake_host_logged("a step finished on the frame thread"));
+    ResetHold("the long hold's line: no run in flight, no permit, a queue; again in the next level");
+    Section(IDX, 3, 40); g_queued = 7; AiUpdate(1); g_grant = 0; Budget(0.008f);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 1000) == 0 && Tick(0, 30999) == 0 && !fake_host_logged("LONG HOLD"));
+    CHECK(Tick(0, 31000) == 0);
+    CHECK(fake_host_logged("have waited 30000 ms and wait on: run in flight 0, done -1, permit 0, 7 queued, AI update 1, section commands unapplied 0, budget 8000 us"));
+    CoXlTestLwNavLevel(2); g_fake.log[0] = 0;
+    CHECK(Tick(0, 40000) == 0 && Tick(0, 69999) == 0 && !fake_host_logged("LONG HOLD"));
+    CHECK(Tick(0, 70000) == 0 && fake_host_logged("LONG HOLD: 1 completion(s) of world 1 have waited 30000 ms"));
+    ResetHold("a taken record starts the relaxed wait again, and no wait ends in a drain");
     Section(IDX, 3, 40); Section(IDX, 4, 41); Section(IDX, 5, 42);
     Push(0, IDX, 3, 0); Push(1, IDX, 4, 0); Push(2, IDX, 5, 0);
     CHECK(Tick(0, 1000) == 1);       /* the first; the others wait from here */
-    CHECK(Tick(0, 2800) == 0 && g_joins == 0);
+    CHECK(Tick(0, 2800) == 0);
     Driver(); Driver();
-    CHECK(Tick(0, 2900) == 1 && g_joins == 0); /* the second, by the step; the third waits from here */
-    CHECK(Tick(0, 3100) == 0 && g_joins == 0); /* 2100 ms after the first wait began: not the limit */
-    CHECK(Tick(0, 4899) == 0 && g_joins == 0);
-    CHECK(Tick(0, 4900) == 1 && g_joins == 1 && g_steps == 1 && g_broken == 0);
-    ResetHold("no permit: they wait on, and the next try is 2000 ms later");
-    Section(IDX, 3, 40); Flight(1); g_grant = 0;
+    CHECK(Tick(0, 2900) == 1);       /* the second, by the step; the third waits from here */
+    CHECK(Tick(0, 3100) == 0 && Tick(0, 9000) == 0 && g_joins == 0 && g_steps == 0 && g_broken == 0);
+}
+
+/* The run in flight gets more time a frame while a completion is held behind it: 4 ms from 100 ms, 8 ms from 500 ms. */
+static void TestHoldRaise(void)
+{
+    uint32_t v[8];
+    ResetHold("the budget of a run in flight with a completion held");
+    Section(IDX, 3, 40); Flight(1); Budget(0.002f);
     Push(0, IDX, 3, 0);
     CHECK(Tick(0, 1000) == 0);
-    CHECK(Tick(0, 3000) == 0 && g_joins == 1 && g_waits == 0 && g_unloads == 0);
-    CHECK(fake_host_logged("no permit for its step, they wait on, "));
-    CHECK(Tick(0, 4999) == 0 && g_joins == 1);
-    g_grant = 1;
-    CHECK(Tick(0, 5000) == 1 && g_joins == 2 && g_waits == 1);
+    CHECK(Aib(1, 1099) == 0.002f);  /* held: the game's own, not the low one */
+    CHECK(Aib(1, 1100) == 0.004f && Aib(1, 1499) == 0.004f);
+    CHECK(Aib(1, 1500) == 0.008f && Aib(1, 600000) == 0.008f); /* never more */
     HoldCounts(v);
-    CHECK(v[2] == 2 && v[0] == 1);
-    ResetHold("30 uses in a level: the hold is off for the rest of it, and on again in the next");
-    ULONGLONG now = 1000;
-    for (int n = 0; n < 30; n++)
-    {
-        Section(IDX, 3, 40); Flight(1);
-        Push(0, IDX, 3, 0);
-        CHECK(Tick(0, now) == 0);
-        now += 2000;
-        g_fake.log[0] = 0;
-        CHECK(Tick(0, now) == 1);
-        StepAtOnce();
-        now += 10;
-    }
-    CHECK(fake_host_logged("(use 30 of 30 this level)") && fake_host_logged("living world: nav: the hold is off for the rest of this level"));
-    g_joins = g_waits = 0;
-    Section(IDX, 3, 40); Flight(1);
+    CHECK(v[2] == 4 && v[5] == 2);
+    CHECK(Aib(0, 1099) == 0.002f && Aib(0, 1100) == 0.004f && Aib(0, 1500) == 0.008f); /* the lever off: the raise alone */
+    CHECK(CoXlTestLwAibWorld((uintptr_t)g_aiw, 0.01f, 0.0f, 1, 1500) == 0.01f);     /* a stock budget above it stays */
+    CHECK(CoXlTestLwAibWorld((uintptr_t)g_aiw, 0.01f, 0.0f, 0, 1500) == 0.01f);
+    CHECK(CoXlTestLwAibWorld((uintptr_t)g_aiw2, 0.002f, 0.0f, 1, 1500) == 0.002f);  /* another world: its own records only */
+    Flight(0);
+    CHECK(Aib(1, 1600) == 0.002f && Aib(0, 1600) == 0.002f); /* no run in flight: nothing to speed up */
+    Flight(1);
+    CHECK(Aib(1, 1600) == 0.008f);
+    Driver();
+    CHECK(Tick(0, 1616) == 1 && g_broken == 0);
+    CHECK(Aib(1, 1632) == 0.002f);  /* none held; its swap unapplied: the game's own */
+    Driver(); Tick(0, 1648); Driver(); CHECK(Tick(0, 1664) == 0 && !CoXlTestLwNavHoldBusy());
+    CHECK(Aib(1, 1680) == 0.0005f && Aib(0, 1680) == 0.002f);
+    ResetHold("the raise counts from the oldest held completion, not from the last one taken");
+    Section(IDX, 3, 40); Section(IDX, 4, 41); Flight(1); Budget(0.002f);
+    Push(0, IDX, 3, 0); Push(1, IDX, 4, 0);
+    CHECK(Tick(0, 1000) == 0);
+    Driver();
+    CHECK(Tick(0, 1400) == 1 && g_done[0] == 0);
+    Driver();                        /* the swap's run starts */
+    CHECK(Tick(0, 1450) == 0 && g_inFlight == 1);
+    CHECK(Aib(1, 1499) == 0.004f && Aib(1, 1500) == 0.008f);
+    ResetHold("a first build held behind an unapplied swap raises too; with nothing held, nothing");
+    Flight(1); Budget(0.002f);
+    CHECK(Tick(0, 1000) == 0 && Aib(1, 9000) == 0.0005f);
+    ResetHold("records the flush tick took are not held any more");
+    Section(IDX, 3, 40); Flight(1); Budget(0.002f);
     Push(0, IDX, 3, 0);
-    CHECK(Tick(0, now) == 1 && g_waits == 1 && fake_host_logged("swapped in at once")); /* as before the hold */
-    CoXlTestLwNavLevel(2);
-    g_waits = 0; g_queued = 0; Flight(1);
-    Section(IDX, 3, 40);
-    Push(0, IDX, 3, 0);
-    CHECK(Tick(0, now + 10) == 0 && g_waits == 0);
-    HoldCounts(v);
-    CHECK(v[2] == 0);
+    CHECK(Tick(0, 1000) == 0 && Aib(0, 1600) == 0.008f);
+    CHECK(Tick(1, 1700) == 1);
+    Flight(1);
+    CHECK(Aib(0, 1800) == 0.002f);
+    ResetHold("a low budget above the game's own is never used");
+    CHECK(CoXlTestLwAibSteer(0.0003f, 0.0003f, 0.0f) == 0.0003f);
+    ResetHold("a long queue: the game's own budget, not the low one");
+    Budget(0.002f); g_queued = 1024;
+    CHECK(Aib(1, 1000) == 0.0005f);
+    g_queued = 1025;
+    CHECK(Aib(1, 1000) == 0.002f && Aib(0, 1000) == 0.002f);
 }
 
 /* Each world has its own wait: records of other worlds or of no world's rules that leave do not start it again. */
 static void TestHoldOwnWait(void)
 {
-    ResetHold("a held world reaches the limit while other records leave every tick");
-    Section(IDX, 3, 40); Flight(1);
+    ResetHold("a held world's wait goes on while other records leave every tick");
+    Section(IDX, 3, 40); Flight(1); Budget(0.002f);
     Push(0, IDX, 3, 0);
     for (int t = 0; t < 20; t++)
     {
         Push(1 + t % 2, t % 2 ? IDX2 : IDX, 5 + t / 2, t % 2 ? 0 : 0x80); /* world 2's first builds and plain records */
         CHECK(Tick(0, 1000 + 100 * t) == 1 && g_joins == 0);
     }
-    CHECK(Tick(0, 2999) == 0 && g_joins == 0);
-    CHECK(Tick(0, 3000) == 1 && g_joins == 1 && g_waits == 1 && g_broken == 0);
-    CHECK(fake_host_logged("1 completion(s) of world 1 waited 2000 ms"));
-    ResetHold("only the world that is due gets its step finished");
-    Section(IDX, 3, 40); Flight(1);
-    Push(0, IDX, 3, 0);
+    CHECK(Aib(1, 3000) == 0.008f && g_joins == 0); /* 2000 ms held, counted from its own first tick */
+    ResetHold("a take starts its world's relaxed wait again");
+    Section(IDX, 3, 40); Section(IDX, 4, 41); g_queued = 5;
+    Push(0, IDX, 3, 0); Push(1, IDX, 4, 0);
+    CHECK(Tick(0, 1000) == 0 && Tick(0, 1100) == 1);
+    Driver(); Driver(); g_queued = 5;     /* its swap applied; cutter changes queued again */
+    CHECK(Tick(0, 1150) == 0);            /* 50 ms since the take, 150 since the first wait began */
+    CHECK(Tick(0, 1200) == 1 && g_broken == 0 && g_joins == 0);
+    ResetHold("another world's take does not start it again");
+    Section(IDX2, 3, 50); g_queued2 = 5;
+    Push(0, IDX2, 3, 0);
     CHECK(Tick(0, 1000) == 0);
-    Section(IDX2, 3, 50); g_queued2 = 3; Put(g_table + 0x80 * IDX2 + 0x54, 1); /* world 2 busy from 2500 on */
-    Push(1, IDX2, 3, 0);
-    CHECK(Tick(0, 2500) == 0);
-    CHECK(Tick(0, 3000) == 1 && g_done[0] == 0 && g_joins == 1);
-    CHECK(!fake_host_logged("of world 2 waited"));
-    ResetHold("a world's wait ends when its last record leaves by the game's rules");
-    Section(IDX, 3, 40); Flight(1);
+    Push(1, IDX, 5, 0);
+    CHECK(Tick(0, 1050) == 1 && g_done[0] == 1); /* world 1's first build */
+    CHECK(Tick(0, 1100) == 1 && g_done[1] == 0); /* 100 ms from 1000 */
+    ResetHold("a wait does not outlive its records");
+    Section(IDX, 3, 40); g_queued = 5;
     Push(0, IDX, 3, 0);
     CHECK(Tick(0, 1000) == 0);
     NavState(IDX, 5);
+    CHECK(Tick(0, 1010) == 1);            /* its nav stopped: the game's record */
+    NavState(IDX, 3); StepAtOnce(); g_queued = 5; g_joins = 0;
+    Section(IDX, 4, 41); Push(1, IDX, 4, 0);
+    CHECK(Tick(0, 2000) == 0 && Tick(0, 2099) == 0); /* a new wait, from 2000 */
+    CHECK(Tick(0, 2100) == 1 && g_joins == 0);
+    ResetHold("a world's wait ends when its last record leaves by the game's rules");
+    Section(IDX, 3, 40); Flight(1); Budget(0.002f);
+    Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 1000) == 0);
+    NavState(IDX, 5);
+    g_fake.log[0] = 0;
     CHECK(Tick(0, 1100) == 1); /* its nav stopped: the game's record, drained as before the hold */
+    CHECK(fake_host_logged("living world: nav: a step finished on the frame thread (before an unload the pop did not let through; flush 0, living world live, "
+        "world 1, 0 queued before): "));
+    CHECK(fake_host_logged("a step finished on the frame thread (after a load the pop did not let through; flush 0, living world live, world 1, 2 queued before): "));
     NavState(IDX, 3); StepAtOnce(); Flight(1); g_joins = 0;
     Section(IDX, 4, 41); Push(1, IDX, 4, 0);
-    CHECK(Tick(0, 5000) == 0 && g_joins == 0); /* waits from here, not from 1000 */
+    CHECK(Tick(0, 5000) == 0 && Aib(1, 5099) == 0.002f && Aib(1, 5100) == 0.004f); /* waits from here, not from 1000 */
+}
+
+static void TestLeft(void)
+{
+    ResetHold("a level that left play marks no more cells");
+    CoXlTestLwNavLevel(5);
+    CHECK(CoXlTestLwNavLeft(1, 1) == 0 && CoXlTestLwNavLeft(0, 0) == 0); /* still generating: not left */
+    CHECK(CoXlTestLwNavLeft(1, 3) == 0 && CoXlTestLwNavLeft(1, 3) == 0 && !fake_host_logged("left play"));
+    CHECK(CoXlTestLwNavLeft(1, 0) == 1 && fake_host_logged("living world: nav: the level left play (state 0); no more cells are marked, 0 rebuild(s) still watched"));
+    g_fake.log[0] = 0;
+    CHECK(CoXlTestLwNavLeft(0, 0) == 1 && CoXlTestLwNavLeft(1, 4) == 1 && !fake_host_logged("left play"));
+    CHECK(CoXlTestLwNavLeft(1, 3) == 0); /* in play again */
+    CoXlTestLwNavLevel(6);
+    CHECK(CoXlTestLwNavLeft(1, 0) == 0 && CoXlTestLwNavLeft(0, 3) == 0); /* the next level has not been in play; unread is not play */
+    CHECK(CoXlTestLwNavLeft(1, 0) == 0);
+}
+
+/* A count of section slots over the 1024 a face key names is said once a level. */
+static void TestSlots(void)
+{
+    static uint8_t all[0x48] __attribute__((aligned(16)));
+    ResetHold("the section slot guard");
+    int32_t n = 1024; memcpy(all + 0x40, &n, 4); Put(g_aiw + 0x130, (uintptr_t)all);
+    CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
+    CHECK(!fake_host_logged("SECTION SLOTS"));
+    n = 1025; memcpy(all + 0x40, &n, 4);
+    CoXlTestLwNavSwapSummary(61000);
+    CHECK(fake_host_logged("living world: nav: SECTION SLOTS: an AI world holds 1025 sections, over the 1024 a face key can name"));
+    g_fake.log[0] = 0;
+    CoXlTestLwNavSwapSummary(91000);
+    CHECK(!fake_host_logged("SECTION SLOTS"));
+    CoXlTestLwNavLevel(2); CoXlTestLwNavSwapSummary(121000); CoXlTestLwNavSwapSummary(151000);
+    CHECK(fake_host_logged("SECTION SLOTS"));
 }
 
 /* Marks wait for the nav's jobs in flight, which a held completion still counts in: every completion must leave. */
 static void TestHoldNoStarve(void)
 {
-    uint32_t v[5];
+    uint32_t v[8];
     ResetHold("built cells and first builds mixed, the driver stepping: all leave in their order, nothing drained");
     for (int c = 0; c < 12; c++) { if (c % 3 != 2) Section(IDX, c, 40 + c); Push(c, IDX, c, 0); }
     int ticks = 0;
@@ -829,7 +929,7 @@ static void TestHoldBudget(void)
 /* A cell marked again before it completes is watched once; the built cells marked are the swaps to come. */
 static void TestWatch(void)
 {
-    uint32_t v[5];
+    uint32_t v[8];
     ResetHold("the watch list and the marked built cells");
     CHECK(CoXlTestLwNavWatch(3, 4, 0xC, 40) == 1);
     CHECK(CoXlTestLwNavWatch(3, 4, 0x1C, 40) == 1);  /* marked again before its job started: one entry, one swap to come */
@@ -856,8 +956,11 @@ int main(void)
     TestHoldOnePerRun();
     TestHoldTwoWorlds();
     TestHoldLevelEnd();
-    TestHoldGiveWay();
+    TestHoldLong();
+    TestHoldRaise();
     TestHoldOwnWait();
+    TestLeft();
+    TestSlots();
     TestHoldNoStarve();
     TestHoldBudget();
     TestWatch();

@@ -156,6 +156,31 @@ static void TestBudgets(void)
     CHECK(fake_host_logged("frame times (1"));
 }
 
+/* A slow frame's line names the game thread's AI joins, the engine's world update and a far-grass job out. */
+static void TestExtras(void)
+{
+    double join, world; int grass;
+    Reset("a slow frame's extras");
+    Frame(10.0, 0.0, 1);
+    co_framecost_test_begin(g_now, 1, g_mission);
+    co_framecost_test_mark(CO_FC_STREAM, g_now + 10);
+    co_framecost_test_extra(CO_FX_JOIN, g_now + 100, g_now + 3100);
+    co_framecost_test_extra(CO_FX_JOIN, g_now + 4000, g_now + 6000);
+    co_framecost_test_extra(CO_FX_WORLD, g_now + 7000, g_now + 27000);
+    co_framecost_test_extra(CO_FX_WORLD, 0, g_now + 27000);          /* no start: not counted */
+    co_framecost_grass(0); co_framecost_grass(1); co_framecost_grass(0); /* out at any time in the frame */
+    g_now += 40000;
+    Frame(30.0, 0.0, 1);             /* closes the 40 ms frame; this one has no extras */
+    co_framecost_test_extra(CO_FX_COUNT, g_now - 20000, g_now - 10000); /* not an extra: counted nowhere */
+    co_framecost_test_extra(-1, g_now - 20000, g_now - 10000);
+    CHECK(co_framecost_test_slow(0, &join, &world, &grass) == 40.0 && join == 5.0 && world == 20.0 && grass == 1);
+    Frame(10.0, 0.0, 1);
+    CHECK(co_framecost_test_slow(1, &join, &world, &grass) == 30.0 && join == 0.0 && world == 0.0 && grass == 0);
+    for (int i = 0; i < 400; i++) Frame(26.0, 0.0, 1);
+    CHECK(fake_host_logged("frame times: a 40.0 ms frame") && fake_host_logged("into the window; AI joins 5.0 ms, world update 20.0 ms, far-grass job out"));
+    CHECK(fake_host_logged("frame times: a 30.0 ms frame") && fake_host_logged("into the window; AI joins 0.0 ms, world update 0.0 ms, far-grass job not out"));
+}
+
 static void TestNotes(void)
 {
     Reset("the budgets' notes");
@@ -267,6 +292,7 @@ int main(void)
     TestOnlyPlay();
     TestGate();
     TestBudgets();
+    TestExtras();
     TestNotes();
     TestHookParts();
     TestSlowest();

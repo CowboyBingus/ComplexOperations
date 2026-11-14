@@ -42,6 +42,11 @@ int64_t co_framecost_now(void);
 int64_t co_framecost_add(int part, int64_t since);
 /* A part timed inside another: its ticks go to `inner` and come off `outer`. */
 void co_framecost_nested(int inner, int outer, int64_t since);
+/* What a slow frame's line says beside its parts, so a frame the parts do not explain can be told apart: the game
+ * thread's waits for the AI step, the engine's world update, and whether a far-grass bake job was out. */
+enum { CO_FX_JOIN, CO_FX_WORLD, CO_FX_COUNT };
+void co_framecost_extra(int which, int64_t since);
+void co_framecost_grass(int out);
 
 #ifdef CO_TEST
 /* The same on a given clock (ticks of `freq` a second) and given CPU times (100 ns units). */
@@ -51,6 +56,9 @@ void co_framecost_test_begin(int64_t now, int play, long mission);
 void co_framecost_test_mark(int part, int64_t now);
 int64_t co_framecost_test_add(int part, int64_t since, int64_t now);
 void co_framecost_test_nested(int inner, int outer, int64_t since, int64_t now);
+void co_framecost_test_extra(int which, int64_t since, int64_t now);
+/* The window being filled, its slow frame `k` (0 the slowest): its ms beside the AI joins, the world update and the far-grass flag. */
+double co_framecost_test_slow(int k, double* join, double* world, int* grass);
 int co_framecost_test_window_lines(void);
 int co_framecost_test_detail_lines(void);
 /* The last closed window: 1% and 0.1% lows (fps), frames over 25 ms, 33 ms and 1 s, the CPU verdict. */

@@ -517,6 +517,7 @@ static void LwBbFrame(void); /* living_world_bpbuild.c, test instrument */
 static void LwInstallNavTime(void); /* living_world_navtime.c, test instrument */
 static void LwInstallNavJob(void); static void LwNavJobCmd(int mode); static void LwNjFrame(void); /* living_world_navjob.c */
 static void LwAibFrame(void); static void LwAibInit(void); static void LwAibCmd(int us, int raiseMs); /* living_world_aibudget.c */
+static void LwInstallFrameParts(void); /* living_world_fparts.c */
 static void LwSemFrame(void); static void LwInstallSemCap(void); static void LwSemCapCmd(int on); /* living_world_semcap.c */
 static void LwRhFrame(void); static void LwInstallRenderHelp(void); static void LwRenderHelpCmd(int on); /* living_world_renderhelp.c */
 static void LwAllocStatsCmd(int mode); /* living_world_allocstats.c */
@@ -3231,8 +3232,15 @@ static void LwNavSwapLevel(void);
  * tick's pop (0x7B8B0B..0x7B8B35, inside the list's lock) is LwNavPop. A level's end keeps the game's order and the
  * drain: the tick's flush argument, a nav that stopped (0x7B7ED0 clears bit 2 of [nav+0x20] and sets bit 4). */
 #define LW_NAV_HOLD_RELAX_MS 100 /* a world's records wait this long: a built cell goes with other changes queued */
-#define LW_NAV_HOLD_MS 2000    /* and this long with none of them taken: the step is finished on the frame thread */
-#define LW_NAV_HOLD_USES 30    /* that many times in a level: the hold is off until the next level */
+/* A run in flight is driven [W+0x47C] seconds a frame (0xBD04A0 -> 0xA10C50), so one over a long queue spans seconds
+ * and a held completion waits that long. No step is finished on the frame thread for it; the run gets more time. */
+#define LW_NAV_RAISE_MS 100    /* the oldest held completion has waited this long with a run in flight: */
+#define LW_NAV_RAISE_US 4000   /* the run's budget a frame, */
+#define LW_NAV_RAISE2_MS 500
+#define LW_NAV_RAISE2_US 8000  /* and the most it is ever given */
+#define LW_NAV_LONG_MS 30000   /* a hold this long is noted once a world and level; it goes on */
+#define LW_NAV_QUEUE_LONG 1024 /* more commands queued than this: the run that takes them needs the stock budget */
+#define LW_NAV_DRAIN_LINES 64  /* drain lines a level */
 #define LW_NAV_HOLD_WALK 4096  /* more records than the nav's jobs can make: the game's order */
 #define LW_NAV_HOLD_SEEN 64
 static struct
@@ -3247,10 +3255,12 @@ static struct
     uint8_t granted[4];                            /* that cell's unload ran with no drain: so does its load */
     uint32_t waiting[4];                           /* the world's records the last pop left on the list */
     uint32_t frame; ULONGLONG stuckAt[4];          /* the mod's ticks; since when a world's records wait, none taken */
-    long offLevel;                                 /* the level + 1 the hold gave up on */
-    struct { uintptr_t rec; uint32_t frame; } seen[LW_NAV_HOLD_SEEN]; /* the waiting records and their first tick */
-    uint32_t held, longest, uses, drains, marked;  /* this level's; marked: built cells asked to rebuild */
-    uint32_t sumHeld, sumLongest, sumUses, sumDrains, sumRelaxed;
+    ULONGLONG oldAt[4];                            /* when the world's oldest waiting record was first left on the list */
+    uint8_t longNoted[4]; uint32_t flush;          /* the long hold's line is out; the last pop's flush argument */
+    struct { uintptr_t rec; uint32_t frame; ULONGLONG at; } seen[LW_NAV_HOLD_SEEN]; /* the waiting records, first left */
+    uint32_t held, longest, drains, marked;        /* this level's; marked: built cells asked to rebuild */
+    uint32_t drainLines; long slotLevel;           /* this level's drain lines; the level + 1 of the slot line */
+    uint32_t sumHeld, sumLongest, sumDrains, sumRelaxed, sumRaise, sumRaise2;
 } g_lwNavHold;
 
 /* Between steps: no AI update runs (table +0x54, set and cleared around it at 0x7D8618 / 0x7D8726 and read first and
@@ -3301,6 +3311,24 @@ static int LwNavHoldBusy(void)
     for (int i = 0; i < 4; i++) if (g_lwNavHold.swapUnapplied[i] || g_lwNavHold.waiting[i]) return 1;
     return 0;
 }
+static int LwNavQueueLong(uintptr_t w) { return g_lwSwap.queued != NULL && LwNavQueue(w) > LW_NAV_QUEUE_LONG; }
+/* The budget in microseconds the AI world `h` gets this frame over its stock, 0 for none: a completion is held and a
+ * run is in flight. Asked once a frame by the budget lever, which counts for the summary. */
+static int LwNavHoldRaiseUs(uintptr_t h, ULONGLONG now)
+{
+    for (int i = 0; i < 4 && g_lwSwap.table && h; i++)
+    {
+        if (*(volatile uintptr_t*)(g_lwSwap.table + 0x80u * i) != h) continue;
+        if (!g_lwNavHold.waiting[i] || !g_lwNavHold.oldAt[i] || !*(volatile uintptr_t*)(h + 0x4B0)) return 0;
+        ULONGLONG age = now - g_lwNavHold.oldAt[i];
+        if (age < LW_NAV_RAISE_MS) return 0;
+        g_lwNavHold.sumRaise++;
+        if (age < LW_NAV_RAISE2_MS) return LW_NAV_RAISE_US;
+        g_lwNavHold.sumRaise2++;
+        return LW_NAV_RAISE2_US;
+    }
+    return 0;
+}
 /* A record's world index + 1 when the hold's rules are its, 0 when the game's: no cell work (flag 0x80), a nav that is
  * not running, a world with no async step. `*rebuild`: its cell has a section, which the completion unloads (0x7B9026). */
 static int LwNavRecWorld(uintptr_t rec, uintptr_t* cell, int* rebuild)
@@ -3336,22 +3364,38 @@ static uint32_t LwNavWaited(uintptr_t rec)
         if (g_lwNavHold.seen[k].rec == rec) return g_lwNavHold.frame - g_lwNavHold.seen[k].frame;
     return 0;
 }
+/* Every step still finished on the frame thread says where and what it cost: none is expected in play. */
+static void LwNavDrainNote(const char* path, int idx, int queued, int ok, const double* ms)
+{
+    g_lwNavHold.drains++; g_lwNavHold.sumDrains++;
+    if (g_lwNavHold.drainLines >= LW_NAV_DRAIN_LINES) return;
+    Note("living world: nav: a step finished on the frame thread (%s; flush %u, living world %s, world %d, %d queued before): %.1f ms%s: AI update %.1f, "
+        "permit %.1f, step in flight %.1f, its commit %.1f, queued %.1f", path, g_lwNavHold.flush, LwLive() ? "live" : "not live", idx, queued, LwNavSum(ms),
+        ok ? "" : " and no permit, nothing done", ms[LW_NAV_JOIN], ms[LW_NAV_PERMIT], ms[LW_NAV_WAIT], ms[LW_NAV_COMMIT], ms[LW_NAV_STEP]);
+    if (++g_lwNavHold.drainLines == LW_NAV_DRAIN_LINES) Note("living world: nav: %d drain lines this level; the 30 s summaries go on", LW_NAV_DRAIN_LINES);
+}
+/* When `rec` was first left on the list; `other` for one the table had no room for. */
+static ULONGLONG LwNavSeenAt(uintptr_t rec, ULONGLONG other)
+{
+    for (int k = 0; k < LW_NAV_HOLD_SEEN; k++) if (g_lwNavHold.seen[k].rec == rec) return g_lwNavHold.seen[k].at;
+    return other;
+}
 /* The world's step finished on the frame thread, with the list's lock released: the nav's build threads push to it. */
-static int LwNavHoldDrain(uintptr_t list, int idx, uintptr_t w, double* ms)
+static int LwNavHoldDrain(uintptr_t list, int idx, uintptr_t w, const char* path)
 {
     double parts[LW_NAV_PARTS];
-    int64_t t = co_framecost_now(), a = LwNavNow();
+    int64_t t = co_framecost_now();
+    int queued = LwNavQueue(w);
     g_lwNavHold.leave(list);
     int ok = LwNavDrain(w, idx, parts);
     g_lwNavHold.enter(list);
     co_framecost_add(CO_FC_NAVSWAP, t);
-    g_lwNavHold.drains++; g_lwNavHold.sumDrains++;
+    LwNavDrainNote(path, idx, queued, ok, parts);
     if (!ok) { g_lwSwap.refused++; InterlockedExchange(&g_lwSwap.unsafe, 1); }
     else g_lwNavHold.unapplied[idx] = g_lwNavHold.swapUnapplied[idx] = 0; /* committed, and the queue applied */
-    *ms = LwNavMs(a, LwNavNow());
     return ok;
 }
-/* The game's order (a level's end, a normal mission, the hold off). A swap the hold left to the next async step is
+/* The game's order (a level's end, a normal mission). A swap the hold left to the next async step is
  * finished first, as every swap was before the hold: this completion's connect must not meet it half applied. */
 static uintptr_t LwNavPopHead(uintptr_t list, uint32_t off)
 {
@@ -3361,54 +3405,38 @@ static uintptr_t LwNavPopHead(uintptr_t list, uint32_t off)
         if (!head) return 0;
         uint32_t flags = *(volatile uint32_t*)(head + 0xC), idx = flags & 0x7F;
         if ((flags & 0x80) || idx >= 4 || !g_lwNavHold.swapUnapplied[idx]) break;
-        double ms;
-        if (!LwNavHoldDrain(list, (int)idx, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx), &ms)) break;
+        if (!LwNavHoldDrain(list, (int)idx, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx), "the game's order, behind a swap not applied yet")) break;
     }
     uintptr_t head = *(uintptr_t*)(list + 0x28);
     return head ? LwNavTake(list, off, 0, head, -1) : 0;
 }
-/* A world's records waited LW_NAV_HOLD_MS with none taken (it was never found between steps with its swap applied and
- * no query job): its step is finished here, once, and noted; LW_NAV_HOLD_USES times in a level and the hold is off for
- * the rest of it. 1 when a world was due. */
-static int LwNavHoldGiveWay(uintptr_t list, ULONGLONG now)
+/* A hold of LW_NAV_LONG_MS says once what the world's run is doing; the completion waits on. */
+static void LwNavLongHold(int i, uintptr_t w, ULONGLONG now)
 {
-    int due = 0;
-    for (int i = 0; i < 4; i++)
-    {
-        uintptr_t w = *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * i);
-        if (!g_lwNavHold.waiting[i] || !w || !g_lwNavHold.stuckAt[i] || now - g_lwNavHold.stuckAt[i] < LW_NAV_HOLD_MS) continue;
-        int flight = *(volatile uintptr_t*)(w + 0x4B0) != 0, queued = LwNavQueue(w), update = *(volatile int32_t*)(g_lwSwap.table + 0x80u * i + 0x54);
-        double ms;
-        int ok = LwNavHoldDrain(list, i, w, &ms);
-        g_lwNavHold.uses++; g_lwNavHold.sumUses++; due = 1;
-        Note("living world: nav: %u completion(s) of world %d waited %llu ms and it was never idle (step in flight %d, %d queued, AI update %d, swap "
-            "unapplied %d): %s, %.1f ms on the frame thread (use %u of %d this level)", g_lwNavHold.waiting[i], i, (unsigned long long)(now - g_lwNavHold.stuckAt[i]),
-            flight, queued, update, g_lwNavHold.unapplied[i], ok ? "its step is finished here" : "no permit for its step, they wait on", ms, g_lwNavHold.uses,
-            LW_NAV_HOLD_USES);
-        g_lwNavHold.stuckAt[i] = now;
-    }
-    if (g_lwNavHold.uses >= LW_NAV_HOLD_USES && g_lwNavHold.offLevel != g_world.levels + 1)
-    {
-        g_lwNavHold.offLevel = g_world.levels + 1;
-        Note("living world: nav: the hold is off for the rest of this level; each swap's step is finished on the frame thread as before");
-    }
-    return due;
+    if (g_lwNavHold.longNoted[i] || !g_lwNavHold.waiting[i] || !g_lwNavHold.oldAt[i] || now - g_lwNavHold.oldAt[i] < LW_NAV_LONG_MS) return;
+    g_lwNavHold.longNoted[i] = 1;
+    int flight = *(volatile uintptr_t*)(w + 0x4B0) != 0; float budget = *(volatile float*)(w + 0x47C);
+    Note("living world: nav: LONG HOLD: %u completion(s) of world %d have waited %llu ms and wait on: run in flight %d, done %d, permit %d, %d queued, AI "
+        "update %d, section commands unapplied %d, budget %.0f us", g_lwNavHold.waiting[i], i, (unsigned long long)(now - g_lwNavHold.oldAt[i]), flight,
+        flight ? (int)g_lwSwap.stepDone(w) : -1, LwNavQuiet(i, w), LwNavQueue(w), *(volatile int32_t*)(g_lwSwap.table + 0x80u * i + 0x54),
+        g_lwNavHold.unapplied[i], (double)budget * 1e6);
 }
 /* The tick's pop, inside the list's lock; `flush` is the tick's argument (not 0 at a level's end). Per world the oldest
  * record goes first (the list is newest first, 0x7B2690). A built cell's goes between steps with no section command
  * unapplied and no query job, and with nothing else queued until the world's records have waited LW_NAV_HOLD_RELAX_MS
- * (cutter changes keep the queue full while tiles come in). A first build waits only for an unapplied swap. A record
- * of no world's rules goes at once. 0 = nothing to take this tick. */
+ * (cutter changes keep the queue full while tiles come in), and waits for that however long it takes. A first build
+ * waits only for an unapplied swap. A record of no world's rules goes at once. 0 = nothing to take this tick. */
 static uintptr_t LwNavPopAt(uintptr_t list, uint32_t flush, ULONGLONG now)
 {
     uint32_t off = *(uint32_t*)(list + 0x38);
     LwNavSwapLevel();
+    g_lwNavHold.flush = flush;
     for (int i = 0; i < 4; i++)
     {
         g_lwNavHold.grant[i] = 0;
         LwNavApplied(i);
     }
-    if (flush || !LwLive() || g_lwNavHold.offLevel == g_world.levels + 1)
+    if (flush || !LwLive())
     {
         memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting);
         return LwNavPopHead(list, off);
@@ -3428,9 +3456,9 @@ static uintptr_t LwNavPopAt(uintptr_t list, uint32_t flush, ULONGLONG now)
         if (plain)
         {
             /* the game's record of a world whose swap is not applied yet (its nav stopped): that swap first, then again */
-            uint32_t flags = *(volatile uint32_t*)(plain + 0xC), idx = flags & 0x7F; double ms;
+            uint32_t flags = *(volatile uint32_t*)(plain + 0xC), idx = flags & 0x7F;
             if (!pass && !(flags & 0x80) && idx < 4 && g_lwNavHold.swapUnapplied[idx])
-            { LwNavHoldDrain(list, (int)idx, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx), &ms); continue; }
+            { LwNavHoldDrain(list, (int)idx, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * idx), "a stopped nav's record, behind a swap not applied yet"); continue; }
             return LwNavTake(list, off, plainPrev, plain, -1);
         }
         for (int i = 0; i < 4; i++)
@@ -3465,11 +3493,15 @@ static uintptr_t LwNavPopAt(uintptr_t list, uint32_t flush, ULONGLONG now)
             for (; k < LW_NAV_HOLD_SEEN && g_lwNavHold.seen[k].rec != rec; k++) if (!g_lwNavHold.seen[k].rec && free < 0) free = k;
             if (k < LW_NAV_HOLD_SEEN) continue;
             if (free < 0) continue; /* more than the nav's jobs make: not counted */
-            g_lwNavHold.seen[free].rec = rec; g_lwNavHold.seen[free].frame = g_lwNavHold.frame;
+            g_lwNavHold.seen[free].rec = rec; g_lwNavHold.seen[free].frame = g_lwNavHold.frame; g_lwNavHold.seen[free].at = now;
             g_lwNavHold.held++; g_lwNavHold.sumHeld++;
         }
-        if (pass || !LwNavHoldGiveWay(list, now)) return 0;
-        if (g_lwNavHold.offLevel == g_world.levels + 1) { memset(g_lwNavHold.waiting, 0, sizeof g_lwNavHold.waiting); return LwNavPopHead(list, off); }
+        for (int i = 0; i < 4; i++)
+        {
+            g_lwNavHold.oldAt[i] = old[i] ? LwNavSeenAt(old[i], g_lwNavHold.stuckAt[i]) : 0;
+            if (old[i]) LwNavLongHold(i, *(volatile uintptr_t*)(g_lwSwap.table + 0x80u * i), now);
+        }
+        return 0;
     }
     return 0;
 }
@@ -3487,8 +3519,9 @@ static uintptr_t LwNavUnload(uintptr_t w, uint32_t* id, uint8_t graph)
     if (g_lwNavHold.granted[idx]) { memset(g_lwSwap.pre[idx], 0, sizeof g_lwSwap.pre[idx]); g_lwSwap.swap[idx] = 1; }
     else
     {
-        g_lwNavHold.drains++; g_lwNavHold.sumDrains++;
-        if (LwNavDrain(w, idx, g_lwSwap.pre[idx])) g_lwSwap.swap[idx] = 1;
+        int queued = LwNavQueue(w), ok = LwNavDrain(w, idx, g_lwSwap.pre[idx]);
+        LwNavDrainNote("before an unload the pop did not let through", idx, queued, ok, g_lwSwap.pre[idx]);
+        if (ok) g_lwSwap.swap[idx] = 1;
         else { g_lwSwap.swap[idx] = 0; g_lwSwap.refused++; InterlockedExchange(&g_lwSwap.unsafe, 1); }
     }
     int64_t u = LwNavNow();
@@ -3512,19 +3545,29 @@ static int LwNavSections(void)
     }
     return most;
 }
+/* One slot a grid cell (a swap takes its cell's slot again, 0xBAD120), so a 32 x 32 grid meets the 1024 a face key
+ * can name and never passes it. A count over it means faces of two sections share keys: said once a level. */
+static void LwNavSlotGuard(void)
+{
+    int n = LwNavSections();
+    if (n <= 1024 || g_lwNavHold.slotLevel == g_world.levels + 1) return;
+    g_lwNavHold.slotLevel = g_world.levels + 1;
+    Note("living world: nav: SECTION SLOTS: an AI world holds %d sections, over the 1024 a face key can name; paths can cross to the wrong section", n);
+}
 /* The summary since the last one, then its sums cleared. */
 static void LwNavSwapNote(const char* span)
 {
     if (g_lwSwap.sumSwaps > 0 || g_lwSwap.sumNoLoad > 0 || g_lwNavHold.sumHeld > 0 || g_lwNavHold.sumDrains > 0)
         Note("living world: nav swaps (%s): %u on the frame thread, %.0f ms in all (worst %.1f ms): in-flight steps waited %.0f ms, synchronous steps %.0f ms "
             "(the last on %d thread(s); %u of %u steps on the AI update's runner this level); %u unload(s) with no load; %u completion(s) held, the longest "
-            "%u tick(s); %u drain(s) on the frame thread (%u after %d ms held); %u swap(s) let through with other changes queued; this level %u swap(s) and %u unload(s) with no load for %u built "
-            "cell(s) marked; %d of 1024 section slots", span, g_lwSwap.sumSwaps, g_lwSwap.sumMs, g_lwSwap.sumWorst, g_lwSwap.sumWait, g_lwSwap.sumStep, g_lwSwap.threads, g_lwSwap.parallel,
-            g_lwSwap.steps, g_lwSwap.sumNoLoad, g_lwNavHold.sumHeld, g_lwNavHold.sumLongest, g_lwNavHold.sumDrains, g_lwNavHold.sumUses, LW_NAV_HOLD_MS, g_lwNavHold.sumRelaxed,
-            g_lwSwap.swaps,
+            "%u tick(s); %u drain(s) on the frame thread; %u swap(s) let through with other changes queued; AI budget raised on %u frame(s) (%u at %d us); "
+            "this level %u swap(s) and %u unload(s) with no load for %u built cell(s) marked; %d of 1024 section slots", span, g_lwSwap.sumSwaps, g_lwSwap.sumMs, g_lwSwap.sumWorst, g_lwSwap.sumWait, g_lwSwap.sumStep, g_lwSwap.threads, g_lwSwap.parallel,
+            g_lwSwap.steps, g_lwSwap.sumNoLoad, g_lwNavHold.sumHeld, g_lwNavHold.sumLongest, g_lwNavHold.sumDrains, g_lwNavHold.sumRelaxed, g_lwNavHold.sumRaise,
+            g_lwNavHold.sumRaise2, LW_NAV_RAISE2_US, g_lwSwap.swaps,
             g_lwSwap.noLoad, g_lwNavHold.marked, LwNavSections());
     g_lwSwap.sumSwaps = g_lwSwap.sumNoLoad = 0; g_lwSwap.sumMs = g_lwSwap.sumWorst = g_lwSwap.sumStep = g_lwSwap.sumWait = 0;
-    g_lwNavHold.sumHeld = g_lwNavHold.sumLongest = g_lwNavHold.sumUses = g_lwNavHold.sumDrains = g_lwNavHold.sumRelaxed = 0;
+    g_lwNavHold.sumHeld = g_lwNavHold.sumLongest = g_lwNavHold.sumDrains = g_lwNavHold.sumRelaxed = g_lwNavHold.sumRaise = g_lwNavHold.sumRaise2 = 0;
+    LwNavSlotGuard();
 }
 /* A new level: the last one's summary, then its counts start again. */
 static void LwNavSwapLevel(void)
@@ -3534,8 +3577,9 @@ static void LwNavSwapLevel(void)
     g_lwSwap.level = g_world.levels;
     g_lwSwap.swaps = g_lwSwap.steps = g_lwSwap.parallel = g_lwSwap.lines = g_lwSwap.noLoad = 0;
     g_lwSwap.threads = 0; g_lwSwap.worstMs = 0;
-    g_lwNavHold.held = g_lwNavHold.longest = g_lwNavHold.uses = g_lwNavHold.drains = g_lwNavHold.marked = 0;
+    g_lwNavHold.held = g_lwNavHold.longest = g_lwNavHold.drains = g_lwNavHold.marked = g_lwNavHold.drainLines = 0;
     memset(g_lwNavHold.stuckAt, 0, sizeof g_lwNavHold.stuckAt); memset(g_lwNavHold.seen, 0, sizeof g_lwNavHold.seen);
+    memset(g_lwNavHold.oldAt, 0, sizeof g_lwNavHold.oldAt); memset(g_lwNavHold.longNoted, 0, sizeof g_lwNavHold.longNoted);
 }
 /* Once a tick, before the game's nav tick can run again: an unload whose completion did not load (see .cell) ends here. */
 static void LwNavSwapFrame(void)
@@ -3571,7 +3615,12 @@ static uintptr_t LwNavLoad(uintptr_t w, uint32_t* out, uintptr_t inst, void* p4,
     double post[LW_NAV_PARTS] = {0};
     int held = g_lwNavHold.granted[idx], ok = 1;
     g_lwNavHold.granted[idx] = 0;
-    if (!held) { g_lwNavHold.drains++; g_lwNavHold.sumDrains++; ok = LwNavDrain(w, idx, post); }
+    if (!held)
+    {
+        int queued = LwNavQueue(w);
+        ok = LwNavDrain(w, idx, post);
+        LwNavDrainNote("after a load the pop did not let through", idx, queued, ok, post);
+    }
     else if (g_lwNavHold.grantQueued[idx] > 0) g_lwNavHold.sumRelaxed++;
     co_framecost_add(CO_FC_NAVSWAP, between >= 0 ? g_lwSwap.unloadEnd[idx] : t);
     if (!ok) { g_lwSwap.refused++; InterlockedExchange(&g_lwSwap.unsafe, 1); return r; }
@@ -4290,6 +4339,7 @@ static void LwInstallWallReach(uintptr_t game)
     if (!LwEnabled()) return; /* audit 1b: the leave fix patched the exe with the living world off; only its rebuilds need it */
     LwInstallNavLeaveFix();
     LwInstallNavSwapSync();
+    LwInstallFrameParts();
     LwInstallNavTime(); /* test instrument; after the swap sync, whose pins read 0xBB19B0 */
     LwInstallNavJob(); /* after the nav time instrument, which it refuses to share 0x7B8A10 and 0x7B7590 with */
     if (g_lwWallReach != NULL) return;
@@ -4360,6 +4410,7 @@ static struct
     struct { uint16_t cx, cy; uint32_t section; ULONGLONG at; } watch[LW_NAV_WATCH];
     int watching;
     LONG noted;                     /* why it waits, noted once a level (the level + 1) */
+    LONG played, left;              /* the level + 1 that reached play; the one whose leave is noted */
     uint32_t busyFrames;
 } g_lwNav;
 
@@ -4546,6 +4597,24 @@ static void LwNavBoost(uintptr_t nav, const uint16_t* wh, uint32_t marksId)
     }
 }
 
+/* The level was in play ([lg+0x1E4] == 3) and is no longer: it is ending. A cell marked now starts a rebuild whose
+ * swap lands in the level's end, where the game's flush finishes every step on the frame thread. */
+static int LwNavLeftAt(int read, uint32_t state)
+{
+    if (read && state == 3) { g_lwNav.played = g_world.levels + 1; return 0; }
+    if (g_lwNav.played != g_world.levels + 1) return 0;
+    if (g_lwNav.left != g_world.levels + 1)
+    {
+        g_lwNav.left = g_world.levels + 1;
+        Note("living world: nav: the level left play (state %u); no more cells are marked, %d rebuild(s) still watched", state, g_lwNav.watching);
+    }
+    return 1;
+}
+static int LwNavLeft(void)
+{
+    uintptr_t lg = LwLevel(); uint32_t state = 0;
+    return LwNavLeftAt(lg && !SafeRead(lg + 0x1E4, &state, 4), state);
+}
 static void LwNavTick(uintptr_t dir)
 {
     uintptr_t exe = g_navExe, nav, H;
@@ -4739,7 +4808,7 @@ static void LivingTickBody(void)
     if (!mission || !host) return;
     LwTraceTick();
     uintptr_t dir;
-    if (EvpPtr(g_lw.game + LW_DIRECTOR, &dir)) LwNavTick(dir);
+    if (EvpPtr(g_lw.game + LW_DIRECTOR, &dir) && !LwNavLeft()) LwNavTick(dir);
     LwGarrisonsTick();
     LwSquadsTick();
     LwTiltScan();
@@ -4791,6 +4860,7 @@ static void LwLiveSet(int complex)
 #include "living_world_corpse.c" /* settled ring corpses frozen as in disposal */
 #include "living_world_pairs.c" /* after living_world_corpse.c: dead ragdoll bones keep only ground and trigger pairs */
 #include "living_world_aibudget.c" /* the AI path threads' time a step, raised while requests wait */
+#include "living_world_fparts.c" /* a slow frame's line: the AI joins and the engine's world update */
 #include "living_world_semcap.c" /* test: the worker wake tokens capped at the worker count */
 #include "living_world_srwwake.c" /* Wine's shared SRW release without the needless wake (KB frame-cost-swarm-cap2) */
 #include "living_world_registry.c" /* the unit registry lookup without its lock; old arrays kept */

@@ -426,14 +426,27 @@ void CoXlTestLwNavHold(uintptr_t worlds, void (*enter)(uintptr_t), void (*leave)
 uintptr_t CoXlTestLwNavPop(uintptr_t list, uint32_t flush, ULONGLONG now) { return LwNavPopAt(list, flush, now); }
 int CoXlTestLwNavHoldBusy(void) { return LwNavHoldBusy(); }
 void CoXlTestLwNavHoldCounts(uint32_t* v)
-{ v[0] = g_lwNavHold.held; v[1] = g_lwNavHold.longest; v[2] = g_lwNavHold.uses; v[3] = g_lwNavHold.drains; v[4] = g_lwNavHold.marked; }
+{
+    v[0] = g_lwNavHold.held; v[1] = g_lwNavHold.longest; v[2] = g_lwNavHold.sumRaise; v[3] = g_lwNavHold.drains; v[4] = g_lwNavHold.marked;
+    v[5] = g_lwNavHold.sumRaise2; v[6] = g_lwNavHold.drainLines; v[7] = g_lwNavHold.longNoted[0] + g_lwNavHold.longNoted[1] + g_lwNavHold.longNoted[2] + g_lwNavHold.longNoted[3];
+}
+int CoXlTestLwNavLeft(int read, uint32_t state) { return LwNavLeftAt(read, state); }
+/* The lever on the AI world `w` at `now`: on, with requests `lat` s old, or off; the budget it leaves at w+0x47C. */
+float CoXlTestLwAibWorld(uintptr_t w, float stock, float lat, int on, ULONGLONG now)
+{
+    float cur = *(float*)(w + 0x47C);
+    g_lwAib.stock = stock; g_lwAib.raised = 0;
+    if (on) LwAibSteer(w, cur, lat, now);
+    else { float want = LwAibWant(w, 0, now); if (cur != want) *(volatile float*)(w + 0x47C) = want; }
+    return *(float*)(w + 0x47C);
+}
 int CoXlTestLwNavWatch(uint16_t cx, uint16_t cy, uint32_t flags, uint32_t section) { LwNavWatch(cx, cy, flags, section, 1); return g_lwNav.watching; }
 /* The AI budget lever's choice for a step: the budget it leaves at H+0x47C from `cur`, with requests `lat` s old. */
 float CoXlTestLwAibSteer(float stock, float cur, float lat)
 {
-    float h[0x120]; memset(h, 0, sizeof h);
+    float h[0x130]; memset(h, 0, sizeof h);
     g_lwAib.stock = stock; g_lwAib.raised = 0; h[0x47C / 4] = cur;
-    LwAibSteer((uintptr_t)h, cur, lat);
+    LwAibSteer((uintptr_t)h, cur, lat, 0);
     return h[0x47C / 4];
 }
 LONG CoXlTestNoiseHead(void) { return g_lwNoiseHead; }
