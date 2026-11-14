@@ -434,16 +434,36 @@ int CoXlTestLwBudget(int density, int eff, int b0, int b1)
 }
 /* Every build's note of why a waiting event squad is not online: index 0 (reinforcing) with `why`. */
 void CoXlTestLwHeldWhy(const char* why) { g_lwSquads[0].intent = LW_REINFORCE; LwHeldWhy(&g_lwSquads[0], why, 160.0f * 160.0f); }
-/* Squad 0 online and calm with a goal (fresh: a new stretch sent at `now`), its leader at `at` at `now` ms: the stall
- * check; the 30 s count of still squads. */
+/* Squad 0 online and calm with a goal (fresh: a new stretch sent at `now`; 2: no goal sent, 3: rushing), its leader at
+ * `at` at `now` ms: the stall check; the 30 s count of calm still squads (the others' count in `other`). */
+uint32_t CoXlTestLwStallOther(void) { return g_lwWorld.stalledOther; }
 uint32_t CoXlTestLwStall(int fresh, const float* at, const float* goal, uint64_t now)
 {
     LwSquad* q = &g_lwSquads[0];
-    if (fresh) { memset(q, 0, sizeof *q); q->state = LW_ONLINE; q->cap = 9; float g[3] = {goal[0], goal[1], 0}; LwGoalSent(q, g); q->goalAt = now; g_lwWorld.stalled = 0; }
+    if (fresh) { memset(q, 0, sizeof *q); q->state = LW_ONLINE; q->cap = 9; float g[3] = {goal[0], goal[1], 0}; LwGoalSent(q, g); q->goalAt = now; g_lwWorld.stalled = g_lwWorld.stalledOther = 0; }
+    if (fresh == 2) q->goalAt = 0; /* no goal sent */
+    if (fresh == 3) q->rushed = 1;
     LwStallCheck(q, NULL, 0, at, now);
     return g_lwWorld.stalled;
 }
 void CoXlTestLwStallLines(uint32_t n) { g_lwWorld.stallLines = n; }
+/* LwOnline's checks for squad 0 (held or not) with placement and room answered by the test: how often each ran, and the
+ * retry it left (ms from now, 0 = none). */
+static int g_testPlaceOk, g_testRoomOk, g_testPlaces, g_testRooms;
+static int TestPlace(LwSquad* q, uintptr_t slot, uint32_t cap, float* pos, float* target) { (void)q; (void)slot; (void)cap; (void)pos; (void)target; g_testPlaces++; return g_testPlaceOk; }
+static int TestRoom(uint32_t members) { (void)members; g_testRooms++; snprintf(g_lwRoomWhy, sizeof g_lwRoomWhy, "the cap: bubble 70 online + 9 over 72 (1 players)"); return g_testRoomOk; }
+int CoXlTestLwGates(int held, int placeOk, int roomOk, int* places, int* rooms, int* retryMs)
+{
+    LwSquad* q = &g_lwSquads[0]; float pos[3] = {0}, target[3] = {0};
+    q->held = (uint8_t)held; q->retry = 0; g_testPlaceOk = placeOk; g_testRoomOk = roomOk; g_testPlaces = g_testRooms = 0;
+    g_lwGates.place = TestPlace; g_lwGates.room = TestRoom;
+    int r = LwOnlineGates(q, 0, 9, pos, target);
+    g_lwGates.place = LwOnlinePlace; g_lwGates.room = LwRoomFor;
+    *places = g_testPlaces; *rooms = g_testRooms; *retryMs = q->retry ? (int)(q->retry - GetTickCount64()) : 0;
+    return r;
+}
+/* A refusal counted, then a new mission's clear: the first 30 s list is empty. */
+void CoXlTestLwMissionClear(void) { LwMissionClear(); }
 const char* CoXlTestGuards(uintptr_t game) { return CoXlGuards(game); }
 void CoXlTestRenderShrink(uintptr_t map, void (*rehash)(uintptr_t, uint32_t)) { g_lwRender.rehash = (uintptr_t)rehash; LwRenderShrink(map); }
 void CoXlTestRenderCopies(uintptr_t dev, void (*resize)(uintptr_t, uint32_t)) { g_lwRender.resize = (uintptr_t)resize; LwRenderCopiesFree(dev); }

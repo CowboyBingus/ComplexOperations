@@ -139,17 +139,24 @@ static const char* LwSnapWord(uint32_t nav, uint32_t layer, const float* at, cha
 static const char* const kLwIntentNames[4] = {"patrol", "investigate", "reinforce", "retake"};
 static uintptr_t LwAiRecord(uint32_t unit);
 #define LW_STALL_LINES 40u
+#define LW_STALL_OTHER_LINES 20u
 static void LwStallCheck(LwSquad* q, const uint32_t* members, int n, const float* at, ULONGLONG now)
 {
     uintptr_t nav = q->squad ? LwNavRecord(q->squad) : 0;
     uint8_t pending = nav ? (uint8_t)EvpU32(nav + 0x90, 0) : 0;
     if (!pending) q->pendSince = 0; else if (!q->pendSince) q->pendSince = now;
-    if (!q->goalAt || q->rushed || !LwSteerOk(q) || LwDist2(at, q->goalTo[0], q->goalTo[1]) <= LW_ARRIVE * LW_ARRIVE) { q->stillSince = 0; return; }
+    if (q->goalAt && LwDist2(at, q->goalTo[0], q->goalTo[1]) <= LW_ARRIVE * LW_ARRIVE) { q->stillSince = 0; return; } /* there */
     if (!q->stillSince || LwDist2(q->stillFrom, at[0], at[1]) > 3.0f * 3.0f) { q->stillSince = now; q->stillFrom[0] = at[0]; q->stillFrom[1] = at[1]; return; }
     if (now - q->stillSince < LW_STALL_MS) return;
-    g_lwWorld.stalled++; q->stillSince = now; /* counted once per 30 s still */
-    if (q->stallNoted || g_lwWorld.stallLines >= LW_STALL_LINES) return;
-    q->stallNoted = 1; g_lwWorld.stallLines++;
+    q->stillSince = now; /* counted once per 30 s still */
+    /* calm with a goal is the stall; alert, rushing or goal-less squads are noted apart (their own cap), so a long fight
+     * standing its ground does not use up the calm ones' lines */
+    const char* steer = q->rushed ? "rushing" : !LwSteerOk(q) ? (LwCalm(q) ? "calm under 10 s, goal held" : "alert, goal held") : !q->goalAt ? "calm, no goal sent" : "calm";
+    int calm = !q->rushed && q->goalAt && LwSteerOk(q);
+    if (calm) g_lwWorld.stalled++; else g_lwWorld.stalledOther++;
+    uint32_t* lines = calm ? &g_lwWorld.stallLines : &g_lwWorld.stallOtherLines, cap = calm ? LW_STALL_LINES : LW_STALL_OTHER_LINES;
+    if (q->stallNoted || *lines >= cap) return;
+    q->stallNoted = 1; (*lines)++;
     float near2 = 1e18f;
     for (int i = 0; i < g_lwWorld.playersAt; i++) { float d2 = LwDist2(g_lwWorld.players[i], at[0], at[1]); if (d2 < near2) near2 = d2; }
     uintptr_t job = LwJobRecord(q->squad), lead = n > 0 ? LwJobRecord(members[0]) : 0, ai = n > 0 ? LwAiRecord(members[0]) : 0, beh = 0, cur = 0, want = 0, mgr = 0, clock = 0;
@@ -164,19 +171,20 @@ static void LwStallCheck(LwSquad* q, const uint32_t* members, int n, const float
     char s0[24], s1[24];
     const char* snap0 = LwSnapWord(EvpU32(g_lwWorld.dir + 0x648, 0), 0, q->goalTo, s0, sizeof s0);
     const char* snap1 = EvpPtr(g_lw.game + 0x33266C8u, &mgr) && nav ? LwSnapWord(EvpU32(mgr + 0x22D0, 0), layer, q->goalTo, s1, sizeof s1) : "?";
-    Note("living world: squad %d (%08X, %s stage %d, %s, %.0f m from the nearest player, %d of %u members) still for 30 s %.0f m from its goal "
-         "(%.0f, %.0f, %.1f), sent %.0f s ago, %u sends; job %u, its point %.0f m from the goal, leader %08X's %.0f m from it; state %d (wanted %d); "
+    char goalWords[96] = "no goal sent";
+    if (q->goalAt) snprintf(goalWords, sizeof goalWords, "%.0f m from its goal (%.0f, %.0f, %.1f), sent %.0f s ago, %u sends", (double)sqrtf(LwDist2(at, q->goalTo[0], q->goalTo[1])),
+        (double)q->goalTo[0], (double)q->goalTo[1], (double)q->goalTo[2], (double)(now - q->goalAt) / 1000.0, q->goalSends);
+    Note("living world: squad %d (%08X, %s stage %d, %s, %.0f m from the nearest player, %d of %u members) still for 30 s (%s), %s; job %u, its point %.0f m from the goal, leader %08X's %.0f m from it; state %d (wanted %d); "
          "leader flag bit 14 %d; nav %s: agent %d, status %u, flags %08X, +16 %u, pending %u for %.0f s, cooldown %lld, layer %u, destination %.0f m and last "
          "path %.0f m from the goal; snap 25 m at the goal: layer 0 %s, the leader's layer %s%s",
         (int)(q - g_lwSquads), q->squad, kLwIntentNames[q->intent & 3], q->intentStage, q->farOn ? "far" : "near", (double)sqrtf(near2), n, q->cap,
-        (double)sqrtf(LwDist2(at, q->goalTo[0], q->goalTo[1])), (double)q->goalTo[0], (double)q->goalTo[1], (double)q->goalTo[2],
-        (double)(now - q->goalAt) / 1000.0, q->goalSends, jobKind, job ? (double)sqrtf(LwDist2(q->goalTo, jp[0], jp[1])) : -1.0,
+        steer, goalWords, jobKind, job ? (double)sqrtf(LwDist2(q->goalTo, jp[0], jp[1])) : -1.0,
         n > 0 ? members[0] : 0, lead ? (double)sqrtf(LwDist2(jp, lp[0], lp[1])) : -1.0,
         states ? (int)EvpU32(cur + 0x58ull * bi, 0xFFFFFFFFu) : -1, states ? (int)EvpU32(want + 4ull * bi, 0xFFFFFFFFu) : -1,
         ai ? (int)(EvpU32(ai + 0xE4, 0) >> 14 & 1) : -1, nav ? "found" : "missing", (int)agent, status, flags, nav ? EvpU32(nav + 0x16, 0) & 0xFF : 0,
         pending, q->pendSince ? (double)(now - q->pendSince) / 1000.0 : 0.0, nav && tick ? (long long)(cool - tick) : 0LL, layer,
         (double)sqrtf(LwDist2(q->goalTo, dest[0], dest[1])), (double)sqrtf(LwDist2(q->goalTo, pathed[0], pathed[1])), snap0, snap1,
-        g_lwWorld.stallLines == LW_STALL_LINES ? " (the last such line this mission)" : "");
+        *lines == cap ? " (the last such line this mission)" : "");
 }
 
 /* Phase 2b (KB living-world-plan "Phase 2 design", living-world-p2-contact): fights draw squads in. Once a second the
@@ -1553,9 +1561,9 @@ static int LwIntentInside(LwSquad* q)
     float rMin = g_lwWorld.rMin > 0 ? g_lwWorld.rMin : LW_R_MIN;
     if (q->intentStage != 0 && LwNearestPlayer2(q->pos[0], q->pos[1]) < rMin * rMin)
     {
-        Note("living world: squad %d (%s) is at its point inside the spawn band, %.0f m from the nearest player: it walks in online from the band's edge", (int)(q - g_lwSquads),
+        if (q->insideAt < q->intentAt) Note("living world: squad %d (%s) is at its point inside the spawn band, %.0f m from the nearest player: it walks in online from the band's edge", (int)(q - g_lwSquads),
             q->intent == LW_REINFORCE ? "reinforcing" : "investigating", (double)sqrtf(LwNearestPlayer2(q->pos[0], q->pos[1])));
-        q->intentStage = 0; q->intentSent = 0;
+        q->intentStage = 0; q->intentSent = 0; q->insideAt = GetTickCount64(); /* noted once per intent */
     }
     if (q->intentStage != 0 || LwNearestPlayer2(q->pos[0], q->pos[1]) >= rMin * rMin) return 0; /* outside: the last leg walks on and waits at the edge (LwIntentLeg) */
     return LwIntentHold(q, q->target[0], q->target[1]);
@@ -1571,8 +1579,11 @@ static int LwIntentLeg(LwSquad* q, float dt)
     float dx = q->target[0] - q->pos[0], dy = q->target[1] - q->pos[1], d = sqrtf(dx * dx + dy * dy);
     /* Within reach of a point inside the band, an offline squad waits at the band's edge in stage 0 instead of arriving
      * unseen: it comes online there and walks in with its online goal. Waiting is the hold's inward step to the point,
-     * which keeps the hold's own ends (the fight over, 240 s / 180 s) and its moves along the edge. */
-    if (d <= reach) return q->intent != LW_RETAKE && LwInsideBand(q->target) ? LwIntentHold(q, q->target[0], q->target[1]) : 0;
+     * which keeps the hold's own ends (the fight over, 240 s / 180 s) and its moves along the edge. A squad that arrived
+     * once and was pushed out of the band keeps waiting too: arriving again just outside it ran a push-arrive loop. */
+    if (d <= reach && q->intent != LW_RETAKE && LwInsideBand(q->target)) return LwIntentHold(q, q->target[0], q->target[1]);
+    if (d <= reach && q->intent != LW_RETAKE && q->held && q->intentStageAt >= q->intentAt) return LwIntentHold(q, q->target[0], q->target[1]) || q->held;
+    if (d <= reach) return 0;
     float step = q->speed * (q->intent == LW_REINFORCE ? LW_RUSH : 1.0f) * dt, go = d - reach * 0.5f;
     if (step > go) step = go;
     float nx = q->pos[0] + dx / d * step, ny = q->pos[1] + dy / d * step;
