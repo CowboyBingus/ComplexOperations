@@ -755,7 +755,7 @@ int CoXlTestLwOnlineStep(uint64_t wideUntil, uint64_t now)
     memset(q, 0, sizeof *q);
     return r;
 }
-int CoXlTestLwNoiseSkip(float playerDist, float reach, uint64_t sinceSent, float moved) { return LwNoiseSkip(playerDist, reach, sinceSent, moved); }
+int CoXlTestLwNoiseSkip(float playerDist, float reach, uint64_t sinceSent, float moved) { return LwNoiseSkip(playerDist, reach, sinceSent, moved, 1); }
 /* Squad 0 with a goal sent at 5000: whether a goal can be sent now, and (*after) its goal time then. */
 int CoXlTestLwGoalCanSend(int route, int records, uint64_t* after)
 {
@@ -1081,6 +1081,53 @@ int CoXlTestLwFightTakeWhom(float x, float y, int n, const uint32_t* ids, const 
 uint32_t CoXlTestLwFightFar(void) { return g_lwRush.afar; }
 /* Fight f's point moved to (x, y), the fight otherwise as it was. */
 void CoXlTestLwFightPoint(int f, float x, float y) { g_lwFights[f].pos[0] = x; g_lwFights[f].pos[1] = y; }
+/* The noise path's world: `np` players at pl[] with avatars 0x500 + i, `n` calm patrol squads of 8 at sq[] (x, y
+ * pairs), offline, one route node; no fights, events or sources from before. */
+void CoXlTestLwNoiseWorld(const float* pl, int np, const float* sq, int n)
+{
+    memset(&g_lwWorld, 0, sizeof g_lwWorld); memset(g_lwFights, 0, sizeof g_lwFights); memset(g_lwEvents, 0, sizeof g_lwEvents); memset(g_lwNoiseSent, 0, sizeof g_lwNoiseSent);
+    memset(&g_lwHear, 0, sizeof g_lwHear); memset(g_lwNoiseSkips, 0, sizeof g_lwNoiseSkips);
+    g_lwWorld.count = n; g_lwWorld.rMin = 150.0f; g_lwWorld.radius = 7782.0f;
+    np = CoXlTestLwPlayers(pl, np);
+    for (int i = 0; i < np; i++) g_lwWorld.avatars[i] = 0x500u + (uint32_t)i;
+    for (int i = 0; i < n; i++)
+    {
+        LwSquad* q = &g_lwSquads[i]; memset(q, 0, sizeof *q);
+        q->state = LW_OFFLINE; q->intent = LW_PATROL; q->fight = -1; q->survivors = 8; q->speed = 2.0f; q->pos[0] = sq[2 * i]; q->pos[1] = sq[2 * i + 1];
+    }
+    memset(&g_lwNodes[0], 0, sizeof g_lwNodes[0]); g_lwNodeCount = 1;
+}
+/* Squad i of that world: what 0 at (x, y); 1 online; 2 its investigation is over. */
+void CoXlTestLwNoiseSquad(int i, int what, float x, float y)
+{
+    LwSquad* q = &g_lwSquads[i];
+    if (what == 0) { q->pos[0] = x; q->pos[1] = y; } else if (what == 1) q->state = LW_ONLINE; else { q->intent = LW_PATROL; q->intentFree = 0; }
+}
+static int TestLwInvestigating(uint32_t source)
+{
+    int n = 0;
+    for (int i = 0; i < g_lwWorld.count; i++) n += g_lwSquads[i].intent == LW_INVESTIGATE && (!source || g_lwSquads[i].intentSource == source);
+    return n;
+}
+/* A noise of 300 m reach from `source` at (x, y) at `now` (source 0: none, only the events' later passes), then
+ * those passes: the squads investigating `of` (0: any source) after it. */
+int CoXlTestLwNoise(uint32_t source, float x, float y, uint64_t now, uint32_t of)
+{
+    LwNoise n; memset(&n, 0, sizeof n); n.source = source; n.pos[0] = x; n.pos[1] = y; n.type = 7; n.loudness = 1.0f; n.at = now;
+    if (source) LwNoiseEvent(&n, 300.0f, now);
+    LwNoiseLater(now);
+    return TestLwInvestigating(of);
+}
+/* The noise counters since the world was made: 0 events, 1 squads sent, 2 events asked again, 3 noises of a source with no room. */
+uint32_t CoXlTestLwNoiseCount(int what) { return what == 0 ? g_lwHear.events : what == 1 ? g_lwHear.sent : what == 2 ? g_lwHear.retries : g_lwNoiseSkips[3]; }
+/* Fight f at `now`: 1 when it is over. The mission's lines so far for squads a fight could not send. */
+int CoXlTestLwFightOver(int f, uint64_t now) { return LwFightOver(f, now); }
+void CoXlTestLwNotSentLines(uint32_t n) { g_lwWorld.notSentLines = n; }
+const char* CoXlTestLwKillerKind(uint64_t res) { return LwKillerKind(res); }
+/* The players' avatar entities, in the order of their places. */
+void CoXlTestLwAvatars(const uint32_t* ids, int n) { for (int i = 0; i < n && i < EVT_MAX_PLAYERS; i++) g_lwWorld.avatars[i] = ids[i]; }
+/* Fight f's target was last fought `ago` ms ago. */
+void CoXlTestLwFightFought(int f, uint32_t ago) { g_lwFights[f].foughtAt = GetTickCount64() - ago; }
 int CoXlTestLwTeleportUnder(float hit, float plan, float drawn) { return LwTeleportUnder(hit, plan, drawn); }
 void CoXlTestLwStallSet(int rushed, float dist) { g_lwSquads[0].rushed = (uint8_t)rushed; g_lwSquads[0].stallDist = dist; }
 /* An intent's end with no patrol goal set: whether the squad still has a goal. */
