@@ -70,6 +70,7 @@ static double HitchNow(void)
 #include "proto/difficulty_world_poisson.c"
 #include "proto/difficulty_world_diag.c"
 #include "proto/difficulty_world_terrain.c"
+#include "proto/difficulty_world_patches.c"
 #include "proto/difficulty_world_towns.c"
 #include "proto/difficulty_world_gates.c"
 #include "proto/difficulty_world_macro.c"
@@ -1378,6 +1379,23 @@ void CoXlTestRoadsSpursBuild(uintptr_t block, uint64_t context, void (*capsule)(
 void CoXlTestRoadsSpurTerminals(const float* xy, const float* gap, uint32_t terms) { RoadsSpurTerminals(xy, gap, terms); }
 uint32_t CoXlTestRoadsSpurs(uint32_t* reserve, const float** table) { *reserve = RoadsSpurReserve(); *table = (const float*)g_spurs.spur; return g_spurs.level == g_world.levels ? g_spurs.count : 0; }
 int CoXlTestRoadsArterial(uint32_t edge) { return g_arterials.level == g_world.levels && (g_arterials.bits[edge >> 3] >> (edge & 7)) & 1; }
+/* The patch outlines' breakup (proto/difficulty_world_patches.c) over a tile's own map `own` (4096 x 4096, texel
+ * (0, 0) at (x0, y0)): the warp, the mix's ids and shares (returns their count), and the packed texel. */
+void CoXlTestPatchField(double x, double y, double strength, double* dx, double* dy) { PatchField(x, y, strength, dx, dy); }
+int CoXlTestPatchMix(const uint32_t* own, double x0, double y0, double x, double y, double strength, uint32_t* id, double* w, int* broken)
+{
+    const NearTileSrc src = {own, x0, y0};
+    return PatchBreak(NearMixTile, &src, x, y, strength, id, w, broken);
+}
+uint32_t CoXlTestPatchTexel(const uint32_t* own, double x0, double y0, double x, double y, double strength, uint32_t hole)
+{
+    uint32_t id[NEAR_MAT_IDS]; double w[NEAR_MAT_IDS]; int broken;
+    const int n = CoXlTestPatchMix(own, x0, y0, x, y, strength, id, w, &broken);
+    return NearMatPack(id, w, n, hole);
+}
+/* What a build without the research switches draws with: the breakup's strength, and the level-ground switch. */
+double CoXlTestPatchStrength(void) { return PatchStrength(); }
+int CoXlTestPatchLevelGround(void) { return PatchLevelGround(); }
 /* The roads' worn track (proto/difficulty_world_roadtrack.c, difficulty_world_roadtracklevel.c). */
 double CoXlTestTrackWeight(double d, double x, double y) { return TrackWeight(d, x, y); }
 double CoXlTestTrackCoarse(double d) { return TrackCoarse(d); }
