@@ -476,13 +476,19 @@ void CoXlTestLwHoldTwo(int idx, float* pos)
     LwIntentHoldAt(q, q->target[0], q->target[1], 1);
     pos[0] = q->pos[0]; pos[1] = q->pos[1];
 }
-/* Squad 0 waiting in `lane` with all nine points refused: how far its bearing turns. */
-float CoXlTestLwHoldTurn(int lane)
+/* Squad 0 waiting in `lane` at bearing 1.0, squad 1 at bearing `other` (waiting 0: not, 1: yes, 2: online with the
+ * flag still set): squad 0's shift
+ * after n dead-end patches (all nine points refused n times); 99 when its bearing is not its lane's plus the shift. */
+float CoXlTestLwHoldTurns(int lane, int n, float other, int waiting)
 {
-    LwSquad* q = &g_lwSquads[0]; q->state = LW_OFFLINE; q->held = 1; q->holdLane = (int8_t)lane; q->holdTry = 8; q->holdA = 1.0f; q->holdShift = 0;
-    LwHoldNext(q);
+    LwSquad* q = &g_lwSquads[0]; LwSquad* o = &g_lwSquads[1];
+    g_lwWorld.count = 2; memset(o, 0, sizeof *o); o->state = waiting == 2 ? LW_ONLINE : LW_OFFLINE; o->held = waiting != 0; o->holdA = other;
+    q->state = LW_OFFLINE; q->held = 1; q->holdLane = (int8_t)lane; q->holdA = 1.0f; q->holdShift = 0;
+    for (int k = 0; k < n; k++) { q->holdTry = 8; LwHoldNext(q); }
     return fabsf(q->holdA - 1.0f - q->holdShift) < 0.0001f ? q->holdShift : 99.0f;
 }
+/* Squad 0's target moves (the fight's place from the player changes its lane's bearing). */
+void CoXlTestLwHoldTarget(float x, float y) { g_lwSquads[0].target[0] = x; g_lwSquads[0].target[1] = y; }
 /* After a refused request, squad 0's next point at the edge. */
 void CoXlTestLwHoldNext(float* pos) { LwHoldNext(&g_lwSquads[0]); pos[0] = g_lwSquads[0].pos[0]; pos[1] = g_lwSquads[0].pos[1]; }
 void CoXlTestLwStallLines(uint32_t n) { g_lwWorld.stallLines = n; }

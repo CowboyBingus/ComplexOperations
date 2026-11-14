@@ -38,7 +38,8 @@ int CoXlTestLwIntentEndGoal(void);
 void CoXlTestLwStallPath(float left);
 int CoXlTestLwHoldLane(int rank);
 int CoXlTestLwHoldFree(int a, int b);
-float CoXlTestLwHoldTurn(int lane);
+float CoXlTestLwHoldTurns(int lane, int n, float other, int waiting);
+void CoXlTestLwHoldTarget(float x, float y);
 void CoXlTestLwHoldPoint(float a, int k, float* out);
 void CoXlTestLwHoldTwo(int idx, float* pos);
 void CoXlTestLwHoldNext(float* pos);
@@ -142,10 +143,11 @@ static void BandEdge(void)
         const int moves = Count("along the spawn band's edge"), ended = Count(why);
         if (end == 2)
         {
-            g_case = "after 20 s at a point that does not come online it moves along the edge";
+            g_case = "20 s at a point on its own bearing: it stays in its wait (LwHoldNext moves it on after each refusal)";
+            const float was[2] = {pos[0], pos[1]};
             CoXlTestLwHoldAge(1, 21000);
             CoXlTestLwWalk(0.1f, &stage, &held, pos, &at);
-            CHECK(stage == 0 && held == 1 && Count("along the spawn band's edge") == moves + 1);
+            CHECK(stage == 0 && held == 1 && Count("along the spawn band's edge") == moves && pos[0] == was[0] && pos[1] == was[1]);
             continue;
         }
         g_case = "the wait ends with its fight, and after 240 s";
@@ -189,19 +191,37 @@ static void HoldPoints(void)
     seen[0][0] = next[0]; seen[0][1] = next[1];
     for (int k = 1; k < 8; k++) { CoXlTestLwHoldNext(seen[k]); for (int j = 0; j < k; j++) distinct &= Dist(seen[k], seen[j]) > 5.0f; }
     CHECK(distinct);
-    g_case = "all nine refused: the bearing moves on 15 degrees, away from the other lane, and the 20 s move keeps it there";
+    g_case = "all nine refused: the bearing turns 15 degrees, to the side clear of the other waiting squad";
     CoXlTestLwHoldNext(next); /* the ninth refusal: the first point of the new bearing */
-    CHECK(fabsf(Dist(next, pl) - 158.0f) < 0.01f && fabsf(atan2f(next[1], next[0]) - 0.2618f) < 0.001f);
+    CHECK(fabsf(Dist(next, pl) - 158.0f) < 0.01f && fabsf(atan2f(next[1], next[0]) + 0.2618f) < 0.001f);
     for (int k = 0; k < 8; k++) CoXlTestLwHoldNext(seen[k]);
     CoXlTestLwHoldNext(next);
-    CHECK(fabsf(atan2f(next[1], next[0]) - 0.5236f) < 0.001f);
+    CHECK(fabsf(atan2f(next[1], next[0]) + 0.5236f) < 0.001f);
+    g_case = "20 s on its bearing: its points go on from where they are; the turned bearing is kept";
     for (int k = 0; k < 3; k++) CoXlTestLwHoldNext(next);
     CoXlTestLwHoldTwo(0, pos);
-    CHECK(fabsf(atan2f(pos[1], pos[0]) - 0.5236f) < 0.001f && fabsf(Dist(pos, pl) - 158.0f) < 0.01f);
-    CoXlTestLwHoldNext(next); /* after the move the points start again: the second is 6 m farther out */
-    CHECK(fabsf(atan2f(next[1], next[0]) - 0.5236f) < 0.001f && fabsf(Dist(next, pl) - 164.0f) < 0.01f);
-    g_case = "a squad in a lower lane turns the other way";
-    CHECK(fabsf(CoXlTestLwHoldTurn(0) - 0.2618f) < 0.0001f && fabsf(CoXlTestLwHoldTurn(2) - 0.2618f) < 0.0001f && fabsf(CoXlTestLwHoldTurn(-1) + 0.2618f) < 0.0001f);
+    CHECK(pos[0] == next[0] && pos[1] == next[1]);
+    CoXlTestLwHoldNext(next); /* the fifth point: 6 m farther out, 10 m to the side */
+    CHECK(fabsf(Dist(next, pl) - 164.0f) < 0.01f && fabsf(atan2f(next[1], next[0]) - (-0.5236f + 10.0f / 164.0f)) < 0.001f);
+    g_case = "20 s with the fight on another bearing: it moves there and starts at that bearing's first point";
+    CoXlTestLwHoldTarget(125.0f * cosf(0.1f), 125.0f * sinf(0.1f));
+    CoXlTestLwHoldTwo(0, pos);
+    CHECK(fabsf(Dist(pos, pl) - 158.0f) < 0.01f && fabsf(atan2f(pos[1], pos[0]) - (-0.5236f + 0.1f)) < 0.001f);
+    CoXlTestLwHoldNext(next);
+    CHECK(fabsf(Dist(next, pl) - 164.0f) < 0.01f && fabsf(atan2f(next[1], next[0]) - (-0.5236f + 0.1f)) < 0.001f);
+    CoXlTestLwHoldTarget(fight[0], fight[1]);
+    g_case = "dead ends in turn: 15, 30, 45 degrees one way, then the other side, then its lane again; mirrored in a lower lane";
+    const float turns[8] = {0, 0.2618f, 0.5236f, 0.7854f, -0.2618f, -0.5236f, -0.7854f, 0};
+    for (int n = 0; n < 8; n++) CHECK(fabsf(CoXlTestLwHoldTurns(0, n, 1.56f, 0) - turns[n]) < 0.0001f);
+    for (int n = 0; n < 8; n++) CHECK(fabsf(CoXlTestLwHoldTurns(-1, n, 1.56f, 0) + turns[n]) < 0.0001f);
+    CHECK(fabsf(CoXlTestLwHoldTurns(2, 1, 1.56f, 0) - 0.2618f) < 0.0001f);
+    g_case = "a turn never comes within 0.5 rad of another waiting squad's bearing";
+    CHECK(fabsf(CoXlTestLwHoldTurns(0, 1, 1.56f, 1) + 0.2618f) < 0.0001f); /* +15, +30, +45 degrees are by the squad at +0.56 */
+    CHECK(fabsf(CoXlTestLwHoldTurns(0, 1, 1.56f, 2) - 0.2618f) < 0.0001f); /* online: its bearing is free */
+    CHECK(fabsf(CoXlTestLwHoldTurns(0, 1, 1.0f + 0.7854f + 0.49f, 1) - 0.2618f) < 0.0001f && fabsf(CoXlTestLwHoldTurns(0, 3, 1.0f + 0.7854f + 0.49f, 1) + 0.2618f) < 0.0001f);
+    CHECK(fabsf(CoXlTestLwHoldTurns(0, 3, 1.0f + 0.7854f + 0.51f, 1) - 0.7854f) < 0.0001f);
+    CHECK(fabsf(CoXlTestLwHoldTurns(0, 1, 1.0f - 6.2831853f + 0.5236f, 1) + 0.2618f) < 0.0001f); /* the same bearing a turn round */
+    CHECK(fabsf(CoXlTestLwHoldTurns(0, 1, 1.0f + 6.2831853f + 0.5236f, 1) + 0.2618f) < 0.0001f);
     g_case = "a newly waiting squad takes the first lane no waiting squad has; a squad that ended frees its lane";
     CHECK(CoXlTestLwHoldFree(99, 99) == 0 && CoXlTestLwHoldFree(0, 99) == 1 && CoXlTestLwHoldFree(0, 1) == -1 && CoXlTestLwHoldFree(99, 1) == 0 && CoXlTestLwHoldFree(1, 0) == -1);
     const float far0[2] = {-300, 0};
