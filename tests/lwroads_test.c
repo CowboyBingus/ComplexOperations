@@ -42,7 +42,9 @@ int CoXlTestLwRoadTail(int base, int count, int probe, int* out, int max, int* m
 void CoXlTestLwCallWorld(int n, int fork, const float (*pl)[2], int np, const float* sx, const int* dir, const int* mk, int squads);
 int CoXlTestLwCallOne(int i, int turn, int* out);
 int CoXlTestLwCallTick(uint64_t nowMs);
-int CoXlTestLwCallOver(int idx, int errand);
+int CoXlTestLwCallOver(int idx, int how);
+int CoXlTestLwCallOf(int idx);
+int CoXlTestLwCallZone(float x, int to, float x2, int turn);
 void CoXlTestLwCallEnd(void);
 
 int main(void)
@@ -395,6 +397,8 @@ int main(void)
         const float B = CoXlTestLwSeenBand(); int o[5];
         const float by[1][2] = {{1500, 20}}, sx[4] = {250, 2350, 1950, 650}; const int dir[4] = {1, 1, 1, -1}, none[4] = {0, 0, 0, 0};
         CoXlTestLwSeenSetup(1, 1, 0, 0, 0);
+        g_case = "a 2 m unit's band through a 4x scope is 861 m, whatever the host's view";
+        { const float S = CoXlTestLwSeenRange(1, 2); CHECK(S > 840.0f && S < 880.0f && S > B + 150.0f); }
         g_case = "a patrol is called to a player's road: the nearest one beyond the zone on the side whose turn it is, about turn";
         CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
         CHECK(CoXlTestLwCallOne(0, 0, o) == 30 && o[0] == 7 && o[1] == 13 && o[2] == 19 && o[3] == 6 && o[4] == 1);
@@ -405,7 +409,21 @@ int main(void)
         g_case = "a patrol inside a player's band is not called: it would be offline in clear view";
         CHECK(CoXlTestLwCallOne(0, 0, o) == -1);
         g_case = "a called patrol's next plan, or an errand, ends its call";
+        CHECK(CoXlTestLwCallOf(30) == 1 && CoXlTestLwCallOf(0) == 1 && CoXlTestLwCallOf(10) == 1 && CoXlTestLwCallOf(20) == 0);
         CHECK(CoXlTestLwCallOver(30, 1) == 0 && CoXlTestLwCallOver(0, 0) == 0);
+        g_case = "a called patrol that turns back is free again; one that comes online is counted and free";
+        CHECK(CoXlTestLwCallOver(10, 2) == 0);
+        CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
+        CHECK(CoXlTestLwCallOne(0, 0, o) == 30 && CoXlTestLwCallOver(30, 3) == 0);
+        g_case = "a patrol standing in the zone it comes online in is left there: only one beyond it is called";
+        { const float zx[2] = {250, 800}; const int zd[2] = {1, 1};
+          CoXlTestLwCallWorld(30, 0, by, 1, zx, zd, none, 2); CHECK(CoXlTestLwCallOne(0, 0, o) == 0); }
+        g_case = "a patrol refused the far share stands in the zone; once the players' bands have moved, or its way no longer leads to one, it stands no more";
+        CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
+        CHECK(CoXlTestLwCallZone(1500.0f - B - 50.0f, 19, 1500.0f - B - 60.0f, 0) == 3);
+        CHECK(CoXlTestLwCallZone(1500.0f - B - 50.0f, 19, 1500.0f - B + 30.0f, 0) == 1);
+        CHECK(CoXlTestLwCallZone(1500.0f - B - 50.0f, 19, 1500.0f - B - 150.0f, 0) == 1);
+        CHECK(CoXlTestLwCallZone(1500.0f - B - 50.0f, 19, 1500.0f - B - 60.0f, 1) == 1);
         g_case = "the other side's turn";
         CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
         CHECK(CoXlTestLwCallOne(0, 1, o) == 10);
@@ -421,7 +439,7 @@ int main(void)
         { const float at9[1][2] = {{900, 20}}, at2[1][2] = {{200, 20}}, one[1] = {1850}, last[1] = {2950}; const int back[1] = {-1};
           CoXlTestLwCallWorld(30, 7, at9, 1, one, back, none, 1);
           CHECK(CoXlTestLwCallOne(0, 1, o) == 0 && o[0] == 18 && o[1] == 12 && o[2] == 7);
-          CoXlTestLwCallWorld(30, 0, at2, 1, last, back, none, 1); CHECK(CoXlTestLwCallOne(0, 1, o) == -1);
+          CoXlTestLwCallWorld(30, 0, at2, 1, last, back, none, 1); CHECK(CoXlTestLwCallOne(0, 1, o) == -1); /* 27 nodes out, 2750 m */
           const float at3[1][2] = {{300, 20}};
           CoXlTestLwCallWorld(30, 0, at3, 1, last, back, none, 1); CHECK(CoXlTestLwCallOne(0, 1, o) == 0 && o[0] == 29 && o[1] == 29 && o[2] == 1); }
         g_case = "one call a second at most, and a player's next call a far walk's time on: 103 s solo on a far share of 18";
@@ -429,12 +447,14 @@ int main(void)
           CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
           CHECK(period > 100000u && period < 107000u);
           CHECK(CoXlTestLwCallTick(1000000u) == 1 && CoXlTestLwCallTick(1000500u) == 1 && CoXlTestLwCallTick(1002000u) == 1);
-          CHECK(CoXlTestLwCallTick(1000000u + period - 1500u) == 1 && CoXlTestLwCallTick(1000000u + period + 500u) == 2); }
+          CHECK(CoXlTestLwCallTick(1000000u + period - 1500u) == 1 && CoXlTestLwCallTick(1000000u + period + 500u) == 2);
+          CHECK(CoXlTestLwCallOf(30) == 1 && CoXlTestLwCallOf(10) == 1 && CoXlTestLwCallOf(0) == 0); /* the second from the other side */ }
         g_case = "two players on a road: each has its call in turn, and twice the time to its next";
         { const float pair[2][2] = {{1500, 20}, {1600, -20}}, wide[4] = {250, 450, 550, 2750}; const int d4[4] = {1, 1, -1, -1};
           const uint32_t period = co_lw_meet_call_ms(18.0f, 4, 1, B + 50.0f - 250.0f);
           CoXlTestLwCallWorld(30, 0, pair, 2, wide, d4, none, 4);
-          CHECK(CoXlTestLwCallTick(1000000u) == 1 && CoXlTestLwCallTick(1001000u) == 2 && CoXlTestLwCallTick(1002000u) == 2);
+          CHECK(CoXlTestLwCallTick(1000000u) == 1 && CoXlTestLwCallTick(1000500u) == 1 && CoXlTestLwCallTick(1001000u) == 2 && CoXlTestLwCallTick(1002000u) == 2);
+          CHECK(CoXlTestLwCallOf(20) == 1 && CoXlTestLwCallOf(10) == 2);
           CHECK(CoXlTestLwCallTick(1000000u + period + 2000u) == 2 && CoXlTestLwCallTick(1000000u + 2u * period + 2000u) == 3); }
         g_case = "meet 0: no patrol is called";
         CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);

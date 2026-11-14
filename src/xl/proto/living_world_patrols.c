@@ -771,7 +771,7 @@ static void LwCallSend(LwSquad* q, int toward, int root)
 static int LwCallFor(int i, int root)
 {
     int sides[16], ns = 0, best = -1, bestHops = -1, bestOn = 0, bestToward = -1;
-    const float reach = (float)(CO_LW_MEET_CALL_HOPS + 1) * CO_LW_ROADS_STRETCH;
+    const float reach = (float)(CO_LW_MEET_CALL_HOPS + 2) * CO_LW_ROADS_STRETCH; /* no patrol the tree holds stands farther */
     for (int k = 0; k < g_lwNodes[root].degree; k++) if (g_lwNodeKind[g_lwNodes[root].next[k]]) sides[ns++] = k;
     if (ns == 0) return -1;
     const int want = sides[g_lwCall.turn[i] % ns];
@@ -1599,13 +1599,38 @@ int CoXlTestLwCallOne(int i, int turn, int* out)
 }
 /* The calls' tick at `nowMs`: the patrols called since the world was made. */
 int CoXlTestLwCallTick(uint64_t nowMs) { LwCallTick(nowMs); return (int)g_lwCall.called; }
-/* Squad `idx` plans its next way (its call is over), or is sent on an errand and visited: 1 while it still counts as called. */
-int CoXlTestLwCallOver(int idx, int errand)
+/* Squad `idx`: 0 plans its next way, 1 is sent on an errand and visited, 2 turns back, 3 comes online. 1 while it
+ * still counts as called; with 3, 2 when it was not counted as a called patrol that came. */
+int CoXlTestLwCallOver(int idx, int how)
 {
-    LwSquad* q = &g_lwSquads[idx];
-    if (errand) { q->intent = LW_REINFORCE; LwMeetApproach(q, 1000000u, 0); q->intent = LW_PATROL; }
+    LwSquad* q = &g_lwSquads[idx]; const uint32_t came = g_lwCall.came;
+    if (how == 1) { q->intent = LW_REINFORCE; LwMeetApproach(q, 1000000u, 0); q->intent = LW_PATROL; }
+    else if (how == 2) LwMeetTurn(q, "a test");
+    else if (how == 3) { q->state = LW_PENDING; LwMeetAsked(q, CO_LW_MEET_ASK_BEYOND, 1); q->state = LW_OFFLINE; if (g_lwCall.came != came + 1) return 2; }
     else { q->node = q->path[q->pathLen - 1]; q->pathAt = q->pathLen; LwRoadPlan(q, 0); }
     return g_lwCallOf[idx] != 0;
+}
+/* The player + 1 squad `idx` is called to, 0 for none. */
+int CoXlTestLwCallOf(int idx) { return g_lwCallOf[idx]; }
+/* Road patrol 0 of the calls' world at x `x`, its plan the road on to node `to`: visited, refused the far share
+ * there, then put at x `x2` (with `turn`, its plan back to node 1) and visited a second later. Bits: 1 it stands
+ * after the refusal, 2 it still stands after the second visit. */
+int CoXlTestLwCallZone(float x, int to, float x2, int turn)
+{
+    LwSquad* q = &g_lwSquads[0]; const ULONGLONG now = 2000000u; int bits = 0;
+    LwZoneClear(0); g_lwMeetMark[0] = 0; g_lwCallOf[0] = 0; g_lwMeetSince[0] = 0;
+    for (int pass = 0; pass < 2; pass++)
+    {
+        const float at = pass ? x2 : x; const int a = (int)(at / 100.0f), back = pass && turn;
+        q->pos[0] = at; q->pos[1] = 0; q->node = (uint16_t)(back ? a + 1 : a); q->pathLen = 0; q->pathAt = 0; q->retry = 0;
+        for (int k = back ? a : a + 1; back ? k >= 1 : k <= to; k += back ? -1 : 1) if (q->pathLen < LW_PATH_MAX) q->path[q->pathLen++] = (uint16_t)k;
+        g_lwMeetTestNow = now + 1000u * (ULONGLONG)pass;
+        LwMeetApproach(q, g_lwMeetTestNow, 1);
+        if (!pass) LwMeetFarNo(q, now);
+        bits |= LwMeetHold(q, at + (back ? -1.0f : 1.0f), 0) << pass;
+    }
+    LwZoneClear(0); g_lwMeetMark[0] = 0; g_lwMeetSince[0] = 0; g_lwMeetTestNow = 1000000u;
+    return bits;
 }
 void CoXlTestLwCallEnd(void)
 {
