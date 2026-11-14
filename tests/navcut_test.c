@@ -574,10 +574,21 @@ int main(void)
         co_navcut_limits(CO_NAVCUT_MAX, CO_NAVCUT_MAX);
         Construct(&s);
         E.faceSegments = 5; E.faceEvents = 5; E.perStep = 2; E.perStepAlone = 2; E.facesOnFirst = 1; E.own = 5;
-        for (uint32_t k = 0; k < 150000; k++) { face(&s, &g_instance, kUp, 0, 0x10000u + k, &g_vertices); Sweep(&s); }
+        /* a point that differs by face scatters the places: faces share one, and the next rows take them */
+        for (uint32_t k = 0; k < 150000; k++)
+        {
+            const uint32_t point = k * 2654435761u;
+            memcpy(E.ownEdges, &point, 4);
+            face(&s, &g_instance, kUp, 0, 0x10000u + k, &g_vertices); Sweep(&s);
+        }
         co_navcut_study(&study);
         CHECK(study.notKept == 0 && study.same == 0 && study.differ == 0);
-        for (uint32_t k = 0; k < 150000; k += 15) { face(&s, &g_instance, kUp, 0, 0x10000u + k, &g_vertices); add(&s, points, 5000, 1); Sweep(&s); }
+        for (uint32_t k = 0; k < 150000; k += 15)
+        {
+            const uint32_t point = k * 2654435761u;
+            memcpy(E.ownEdges, &point, 4);
+            face(&s, &g_instance, kUp, 0, 0x10000u + k, &g_vertices); add(&s, points, 5000, 1); Sweep(&s);
+        }
         co_navcut_study(&study);
         CHECK(study.notKept == 0 && study.same == 10000 && study.differ == 0);
     }
