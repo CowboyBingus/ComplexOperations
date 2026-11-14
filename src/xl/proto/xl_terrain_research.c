@@ -73,10 +73,31 @@ static uint64_t TerrainLogGet(uint64_t holder, uint64_t descriptor, uint64_t key
 
 /* The two calls point at a stub for good: each rel32 lies inside one cache line (0x2F4528, 0x2F4619), so the write
  * is whole for a thread that runs the call meanwhile, and nothing ever points them back. */
+/* The stub is untested in game, so it is off unless asked for: HELLFORGE_XL_TERRAIN_GETS=1 installs it at the first
+ * state dump, =file at the first state dump after xl-terrain-gets.txt exists in the session's logs, so one start
+ * can keep it out until its last mission. The answer is written when it changes. */
+static int TerrainLogGetsWanted(void)
+{
+    static LONG said = -1;
+    char t[8];
+    wchar_t path[MAX_PATH];
+    const DWORD n = GetEnvironmentVariableA("HELLFORGE_XL_TERRAIN_GETS", t, sizeof t);
+    const int file = n > 0 && n < sizeof t && t[0] == 'f';
+    const int on = n > 0 && n < sizeof t && (t[0] == '1' || (file && g_logs[0] &&
+        swprintf(path, MAX_PATH, L"%ls\\xl-terrain-gets.txt", g_logs) > 0 &&
+        GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES));
+    const LONG state = on ? 2 : file ? 1 : 0;
+    if (InterlockedExchange(&said, state) != state)
+        Note("research: terrain log: the material gets' stub is %s (HELLFORGE_XL_TERRAIN_GETS)",
+             on ? "on" : file ? "off until xl-terrain-gets.txt is in the session's logs" : "off");
+    return on;
+}
+
 static void TerrainLogInstall(void)
 {
     static LONG once;
     static const uint32_t sites[2] = {0x2F4527u, 0x2F4618u};
+    if (!TerrainLogGetsWanted()) return;
     if (InterlockedCompareExchange(&once, 1, 0) != 0) return;
     const uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
     if (!ApiCodeMatches(exe + sites[0], "E8 54 9C EE FF") || !ApiCodeMatches(exe + sites[1], "E8 63 9B EE FF"))
