@@ -1143,6 +1143,7 @@ uint32_t CoXlTestGradeSolve(const float* ground, const uint8_t* pinned, uint32_t
     if (s == NULL) return n;
     for (uint32_t i = 0; i < n; i++) { s[i].ground = ground[i]; s[i].pinned = pinned != NULL && pinned[i]; s[i].floor = -GRADE_FAR; }
     for (uint32_t k = 0; k < count; k++) GradeLink(s, links[2 * k], links[2 * k + 1], gaps[k]);
+    for (uint32_t i = 0; i < n; i++) s[i].roads = s[i].links;
     const uint32_t torn = GradeSolve(s, n, slope, passes);
     GradeStats g; GradeMeasure(s, n, &g);
     for (uint32_t i = 0; i < n; i++) target[i] = s[i].target;
@@ -1287,6 +1288,7 @@ uint32_t CoXlTestGradeCapped(const float* ground, const uint8_t* pinned, const f
     for (uint32_t i = 0; i < n; i++)
     { s[i].ground = ground[i]; s[i].pinned = pinned != NULL && pinned[i]; s[i].floor = -GRADE_FAR; s[i].earth = earth != NULL ? earth[i] : GRADE_FAR; }
     for (uint32_t k = 0; k < count; k++) GradeLink(s, links[2 * k], links[2 * k + 1], gaps[k]);
+    for (uint32_t i = 0; i < n; i++) s[i].roads = s[i].links;
     const uint32_t torn = GradeSolveCapped(s, n, soft, hard, hard, 0.0f, passes);
     float worst = 0.0f; uint32_t at = 0; double metres = 0.0;
     out[0] = GradeOverCap(s, n, by, &worst, &at, &metres); out[1] = worst; out[2] = at; out[3] = metres;
@@ -1305,6 +1307,7 @@ uint32_t CoXlTestGradeSteep(const float* ground, const uint8_t* pinned, const fl
     for (uint32_t i = 0; i < n; i++)
     { s[i].ground = ground[i]; s[i].pinned = pinned != NULL && pinned[i]; s[i].floor = -GRADE_FAR; s[i].earth = earth != NULL ? earth[i] : GRADE_FAR; }
     for (uint32_t k = 0; k < count; k++) GradeLink(s, links[2 * k], links[2 * k + 1], gaps[k]);
+    for (uint32_t i = 0; i < n; i++) s[i].roads = s[i].links;
     const uint32_t torn = GradeSolveCapped(s, n, soft, hard, steep, cap, passes);
     float steepest = 0.0f; uint32_t at = 0; double metres = 0.0;
     out[0] = GradeRelaxed(s, n, hard, &metres, &steepest, &at); out[1] = metres; out[2] = steepest; out[3] = at;
@@ -1365,11 +1368,13 @@ int CoXlTestGradeStations(uintptr_t block, float (*ground)(float, float), float 
     return made ? (int)g_testField.stations : -1;
 }
 /* A station's marks: bit 0 pinned, bit 1 a spur's end at its place's edge, bit 2 a spur's own (solved after the
- * arterials); *target and *ground its heights. */
+ * arterials), bit 3 a spur's station in an arterial's bed, bit 4 on a level link; *target and *ground its heights. */
 int CoXlTestGradeStationPin(uint32_t i, float* xy, float* target, float* ground)
 {
     xy[0] = g_testField.xy[2 * i]; xy[1] = g_testField.xy[2 * i + 1]; *target = g_testField.s[i].target; *ground = g_testField.s[i].ground;
-    return g_testField.s[i].pinned | g_testField.s[i].edge << 1 | g_testField.s[i].later << 2;
+    int level = 0;
+    for (uint32_t k = 0; k < g_testField.s[i].roads; k++) level |= g_testField.s[i].most[k] == GRADE_LEVEL;
+    return g_testField.s[i].pinned | g_testField.s[i].edge << 1 | g_testField.s[i].later << 2 | g_testField.s[i].bed << 3 | level << 4;
 }
 /* The ground's slope across the road at a station of the test field (GradeFieldCross), as a tangent. */
 float CoXlTestGradeStationCross(uint32_t i) { return g_testField.s[i].cross; }

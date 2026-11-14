@@ -8,7 +8,10 @@
  *   whole), then down to 0 at the station's band (GradeBandWeight). The level's shader and a close tile ease it
  *   (GradeSmooth).
  * - Band: wide enough that the blend adds at most GRADE_SIDE to the ground's own side slope and bends at most
- *   GRADE_BEND at the bed's edge (GradeBandRamp). A worn path has shoulders, not banks. */
+ *   GRADE_BEND at the bed's edge (GradeBandRamp). A worn path has shoulders, not banks.
+ * - Beds: a line owns the ground within GRADE_OWN of it against every later line (GradeFieldRuns: arterials before
+ *   spurs, then the order they were added). A later line's height counts nothing there and whole from
+ *   GRADE_OWN_END, so a neighbour's grade is never a cross slope on the earlier line's bed. */
 #define GRADE_NONE 0xFFFFFFFFu
 #define GRADE_CORE 8.0f
 #define GRADE_FULL 10.0f
@@ -19,19 +22,25 @@
 #define GRADE_JOIN 1.0f       /* a point this close a station is that station */
 #define GRADE_CELL 64.0f
 #define GRADE_REACH 8.0f      /* past its band a road is still listed this much further: a lattice cell's far corner */
-typedef struct GradeSeg { float ax, ay, bx, by; uint32_t a, b; } GradeSeg;
+#define GRADE_OWN 6.0f        /* the checker reads a bed 3 to 6 m off its line */
+#define GRADE_OWN_END 10.0f   /* GRADE_FULL: where the earlier line's own level bed ends */
+#define GRADE_SPUR_RUN 0x80000000u
+/* run: the line a piece belongs to, by its first piece (spurs after every arterial). zone: 1 a level piece or a
+ * spur's piece in an arterial's bed, 2 and 3 the ramp pieces after such a stretch. */
+typedef struct GradeSeg { float ax, ay, bx, by; uint32_t a, b, run; uint8_t zone; } GradeSeg;
 typedef struct GradeField
 {
     GradeStation* s; float* xy; float* band;
     GradeSeg* seg;
     uint32_t* start; uint32_t* item;
-    uint32_t stations, stationRoom, segs, segRoom, unlinked, capped, ties, untied;
+    uint32_t* piece; /* per station and link slot: the piece of road that link is (GradeFieldLinks) */
+    uint32_t stations, stationRoom, segs, segRoom, unlinked, capped, ties, untied, runs, beds, ramps;
     int grid;
 } GradeField;
 
 static void GradeFieldFree(GradeField* f)
 {
-    free(f->s); free(f->xy); free(f->band); free(f->seg); free(f->start); free(f->item);
+    free(f->s); free(f->xy); free(f->band); free(f->seg); free(f->start); free(f->item); free(f->piece);
     memset(f, 0, sizeof *f);
 }
 
@@ -63,7 +72,7 @@ static int GradeFieldSeg(GradeField* f, uint32_t a, uint32_t b)
         if (seg == NULL) return 0;
         f->seg = seg; f->segRoom = room;
     }
-    const GradeSeg g = {f->xy[2 * a], f->xy[2 * a + 1], f->xy[2 * b], f->xy[2 * b + 1], a, b};
+    const GradeSeg g = {f->xy[2 * a], f->xy[2 * a + 1], f->xy[2 * b], f->xy[2 * b + 1], a, b, 0, 0};
     f->seg[f->segs++] = g;
     return 1;
 }
@@ -130,12 +139,83 @@ static uint32_t GradeFieldAttach(GradeField* f, float x, float y, uint32_t among
 static void GradeFieldLinks(GradeField* f)
 {
     f->unlinked = 0;
+    free(f->piece);
+    f->piece = (uint32_t*)malloc(4 * (size_t)GRADE_LINKS * (f->stations ? f->stations : 1));
     for (uint32_t k = 0; k < f->segs; k++)
     {
         const GradeSeg* g = &f->seg[k];
-        f->unlinked += !GradeLink(f->s, g->a, g->b, sqrtf((g->bx - g->ax) * (g->bx - g->ax) + (g->by - g->ay) * (g->by - g->ay)));
+        if (!GradeLink(f->s, g->a, g->b, sqrtf((g->bx - g->ax) * (g->bx - g->ax) + (g->by - g->ay) * (g->by - g->ay)))) { f->unlinked++; continue; }
+        if (f->piece == NULL) continue;
+        f->piece[GRADE_LINKS * g->a + f->s[g->a].links - 1] = k; f->piece[GRADE_LINKS * g->b + f->s[g->b].links - 1] = k;
     }
     for (uint32_t i = 0; i < f->stations; i++) f->s[i].roads = f->s[i].links;
+}
+
+/* The distance from (x, y) to a piece; *t the foot's share of the way from a to b. */
+static float GradeSegFar(const GradeSeg* g, float x, float y, float* t)
+{
+    const float dx = g->bx - g->ax, dy = g->by - g->ay, l2 = dx * dx + dy * dy;
+    float u = l2 > 1.0e-9f ? ((x - g->ax) * dx + (y - g->ay) * dy) / l2 : 0.0f;
+    u = u < 0.0f ? 0.0f : u > 1.0f ? 1.0f : u;
+    const float qx = g->ax + u * dx - x, qy = g->ay + u * dy - y;
+    *t = u;
+    return sqrtf(qx * qx + qy * qy);
+}
+static int GradeSegSpur(const GradeField* f, const GradeSeg* g) { return f->s[g->a].later || f->s[g->b].later; }
+static void GradeSegMost(GradeField* f, const GradeSeg* g, float most)
+{
+    GradeStation* a = &f->s[g->a]; GradeStation* b = &f->s[g->b];
+    for (uint32_t k = 0; k < a->roads; k++) if (a->link[k] == g->b) a->most[k] = most;
+    for (uint32_t k = 0; k < b->roads; k++) if (b->link[k] == g->a) b->most[k] = most;
+}
+
+/* Runs: the pieces that go on as one line. At a station the two pieces of one kind (arterial, or a spur's own) that
+ * pass straightest go on when they turn under GRADE_LAND_TURN; a spur starts at its arterial's station. A run is
+ * named by its first piece, spurs after every arterial: the order of beds (GradeFieldAt). Positions and the order
+ * the roads were added only: the same on every machine. After GradeFieldLinks. */
+#define GRADE_LAND_TURN 0.8660254f /* the cosine of 30 degrees */
+static uint32_t GradeRunRoot(uint32_t* up, uint32_t k)
+{
+    while (up[k] != k) { up[k] = up[up[k]]; k = up[k]; }
+    return k;
+}
+static void GradeFieldRuns(GradeField* f)
+{
+    f->runs = 0;
+    uint32_t* up = (uint32_t*)malloc(4 * (size_t)(f->segs ? f->segs : 1));
+    if (up == NULL || f->piece == NULL) { free(up); for (uint32_t k = 0; k < f->segs; k++) f->seg[k].run = k; return; }
+    for (uint32_t k = 0; k < f->segs; k++) up[k] = k;
+    for (uint32_t i = 0; i < f->stations; i++)
+    {
+        const GradeStation* s = &f->s[i];
+        for (int spur = 0; spur < 2; spur++)
+        {
+            if (spur && !s->later) continue;
+            float best = -2.0f; uint32_t pa = 0, pb = 0;
+            for (uint32_t x = 0; x < s->roads; x++)
+                for (uint32_t y = x + 1; y < s->roads; y++)
+                {
+                    const uint32_t ka = f->piece[GRADE_LINKS * i + x], kb = f->piece[GRADE_LINKS * i + y];
+                    if (GradeSegSpur(f, &f->seg[ka]) != spur || GradeSegSpur(f, &f->seg[kb]) != spur) continue;
+                    const float ax = f->xy[2 * i] - f->xy[2 * s->link[x]], ay = f->xy[2 * i + 1] - f->xy[2 * s->link[x] + 1];
+                    const float bx = f->xy[2 * s->link[y]] - f->xy[2 * i], by = f->xy[2 * s->link[y] + 1] - f->xy[2 * i + 1];
+                    const float la = sqrtf(ax * ax + ay * ay), lb = sqrtf(bx * bx + by * by);
+                    if (!(la > 0.0f) || !(lb > 0.0f)) continue;
+                    const float straight = (ax * bx + ay * by) / (la * lb);
+                    if (straight > best) { best = straight; pa = ka; pb = kb; }
+                }
+            if (!(best >= GRADE_LAND_TURN)) continue;
+            const uint32_t ra = GradeRunRoot(up, pa), rb = GradeRunRoot(up, pb);
+            if (ra != rb) up[ra > rb ? ra : rb] = ra < rb ? ra : rb; /* the root is the run's first piece */
+        }
+    }
+    for (uint32_t k = 0; k < f->segs; k++)
+    {
+        const uint32_t root = GradeRunRoot(up, k);
+        f->runs += root == k;
+        f->seg[k].run = root | (GradeSegSpur(f, &f->seg[k]) ? GRADE_SPUR_RUN : 0u);
+    }
+    free(up);
 }
 
 /* Roads side by side that share no station (a fan of spurs into one junction, a spur along an arterial) would each
@@ -228,62 +308,180 @@ static void GradeFieldTies(GradeField* f)
     free(head);
 }
 
-/* Landings. Where roads meet (a station with three or more pieces) or a line turns sharply (GRADE_LAND_TURN), the
- * beds overlap and each takes the other's height by nearness: one road's grade becomes the other's cross slope. So
- * every link within GRADE_LAND along the roads from such a station takes GRADE_LAND_SLOPE at most, and the meeting
- * place is near level. At a spur's junction only the spur's own links are landed: the arterial is as it would be
- * without the spur. A link with a pinned end is left alone: a pad's height is not the road's to choose. Before
- * the ties: it reads the pieces' links and positions only. landings counts the stations, landed the links. */
-#define GRADE_LAND 20.0f
-#define GRADE_LAND_SLOPE 0.0305530f /* tan 1.75 degrees: read across the other bed through the hand-over, 4 degrees */
-#define GRADE_LAND_TURN 0.8660254f  /* the cosine of 30 degrees */
-static int GradeLandTurn(const GradeField* f, uint32_t i, uint32_t from, uint32_t to)
+/* Landings. Where two runs of one kind meet (a corner over 30 degrees, an arterials' junction) the later run's
+ * height counts nothing in the earlier one's bed (GradeFieldAt), so there the two must agree: every piece of either
+ * run with an end within GRADE_OWN of the other run is level (GRADE_LEVEL), and never gives way. Arms that leave
+ * the station within 60 degrees of each other run side by side instead: the ties hold those. A piece with a pinned
+ * end is left alone: a pad's height is not the road's to choose. Reads positions, runs and pins only; before the
+ * ties. Returns the meeting stations, *landed the level pieces. */
+#define GRADE_LAND_WALK 32.0f /* how far along a run its pieces are tested against the other run */
+#define GRADE_LAND_FAN 0.5f   /* the cosine of 60 degrees */
+#define GRADE_LAND_SEEN 16u
+/* The pieces of `run` within GRADE_LAND_WALK along it from station i, both ways; returns their count. */
+static uint32_t GradeLandWalk(const GradeField* f, uint32_t i, uint32_t run, uint32_t* out)
 {
-    const float ax = f->xy[2 * i] - f->xy[2 * from], ay = f->xy[2 * i + 1] - f->xy[2 * from + 1];
-    const float bx = f->xy[2 * to] - f->xy[2 * i], by = f->xy[2 * to + 1] - f->xy[2 * i + 1];
-    const float la = sqrtf(ax * ax + ay * ay), lb = sqrtf(bx * bx + by * by);
-    return la > 0.0f && lb > 0.0f && ax * bx + ay * by < GRADE_LAND_TURN * la * lb;
+    uint32_t n = 0;
+    for (uint32_t k = 0; k < f->s[i].roads; k++)
+    {
+        uint32_t piece = f->piece[GRADE_LINKS * i + k], from = i, slot = k; float gone = 0.0f;
+        if (f->seg[piece].run != run) continue;
+        while (n < GRADE_LAND_SEEN)
+        {
+            const GradeStation* a = &f->s[from]; const uint32_t to = a->link[slot];
+            out[n++] = piece; gone += a->gap[slot];
+            if (!(gone < GRADE_LAND_WALK)) break;
+            uint32_t on = GRADE_LINKS;
+            for (uint32_t m = 0; m < f->s[to].roads; m++)
+            {
+                const uint32_t next = f->piece[GRADE_LINKS * to + m];
+                if (next != piece && f->seg[next].run == run) on = m;
+            }
+            if (on == GRADE_LINKS) break;
+            piece = f->piece[GRADE_LINKS * to + on]; slot = on; from = to;
+        }
+    }
+    return n;
+}
+/* 1 when two arms of the runs leave station i within 60 degrees of each other. */
+static int GradeLandFan(const GradeField* f, uint32_t i, uint32_t g, uint32_t h)
+{
+    const GradeStation* s = &f->s[i];
+    for (uint32_t x = 0; x < s->roads; x++)
+        for (uint32_t y = 0; y < s->roads; y++)
+        {
+            if (f->seg[f->piece[GRADE_LINKS * i + x]].run != g || f->seg[f->piece[GRADE_LINKS * i + y]].run != h) continue;
+            const float ax = f->xy[2 * s->link[x]] - f->xy[2 * i], ay = f->xy[2 * s->link[x] + 1] - f->xy[2 * i + 1];
+            const float bx = f->xy[2 * s->link[y]] - f->xy[2 * i], by = f->xy[2 * s->link[y] + 1] - f->xy[2 * i + 1];
+            const float la = sqrtf(ax * ax + ay * ay), lb = sqrtf(bx * bx + by * by);
+            if (la > 0.0f && lb > 0.0f && ax * bx + ay * by > GRADE_LAND_FAN * la * lb) return 1;
+        }
+    return 0;
 }
 static uint32_t GradeFieldLand(GradeField* f, uint32_t* landed)
 {
     uint32_t landings = 0;
     *landed = 0;
+    if (f->piece == NULL) return 0;
     for (uint32_t i = 0; i < f->stations; i++)
     {
         const GradeStation* s = &f->s[i];
-        /* the arterials' arms are judged without the spurs, so no spur decides where an arterial is level */
-        uint32_t own[2] = {0, 0}, arms = 0;
-        for (uint32_t k = 0; k < s->links; k++) if (!f->s[s->link[k]].later) { if (arms < 2) own[arms] = s->link[k]; arms++; }
-        const int first = s->later ? 0 : arms >= 3 || (arms == 2 && GradeLandTurn(f, i, own[0], own[1]));
-        const int meet = s->links >= 3 || (s->links == 2 && GradeLandTurn(f, i, s->link[0], s->link[1]));
-        if (!meet) continue;
-        landings++;
-        for (uint32_t k = 0; k < s->links; k++)
+        uint32_t run[GRADE_LINKS], runs = 0; int hit = 0;
+        for (uint32_t k = 0; k < s->roads; k++)
         {
-            uint32_t from = i, slot = k; float gone = 0.0f;
-            const int arterial = !f->s[s->link[k]].later && !s->later;
-            if (arterial && !first) continue;
-            /* along the road until GRADE_LAND is behind or the road meets another */
-            for (uint32_t step = 0; step < 64 && gone < GRADE_LAND; step++)
-            {
-                GradeStation* a = &f->s[from]; const uint32_t to = a->link[slot]; GradeStation* b = &f->s[to];
-                gone += a->gap[slot];
-                if (!a->pinned && !b->pinned)
-                {
-                    if (!(a->most[slot] > 0.0f)) (*landed)++;
-                    a->most[slot] = GRADE_LAND_SLOPE;
-                    for (uint32_t m = 0; m < b->links; m++) if (b->link[m] == from) b->most[m] = GRADE_LAND_SLOPE;
-                }
-                /* on: an arterial's arm passes a spur's junction as if the spur were not there */
-                uint32_t on = GRADE_LINKS, ways = 0;
-                for (uint32_t m = 0; m < b->links; m++)
-                    if (!(arterial && f->s[b->link[m]].later)) { ways++; if (b->link[m] != from) on = m; }
-                if (ways != 2 || on == GRADE_LINKS) break;
-                slot = on; from = to;
-            }
+            const uint32_t r = f->seg[f->piece[GRADE_LINKS * i + k]].run; uint32_t q = 0;
+            while (q < runs && run[q] != r) q++;
+            if (q == runs) run[runs++] = r;
         }
+        for (uint32_t x = 0; x < runs; x++)
+            for (uint32_t y = x + 1; y < runs; y++)
+            {
+                /* an arterial and a spur: the spur stands at the arterial's height in its bed instead (GradeFieldBeds) */
+                if ((run[x] ^ run[y]) & GRADE_SPUR_RUN || GradeLandFan(f, i, run[x], run[y])) continue;
+                uint32_t walk[2][GRADE_LAND_SEEN];
+                const uint32_t count[2] = {GradeLandWalk(f, i, run[x], walk[0]), GradeLandWalk(f, i, run[y], walk[1])};
+                hit = 1;
+                for (int side = 0; side < 2; side++)
+                    for (uint32_t p = 0; p < count[side]; p++)
+                    {
+                        GradeSeg* g = &f->seg[walk[side][p]];
+                        float near_ = GRADE_FAR, t;
+                        if (f->s[g->a].pinned || f->s[g->b].pinned || g->zone == 1) continue;
+                        for (uint32_t q = 0; q < count[!side]; q++)
+                        {
+                            const GradeSeg* o = &f->seg[walk[!side][q]];
+                            const float da = GradeSegFar(o, g->ax, g->ay, &t), db = GradeSegFar(o, g->bx, g->by, &t);
+                            near_ = da < near_ ? da : near_; near_ = db < near_ ? db : near_;
+                        }
+                        if (!(near_ <= GRADE_OWN)) continue;
+                        g->zone = 1; (*landed)++;
+                        GradeSegMost(f, g, GRADE_LEVEL);
+                    }
+            }
+        landings += (uint32_t)hit;
     }
     return landings;
+}
+/* A spur in an arterial's bed. A spur's piece with an end within GRADE_OWN of an arterial's piece lies on ground the
+ * arterial owns: its own stations (not a pinned one: a pad holds) are marked `bed` and take the arterial's surface
+ * there, the mean of the up to four nearest arterial pieces' heights at their feet by the field's shares. So the
+ * spur's height equals the arterial's wherever the field ignores the spur, and the spur leaves the bed's edge at
+ * the arterial's height. Positions and pins only. Returns the stations marked. */
+#define GRADE_BED_REACH 16.0f
+static uint32_t GradeFieldBeds(GradeField* f)
+{
+    uint32_t beds = 0;
+    float* near_ = (float*)malloc(4 * (size_t)(f->stations ? f->stations : 1));
+    if (near_ == NULL || f->piece == NULL) { free(near_); return 0; }
+    for (uint32_t i = 0; i < f->stations; i++)
+    {
+        float t;
+        near_[i] = f->s[i].later ? GRADE_FAR : 0.0f;
+        for (uint32_t k = 0; f->s[i].later && k < f->segs; k++)
+        {
+            if (f->seg[k].run & GRADE_SPUR_RUN) continue;
+            const float d = GradeSegFar(&f->seg[k], f->xy[2 * i], f->xy[2 * i + 1], &t);
+            if (d < near_[i]) near_[i] = d;
+        }
+    }
+    for (uint32_t k = 0; k < f->segs; k++)
+        if (f->seg[k].run & GRADE_SPUR_RUN && (near_[f->seg[k].a] <= GRADE_OWN || near_[f->seg[k].b] <= GRADE_OWN)) f->seg[k].zone = 1;
+    for (uint32_t i = 0; i < f->stations; i++)
+    {
+        GradeStation* s = &f->s[i];
+        int reach = 0;
+        for (uint32_t k = 0; s->later && !s->pinned && k < s->roads; k++) reach |= f->seg[f->piece[GRADE_LINKS * i + k]].zone == 1;
+        if (!reach) continue;
+        float far_[GRADE_FEET / 2], at[GRADE_FEET / 2]; uint32_t piece[GRADE_FEET / 2], n = 0;
+        for (uint32_t k = 0; k < f->segs; k++)
+        {
+            float t;
+            if (f->seg[k].run & GRADE_SPUR_RUN) continue;
+            const float d = GradeSegFar(&f->seg[k], f->xy[2 * i], f->xy[2 * i + 1], &t);
+            if (!(d <= GRADE_BED_REACH)) continue;
+            uint32_t q = n; /* nearest first; past the room the furthest drops out */
+            if (n == GRADE_FEET / 2) { if (!(d < far_[n - 1])) continue; q = n - 1; } else n++;
+            for (; q > 0 && far_[q - 1] > d; q--) { far_[q] = far_[q - 1]; at[q] = at[q - 1]; piece[q] = piece[q - 1]; }
+            far_[q] = d; at[q] = t; piece[q] = k;
+        }
+        if (n == 0) continue;
+        double sum = 0.0;
+        for (uint32_t q = 0; q < n; q++) { const double close = (double)far_[q] * far_[q] + 1.0; sum += 1.0 / (close * close); }
+        for (uint32_t q = 0; q < GRADE_FEET; q++) { s->foot[q] = 0; s->footW[q] = 0.0f; }
+        for (uint32_t q = 0; q < n; q++)
+        {
+            const double close = (double)far_[q] * far_[q] + 1.0, share = 1.0 / (close * close) / sum;
+            s->foot[2 * q] = f->seg[piece[q]].a; s->footW[2 * q] = (float)(share * (1.0 - at[q]));
+            s->foot[2 * q + 1] = f->seg[piece[q]].b; s->footW[2 * q + 1] = (float)(share * at[q]);
+        }
+        s->bed = 1; beds++;
+    }
+    free(near_);
+    return beds;
+}
+/* Ramps. The pieces next to a level stretch or a spur's stretch in a bed (zone 1) take GRADE_RAMP at most, the
+ * pieces after those GRADE_RAMP2, so a road leaves such a stretch by a step of grade a station and not by the
+ * whole of what a relaxed link may climb. Only where no slope is set, never on a piece between two pins, and a
+ * spur's stretch never caps an arterial. Returns the pieces capped. */
+static uint32_t GradeFieldRamps(GradeField* f)
+{
+    uint32_t ramps = 0;
+    if (f->piece == NULL) return 0;
+    for (uint8_t step = 1; step <= 2; step++)
+        for (uint32_t k = 0; k < f->segs; k++)
+        {
+            if (f->seg[k].zone != step) continue;
+            const int spur = GradeSegSpur(f, &f->seg[k]);
+            const uint32_t end[2] = {f->seg[k].a, f->seg[k].b};
+            for (int e = 0; e < 2; e++)
+                for (uint32_t m = 0; m < f->s[end[e]].roads; m++)
+                {
+                    GradeSeg* g = &f->seg[f->piece[GRADE_LINKS * end[e] + m]];
+                    if (g->zone != 0 || GradeSegSpur(f, g) != spur || (f->s[g->a].pinned && f->s[g->b].pinned)) continue;
+                    g->zone = (uint8_t)(step + 1); ramps++;
+                    GradeSegMost(f, g, step == 1 ? GRADE_RAMP : GRADE_RAMP2);
+                }
+        }
+    return ramps;
 }
 
 /* The side band's ramp for a road moved `move` metres at its middle on ground that slopes `cross` (a tangent) across
@@ -388,10 +586,12 @@ static float GradeSmooth(float w) { w = w < 0.0f ? 0.0f : w > 1.0f ? 1.0f : w; r
  * `held` along the pieces, foot the mean of pad() at the point's foot on each centreline (by the shares squared:
  * beside a station the next piece's end is a foot too, and must not blur the nearest one's). */
 typedef struct GradeFoot { float (*pad)(float x, float y); float held, foot; } GradeFoot;
+#define GRADE_BEDS 24u /* pieces within GRADE_OWN_END of one point: a junction of several roads has under ten */
 /* The field at (x, y), metres from the map's corner: the weight before easing (0: no road reaches here), *z the
  * height the roads set (the nearer a road and the more of it, the more it counts; left alone where none has weight)
  * and *d the distance to the nearest centreline. Only a road with weight shares the height, so which roads a cell
- * lists (their bands, from the capture) never changes a height. on: may be NULL. */
+ * lists (their bands, from the capture) never changes a height. A piece in an earlier run's bed is left out by how
+ * deep it lies there. on: may be NULL. */
 static float GradeFieldAt(const GradeField* f, float x, float y, float* z, float* d, GradeFoot* on)
 {
     *d = GRADE_FAR;
@@ -401,6 +601,17 @@ static float GradeFieldAt(const GradeField* f, float x, float y, float* z, float
     if (c >= f->grid || r >= f->grid) return 0.0f;
     const size_t cell = (size_t)r * f->grid + c;
     float weight = 0.0f; double sum = 0.0, heights = 0.0, held = 0.0, foot = 0.0, feet = 0.0;
+    /* the beds here: every piece within GRADE_OWN_END, its run and what a later run still counts for beside it */
+    uint32_t bedRun[GRADE_BEDS], beds = 0, lone = 1; float bedShare[GRADE_BEDS];
+    for (uint32_t q = f->start[cell]; q < f->start[cell + 1] && beds < GRADE_BEDS; q++)
+    {
+        float t;
+        const GradeSeg* g = &f->seg[f->item[q]];
+        const float dist = GradeSegFar(g, x, y, &t);
+        if (!(dist < GRADE_OWN_END)) continue;
+        if (beds > 0 && g->run != bedRun[0]) lone = 0;
+        bedRun[beds] = g->run; bedShare[beds++] = GradeSmooth((dist - GRADE_OWN) / (GRADE_OWN_END - GRADE_OWN));
+    }
     for (uint32_t q = f->start[cell]; q < f->start[cell + 1]; q++)
     {
         const GradeSeg* g = &f->seg[f->item[q]];
@@ -415,14 +626,18 @@ static float GradeFieldAt(const GradeField* f, float x, float y, float* z, float
             : GradeBandWeight((dist - GRADE_FULL) / (band - GRADE_FULL), band - GRADE_FULL, ma + t * (mb - ma), sa->cross + t * (sb->cross - sa->cross));
         if (dist < *d) *d = dist;
         if (!(w > 0.0f)) continue;
-        const double close = (double)dist * dist + 1.0, share = w / (close * close);
+        if (w > weight) weight = w;
+        const double close = (double)dist * dist + 1.0;
+        double share = w / (close * close);
+        /* in the bed of an earlier run this piece's height counts nothing, and whole from the bed's edge */
+        for (uint32_t b = 0; !lone && b < beds; b++) if (bedRun[b] < g->run) share *= bedShare[b];
+        if (!(share > 0.0)) continue;
         sum += share; heights += share * (sa->target + t * (sb->target - sa->target));
         if (on != NULL)
         {
             held += share * ((float)sa->held + t * ((float)sb->held - (float)sa->held));
             if (on->pad != NULL) { foot += share * share * on->pad(x + qx, y + qy); feet += share * share; }
         }
-        if (w > weight) weight = w;
     }
     if (!(sum > 0.0)) return 0.0f;
     *z = (float)(heights / sum);
