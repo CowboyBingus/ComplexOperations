@@ -125,8 +125,9 @@ static void FillCards(uintptr_t screen, uintptr_t session)
     for (uint32_t i = 0; i < 8u && from == 8u; i++)
         if (Present(Card(screen, i))) from = i;
     if (from == 8u) return;
-    /* A figure without a player must not be found as one (0x18A17D0's lookup). */
-    if (co_summary_player(*(const uint32_t* const*)(players + 0xD0u), *(const uint32_t*)(players + 0xD8u),
+    /* A figure without a player must not be found as one: 0x18A17D0 leaves at once on the no-player id, and looks
+     * any other id up. */
+    if (unset != *(const uint32_t*)(g_game + CO_SUM_NO_ID) && co_summary_player(*(const uint32_t* const*)(players + 0xD0u), *(const uint32_t*)(players + 0xD8u),
             *(const uint32_t*)(players + 0xDCu), *(const uint32_t*)(players + 0xE0u), unset))
     {
         if (g_fillFrom != 9u) co_log("mission summary: research fill: refused, the unset id is a player");
