@@ -11,7 +11,7 @@
 #define LW_TILT_NAV 0x3326330u       /* nav API: +0x10 closest face (nav id, p in and out, radius, out, normal, agent hash) */
 #define LW_TILT_UNITREC 0x27C5B40u   /* exe: unit physics records, 0x18 each: +0 world << 30 | unit, +4 counts (bit 30 live) */
 #define LW_TILT_LINES 96
-#define LW_TILT_WINDOW_LINES 4       /* unit lines a 30 s window, so the lines cover the whole mission */
+#define LW_TILT_WINDOW_LINES 12      /* unit lines a 30 s window, so the lines cover the whole mission */
 #define LW_TILT_SEEN 64
 #define LW_TILT_EXCESS 12.0f         /* degrees off the ground's normal that count as tilted */
 #define LW_TILT_LINE_OFF 30.0f       /* degrees off that make a unit line */
@@ -44,7 +44,7 @@ static struct
      * cut by the navmesh's heights around the column against the boxes, by the face against the prop's surface, and by
      * whether the point's nav cell was built before its carvers; props with a carver object but no volume box over
      * the point; the column asked for the unit's own agent type; units still where first seen, and those that moved */
-    uint32_t notCut, cut, reachOver, reachUnder, reachMeets, faceOver, faceAt, faceUnder, lateCell, builtCell, carverBeside, agentColumn, propStayed, propWalked;
+    uint32_t notCut, cut, reachOver, reachUnder, reachMeets, faceOver, faceAt, faceUnder, lateCell, builtCell, propInBuild, propNotInBuild, carverBeside, agentColumn, propStayed, propWalked;
     /* corners that went from a start under a surface to a miss or back between two scans */
     uint32_t flips, flipSamples, flipMax, flipId;
     uint32_t seenId[LW_TILT_SEEN]; ULONGLONG seenAt[LW_TILT_SEEN];
@@ -381,6 +381,8 @@ static int LwTiltCheck(uintptr_t mgr, uint32_t id, const float* p, const float* 
         if (((rec >> 15) & 0xFFu) == 0) g_lwTilt.propNone++;
     }
     LwTnAt at; LwTnObjects(LwTnNav(&navId), f, &at);
+    int inBuild = LwTnPropBuilt(&at, p[0], p[1]);
+    if (inBuild > 0) g_lwTilt.propInBuild++; else if (inBuild == 0) g_lwTilt.propNotInBuild++;
     if (!at.read) g_lwTilt.propUnread++;
     else if (at.n[LW_TN_CARVER]) g_lwTilt.propCarver++;
     else if (at.n[LW_TN_GEOMETRY]) g_lwTilt.propGeometry++;
@@ -433,16 +435,18 @@ static void LwTiltPropLine(uintptr_t mgr, uint32_t id, const float* p)
     int a = LwTnColumnFace(p[0], p[1], f[2], 0, &any), o = place > 0 && LwTnColumnFace(p[0], p[1], f[2], agent, &own);
     float flo = any, fhi = any; int around = a ? LwTnAround(p[0], p[1], any, &flo, &fhi) : 0;
     int reach = a && at.volumes ? LwTnReach(flo, fhi, at.volLo, at.volHi, g_lwTn.height) : 0, late = LwTnPointLate(LwTnNav(&navId), p[0], p[1]);
+    int inBuild = LwTnPropBuilt(&at, p[0], p[1]);
     const LwTiltUnit* t = LwTiltTrack(g_lwTilt.track, id, p);
     float moved = t ? sqrtf((p[0] - t->first[0]) * (p[0] - t->first[0]) + (p[1] - t->first[1]) * (p[1] - t->first[1]) + (p[2] - t->first[2]) * (p[2] - t->first[2])) : -1.0f;
     Note("living world: tilt: unit %08X on prop %08X (surface z %.2f), %.1f m from where it was first seen, %u corner flips: nav objects over that point%s: %u carvers, %u geometry, "
         "%u painters, %u inert, %u with a painter set; the first: flags %X, material %08X, resource %016llX, z %.2f to %.2f; the carver objects' boxes span z %.2f to %.2f; %u carver volume boxes hold the point, z %.2f to %.2f; agent type %08X (place %d); "
-        "the face in its column for any agent: %sz %.2f%s; the navmesh in %d columns within 4 m: z %.2f to %.2f%s; its nav cell: %s; for its own type: %sz %.2f",
+        "the face in its column for any agent: %sz %.2f%s; the navmesh in %d columns within 4 m: z %.2f to %.2f%s; its nav cell: %s; the prop's nav objects: %s; for its own type: %sz %.2f",
         id, u[0], (double)f[2], (double)moved, t ? t->flips : 0u, at.read ? "" : " (not read)", at.n[LW_TN_CARVER], at.n[LW_TN_GEOMETRY], at.n[LW_TN_PAINTER], at.n[LW_TN_INERT],
         at.painters, at.flags, at.material, (unsigned long long)at.owner, (double)at.lo, (double)at.hi, (double)at.carverLo, (double)at.carverHi, at.volumes, (double)at.volLo, (double)at.volHi, agent, place,
         a ? "" : "none, ", (double)any, !a ? "" : !at.volumes ? "" : " (not cut by a carver whose box holds the point)", around, (double)flo, (double)fhi,
         !a || !at.volumes ? "" : reach > 0 ? " (all over the boxes)" : reach < 0 ? " (all under the boxes' reach)" : " (the boxes meet these heights)",
         late > 0 ? "holds more now than its last build was handed" : late == 0 ? "built with what it holds now" : "no build seen",
+        inBuild > 0 ? "IN its cells' last builds" : inBuild == 0 ? "NOT IN a cell's last build" : "not known",
         o ? "" : place > 0 ? "none, " : "not asked, ", (double)own);
 }
 
@@ -605,6 +609,10 @@ static void LwTiltNote(void)
                 g_lwTilt.faceOver, g_lwTilt.faceAt, g_lwTilt.faceUnder, g_lwTilt.lateCell, g_lwTilt.builtCell, (double)g_lwTn.height, g_lwTilt.agentColumn, g_lwTilt.agentAsked,
                 (double)LW_TILT_STAYED, g_lwTilt.propStayed, g_lwTilt.propWalked);
         if (g_lwTilt.onProp)
+            Note("living world: tilt on props (30 s): of the %u on a prop, the carver and geometry objects over the prop's point were handed to the last build of every "
+                "nav cell that holds it for %u, NOT to one of them for %u (the navmesh there has no such prop), not known for %u",
+                g_lwTilt.onProp, g_lwTilt.propInBuild, g_lwTilt.propNotInBuild, g_lwTilt.onProp - g_lwTilt.propInBuild - g_lwTilt.propNotInBuild);
+        if (g_lwTilt.onProp)
             Note("living world: tilt on props (30 s): of the %u on a prop: nav objects over the prop's point: a carver %u, geometry and no carver %u, a painter only %u, none %u, not read %u; "
                 "a face at its column for any agent %u; asked for the unit's own agent type %u, a face %u; in a streamed stamp's footprint %u, a level-made stamp's %u, no stamp's %u",
                 g_lwTilt.onProp, g_lwTilt.propCarver, g_lwTilt.propGeometry, g_lwTilt.propPainter, g_lwTilt.propBare, g_lwTilt.propUnread, g_lwTilt.faceAny, g_lwTilt.agentAsked,
@@ -617,7 +625,7 @@ static void LwTiltNote(void)
     g_lwTilt.propCarver = g_lwTilt.propGeometry = g_lwTilt.propPainter = g_lwTilt.propBare = g_lwTilt.propUnread = g_lwTilt.faceAny = g_lwTilt.agentAsked = g_lwTilt.agentFace = 0;
     g_lwTilt.inStreamed = g_lwTilt.inLevel = g_lwTilt.noStamp = g_lwTilt.up30 = g_lwTilt.upChecked = g_lwTilt.upOnProp = 0;
     g_lwTilt.notCut = g_lwTilt.cut = g_lwTilt.reachOver = g_lwTilt.reachUnder = g_lwTilt.reachMeets = g_lwTilt.faceOver = g_lwTilt.faceAt = g_lwTilt.faceUnder = 0;
-    g_lwTilt.lateCell = g_lwTilt.builtCell = g_lwTilt.carverBeside = g_lwTilt.agentColumn = g_lwTilt.propStayed = g_lwTilt.propWalked = 0;
+    g_lwTilt.lateCell = g_lwTilt.builtCell = g_lwTilt.propInBuild = g_lwTilt.propNotInBuild = g_lwTilt.carverBeside = g_lwTilt.agentColumn = g_lwTilt.propStayed = g_lwTilt.propWalked = 0;
     g_lwTilt.flips = g_lwTilt.flipSamples = 0;
     g_lwTilt.windowLines = g_lwTilt.windowFits = 0;
     g_lwTilt.four = g_lwTilt.fitsOnProp = 0; memset(g_lwTilt.cls, 0, sizeof g_lwTilt.cls);

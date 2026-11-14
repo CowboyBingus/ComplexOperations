@@ -516,6 +516,7 @@ static void LwBpCmd(int on); static void LwBpFrame(void); static void LwPcFrame(
 static void LwBbFrame(void); /* living_world_bpbuild.c, test instrument */
 static void LwInstallNavTime(void); /* living_world_navtime.c, test instrument */
 static void LwInstallNavJob(void); static void LwNavJobCmd(int mode); static void LwNjFrame(void); /* living_world_navjob.c */
+static void LwInstallNavHeight(void); static void LwNhNote(void); /* living_world_navheight.c */
 static void LwAibFrame(void); static void LwAibInit(void); static void LwAibCmd(int us, int raiseMs); /* living_world_aibudget.c */
 static void LwSemFrame(void); static void LwInstallSemCap(void); static void LwSemCapCmd(int on); /* living_world_semcap.c */
 static void LwRhFrame(void); static void LwInstallRenderHelp(void); static void LwRenderHelpCmd(int on); /* living_world_renderhelp.c */
@@ -2753,7 +2754,7 @@ static void LwSquadsTick(void)
         g_lwWorld.goals = g_lwWorld.goalNoFace = g_lwWorld.goalReplans = g_lwWorld.goalStuck = 0;
         LwNavTypeDump(); /* test (HELLFORGE_LW_TEST_NAV=1): agent types and obstacle areas, twice a level */
         LwHearNote(); LwRushNote();
-        LwGroundNote(); LwTiltNote();
+        LwGroundNote(); LwNhNote(); LwTiltNote();
         Note("living world: %d squads, %d online (%d units of %d), %u spawned, %u taken offline, %u destroyed, %u request frames refused; job-1 units %u, AI %u; "
             "player 1 at (%.0f, %.0f); by sightline: %u spawned (%u in sight, off the host's screen), %d units now", g_lwWorld.count, online, g_lwWorld.onlineUnits, g_lwWorld.eff, g_lwWorld.spawned, g_lwWorld.offlined, g_lwWorld.died,
             g_lwWorld.refused, EvpU32(dir + 0x614, 0), LwAiCount(), (double)(g_lwWorld.playersAt ? g_lwWorld.players[0][0] : 0),
@@ -3831,6 +3832,7 @@ static void LwInstallWallReach(uintptr_t game)
     LwInstallNavSwapSync();
     LwInstallNavTime(); /* test instrument; after the swap sync, whose pins read 0xBB19B0 */
     LwInstallNavJob(); /* after the nav time instrument, which it refuses to share 0x7B8A10 and 0x7B7590 with */
+    LwInstallNavHeight();
     if (g_lwWallReach != NULL) return;
     if (!ApiCodeMatches(game + LW_WALL_SITE, "F3 0F 58 C8 0F 28 C5 F3 0F 59 CE 0F 28 F2") ||
         !ApiCodeMatches(game + 0x59CCFEu, "C7 44 24 78 00 00 80 40"))
@@ -4315,6 +4317,7 @@ static void LwLiveSet(int complex)
 #include "living_world_bpbuild.c" /* test instrument: whole-layer builds of the broad phase and what marked them */
 #include "living_world_navtime.c" /* test instrument: the parts of the main thread's nav cell tick */
 #include "living_world_navjob.c" /* the nav job start's arrays reserved once, huge blocks kept (KB lever-navjob-registry) */
+#include "living_world_navheight.c" /* extra large levels: the navmesh's terrain at a 0.5 m cell height, not 4 m */
 #include "living_world_corpse.c" /* settled ring corpses frozen as in disposal */
 #include "living_world_pairs.c" /* after living_world_corpse.c: dead ragdoll bones keep only ground and trigger pairs */
 #include "living_world_aibudget.c" /* the AI path threads' time a step, raised while requests wait */

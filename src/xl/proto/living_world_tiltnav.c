@@ -17,11 +17,14 @@
 #define LW_TN_CELLS 4096u     /* nav cells whose last build start is kept (64 x 64 at most) */
 #define LW_TN_CELL_LINES 6    /* cell lines a 30 s window */
 #define LW_TN_GROW 1.0f       /* metres an object's box is grown before it is asked for the prop's point */
+#define LW_TN_IDS 4u          /* objects over a point that are looked up in the cells' builds */
+#define LW_TN_KEPT (1u << 22) /* places for the objects handed to the cells' builds: 32 MB, research builds only */
 enum { LW_TN_CARVER, LW_TN_GEOMETRY, LW_TN_PAINTER, LW_TN_INERT, LW_TN_KINDS };
 
 /* carverLo..carverHi: the world heights the carver objects' boxes span; volumes: the carvers whose volume's own box
  * holds the point's (x, y), volLo..volHi the heights those span; owner: the first object's resource (+0x60) */
-typedef struct { uint32_t n[LW_TN_KINDS]; uint32_t flags, material, painters, volumes; float lo, hi, carverLo, carverHi, volLo, volHi; uint64_t owner; int read; } LwTnAt;
+typedef struct { uint32_t n[LW_TN_KINDS]; uint32_t flags, material, painters, volumes; float lo, hi, carverLo, carverHi, volLo, volHi; uint64_t owner; int read;
+    uint64_t ids[LW_TN_IDS]; uint32_t idn; /* the carver and geometry objects over the point, as LwTnId */ } LwTnAt;
 typedef struct { uint32_t at[LW_TN_KINDS], game[3]; float box[4]; ULONGLONG tick; uint32_t builds; uint8_t noted; } LwTnCell;
 static struct
 {
@@ -31,6 +34,39 @@ static struct
     uintptr_t buf[LW_TN_BUF];
 } g_lwTn = {.level = -1};
 static SRWLOCK g_lwTnLock = SRWLOCK_INIT; /* the buffer: the game thread's scan and the nav tick's build starts */
+
+/* The carver and geometry objects each cell's last build start was handed, as LwTnKey: a research build keeps them. */
+static struct { uint64_t* slot; uint32_t used; } g_lwTnKept;
+
+/* An object by its place and resource: the grid's array of objects may move. */
+static uint64_t LwTnId(const uint8_t* o) { uint8_t k[20]; memcpy(k, o + 0x30, 12); memcpy(k + 12, o + 0x60, 8); return Murmur64A(k, sizeof k); }
+
+/* An object in one build of one cell; never 0, an empty place. */
+static uint64_t LwTnKey(uint64_t id, uint32_t cell, uint32_t build)
+{
+    const uint64_t k[2] = {id, ((uint64_t)cell << 32) | build};
+    const uint64_t h = Murmur64A(k, sizeof k);
+    return h ? h : 1;
+}
+
+static int LwTnKeptHas(const uint64_t* slot, uint32_t size, uint64_t key)
+{
+    for (uint32_t i = (uint32_t)key & (size - 1), n = 0; n < size && slot[i] != 0; i = (i + 1) & (size - 1), n++)
+        if (slot[i] == key) return 1;
+    return 0;
+}
+
+/* 0 when three quarters of the places are taken: nothing more is kept, and the lookups say so. */
+static int LwTnKeptAdd(uint64_t* slot, uint32_t size, uint32_t* used, uint64_t key)
+{
+    if (*used >= size / 4 * 3) return 0;
+    uint32_t i = (uint32_t)key & (size - 1);
+    while (slot[i] != 0 && slot[i] != key) i = (i + 1) & (size - 1);
+    if (slot[i] == 0) { slot[i] = key; (*used)++; }
+    return 1;
+}
+
+static int LwTnInBox(const float* box, float x, float y);
 
 /* What the build start does with an object: its carver first, then its geometry, then its painter. */
 static int LwTnKind(uint32_t flags, uintptr_t carver)
@@ -93,6 +129,7 @@ static void LwTnObjects(uintptr_t nav, const float* p, LwTnAt* out)
         memcpy(m, o, sizeof m); memcpy(fm, o + 0x40, sizeof fm); memcpy(box, o + 0x48, sizeof box); memcpy(&carver, o + 0x68, 8); memcpy(&painter, o + 0x70, 8);
         if (!LwTnOver(m, box, box + 3, p, LW_TN_GROW, &zlo, &zhi)) continue;
         int kind = LwTnKind(fm[0], carver);
+        if ((kind == LW_TN_CARVER || kind == LW_TN_GEOMETRY) && out->idn < LW_TN_IDS) out->ids[out->idn++] = LwTnId(o);
         if (out->n[0] + out->n[1] + out->n[2] + out->n[3] == 0) { out->flags = fm[0]; out->material = fm[1]; out->lo = zlo; out->hi = zhi; memcpy(&out->owner, o + 0x60, 8); }
         if (kind == LW_TN_CARVER)
         {
@@ -229,6 +266,7 @@ static void LwTnLevel(void)
     if (g_lwTn.level == g_world.levels) return;
     g_lwTn.level = g_world.levels; g_lwTn.levelAt = GetTickCount64();
     memset(g_lwTn.cell, 0, sizeof g_lwTn.cell);
+    if (g_lwTnKept.slot != NULL) { memset(g_lwTnKept.slot, 0, sizeof(uint64_t) * LW_TN_KEPT); g_lwTnKept.used = 0; }
 }
 
 /* The three counts of a cell's build the game keeps for its own line: carvers, painters, volumes. 0 when unread. */
@@ -238,6 +276,47 @@ static int LwTnGameCounts(uintptr_t grid, uint32_t cellId, uint32_t* out)
     out[0] = out[1] = out[2] = 0;
     return EvpPtr(grid + 0x38, &cells) && !SafeRead(grid + 0x26, &stride, 2) && EvpPtr(cells + (uintptr_t)stride * cellId + 0x50, &stats) &&
         !SafeRead(stats + 0x60, &out[0], 4) && !SafeRead(stats + 0x40, &out[1], 4) && !SafeRead(stats + 0x20, &out[2], 4);
+}
+
+/* The carver and geometry objects of the box, kept as handed to this build of the cell. */
+static void LwTnKeep(uintptr_t grid, const float* box, uint32_t cell, uint32_t build)
+{
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+    if (g_lwNj.cell == NULL) return;
+    AcquireSRWLockExclusive(&g_lwTnLock);
+    if (g_lwTnKept.slot == NULL) g_lwTnKept.slot = (uint64_t*)VirtualAlloc(NULL, sizeof(uint64_t) * LW_TN_KEPT, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    int n = g_lwTnKept.slot == NULL ? 0 : LwTnGather(grid, g_lwNj.cell(grid, box[0], box[1]), g_lwNj.cell(grid, box[2], box[3]));
+    for (int i = 0; i < n; i++)
+    {
+        uint8_t o[0x80]; uint32_t flags; uintptr_t carver;
+        if (SafeRead(g_lwTn.buf[i], o, sizeof o)) continue;
+        memcpy(&flags, o + 0x40, 4); memcpy(&carver, o + 0x68, 8);
+        if (LwTnKind(flags, carver) > LW_TN_GEOMETRY) continue;
+        if (!LwTnKeptAdd(g_lwTnKept.slot, LW_TN_KEPT, &g_lwTnKept.used, LwTnKey(LwTnId(o), cell, build))) break;
+    }
+    ReleaseSRWLockExclusive(&g_lwTnLock);
+#else
+    (void)grid; (void)box; (void)cell; (void)build;
+#endif
+}
+
+/* Whether the objects over a point were handed to the last build of every built cell whose box holds (x, y): 1 all,
+ * 0 one was not (the navmesh there was made without it), -1 not known (no object, no build seen, nothing kept). */
+static int LwTnPropBuilt(const LwTnAt* at, float x, float y)
+{
+    int found = -1;
+    AcquireSRWLockExclusive(&g_lwTnLock);
+    if (g_lwTnKept.slot != NULL && g_lwTnKept.used < LW_TN_KEPT / 4 * 3 && at->idn != 0)
+        for (uint32_t k = 0; k < LW_TN_CELLS; k++)
+        {
+            const LwTnCell* c = &g_lwTn.cell[k];
+            if (c->builds == 0 || !LwTnInBox(c->box, x, y)) continue;
+            if (found < 0) found = 1;
+            for (uint32_t i = 0; i < at->idn; i++)
+                if (!LwTnKeptHas(g_lwTnKept.slot, LW_TN_KEPT, LwTnKey(at->ids[i], k, c->builds))) found = 0;
+        }
+    ReleaseSRWLockExclusive(&g_lwTnLock);
+    return found;
 }
 
 /* After a cell's build start (the nav job's hook, main thread): what its box held, kept as the cell's last build. */
@@ -253,6 +332,7 @@ static void LwTnCellStart(uintptr_t grid, uint32_t cellId)
     LwTnGameCounts(grid, cellId, c->game);
     memcpy(c->box, box, sizeof box);
     c->tick = GetTickCount64(); c->builds++; c->noted = 0;
+    LwTnKeep(grid, box, cellId, c->builds);
 }
 
 /* Whether a cell's box holds more carvers, geometry or painters now than its last build was handed. */
@@ -302,6 +382,11 @@ static void LwTnNote(void)
 }
 
 #ifdef CO_TEST
+int CoXlTestTnKept(uint64_t* slot, uint32_t size, uint32_t* used, uint64_t id, uint32_t cell, uint32_t build, int add)
+{
+    return add ? LwTnKeptAdd(slot, size, used, LwTnKey(id, cell, build)) : LwTnKeptHas(slot, size, LwTnKey(id, cell, build));
+}
+uint64_t CoXlTestTnId(const uint8_t* o) { return LwTnId(o); }
 int CoXlTestTnKind(uint32_t flags, uintptr_t carver) { return LwTnKind(flags, carver); }
 int CoXlTestTnOver(const float* m, const float* lo, const float* hi, const float* p, float grow, float* zlo, float* zhi) { return LwTnOver(m, lo, hi, p, grow, zlo, zhi); }
 int CoXlTestTnReach(float flo, float fhi, float lo, float hi, float height) { return LwTnReach(flo, fhi, lo, hi, height); }
@@ -310,6 +395,23 @@ int CoXlTestTnInBox(const float* box, float x, float y) { return LwTnInBox(box, 
 int CoXlTestTnLate(const uint32_t* at, const uint32_t* now) { return LwTnLate(at, now); }
 int CoXlTestTnAgentIndex(uintptr_t exe, uint32_t hash) { return LwTnAgentIndex(exe, hash); }
 /* The engine's cell and gather steps as the test's own; then the objects over p as the probe counts them. */
+/* A build start of a cell with this box (start 1; -1 first forgets every build), then whether the objects over p were
+ * handed to the builds of the cells holding it. */
+int CoXlTestTnBuilt(uintptr_t nav, uint32_t (*cell)(uintptr_t, float, float), uint32_t (*gather)(uintptr_t, uint32_t, uint32_t, uintptr_t*, uint32_t),
+    uint32_t cellId, const float* box, int start, const float* p)
+{
+    LwTnAt at;
+    g_lwNj.cell = (LwNjCellFn)cell; g_lwNj.gather = (LwNjGatherFn)gather;
+    if (start < 0) { g_lwTn.level = -2; LwTnLevel(); }
+    if (start)
+    {
+        LwTnCell* c = &g_lwTn.cell[cellId];
+        memcpy(c->box, box, sizeof c->box); c->builds++;
+        LwTnKeep(nav + 0x6710u, box, cellId, c->builds);
+    }
+    LwTnObjects(nav, p, &at);
+    return LwTnPropBuilt(&at, p[0], p[1]);
+}
 void CoXlTestTnObjects(uintptr_t nav, uint32_t (*cell)(uintptr_t, float, float), uint32_t (*gather)(uintptr_t, uint32_t, uint32_t, uintptr_t*, uint32_t),
     const float* p, uint32_t* counts, uint32_t* flags, uint32_t* material, int* read, float* carverZ, uint32_t* painters, uint64_t* owner, float* volumeZ, uint32_t* volumes)
 {
