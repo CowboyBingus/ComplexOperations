@@ -62,6 +62,20 @@ static void EngineSwitch(const uint32_t* handles, uint32_t count, int on)
         if (!on && g_swOffCount < 64) g_swOff[g_swOffCount++] = handles[i];
     }
 }
+/* A make and a destroy on a thread of their own, as a generator thread's would be. */
+typedef struct OffThread { const void* description; uintptr_t from; void (*destroy)(const uint32_t*, uint32_t); uint32_t handle; } OffThread;
+static DWORD WINAPI OffThreadRun(void* arg)
+{
+    const OffThread* o = arg;
+    if (o->description != NULL) co_cutters_test_make(o->description, o->from);
+    if (o->destroy != NULL) o->destroy(&o->handle, 1);
+    return 0;
+}
+static void OnOtherThread(OffThread o)
+{
+    HANDLE t = CreateThread(NULL, 0, OffThreadRun, &o, 0, NULL);
+    if (t != NULL) { WaitForSingleObject(t, INFINITE); CloseHandle(t); }
+}
 static void StepTask(uint64_t handle) { memcpy(g_exe + CO_CUTTERS_AI_WORLDS + 0x80u * CO_CUTTERS_WORLD + CO_CUTTERS_STEP_TASK, &handle, 8); }
 
 static void Hex(uint8_t* at, const char* hex)
@@ -301,6 +315,13 @@ int main(void)
         CHECK(co_cutters_live(1) == 0);
         CHECK(co_cutters_test_make(&d, forest) == 0x81010005u && g_addSeen == 1);
         CHECK(memcmp(&d, &was, sizeof d) == 0);
+        /* before any tick, a make and a destroy on other threads: counted as off the tick's once a tick says which
+         * thread that is, and this thread's own are not */
+        g_makeAnswer = 0x81010041u; OnOtherThread((OffThread){&d, forest, NULL, 0});
+        g_makeAnswer = 0x81010042u; OnOtherThread((OffThread){&d, forest, destroy, 0x81010041u});
+        OnOtherThread((OffThread){NULL, 0, destroy, 0x81010042u});
+        g_makeAnswer = 0x81010005u; g_calls = g_seenCount = 0;
+        CHECK(co_cutters_tick(NULL, 0, 900, 16, &t) == 1 && t.makesOff == 2 && t.destroysOff == 2 && t.threadsOff == 3 && t.records == 1 && t.trees == 3);
         CHECK(s->records == 1 && s->wanted == 1 && s->world == 0x5000 && s->pool == (uintptr_t)g_pool && s->mask == 0xFFFF);
         CHECK(s->rec[0].handle == 0x81010005u && s->rec[0].x == 40.0f && s->rec[0].y == -70.0f);
         /* a tree the game does not add: recorded as such, the game's choice passed on */
@@ -321,7 +342,7 @@ int main(void)
         CoCutCentre c = {40.0f, -60.0f, CO_CUTSET_PLAYER_IN, CO_CUTSET_PLAYER_OUT};
         CHECK(co_cutters_tick(&c, 1, 1000, 16, &t) == 1);
         CHECK(t.bound == 1 && t.hooked == 1 && t.records == 2 && t.wanted == 1 && t.on == 1 && t.adds == 1 && t.removes == 0 && t.cap == 3);
-        CHECK(t.trees == 2 && t.others == 2 && t.unbound == 0 && t.destroyed == 0 && t.world == 0x5000 && t.binds == 1);
+        CHECK(t.trees == 4 && t.others == 2 && t.unbound == 0 && t.destroyed == 2 && t.world == 0x5000 && t.binds == 1);
         CHECK(g_makes == makes && g_calls == 0);
         /* any other caller's cutter in a recorded slot (through the hook itself): the tree's old record goes */
         g_makeAnswer = 0x81030005u;
@@ -330,7 +351,7 @@ int main(void)
         const uint32_t batch[3] = {0x81010006u, 0x81010099u, 0x81030006u};
         destroy(batch, 3);
         CHECK(s->records == 0 && s->stale == 0 && g_calls == 1 && g_seenCount == 3 && g_seen[0] == 0x81010006u && g_seen[2] == 0x81030006u);
-        CHECK(co_cutters_tick(&c, 1, 1250, 16, &t) == 1 && t.destroyed == 1 && t.records == 0);
+        CHECK(co_cutters_tick(&c, 1, 1250, 16, &t) == 1 && t.destroyed == 3 && t.records == 0 && t.makesOff == 2 && t.destroysOff == 2);
         /* a new AI world, then a new pool: the records of the old one go before the next is taken */
         g_makeAnswer = 0x81010005u;
         CHECK(co_cutters_test_make(&d, forest) == 0x81010005u && s->records == 1 && s->binds == 1);

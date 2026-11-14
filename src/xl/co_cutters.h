@@ -63,7 +63,9 @@ typedef struct CoCuttersTick
     uint64_t trees, others, unbound, refused, replaced, stale, destroyed, binds;
     uintptr_t world;
     double us, holdUs; /* the tick, and the part of it under the set's lock (the engine's adds are inside it) */
-    uint64_t makesOff, destroysOff, stranded; /* makes and destroys on a thread other than the tick's; records dropped while they waited */
+    /* makes and destroys since the start on the threads other than the tick's, a level's first trees too, and how
+     * many such threads (the first 64); records dropped while they waited */
+    uint64_t makesOff, destroysOff, stranded; uint32_t threadsOff;
     /* switching: the tick was skipped with the AI step in flight; makes held back, added by the game with no tick
      * alive, added at once because the record was refused, or not added (the AI world or the pool had gone); handles
      * sent to the switch */

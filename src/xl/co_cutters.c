@@ -53,13 +53,17 @@ static const Pin kRecordPins[] = {
 };
 
 /* The make can run on a thread other than the game's (the forest's spawn has several callers), so the set has its
- * own lock; the tick holds it for well under a millisecond. */
+ * own lock; the tick holds it for well under a millisecond. Makes and destroys are counted by thread: a level's
+ * first trees are made before any tick has said which thread the tick's is. */
+#define THREADS 64
 static struct
 {
     volatile LONG armed, live, switching, alive, tickAt;
     SwitchFn sw;
     volatile LONG tickThread;
-    uint64_t held, atOnce, noWorld, stock, sentOn, sentOff, skips, makesOff, destroysOff;
+    uint64_t held, atOnce, noWorld, stock, sentOn, sentOff, skips;
+    struct { LONG id; uint64_t makes, destroys; } thread[THREADS];
+    uint64_t makesPast, destroysPast; /* on threads past the table: counted as off the tick's */
     SRWLOCK lock;
     CoCutSet set;
     void* memory;
@@ -87,6 +91,17 @@ static int Bound(void)
     return co_cutset_bind(&g_rec.set, world, pool, mask);
 }
 
+/* Called under the set's lock. */
+static void Counted(int destroy)
+{
+    const LONG id = (LONG)GetCurrentThreadId();
+    uint32_t i = 0;
+    while (i < THREADS && g_rec.thread[i].id != id && g_rec.thread[i].id != 0) i++;
+    if (i == THREADS) { if (destroy) g_rec.destroysPast++; else g_rec.makesPast++; return; }
+    g_rec.thread[i].id = id;
+    if (destroy) g_rec.thread[i].destroys++; else g_rec.thread[i].makes++;
+}
+
 /* A cutter of the mission's world was made: a tree's is recorded, any other only frees its slot of an old record.
  * `lit`: the game added it itself. `held`: the mod held its add back, so with no record it is added here, at once,
  * unless the AI world or the pool went during the make: then nothing can add it, and it is counted.
@@ -97,7 +112,7 @@ static void Recorded(uint32_t handle, int tree, float x, float y, int wanted, in
     int made = 0;
     uintptr_t world, pool;
     AcquireSRWLockExclusive(&g_rec.lock);
-    if (g_rec.tickThread != 0 && (LONG)GetCurrentThreadId() != g_rec.tickThread) g_rec.makesOff++;
+    Counted(0);
     if (!g_rec.live || !Bound()) g_rec.unbound++;
     else if (!tree) { co_cutset_taken(&g_rec.set, handle); g_rec.others++; }
     else if ((made = co_cutset_made(&g_rec.set, handle, x, y, wanted)) != 0)
@@ -155,7 +170,7 @@ static void Destroy(const uint32_t* handles, uint32_t count)
     if (g_rec.armed) /* before the engine frees the slots: a make on another thread can take one at once */
     {
         AcquireSRWLockExclusive(&g_rec.lock);
-        if (g_rec.tickThread != 0 && (LONG)GetCurrentThreadId() != g_rec.tickThread) g_rec.destroysOff++;
+        Counted(1);
         g_rec.destroyed += co_cutset_gone(&g_rec.set, handles, count);
         ReleaseSRWLockExclusive(&g_rec.lock);
     }
@@ -294,7 +309,13 @@ int co_cutters_tick(const CoCutCentre* centres, uint32_t count, uint32_t nowMs, 
         g_rec.sentOn += g_rec.tick.adds; g_rec.sentOff += g_rec.tick.removes;
         if (out->bound && out->hooked) { InterlockedExchange(&g_rec.tickAt, (LONG)nowMs); InterlockedExchange(&g_rec.alive, 1); }
     }
-    out->held = g_rec.held; out->stock = g_rec.stock; out->atOnce = g_rec.atOnce; out->noWorld = g_rec.noWorld; out->makesOff = g_rec.makesOff; out->destroysOff = g_rec.destroysOff; out->stranded = s->stranded; out->sentOn = g_rec.sentOn; out->sentOff = g_rec.sentOff; out->skips = g_rec.skips;
+    out->held = g_rec.held; out->stock = g_rec.stock; out->atOnce = g_rec.atOnce; out->noWorld = g_rec.noWorld; out->stranded = s->stranded; out->sentOn = g_rec.sentOn; out->sentOff = g_rec.sentOff; out->skips = g_rec.skips;
+    out->makesOff = g_rec.makesPast; out->destroysOff = g_rec.destroysPast; out->threadsOff = 0;
+    for (uint32_t i = 0; i < THREADS && g_rec.thread[i].id != 0; i++)
+    {
+        if (g_rec.thread[i].id == g_rec.tickThread) continue;
+        out->makesOff += g_rec.thread[i].makes; out->destroysOff += g_rec.thread[i].destroys; out->threadsOff++;
+    }
     out->capped = g_rec.tick.capped; out->adds = g_rec.tick.adds; out->removes = g_rec.tick.removes; out->shed = g_rec.tick.shed;
     out->waiting = g_rec.tick.waiting; out->over = g_rec.tick.over;
     out->records = s->records; out->wanted = s->wanted; out->on = s->on; out->cap = s->cap; out->world = s->world;
