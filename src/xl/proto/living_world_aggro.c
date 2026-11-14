@@ -40,7 +40,7 @@ static const char* const kLwEyeWhat[LW_EYE_N] = {"no eye", "out of view", "seen"
 typedef struct { uint32_t unit; ULONGLONG since, seen, closeAt, senseAt, checkedAt, noticedAt; uint8_t logged, timed, route, lastPlayer, lastWhy, calm; } LwAgpUnit;
 /* A notice waits and is confirmed per detector: a loader squad's members share one, and whichever updates first takes
  * the flag (0x7EB730 clears it), so the unit that leaves alert 0 need not be the one noticed. */
-typedef struct { uint32_t det, unit; ULONGLONG waitAt, checkAt; uint8_t tries, route, pending, present, left; } LwSenseDet;
+typedef struct { uint32_t det, unit, leftUnit; ULONGLONG waitAt, checkAt; uint8_t tries, route, pending, present, left; } LwSenseDet;
 typedef struct { LwAgpUnit* a; uint32_t unit; float d, radius; ULONGLONG checkedAt; uint8_t player, loader, taken; } LwSenseCand;
 static struct
 {
@@ -530,9 +530,11 @@ static void LwSenseResults(ULONGLONG now)
         if (c == LW_CONF_LEFT) g_lwAgp.mLeft[route]++;
         else if (c == LW_CONF_GONE) g_lwAgp.mGone++;
         else { g_lwAgp.mNoEffect[route]++; g_lwAgp.mGiven += (uint32_t)(c == LW_CONF_GIVEN); }
+        char who[64] = "";
+        if (c == LW_CONF_LEFT) snprintf(who, sizeof who, ": %08X, alert %u (%s)", e->leftUnit, LwAlert(e->leftUnit), e->leftUnit == e->unit ? "the unit noticed" : "a mate");
         if (g_lwAgp.resultLines++ < LW_SENSE_LINES)
-            Note("living world: sight: detector %08X, noticed through %08X (%s, notice %d): %s", e->det, e->unit,
-                route == LW_ROUTE_FLAG ? "flag 0x10" : "hearing", tries, what[c]);
+            Note("living world: sight: detector %08X, noticed through %08X (%s, notice %d): %s%s", e->det, e->unit,
+                route == LW_ROUTE_FLAG ? "flag 0x10" : "hearing", tries, what[c], who);
     }
 }
 
@@ -577,7 +579,7 @@ static void LwAggroProbe(void)
         {
             /* a unit that was calm at the last probe and is not now: one already fighting proves nothing */
             LwSenseDet* e = LwSenseDetOf(g_lwAgp.dets, LW_SENSE_DETS, LwAwareDetector(unit), now, 0);
-            if (e && e->pending) { e->present = 1; if (a->calm && LwAlert(unit) != 0) e->left = 1; }
+            if (e && e->pending) { e->present = 1; if (a->calm && LwAlert(unit) != 0 && !e->left) { e->left = 1; e->leftUnit = unit; } }
         }
         a->calm = (uint8_t)(LwAlert(unit) == 0);
         if (!fighting && !a->closeAt && best <= LW_AGP_TIMED * LW_AGP_TIMED) a->closeAt = now;
