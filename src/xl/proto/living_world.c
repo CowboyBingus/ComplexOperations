@@ -1817,6 +1817,11 @@ static int LwSquadOfMember(uint32_t id, ULONGLONG now, int* dead)
         if (g_lwLost[k].id == id && g_lwLost[k].at && now - g_lwLost[k].at <= LW_LOST_MS) { *dead = 1; return g_lwLost[k].squad; }
     return -1;
 }
+/* An attacker that is no unit, by its entity type. 4D4793E8C8108CFE is the game's huge explosion (HugeExplosion and
+ * StaticPosition components, spawned by the explosion update, the type's only use: movabs at 0x13C61C7). It names
+ * itself as the attacker when the one who set it off is gone, and one blast takes a whole squad in a millisecond. */
+#define LW_HUGE_BLAST 0x4D4793E8C8108CFEull
+static const char* LwKillerKind(uint64_t res) { return res == LW_HUGE_BLAST ? "a huge explosion with no living attacker, its " : ""; }
 static const char* LwLostWhy(uint32_t unit, uint32_t* squad, char* by, size_t size, const float* at)
 {
     ActHealth h; uintptr_t m, links, av; uint32_t index;
@@ -1847,7 +1852,7 @@ static const char* LwLostWhy(uint32_t unit, uint32_t* squad, char* by, size_t si
         {
             uint32_t au = 0; float ap[3] = {0, 0, 0}; uint64_t res = attacker && attacker != 0x7FFF ? EvpEntityResource(g_lw.game, attacker, &au) : 0;
             int placed = au && EvpUnitPosition(au, ap);
-            snprintf(what, sizeof what, "entity (resource %016llx, %s%.0f m away)", (unsigned long long)res, placed ? "" : "no position, ",
+            snprintf(what, sizeof what, "%sentity (resource %016llx, %s%.0f m away)", LwKillerKind(res), (unsigned long long)res, placed ? "" : "no position, ",
                 placed ? (double)sqrtf((ap[0] - at[0]) * (ap[0] - at[0]) + (ap[1] - at[1]) * (ap[1] - at[1]) + (ap[2] - at[2]) * (ap[2] - at[2])) : 0.0);
         }
         uint32_t hit = EvpU32(h.record + 0x40, 0); /* the damage hash the apply writes with the attacker (0x923C0A..0x923C34; KB
@@ -3821,6 +3826,9 @@ static uint64_t LwHitApply(uint64_t mgr, uint64_t target, uint64_t kind, uint64_
     }
     return g_lwApply(mgr, target, kind, a4, damager, attacker, creditor, amount, a9, a10, a11, a12, a13, a14, a15, info, hash, a18, a19);
 }
+/* Explosions are noted this near a member: a squad 13 m across died to one huge explosion, and the 15 m this was
+ * left the blast that set it off unnamed. */
+#define LW_BLAST_NOTE 100.0f
 static uint64_t LwHitBlast(uint64_t self, const float* pos, uint64_t type, uint64_t source, uint64_t attacker, uint64_t a6, uint64_t a7, uint64_t a8, uint64_t a9, uint64_t a10,
     uint64_t a11, uint64_t a12, uint64_t a13, uint64_t a14, uint64_t a15)
 {
@@ -3833,7 +3841,7 @@ static uint64_t LwHitBlast(uint64_t self, const float* pos, uint64_t type, uint6
             const LwSquad* q = &g_lwSquads[i];
             if (q->state != LW_ONLINE) continue;
             for (int k = 0; k < q->seenCount && k < 32; k++)
-            { float dx = q->seenAt[k][0] - p[0], dy = q->seenAt[k][1] - p[1]; if (dx * dx + dy * dy < 15.0f * 15.0f) { closeTo = i; break; } }
+            { float dx = q->seenAt[k][0] - p[0], dy = q->seenAt[k][1] - p[1]; if (dx * dx + dy * dy < LW_BLAST_NOTE * LW_BLAST_NOTE) { closeTo = i; break; } }
         }
         if (closeTo >= 0 && InterlockedIncrement(&g_lwHitNotes) <= 4000)
         {
@@ -3851,8 +3859,8 @@ static uint64_t LwHitBlast(uint64_t self, const float* pos, uint64_t type, uint6
                 uintptr_t f = (uintptr_t)frames[k]; int in = f >= g_lw.game && f < g_lw.game + 0x4744000u;
                 at += (size_t)snprintf(chain + at, sizeof chain - at, in ? " g+0x%llX" : " ?%llX", (unsigned long long)(in ? f - g_lw.game : f));
             }
-            Note("living world: test: explosion type %08X at (%.1f, %.1f, %.1f) within 15 m of squad %d; source %s; attacker %s; chain%s",
-                (uint32_t)type, (double)p[0], (double)p[1], (double)p[2], closeTo, who[0], who[1], chain);
+            Note("living world: test: explosion type %08X at (%.1f, %.1f, %.1f) within %.0f m of squad %d; source %s; attacker %s; chain%s",
+                (uint32_t)type, (double)p[0], (double)p[1], (double)p[2], (double)LW_BLAST_NOTE, closeTo, who[0], who[1], chain);
         }
     }
     return g_lwBlast(self, pos, type, source, attacker, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15);

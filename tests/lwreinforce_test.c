@@ -77,6 +77,7 @@ int CoXlTestLwFightTakeWhom(float x, float y, int n, const uint32_t* ids, const 
 uint32_t CoXlTestLwFightFar(void);
 void CoXlTestLwFightPoint(int f, float x, float y);
 void CoXlTestLwAvatars(const uint32_t* ids, int n);
+const char* CoXlTestLwKillerKind(uint64_t res);
 int CoXlTestLwFightOver(int f, uint64_t now);
 void CoXlTestLwNotSentLines(uint32_t n);
 void CoXlTestLwNoiseWorld(const float* pl, int np, const float* sq, int n);
@@ -364,6 +365,13 @@ static void Lost(void)
     CHECK(CoXlTestLwSquadOf(0, 0, &dead) == -1);
 }
 
+/* The game's huge explosion entity as a killer is named; any other entity type is not. */
+static void KillerKind(void)
+{
+    g_case = "resource 4d4793e8c8108cfe is a huge explosion with no living attacker; another resource has no name";
+    CHECK(strcmp(CoXlTestLwKillerKind(0x4D4793E8C8108CFEull), "a huge explosion with no living attacker, its ") == 0);
+    CHECK(CoXlTestLwKillerKind(0x4D4793E8C8108CFFull)[0] == 0 && CoXlTestLwKillerKind(0)[0] == 0);
+}
 static void Slots(void)
 {
     const float p[3] = {100, 200, 5};
@@ -1627,6 +1635,7 @@ int main(void)
     Send();
     OneClock();
     AimRules();
+    KillerKind();
     FightNear();
     ShotAt();
     NoisePath();

@@ -920,6 +920,7 @@ uint32_t CoXlTestLwNoiseCount(int what) { return what == 0 ? g_lwHear.events : w
 /* Fight f at `now`: 1 when it is over. The mission's lines so far for squads a fight could not send. */
 int CoXlTestLwFightOver(int f, uint64_t now) { return LwFightOver(f, now); }
 void CoXlTestLwNotSentLines(uint32_t n) { g_lwWorld.notSentLines = n; }
+const char* CoXlTestLwKillerKind(uint64_t res) { return LwKillerKind(res); }
 /* The players' avatar entities, in the order of their places. */
 void CoXlTestLwAvatars(const uint32_t* ids, int n) { for (int i = 0; i < n && i < EVT_MAX_PLAYERS; i++) g_lwWorld.avatars[i] = ids[i]; }
 /* Fight f's target was last fought `ago` ms ago. */
