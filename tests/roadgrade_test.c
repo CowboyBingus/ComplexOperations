@@ -222,6 +222,17 @@ static void Crest(void)
  *   their count differs.
  * - A link measured from its other end: its length, grade and the larger move of its two ends are the same. */
 static double g_at[N], g_ref[N], g_low[N], g_high[N];
+/* What link k (station k to k + 1) may climb over the common limit (0: nothing more), and the way between two
+ * stations at each link's own limit. */
+static double g_lim[N], g_cum[N];
+static double RefReach(uint32_t n, double slope, uint32_t i, uint32_t j)
+{
+    (void)n;
+    double sum = 0.0;
+    for (uint32_t k = i < j ? i : j; k < (i < j ? j : i); k++) sum += (g_lim[k] > slope ? g_lim[k] : slope) * g_gaps[k];
+    (void)g_cum;
+    return sum;
+}
 static void RefWithin(uint32_t n, double slope)
 {
     static double under[N], over[N];
@@ -230,7 +241,7 @@ static void RefWithin(uint32_t n, double slope)
         under[i] = over[i] = g_ref[i];
         for (uint32_t j = 0; j < n; j++)
         {
-            const double reach = slope * fabs(g_at[i] - g_at[j]);
+            const double reach = RefReach(n, slope, i, j);
             if (g_ref[j] + reach < under[i]) under[i] = g_ref[j] + reach;
             if (g_ref[j] - reach > over[i]) over[i] = g_ref[j] - reach;
         }
@@ -267,7 +278,7 @@ static uint32_t RefFrom(uint32_t n, double slope, uint32_t passes, int capped)
         for (uint32_t j = 0; j < n; j++)
         {
             if (!g_pinned[j]) continue;
-            const double reach = slope * fabs(g_at[i] - g_at[j]);
+            const double reach = RefReach(n, slope, i, j);
             if (g_ground[j] - reach > g_low[i]) g_low[i] = g_ground[j] - reach;
             if (g_ground[j] + reach < g_high[i]) g_high[i] = g_ground[j] + reach;
         }
@@ -298,13 +309,38 @@ static void RefStart(uint32_t n)
 static uint32_t RefSolve(uint32_t n, double slope, uint32_t passes) { RefStart(n); return RefFrom(n, slope, passes, 0); }
 /* The worn path by its definition: the gentle profile without pins, pulled to within each station's cap of the
  * ground, then the hard limit from there, the eased profile pulled back into the cap before the limit each pass. */
-static uint32_t RefCapped(uint32_t n, double soft, double hard, uint32_t passes)
+static uint32_t RefStage(uint32_t n, double soft, double hard, uint32_t passes)
 {
+    static double keep[N];
     RefStart(n);
+    memcpy(keep, g_lim, sizeof keep); memset(g_lim, 0, sizeof g_lim); /* the gentle profile knows no link's own limit */
     RefWithin(n, soft);
+    memcpy(g_lim, keep, sizeof keep);
     RefCap(n);
     return RefFrom(n, hard, passes, 1);
 }
+/* With steep > hard: solved twice. After the first solve a link may climb more as the worse of its ends stands
+ * further than `cap` off its ground (eased, whole at twice the cap). A link between two pins has no limit. */
+static uint32_t RefSteep(uint32_t n, double soft, double hard, double steep, double cap, uint32_t passes)
+{
+    for (uint32_t k = 0; k + 1 < n; k++) g_lim[k] = g_pinned[k] && g_pinned[k + 1] ? 1.0e6 : 0.0;
+    uint32_t torn = RefStage(n, soft, hard, passes);
+    if (steep > hard)
+    {
+        for (uint32_t k = 0; k + 1 < n; k++)
+        {
+            if (g_pinned[k] && g_pinned[k + 1]) continue;
+            const double a = g_pinned[k] ? 0.0 : fabs(g_ref[k] - g_ground[k]) - cap, b = g_pinned[k + 1] ? 0.0 : fabs(g_ref[k + 1] - g_ground[k + 1]) - cap;
+            double w = (a > b ? a : b) / cap;
+            w = w < 0.0 ? 0.0 : w > 1.0 ? 1.0 : w;
+            g_lim[k] = hard + (steep - hard) * w * w * (3.0 - 2.0 * w);
+        }
+        torn = RefStage(n, soft, hard, passes);
+    }
+    memset(g_lim, 0, sizeof g_lim);
+    return torn;
+}
+static uint32_t RefCapped(uint32_t n, double soft, double hard, uint32_t passes) { return RefSteep(n, soft, hard, 0.0, 4.0, passes); }
 /* GradeOverCap by its definition on a chain's g_ref: free stations more than their cap and `by` from the ground. */
 static uint32_t RefOverCap(uint32_t n, double by, double* worst, uint32_t* at, double* metres)
 {
@@ -743,6 +779,9 @@ static void Together(void)
 /* ---- the worn path: 4.5 degrees where that keeps the road within its cap of the ground, the hard limit everywhere ---- */
 #define SOFT 0.0787017f /* tan 4.5 degrees */
 #define HARD 0.1227846f /* tan 7 degrees */
+uint32_t CoXlTestGradeSteep(const float* ground, const uint8_t* pinned, const float* earth, uint32_t n, const uint32_t* links, const float* gaps, uint32_t count,
+    float soft, float hard, float steep, float cap, uint32_t passes, float* target, double out[7]);
+float CoXlTestGradeFade(float world, float playable, float x, float y, float* cap);
 static float g_soft[N + 8], g_hard[N + 8];
 static double g_over[4];
 static uint32_t Even(uint32_t n, float gap)
@@ -885,6 +924,79 @@ static void CappedPins(void)
 static float GroundRidge(float x, float y) { (void)y; const float up = x < 1000.0f ? 30.0f - 0.25f * (1000.0f - x) : 30.0f - 0.5f * (x - 1000.0f); return up > 0.0f ? up : 0.0f; }
 static float GroundMound(float x, float y) { (void)y; const float up = 0.12f * (496.0f - fabsf(x - 1000.0f)); return up > 0.0f ? up : 0.0f; }
 static float MoveAt(void* c, float x, float y) { (void)c; return CoXlTestGradeMove(x, y); }
+/* Run 3's causeway (Automaton level, spur 0 from the plateau at (-4001, 5055) down to the junction at (-4143, 4784)
+ * and on along arterial 1072): the ground of grade-stations-2.tsv along the line, a station every 10 m. */
+static float Hillside(float s)
+{
+    static const float k[16][2] = {{0, 93.5f}, {30, 93.4f}, {60, 91.2f}, {80, 86.8f}, {139, 71.4f}, {198, 53.8f}, {257, 33.8f}, {311, 22.2f}, {355, 20.2f},
+        {406, 15.8f}, {457, 13.8f}, {508, 15.3f}, {558, 19.9f}, {609, 26.1f}, {659, 31.9f}, {710, 35.8f}};
+    for (int i = 1; i < 16; i++)
+        if (s <= k[i][0]) return k[i - 1][1] + (k[i][1] - k[i - 1][1]) * (s - k[i - 1][0]) / (k[i][0] - k[i - 1][0]);
+    return k[15][1];
+}
+#define STEEP 0.3249197f /* tan 18 degrees */
+static void Steep(void)
+{
+    enum { M = 72 };
+    static float steep[M], plain[M], moved[M];
+    double out[7], flat[7];
+    for (uint32_t i = 0; i < M; i++)
+    {
+        g_ground[i] = Hillside(10.0f * (float)i); g_pinned[i] = i <= 6;
+        g_earth[i] = i <= 6 ? 0.0f : i < 11 ? 4.0f * (float)(i - 6) / 5.0f : 4.0f;
+    }
+    Even(M, 10.0f);
+    g_case = "a hillside of 17 to 19 degrees under a pinned plateau: 7 degrees stands the road 38 m over the ground";
+    CoXlTestGradeSteep(g_ground, g_pinned, g_earth, M, g_links, g_gaps, M - 1, SOFT, HARD, HARD, 4.0f, 16, plain, out);
+    CHECK(out[0] == 0 && out[5] > 37.0 && out[5] < 39.0 && out[4] < 7.01); /* the run measured 38.3 m */
+    g_case = "the same with links up to 18 degrees where 7 stood over the cap: the road follows the hillside";
+    CHECK(CoXlTestGradeSteep(g_ground, g_pinned, g_earth, M, g_links, g_gaps, M - 1, SOFT, HARD, STEEP, 4.0f, 16, steep, out) == 0);
+    CHECK(out[5] < 5.0 && out[6] < 1.0 && out[4] > 7.5 && out[4] < 18.01 && out[0] >= 40 && out[0] <= 60 && out[1] == 10.0 * out[0]);
+    CHECK(fabs(atan(out[2]) * 57.29578 - out[4]) < 0.01 && out[3] >= 7 && out[3] < 32); /* the steepest is on the hillside, and a link that may */
+    for (uint32_t i = 0; i < M; i++)
+    {
+        CHECK(fabsf(steep[i] - g_ground[i]) < 8.0f);
+        if (i <= 6) CHECK(steep[i] == g_ground[i]);
+        if (i + 1 < M && i >= 6) CHECK(fabsf(steep[i + 1] - steep[i]) <= STEEP * 10.0f + 1.0e-3f);
+    }
+    /* past the hillside's foot, where 7 degrees stayed within the cap, no link climbs more than 7 */
+    for (uint32_t i = 50; i + 1 < M; i++) CHECK(fabsf(steep[i + 1] - steep[i]) <= HARD * 10.0f + 1.0e-3f);
+    g_case = "the steep rule has no branch on a height: a millimetre of ground moves the road no further";
+    g_ground[30] += 0.001f;
+    CoXlTestGradeSteep(g_ground, g_pinned, g_earth, M, g_links, g_gaps, M - 1, SOFT, HARD, STEEP, 4.0f, 16, moved, flat);
+    { float far_ = 0.0f; for (uint32_t i = 0; i < M; i++) if (fabsf(moved[i] - steep[i]) > far_) far_ = fabsf(moved[i] - steep[i]); CHECK(far_ < 0.002f); }
+    g_ground[30] -= 0.001f;
+    g_case = "ground 7 degrees serves within the cap: no link may climb more and the profile is the capped one's";
+    for (uint32_t i = 0; i < M; i++) { g_ground[i] = 3.0f * sinf(0.05f * (float)i * 10.0f) + 0.06f * 10.0f * (float)i; g_pinned[i] = 0; g_earth[i] = 4.0f; }
+    CoXlTestGradeSteep(g_ground, g_pinned, g_earth, M, g_links, g_gaps, M - 1, SOFT, HARD, STEEP, 4.0f, 16, steep, out);
+    CoXlTestGradeCapped(g_ground, g_pinned, g_earth, M, g_links, g_gaps, M - 1, SOFT, HARD, 16, 0.25f, plain, g_over);
+    CHECK(out[0] == 0 && memcmp(steep, plain, sizeof steep) == 0 && out[4] < 7.01);
+    g_case = "pins on a pad that is not level (10 degrees): each keeps its ground, none is torn, and the road leaves the last within the limit";
+    for (uint32_t i = 0; i < M; i++) { g_ground[i] = i < 6 ? 1.7633f * (float)i : 1.7633f * 5.0f; g_pinned[i] = i < 6; g_earth[i] = i < 6 ? 0.0f : 4.0f; }
+    CHECK(CoXlTestGradeSteep(g_ground, g_pinned, g_earth, M, g_links, g_gaps, M - 1, SOFT, HARD, STEEP, 4.0f, 16, steep, out) == 0);
+    for (uint32_t i = 0; i < 6; i++) CHECK(steep[i] == g_ground[i]);
+    CHECK(CoXlTestGradeSteep(g_ground, g_pinned, g_earth, M, g_links, g_gaps, M - 1, SOFT, HARD, 0.0f, 4.0f, 16, moved, flat) == 0); /* and with no steep rule */
+    CHECK(out[0] == 0 && out[4] < 7.01); /* the links between pins are the pad's own ground, not road: not measured */
+    for (uint32_t i = 0; i < M; i++) { g_pinned[i] = 0; g_earth[i] = 4.0f; }
+
+    g_case = "a place's footprint: a road's share and cap fall to none at its edge over 48 m, and it pins nothing";
+    {
+        const float world = 4096.0f, playable = 2000.0f, mid = 2048.0f; float cap = 0.0f; int pinned = 1;
+        float pad[6] = {0.0f, 0.0f, 40.0f, 20.0f, 1.0f, 1.0f}; /* a footprint of 40 m whose tile band is 20 m */
+        CoXlTestGradePads(pad, 1);
+        CHECK(CoXlTestGradeFade(world, playable, mid + 39.0f, mid, &cap) == 1.0f && cap == 0.0f);
+        CHECK(fabsf(CoXlTestGradeFade(world, playable, mid + 64.0f, mid, &cap) - 0.5f) < 1.0e-4f); /* halfway: 24 of 48 m */
+        CHECK(CoXlTestGradeFade(world, playable, mid + 88.5f, mid, &cap) == 0.0f && cap > 3.85f && cap < 3.9f); /* the ring of 10 m still touches the fade */
+        CHECK(CoXlTestGradeFade(world, playable, mid + 98.5f, mid, &cap) == 0.0f && cap == 4.0f); /* 58 m from the footprint: whole */
+        CoXlTestGradeFree(world, playable, mid + 10.0f, mid, &pinned);
+        CHECK(pinned == 0);
+        pad[5] = 0.0f; pad[3] = 48.0f;
+        CoXlTestGradePads(pad, 1);
+        CHECK(fabsf(CoXlTestGradeFade(world, playable, mid + 64.0f, mid, &cap) - 0.5f) < 1.0e-4f); /* as a pad of the same band */
+        CoXlTestGradePads(NULL, 0);
+    }
+}
+
 static void Zone(void)
 {
     const float world = 2048.0f, mid = 1024.0f;
@@ -911,12 +1023,12 @@ static void Zone(void)
     CHECK(fabsf(CoXlTestGradeStation(53, xy, &band, &links) - 0.05f * 624.0f) < 1.0e-3f && xy[0] == 624.0f);
     CoXlTestGradePads(pad, 0);
 
-    g_case = "the level's solve: 4.5 degrees within 4 m of the ground, 7 degrees everywhere, 16 passes, the stations past the cap reported";
+    g_case = "the level's solve: 4.5 degrees within 4 m of the ground, 7 degrees and up to 18 where 7 leaves the cap, 16 passes, the stations past the cap reported";
     CHECK(CoXlTestGradeLevel(g_road, n, GroundRidge, world, 1000.0f, out) == 0 && out[0] == 0.0);
     memset(g_pinned, 0, sizeof g_pinned);
     for (uint32_t i = 0; i < N; i++) { g_ground[i] = GroundRidge(g_road[2 * i], mid); g_earth[i] = 4.0f; }
     Even(N, 8.0f);
-    RefCapped(N, (double)SOFT, (double)HARD, 16);
+    RefSteep(N, (double)SOFT, (double)HARD, 0.3249197, 4.0, 16);
     double far_ = 0.0, steepest = 0.0, worst, metres[2]; uint32_t at, count[2];
     for (uint32_t i = 0; i < N; i++)
     {
@@ -924,12 +1036,12 @@ static void Zone(void)
         if (fabs(g_target[i] - g_ref[i]) > far_) far_ = fabs(g_target[i] - g_ref[i]);
         if (i > 0 && fabsf(g_target[i] - g_target[i - 1]) / 8.0f > steepest) steepest = fabsf(g_target[i] - g_target[i - 1]) / 8.0f;
     }
-    CHECK(far_ < 5.0e-3 && steepest <= HARD + 1.0e-5 && steepest > 0.9 * HARD);
+    CHECK(far_ < 5.0e-3 && steepest <= 0.3249197 + 1.0e-5 && steepest > 2.0 * HARD);
     count[0] = RefOverCap(N, 0.26, &worst, &at, &metres[0]);
     count[1] = RefOverCap(N, 0.24, &worst, &at, &metres[1]);
-    CHECK(count[0] > 30 && out[1] >= count[0] && out[1] <= count[1] && out[5] >= metres[0] - 1.0e-3 && out[5] <= metres[1] + 1.0e-3);
-    /* 7.07 m past the cap: what 7 degrees takes at the top (11.07 m), no more for the easing */
-    CHECK(fabs(out[2] - worst) < 5.0e-3 && worst > 7.0 && worst < 7.2 && at == 100 && out[3] == 1000.0 && out[4] == mid); /* the ridge's top */
+    CHECK(count[0] > 10 && out[1] >= count[0] && out[1] <= count[1] && out[5] >= metres[0] - 1.0e-3 && out[5] <= metres[1] + 1.0e-3);
+    /* 3.3 m past the cap at the top, where 7 degrees alone took 7.07 m */
+    CHECK(fabs(out[2] - worst) < 5.0e-3 && worst > 3.2 && worst < 3.4 && at == 100 && out[3] == 1000.0 && out[4] == mid); /* the ridge's top */
 
     g_case = "what the grading adds: nothing off the band, the whole cut on the bed, eased between; a 4 m cut's shoulder within 12 degrees";
     CHECK(CoXlTestGradeLevel(g_road, n, GroundMound, world, 1000.0f, out) == 0);
@@ -1003,7 +1115,7 @@ static void Site(void)
     CHECK(fabsf(CoXlTestGradeStationCap(95, &pinned) - 1.2f) < 0.1f && pinned == 0 && CoXlTestGradeStationCap(85, &pinned) == 4.0f); /* weight 0.62 at 30 m */
     CoXlTestGradePads(beside, 0);
 
-    g_case = "a road onto a pad on land that falls 11.3 degrees along it: 7 degrees to the pad's first station, no step, the pad met";
+    g_case = "a road onto a pad on land that falls 11.3 degrees along it: with the ground, under 18 degrees, to the pad's first station; the pad met";
     g_site.x = mid; g_site.y = mid; g_site.r = 20.0f; g_site.band = 97.0f; g_site.alongX = 0.2f; g_site.alongY = 0.0f;
     const float onto[6] = {0.0f, 0.0f, 20.0f, 97.0f, 1.0f, 0.0f};
     n = Line(g_road, 200.0f, mid, mid, mid, 104); /* a station every 8 m, the last at the pad's centre */
@@ -1020,8 +1132,8 @@ static void Site(void)
             if (side == 0 && rise > steepest) steepest = rise;
             if (side != 0 && rise > beside2) beside2 = rise;
         }
-    CHECK(steepest < 0.137f && steepest > 0.11f); /* 7 degrees and the stations' rounding; the skirt left 20 degrees here */
-    CHECK(beside2 < 0.165f);
+    CHECK(steepest < 0.25f && steepest > 0.2f); /* the land's own fall where 7 degrees would cut over the cap; the skirt left 20 degrees here */
+    CHECK(beside2 < 0.28f);
     CHECK(fabsf(CoXlTestGradeMove(mid, mid)) < 1.0e-6f && CoXlTestGradeFree(world, 1000.0f, 998.0f, mid, &pinned) > 0.99f);
     CoXlTestGradePads(onto, 0);
 }
@@ -1176,6 +1288,7 @@ int main(void)
     Together();
     Capped();
     CappedPins();
+    Steep();
     Zone();
     Site();
     Measures();
