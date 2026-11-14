@@ -31,7 +31,12 @@ static ULONGLONG g_lwPatrolLookAt[LW_SQUADS_MAX]; /* a standing far squad's next
 static uint16_t g_lwRoadEdge[LW_NODES_MAX];       /* a road node's route edge (the spurs join an edge) */
 static int g_lwArtNodes;
 /* Whether each patrol with a goal walks (co_lw_view.h, co_lw_move_*), and its own line every 5 s. */
-#define LW_PATROL_TRACE 3000 /* 5 s lines a mission */
+/* 5 s lines a mission: 30 patrols online write 360 a minute, so a research run's half hour needs its own limit. */
+#ifdef CO_RESEARCH
+#define LW_PATROL_TRACE 20000
+#else
+#define LW_PATROL_TRACE 3000
+#endif
 static CoLwMove g_lwPatrolMove[LW_SQUADS_MAX];
 static uint32_t g_lwPatrolTraced;
 static int LwRoadPatrolsOn(void); static void LwPatrolMoved(const LwSquad* q, int idx, int calm, int fighting, ULONGLONG now);
