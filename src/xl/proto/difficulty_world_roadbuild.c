@@ -117,6 +117,7 @@ static int RoadsFirstPass(uint64_t pass, uintptr_t edgesAt, const RoadEdge* e, u
     return 1;
 }
 
+static uint32_t RoadsSpurReserve(void);
 /* Before the level's op 0x0E: the spacing its edges need, and the pass as the stub's key. Once a level. */
 static void RoadsSpacingBegin(uintptr_t block, uint64_t record)
 {
@@ -140,6 +141,8 @@ static void RoadsSpacingBegin(uintptr_t block, uint64_t record)
         return;
     }
     if (capacity > ROADS_POINT_IDS) capacity = ROADS_POINT_IDS; /* op 0x0F names a point in 16 bits */
+    const uint32_t reserve = RoadsSpurReserve(); /* the spurs' points come after op 0x0F, from the same places */
+    capacity = capacity > used + reserve ? capacity - reserve : used;
     uint32_t atGame = 0, total = 0, left = 0;
     const uint32_t leftAtGame = RoadsSpacingLeftOut(e, n, taken, used, capacity, ROADS_SPACING_GAME, &atGame);
     const float spacing = RoadsSpacingChoose(e, n, taken, used, capacity, &total, &left);
@@ -280,6 +283,7 @@ static uint32_t RoadsArterials(const RoadsGraph* g, const float* termXY, uint32_
  * bit i is edge i of the level's route edges (G + g_routeEdges), valid while `level` is g_world.levels. */
 static struct { LONG level; uint32_t count; uint8_t bits[ROADS_EDGES_MAX / 8]; } g_arterials = {.level = -1};
 
+static void RoadsSpurTerminals(const float* xy, const float* gap, uint32_t terms);
 /* After the level's op 0x86: the arterials are chosen and take their width (never a narrower one). The terminals are
  * the locations ops 0x16, 0x17 and 0x82 placed (ops[i]: the op that appended location i). */
 static void RoadsArterialsApply(uintptr_t block, const uint8_t* ops, uint32_t total)
@@ -335,6 +339,7 @@ static void RoadsArterialsApply(uintptr_t block, const uint8_t* ops, uint32_t to
         gap[t] = ROADS_NONE;
         for (uint32_t i = 0; i < n; i++) if (chosen[i]) gap[t] = RoadsEdgeDistance(termXY[2 * t], termXY[2 * t + 1], &e[i], NULL, gap[t]);
     }
+    RoadsSpurTerminals(termXY, gap, terms);
     RoadsSummary(gap, terms, &gapMedian, &gapMost);
     Note("roads: level %ld arterials: %u of %u open route edges (%.1f km; %u with flag 0x8) join %u objectives and outposts; %u widened to %.1f m, "
         "%u wanted nodes not joined; the places lie median %.0f m, at most %.0f m from them; road set %08X", (long)g_world.levels, g_arterials.count, open,
@@ -355,4 +360,108 @@ static void RoadsArterialsPoints(uintptr_t block)
     for (uint32_t i = 0; i < n; i++) empty += ((g_arterials.bits[i >> 3] >> (i & 7)) & 1) && !RoadEdgeHasPoints(&e[i], points);
     Note("roads: level %ld arterials after op 0x0E: %u of %u arterial edges without points (%u road points)", (long)g_world.levels, empty, g_arterials.count, points);
     RoadsFreeEdges(e, n);
+}
+
+/* ---- the spurs ----
+ * A place lies off the route graph (its edges are the borders between route cells), so each terminal gets a straight
+ * spur to the nearest point of an arterial's path. A spur is not a route edge: its points are appended to the level's
+ * road points and each pair goes into the level's stamp index as op 0x0F puts a route's (0xC14EE0..0xC14F1E: capsule
+ * {p0, p1, r, r} and the id, point index | (edge << 2 | 1) << 16, to 0xFCADC0 with the index [context + 0x20]). The
+ * edge named is the arterial it joins: the stamp tests (0xF30D40, the mod's merge) read the width from it. */
+#define ROADS_SPUR_STEP 10.0f    /* a pair as long as a route's own: the index holds boxes of that size */
+#define ROADS_SPUR_MOST 1000.0f  /* a place farther from the network gets none */
+#define ROADS_SPUR_SLACK 40.0f   /* the path's meander about the chord the reserve is counted from */
+#define ROADS_SPURS (2 * ROADS_GROUP_MAX)
+typedef struct RoadSpur { float from[2], to[2]; uint32_t edge, first, end; } RoadSpur; /* place, the arterial's point; points [first, end) */
+static struct { LONG level; uint32_t terms, reserve, count; float xy[2 * ROADS_SPURS]; RoadSpur spur[ROADS_SPURS]; } g_spurs = {.level = -1};
+typedef void (*RoadCapsuleFn)(uint64_t index, const float* capsule, uint32_t id);
+static RoadCapsuleFn g_roadCapsule; /* tests: in place of the game's 0xFCADC0 */
+
+static uint32_t RoadsSpurCount(float length) { return length < ROADS_SPUR_MOST ? (uint32_t)ceilf(length / ROADS_SPUR_STEP) + 1 : 0; }
+static void RoadsSpurTerminals(const float* xy, const float* gap, uint32_t terms)
+{
+    g_spurs.level = g_world.levels; g_spurs.terms = terms; g_spurs.reserve = 0; g_spurs.count = 0;
+    memcpy(g_spurs.xy, xy, (size_t)terms * 8);
+    for (uint32_t t = 0; t < terms; t++) g_spurs.reserve += RoadsSpurCount(gap[t] + ROADS_SPUR_SLACK);
+}
+static uint32_t RoadsSpurReserve(void) { return g_spurs.level == g_world.levels ? g_spurs.reserve : 0; }
+
+/* The nearest point of the arterials' paths (bits: the arterial edges; the lower edge and point on a tie); the
+ * distance, ROADS_NONE when no arterial has points. */
+static float RoadsSpurAttach(float x, float y, const RoadEdge* e, uint32_t n, const uint8_t* bits, const float* pts, uint32_t points, float to[2], uint32_t* edge)
+{
+    float best = ROADS_NONE;
+    for (uint32_t i = 0; i < n; i++)
+    {
+        if (!((bits[i >> 3] >> (i & 7)) & 1) || !RoadEdgeHasPoints(&e[i], points)) continue;
+        for (uint32_t p = e[i].first + 1; p < e[i].end; p++)
+        {
+            const float ax = pts[2 * (p - 1)], ay = pts[2 * (p - 1) + 1], dx = pts[2 * p] - ax, dy = pts[2 * p + 1] - ay, l2 = dx * dx + dy * dy;
+            float t = 0.0f;
+            if (l2 > 1.0e-9f) { t = ((x - ax) * dx + (y - ay) * dy) / l2; t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t; }
+            const float qx = ax + t * dx, qy = ay + t * dy, d = sqrtf((x - qx) * (x - qx) + (y - qy) * (y - qy));
+            if (d < best) { best = d; to[0] = qx; to[1] = qy; *edge = i; }
+        }
+    }
+    return best;
+}
+/* count points from `from` to `to`, both included, evenly */
+static void RoadsSpurPoints(const float from[2], const float to[2], uint32_t count, float* out)
+{
+    for (uint32_t k = 0; k < count; k++)
+    {
+        const float t = (float)k / (float)(count - 1);
+        out[2 * k] = from[0] + (to[0] - from[0]) * t; out[2 * k + 1] = from[1] + (to[1] - from[1]) * t;
+    }
+}
+
+/* After the level's op 0x0F: the spurs' points and their capsules in the level's index, before any stamp is placed. */
+static void RoadsSpursBuild(uintptr_t block, uint64_t context)
+{
+    const RoadsLayout L = {g_routeEdges, g_routePoints, 0};
+    RoadEdge* e = NULL;
+    uint64_t index = 0; uint32_t points = 0;
+    if (g_spurs.level != g_world.levels || g_arterials.level != g_world.levels || g_arterials.count == 0 || g_spurs.terms == 0) return;
+    const RoadCapsuleFn capsule = g_roadCapsule != NULL ? g_roadCapsule :
+        ApiCodeMatches(g_world.game + 0xFCADC0u, "48 89 5C 24 10 57 48 83 EC 60 F3 0F 10 4A 08") ? (RoadCapsuleFn)(g_world.game + 0xFCADC0u) : NULL;
+    const uint32_t n = RoadsReadEdges(block, &L, &e);
+    float* pts = RoadsReadPoints(block, &L, &points);
+    uint32_t room = co_gen_places(HF_GEN_ROUTE_POINTS);
+    if (room > ROADS_POINT_IDS) room = ROADS_POINT_IDS;
+    if (capsule == NULL || n == 0 || pts == NULL || SafeRead(context + 0x20, &index, 8) || index == 0)
+    {
+        Note("roads: level %ld spurs: the stamp index or the road points are not readable; no spur made", (long)g_world.levels);
+        RoadsFreeEdges(e, n); if (pts != NULL) VirtualFree(pts, 0, MEM_RELEASE);
+        return;
+    }
+    uint32_t onRoad = 0, tooFar = 0, noRoom = 0, at = points; double km = 0; float longest = 0;
+    static float line[2 * 128];
+    for (uint32_t t = 0; t < g_spurs.terms; t++)
+    {
+        RoadSpur* s = &g_spurs.spur[g_spurs.count];
+        memcpy(s->from, &g_spurs.xy[2 * t], 8);
+        const float d = RoadsSpurAttach(s->from[0], s->from[1], e, n, g_arterials.bits, pts, points, s->to, &s->edge);
+        const uint32_t count = RoadsSpurCount(d);
+        if (d < 1.0f) { onRoad++; continue; }
+        if (count == 0 || count > 128) { tooFar++; continue; }
+        if (at + count > room) { noRoom++; continue; }
+        RoadsSpurPoints(s->from, s->to, count, line);
+        const float r = 0.5f * (e[s->edge].width > ROADS_ARTERIAL_WIDTH ? e[s->edge].width : ROADS_ARTERIAL_WIDTH);
+        for (uint32_t k = 0; k < count; k++)
+        {
+            uint64_t xy; memcpy(&xy, &line[2 * k], 8);
+            *(volatile uint64_t*)(block + L.pointsAt + 8ull * (at + k)) = xy;
+            if (k == 0) continue;
+            const float c[6] = {line[2 * k - 2], line[2 * k - 1], line[2 * k], line[2 * k + 1], r, r};
+            capsule(index, c, (at + k) | ((s->edge << 2 | 1u) << 16));
+        }
+        s->first = at; s->end = at + count; at += count;
+        g_spurs.count++; km += d / 1000.0; if (d > longest) longest = d;
+    }
+    if (at != points) *(volatile uint32_t*)(block + 0x11A71D4u) = at;
+    Note("roads: level %ld spurs: %u of %u places joined to the arterials (%.1f km, the longest %.0f m; %u road points of %u kept for them), "
+        "%u on a road already, %u too far, %u without room", (long)g_world.levels, g_spurs.count, g_spurs.terms, km, (double)longest, at - points,
+        g_spurs.reserve, onRoad, tooFar, noRoom);
+    RoadsFreeEdges(e, n);
+    VirtualFree(pts, 0, MEM_RELEASE);
 }

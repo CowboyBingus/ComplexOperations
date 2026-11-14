@@ -953,6 +953,9 @@ uint32_t CoXlTestRoadsArterials(const uint8_t* recs, uint32_t edges, const uint3
 }
 void CoXlTestRoadsArterialsApply(uintptr_t block, const uint8_t* ops, uint32_t total) { RoadsArterialsApply(block, ops, total); }
 void CoXlTestRoadsArterialsPoints(uintptr_t block) { RoadsArterialsPoints(block); }
+void CoXlTestRoadsSpursBuild(uintptr_t block, uint64_t context, void (*capsule)(uint64_t, const float*, uint32_t)) { g_roadCapsule = capsule; RoadsSpursBuild(block, context); }
+void CoXlTestRoadsSpurTerminals(const float* xy, const float* gap, uint32_t terms) { RoadsSpurTerminals(xy, gap, terms); }
+uint32_t CoXlTestRoadsSpurs(uint32_t* reserve, const float** table) { *reserve = RoadsSpurReserve(); *table = (const float*)g_spurs.spur; return g_spurs.level == g_world.levels ? g_spurs.count : 0; }
 int CoXlTestRoadsArterial(uint32_t edge) { return g_arterials.level == g_world.levels && (g_arterials.bits[edge >> 3] >> (edge & 7)) & 1; }
 /* The stamp packages a level requested early (EarlyPackages): held as a level that ended before its record 94 leaves them. */
 void CoXlTestEarlyHeld(const uint64_t* ids, uint32_t count)
