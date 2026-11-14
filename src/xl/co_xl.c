@@ -429,7 +429,7 @@ int CoXlTestLwNavHoldBusy(void) { return LwNavHoldBusy(); }
 void CoXlTestLwNavHoldCounts(uint32_t* v)
 {
     v[0] = g_lwNavHold.held; v[1] = g_lwNavHold.longest; v[2] = g_lwNavHold.sumRaise; v[3] = g_lwNavHold.drains; v[4] = g_lwNavHold.marked;
-    v[5] = g_lwNavHold.sumRaise2; v[6] = g_lwNavHold.sumBreaks; v[7] = g_lwNavHold.longNoted[0] + g_lwNavHold.longNoted[1] + g_lwNavHold.longNoted[2] + g_lwNavHold.longNoted[3];
+    v[5] = g_lwNavHold.sumBack; v[6] = g_lwNavHold.sumBreaks; v[7] = g_lwNavHold.longNoted[0] + g_lwNavHold.longNoted[1] + g_lwNavHold.longNoted[2] + g_lwNavHold.longNoted[3];
 }
 int CoXlTestLwNavLeft(int read, uint32_t state) { return LwNavLeftAt(read, state); }
 /* An AI join of `ms` on this thread, as the hook counts it. */

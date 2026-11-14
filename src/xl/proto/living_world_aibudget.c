@@ -42,7 +42,7 @@ static void LwAibNote(ULONGLONG now)
 /* The budget for this step: the low one, or the stock one from a wait over RAISE_MS until it is under half that. The
  * stock one too while a nav completion waits for the world's step, a swap is not applied yet (LwNavHoldBusy) or the
  * queue is long (LwNavQueueLong): the low budget makes that run, and so the wait, several times longer. Only a
- * completion held behind a run in flight gets more than the game's own (LwNavHoldRaiseUs). */
+ * run in flight with a completion held or a backlog behind it gets more than the game's own (LwNavHoldRaiseUs). */
 static float LwAibWant(uintptr_t h, int low, ULONGLONG now)
 {
     float want = low ? (float)g_lwAib.lowUs / 1000000.0f : g_lwAib.stock;

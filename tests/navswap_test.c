@@ -708,6 +708,7 @@ static void TestHoldLevelEnd(void)
 }
 
 static void Budget(float v) { memcpy(g_aiw + 0x47C, &v, 4); }
+static void RunAge(float s) { memcpy(g_aiw + 0x484, &s, 4); }
 static float Aib(int on, ULONGLONG now) { return CoXlTestLwAibWorld((uintptr_t)g_aiw, 0.002f, 0.0f, on, now); }
 
 /* A run that stays in flight: the completion waits however long, no step is finished here, and 30 s is said once. */
@@ -753,7 +754,7 @@ static void TestHoldLong(void)
     CHECK(Tick(0, 3100) == 0 && Tick(0, 9000) == 0 && g_joins == 0 && g_steps == 0 && g_broken == 0);
 }
 
-/* The run in flight gets more time a frame while a completion is held behind it: 4 ms from 100 ms, 8 ms from 500 ms. */
+/* The run in flight gets 4 ms a frame, never more, while a completion is held behind it or a backlog waits. */
 static void TestHoldRaise(void)
 {
     uint32_t v[8];
@@ -763,17 +764,17 @@ static void TestHoldRaise(void)
     CHECK(Tick(0, 1000) == 0);
     CHECK(Aib(1, 1099) == 0.002f);  /* held: the game's own, not the low one */
     CHECK(Aib(1, 1100) == 0.004f && Aib(1, 1499) == 0.004f);
-    CHECK(Aib(1, 1500) == 0.008f && Aib(1, 600000) == 0.008f); /* never more */
+    CHECK(Aib(1, 1500) == 0.004f && Aib(1, 600000) == 0.004f); /* never more */
     HoldCounts(v);
-    CHECK(v[2] == 4 && v[5] == 2);
-    CHECK(Aib(0, 1099) == 0.002f && Aib(0, 1100) == 0.004f && Aib(0, 1500) == 0.008f); /* the lever off: the raise alone */
+    CHECK(v[2] == 4 && v[5] == 0);
+    CHECK(Aib(0, 1099) == 0.002f && Aib(0, 1100) == 0.004f && Aib(0, 1500) == 0.004f); /* the lever off: the raise alone */
     CHECK(CoXlTestLwAibWorld((uintptr_t)g_aiw, 0.01f, 0.0f, 1, 1500) == 0.01f);     /* a stock budget above it stays */
     CHECK(CoXlTestLwAibWorld((uintptr_t)g_aiw, 0.01f, 0.0f, 0, 1500) == 0.01f);
     CHECK(CoXlTestLwAibWorld((uintptr_t)g_aiw2, 0.002f, 0.0f, 1, 1500) == 0.002f);  /* another world: its own records only */
     Flight(0);
     CHECK(Aib(1, 1600) == 0.002f && Aib(0, 1600) == 0.002f); /* no run in flight: nothing to speed up */
     Flight(1);
-    CHECK(Aib(1, 1600) == 0.008f);
+    CHECK(Aib(1, 1600) == 0.004f);
     Driver();
     CHECK(Tick(0, 1616) == 1 && g_broken == 0);
     CHECK(Aib(1, 1632) == 0.002f);  /* none held; its swap unapplied: the game's own */
@@ -787,7 +788,7 @@ static void TestHoldRaise(void)
     CHECK(Tick(0, 1400) == 1 && g_done[0] == 0);
     Driver();                        /* the swap's run starts */
     CHECK(Tick(0, 1450) == 0 && g_inFlight == 1);
-    CHECK(Aib(1, 1499) == 0.004f && Aib(1, 1500) == 0.008f);
+    CHECK(Aib(1, 1099) == 0.002f && Aib(1, 1100) == 0.004f);
     ResetHold("a first build held behind an unapplied swap raises too; with nothing held, nothing");
     Flight(1); Budget(0.002f);
     CHECK(Tick(0, 1000) == 0 && Aib(1, 9000) == 0.0005f);
@@ -805,21 +806,21 @@ static void TestHoldRaise(void)
     CoXlTestLwFpJoin(7.0);
     CHECK(Aib(1, 1400) == 0.002f);
     CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
-    CHECK(fake_host_logged("living world: nav hold (30 s): AI budget raised on 2 frame(s) (0 at 8000 us); the AI joins after them 4.00 ms on average, 5.00 ms at worst "
+    CHECK(fake_host_logged("living world: nav hold (30 s): AI budget raised to 4000 us on 2 frame(s) (0 for a backlog, no completion held); the AI joins after them 4.00 ms on average, 5.00 ms at worst "
         "(2 frame(s)); 0 tick(s) given the game's order with no game frame before them"));
     g_fake.log[0] = 0;
     CoXlTestLwNavSwapSummary(61000);
     CHECK(!fake_host_logged("nav hold (")); /* nothing raised since */
     Flight(1);
-    CHECK(Aib(1, 2000) == 0.008f);
+    CHECK(Aib(1, 2000) == 0.004f);
     CoXlTestLwFpJoin(2.0);
-    CHECK(Aib(1, 2016) == 0.008f);
+    CHECK(Aib(1, 2016) == 0.004f);
     CoXlTestLwNavSwapSummary(91000);
-    CHECK(fake_host_logged("AI budget raised on 2 frame(s) (2 at 8000 us); the AI joins after them 2.00 ms on average, 2.00 ms at worst (1 frame(s)); 0 tick(s)"));
+    CHECK(fake_host_logged("AI budget raised to 4000 us on 2 frame(s) (0 for a backlog, no completion held); the AI joins after them 2.00 ms on average, 2.00 ms at worst (1 frame(s)); 0 tick(s)"));
     ResetHold("records the flush tick took are not held any more");
     Section(IDX, 3, 40); Flight(1); Budget(0.002f);
     Push(0, IDX, 3, 0);
-    CHECK(Tick(0, 1000) == 0 && Aib(0, 1600) == 0.008f);
+    CHECK(Tick(0, 1000) == 0 && Aib(0, 1600) == 0.004f);
     CHECK(Tick(1, 1700) == 1);
     Flight(1);
     CHECK(Aib(0, 1800) == 0.002f);
@@ -830,6 +831,58 @@ static void TestHoldRaise(void)
     CHECK(Aib(1, 1000) == 0.0005f);
     g_queued = 1025;
     CHECK(Aib(1, 1000) == 0.002f && Aib(0, 1000) == 0.002f);
+    ResetHold("a backlog behind a run in flight: the raised budget with no completion held");
+    Budget(0.002f); Flight(1); g_queued = 1024;
+    CHECK(Aib(1, 1000) == 0.0005f && Aib(0, 1000) == 0.002f); /* a short queue behind a young run: nothing */
+    g_queued = 1025;
+    CHECK(Aib(1, 1000) == 0.004f && Aib(0, 1000) == 0.004f);
+    HoldCounts(v);
+    CHECK(v[2] == 2 && v[5] == 2);
+    Flight(0);
+    CHECK(Aib(1, 1000) == 0.002f);  /* no run to speed up: the game's own for the one that starts */
+    Flight(1); g_queued = 1; RunAge(4.999f);
+    CHECK(Aib(1, 1000) == 0.0005f);
+    RunAge(5.0f);
+    CHECK(Aib(1, 1000) == 0.004f && Aib(0, 1000) == 0.004f);
+    g_queued = 0; RunAge(900.0f);
+    CHECK(Aib(1, 1000) == 0.0005f); /* an old run with nothing behind it */
+    g_queued = 1; RunAge(__builtin_nanf(""));
+    CHECK(Aib(1, 1000) == 0.0005f);
+    RunAge(60.0f); Flight(0);
+    CHECK(Aib(1, 1000) == 0.0005f);
+    HoldCounts(v);
+    CHECK(v[2] == 4 && v[5] == 4);
+    CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
+    CHECK(fake_host_logged("AI budget raised to 4000 us on 4 frame(s) (4 for a backlog, no completion held); "));
+    g_fake.log[0] = 0;
+    Flight(1);
+    CHECK(Aib(1, 32000) == 0.004f);
+    CoXlTestLwNavSwapSummary(61000);
+    CHECK(fake_host_logged("AI budget raised to 4000 us on 1 frame(s) (1 for a backlog, no completion held); ")); /* counted since the last line */
+    ResetHold("in play the summary is written with nothing to count: the queue, the run and the slots");
+    CoXlTestLwNavLevel(7); Budget(0.002f);
+    CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
+    CHECK(!fake_host_logged("nav swaps (")); /* not in play yet */
+    CHECK(CoXlTestLwNavLeft(1, 3) == 0);
+    g_queued = 3;
+    CoXlTestLwNavSwapSummary(61000);
+    CHECK(fake_host_logged("living world: nav swaps (30 s): 0 on the frame thread, ") && fake_host_logged("section slots; world 1: 3 command(s) queued, no run in flight"));
+    g_fake.log[0] = 0;
+    Flight(1); RunAge(6.5f); g_queued = 930;
+    Aib(1, 62000); Aib(1, 62016);    /* two frames with the run finished and not committed */
+    CoXlTestLwNavSwapSummary(90999);
+    CHECK(!fake_host_logged("nav swaps ("));
+    CoXlTestLwNavSwapSummary(91000);
+    CHECK(fake_host_logged("section slots; world 1: 930 command(s) queued behind a run 6.5 s old (done 1, no query job 1); a finished run waited for its commit on 2 frame(s)"));
+    g_fake.log[0] = 0;
+    g_queued2 = 931; Flight(0);
+    CoXlTestLwNavSwapSummary(121000);
+    CHECK(fake_host_logged("section slots; world 2: 931 command(s) queued, no run in flight; a finished run waited for its commit on 0 frame(s)"));
+    g_fake.log[0] = 0;
+    CHECK(CoXlTestLwNavLeft(1, 0) == 1);
+    g_fake.log[0] = 0;
+    CoXlTestLwNavSwapSummary(151000);
+    CHECK(!fake_host_logged("nav swaps (")); /* the level left play */
 }
 
 /* Each world has its own wait: records of other worlds or of no world's rules that leave do not start it again. */
@@ -843,7 +896,7 @@ static void TestHoldOwnWait(void)
         Push(1 + t % 2, t % 2 ? IDX2 : IDX, 5 + t / 2, t % 2 ? 0 : 0x80); /* world 2's first builds and plain records */
         CHECK(Tick(0, 1000 + 100 * t) == 1 && g_joins == 0);
     }
-    CHECK(Aib(1, 3000) == 0.008f && g_joins == 0); /* 2000 ms held, counted from its own first tick */
+    CHECK(Aib(1, 2950) == 0.004f && g_joins == 0); /* 1950 ms held, counted from its own first tick */
     ResetHold("a take starts its world's relaxed wait again");
     Section(IDX, 3, 40); Section(IDX, 4, 41); g_queued = 5;
     Push(0, IDX, 3, 0); Push(1, IDX, 4, 0);
@@ -907,7 +960,7 @@ static void TestBreaker(void)
     Section(IDX, 4, 41); Push(1, IDX, 4, 0);
     CHECK(Tick(0, 1048) == 0 && Tick(0, 1064) == 0 && !fake_host_logged("ran again")); /* a frame between: held again */
     CoXlTestLwNavSwapSummary(1000); CoXlTestLwNavSwapSummary(31000);
-    CHECK(fake_host_logged("nav hold (30 s): AI budget raised on 0 frame(s) (0 at 8000 us); the AI joins after them 0.00 ms on average, 0.00 ms at worst (0 frame(s)); "
+    CHECK(fake_host_logged("nav hold (30 s): AI budget raised to 4000 us on 0 frame(s) (0 for a backlog, no completion held); the AI joins after them 0.00 ms on average, 0.00 ms at worst (0 frame(s)); "
         "1 tick(s) given the game's order"));
     g_fake.log[0] = 0;
     CoXlTestLwNavSwapSummary(61000);
