@@ -632,6 +632,30 @@ void CoXlTestTileAdd(float cx, float cy, const uint16_t* heights, uint32_t n, fl
     NearTileAdd(NearTileFree(), cx, cy, 0x1234, &ground);
 }
 int CoXlTestTilesLive(void) { return NearTilesLive(); }
+/* The tiles' terrains at a level's end (proto/xl_free.c NearTilesDestroy, NearTilesLeft): slot k's handle and maps (k -1:
+ * g_near's and g_matband's, the drop tile's), a build in step `move` with the drop tile's handle stashed (0: none), the
+ * near state, and what a slot holds after (k -2: the stashed drop handle). */
+void CoXlTestTileReset(void)
+{
+    for (int k = 0; k < NEAR_TILES_MAX; k++) { g_tiles[k].handle = 0; g_tiles[k].tex[0] = g_tiles[k].tex[1] = g_tiles[k].band = 0; g_tiles[k].bandPixels = NULL; g_tiles[k].live = 0; }
+    g_near.handle = 0; g_near.tex[0] = g_near.tex[1] = 0; g_near.state = NEAR_IN; g_near.world = 0; g_matband.tex = 0; g_matband.pixels = NULL;
+    g_move.state = MV_IDLE; g_move.stashed = 0; g_move.dropHandle = 0; g_move.dropTex[0] = g_move.dropTex[1] = g_move.dropBand = 0; g_move.dropBandPixels = NULL;
+    memset(g_move.freeing, 0, sizeof g_move.freeing);
+}
+void CoXlTestTileTerrain(int k, uint64_t handle, uint64_t tex0, uint64_t tex1, uint64_t band)
+{
+    if (k < 0) { g_near.handle = handle; g_near.tex[0] = tex0; g_near.tex[1] = tex1; g_matband.tex = band; return; }
+    g_tiles[k].handle = handle; g_tiles[k].tex[0] = tex0; g_tiles[k].tex[1] = tex1; g_tiles[k].band = band;
+    g_tiles[k].live = 1; g_tiles[k].level = g_world.levels;
+}
+void CoXlTestTileBuild(int move, uint64_t dropHandle, uint64_t dropTex, int nearState)
+{
+    g_move.state = move ? MV_SPAWN : MV_IDLE; g_move.stashed = dropHandle != 0; g_move.dropHandle = dropHandle;
+    g_move.dropTex[0] = dropTex; g_near.state = nearState ? NEAR_READY : NEAR_IN;
+}
+uint64_t CoXlTestTileHandle(int k) { return k == -2 ? g_move.dropHandle : k < 0 ? g_near.handle : g_tiles[k].handle; }
+uint64_t CoXlTestTileTex(int k) { return k == -2 ? g_move.dropTex[0] : k < 0 ? g_near.tex[0] : g_tiles[k].tex[0]; }
+void CoXlTestLevelGone(void) { MoveLevelGone(); }
 /* The game code a replayed tile step runs under (proto/difficulty_world_terrain.c NearStepPatch): 1 when patched. */
 int CoXlTestNearStepPatch(uint8_t op, int on) { return NearStepPatch(op, on); }
 /* A replayed step's record copy, and the cone count over a tile's heights centred on (cx, cy) (NearRecordEdit,

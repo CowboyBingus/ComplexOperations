@@ -200,10 +200,12 @@ static void MoveRestoreDrop(void)
     MoveHold(0);
 }
 
-/* A new level starts (TerrainNearReplay's first call): the last level's world is gone with every tile in it. */
+/* A new level starts (TerrainNearReplay's first call): the last level's tile terrains went at its end (NearTilesDestroy),
+ * so their maps go now; one still in the world keeps them (NearTilesLeft). */
 static void MoveLevelGone(void)
 {
     NearLayerSettle();
+    NearTilesLeft();
     if (g_move.state != MV_IDLE && g_move.stashed)
         MoveFreeNow(g_move.dropTex[0] == g_near.tex[0] ? 0 : g_move.dropTex[0], g_move.dropTex[1] == g_near.tex[1] ? 0 : g_move.dropTex[1],
             g_move.dropBand == g_matband.tex ? 0 : g_move.dropBand, g_move.dropBand == g_matband.tex ? NULL : g_move.dropBandPixels);
@@ -563,7 +565,7 @@ static void MoveFailRest(void)
     {
         typedef void (*DestroyFn)(uint64_t world, uint64_t handle);
         DestroyFn destroy = (DestroyFn)NearApi(0x08, 0x1E0);
-        if (destroy != NULL) destroy(MoveWorld(), g_near.handle);
+        if (destroy != NULL) { destroy(MoveWorld(), g_near.handle); g_near.handle = 0; }
     }
     if (g_move.stashed)
     {
@@ -746,6 +748,7 @@ static void MoveRelease(int slot)
         destroy(world, t.handle);
         QueryPerformanceCounter(&d1);
         g_move.destroyTicks = d1.QuadPart - d0.QuadPart;
+        g_tiles[slot].handle = 0; /* its object is freed: a later terrain may get the address */
     }
     MoveFreeLater(t.tex[0], t.tex[1], t.band, t.bandPixels);
     g_move.released++;
@@ -1413,6 +1416,7 @@ static void MoveInstall(uintptr_t game)
 static void NearLevelLeft(int ship)
 {
     NearLayerSettle();
+    NearTilesDestroy(ship ? "the ship" : "a level init"); /* the world outlives the level: its tiles go with the level */
     NearOneMipDisarm();
     InterlockedExchange(&g_nearActive, 0);
     MoveHold(0);

@@ -13,5 +13,7 @@ static void MoveBandStash(void);
 static void MoveBandUnstash(void);
 static void MoveTrimEvent(const char* why);
 static int MoveTrimTick(void);
+static int NearTilesDestroy(const char* why);
+static int NearTilesLeft(void);
 
 #endif

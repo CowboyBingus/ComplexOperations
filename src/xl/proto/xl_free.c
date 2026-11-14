@@ -301,3 +301,133 @@ static int MoveTrimTick(void)
     g_trim.events = 0;
     return 1;
 }
+
+/* ---- The tiles' terrains at a level's end --------------------------------------------------------------------------
+ * A tile's terrain is spawned into the main world ([[game+0x3326340]+0x10E8]), which the ship and every level share,
+ * and no op of the level destroys it. Left there, the next levels draw it with the maps the next replay frees: the
+ * binder 0x6F8B30 then reads a freed map's heap link as its texture handle (crash exe+0x6F9394). */
+#define NEAR_TERRAINS 0x230550u /* world: the terrains by handle; entries (0x170 bytes) at +8, count +0x18, buckets +0x1C */
+
+static uint64_t NearMainWorld(void)
+{
+    uint64_t engine = 0, world = 0;
+    if (SafeRead(g_world.game + 0x3326340u, &engine, 8) || engine == 0 || SafeRead(engine + 0x10E8u, &world, 8)) return 0;
+    return world;
+}
+
+/* The world's find, exe 0x1BCF30, which neither inserts nor locks: 1 when `handle` is a terrain of `world`, 0 when not,
+ * -1 when the map does not read. The destroy (0x1ADEA0) finds with insert (0x1B86C0) and frees the handle's object, so
+ * a handle not found here is never given to it. */
+static int NearTerrainIn(uint64_t world, uint64_t handle)
+{
+    const uint64_t map = world + NEAR_TERRAINS;
+    uint64_t entries = 0, key = 0;
+    uint32_t count = 0, buckets = 0, next = 0;
+    if (world == 0 || SafeRead(map + 8, &entries, 8) || SafeRead(map + 0x18, &count, 4) || SafeRead(map + 0x1C, &buckets, 4)) return -1;
+    if (count == 0) return 0;
+    if (entries == 0 || buckets == 0) return -1;
+    const uint32_t m = 0x5BD1E995u;
+    uint32_t a = (uint32_t)handle * m, b = (uint32_t)(handle >> 32) * m;
+    a = (a ^ a >> 24) * m; b = (b ^ b >> 24) * m;
+    uint32_t h = ((a ^ 0xDE8F4CA8u) * m) ^ b;
+    h = (h ^ h >> 13) * m; h ^= h >> 15;
+    uint32_t i = h % buckets;
+    if (SafeRead(entries + (uint64_t)i * 0x170 + 0x168, &next, 4)) return -1;
+    if (next == 0xFFFFFFFEu) return 0; /* an empty bucket */
+    for (uint32_t steps = 0; steps <= count; steps++)
+    {
+        if (SafeRead(entries + (uint64_t)i * 0x170, &key, 8) || SafeRead(entries + (uint64_t)i * 0x170 + 0x168, &next, 4)) return -1;
+        if (key == handle) return 1;
+        if (next == 0x7FFFFFFFu) return 0;
+        i = next;
+    }
+    return -1;
+}
+
+/* Under the world's terrain lock, which the destroy takes too (so never held across it). */
+static int NearTerrainInLocked(uint64_t world, uint64_t handle)
+{
+    const int locked = world != 0 && g_nearTerrainLock[0] != NULL && g_nearTerrainLock[1] != NULL;
+    if (locked) g_nearTerrainLock[0](world + 0x230520u);
+    const int in = NearTerrainIn(world, handle);
+    if (locked) g_nearTerrainLock[1](world + 0x230520u);
+    return in;
+}
+
+/* Every tile terrain handle the mod holds: the tiles', g_near's and a build's stashed drop tile's. */
+#define NEAR_HANDLES (NEAR_TILES_MAX + 2)
+static int NearHandles(uint64_t** at)
+{
+    int n = 0;
+    for (int k = 0; k < NEAR_TILES_MAX; k++) at[n++] = &g_tiles[k].handle;
+    at[n++] = &g_near.handle;
+    if (g_move.stashed) at[n++] = &g_move.dropHandle;
+    return n;
+}
+
+/* The last level's tile terrains destroyed on the game thread (a level init or the ship's set-up), as MoveRelease
+ * destroys one; their maps go at the next replay. Kept: a drop tile the generation may still be finalizing, and any
+ * handle whose world does not read. A handle is forgotten once its terrain is gone: its address can be reused. */
+static int NearTilesDestroy(const char* why)
+{
+    typedef void (*DestroyFn)(uint64_t world, uint64_t handle);
+    DestroyFn destroy = (DestroyFn)NearApi(0x08, 0x1E0);
+    uint64_t world = NearMainWorld(), *at[NEAR_HANDLES], seen[NEAR_HANDLES];
+    int verdict[NEAR_HANDLES], unique = 0, gone = 0, absent = 0, kept = 0;
+    const int n = NearHandles(at);
+    const uint64_t generating = g_move.state == MV_IDLE && g_near.state == NEAR_READY ? g_near.handle : 0;
+    const int known = world != 0 && (g_near.world == 0 || g_near.world == world);
+    LARGE_INTEGER t0, t1, hz;
+    QueryPerformanceCounter(&t0);
+    for (int i = 0; i < n; i++)
+    {
+        const uint64_t h = *at[i];
+        int j = 0;
+        while (j < unique && seen[j] != h) j++;
+        if (h == 0 || j < unique) continue;
+        seen[unique] = h;
+        const int in = !known || h == generating ? -1 : NearTerrainInLocked(world, h);
+        verdict[unique] = in > 0 && destroy != NULL ? 1 : in == 0 ? 0 : -1;
+        if (verdict[unique] == 1)
+        {
+            if (gone == 0) NearTilesClear(); /* their heights stop being read before the terrain goes */
+            destroy(world, h);
+            gone++;
+        }
+        else if (verdict[unique] == 0) absent++;
+        else kept++;
+        unique++;
+    }
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < unique; j++)
+            if (*at[i] != 0 && *at[i] == seen[j] && verdict[j] >= 0) { *at[i] = 0; break; }
+    if (!g_move.stashed) g_move.dropHandle = 0;
+    QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
+    if (unique > 0)
+        Note("difficulty: near terrain: %s: %d tile terrain(s) of the last level destroyed (%.1f ms on the game thread), %d already gone, %d kept "
+            "(%s); their maps go at the next replay", why, gone, (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart, absent, kept,
+            !known ? "the main world does not read" : destroy == NULL ? "no destroy call" : generating != 0 ? "the generation may still finalize the drop tile" : "none");
+    return gone;
+}
+
+/* The new level's replay, before it frees the last level's tile maps: a terrain still in the world (or one whose world
+ * does not read) keeps every map of that level, leaked, since the world may draw it in this level. */
+static int NearTilesLeft(void)
+{
+    const uint64_t world = NearMainWorld();
+    uint64_t* at[NEAR_HANDLES];
+    const int n = NearHandles(at);
+    int left = 0;
+    for (int i = 0; i < n; i++)
+    {
+        if (*at[i] == 0) continue;
+        if (NearTerrainInLocked(world, *at[i]) != 0) left++;
+        *at[i] = 0;
+    }
+    if (left == 0) { Note("difficulty: near terrain: 0 tile terrains left from the last level"); return 0; }
+    for (int k = 0; k < NEAR_TILES_MAX; k++) { g_tiles[k].tex[0] = g_tiles[k].tex[1] = g_tiles[k].band = 0; g_tiles[k].bandPixels = NULL; }
+    g_near.tex[0] = g_near.tex[1] = 0; g_matband.tex = 0; g_matband.pixels = NULL;
+    g_move.dropTex[0] = g_move.dropTex[1] = g_move.dropBand = 0; g_move.dropBandPixels = NULL;
+    Note("difficulty: near terrain: %d tile terrain(s) left in the world from the last level; their maps stay allocated (leaked) so that it never draws freed ones", left);
+    return left;
+}
