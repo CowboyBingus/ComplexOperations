@@ -7118,6 +7118,8 @@ static void NearLayerPendingAdd(uint64_t unit, float x, float y)
         g_layerPending.level = g_world.levels;
         g_layerPending.count = g_layerPending.added = g_layerPending.lost = g_layerPending.replaced = g_layerPending.kept = g_layerPending.expired = 0;
     }
+    for (uint32_t p = 0; p < g_layerPending.count; p++) /* a stamp spawned again before its grid came: listed once */
+        if (g_layerPending.e[p].unit == unit) { g_layerPending.e[p].x = x; g_layerPending.e[p].y = y; ReleaseSRWLockExclusive(&g_layerPending.lock); return; }
     if (g_layerPending.count < NEAR_PENDING)
     {
         g_layerPending.e[g_layerPending.count].unit = unit; g_layerPending.e[g_layerPending.count].x = x; g_layerPending.e[g_layerPending.count].y = y;
@@ -7156,16 +7158,15 @@ static float NearSpawnRead(uint64_t desc, float x, float y)
     return NearTraceLevelAt(x, y);
 }
 
-/* `again`: a second choice after a refill (WorldLayerSpawn), not counted twice. */
-static uint64_t NearLayerSpawnField(uint64_t unit, uint64_t field, int again)
+/* One layer spawn, counted once WorldLayerSpawn knows its heights: grid the tile grid it entered, else 0 (the level's
+ * `field`). One that chose a grid but entered none (a refill began meanwhile) or had a tile within reach is listed. */
+static void NearLayerSpawnCount(uint64_t unit, uint64_t field, uint64_t grid, int chosen)
 {
-    uint64_t grid = NearLayerField(unit, field);
-    if (again) return grid;
     uint32_t trees = 0, effects = 0; uint64_t res = 0; float t[3] = {0}, distance = 0, off = -1.0f, read = 0, drawn = 0, relief = 0;
     SafeRead(unit + 0x3D0, &trees, 4); /* 0xDC390: the unit's SpeedTree groups */
     if (!SafeRead(unit + 0x10, &res, 8) && res != 0) SafeRead(res + 0x48, &effects, 4); /* 0xE7D1B: its particle effects */
     int placed = !SafeRead(unit + 0x50, t, 12) && isfinite(t[0]) && isfinite(t[1]);
-    if (placed && grid == 0 && NearTileNear(t[0], t[1], NEAR_LAYER_REACH) >= 0) NearLayerPendingAdd(unit, t[0], t[1]);
+    if (placed && grid == 0 && (chosen || NearTileNear(t[0], t[1], NEAR_LAYER_REACH) >= 0)) NearLayerPendingAdd(unit, t[0], t[1]);
     if (placed && WorldStreamNearPlayer(t[0], t[1], NEAR_PROBE_RADIUS, &distance))
     {
         read = NearSpawnRead(grid != 0 ? grid : field, t[0], t[1]);
@@ -7212,14 +7213,6 @@ static uint64_t NearLayerSpawnField(uint64_t unit, uint64_t field, int again)
         Note("difficulty: near terrain: layer spawn off the ground: the stamp at (%.1f, %.1f), %.0f m from a player: its members read %.2f (%s), drawn %.2f, unit z %.2f",
             (double)t[0], (double)t[1], (double)distance, (double)read, grid != 0 ? "a tile's grid" : "the level's heights", (double)drawn, (double)t[2]);
     if (n == 1 || n == 100 || n == 1000 || n == 10000) NearLayerSpawnNote(n == 1 ? "the first" : n == 100 ? "100" : n == 1000 ? "1000" : "10000");
-    return grid;
-}
-
-/* WorldLayerSpawn chose a grid twice and both were written meanwhile: the stamp spawns on the level's heights. */
-static void NearLayerSpawnStale(uint64_t unit)
-{
-    float t[2];
-    if (!SafeRead(unit + 0x50, t, 8) && isfinite(t[0]) && isfinite(t[1])) NearLayerPendingAdd(unit, t[0], t[1]);
 }
 
 /* kind 'S': a placed-unit read (0xDFA60), result the grid's slot or -1, z the stamp unit's pose z (+0x58), used the height

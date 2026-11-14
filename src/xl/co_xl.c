@@ -12,6 +12,7 @@
 #include <string.h>
 #include <math.h>
 #include <tlhelp32.h>
+#include "co_unwind.h"
 #include "co_shim.h"
 #include "co_xl_standin.h"
 #include "co_pages.h"
@@ -190,14 +191,17 @@ static int CoXlInPlay(void)
 uint32_t CoIndexQueryThunk(uint64_t index, uint32_t key, uint32_t mode, uint64_t buffer, uint32_t places);
 uint32_t (*g_coIndexQueryClamped)(uint64_t, uint32_t, uint32_t, uint64_t, uint32_t) = IndexQueryClamped;
 __asm__(".text\n.p2align 4\n.globl CoIndexQueryThunk\nCoIndexQueryThunk:\n"
+        "  .seh_proc CoIndexQueryThunk\n"
         "  subq $0x98, %rsp\n"
+        "  .seh_stackalloc 0x98\n  .seh_endprologue\n"
         "  movdqu %xmm0, 0x30(%rsp)\n  movdqu %xmm1, 0x40(%rsp)\n  movdqu %xmm2, 0x50(%rsp)\n"
         "  movdqu %xmm3, 0x60(%rsp)\n  movdqu %xmm4, 0x70(%rsp)\n  movdqu %xmm5, 0x80(%rsp)\n"
         "  movq 0xC0(%rsp), %rax\n  movq %rax, 0x20(%rsp)\n"
         "  callq *g_coIndexQueryClamped(%rip)\n"
         "  movdqu 0x30(%rsp), %xmm0\n  movdqu 0x40(%rsp), %xmm1\n  movdqu 0x50(%rsp), %xmm2\n"
         "  movdqu 0x60(%rsp), %xmm3\n  movdqu 0x70(%rsp), %xmm4\n  movdqu 0x80(%rsp), %xmm5\n"
-        "  addq $0x98, %rsp\n  retq\n");
+        "  addq $0x98, %rsp\n  retq\n"
+        "  .seh_endproc\n");
 
 /* The game thread's part, in the order the loader's tick called it. */
 static void CoXlTick(HfMod* mod, float dt, void* user)
@@ -713,6 +717,55 @@ uintptr_t CoXlTestLayerSpawnDetour(void) { return (uintptr_t)WorldLayerSpawn; }
 uintptr_t CoXlTestLayerSpawnOriginal(void) { return (uintptr_t)g_layerSpawn; }
 int CoXlTestGridEnter(uint64_t desc) { return NearLayerGridEnter(desc); }
 void CoXlTestGridLeave(int k) { NearLayerGridLeave(k); }
+void CoXlTestLayerChosen(void (*fn)(uint64_t)) { g_coTestLayerChosen = fn; }
+void CoXlTestGridReady(int slot, LONG ready) { InterlockedExchange(&g_layerGrid[slot].ready, ready); }
+void CoXlTestLayerCounts(long* grids, long* spawns, uint32_t* pending) { *grids = g_layerSpawnNote.grids; *spawns = g_layerSpawnNote.spawns; *pending = g_layerPending.count; }
+float CoXlTestSeen2(uint32_t i) { return g_streamSeen2[i]; }
+float CoXlTestSeen2Of(float side) { return MoveStampSeen2(side); }
+/* Unwinds from inside a stub laid over `site` (pre: before its 0x80 frame, else inside it) and from the site itself with
+ * the stub's frame taken off: out[0..4] the stub's Rip, Rsp, Rbx, R12 and Xmm6's low half, out[5..9] the site's. */
+static int CoXlTestUnwindFrom(uint64_t rip, uint64_t rsp, uint64_t* out)
+{
+    DWORD64 base = 0, frame = 0; PVOID data = NULL;
+    PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(rip, &base, NULL);
+    if (fe == NULL) return -1;
+    CONTEXT c; memset(&c, 0, sizeof c);
+    c.Rip = rip; c.Rsp = rsp;
+    RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, rip, fe, &c, &data, &frame, NULL);
+    out[0] = c.Rip; out[1] = c.Rsp; out[2] = c.Rbx; out[3] = c.R12; out[4] = c.Xmm6.Low;
+    return 0;
+}
+/* kind 0: a stub with 0x80 of its own (the smash stub's shape); 1: four pushes and 0x80 (the blast stub's, 0xA0).
+ * handler: the one the host's data may name. co_unwind_block's refusal comes back as it minus 10. */
+int CoXlTestUnwindWith(uintptr_t site, uintptr_t handler, int kind, int pre, uint64_t out[10])
+{
+    DWORD64 base = 0;
+    if (RtlLookupFunctionEntry(site, &base, NULL) == NULL) return -1;
+    uint8_t* block = AllocateNearGame((uintptr_t)base, 0x1000);
+    static uint64_t stack[0x400];
+    if (block == NULL) return -2;
+    memset(block, 0xCC, 0x800);
+    static const CoUnwindRange small[2] = {{0, 17, 0, 0, {0}}, {17, 102, 7, 1, {CO_UNWIND_ALLOC(7, 0x80)}}};
+    static const CoUnwindRange pushes[2] = {{0, 5, 0, 0, {0}},
+        {5, 108, 15, 5, {CO_UNWIND_ALLOC(15, 0x80), CO_UNWIND_PUSH(8, 11), CO_UNWIND_PUSH(6, 10), CO_UNWIND_PUSH(4, 9), CO_UNWIND_PUSH(2, 8)}}};
+    int rc = co_unwind_block(block, kind ? pushes : small, 2, site, handler, block + 0x800, 0x800);
+    if (rc != 0) return rc - 10;
+    for (int i = 0; i < 0x400; i++) stack[i] = 0x1000u + (uint64_t)i;
+    uint64_t rsp = (uint64_t)(uintptr_t)&stack[0x100];
+    if (CoXlTestUnwindFrom((uint64_t)(uintptr_t)block + (pre ? 3u : 60u), rsp, out)) return -4;
+    return CoXlTestUnwindFrom((uint64_t)site, pre ? rsp : rsp + (kind ? 0xA0u : 0x80u), out + 5);
+}
+int CoXlTestUnwind(uintptr_t site, int pre, uint64_t out[10]) { return CoXlTestUnwindWith(site, 0, 0, pre, out); }
+int CoXlTestThunkUnwind(uint64_t out[2], uint64_t* stackTop)
+{
+    static uint64_t stack[0x100];
+    for (int i = 0; i < 0x100; i++) stack[i] = 0x2000u + (uint64_t)i;
+    *stackTop = (uint64_t)(uintptr_t)&stack[0];
+    uint64_t r[5];
+    int k = CoXlTestUnwindFrom((uint64_t)(uintptr_t)CoIndexQueryThunk + 13u, (uint64_t)(uintptr_t)&stack[0], r);
+    out[0] = r[0]; out[1] = r[1];
+    return k;
+}
 /* The two leaf thunks against a target that wipes xmm0-xmm5: out gets xmm1-xmm5 after the call, the target's r9 and
  * fifth argument, and the address the runner's call returns to. which 0: the layer sampler's, 1: the index query's. */
 uint64_t g_coTestR9, g_coTestFifth;

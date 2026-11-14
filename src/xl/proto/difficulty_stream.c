@@ -851,6 +851,8 @@ static void WorldStreamReplacePick(uint32_t* pick, float* key, uint32_t* picks, 
 /* The stamps whose layers spawned on the level's heights by a live tile (NearLayerPendingAdd): once a grid covers one,
  * a stamp the streamer may take out goes out and comes back on it, as after a tile's change; any other is counted
  * (the start area's and the mission's stamps stay). One with no grid after 60 s is dropped. */
+static float MoveStampFootprint(uint32_t i, float f[4]); /* difficulty_world_move.c */
+static float MoveStampSeen2(float side);
 static void WorldStreamPendingLocked(ULONGLONG now)
 {
     AcquireSRWLockExclusive(&g_layerPending.lock);
@@ -871,7 +873,8 @@ static void WorldStreamPendingLocked(ULONGLONG now)
             !g_streamMission[i])
         {
             g_streamReplace[i] = 1;
-            g_streamSeen2[i] = 1.0f;
+            float f[4];
+            g_streamSeen2[i] = MoveStampSeen2(MoveStampFootprint(i, f)); /* ranked by how far it is seen, as MoveStampsReplace */
             g_layerPending.replaced++;
         }
         else g_layerPending.kept++;
@@ -926,7 +929,8 @@ static void WorldStreamScanLocked(ULONGLONG now)
         }
         if (g_streamLive[i] && g_streamReplace[i]) /* its ground changed: picked below */
         {
-            if (g_streamPoseGood[i] && !g_streamNeedsUnit[i] && g_streamUnit[i] != 0 && !g_streamDrop[i])
+            /* not while a layer fill runs: its respawn waits for the fill, and the stamp would be missing until then */
+            if (g_streamPoseGood[i] && !g_streamNeedsUnit[i] && g_streamUnit[i] != 0 && !g_streamDrop[i] && !g_layerJob.running)
                 WorldStreamReplacePick(pick, pickKey, &picks, i, best / g_streamSeen2[i]);
             continue;
         }

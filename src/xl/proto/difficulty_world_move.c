@@ -613,18 +613,35 @@ static int MoveStampMovable(uint32_t i, float cx, float cy, float reach)
 /* Whether the ground under stream slot i moved by more than MOVE_STAMP_MOVED when the tile in `slot` came (gone NULL)
  * or went (gone: its copy). Before and after are what its units read (the grid chosen by its level unit, the stamp's
  * pose, else the level's heightfield) over its footprint (record +0xB0, map metres). *side: the footprint's side. */
-static int MoveStampGroundMoved(uint32_t i, int slot, const NearTile* gone, float cx, float cy, float* side)
+/* Stream slot i's footprint in world metres (record +0xB0, map metres), else foot_band_min around its pose:
+ * f = x0, x1, y0, y1. Returns its longer side. */
+static float MoveStampFootprint(uint32_t i, float f[4])
 {
     const float x = g_streamAt[i][0], y = g_streamAt[i][1];
     float box[4];
     if (SafeRead((uintptr_t)g_stream.array + (size_t)i * kStreamRecord + 0xB0, box, sizeof box) || !isfinite(box[0]) || !isfinite(box[1]) ||
         !isfinite(box[2]) || !isfinite(box[3]))
         box[0] = box[2] = x + g_stream.half, box[1] = box[3] = y + g_stream.half;
-    float x0 = fminf(box[0], box[2]) - g_stream.half, x1 = fmaxf(box[0], box[2]) - g_stream.half;
-    float y0 = fminf(box[1], box[3]) - g_stream.half, y1 = fmaxf(box[1], box[3]) - g_stream.half;
-    if (x1 - x0 < 1.0f) { x0 = x - 16.0f; x1 = x + 16.0f; } /* no footprint: foot_band_min around the pose */
-    if (y1 - y0 < 1.0f) { y0 = y - 16.0f; y1 = y + 16.0f; }
-    *side = fmaxf(x1 - x0, y1 - y0);
+    f[0] = fminf(box[0], box[2]) - g_stream.half; f[1] = fmaxf(box[0], box[2]) - g_stream.half;
+    f[2] = fminf(box[1], box[3]) - g_stream.half; f[3] = fmaxf(box[1], box[3]) - g_stream.half;
+    if (f[1] - f[0] < 1.0f) { f[0] = x - 16.0f; f[1] = x + 16.0f; }
+    if (f[3] - f[2] < 1.0f) { f[2] = y - 16.0f; f[3] = y + 16.0f; }
+    return fmaxf(f[1] - f[0], f[3] - f[2]);
+}
+
+/* The replace pick's key for a stamp `side` m across: the distance its meshes are drawn to, squared. */
+static float MoveStampSeen2(float side)
+{
+    float seen = WindowVisible(side * 1.41421356f);
+    return seen * seen > 1.0f ? seen * seen : 1.0f;
+}
+
+static int MoveStampGroundMoved(uint32_t i, int slot, const NearTile* gone, float cx, float cy, float* side)
+{
+    const float x = g_streamAt[i][0], y = g_streamAt[i][1];
+    float f[4];
+    *side = MoveStampFootprint(i, f);
+    const float x0 = f[0], x1 = f[1], y0 = f[2], y1 = f[3];
     const int skip = gone != NULL ? -1 : slot;
     const int before = NearLayerGridWith(x, y, skip, gone != NULL ? gone->centre : NULL), after = NearLayerGridWith(x, y, -1, NULL);
     if (!before && !after) return 0; /* the level's heightfield both times */
@@ -665,8 +682,7 @@ static uint32_t MoveStampsReplace(int slot, const NearTile* gone, float cx, floa
             inReach++;
             float side = 0.0f;
             if (!MoveStampGroundMoved(i, slot, gone, cx, cy, &side)) continue;
-            float seen = WindowVisible(side * 1.41421356f);
-            g_streamSeen2[i] = seen * seen > 1.0f ? seen * seen : 1.0f;
+            g_streamSeen2[i] = MoveStampSeen2(side);
             g_streamReplace[i] = 1;
             flagged++;
         }
