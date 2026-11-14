@@ -186,7 +186,7 @@ static LwLpUnit* LwLpSample(uint32_t id, const float* up, float tilt, float grou
     if (off >= 30.0f) { g_lwLp.off30++; if (ground >= 30.0f) g_lwLp.off30Steep++; }
     LwLpUnit* u = LwLpSlot(id);
     if (u == NULL) return NULL;
-    if (tilt < allowed - 1.0f) { u->scan = 0; return NULL; }
+    if (tilt < allowed - 1.0f) return NULL;
     g_lwLp.at++;
     if (u->scan != 0 && u->scan + 1 == g_lwLp.scan)
     {
@@ -273,6 +273,7 @@ int CoXlTestLeanHold(float* up, const float* w, float deg) { return LwLeanHold(u
 float CoXlTestLeanAllowed(float slope, float over) { return LwLeanAllowed(slope, over); }
 int CoXlTestLeanSlope(float x, float y, float* deg) { return LwLeanSlope(x, y, deg); }
 void CoXlTestLeanAt(const float* origin) { LwLeanAt(origin); }
+int CoXlTestLeanSlot(float* xy) { xy[0] = t_lwLean.x; xy[1] = t_lwLean.y; return t_lwLean.set; }
 void CoXlTestLeanCounts(long* c)
 {
     c[0] = InterlockedExchange(&g_lwLean.poses, 0); c[1] = InterlockedExchange(&g_lwLean.game, 0); c[2] = InterlockedExchange(&g_lwLean.ours, 0);

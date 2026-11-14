@@ -14,6 +14,7 @@ void CoXlTestTiltTile(float cx, float cy, float z);
 float CoXlTestTiltUnder(float d, uint32_t count, float originZ, float ground);
 void CoXlTestTiltHold(int on);
 void CoXlTestTiltCounts(long* reads, long* under);
+int CoXlTestLeanSlot(float* xy);
 int CoXlTestTiltIsProp(uint32_t owner, uint32_t body, uint32_t terrain);
 int CoXlTestTiltOnProp(uintptr_t game, uintptr_t mgr, const float* p, float* z);
 void CoXlTestTiltPropSample(uintptr_t mgr, const float* p, float fromUpright);
@@ -127,6 +128,10 @@ int main(void)
     float d = Call(read, 2, 3, 4.0f);
     CHECK(fabsf(d - (11.7f - 12.0f)) < 0.02f);
     CHECK(g_read.calls == 1 && g_read.request == 2 && g_read.coarse == 3); /* the game's call as made */
+    float slot[2] = {0, 0}; /* the lean limit's place for this thread's unit: the ray's origin */
+    CHECK(CoXlTestLeanSlot(slot) == 1 && slot[0] == 110.0f && slot[1] == -190.0f);
+    Call(read, 0, 3, 4.0f); /* no ray: no place */
+    CHECK(CoXlTestLeanSlot(slot) == 0);
     CoXlTestTiltCounts(&reads, &under);
     CHECK(reads == 1 && under == 1);
 

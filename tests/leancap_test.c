@@ -352,6 +352,7 @@ int main(void)
     CHECK(CoXlTestLpSample(7, a, 25.0f, 0.0f, 25.0f, hit, 4.0f) == 1);  /* at its limit */
     CHECK(CoXlTestLpSample(8, a, 23.9f, 0.0f, 23.9f, hit, 4.0f) == 0);  /* over 1 deg under it */
     CHECK(CoXlTestLpSample(9, a, 27.1f, 0.0f, 27.1f, hit, 4.0f) == 1);  /* over it by more than 2 */
+    CHECK(CoXlTestLpSample(12, a, 26.5f, 0.0f, 26.5f, hit, 4.0f) == 1); /* over it by less: the hold's own slack */
     CHECK(CoXlTestLpSample(10, a, 43.9f, 20.0f, 30.0f, hit, 4.0f) == 0); /* steep ground: the limit rises; 30 off it */
     CHECK(CoXlTestLpSample(11, a, 45.0f, 30.0f, 31.0f, hit, 4.0f) == 1); /* the game's limit; 30 off ground of 30 */
     CoXlTestLpScan();
@@ -364,7 +365,7 @@ int main(void)
     CoXlTestLpScan();
     CHECK(CoXlTestLpSample(7, a, 25.0f, 0.0f, 25.0f, hit, 4.0f) == 1);     /* not seen last scan: no pair */
     CoXlTestLpNote();
-    CHECK(fake_host_logged("lean probe (30 s): 10 four-corner samples on read ground, 1 over their limit by 2 deg or more (ground slope + 25, at most 45.6), 7 at it; "
+    CHECK(fake_host_logged("lean probe (30 s): 11 four-corner samples on read ground, 1 over their limit by 2 deg or more (ground slope + 25, at most 45.6), 8 at it; "
         "30 deg or more off their ground 2, 1 of them on ground of 30 deg or more; at their limit two scans running 1: up turned 34.8 deg on average, 34.8 at most, 2 corner readings changed kind"));
     CoXlTestLeanSet(0.0f); /* a control run measures against the default */
     CoXlTestLpScan();
