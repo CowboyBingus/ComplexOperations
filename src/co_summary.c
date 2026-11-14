@@ -27,9 +27,9 @@
 #define CO_SUM_SET_POSITION 0x14476A0u
 #define CO_SUM_SET_SCALE 0x1447ED0u
 #define CO_SUM_SET_SHOWN 0x14508E0u
-#define CO_SUM_REFRESH 0x19901B0u /* a card takes its row's player: name, figure, state */
+#define CO_SUM_STATE 0x12538u      /* in a card: its state (1 no player, 2 collapsed, 3 raised, 4 stats); +0xC the target */
+#define CO_SUM_FIGURE_PLAYER 0x18A1600u /* (figure, player id): the figure takes a player, as the card's refresh calls it */
 #define CO_SUM_UNLISTEN 0xB0B020u /* (entity, listener, -1): the listener leaves the entity's events, as 0x18A1630 calls it */
-#define CO_SUM_FILL_AFTER 900u    /* updates of the summary before the fill, so the game's own row is seen first */
 #define CO_SUM_SESSION 0x347CEF0u /* the session context: +0x16390 the peers' count, entries of 0x20 from +0x16398 with
                                      the figure position at +0x14 (0x18A18EC) */
 
@@ -48,9 +48,6 @@ static uint32_t g_logged = ~0u;
 static int g_figures;
 static uint64_t g_seen;
 static uint64_t (*g_clock)(void) = GetTickCount64;
-#ifdef CO_RESEARCH
-static uint32_t g_fillWait;
-#endif
 
 void co_summary_install(uintptr_t game) { g_game = game; }
 
@@ -110,11 +107,53 @@ static int Present(uintptr_t card)
 }
 
 #ifdef CO_RESEARCH
-/* HELLFORGE_CO_SUMMARY_FILL=5..8, alone in a session: after 900 updates cards 5 to that number show the local player,
- * each with its own figure position (4 and up), so one player sees the row and the figures of a full session. The
- * position is the local peer's for the length of the card's refresh only. A filled figure leaves the player's events:
- * its event 0xCC (0x18A17A7) would read the peer's own position again and put two figures on one record. */
+/* HELLFORGE_CO_SUMMARY_FILL=2..8, alone in a session: cards 2 to that number take the local player's row, each with
+ * a figure of its own, so one player sees the row of a full session. HELLFORGE_CO_SUMMARY_FILL_FILE names a file the
+ * fill waits for. The figure is set up here with the peer's position changed for the call only, and loses its player
+ * a frame later: the game reads the position again by that player on every update (0x18A10C0, 0x18A17D0) and would
+ * move all of them to the peer's one record. The game raises cards once, as the summary opens (0x1993901), so a
+ * card filled later takes the local card's target here, as 0x1993510 stores it. */
 static int g_fill = -1;
+static char g_fillFile[260];
+static uint8_t g_filled, g_fillDone;
+static uint32_t g_fillFrom;
+static uint64_t g_fillAsked;
+
+static void FillCards(uintptr_t screen, uintptr_t session)
+{
+    const uintptr_t players = *(const uintptr_t*)(g_game + CO_SUM_PLAYERS);
+    const uint32_t unset = *(const uint32_t*)(g_game + CO_SUM_UNSET_ID);
+    uint32_t from = 8;
+    for (uint32_t i = 0; i < 8u && from == 8u; i++)
+        if (Present(Card(screen, i))) from = i;
+    if (from == 8u) return;
+    /* A figure without a player must not be found as one (0x18A17D0's lookup). */
+    if (co_summary_player(*(const uint32_t* const*)(players + 0xD0u), *(const uint32_t*)(players + 0xD8u),
+            *(const uint32_t*)(players + 0xDCu), *(const uint32_t*)(players + 0xE0u), unset))
+    {
+        co_log("mission summary: research fill: refused, the unset id is a player");
+        g_fill = 0;
+        return;
+    }
+    uint32_t* position = (uint32_t*)(session + 0x163ACu);
+    const uint32_t own = *position;
+    g_fillFrom = from;
+    for (uint32_t i = 0; i < (uint32_t)g_fill; i++)
+    {
+        const uintptr_t card = Card(screen, i), row = screen + CO_SUM_ROWS + 8u + i * CO_SUM_ROW, figure = card + CO_SUM_FIGURE;
+        if (i == from || Present(card) || *(const uintptr_t*)(card + CO_SUM_CARD_ROW) != row) continue;
+        memcpy((void*)row, (const void*)(screen + CO_SUM_ROWS + 8u + from * CO_SUM_ROW), CO_SUM_ROW);
+        /* Not hidden: the game's refresh then leaves the figure's start to its update, which reads no position. */
+        *(uint8_t*)(figure + 0x8D8u) = 0;
+        *position = i == own ? from : i;
+        ((void (*)(uintptr_t, uint32_t))(g_game + CO_SUM_FIGURE_PLAYER))(figure, *(const uint32_t*)row);
+        *position = own;
+        ((void (*)(uint32_t, uintptr_t, uint32_t))(g_game + CO_SUM_UNLISTEN))(*(const uint32_t*)row, figure, 0xFFFFFFFFu);
+        g_filled |= (uint8_t)(1u << i);
+        co_log("mission summary: research fill: card %u shows the player of card %u (figure position %d, record %d)", i + 1u,
+            from + 1u, *(const int32_t*)(figure + 0x8E4u), *(const int32_t*)(figure + 0x8E0u));
+    }
+}
 
 static void Fill(uintptr_t screen)
 {
@@ -122,28 +161,40 @@ static void Fill(uintptr_t screen)
     {
         char text[8];
         const DWORD n = GetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL", text, sizeof text);
-        g_fill = n == 1 && text[0] >= '5' && text[0] <= '8' ? text[0] - '0' : 0;
+        g_fill = n == 1 && text[0] >= '2' && text[0] <= '8' ? text[0] - '0' : 0;
+        const DWORD m = GetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL_FILE", g_fillFile, sizeof g_fillFile);
+        if (m == 0 || m >= sizeof g_fillFile) g_fillFile[0] = 0;
     }
     const uintptr_t session = *(const uintptr_t*)(g_game + CO_SUM_SESSION);
     if (g_fill == 0 || session == 0 || *(const uint32_t*)(session + 0x16390u) != 1u) return;
-    if (g_fillWait < CO_SUM_FILL_AFTER) { g_fillWait++; return; }
-    uint32_t from = 8;
-    for (uint32_t i = 0; i < 4u && from == 8u; i++)
-        if (Present(Card(screen, i))) from = i;
-    if (from == 8u) return;
-    uint32_t* position = (uint32_t*)(session + 0x163ACu);
-    const uint32_t own = *position;
-    for (uint32_t i = 4; i < (uint32_t)g_fill; i++)
+    if (g_filled == 0)
     {
-        const uintptr_t card = Card(screen, i), row = screen + CO_SUM_ROWS + 8u + i * CO_SUM_ROW;
-        if (Present(card) || *(const uintptr_t*)(card + CO_SUM_CARD_ROW) != row) continue;
-        memcpy((void*)row, (const void*)(screen + CO_SUM_ROWS + 8u + from * CO_SUM_ROW), CO_SUM_ROW);
-        *position = i;
-        ((void (*)(uintptr_t))(g_game + CO_SUM_REFRESH))(card);
-        *position = own;
-        ((void (*)(uint32_t, uintptr_t, uint32_t))(g_game + CO_SUM_UNLISTEN))(*(const uint32_t*)row, card + CO_SUM_FIGURE, 0xFFFFFFFFu);
-        co_log("mission summary: research fill: card %u shows the player of card %u (figure position %d, record %d)", i + 1u,
-            from + 1u, *(const int32_t*)(card + CO_SUM_FIGURE + 0x8E4u), *(const int32_t*)(card + CO_SUM_FIGURE + 0x8E0u));
+        if (g_fillFile[0] != 0)
+        {
+            const uint64_t now = g_clock();
+            if (now - g_fillAsked < 250u) return;
+            g_fillAsked = now;
+            if (GetFileAttributesA(g_fillFile) == INVALID_FILE_ATTRIBUTES) return;
+        }
+        FillCards(screen, session);
+        return;
+    }
+    const uint32_t target = *(const uint32_t*)(Card(screen, g_fillFrom) + CO_SUM_STATE + 0xCu);
+    for (uint32_t i = 0; i < 8u; i++)
+    {
+        const uintptr_t card = Card(screen, i), figure = card + CO_SUM_FIGURE;
+        if (!(g_filled >> i & 1u)) continue;
+        if (!(g_fillDone >> i & 1u) && *(const uint8_t*)(figure + 0x8D9u) != 0)
+        {
+            *(uint32_t*)(figure + 0x8DCu) = *(const uint32_t*)(g_game + CO_SUM_UNSET_ID);
+            g_fillDone |= (uint8_t)(1u << i);
+        }
+        uint32_t* state = (uint32_t*)(card + CO_SUM_STATE);
+        if (state[0] == 2u && state[3] == 2u && (target == 3u || target == 4u))
+        {
+            state[3] = target;
+            co_log("mission summary: research fill: card %u raised with card %u (target %u)", i + 1u, g_fillFrom + 1u, target);
+        }
     }
 }
 #endif
@@ -161,7 +212,8 @@ void co_summary_layout(CoRegs* regs)
         g_logged = ~0u;
         g_figures = 0;
 #ifdef CO_RESEARCH
-        g_fillWait = 0;
+        g_filled = g_fillDone = 0;
+        g_fillAsked = 0;
 #endif
     }
     g_seen = now;
@@ -221,7 +273,8 @@ void co_summary_test_reset(void)
     g_seen = 0;
 #ifdef CO_RESEARCH
     g_fill = -1;
-    g_fillWait = 0;
+    g_filled = g_fillDone = 0;
+    g_fillAsked = 0;
 #endif
 }
 void co_summary_test_clock(uint64_t (*clock)(void)) { g_clock = clock != NULL ? clock : GetTickCount64; }
