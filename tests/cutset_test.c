@@ -799,6 +799,19 @@ static void Centres(void)
     CHECK(co_cutset_player(held, 0, 3, 0, 0, 0, 0x300u, at) == 0);
 }
 
+/* The nearest tree's own cutter state, whatever the order the cell lists its records in. */
+static void Tree(void)
+{
+    int on = 9;
+    Fresh("nearest tree: a nearer one that is off, listed after one that is on");
+    const CoCutCentre squad = {100.0f, 100.0f, CO_CUTSET_SQUAD_IN, CO_CUTSET_SQUAD_OUT};
+    co_cutset_made(&g_set, H(1), 105.0f, 100.0f, 0);
+    co_cutset_made(&g_set, H(2), 112.0f, 100.0f, 1);
+    Tick(&squad, 1, 1000, 0);
+    CHECK(g_out.adds == 1 && co_cutset_tree(&g_set, 106.0f, 100.0f, 6.5f, &on) == 1.0f && on == 0);
+    CHECK(co_cutset_tree(&g_set, 110.0f, 100.0f, 6.5f, &on) == 2.0f && on == 1);
+}
+
 /* A squad's place is cut in when nothing wanted near it waits and a run that began after its last add has ended. */
 static void CutIn(void)
 {
@@ -877,7 +890,7 @@ static void CutIn(void)
 int main(void)
 {
     /* unbuffered, and no group after a failed one: a set gone wrong can loop, and its failed checks must show */
-    void (*const groups[])(void) = {Binding, Records, AddsInReach, Leaving, Cap, Clock, Centres, CutIn, Forest};
+    void (*const groups[])(void) = {Binding, Records, AddsInReach, Leaving, Cap, Clock, Centres, CutIn, Tree, Forest};
     setvbuf(stdout, NULL, _IONBF, 0);
     for (size_t i = 0; i < sizeof groups / sizeof groups[0] && g_failed == 0; i++) groups[i]();
     free(g_memory);

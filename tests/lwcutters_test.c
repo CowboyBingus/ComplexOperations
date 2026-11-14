@@ -44,6 +44,8 @@ static void Measures(void)
     CHECK(CoXlTestLwCutNavSlot(0xFFFFFFFFu, 0x10000, 0xFFFFu, 0x10000u, 0x08100018u, &key, &at) == 0); /* none */
     CHECK(CoXlTestLwCutNavSlot(0x80010103u, 8, 0xFFu, 0x10000u, 0x00040008u, &key, &at) == 1 && key == 3 * 8 + 4 && at == 3 * 8);
 
+    CHECK(CoXlTestLwCutNavSlot(0x80010002u, 8, 0xFFFFu, 0x10000u, 0x08100118u, &key, &at) == 1 && key == 2 * 0x118 + 0x10 && at == 2 * 0x118 + 0x08);
+
     g_case = "a watched member is stuck after 5 s with a goal and no way made";
     CHECK(CoXlTestLwCutBodyStep(1, 0.3f, 0.0f, 1, 0) == 0);
     for (int i = 0; i < 3; i++) CHECK(CoXlTestLwCutBodyStep(0, 0.3f, 0.3f, 1, 0) == 0);
@@ -64,6 +66,17 @@ static void Measures(void)
     for (int i = 1; i <= 4; i++) CHECK(CoXlTestLwCutBodyStep(0, 12.0f + 2.0f * (float)i, 0.0f, 1, 2) == 0);
     for (int i = 0; i < 300; i++) CoXlTestLwCutBodyStep(0, 0.0f, 0.0f, 1, 2); /* the counts hold at their top */
     CHECK(CoXlTestLwCutBodyStep(0, 0.0f, 0.0f, 1, 2) == 1);
+
+    g_case = "the spot follows the member on both axes, and the seconds hold at their top";
+    CHECK(CoXlTestLwCutBodyStep(1, 0.0f, 0.0f, 1, 0) == 0 && CoXlTestLwCutBodyStep(0, 0.0f, 2.0f, 1, 0) == 0);
+    for (int i = 0; i < 4; i++) CHECK(CoXlTestLwCutBodyStep(0, 0.0f, 2.0f, 1, 0) == 0);
+    CHECK(CoXlTestLwCutBodyStep(0, 0.0f, 2.0f, 1, 0) == 1);
+    CHECK(CoXlTestLwCutBodyStep(1, 0.0f, 0.0f, 1, 2) == 0);
+    for (int i = 0; i < 254; i++) CoXlTestLwCutBodyStep(0, 0.0f, 0.0f, 1, 2);
+    CHECK(CoXlTestLwCutBodyStep(0, 0.0f, 0.0f, 1, 2) == 1);
+    CHECK(CoXlTestLwCutBodyStep(1, 0.0f, 0.0f, 1, 0) == 0);
+    for (int i = 0; i < 254; i++) CoXlTestLwCutBodyStep(0, 0.0f, 0.0f, 1, 0);
+    CHECK(CoXlTestLwCutBodyStep(0, 0.0f, 0.0f, 1, 0) == 1);
 
     g_case = "repaths between two reads of a record's navigator";
     CHECK(CoXlTestLwCutRepathStep(5, 0x80010005u, 7) == 0);  /* the first read of it */
