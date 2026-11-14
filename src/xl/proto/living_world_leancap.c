@@ -152,10 +152,11 @@ static void LwInstallLeanCap(void)
  * switch of 0 measures against the default, so a control run counts the same units. */
 #define LW_LP_UNITS 256
 #define LW_LP_LINES 16
+#define LW_LP_STEEP 48  /* lines a level (and a value of xl-lean.txt) for samples 30 deg off ground of 30 deg */
 typedef struct LwLpUnit { uint32_t id, scan; float up[3]; uint8_t kind[4]; ULONGLONG lineAt; } LwLpUnit;
 static struct
 {
-    uint32_t scan, samples, over, at, off30, off30Steep, pairs, flips; float turnSum, turnMax; int lines;
+    uint32_t scan, samples, over, at, off30, off30Steep, pairs, flips; float turnSum, turnMax; int lines, steepLines;
     LwLpUnit units[LW_LP_UNITS];
 } g_lwLp;
 
@@ -229,10 +230,13 @@ static int LwLeanWatch(const wchar_t* path)
     text[got] = 0;
     const float deg = strtof(text, &end);
     if (end == text || !(deg >= 0.0f)) { Note("living world: lean: xl-lean.txt \"%.20s\" is not degrees; still %.0f", text, (double)LwLeanDeg()); return 0; }
+    char* rest = end; const long props = strtol(end, &rest, 10); /* a second number: 0 leaves prop hits the game's */
     LwTiltNote(); LwLeanNote();
     LwLeanSet(deg);
-    g_lwLp.lines = 0;
-    Note("living world: lean: now %.0f deg over the slope (0: none), from xl-lean.txt", (double)LwLeanDeg());
+    if (rest != end) InterlockedExchange(&g_lwTiltPropsOn, props != 0);
+    g_lwLp.lines = g_lwLp.steepLines = 0;
+    Note("living world: lean: now %.0f deg over the slope (0: none), prop hits read %s, from xl-lean.txt", (double)LwLeanDeg(),
+        g_lwTiltPropsOn ? "the drawn ground" : "as the game reads them");
     return 1;
 }
 #endif
@@ -246,6 +250,16 @@ static void LwLpUnitScan(uintptr_t mgr, uintptr_t R, uint32_t id, const float* q
     SafeRead(R + 0x48, &len, 4);
     for (int k = 0; k < 4; k++) SafeRead(R + 0x58 + 0x18u * k + 0x10, &last[k], 4);
     LwLpUnit* u = LwLpSample(id, up, tilt, ground, off, last, len);
+    if (off >= 30.0f && ground >= 30.0f && g_lwLp.steepLines < LW_LP_STEEP)
+    {
+        float drawn = -1.0f; const int tile = LwLeanSlope(p[0], p[1], &drawn), under = LwTiltOnProp(mgr, p, &z);
+        g_lwLp.steepLines++;
+        Note("living world: lean probe: steep: unit %08X at (%.1f, %.1f, %.2f): %.1f deg from upright, %.1f off its ground; the ground's slope %.1f deg by the game's read, "
+            "%.1f by the drawn tile (-1: none read); limit %.1f; under it %s; readings %.2f %.2f %.2f %.2f of %.2f",
+            id, (double)p[0], (double)p[1], (double)p[2], (double)tilt, (double)off, (double)ground, tile ? (double)drawn : -1.0,
+            (double)LwLeanAllowed(tile ? drawn : ground, LwLpOver()), under < 0 ? "nothing" : under ? "a prop" : "the ground",
+            (double)last[0], (double)last[1], (double)last[2], (double)last[3], (double)len);
+    }
     if (u == NULL || g_lwLp.lines >= LW_LP_LINES || (u->lineAt != 0 && now - u->lineAt < 20000)) return;
     u->lineAt = now; g_lwLp.lines++;
     char corners[160] = ""; int at = 0;

@@ -29,6 +29,7 @@ void CoXlTestTiltHold(int on);
 void CoXlTestLpLevel(void);
 void CoXlTestLpScan(void);
 int CoXlTestLeanWatch(const wchar_t* path);
+int CoXlTestTiltPropsOn(void);
 int CoXlTestLpSample(uint32_t id, const float* up, float tilt, float ground, float off, const float* last, float len);
 void CoXlTestLpNote(void);
 void CoXlTestFgWorld(float live);
@@ -410,7 +411,7 @@ int main(void)
     Put(file, "0\n");
     CHECK(CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 0.0f);
     CHECK(fake_host_logged("lean (30 s): 1 four-corner poses, 0 held at the game's 45.6 deg, 1 at their ground's slope and 25 deg")); /* the counts under 25, before */
-    CHECK(fake_host_logged("lean: now 0 deg over the slope (0: none), from xl-lean.txt"));
+    CHECK(fake_host_logged("lean: now 0 deg over the slope (0: none), prop hits read the drawn ground, from xl-lean.txt"));
     CHECK(Through(four, 40.0f, 15.0f) && Is(g_out, 40.0f, 15.0f)); /* the game's answer, untouched */
     CHECK(!CoXlTestLeanWatch(file)); /* not written again: not read again */
     Put(file, "twelve");
@@ -423,8 +424,17 @@ int main(void)
     CHECK(fake_host_logged("lean (30 s): 1 four-corner poses, 0 held at the game's 45.6 deg, 0 at their ground's slope and 0 deg"));
     CHECK(fake_host_logged("lean: now 12 deg over the slope"));
     CHECK(Through(four, 40.0f, 15.0f) && Is(g_out, 12.0f, 15.0f));
+    CHECK(fake_host_logged("lean: now 12 deg over the slope (0: none), prop hits read the drawn ground, from xl-lean.txt"));
+    CHECK(CoXlTestTiltPropsOn()); /* no second number: prop hits as they were */
+    Put(file, "25 0\n");
+    CHECK(CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 25.0f && !CoXlTestTiltPropsOn());
+    CHECK(fake_host_logged("lean: now 25 deg over the slope (0: none), prop hits read as the game reads them, from xl-lean.txt"));
+    Put(file, "0");
+    CHECK(CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 0.0f && !CoXlTestTiltPropsOn()); /* the degrees alone: prop hits stay off */
+    Put(file, "25 1");
+    CHECK(CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 25.0f && CoXlTestTiltPropsOn());
     DeleteFileW(file);
-    CHECK(!CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 12.0f); /* taken away: the last degrees stay */
+    CHECK(!CoXlTestLeanWatch(file) && CoXlTestLeanDeg() == 25.0f && CoXlTestTiltPropsOn()); /* taken away: the last values stay */
 
     if (g_failed) { printf("%d check(s) failed\n", g_failed); return 1; }
     printf("leancap: all checks passed\n");

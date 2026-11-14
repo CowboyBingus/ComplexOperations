@@ -1,6 +1,8 @@
 /* The rotation's ray reader (game 0x620810) on extra large levels: a ray that starts under a live tile's ground reads
  * that ground above it (minus the depth) when it missed; hits, misses over the ground, other places and a busy tile
- * list keep the game's answer. The game's call is always made as the game made it.
+ * list keep the game's answer. A four-corner unit's hit on a prop reads the ray's length to the drawn ground; hits on
+ * the ground, other modes, other levels and places with no drawn ground keep the game's. The game's call is always
+ * made as the game made it.
  * Run on the fake game. */
 #include <math.h>
 #include <stdio.h>
@@ -19,6 +21,13 @@ int CoXlTestTiltIsProp(uint32_t owner, uint32_t body, uint32_t terrain);
 int CoXlTestTiltOnProp(uintptr_t game, uintptr_t mgr, const float* p, float* z);
 void CoXlTestTiltPropSample(uintptr_t mgr, const float* p, float fromUpright);
 void CoXlTestTiltPropNote(void);
+float CoXlTestTiltPropRead(float t, float len);
+int CoXlTestTiltGroundAlong(const float* o, const float* dir, float* t);
+void CoXlTestTiltProps(int on);
+void CoXlTestTiltPropCounts(long* ground, long* kept);
+void CoXlTestTiltNote(void);
+void CoXlTestLeanTile(float cx, float cy, float z, float gx, float gy);
+void CoXlTestFgWorld(float live);
 
 static int g_failed;
 static const char* g_case;
@@ -74,6 +83,28 @@ static int Passed(float got, float answer, uint32_t request, uint32_t coarse)
     return got == answer && g_read.calls == 1 && g_read.mgr == 0x1234 && g_read.i == 7 && g_read.rays == (uintptr_t)g_rays &&
         g_read.request == request && g_read.coarse == coarse;
 }
+
+/* A four-corner unit's ray that hit: record 2 of unit 7 (mode at R+0x54, full length at R+0x48), from (x, y, z) along
+ * dir, its hit naming owner and body; the level terrain's body is 0x80300067. */
+static uint8_t g_units[8][0x298], g_hit[0x2C], g_mgr[0x60];
+static void PropRay(float x, float y, float z, float dx, float dy, float dz, uint32_t owner, uint32_t body)
+{
+    const uintptr_t recs = (uintptr_t)g_units, hit = (uintptr_t)g_hit; const uint32_t terrain = 0x80300067u, ids[2] = {owner, body};
+    const float dir[3] = {dx, dy, dz};
+    memcpy(g_mgr + 0x18, &terrain, 4); memcpy(g_mgr + 0x58, &recs, 8);
+    memcpy(g_hit + 0x1C, ids, 8);
+    Ray(2, x, y, z, 1);
+    memcpy(g_rays[1] + 8, &hit, 8); memcpy(g_rays[1] + 0x1C, dir, 12);
+}
+static void Unit(int i, uint32_t mode, float len) { memcpy(g_units[i] + 0x54, &mode, 4); memcpy(g_units[i] + 0x48, &len, 4); }
+static float PropCall(ReadFn read, uint32_t i, float answer)
+{
+    memset(&g_read, 0, sizeof g_read);
+    g_read.answer = answer;
+    return read((uintptr_t)g_mgr, i, (uintptr_t)g_rays, 2, 3);
+}
+/* The game's call made once as the game made it. */
+static int PropMade(uint32_t i) { return g_read.calls == 1 && g_read.mgr == (uintptr_t)g_mgr && g_read.i == i && g_read.rays == (uintptr_t)g_rays && g_read.request == 2 && g_read.coarse == 3; }
 
 /* The physics ray as the fake: what it was asked, and one hit (owner +0x1C, body +0x20) or none. */
 static struct { int calls, hits; uint32_t type, filter, max, owner, body; float origin[3], dir[3], length, z; } g_ray;
@@ -165,6 +196,93 @@ int main(void)
 
     g_case = "no request: the game's call";
     CHECK(Passed(Call(read, 0, 3, 4.0f), 4.0f, 0, 3));
+
+    g_case = "a prop's hit as the ground: at most the full length";
+    CHECK(CoXlTestTiltPropRead(1.5f, 4.0f) == 1.5f && CoXlTestTiltPropRead(4.5f, 4.0f) == 4.0f && CoXlTestTiltPropRead(-0.4f, 4.0f) == -0.4f);
+    CHECK(CoXlTestTiltPropRead(3.5f, 3.0f) == 3.0f);
+
+    g_case = "a four-corner hit on a prop reads the drawn ground";
+    const uint32_t rock = 0x1188B, rockBody = 0x801122A3u, level = 0x80300067u;
+    long pg, pk; float t = 0;
+    CoXlTestFgWorld(8.0f);
+    CoXlTestLeanTile(100.0f, -200.0f, 12.0f, 0.5f, 0.0f); /* the ground rises 0.5 m a metre east: 14 at x 104 */
+    Unit(7, 4, 4.0f); Unit(6, 3, 4.0f);
+    CoXlTestTiltPropCounts(&pg, &pk);
+    PropRay(104.0f, -200.0f, 15.5f, 0, 0, -1.0f, rock, rockBody);
+    d = PropCall(read, 7, 0.3f); /* the rock 0.3 m under the ray's start, the ground 1.5 m */
+    CHECK(fabsf(d - 1.5f) < 0.02f && PropMade(7));
+    CoXlTestTiltPropCounts(&pg, &pk);
+    CHECK(pg == 1 && pk == 0);
+    PropRay(104.0f, -200.0f, 15.5f, 0.6f, 0, -0.8f, rock, rockBody); /* leaning east, uphill: 15.5 - 0.8 t = 14 + 0.3 t */
+    CHECK(fabsf(PropCall(read, 7, 0.3f) - 1.5f / 1.1f) < 0.05f);
+    PropRay(104.0f, -200.0f, 15.5f, 1.2f, 0, -1.6f, rock, rockBody); /* the same direction, not a unit vector */
+    CHECK(fabsf(PropCall(read, 7, 0.3f) - 1.5f / 1.1f) < 0.05f);
+    PropRay(104.0f, -200.0f, 15.5f, -0.6f, 0, -0.8f, rock, rockBody); /* leaning west, downhill: 15.5 - 0.8 t = 14 - 0.3 t */
+    CHECK(fabsf(PropCall(read, 7, 0.3f) - 3.0f) < 0.05f);
+    PropRay(104.0f, -196.0f, 15.5f, 0, 0.6f, -0.8f, rock, rockBody); /* leaning north, along the slope: 1.5 / 0.8 */
+    CHECK(fabsf(PropCall(read, 7, 0.3f) - 1.875f) < 0.02f);
+    PropRay(104.0f, -200.0f, 20.0f, 0, 0, -1.0f, rock, rockBody); /* the ground 6 m under: a hole */
+    CHECK(PropCall(read, 7, 0.3f) == 4.0f);
+    Unit(7, 4, 7.0f);
+    CHECK(fabsf(PropCall(read, 7, 0.3f) - 6.0f) < 0.02f); /* within this unit's own length */
+    Unit(7, 4, 4.0f);
+    PropRay(104.0f, -200.0f, 13.6f, 0, 0, -1.0f, rock, rockBody); /* started under the drawn ground: minus the depth */
+    CHECK(fabsf(PropCall(read, 7, -0.2f) + 0.4f) < 0.02f);
+    CoXlTestTiltPropCounts(&pg, &pk);
+    CHECK(pg == 7 && pk == 0);
+
+    g_case = "a hit on the ground, another mode, another level, the switch off: the game's";
+    PropRay(104.0f, -200.0f, 15.5f, 0, 0, -1.0f, 0, 0x80300099u); /* no owner: a tile's ground */
+    CHECK(PropCall(read, 7, 0.3f) == 0.3f && PropMade(7));
+    PropRay(104.0f, -200.0f, 15.5f, 0, 0, -1.0f, rock, level); /* the level terrain's body */
+    CHECK(PropCall(read, 7, 0.3f) == 0.3f);
+    PropRay(104.0f, -200.0f, 15.5f, 0, 0, -1.0f, rock, rockBody);
+    CHECK(PropCall(read, 6, 0.3f) == 0.3f && PropMade(6)); /* a bone-ray unit */
+    Unit(7, 2, 4.0f);
+    CHECK(PropCall(read, 7, 0.3f) == 0.3f);
+    Unit(7, 4, 4.0f);
+    CoXlTestFgWorld(1.0f);
+    CHECK(PropCall(read, 7, 0.3f) == 0.3f); /* not a complex level */
+    CoXlTestFgWorld(8.0f);
+    CoXlTestTiltProps(0);
+    CHECK(PropCall(read, 7, 0.3f) == 0.3f);
+    CoXlTestTiltProps(1);
+    CHECK(fabsf(PropCall(read, 7, 0.3f) - 1.5f) < 0.02f);
+    memcpy(g_rays[1] + 0x30, &(uint32_t){0}, 4); /* a miss with a prop still named in its hit record: a miss */
+    CHECK(PropCall(read, 7, 4.0f) == 4.0f);
+    CoXlTestTiltPropCounts(&pg, &pk);
+    CHECK(pg == 1 && pk == 0);
+
+    g_case = "a prop's hit with no drawn ground to read: the game's, counted";
+    PropRay(104.0f, -200.0f, 15.5f, 0.9f, 0, -0.43f, rock, rockBody); /* over 60 deg from straight down */
+    CHECK(PropCall(read, 7, 0.3f) == 0.3f);
+    PropRay(104.0f, -200.0f, 15.5f, 0, 0, 0, rock, rockBody); /* no direction */
+    CHECK(PropCall(read, 7, 0.3f) == 0.3f);
+    PropRay(104.0f, -200.0f, 15.5f, 0, 0, 1.0f, rock, rockBody); /* upward */
+    CHECK(PropCall(read, 7, 0.3f) == 0.3f);
+    PropRay(100.0f + 40.0f, -200.0f, 15.5f, 0, 0, -1.0f, rock, rockBody); /* past the tile's heights */
+    CHECK(PropCall(read, 7, 0.3f) == 0.3f);
+    PropRay(131.5f, -200.0f, 30.0f, 0.6f, 0, -0.8f, rock, rockBody); /* starts over the heights and leaves them */
+    CHECK(PropCall(read, 7, 0.3f) == 0.3f);
+    PropRay(104.0f, -200.0f, 15.5f, 0, 0, -1.0f, rock, rockBody);
+    CoXlTestTiltHold(1);
+    CHECK(PropCall(read, 7, 0.3f) == 0.3f); /* a writer holds the tiles */
+    CoXlTestTiltHold(0);
+    CoXlTestTiltPropCounts(&pg, &pk);
+    CHECK(pg == 0 && pk == 6);
+    const float o1[3] = {104.0f, -200.0f, 15.5f}, down[3] = {0, 0, -2.0f}, flat[3] = {0.87f, 0, -0.49f};
+    CHECK(CoXlTestTiltGroundAlong(o1, down, &t) && fabsf(t - 1.5f) < 0.02f);
+    CHECK(!CoXlTestTiltGroundAlong(o1, flat, &t)); /* 60.6 deg from straight down */
+
+    g_case = "the 30 s line";
+    CoXlTestTiltNote();
+    CHECK(!fake_host_logged("four-corner hits on a prop")); /* none: no line */
+    PropCall(read, 7, 0.3f); PropCall(read, 7, 0.3f);
+    PropRay(140.0f, -200.0f, 15.5f, 0, 0, -1.0f, rock, rockBody);
+    PropCall(read, 7, 0.3f);
+    CoXlTestTiltNote();
+    CHECK(fake_host_logged("tilt rays (30 s): 2 four-corner hits on a prop read the drawn ground, 1 stayed the game's with no drawn ground there"));
+    CoXlTestTiltTile(0, 0, NAN);
 
     g_case = "research: a prop under a unit";
     CHECK(CoXlTestTiltIsProp(0x1188B, 0x801122A3u, 0x80300067u) == 1);
