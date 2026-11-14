@@ -108,13 +108,11 @@ static int Present(uintptr_t card)
 
 #ifdef CO_RESEARCH
 /* HELLFORGE_CO_SUMMARY_FILL=2..8, alone in a session: cards 2 to that number take the local player's row, each with
- * a figure of its own, so one player sees the row of a full session. HELLFORGE_CO_SUMMARY_FILL_FILE names a file the
- * fill waits for. The figure is set up here with the peer's position changed for the call only, and loses its player
+ * a figure of its own, so one player sees the row of a full session. The figure is set up here with the peer's position changed for the call only, and loses its player
  * a frame later: the game reads the position again by that player on every update (0x18A10C0, 0x18A17D0) and would
  * move all of them to the peer's one record. The game raises cards once, as the summary opens (0x1993901), so a
  * card filled later takes the local card's target here, as 0x1993510 stores it. */
-static int g_fill = -1;
-static char g_fillFile[260];
+static int g_fill;
 static uint8_t g_filled, g_fillDone;
 static uint32_t g_fillFrom;
 static uint64_t g_fillAsked;
@@ -131,8 +129,8 @@ static void FillCards(uintptr_t screen, uintptr_t session)
     if (co_summary_player(*(const uint32_t* const*)(players + 0xD0u), *(const uint32_t*)(players + 0xD8u),
             *(const uint32_t*)(players + 0xDCu), *(const uint32_t*)(players + 0xE0u), unset))
     {
-        co_log("mission summary: research fill: refused, the unset id is a player");
-        g_fill = 0;
+        if (g_fillFrom != 9u) co_log("mission summary: research fill: refused, the unset id is a player");
+        g_fillFrom = 9;
         return;
     }
     uint32_t* position = (uint32_t*)(session + 0x163ACu);
@@ -157,26 +155,18 @@ static void FillCards(uintptr_t screen, uintptr_t session)
 
 static void Fill(uintptr_t screen)
 {
-    if (g_fill < 0)
+    const uintptr_t session = *(const uintptr_t*)(g_game + CO_SUM_SESSION);
+    if (session == 0 || *(const uint32_t*)(session + 0x16390u) != 1u) return;
+    if (g_filled == 0)
     {
+        /* Read while the summary is open, four times a second: a script sets it once the game's row is taken. */
+        const uint64_t now = g_clock();
+        if (now - g_fillAsked < 250u) return;
+        g_fillAsked = now;
         char text[8];
         const DWORD n = GetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL", text, sizeof text);
         g_fill = n == 1 && text[0] >= '2' && text[0] <= '8' ? text[0] - '0' : 0;
-        const DWORD m = GetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL_FILE", g_fillFile, sizeof g_fillFile);
-        if (m == 0 || m >= sizeof g_fillFile) g_fillFile[0] = 0;
-    }
-    const uintptr_t session = *(const uintptr_t*)(g_game + CO_SUM_SESSION);
-    if (g_fill == 0 || session == 0 || *(const uint32_t*)(session + 0x16390u) != 1u) return;
-    if (g_filled == 0)
-    {
-        if (g_fillFile[0] != 0)
-        {
-            const uint64_t now = g_clock();
-            if (now - g_fillAsked < 250u) return;
-            g_fillAsked = now;
-            if (GetFileAttributesA(g_fillFile) == INVALID_FILE_ATTRIBUTES) return;
-        }
-        FillCards(screen, session);
+        if (g_fill != 0) FillCards(screen, session);
         return;
     }
     const uint32_t target = *(const uint32_t*)(Card(screen, g_fillFrom) + CO_SUM_STATE + 0xCu);
@@ -214,6 +204,7 @@ void co_summary_layout(CoRegs* regs)
 #ifdef CO_RESEARCH
         g_filled = g_fillDone = 0;
         g_fillAsked = 0;
+        g_fillFrom = 0;
 #endif
     }
     g_seen = now;
@@ -272,7 +263,8 @@ void co_summary_test_reset(void)
     g_figures = 0;
     g_seen = 0;
 #ifdef CO_RESEARCH
-    g_fill = -1;
+    g_fill = 0;
+    g_fillFrom = 0;
     g_filled = g_fillDone = 0;
     g_fillAsked = 0;
 #endif

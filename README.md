@@ -247,8 +247,8 @@ The summary shows its cards in one row (`src/co_summary.c`):
 - The scale for five to eight cards is 0.80, 0.66, 0.57 and 0.50 at 16:9, and 1.00, 0.91, 0.78 and 0.68 at 21:9.
 - The game's own layout places the cards, so a card's buttons are pressed where they are drawn.
 - A research build takes `HELLFORGE_CO_SUMMARY_FILL` (2 to 8) in a session of one. Cards 2 to that number then show
-  the local player, each with a figure of its own. With `HELLFORGE_CO_SUMMARY_FILL_FILE` set, the fill waits until
-  that file exists.
+  the local player, each with a figure of its own. The variable is read while the summary is open, so a script can
+  set it in the running game.
 
 Limits that remain:
 

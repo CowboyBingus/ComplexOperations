@@ -244,7 +244,7 @@ static void CheckCallback(void)
     CHECK(Shown(1.0f) == 0x0Fu && Field(g_screen + BOX, 0x4) == 56.0f);
 
 #ifdef CO_RESEARCH
-    /* The fill: one player in the session, on card 2; cards 1 and 3 to 7 take that row once the named file is there,
+    /* The fill: one player in the session, on card 2; cards 1 and 3 to 7 take that row once the variable is set,
      * each figure set up under its own position (the peer's own, 0, is card 2's: card 1 takes 1) and the
      * peer's position its own again behind each. The stand-in for the figure's player keeps the id at +0x8DC and the
      * session's position at +0x8E4: mov [rcx+0x8DC],edx; mov rax,position; mov eax,[rax]; mov [rcx+0x8E4],eax; ret. */
@@ -255,12 +255,7 @@ static void CheckCallback(void)
     /* the listener's removal keeps its entity and key at the figure's +0x8E8 and +0x8EC: mov [rdx+0x8E8],ecx; mov [rdx+0x8EC],r8d; ret */
     static const uint8_t kUnlisten[] = {0x89, 0x8A, 0xE8, 0x08, 0x00, 0x00, 0x44, 0x89, 0x82, 0xEC, 0x08, 0x00, 0x00, 0xC3};
     Code(0xB0B020u, kUnlisten, sizeof kUnlisten);
-    char file[MAX_PATH];
-    GetTempPathA(sizeof file - 32, file);
-    strcat(file, "co-summary-fill-test");
-    DeleteFileA(file);
     SetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL", "7");
-    SetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL_FILE", file);
     Screen(1920.0f);
     Player(0x77);
     Put32(Row(1), 0x77);
@@ -275,19 +270,15 @@ static void CheckCallback(void)
     }
     Put32(Card(1) + 0x12538, 2);
     Put32(Card(1) + 0x12544, 2);
-    HANDLE made = CreateFileA(file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
-    CHECK(made != INVALID_HANDLE_VALUE);
-    CloseHandle(made);
     co_summary_layout(&regs);
     CHECK(Shown(1.0f) == 0x0Fu && Word(Row(4)) == 0);      /* two peers: no fill */
     Put32(g_session + 0x16390, 1);
-    DeleteFileA(file);
+    SetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL", NULL);
     g_now += 300;
     co_summary_layout(&regs);
-    CHECK(Shown(1.0f) == 0x0Fu && Word(Row(4)) == 0 && Word(Row(0)) == 0);      /* no file: the game's row */
+    CHECK(Shown(1.0f) == 0x0Fu && Word(Row(4)) == 0 && Word(Row(0)) == 0);      /* not set: the game's row */
     CHECK(fake_host_logged("mission summary: no player on cards 5 to 8: the game's four cards"));
-    made = CreateFileA(file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
-    CloseHandle(made);
+    SetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL", "7");
     g_now += 100;
     co_summary_layout(&regs);
     CHECK(Word(Row(4)) == 0);                              /* asked again only a quarter of a second later */
@@ -354,9 +345,7 @@ static void CheckCallback(void)
     Put32(g_session + 0x16390, 1);
     co_summary_layout(&regs);
     CHECK(Word(Row(0)) == 0x77u && Word(Row(2)) == 0x77u && Word(Row(3)) == 0u);
-    DeleteFileA(file);
     SetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL", NULL);
-    SetEnvironmentVariableA("HELLFORGE_CO_SUMMARY_FILL_FILE", NULL);
 #endif
     co_summary_install(0);
 }
