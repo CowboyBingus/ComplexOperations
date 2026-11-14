@@ -122,9 +122,15 @@ static void SightVerdict(void)
     CHECK(CoXlTestLwSightMod(40.0f, 0, 0.0f) == 40.0f);
     CHECK(CoXlTestLwSightMod(40.0f, 1, -5.0f) == 40.0f);
     CHECK(CoXlTestLwSenseReach(1.0f, 40.0f, 0, 0.0f) == 15.0f);  /* no modifier */
-    CHECK(CoXlTestLwSenseReach(0.6f, 40.0f, 0, 0.0f) == 9.0f);   /* the visibility */
+    #define REACH_IS(v, base, op, val, want) (CoXlTestLwSenseReach(v, base, op, val) > (want) - 0.01f && CoXlTestLwSenseReach(v, base, op, val) < (want) + 0.01f)
+    CHECK(REACH_IS(0.6f, 40.0f, 0, 0.0f, 11.619f));  /* the square root of the visibility: daylight, standing */
+    CHECK(REACH_IS(0.24f, 40.0f, 0, 0.0f, 7.348f));  /* dusk, standing still */
+    CHECK(REACH_IS(0.12f, 40.0f, 0, 0.0f, 5.196f));  /* dusk, prone */
+    CHECK(REACH_IS(0.25f, 40.0f, 0, 0.0f, 7.5f));
+    CHECK(CoXlTestLwSenseReach(0.0f, 40.0f, 0, 0.0f) == 0.0f);
+    CHECK(CoXlTestLwSenseReach(-0.5f, 40.0f, 0, 0.0f) == 0.0f);  /* no root of a negative */
     CHECK(CoXlTestLwSenseReach(1.0f, 40.0f, 2, 0.5f) == 7.5f);   /* stealth armour halves it */
-    CHECK(CoXlTestLwSenseReach(0.6f, 40.0f, 2, 0.5f) == 4.5f);   /* ... on top of the visibility */
+    CHECK(REACH_IS(0.6f, 40.0f, 2, 0.5f, 5.809f));               /* ... on top of the visibility */
     CHECK(CoXlTestLwSenseReach(1.0f, 40.0f, 0, 20.0f) == 7.5f);  /* replaced: the share of the eye's range */
     CHECK(CoXlTestLwSenseReach(1.0f, 40.0f, 0, 80.0f) == 15.0f); /* never lengthened */
     CHECK(CoXlTestLwSenseReach(1.0f, 40.0f, 1, 10.0f) == 15.0f);
@@ -137,8 +143,15 @@ static void SightVerdict(void)
     CHECK(CoXlTestLwBodyDist(1.0f, 1.9f) == 0.0f);
     CHECK(CoXlTestLwBodyDist(10.0f, -3.0f) == 10.0f);
     CHECK(CoXlTestLwBodyDist(10.0f, 50.0f) == 2.0f);       /* a radius is trusted to 8 m */
-    CHECK(CoXlTestLwSenseRule(0, CoXlTestLwBodyDist(10.0f, 0.0f), CoXlTestLwSenseReach(0.6f, 40.0f, 0, 0.0f), 0, 1) == 3);
+    /* reach 11.6 m at 0.6: 12 m from the root is out, from the body (10.1 m) in */
+    CHECK(CoXlTestLwSenseRule(0, CoXlTestLwBodyDist(12.0f, 0.0f), CoXlTestLwSenseReach(0.6f, 40.0f, 0, 0.0f), 0, 1) == 3);
+    CHECK(CoXlTestLwSenseRule(0, CoXlTestLwBodyDist(12.0f, 1.9f), CoXlTestLwSenseReach(0.6f, 40.0f, 0, 0.0f), 0, 1) == 0);
     CHECK(CoXlTestLwSenseRule(0, CoXlTestLwBodyDist(10.0f, 1.9f), CoXlTestLwSenseReach(0.6f, 40.0f, 0, 0.0f), 0, 1) == 0);
+    /* 5 m behind a small unit (0.8 m): noticed standing at dusk (7.3 m) and prone (5.2 m); 6.5 m is out when prone */
+    CHECK(CoXlTestLwSenseRule(0, CoXlTestLwBodyDist(5.0f, 0.8f), CoXlTestLwSenseReach(0.24f, 40.0f, 0, 0.0f), 0, 1) == 0);
+    CHECK(CoXlTestLwSenseRule(0, CoXlTestLwBodyDist(5.0f, 0.8f), CoXlTestLwSenseReach(0.12f, 40.0f, 0, 0.0f), 0, 1) == 0);
+    CHECK(CoXlTestLwSenseRule(0, CoXlTestLwBodyDist(6.5f, 0.8f), CoXlTestLwSenseReach(0.12f, 40.0f, 0, 0.0f), 0, 1) == 3);
+    CHECK(CoXlTestLwSenseRule(0, CoXlTestLwBodyDist(6.5f, 0.8f), CoXlTestLwSenseReach(0.24f, 40.0f, 0, 0.0f), 0, 1) == 0);
     g_case = "the hearing writer's two exits"; /* 0 yes, 13 the detector entity's +0x14 bit 0 clear, 14 the source's tag bit 25 */
     CHECK(CoXlTestLwSenseGate(1, 0) == 0);
     CHECK(CoXlTestLwSenseGate(3, 0) == 0);

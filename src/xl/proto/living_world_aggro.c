@@ -304,12 +304,13 @@ static float LwSightMod(float range, uint32_t op, float value)
     return op == 2 ? range * value : range;
 }
 /* The reach: LW_SENSE_NEAR cut by the share the modifier leaves of the eye's range ahead `base` (never lengthened: the
- * reach is the mod's own), times the visibility, as the game scales the eye's range (0x64CE30). */
+ * reach is the mod's own), times the square root of the visibility. The game scales an eye's range by the visibility
+ * itself (0x64CE30); at dusk that is 0.12 to 0.6, which left a player standing 5 m behind a unit unnoticed. */
 static float LwSenseReach(float visibility, float base, uint32_t op, float value)
 {
     float share = base > 0.0f ? LwSightMod(base, op, value) / base : 1.0f;
     if (!(share < 1.0f)) share = 1.0f;
-    return LW_SENSE_NEAR * share * visibility;
+    return LW_SENSE_NEAR * share * (visibility > 0.0f ? sqrtf(visibility) : 0.0f);
 }
 /* The distance from a unit's body, not its root: a large unit's root is metres inside it. `radius` is the mover's
  * ([game+0x3326418] record +0x98, which 0x59C21D copies to the motion record the mover step 0x134CF99 reads). */
