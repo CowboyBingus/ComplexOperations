@@ -35,6 +35,56 @@ static void Unknown(void)
     co_aibudget_wrote(&b, 0.008f);
     CHECK(co_aibudget_stock(&b, 0x3000, low) == CO_AIB_STOCK_LEAST);
     CHECK(co_aibudget_stock(&b, 0x4000, 0.003f) == 0.003f);
+    /* a fresh instance over a world in a drain, or under another part's raise: over any game value, not taken */
+    CoAiBudget c = {0};
+    CHECK(co_aibudget_stock(&c, 0x1000, 0.008f) == 0.0f);
+    CHECK(co_aibudget_stock(&c, 0x1000, 0.004f) == 0.0f);
+    CHECK(co_aibudget_stock(&c, 0x1000, 0.0030001f) == 0.0f);
+    CHECK(co_aibudget_step(&c, &d, 1, 900.0f, 500, 500, 1, 900.0f, 5000, 0.004f) == 0.0f);
+    CHECK(co_aibudget_stock(&c, 0x1000, CO_AIB_STOCK_MOST) == CO_AIB_STOCK_MOST);
+    CoAiBudget g = {0};
+    CHECK(co_aibudget_stock(&g, 0x1000, 0.002f) == 0.002f);
+    /* a known stock is kept over a later world's high read too */
+    CHECK(co_aibudget_stock(&g, 0x2000, 0.008f) == 0.002f);
+}
+
+/* The lever, the drain and another part's raise (the nav hold's 4000 us) in one step: the largest, in every order. */
+static void ThreeWay(void)
+{
+    const float stock = 0.002f, low = 500.0f / 1000000.0f, hold = 0.004f;
+    const CoAiDrain d8 = {8000, 3000, 1024}, d3 = {3000, 3000, 1024}, d1 = {1000, 3000, 1024};
+    CoAiBudget b = {0};
+    co_aibudget_stock(&b, 0x1000, stock);
+    /* drain 8000 > hold 4000 > lever (stock, its wait raised it) */
+    CHECK(co_aibudget_step(&b, &d8, 1, 9.0f, 500, 500, 1, 9.0f, 0, hold) == 0.008f);
+    /* hold 4000 > drain 3000 > lever 2000 */
+    CHECK(co_aibudget_step(&b, &d3, 1, 9.0f, 500, 500, 1, 9.0f, 0, hold) == hold);
+    /* hold 4000 > lever 2000 > drain 1000 */
+    CHECK(co_aibudget_step(&b, &d1, 1, 9.0f, 500, 500, 1, 9.0f, 0, hold) == hold);
+    /* lever 2000 > hold 1500 > drain 1000; and drain 3000 > lever 2000 > hold 1500 */
+    CHECK(co_aibudget_step(&b, &d1, 1, 9.0f, 500, 500, 1, 9.0f, 0, 0.0015f) == stock);
+    CHECK(co_aibudget_step(&b, &d3, 1, 9.0f, 500, 500, 1, 9.0f, 0, 0.0015f) == 0.003f);
+    /* the lever held at the stock by the hold (leverOn 0), no drain: the hold's raise is not lost */
+    CHECK(co_aibudget_step(&b, &d8, 0, 0.0f, 500, 500, 0, 0.0f, 0, hold) == hold);
+    CHECK(co_aibudget_step(&b, &d8, 0, 0.0f, 500, 500, 0, 0.0f, 0, 0.0f) == stock);
+    /* the lever low, no drain: the hold alone, then the lever alone */
+    CHECK(co_aibudget_step(&b, &d8, 1, 0.0f, 500, 500, 0, 0.0f, 0, hold) == hold);
+    CHECK(co_aibudget_step(&b, &d8, 1, 0.0f, 500, 500, 0, 0.0f, 0, 0.0f) == low);
+}
+
+/* The watchdog's stack copy stays on the thread's own stack. */
+static void Stack(void)
+{
+    size_t n = 99;
+    CHECK(co_aibudget_stack(0x8000, 0x1000, 0x9000, 0x1000, &n) == 1 && n == 0x1000);
+    CHECK(co_aibudget_stack(0x8F00, 0x1000, 0x9000, 0x1000, &n) == 1 && n == 0x100);   /* a parked thread: to the top only */
+    CHECK(co_aibudget_stack(0x8FF4, 0x1000, 0x9000, 0x1000, &n) == 1 && n == 8);       /* whole words */
+    CHECK(co_aibudget_stack(0x1000, 0x1000, 0x9000, 0x1000, &n) == 1 && n == 0x1000);  /* the limit itself is on it */
+    CHECK(co_aibudget_stack(0x9000, 0x1000, 0x9000, 0x1000, &n) == 0);                 /* the top is not */
+    CHECK(co_aibudget_stack(0xFFF, 0x1000, 0x9000, 0x1000, &n) == 0);                  /* another stack, below */
+    CHECK(co_aibudget_stack(0xA000, 0x1000, 0x9000, 0x1000, &n) == 0);                 /* and above */
+    CHECK(co_aibudget_stack(0x8000, 0, 0, 0x1000, &n) == 0);                           /* bounds that did not read */
+    CHECK(co_aibudget_stack(0x8000, 0x9000, 0x9000, 0x1000, &n) == 0);
 }
 
 /* The changes a run applied between two frames, from the run's own count. */
@@ -196,17 +246,25 @@ int main(void)
     /* another address holding the lowered value */
     field = Frame(&b, 0x2000, low, 0.0f); CHECK(b.stock == stock); CHECK(field == low);
     /* another address with another game value: taken */
-    field = Frame(&b, 0x3000, 0.004f, 0.0f); CHECK(b.stock == 0.004f); CHECK(field == low);
+    field = Frame(&b, 0x3000, 0.003f, 0.0f); CHECK(b.stock == 0.003f); CHECK(field == low);
     /* a world change drops the raise */
     field = Frame(&b, 0x3000, field, 1.0f); CHECK(b.raised == 1);
-    field = Frame(&b, 0x4000, 0.004f, 0.3f); CHECK(b.raised == 0); CHECK(field == low);
+    field = Frame(&b, 0x4000, 0.003f, 0.3f); CHECK(b.raised == 0); CHECK(field == low);
 
     /* a low budget above the stock is held to the stock */
     CoAiBudget c = {0};
     co_aibudget_stock(&c, 0x1000, 0.0012f);
     CHECK(co_aibudget_want(&c, 0.0f, 1500, 500) == 0.0012f);
+    /* a low budget set inside the game's range (the command's 1500 us) is still the mod's when read back */
+    CoAiBudget e = {0};
+    co_aibudget_stock(&e, 0x1000, stock);
+    co_aibudget_wrote(&e, co_aibudget_want(&e, 0.0f, 1500, 500));
+    co_aibudget_leave(&e);
+    CHECK(co_aibudget_stock(&e, 0x1000, 0.0015f) == stock);
     Unknown();
     Applied();
+    ThreeWay();
+    Stack();
 
     Drain();
     DrainMissions();

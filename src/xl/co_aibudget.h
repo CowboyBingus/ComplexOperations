@@ -7,8 +7,10 @@
 #include "co.h"
 
 typedef struct CoAiBudget { uintptr_t world; float stock, wrote; int raised, draining; uintptr_t run; int applied; } CoAiBudget;
-/* No game build has had a budget under this, and the mod's lowered one is: a read under it is never the game's. */
+/* The game's budget is 0.002 (game.dll's constant) and the world's own default 0.003 (exe 0xBB0CCD); the mod's
+ * lowered one is under this range and its raised ones over it, so a read outside it is never taken as the game's. */
 #define CO_AIB_STOCK_LEAST 0.001f
+#define CO_AIB_STOCK_MOST 0.003f
 
 /* The bounded drain. One run applies the navmesh changes queued at its start one by one inside the budget, and the
  * cuts and paths wait behind them: 15 minutes at 500 us with tens of thousands of tree cutters removed a minute. A
@@ -19,7 +21,7 @@ typedef struct CoAiBudget { uintptr_t world; float stock, wrote; int raised, dra
 typedef struct CoAiDrain { int us, runMs, queue; } CoAiDrain;
 
 /* The game's budget for `world`, whose field reads `cur` now, 0 when it is not known: a value this mod wrote, or one
- * under CO_AIB_STOCK_LEAST (another instance of the mod wrote it), is never taken as the game's. */
+ * outside CO_AIB_STOCK_LEAST..CO_AIB_STOCK_MOST (another instance of the mod wrote it), is never taken as the game's. */
 float co_aibudget_stock(CoAiBudget* b, uintptr_t world, float cur);
 /* The budget for this step: `lowUs`, or the stock one from a wait over `raiseMs` until it is under half of that.
  * The caller writes it and passes what it wrote to co_aibudget_wrote. */
@@ -37,6 +39,9 @@ float co_aibudget_step(CoAiBudget* b, const CoAiDrain* d, int leverOn, float wai
 /* Navmesh changes the run in flight applied since the last call: `run` is that run (0 for none) and `sum` the changes
  * it has applied so far. A new run counts from its start. */
 int co_aibudget_applied(CoAiBudget* b, uintptr_t run, int sum);
+/* 1 with `*bytes`, a multiple of 8 and at most `most`, when a stack copy from `rsp` stays inside the thread's stack
+ * `limit`..`top`; 0 when `rsp` is not on it. */
+int co_aibudget_stack(uintptr_t rsp, uintptr_t limit, uintptr_t top, size_t most, size_t* bytes);
 /* The level ended: the world is read anew, the stock known so far stays. */
 void co_aibudget_leave(CoAiBudget* b);
 

@@ -7,13 +7,36 @@
 #define LW_AIB_LOW_US 500
 #define LW_AIB_RAISE_MS 500
 #define LW_AIB_DRAIN_LINES 16 /* drain start and end lines a level; the 30 s line counts the rest */
+#define LW_AIB_APPLYING 60u   /* a run that applied a change within this many frames is applying */
 static struct
 {
     int on, failed, verbose; CoAiBudget b; int lowUs, raiseMs; CoAiDrain drain;
     uint32_t frames, raisedFrames; float worst; double latSum; ULONGLONG notedAt;
     uint32_t drainFrames, drainStarts, drainRun, drainLines; int drainMost; ULONGLONG drainAt;
     uint32_t applied, appliedFrames; int appliedMost; uintptr_t unknown;
+    uint32_t sinceApplied; int runApplied;       /* frames since the run in flight applied a change; its count so far */
+    void* join; volatile LONG64 joinTicks; DWORD joinTaker; int wasDraining; /* the join's time on the tick's thread */
+    uint32_t drainJoins; double drainJoinSum, drainJoinWorst, runJoinSum, runJoinWorst;
 } g_lwAib = {.on = 1, .lowUs = LW_AIB_LOW_US, .raiseMs = LW_AIB_RAISE_MS, .drain = {CO_AIB_DRAIN_US, CO_AIB_DRAIN_RUN_MS, CO_AIB_DRAIN_QUEUE}};
+
+/* The game thread's join of the AI step (0x7D7930) waits about as long as the step's budget: timed on the tick's
+ * thread, so a drain's frames show what they cost. Only the game's call is timed. */
+static uintptr_t LwAibJoin(uintptr_t w)
+{
+    LARGE_INTEGER a, b; QueryPerformanceCounter(&a);
+    uintptr_t out = ((uintptr_t (*)(uintptr_t))g_lwAib.join)(w);
+    QueryPerformanceCounter(&b);
+    if (GetCurrentThreadId() == g_lwAib.joinTaker) InterlockedAdd64(&g_lwAib.joinTicks, b.QuadPart - a.QuadPart);
+    return out;
+}
+/* The joins' time on this thread since the last call, in ms. */
+static double LwAibJoinTake(void)
+{
+    LARGE_INTEGER f; QueryPerformanceFrequency(&f);
+    LONG64 ticks = InterlockedExchange64(&g_lwAib.joinTicks, 0);
+    g_lwAib.joinTaker = GetCurrentThreadId();
+    return 1000.0 * (double)ticks / (double)f.QuadPart;
+}
 
 /* H = [exe+0x190D4A0 + 2*0x80] (KB world-update-exe-ai-step); the step reads the budget once at 0xBD198C. */
 static uintptr_t LwAibWorld(void)
@@ -22,6 +45,8 @@ static uintptr_t LwAibWorld(void)
     uintptr_t exe = (uintptr_t)GetModuleHandleA(NULL), h = 0;
     if (!checked++ && (!ApiCodeMatches(exe + 0xBD198Cu, "F3 0F 10 8B 7C 04 00 00 48 8B CB E8") || !ApiCodeMatches(exe + 0xC40060u, "F3 0F 10 01 F3 0F 10 49 04")))
     { g_lwAib.failed = 1; Note("living world: AI path budget: this build's AI step is not what the lever expects; off"); return 0; }
+    if (checked == 1 && (!ApiCodeMatches(exe + 0x7D7930u, "48 89 5C 24 10 48 89 6C 24 18") || LoaderHook("AI path budget: the AI step's join is timed", exe + 0x7D7930u, (void*)LwAibJoin, &g_lwAib.join) || !g_lwAib.join))
+    { g_lwAib.join = NULL; Note("living world: AI path budget: the AI step's join is not timed; a drain's lines show 0 ms for it"); }
     return SafeRead(exe + 0x190D4A0u + 2u * 0x80u, &h, 8) ? 0 : h;
 }
 
@@ -70,31 +95,28 @@ static int LwAibApplied(uintptr_t h, uintptr_t* run)
 #define LW_AIB_STALL_AGAIN_MS 60000
 #define LW_AIB_STACK 0x1000
 static struct { ULONGLONG at; uint32_t dumps; uint64_t stack[LW_AIB_STACK / 8]; } g_lwAibW;
-/* The thread's stack top, 0 when it does not read: StackBase at TEB+8, the TEB from the thread's basic information.
- * A parked thread's Rsp is within 4 KiB of it, and a copy past it faults: fault dispatch on this thread, with the
- * other stopped, can wait for a lock that thread holds. */
-static uintptr_t LwAibStackTop(HANDLE t)
+/* The thread's TEB, 0 when it does not read. Its stack bounds (StackBase +8, StackLimit +0x10) are read once the
+ * thread is stopped: a parked thread's Rsp is within 4 KiB of the top, an Rsp on another stack is outside them, and
+ * a copy that faults runs fault dispatch on this thread, which can wait for a lock the stopped thread holds. */
+static uintptr_t LwAibTeb(HANDLE t)
 {
     typedef LONG (WINAPI *Query)(HANDLE, int, void*, ULONG, ULONG*);
     static Query query; static int looked;
     if (!looked++) { HMODULE nt = GetModuleHandleA("ntdll.dll"); if (nt) query = (Query)(void*)GetProcAddress(nt, "NtQueryInformationThread"); }
-    struct { uintptr_t exitStatus, teb, pid, tid, affinity, priority; } info = {0}; uintptr_t top = 0;
-    if (!query || query(t, 0, &info, (ULONG)sizeof info, NULL) < 0 || !info.teb || SafeRead(info.teb + 8, &top, 8)) return 0;
-    return top;
+    struct { uintptr_t exitStatus, teb, pid, tid, affinity, priority; } info = {0};
+    return query && query(t, 0, &info, (ULONG)sizeof info, NULL) >= 0 ? info.teb : 0;
 }
 static void LwAibThread(DWORD id, uintptr_t exe, uintptr_t end)
 {
     HANDLE t = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, id);
     if (!t) return;
-    CONTEXT c = {0}; c.ContextFlags = CONTEXT_CONTROL; size_t got = 0; uintptr_t top = LwAibStackTop(t);
-    if (top && SuspendThread(t) != (DWORD)-1)
+    CONTEXT c = {0}; c.ContextFlags = CONTEXT_CONTROL; size_t got = 0; uintptr_t teb = LwAibTeb(t), bound[2] = {0, 0};
+    if (teb && SuspendThread(t) != (DWORD)-1)
     {
-        if (GetThreadContext(t, &c) && (uintptr_t)c.Rsp < top)
-        {
-            size_t want = top - (uintptr_t)c.Rsp < LW_AIB_STACK ? (size_t)(top - (uintptr_t)c.Rsp) & ~(size_t)7 : LW_AIB_STACK;
+        size_t want = 0;
+        if (GetThreadContext(t, &c) && !SafeRead(teb + 8, bound, 16) && co_aibudget_stack((uintptr_t)c.Rsp, bound[1], bound[0], LW_AIB_STACK, &want))
             for (size_t n; got < want; got += n)
             { n = want - got < 256 ? want - got : 256; if (SafeRead((uintptr_t)c.Rsp + got, (uint8_t*)g_lwAibW.stack + got, n)) break; }
-        }
         ResumeThread(t);
     }
     CloseHandle(t);
@@ -131,12 +153,13 @@ static void LwAibNote(ULONGLONG now)
 {
     if (now - g_lwAib.notedAt < 30000) return;
     if (g_lwAib.frames) /* every build: a request wait that stays high means paths reach squads late (online squads standing) */
-        Note("living world: AI path budget %s %d us: stock %.0f us on %u of %u frames, request wait mean %.0f ms, worst %.0f ms; %d changes queued for the next run; drain %d us on %u frames, %u start(s), most queued %d; runs applied %u generator changes on %u frames, most %d a frame; AI world %p",
+        Note("living world: AI path budget %s %d us: stock %.0f us on %u of %u frames, request wait mean %.0f ms, worst %.0f ms; %d changes queued for the next run; drain %d us on %u frames, %u start(s), most queued %d; runs applied %u generator changes on %u frames, most %d a frame; joins on %u drain frames mean %.2f ms, worst %.2f ms; AI world %p",
             g_lwAib.on ? "on" : "off", g_lwAib.lowUs, (double)g_lwAib.b.stock * 1e6, g_lwAib.raisedFrames, g_lwAib.frames, 1000.0 * g_lwAib.latSum / g_lwAib.frames,
             (double)g_lwAib.worst * 1000.0, g_lwAib.b.world ? LwAibQueued(g_lwAib.b.world) : -1, g_lwAib.drain.us, g_lwAib.drainFrames, g_lwAib.drainStarts, g_lwAib.drainMost,
-            g_lwAib.applied, g_lwAib.appliedFrames, g_lwAib.appliedMost, (void*)g_lwAib.b.world);
+            g_lwAib.applied, g_lwAib.appliedFrames, g_lwAib.appliedMost, g_lwAib.drainJoins, g_lwAib.drainJoins ? g_lwAib.drainJoinSum / g_lwAib.drainJoins : 0.0, g_lwAib.drainJoinWorst,
+            (void*)g_lwAib.b.world);
     g_lwAib.frames = g_lwAib.raisedFrames = g_lwAib.drainFrames = g_lwAib.drainStarts = g_lwAib.applied = g_lwAib.appliedFrames = 0;
-    g_lwAib.drainMost = g_lwAib.appliedMost = 0; g_lwAib.worst = 0; g_lwAib.latSum = 0; g_lwAib.notedAt = now;
+    g_lwAib.drainMost = g_lwAib.appliedMost = 0; g_lwAib.drainJoins = 0; g_lwAib.drainJoinSum = g_lwAib.drainJoinWorst = 0; g_lwAib.worst = 0; g_lwAib.latSum = 0; g_lwAib.notedAt = now;
 }
 
 /* The drain's counts and lines after a step's choice: frames at the raised budget are what it costs (the game
@@ -147,11 +170,15 @@ static void LwAibDrainNote(int was, int inFlight, float runS, int queued)
     if (g_lwAib.b.draining) { g_lwAib.drainFrames++; g_lwAib.drainRun++; }
     if (g_lwAib.b.draining == was) return;
     ULONGLONG now = GetTickCount64();
-    if (!was) { g_lwAib.drainStarts++; g_lwAib.drainRun = 1; g_lwAib.drainAt = now; }
+    if (!was) { g_lwAib.drainStarts++; g_lwAib.drainRun = 1; g_lwAib.drainAt = now; g_lwAib.runJoinSum = g_lwAib.runJoinWorst = 0; }
     if (g_lwAib.drainLines >= LW_AIB_DRAIN_LINES) return;
     g_lwAib.drainLines++;
-    if (!was) Note("living world: AI drain on: the run in flight is %.1f s old, %d changes queued for the next; %d us a step until the run is young and the queue short", inFlight ? (double)runS : 0.0, queued, g_lwAib.drain.us);
-    else Note("living world: AI drain off after %u frames (%.1f s): %d changes queued%s", g_lwAib.drainRun, (double)(now - g_lwAib.drainAt) / 1000.0, queued, g_lwAib.drainLines >= LW_AIB_DRAIN_LINES ? "; no more drain lines this level" : "");
+    /* an old run that applies nothing is old by its path requests or clearance, not by navmesh changes */
+    int applying = inFlight && g_lwAib.runApplied > 0 && g_lwAib.sinceApplied <= LW_AIB_APPLYING;
+    if (!was) Note("living world: AI drain on: the run in flight is %.1f s old and %s (%d generator changes so far, the last %u frames ago), %d changes queued for the next; %d us a step until the run is young and the queue short",
+        inFlight ? (double)runS : 0.0, !inFlight ? "none is in flight" : applying ? "applying navmesh changes" : "not applying navmesh changes", g_lwAib.runApplied, g_lwAib.sinceApplied, queued, g_lwAib.drain.us);
+    else Note("living world: AI drain off after %u frames (%.1f s), joins mean %.2f ms, worst %.2f ms: %d changes queued%s", g_lwAib.drainRun, (double)(now - g_lwAib.drainAt) / 1000.0,
+        g_lwAib.drainRun ? g_lwAib.runJoinSum / g_lwAib.drainRun : 0.0, g_lwAib.runJoinWorst, queued, g_lwAib.drainLines >= LW_AIB_DRAIN_LINES ? "; no more drain lines this level" : "");
 }
 
 /* The budget for this step (co_aibudget.h), written when it differs. Every write is told to co_aibudget_wrote, so no
@@ -175,17 +202,27 @@ static void LwAibFrame(void)
     if (!(co_aibudget_stock(&g_lwAib.b, h, cur) > 0))
     {
         /* another instance of the mod lowered this world (a DLL swapped into a held session): no stock to return to */
-        if (g_lwAib.unknown != h) Note("living world: AI path budget: AI world %p holds %.0f us, under any game value; left alone until it reads %.0f us or more", (void*)h, (double)cur * 1e6, (double)CO_AIB_STOCK_LEAST * 1e6);
+        if (g_lwAib.unknown != h) Note("living world: AI path budget: AI world %p holds %.0f us, not a game value; left alone until it reads %.0f to %.0f us", (void*)h, (double)cur * 1e6, (double)CO_AIB_STOCK_LEAST * 1e6, (double)CO_AIB_STOCK_MOST * 1e6);
         g_lwAib.unknown = h; return;
+    }
+    /* the step the last frame's budget ran in was joined before this tick: its wait is what a drain frame costs */
+    double join = LwAibJoinTake();
+    if (g_lwAib.wasDraining)
+    {
+        g_lwAib.drainJoins++; g_lwAib.drainJoinSum += join; g_lwAib.runJoinSum += join;
+        if (join > g_lwAib.drainJoinWorst) g_lwAib.drainJoinWorst = join;
+        if (join > g_lwAib.runJoinWorst) g_lwAib.runJoinWorst = join;
     }
     uintptr_t run = 0; int sum = LwAibApplied(h, &run), did = co_aibudget_applied(&g_lwAib.b, run, sum);
     if (did) { g_lwAib.applied += (uint32_t)did; g_lwAib.appliedFrames++; if (did > g_lwAib.appliedMost) g_lwAib.appliedMost = did; }
+    g_lwAib.runApplied = run ? sum : 0; g_lwAib.sinceApplied = did ? 0 : g_lwAib.sinceApplied + 1;
     float lat = LwAibLatency(h), t[2] = {0, 0};
     if (lat < 0 || SafeRead(h + 0x480, t, 8)) return;
 #ifdef CO_RESEARCH
     LwAibWatch(h, t[0], t[1]);
 #endif
     LwAibSteer(h, cur, lat, t[1]);
+    g_lwAib.wasDraining = g_lwAib.b.draining;
     g_lwAib.frames++; g_lwAib.raisedFrames += (uint32_t)(g_lwAib.b.raised || !g_lwAib.on);
     if (lat > g_lwAib.worst) g_lwAib.worst = lat;
     g_lwAib.latSum += lat;
@@ -224,7 +261,7 @@ static void LwAibLeave(void)
         *(volatile float*)(h + 0x47C) = g_lwAib.b.stock; co_aibudget_wrote(&g_lwAib.b, g_lwAib.b.stock);
         Note("living world: AI path budget: the game's %.0f us is back in AI world %p at the level's end (it held %.0f us)", (double)g_lwAib.b.stock * 1e6, (void*)h, (double)cur * 1e6);
     }
-    co_aibudget_leave(&g_lwAib.b); g_lwAib.drainLines = 0; g_lwAib.unknown = 0;
+    co_aibudget_leave(&g_lwAib.b); g_lwAib.drainLines = 0; g_lwAib.unknown = 0; g_lwAib.wasDraining = 0;
 }
 /* "aibudget 0" gives the stock budget back; "aibudget US [RAISE_MS]" sets the low budget and the wait that raises it. */
 static void LwAibCmd(int us, int raiseMs)

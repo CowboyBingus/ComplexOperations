@@ -5,7 +5,7 @@ float co_aibudget_stock(CoAiBudget* b, uintptr_t world, float cur)
     if (world == b->world && b->stock > 0) return b->stock; /* one not known yet is read again */
     b->world = world; b->raised = b->draining = 0;
     /* the game makes every world's budget from one config value, so the first unwritten read holds for all */
-    if (!(cur < CO_AIB_STOCK_LEAST) && (!(b->stock > 0) || !(b->wrote > 0) || cur != b->wrote)) b->stock = cur;
+    if (cur >= CO_AIB_STOCK_LEAST && cur <= CO_AIB_STOCK_MOST && (!(b->stock > 0) || !(b->wrote > 0) || cur != b->wrote)) b->stock = cur;
     return b->stock;
 }
 
@@ -43,6 +43,14 @@ int co_aibudget_applied(CoAiBudget* b, uintptr_t run, int sum)
     int since = run && run == b->run ? sum - b->applied : sum;
     b->run = run; b->applied = run ? sum : 0;
     return run && since > 0 ? since : 0;
+}
+
+int co_aibudget_stack(uintptr_t rsp, uintptr_t limit, uintptr_t top, size_t most, size_t* bytes)
+{
+    if (rsp < limit || rsp >= top) return 0; /* bounds that did not read are 0: nothing is on that stack */
+    size_t room = (size_t)(top - rsp);
+    *bytes = (room < most ? room : most) & ~(size_t)7;
+    return 1;
 }
 
 void co_aibudget_leave(CoAiBudget* b) { b->world = 0; b->raised = b->draining = 0; }
