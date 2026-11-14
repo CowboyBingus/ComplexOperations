@@ -1119,7 +1119,7 @@ float CoXlTestLwMeetWalk(int index, int n, int at, float px, float px2, int move
 }
 /* The seen rules without the game: the look and the way ahead are stubs. A squad is hidden where its x lies in
  * [g_lwTestHid[0], g_lwTestHid[1]]; its way ahead is seen as g_lwTestAhead says. */
-static float g_lwTestHid[2]; static int g_lwTestAhead, g_lwTestFiller = -1;
+static float g_lwTestHid[2]; static int g_lwTestAhead, g_lwTestFiller = -1, g_lwTestMeetOff;
 static int LwTestSeenLook(LwSquad* q) { return q->pos[0] >= g_lwTestHid[0] && q->pos[0] <= g_lwTestHid[1]; }
 static int LwTestAheadSeen(LwSquad* q) { (void)q; return g_lwTestAhead; }
 static LwSquad* LwTestFillerPick(const LwSquad* except, float* d2) { (void)except; *d2 = 0; return g_lwTestFiller >= 0 ? &g_lwSquads[g_lwTestFiller] : NULL; }
@@ -1153,7 +1153,7 @@ void CoXlTestLwSeenWalk(int index, int n, float from, const float (*pl)[2], int 
     for (int k = at + 1; k <= n && q->pathLen < LW_PATH_MAX; k++) q->path[q->pathLen++] = (uint16_t)k;
     g_lwWorld.playersAt = np; g_lwWorld.count = index + 1;
     for (int i = 0; i < np; i++) { g_lwWorld.players[i][0] = pl[i][0]; g_lwWorld.players[i][1] = pl[i][1]; g_lwWorld.players[i][2] = 0; }
-    g_lwPatrols.mission = g_lwMission; g_lwPatrolsOld = 0; g_lwMeetOff = 0;
+    g_lwPatrols.mission = g_lwMission; g_lwPatrolsOld = 0; g_lwMeetOff = g_lwTestMeetOff;
     g_lwTestHid[0] = hid0; g_lwTestHid[1] = hid1; g_lwTestAhead = ahead; g_lwMeetLook = LwTestSeenLook; g_lwMeetAhead = LwTestAheadSeen;
     out[1] = out[2] = 0;
     for (int tick = 0; tick < seconds * 8; tick++)
@@ -1171,7 +1171,7 @@ void CoXlTestLwSeenWalk(int index, int n, float from, const float (*pl)[2], int 
     out[0] = q->pos[0]; out[3] = least; out[4] = (float)LwMeetWaits(q); out[5] = (float)g_lwMeet.covered; out[6] = (float)g_lwMeetMark[index];
     out[7] = (float)g_lwMeet.dispatched; out[8] = (float)g_lwMeet.looks; out[9] = (float)LwMeetPriority(q); out[10] = (float)(q->retry != 0);
     g_lwNodeCount = g_lwRoadNodes = 0; g_lwMeetTestNow = 0; g_lwWorld.playersAt = 0; g_lwWorld.count = 0; g_lwMeetSince[index] = 0; g_lwMeetMark[index] = 0;
-    g_lwMeetLook = LwMeetLookAtPos; g_lwMeetAhead = LwAboutToBeSeen; memset(&g_lwMeet, 0, sizeof g_lwMeet);
+    g_lwMeetLook = LwMeetLookAtPos; g_lwMeetAhead = LwAboutToBeSeen; memset(&g_lwMeet, 0, sizeof g_lwMeet); g_lwMeetOff = 0;
 }
 /* A world for the room rules: `np` players at `pl`, every bubble's budget `budget`, 40 squads free. */
 void CoXlTestLwSeenWorld(const float (*pl)[2], int np, int budget)
@@ -1212,11 +1212,37 @@ int CoXlTestLwSeenStands(int idx, uint64_t nowMs)
 }
 /* An event squad's hold (g_lwHold) for squad `idx` until `untilMs` by the real clock's side: -1 ends it. */
 void CoXlTestLwSeenEventHold(int idx, uint32_t units) { g_lwHold.idx = idx; g_lwHold.units = units; g_lwHold.until = idx >= 0 ? GetTickCount64() + 20000 : 0; }
-/* The units LwRoomFor's hold rule counts against `requester` for g_lwHold alone. */
-uint32_t CoXlTestLwSeenEventHeld(int requester)
+/* The units LwRoomFor counts as held against `requester`: the event squad's hold and the patrols' holds. */
+uint32_t CoXlTestLwSeenEventHeld(int requester) { return LwHoldsAgainst(requester); }
+/* Squad `idx`, a patrol waiting at the ring, is sent to reinforce at `nowMs`. Bits: 1 it still counts as waiting,
+ * 2 it still has priority, 4 its wait and 8 its mark are left after its next visit. */
+int CoXlTestLwSeenErrand(int idx, uint64_t nowMs)
 {
-    return g_lwHold.idx >= 0 && g_lwHold.idx != requester && GetTickCount64() < g_lwHold.until && LwHoldBubble(g_lwHold.idx, requester) ? g_lwHold.units : 0;
+    LwSquad* q = &g_lwSquads[idx];
+    g_lwMeetTestNow = nowMs; g_lwMeetSince[idx] = nowMs; q->intent = LW_REINFORCE;
+    int bits = LwMeetWaits(q) | LwMeetPriority(q) << 1;
+    LwMeetApproach(q, nowMs, 0);
+    bits |= (g_lwMeetSince[idx] != 0) << 2 | (g_lwMeetMark[idx] != 0) << 3;
+    q->intent = LW_PATROL;
+    return bits;
 }
+/* A request of a patrol on its way to a player through LwOnlineGates, placement and room as given: how often each
+ * was asked. */
+static int g_lwTestGate[4];
+static int LwTestSeenPlace(LwSquad* q, uintptr_t slot, uint32_t cap, float* pos, float* target) { (void)q; (void)slot; (void)cap; (void)pos; (void)target; g_lwTestGate[2]++; return g_lwTestGate[0]; }
+static int LwTestSeenRoom(uint32_t members) { (void)members; g_lwTestGate[3]++; snprintf(g_lwRoomWhy, sizeof g_lwRoomWhy, "the cap: bubble 70 online + 8 over 72 (1 players)"); return g_lwTestGate[1]; }
+int CoXlTestLwSeenGates(int placeOk, int roomOk, int* places, int* rooms)
+{
+    LwSquad* q = &g_lwSquads[0]; float pos[3] = {0}, target[3] = {0};
+    q->held = 0; g_lwTestGate[0] = placeOk; g_lwTestGate[1] = roomOk; g_lwTestGate[2] = g_lwTestGate[3] = 0;
+    g_lwGates.place = LwTestSeenPlace; g_lwGates.room = LwTestSeenRoom; g_lwFarSpawn = 0; g_lwMeetSpawn = 1;
+    const int r = LwOnlineGates(q, 0, 8, pos, target);
+    g_lwGates.place = LwOnlinePlace; g_lwGates.room = LwRoomFor; g_lwMeetSpawn = 0; q->retry = 0;
+    *places = g_lwTestGate[2]; *rooms = g_lwTestGate[3];
+    return r;
+}
+/* The seen rules off or on for the walks that follow, as the test command "meet" sets them. */
+void CoXlTestLwSeenSwitch(int on) { g_lwTestMeetOff = !on; }
 int CoXlTestLwSeenKeeps(int idx) { return LwMeetKeeps(&g_lwSquads[idx]); }
 int CoXlTestLwSeenFarRoom(int idx, int meet, int farUnits, int roadFar) { g_lwMeet.roadFar = roadFar; return LwMeetFarRoom(&g_lwSquads[idx], meet, farUnits); }
 /* 1 while squad `idx`, online since `sinceMs`, `d` m from the nearest player, is kept by the stay rule at `nowMs`. */

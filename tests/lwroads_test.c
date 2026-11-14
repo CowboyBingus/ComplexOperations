@@ -22,6 +22,9 @@ void CoXlTestLwSeenSquad(int idx, float x, float y, int state, int units, int ma
 int CoXlTestLwSeenWhy(int idx, const char* why, uint64_t nowMs, int filler);
 uint32_t CoXlTestLwSeenHeld(int requester, uint64_t nowMs);
 int CoXlTestLwSeenStands(int idx, uint64_t nowMs);
+int CoXlTestLwSeenErrand(int idx, uint64_t nowMs);
+int CoXlTestLwSeenGates(int placeOk, int roomOk, int* places, int* rooms);
+void CoXlTestLwSeenSwitch(int on);
 void CoXlTestLwSeenEventHold(int idx, uint32_t units);
 uint32_t CoXlTestLwSeenEventHeld(int requester);
 int CoXlTestLwSeenKeeps(int idx);
@@ -185,6 +188,16 @@ int main(void)
         CoXlTestLwSeenWalk(0, 30, P + 200.0f, one, 1, 1, 0, 0, 20, -1, 0, s);
         CHECK(s[6] == 1 && s[9] == 1 && s[1] == 0 && s[0] > P + 230.0f);
         { const float off[1][2] = {{P, 90.0f}}; CoXlTestLwSeenWalk(0, 30, P + 200.0f, off, 1, 1, 0, 0, 20, -1, 0, s); CHECK(s[6] == 0 && s[9] == 0); } /* 90 m off its way */
+        g_case = "a squad off the roads walking away from the player is not looked at";
+        CoXlTestLwSeenWalk(1, 30, P + 200.0f, one, 1, 1, 0, 0, 20, -1, 0, s);
+        CHECK(s[8] == 0 && s[6] == 0);
+        g_case = "meet 0: no look, no priority, no ask, and the road patrol walks into the ring as it did before these rules";
+        CoXlTestLwSeenSwitch(0);
+        CoXlTestLwSeenWalk(0, 30, start, one, 1, 1, 0, 0, walkIn + 60, -1, 0, s);
+        CHECK(s[1] == 0 && s[8] == 0 && s[9] == 0 && s[6] == 0 && s[4] == 0 && s[3] < 100.0f);
+        CoXlTestLwSeenSwitch(1);
+        CoXlTestLwSeenWalk(0, 30, start, one, 1, 1, 0, 0, walkIn + 60, -1, 0, s);
+        CHECK(s[1] == 3 && s[3] >= 155.0f);
         g_case = "sent on an errand while it approaches or waits: its patrol state ends at once";
         CoXlTestLwSeenWalk(0, 30, start, one, 1, 1, 0, 0, 120, -1, 0, s);
         CHECK(s[6] == 1 && s[9] == 1 && s[7] == 0);
@@ -252,7 +265,16 @@ int main(void)
         CoXlTestLwSeenEventHold(7, 9);
         CHECK(CoXlTestLwSeenEventHeld(3) == 0 && CoXlTestLwSeenEventHeld(12) == 9 && CoXlTestLwSeenEventHeld(7) == 0);
         CHECK(CoXlTestLwSeenWhy(10, cap, 500000, 6) == 0 && CoXlTestLwSeenWhy(0, cap, 500000, 5) == 1);
+        g_case = "a request counts the event squad's hold and the patrols' holds of its own bubble";
+        CHECK(CoXlTestLwSeenEventHeld(3) == 8 && CoXlTestLwSeenEventHeld(12) == 9 && CoXlTestLwSeenEventHeld(0) == 0);
+        g_case = "sent to reinforce while it waits with a hold: no wait, no priority, no mark, and its hold ends";
+        CHECK(CoXlTestLwSeenErrand(0, 501000) == 0 && CoXlTestLwSeenEventHeld(3) == 0 && CoXlTestLwSeenEventHeld(12) == 9);
         CoXlTestLwSeenEventHold(-1, 0);
+        g_case = "a patrol on its way to a player is placed and sight-tested before room is asked";
+        { int places, rooms;
+          CHECK(CoXlTestLwSeenGates(0, 1, &places, &rooms) == 0 && places == 1 && rooms == 0);
+          CHECK(CoXlTestLwSeenGates(1, 0, &places, &rooms) == 0 && places == 1 && rooms == 1);
+          CHECK(CoXlTestLwSeenGates(1, 1, &places, &rooms) == 1 && places == 1 && rooms == 1); }
         g_case = "a squad that came online on its way in stays 300 s while within reach of a player";
         { const float B = CoXlTestLwSeenBand();
           CoXlTestLwSeenSquad(0, 700, 0, 3, 8, 2);

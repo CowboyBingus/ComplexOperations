@@ -863,11 +863,16 @@ static int LwHoldBubble(int a, int b)
 }
 /* A refusal for units (the bubble's budget, the map's cap, the game's 70 room): the kind a swap makes room for. */
 static int LwRoomIsUnits(const char* why) { return strncmp(why, "the game's 70 room", 18) == 0 || strncmp(why, "the cap", 7) == 0; }
+/* The units held against a request of squad `requester`. A hold is room in its squad's bubble: counted against
+ * another bubble's requests it kept their squads out. The patrols' holds are one a bubble (living_world_patrols.c). */
+static uint32_t LwHoldsAgainst(int requester)
+{
+    const uint32_t held = g_lwHold.idx >= 0 && g_lwHold.idx != requester && GetTickCount64() < g_lwHold.until && LwHoldBubble(g_lwHold.idx, requester) ? g_lwHold.units : 0;
+    return held + LwMeetHeld(requester);
+}
 static int LwRoomFor(uint32_t members)
 {
-    /* a hold is room in its squad's bubble: counted against another bubble's requests it kept their squads out */
-    uint32_t held = g_lwHold.idx >= 0 && g_lwHold.idx != g_lwRequester && GetTickCount64() < g_lwHold.until && LwHoldBubble(g_lwHold.idx, g_lwRequester) ? g_lwHold.units : 0;
-    held += LwMeetHeld(g_lwRequester); /* the patrols' holds, one a bubble (living_world_patrols.c) */
+    uint32_t held = LwHoldsAgainst(g_lwRequester);
     uintptr_t chars, jobs, dir = g_lwWorld.dir;
     if (!LwRoomPlayers()) return 0;
     if (!EvpPtr(g_lw.game + 0x3326D18u, &chars) || !EvpPtr(g_lw.game + LW_AIJOB, &jobs)) { snprintf(g_lwRoomWhy, sizeof g_lwRoomWhy, "no character or job table"); return 0; }
