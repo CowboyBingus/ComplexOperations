@@ -21,6 +21,8 @@ void CoXlTestBuildCut(uintptr_t level, int state, int merge, int held, uint32_t 
 void CoXlTestBuildEnv(uint64_t env);
 int CoXlTestBuildLeft(int what);
 int CoXlTestTeardown(void);
+void CoXlTestMergeBegin(void);
+void CoXlTestBuildCentre(float y);
 
 static int g_failed;
 static const char* g_case;
@@ -36,11 +38,18 @@ static const char* g_case;
 #define STEP_REPLAY 6      /* MV_REPLAY */
 #define STEP_STAMPS 2      /* MV_STAMPS */
 #define ENV 0xE000ull
+#define STATE 0x1E4u      /* level: the generator's state (0 idle; a level init has written its 1 before the mod's hook) */
+#define JOB 0xF718u        /* level: the generator's job, running while its +8 is set */
+#define STEP_SPAWN 9       /* MV_SPAWN */
+#define STEP_KICK 3        /* MV_KICK */
+#define CENTRE 300.0f      /* the tile's centre in y; its stamp units stand 20000 m north of their places */
 #define PACKAGE 0x5157EF2020B48DCDull
 enum { C_WAIT = 1, C_UNIT, C_NODE, C_CAMERA, C_MERGED, C_ENVIRON, C_UNPUBLISH, C_RELEASE, C_READBACK, C_PACKAGE_OUT, C_TERRAIN };
 
 static uint8_t *g_world, *g_other, *g_level, *g_gen, *g_records;
 static uint64_t g_list[64];
+static uint8_t g_unitMem[10][0x60], g_job[16];
+#define U(n) ((uint64_t)(uintptr_t)g_unitMem[n])
 static struct { int what; uint64_t a, b; } g_calls[128];
 static int g_callCount;
 
@@ -60,6 +69,13 @@ static int First(int what, uint64_t a)
 {
     for (int i = 0; i < g_callCount && i < 128; i++) if (g_calls[i].what == what && (a == 0 || g_calls[i].a == a)) return i + 1;
     return 0;
+}
+
+static int Lines(const char* text)
+{
+    int n = 0;
+    for (const char* at = g_fake.log; (at = strstr(at, text)) != NULL; at++) n++;
+    return n;
 }
 
 static uint32_t ListCount(void) { uint32_t n; memcpy(&n, g_world + UNITS, 4); return n; }
@@ -103,6 +119,21 @@ static void Put(uint32_t at, void* value) { const uint64_t v = (uint64_t)(uintpt
 static void Field(uint8_t* base, uint32_t at, uint64_t value, int bytes) { memcpy(base + at, &value, (size_t)bytes); }
 static uint64_t Read(const uint8_t* base, uint32_t at, int bytes) { uint64_t v = 0; memcpy(&v, base + at, (size_t)bytes); return v; }
 
+/* A unit as the spawn's constructor leaves it (exe 0xD7879..0xD78A8): its world at +0x18, its pose at +0x20, whose
+ * translation's y is at +0x54. */
+static void Unit(int n, const uint8_t* world, float y)
+{
+    const uint64_t w = (uint64_t)(uintptr_t)world;
+    memset(g_unitMem[n], 0, sizeof g_unitMem[n]);
+    memcpy(g_unitMem[n] + 0x18, &w, 8); memcpy(g_unitMem[n] + 0x54, &y, 4);
+}
+static void Generator(uint32_t state, int runs)
+{
+    const uint64_t job = (uint64_t)(uintptr_t)g_job;
+    memcpy(g_level + STATE, &state, 4); memcpy(g_level + JOB, &job, 8);
+    g_job[8] = (uint8_t)runs;
+}
+
 static void Start(const char* name)
 {
     g_case = name;
@@ -126,12 +157,15 @@ static void Start(const char* name)
     VirtualProtect(image + 0xFCF000u, 0x1000, PAGE_EXECUTE_READWRITE, &old);
     VirtualProtect(image + 0x1009000u, 0x1000, PAGE_EXECUTE_READWRITE, &old);
     memset(g_world, 0, TERRAINS + 0x100); memset(g_other, 0, TERRAINS + 0x100);
-    memset(g_level, 0, 0x4000); memset(g_gen, 0, 0x1000); memset(g_records, 0, 0x4000);
+    memset(g_level, 0, 0x10000); memset(g_gen, 0, 0x1000); memset(g_records, 0, 0x4000);
     { const uint64_t manager = 0xA5A5ull, gen = (uint64_t)(uintptr_t)g_gen; memcpy(g_world + 0x230050u, &manager, 8); memcpy(g_level + 0x2C8, &gen, 8); }
     CoXlTestGame((uintptr_t)image);
     CoXlTestTileReset();
     CoXlTestMoverWorld((uint64_t)(uintptr_t)g_world);
     CoXlTestBuildEnv(ENV);
+    CoXlTestBuildCentre(CENTRE);
+    for (int n = 0; n < 10; n++) Unit(n, g_world, CENTRE + 20000.0f + 100.0f * (float)n);
+    Generator(0, 0);
     g_callCount = 0;
 }
 
@@ -157,16 +191,16 @@ int main(void)
 {
     g_world = (uint8_t*)VirtualAlloc(NULL, TERRAINS + 0x100, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     g_other = (uint8_t*)VirtualAlloc(NULL, TERRAINS + 0x100, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    g_level = (uint8_t*)VirtualAlloc(NULL, 0x4000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    g_level = (uint8_t*)VirtualAlloc(NULL, 0x10000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     g_gen = (uint8_t*)VirtualAlloc(NULL, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     g_records = (uint8_t*)VirtualAlloc(NULL, 0x4000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     uint8_t* lg = (uint8_t*)VirtualAlloc(NULL, 0x20000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (g_world == NULL || g_other == NULL || g_level == NULL || g_gen == NULL || g_records == NULL || lg == NULL) { printf("buildleft: no memory\n"); return 1; }
     const uint64_t world = (uint64_t)(uintptr_t)g_world;
     /* the world's units, not in order of address; the build's are 0x5000, 0x3000 and 0x9000 */
-    static const uint64_t kWorld[7] = {0x8000, 0x5000, 0x1000, 0x9000, 0x2000, 0x3000, 0x7000};
+    const uint64_t kWorld[7] = {U(8), U(5), U(1), U(9), U(2), U(3), U(7)};
     static uint64_t units[6];
-    static const uint64_t kUnits[6] = {0x4000 /* destroyed in an earlier frame */, 0x5000, 0x6000 /* not in the world */, 0, 0x3000, 0x9000};
+    const uint64_t kUnits[6] = {U(4) /* destroyed in an earlier frame */, U(5), U(6) /* not in the world */, 0, U(3), U(9)};
 
     Start("the ship ends a build cut short in its replay: its stamp units still in the world go, once each, after one wait");
     ListSet(kWorld, 7);
@@ -175,8 +209,8 @@ int main(void)
     CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 0, 0, 1, (uint64_t)(uintptr_t)g_records, 1);
     CHECK(CoXlTestBuildLeft(0) == 5 && CoXlTestBuildLeft(4) == 1);
     CoXlTestWorldShip();
-    CHECK(Count(C_UNIT, 0) == 3 && Count(C_UNIT, 0x5000) == 1 && Count(C_UNIT, 0x3000) == 1 && Count(C_UNIT, 0x9000) == 1);
-    CHECK(Count(C_UNIT, 0x6000) == 0 && Count(C_UNIT, 0x4000) == 0); /* neither the one not in the list nor the one that went before */
+    CHECK(Count(C_UNIT, 0) == 3 && Count(C_UNIT, U(5)) == 1 && Count(C_UNIT, U(3)) == 1 && Count(C_UNIT, U(9)) == 1);
+    CHECK(Count(C_UNIT, U(6)) == 0 && Count(C_UNIT, U(4)) == 0); /* neither the one not in the list nor the one that went before */
     CHECK(Count(C_WAIT, 0) == 1 && Count(C_WAIT, 0xA5A5) == 1 && First(C_WAIT, 0) < First(C_UNIT, 0));
     CHECK(g_calls[First(C_UNIT, 0) - 1].b == world && ListCount() == 4);
     CHECK(CoXlTestBuildLeft(0) == 0 && CoXlTestBuildLeft(4) == 0); /* and the next level's 0x63 looks where its stamps are */
@@ -186,15 +220,16 @@ int main(void)
     g_callCount = 0;
     CoXlTestWorldShip();
     CoXlTestWorldLevel((uintptr_t)lg, 0);
-    CHECK(g_callCount == 0); /* ended: nothing again */
+    CHECK(g_callCount == 0 && Lines("was cut short") == 1); /* ended: nothing again, no second line */
 
     Start("a level init ends it too (the ship's step may be off)");
     ListSet(kWorld, 7);
     memcpy(units, kUnits, sizeof units);
     CoXlTestStampUnits(units, 6);
     CoXlTestBuildCut((uintptr_t)g_level, STEP_STAMPS, 0, 0, 0, (uint64_t)(uintptr_t)g_records, 1);
+    Generator(1, 0);
     CoXlTestWorldLevel((uintptr_t)lg, 0);
-    CHECK(Count(C_UNIT, 0) == 3 && Count(C_UNIT, 0x4000) == 0 && CoXlTestBuildLeft(0) == 0); /* 0x4000 is not in the world either */
+    CHECK(Count(C_UNIT, 0) == 3 && Count(C_UNIT, U(4)) == 0 && CoXlTestBuildLeft(0) == 0); /* 0x4000 is not in the world either */
     CHECK(fake_host_logged("a level init: the build of cell (0, 0) was cut short in step 'stamps': 3 of its 6 stamp units destroyed, 2 already gone"));
 
     Start("no unit of the build in the world: nothing destroyed, no wait");
@@ -241,7 +276,7 @@ int main(void)
     CoXlTestWorldShip();
     const uint64_t r = (uint64_t)(uintptr_t)(g_level + MERGE);
     CHECK(Count(C_NODE, 0) == 1 && Count(C_NODE, 0x222) == 1 && Count(C_CAMERA, 0xCA00) == 1 && g_calls[First(C_NODE, 0) - 1].b == world);
-    CHECK(Count(C_MERGED, r) == 1 && g_calls[First(C_MERGED, 0) - 1].b == world && Count(C_ENVIRON, ENV) == 1 && g_calls[First(C_ENVIRON, 0) - 1].b == 5);
+    CHECK(Count(C_MERGED, r) == 1 && g_calls[First(C_MERGED, 0) - 1].b == world && Count(C_ENVIRON, 0) == 0); /* slot 5: the level's own teardown ended it */
     CHECK(Count(C_RELEASE, 0) == 3 && Count(C_RELEASE, 0x9800) == 1 && Count(C_RELEASE, 0xA000) == 1 && Count(C_RELEASE, 0xD800) == 1);
     CHECK(Count(C_UNPUBLISH, 0) == 3 && Count(C_UNPUBLISH, 0xA2003184u) == 1 && Count(C_UNPUBLISH, 0x1BB41B90u) == 1 && Count(C_UNPUBLISH, 0xEBD2B190u) == 1);
     CHECK(Count(C_READBACK, 0) == 0 && Count(C_UNPUBLISH, 0xDBCD240Du) == 0 && Read(g_lookup, 0x18, 8) == 0x700C);
@@ -251,26 +286,122 @@ int main(void)
         g_level[MERGE + 0xF0] == 0);
     CHECK(CoXlTestBuildLeft(1) == 0 && CoXlTestBuildLeft(2) == 0);
     CHECK(Count(C_PACKAGE_OUT, 0) == 0 && CoXlTestBuildLeft(3) == 1); /* never in the call that destroyed the merge */
-    CHECK(fake_host_logged("0 of its 0 stamp units destroyed, 0 already gone; the merge torn down; the merge package released at the next level's end"));
+    CHECK(fake_host_logged("0 of its 0 stamp units destroyed, 0 already gone; the merge torn down; the merge package is left to the next level init, "
+        "which takes it over (generator state 0;"));
     g_callCount = 0;
+    CoXlTestWorldShip();
+    CHECK(g_callCount == 0 && CoXlTestBuildLeft(3) == 1); /* no ship step sends it */
+    Generator(1, 0);
     CoXlTestWorldLevel((uintptr_t)lg, 0x44);
-    CHECK(Count(C_PACKAGE_OUT, PACKAGE) == 1 && g_callCount == 1 && CoXlTestBuildLeft(3) == 0); /* now, before this level init's own acquire */
+    CHECK(g_callCount == 0 && CoXlTestBuildLeft(3) == 0); /* the level init asked for the package before the hook: it is the level's */
+    CoXlTestLevelGone();
+    CHECK(Count(C_PACKAGE_OUT, 0) == 0); /* and the replay does not take it from the level's merge */
 
     Start("the merge before the level's own teardown: both cameras and all four textures");
     Merge(0);
     CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 1, 1, 0, (uint64_t)(uintptr_t)g_records, 1);
+    Generator(1, 0);
     CoXlTestWorldLevel((uintptr_t)lg, 0);
     CHECK(Count(C_NODE, 0) == 2 && Count(C_NODE, 0x111) == 1 && Count(C_NODE, 0x222) == 1 && Count(C_CAMERA, 0xCA00) == 1);
     CHECK(Count(C_RELEASE, 0) == 4 && Count(C_RELEASE, 0xB800) == 1 && Count(C_UNPUBLISH, 0x2FFE957Du) == 1 && Read(g_level + MERGE, 0x8, 4) == 0);
-    CHECK(Count(C_PACKAGE_OUT, 0) == 0 && CoXlTestBuildLeft(3) == 1); /* this call tore the merge down: the release waits */
+    CHECK(Count(C_PACKAGE_OUT, 0) == 0 && CoXlTestBuildLeft(2) == 0 && CoXlTestBuildLeft(3) == 0 && Count(C_ENVIRON, 0) == 0);
+    CHECK(fake_host_logged("the merge torn down; the merge package is this level init's now (generator state 1;"));
 
-    Start("a release an earlier teardown left pending goes at the level's end; the package of a build with no merge yet waits for the next");
+    Start("the package of a build with no merge yet: owed at the ship, the level's at the next level init, never sent");
     CoXlTestBuildCut((uintptr_t)g_level, STEP_STAMPS, 0, 1, 0, (uint64_t)(uintptr_t)g_records, 1);
     CoXlTestWorldShip();
     CHECK(Count(C_PACKAGE_OUT, 0) == 0 && CoXlTestBuildLeft(2) == 0 && CoXlTestBuildLeft(3) == 1);
-    CHECK(fake_host_logged("the merge was not up; the merge package released at the next level's end"));
+    CHECK(fake_host_logged("the merge was not up; the merge package is left to the next level init"));
     CoXlTestWorldShip();
-    CHECK(Count(C_PACKAGE_OUT, PACKAGE) == 1 && CoXlTestBuildLeft(3) == 0);
+    CHECK(Count(C_PACKAGE_OUT, 0) == 0 && CoXlTestBuildLeft(3) == 1);
+    Generator(1, 0);
+    CoXlTestWorldLevel((uintptr_t)lg, 0);
+    CHECK(Count(C_PACKAGE_OUT, 0) == 0 && CoXlTestBuildLeft(3) == 0);
+
+    Start("the generator is not idle at the ship: all of the build is kept for the level init");
+    ListSet(kWorld, 7);
+    memcpy(units, kUnits, sizeof units);
+    CoXlTestStampUnits(units, 6);
+    Merge(0);
+    CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 1, 1, 1, (uint64_t)(uintptr_t)g_records, 1);
+    Generator(3, 0);
+    CoXlTestWorldShip();
+    CHECK(g_callCount == 0 && CoXlTestBuildLeft(0) == 5 && CoXlTestBuildLeft(1) == 1 && CoXlTestBuildLeft(2) == 1 && CoXlTestBuildLeft(4) == 1);
+    CHECK(fake_host_logged("the ship: the build of cell (0, 0) was cut short in step 'replay', and the level generator is not idle (state 3, its job is gone): "
+        "its 5 stamp units, its merge (up) and its package (held) wait for the next level init"));
+    Generator(0, 1); /* the state's teardown is past but the job still runs */
+    CoXlTestWorldShip();
+    CHECK(g_callCount == 0 && CoXlTestBuildLeft(0) == 5 && fake_host_logged("(state 0, its job runs)"));
+    Generator(1, 1); /* and a level init beside a running job, which the game never makes */
+    CoXlTestWorldLevel((uintptr_t)lg, 0);
+    CHECK(g_callCount == 0 && CoXlTestBuildLeft(0) == 5 && CoXlTestBuildLeft(1) == 1);
+    Generator(0, 0); /* a level init's hook comes after its own state 1 */
+    CoXlTestWorldLevel((uintptr_t)lg, 0);
+    CHECK(g_callCount == 0 && CoXlTestBuildLeft(0) == 5);
+    Generator(1, 0);
+    CoXlTestWorldLevel((uintptr_t)lg, 0);
+    CHECK(Count(C_UNIT, 0) == 3 && Count(C_NODE, 0) == 2 && Count(C_MERGED, 0) == 1 && CoXlTestBuildLeft(0) == 0 && CoXlTestBuildLeft(1) == 0);
+    CHECK(fake_host_logged("a level init: the build of cell (0, 0) was cut short in step 'replay': 3 of its 5 stamp units destroyed, 1 already gone; the merge torn down"));
+
+    Start("an address in the list that is no longer the build's unit is left alone");
+    ListSet(kWorld, 7);
+    memcpy(units, kUnits, sizeof units);
+    CoXlTestStampUnits(units, 6);
+    Unit(5, g_world, CENTRE + 2000.0f);          /* in the main world, but on the map: not at the offset */
+    Unit(3, g_other, CENTRE + 20000.0f);         /* at the offset, in another world */
+    Unit(9, g_world, CENTRE + 20000.0f + 2176.0f); /* the farthest a stamp of the tile can stand */
+    CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 0, 0, 0, (uint64_t)(uintptr_t)g_records, 1);
+    CoXlTestWorldShip();
+    CHECK(Count(C_UNIT, 0) == 1 && Count(C_UNIT, U(9)) == 1 && Count(C_UNIT, U(5)) == 0 && Count(C_UNIT, U(3)) == 0 && ListCount() == 6);
+    CHECK(fake_host_logged("1 of its 6 stamp units destroyed, 2 already gone, 2 at their addresses are not this build's units (left alone); the merge was not up"));
+    Start("a unit past the tile's reach at the offset is not the build's either");
+    ListSet(kWorld, 7);
+    memcpy(units, kUnits, sizeof units);
+    CoXlTestStampUnits(units, 6);
+    Unit(5, g_world, CENTRE + 20000.0f + 2200.0f);
+    Unit(3, g_world, CENTRE + 20000.0f - 2200.0f);
+    CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 0, 0, 0, (uint64_t)(uintptr_t)g_records, 1);
+    CoXlTestWorldShip();
+    CHECK(Count(C_UNIT, 0) == 1 && Count(C_UNIT, U(9)) == 1 && fake_host_logged("2 at their addresses are not this build's units"));
+
+    Start("the second camera's node a teardown before destroyed is not queued again");
+    Merge(1); /* R+0x18 holds 0x222, which the level's 0x66 destroyed */
+    CoXlTestBuildCut((uintptr_t)g_level, STEP_KICK, 0, 1, 0, (uint64_t)(uintptr_t)g_records, 1);
+    CoXlTestMergeBegin();
+    CoXlTestWorldShip(); /* cut before 0x38 made this build's cameras */
+    CHECK(Count(C_NODE, 0) == 0 && Count(C_CAMERA, 0xCA00) == 1 && Count(C_MERGED, 0) == 1 && CoXlTestBuildLeft(1) == 0);
+    CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 0, 0, 0, (uint64_t)(uintptr_t)g_records, 1);
+    CoXlTestMergeBegin();
+    Field(g_level + MERGE, 0x18, 0x333, 4); /* 0x38 made a new one */
+    CoXlTestMergeBegin(); /* a later frame of the merge keeps the first's reading */
+    g_callCount = 0;
+    CoXlTestWorldShip();
+    CHECK(Count(C_NODE, 0) == 1 && Count(C_NODE, 0x333) == 1);
+    CoXlTestBuildCut((uintptr_t)g_level, STEP_KICK, 0, 0, 0, (uint64_t)(uintptr_t)g_records, 1);
+    CoXlTestMergeBegin();
+    CHECK(CoXlTestTeardown() == 1 && Count(C_NODE, 0x333) == 1); /* in play too: a build that fails before its 0x38 */
+    Field(g_level + MERGE, 0x18, 0x444, 4);
+    CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 1, 0, 0, (uint64_t)(uintptr_t)g_records, 1);
+    CHECK(CoXlTestTeardown() == 1 && Count(C_NODE, 0x444) == 1);
+    CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 1, 0, 0, (uint64_t)(uintptr_t)g_records, 1);
+    CHECK(CoXlTestTeardown() == 1 && Count(C_NODE, 0x444) == 1); /* a teardown remembers what it destroyed */
+
+    Start("the level-end teardown runs only in the main world");
+    Merge(1);
+    CoXlTestMoverWorld((uint64_t)(uintptr_t)g_other);
+    CoXlTestBuildCut((uintptr_t)g_level, STEP_REPLAY, 1, 0, 0, (uint64_t)(uintptr_t)g_records, 1);
+    CoXlTestWorldShip();
+    CHECK(Count(C_NODE, 0) == 0 && Count(C_CAMERA, 0) == 0 && Count(C_MERGED, 0) == 0 && fake_host_logged("the merge NOT torn down"));
+
+    Start("a build cut after its own teardown leaves nothing: one line, once");
+    CoXlTestBuildCut((uintptr_t)g_level, STEP_SPAWN, 0, 0, 0, (uint64_t)(uintptr_t)g_records, 1);
+    Generator(3, 1); /* nothing to do, so the generator does not matter */
+    CoXlTestWorldShip();
+    CHECK(g_callCount == 0 && fake_host_logged("the ship: the build of cell (0, 0) was cut short in step 'spawn' with no stamp unit, merge or package of it left; "
+        "its tile goes with the tile terrains"));
+    CoXlTestWorldShip();
+    CoXlTestWorldLevel((uintptr_t)lg, 0);
+    CHECK(Lines("was cut short") == 1);
 
     Start("the generation block names another merge object: the merge is left alone");
     Merge(0);
@@ -287,6 +418,7 @@ int main(void)
     CHECK(CoXlTestTeardown() == 1);
     CHECK(Count(C_READBACK, (uint64_t)(uintptr_t)g_lookup) == 1 && Count(C_UNPUBLISH, 0xDBCD240Du) == 1 && Count(C_RELEASE, 0x700C) == 1 && Read(g_lookup, 0x18, 8) == 0);
     CHECK(Count(C_NODE, 0) == 2 && Count(C_RELEASE, 0) == 5);
+    CHECK(Count(C_ENVIRON, ENV) == 1 && g_calls[First(C_ENVIRON, 0) - 1].b == 5); /* in play the build's slot 5 is its own to end */
 
     Start("nothing under way: nothing called, no line");
     ListSet(kWorld, 7);
