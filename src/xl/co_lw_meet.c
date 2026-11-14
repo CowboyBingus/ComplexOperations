@@ -57,10 +57,10 @@ int co_lw_meet_on_way(const float (*way)[2], int n, const float* player, float w
     return 0;
 }
 
-int co_lw_meet_act(int onRoad, float d, float rMin, float rOn, float band, int hidden, int aheadSeen, int cover)
+int co_lw_meet_act(int onRoad, float d, float rMin, float rOn, float over, int hidden, int aheadSeen, int cover, int measured)
 {
-    if (d < rMin || d >= band + CO_LW_MEET_OUTER) return CO_LW_MEET_WALK;
-    if (d >= band) return onRoad && !hidden ? CO_LW_MEET_ASK_BEYOND : CO_LW_MEET_WALK; /* hidden: on to where its cover ends */
+    if (d < rMin || over >= CO_LW_MEET_OUTER) return CO_LW_MEET_WALK;
+    if (over >= 0.0f) return onRoad && !hidden && measured ? CO_LW_MEET_ASK_BEYOND : CO_LW_MEET_WALK; /* hidden: on to where its cover ends */
     if (!hidden) return cover ? CO_LW_MEET_ASK_COVER : CO_LW_MEET_WALK;
     return d >= rOn && onRoad && aheadSeen ? CO_LW_MEET_ASK : CO_LW_MEET_WALK; /* nearer, the near band's own request asks */
 }
@@ -86,6 +86,17 @@ int co_lw_meet_far_room(int farUnits, int roadFar, int members, int limit, int o
     if (farUnits + members > limit) return 0;
     if (onRoad || !reserve) return 1;
     return farUnits - roadFar + members <= limit - limit / CO_LW_MEET_FAR_RESERVE;
+}
+
+uint64_t co_lw_meet_stay_ms(float keep, float rOff) { return keep > rOff ? (uint64_t)((keep - rOff) / CO_LW_MEET_STAY_PACE * 1000.0f) : 0; }
+
+int co_lw_meet_watched(uint8_t* run, int seen)
+{
+    if (*run == 255) return 0;
+    if (!seen) { *run = 0; return 0; }
+    if (++*run < CO_LW_MEET_WATCH_S) return 0;
+    *run = 255;
+    return 1;
 }
 
 float co_lw_meet_travel_step(float v, float dt)

@@ -491,13 +491,13 @@ typedef struct LwSquad
     uint8_t wide; /* requested with a face more than 2 m off the ground: its members are listed for the keeper */
     float movedFrom[2], reqZ, seenAt[32][3]; /* seenAt: each listed member's last position (for the loss note) */
     uint8_t arrived, viewed; /* viewed: the test trace noted it in a player's view once */
-    uint8_t checkedCount, appearSeen; float appearLo, appearHi, appearGap; uint32_t checked[32]; float checkedAt[32][2]; /* arrival: members checked in their first 5 s */
+    uint8_t checkedCount, appearSeen, appearDrawn; float appearLo, appearHi, appearGap, appearAt, appearTo; uint32_t checked[32]; float checkedAt[32][2]; /* arrival: members checked in their first 5 s */
     uint8_t farOn, inView; /* farOn: came online by sightline; inView: a player sees it (checked at lookAt) */
     uint8_t forceOff; /* test command: go offline now */
     ULONGLONG lookAt;
     ULONGLONG retry; /* no request before this (placement or sight refused) */
     uint32_t groundId[32]; float groundAt[32][3]; /* each member's last 5 s sample on the ground (the fall note) */
-    float band; uint32_t bandGen; uintptr_t bandDef; /* LwSquadBand's cache */
+    float band, scoped; uint32_t bandGen; uintptr_t bandDef; uint8_t measured; /* LwSquadBand's cache: scoped through a 4x scope; measured: its group's radius is known */
     uint8_t pulled;                 /* 2: held in place by the test stage until it comes online (the only value) */
     uint8_t intent, intentStage, intentSent, held; ULONGLONG heldAt, heldFrom, pushAt; float holdA, holdShift; uint8_t holdTry; int8_t holdLane; /* its bearing from the player at the edge; the point tried there (LwHoldNext) */ /* held: waiting at the spawn band's edge, at this point since heldAt, in this intent since heldFrom (LwIntentHold) */ /* Phase 2 (living_world_intent.c): LW_PATROL / LW_INVESTIGATE; 1 = at the point; goal sent online */
     float target[3]; uint32_t intentSource, intentSearch; ULONGLONG intentAt, intentStageAt, intentFree; ULONGLONG insideAt; /* the last "inside the spawn band" note */
@@ -515,7 +515,7 @@ static void LwDensityOnline(const float* pos, uint32_t members); static int LwDe
 static int LwMeetWaits(const LwSquad* q); static int LwMeetHold(LwSquad* q, float nx, float ny); static void LwMeetWhy(LwSquad* q, const char* why); static void LwNoFaceNote(const LwSquad* q); /* living_world_patrols.c */
 static int LwMeetKeeps(const LwSquad* q); static uint32_t LwMeetHeld(int requester); static int LwMeetApproach(LwSquad* q, ULONGLONG now, int busy); static int LwMeetPriority(const LwSquad* q);
 static int LwMeetFarRoom(const LwSquad* q, int meet, int farUnits); static void LwMeetAsked(LwSquad* q, int meet, int farAsk); static int LwMeetStays(LwSquad* q, float d2, ULONGLONG now); static void LwMeetFarCount(int idx, int units);
-static void LwMeetSight(LwSquad* q); static void LwMeetCmd(int on); static void LwBesideCmd(int seq, float d); static void LwWayOnCmd(int seq);
+static void LwMeetSight(LwSquad* q); static float LwMeetDrawn(LwSquad* q, int i); static void LwMeetCmd(int on); static void LwBesideCmd(int seq, float d); static void LwWayOnCmd(int seq);
 static int LwPatrolFar(const LwSquad* q); static int LwPatrolFarSum(int walking, int standing); static float LwLeadNear2(const LwSquad* q); static void LwPatrolAsked(const LwSquad* q); static int LwPatrolHolds(int idx); static void LwPatrolHoldTaken(void); static int LwPatrolYields(const LwSquad* q); static int LwRoadPlan(LwSquad* q, int home); static void LwPatrolsOldCmd(int on); static void LwTravelCmd(int seq, float v, float s); static void LwTravelBackCmd(int seq, float v); static void LwRoadPatrolsCmd(int on); static void LwPatrolsTick(void); /* living_world_patrols.c */
 static void LwLodTick(void); static void LwLodNote(void); static void LwLodCmd(int on); static int LwLodFullUnits(void); /* living_world_lod.c */
 static void LwDeferTick(uintptr_t lg, uint32_t seed); static void LwDeferNote(void); static void LwSpawnSourcesNote(int seq); /* living_world_defer.c */
@@ -1145,7 +1145,7 @@ static void LwOnline(LwSquad* q)
     Note("living world: squad %d requested at (%.0f, %.0f, %.1f) (snapped %.1f m), %.0f m from the nearest player, out of sight, %u of %u members (group 0x%llx)%s",
         (int)(q - g_lwSquads), (double)pos[0], (double)pos[1], (double)pos[2], (double)sqrtf(LwDist2(wanted, pos[0], pos[1])),
         (double)sqrtf(LwNearestPlayer2(pos[0], pos[1])), cap, size, (unsigned long long)q->definition, q->wide ? ", placed wide" : "");
-    q->reqZ = pos[2]; q->arrived = 0; q->viewed = 0; q->checkedCount = 0; q->appearSeen = 0; q->appearGap = 1e9f; q->farOn = 0; q->inView = 0; q->lookAt = 0;
+    q->reqZ = pos[2]; q->arrived = 0; q->viewed = 0; q->checkedCount = 0; q->appearSeen = q->appearDrawn = 0; q->appearGap = 1e9f; q->farOn = 0; q->inView = 0; q->lookAt = 0;
     g_lwEvery[q - g_lwSquads] = 1;
     q->state = LW_PENDING; q->rec = rec; q->cap = (uint8_t)cap; q->since = GetTickCount64(); q->jobSet = 0; q->jobAt = 0; q->farSince = 0; q->seenCount = 0; q->lost = 0; q->squad = 0;
     g_lwWorld.onlineUnits += (int)cap; q->alive = (uint8_t)cap; LwDensityOnline(pos, cap);
@@ -1171,8 +1171,14 @@ static uint32_t LwAlert(uint32_t unit)
 
 /* The ground's height at (x, y): the game's ground ray (0x13CA380, as the spawn request's ground snap calls it: from
  * z + 500 m down 1000 m; z written only on a hit). 1 with *z. */
+#ifdef CO_TEST
+static int (*g_lwTestRay)(int, const float*); static int g_lwTestView; /* tests: the sight ray; the view's owner + 1 */
+#endif
 static int LwGround(float x, float y, float* z)
 {
+#ifdef CO_TEST
+    if (g_lwTestRay) { *z = 0; return 1; }
+#endif
     typedef uint8_t (*GroundFn)(uintptr_t world, const float* in, float* outZ, uint8_t reject, float* normal, uint8_t mode);
     uintptr_t world;
     if (!EvpPtr(g_lw.game + 0x346D508u, &world)) return 0;
@@ -1505,9 +1511,12 @@ static int LwViewRead(void);
 /* How far player i's sight counts. A patrol's own request and looks (LwMeetSight) set it to what that player could
  * draw of the squad; a player 1700 m away with a line to a point nobody draws refused it. 0: LW_SIGHT. */
 static float g_lwSightHost, g_lwSightPeer;
+/* The host's own range is for this machine's player while its camera is the one read: a dead host's camera follows
+ * another player, whose own screen may show the squad through a scope. */
+static int LwSightIsHost(int i) { return g_lwWorld.local[i] && LwViewRead() == i; }
 static float LwSightRange2(int i)
 {
-    const float r = g_lwSightPeer > 0 ? (g_lwSightHost > 0 && LwViewRead() == i ? g_lwSightHost : g_lwSightPeer) : LW_SIGHT;
+    const float r = g_lwSightPeer > 0 ? (g_lwSightHost > 0 && LwSightIsHost(i) ? g_lwSightHost : g_lwSightPeer) : LW_SIGHT;
     return r * r;
 }
 static int LwHidden(const float* p)
@@ -1557,6 +1566,9 @@ static int g_lwViewOwner = -1; static float g_lwViewCam[3], g_lwViewFwd[2], g_lw
 static int LwRayClear(const float* eye, uint32_t unit, const float* point);
 static int LwViewRead(void)
 {
+#ifdef CO_TEST
+    if (g_lwTestView) return g_lwTestView - 1;
+#endif
     ULONGLONG now = GetTickCount64();
     if (now - g_lwViewAt < 200) return g_lwViewOwner;
     g_lwViewAt = now; g_lwViewOwner = -1;
@@ -1622,6 +1634,9 @@ static int LwOffScreen(int player, const float* p)
  * Returns 1 seen, 0 not, -1 no ray. */
 static int LwSeenFromView(int i, const float* point)
 {
+#ifdef CO_TEST
+    if (g_lwTestRay) return g_lwTestRay(i, point);
+#endif
     int eye = LwSeenFrom(g_lwWorld.players[i], g_lwWorld.units[i], point);
     if (eye == 1) return 1;
     if (LwViewRead() == i && LwRayClear(g_lwViewCam, g_lwWorld.units[i], point) == 1) return 1;
@@ -1717,15 +1732,18 @@ static void LwGroupRadiusSeen(uintptr_t definition, float r)
     if (empty >= 0) { g_lwRadii[empty].definition = definition; g_lwRadii[empty].radius = r; g_lwRadii[empty].band = LwFarBand(r); g_lwRadiiGen++;
         Note("living world: group 0x%llx: units up to %.2f m radius: drawn to %.0f m in a %.0f deg view", (unsigned long long)definition, (double)r, (double)g_lwRadii[empty].band, (double)(g_lwBandFov * 57.29578f)); }
 }
-/* A squad's band, cached per squad: recomputed only when its group changes or any group's radius is learned. */
+/* A squad's band, cached per squad: recomputed only when its group changes or any group's radius is learned. A
+ * group none of whose units has been online has the default radius: a guess (measured 0). */
+#define LW_SCOPED_FOV (11.25f * 3.14159265f / 180.0f)
 static float LwSquadBand(LwSquad* q)
 {
     if (q->bandGen != g_lwRadiiGen || q->bandDef != q->definition)
     {
-        static float defaultBand; static uint32_t defaultGen;
-        if (defaultGen != g_lwRadiiGen) { defaultBand = LwFarBand(LW_RADIUS_DEFAULT); defaultGen = g_lwRadiiGen; }
-        q->band = defaultBand;
-        for (int k = 0; k < LW_RADII; k++) if (g_lwRadii[k].definition == q->definition) { q->band = g_lwRadii[k].band; break; }
+        static float defaultBand, defaultScoped; static uint32_t defaultGen;
+        if (defaultGen != g_lwRadiiGen) { defaultBand = LwFarBand(LW_RADIUS_DEFAULT); defaultScoped = LwFarBandFov(LW_RADIUS_DEFAULT, LW_SCOPED_FOV); defaultGen = g_lwRadiiGen; }
+        q->band = defaultBand; q->scoped = defaultScoped; q->measured = 0;
+        for (int k = 0; q->definition && k < LW_RADII; k++) /* 0 is an empty slot's, not a group */
+            if (g_lwRadii[k].definition == q->definition) { q->band = g_lwRadii[k].band; q->scoped = LwFarBandFov(g_lwRadii[k].radius, LW_SCOPED_FOV); q->measured = 1; break; }
         q->bandGen = g_lwRadiiGen; q->bandDef = q->definition;
     }
     return q->band;
@@ -1968,14 +1986,24 @@ static void LwOnlineTick(LwSquad* q, int* removals)
             float chest[3] = {p[0], p[1], p[2] + 1.0f};
             for (int i = 0; i < g_lwWorld.playersAt; i++)
                 if (LwDist2(g_lwWorld.players[i], p[0], p[1]) <= LW_SIGHT * LW_SIGHT && LwSeenFrom(g_lwWorld.players[i], g_lwWorld.units[i], chest) == 1) { q->appearSeen++; break; }
+            /* a pop-in: a line from a player near enough to draw the member, whose screen holds it */
+            for (int i = 0; i < g_lwWorld.playersAt; i++)
+            {
+                const float d = sqrtf(LwDist2(g_lwWorld.players[i], p[0], p[1])), to = LwMeetDrawn(q, i);
+                if (d > to || LwSeenFromView(i, chest) != 1 || LwOffScreen(i, chest)) continue;
+                if (!q->appearDrawn || d < q->appearAt) { q->appearAt = d; q->appearTo = to; }
+                q->appearDrawn++; break;
+            }
         }
         if (q->checkedCount > 0 && (q->checkedCount >= q->cap || GetTickCount64() - q->since > 5000))
         {
             q->arrived = 1;
             char gap[48] = "one member, no gap"; /* lw50a: a one-member squad read as "nearest two 0.0 m apart" */
             if (q->checkedCount > 1) snprintf(gap, sizeof gap, "nearest two %.1f m apart", (double)q->appearGap);
-            Note("living world: squad %d members appear: %d of %u read in 5 s, z %.1f .. %.1f (requested %.1f), %s, %d of them in a player's sight",
-                (int)(q - g_lwSquads), q->checkedCount, q->cap, (double)q->appearLo, (double)q->appearHi, (double)q->reqZ, gap, q->appearSeen);
+            char drawn[96] = "";
+            if (q->appearDrawn) snprintf(drawn, sizeof drawn, " (nearest %.0f m from a player who draws it to %.0f m)", (double)q->appearAt, (double)q->appearTo);
+            Note("living world: squad %d members appear: %d of %u read in 5 s, z %.1f .. %.1f (requested %.1f), %s, %d of them in a player's sight, %d drawn on a player's screen%s",
+                (int)(q - g_lwSquads), q->checkedCount, q->cap, (double)q->appearLo, (double)q->appearHi, (double)q->reqZ, gap, q->appearSeen, q->appearDrawn, drawn);
         }
     }
     q->survivors = (uint8_t)(q->cap > q->lost ? q->cap - q->lost : 0);
