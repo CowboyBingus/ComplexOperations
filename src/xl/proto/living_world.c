@@ -2204,6 +2204,9 @@ static void LwWallSample(void)
  *   look N           how many of squad N's members a ray from the camera reaches (LwTestLook)
  * The camera: CM = [game+0x346D560], [CM+0x3C] its world position (subagent viewdist, P); the third-person camera
  * stands behind the Helldiver, so player - camera is the screen's direction across the ground. */
+#ifdef CO_RESEARCH
+static void FrvCmd(int seq, const char* cmd); static void FrvTick(void); /* living_world_frv.c */
+#endif
 static SRWLOCK g_lwCmdLock = SRWLOCK_INIT;
 static char g_lwCmd[8][288];
 static int g_lwCmdCount, g_lwCmdSeq;
@@ -3012,6 +3015,7 @@ static void LwTestCommands(void)
         else if (sscanf(cmds[c], "teleport %f %f", &d, &deg) == 2) LwTestTeleport(seq, d, deg);
         else if (strcmp(cmds[c], "vantage") == 0) LwTestVantage(seq);
 #ifdef CO_RESEARCH
+        else if (strncmp(cmds[c], "frv ", 4) == 0) FrvCmd(seq, cmds[c]); /* living_world_frv.c */
         /* the face cutter's limits (co_navcut.h), so one session cuts at the release limits and at low ones */
         else if (sscanf(cmds[c], "navcut %d %d", &ia, &ib) == 2 && ia > 0 && ib > 0)
         { co_navcut_limits((uint32_t)ia, (uint32_t)ib); Note("navmesh cuts: research limits from now: %d half-edges, %d segments a face", ia, ib); }
@@ -3079,6 +3083,9 @@ static void LwTickScans(void)
           LwTestCommands(); /* test commands from the harness (hellforge_lw_test), run here on the game thread */
           if (had) LwFrCmdTime(c0.QuadPart, before); } /* booked and flagged in the frame they run in */
         LwDelayGame(); });
+#ifdef CO_RESEARCH
+    FrvTick(); /* a test drive's inputs go in before the game's update reads them */
+#endif
     LW_TIMED(LW_J_FRAMES, { LwSubTick(); LwVboxFrame(); LwBpFrame(); LwBbFrame(); LwPcFrame(); LwCorpseFrame(); LwAibFrame(); LwSemFrame(); LwRhFrame(); LwAffFrame(); LwSkinFrame(); LwArFrame(); LwFhFrame(); });
     LW_TIMED(LW_J_NOISE, LwNoiseDrain()); /* Phase 2a: noises since the last tick send squads to investigate */
     LW_TIMED(LW_J_FIGHT, LwFightScan()); /* Phase 2b: fights and calls for help draw squads in (once a second) */
@@ -6035,6 +6042,7 @@ static void LwLiveSet(int complex)
 #include "living_world_aggro.c" /* calm enemies near a player, and what their eyes see of them, logged */
 #include "living_world_density.c" /* enemy density: a budget per player bubble (KB living-world-density-design) */
 #include "living_world_patrols.c" /* roads for the squads, the far share's rules, and what each player sees of the patrols */
+#include "living_world_frv.c" /* research: an FRV spawned and driven along a road by test commands; after living_world_patrols.c */
 #include "living_world_lod.c" /* data-only AI LOD for hidden, calm loader squads (KB living-world-density-design, C3) */
 #include "living_world_flat.c" /* test instrument: whole-frame sampling profile (KB xl-destruction-record-map-full) */
 #include "living_world_alloc.c" /* test instrument: large commits by caller (after living_world_flat.c: its function keys) */

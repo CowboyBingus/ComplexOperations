@@ -24,6 +24,7 @@ The tactical map's types (`HfScreen`, `HfDraw`, `HfInput`) are the mod SDK's own
 | `living_world_*.c`, `tacmap_*.c`, `tacmap.h`, `world_sites.h`, `living_world_defer_list.h` | Included by the files above. |
 | `safe_read.c` | Included by `../co_shim.c`: the mod's guarded read. |
 | `xl_span_rescue.c`, `xl_span_rescue_pins.h` | The mod's own, not copied. A full rpmalloc span that other threads freed blocks into goes back to its heap's partial list. A pool worker's trim that only the pass asked for is skipped. `../co_xl.c` installs it after the streamer and calls its pass from the tick. `scripts/gen_span_rescue_pins.py` writes the pins. |
+| `living_world_frv.c` | The mod's own, not copied, and compiled by a research build only. The test commands `frv ...` spawn an FRV through the game's entity spawn and drive it along a road's points by the vehicle's input record; `../co_frv.c` holds the game-free part. `living_world.c` includes it, passes it the commands and calls its step from the tick. |
 | `important_sites.h`, `route_sites.h` | Not compiled. They are tables of the generation block's move, which is HellForge's. |
 
 ## What is left out
