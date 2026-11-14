@@ -337,6 +337,93 @@ static uint32_t RoadsArterials(const RoadsGraph* g, const float* termXY, uint32_
  * bit i is edge i of the level's route edges (G + g_routeEdges), valid while `level` is g_world.levels. */
 static struct { LONG level; uint32_t count; uint8_t bits[ROADS_EDGES_MAX / 8]; } g_arterials = {.level = -1};
 
+/* ---- the places' keep-out ----
+ * Every important location's footprint, as op 0x3F reads it (0xF4D206: P = [entry+0x98], item [P+0x90], radius
+ * [item+0xD8]; the placement ops write the item with the record, 0xF777ED and its like), read before op 0x0E: the
+ * places exist by then (ops 0x16, 0x17, 0x82, 0x8B, 0xA0 and 0x8E run before op 0x86). A road keeps ROADS_KEEP
+ * from a footprint: the bed (GRADE_FULL) and the width its share falls over beside one (GRADE_FADE), so its cap is
+ * whole and its bed level there. Where that leaves no fair way round, a narrower margin is tried, the bed's own
+ * last; a line no margin serves stays straight and is counted. */
+static const float kRoadsKeep[3] = {58.0f, 34.0f, 10.0f};
+#define ROADS_KEEP_SPACING 16.0f /* a pair this long still has its middle inside an arterial's width of a point (op 0x04) */
+#define ROADS_KEEP_TURN 0.5f     /* the cosine of the sharpest corner a rounded line may keep */
+static struct { LONG level; uint32_t count; RoundDisc d[ROUND_DISCS]; } g_roadKeep = {.level = -1};
+static void RoadsKeepRead(uintptr_t block, uint32_t important)
+{
+    g_roadKeep.level = g_world.levels; g_roadKeep.count = 0;
+    for (uint32_t i = 0; i < important && g_importantList != 0 && g_roadKeep.count < ROUND_DISCS; i++)
+    {
+        uint64_t P = 0, item = 0; float xy[2], r = 0.0f;
+        if (SafeRead(block + g_importantList + 0x108ull * i + 0x98, &P, 8) || P == 0 || SafeRead(P, xy, 8) || SafeRead(P + 0x90, &item, 8) || item == 0 ||
+            SafeRead(item + 0xD8, &r, 4) || !(r >= 1.0f && r <= 400.0f) || !isfinite(xy[0]) || !isfinite(xy[1])) continue;
+        const RoundDisc d = {xy[0], xy[1], r};
+        g_roadKeep.d[g_roadKeep.count++] = d;
+    }
+}
+static uint32_t RoadsKeepCount(void) { return g_roadKeep.level == g_world.levels ? g_roadKeep.count : 0; }
+/* The footprint a point is the centre of (within a metre); ROADS_NO_NODE: none. */
+static uint32_t RoadsKeepAt(const float xy[2])
+{
+    for (uint32_t i = 0; i < RoadsKeepCount(); i++)
+        if (fabsf(g_roadKeep.d[i].x - xy[0]) < 1.0f && fabsf(g_roadKeep.d[i].y - xy[1]) < 1.0f) return i;
+    return ROADS_NO_NODE;
+}
+/* The discs a line is rounded about: every footprint but `own`, grown by the margin; one whose margin holds an end of
+ * the line is shrunk to leave it out, and one whose footprint holds it is no obstacle (the line must enter it). */
+static uint32_t RoadsKeepDiscs(float margin, uint32_t own, const float* a, const float* b, RoundDisc* out)
+{
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < RoadsKeepCount(); i++)
+    {
+        if (i == own) continue;
+        RoundDisc d = g_roadKeep.d[i];
+        d.r += margin;
+        for (int q = 0; q < 2; q++)
+        {
+            const float* e = q ? b : a;
+            if (e == NULL) continue;
+            const float away = sqrtf((e[0] - d.x) * (e[0] - d.x) + (e[1] - d.y) * (e[1] - d.y));
+            if (away < d.r) d.r = away < g_roadKeep.d[i].r ? 0.0f : away - 0.5f;
+        }
+        if (d.r > 0.0f) out[n++] = d;
+    }
+    return n;
+}
+/* Where a route node's roads meet: the node, moved out of the places it lies in. Every edge of the node gets the
+ * same point, so they still meet. */
+static void RoadsKeepNode(float p[2])
+{
+    static RoundDisc d[ROUND_DISCS];
+    RoundPush(p, d, RoadsKeepDiscs(kRoadsKeep[0], ROADS_NO_NODE, NULL, NULL, d), 1.0f, 0.0f);
+}
+/* The road line from a to b: n points (0: one per `spacing`, `most` at most) in out. *state: 0 straight, 1 round the
+ * places at the full margin, 2 at a narrower one, 3 left straight through a place. Returns the points. */
+static uint32_t RoadsKeepLine(const float a[2], const float b[2], uint32_t own, uint32_t n, float spacing, uint32_t most, float* out, float* length, int* state)
+{
+    static RoundDisc d[ROUND_DISCS];
+    static float fine[2 * ROUND_POINTS];
+    const float straight = sqrtf((b[0] - a[0]) * (b[0] - a[0]) + (b[1] - a[1]) * (b[1] - a[1]));
+    uint32_t count = n; int any = 0;
+    for (int k = 0; k < 4; k++)
+    {
+        int bent = 0;
+        const uint32_t discs = k < 3 ? RoadsKeepDiscs(kRoadsKeep[k], own, a, b, d) : 0;
+        const uint32_t m = RoundLine(a, b, d, discs, fine, &bent);
+        *length = RoundLength(fine, m);
+        count = n != 0 ? n : (uint32_t)ceilf(*length / spacing) + 1;
+        count = count < 2 ? 2 : count > most ? most : count;
+        RoundSpread(fine, m, count, out);
+        *state = k == 3 ? (any ? 3 : 0) : !bent ? (any ? 2 : 0) : k == 0 ? 1 : 2;
+        if (k == 3 || !bent) break;
+        any = 1;
+        float in = 0.0f;
+        const uint32_t feet = RoadsKeepDiscs(0.0f, own, NULL, NULL, d);
+        for (uint32_t i = 0; i < count; i++) { const float deep = RoundDepth(&out[2 * i], d, feet); if (deep > in) in = deep; }
+        if (in < 0.5f && RoundTurn(out, count) >= ROADS_KEEP_TURN && *length <= 2.5f * straight + 100.0f && *length / (float)(count - 1) <= ROADS_KEEP_SPACING) break;
+    }
+    return count;
+}
+
 static void RoadsSpurTerminals(const float* xy, const float* gap, uint32_t terms);
 /* After the level's op 0x86: the arterials are chosen and take their width (never a narrower one). The terminals are
  * the locations ops 0x16, 0x17 and 0x82 placed (ops[i]: the op that appended location i). */
@@ -368,6 +455,7 @@ static void RoadsArterialsApply(uintptr_t block, const uint8_t* ops, uint32_t to
     /* the extraction is the place the game's own test names (0xF78A4D), whatever op appended it */
     uint32_t important = 0, extractions = 0;
     SafeRead(block + 0x11A715Cu, &important, 4);
+    RoadsKeepRead(block, important);
     for (uint32_t i = 0; i < total && terms < 2 * ROADS_GROUP_MAX; i++)
     {
         const int extraction = i < important && g_importantList != 0 && ClusterExtraction(block + g_importantList + 0x108ull * i);
@@ -412,6 +500,45 @@ static void RoadsArterialsApply(uintptr_t block, const uint8_t* ops, uint32_t to
 /* Before the level's own op 0x2B: its road test takes no tolerant stamp on an arterial while the level has any. */
 static void RoadsToleranceBegin(void) { if (g_roadTolerance != NULL) *g_roadTolerance = g_arterials.level == g_world.levels && g_arterials.count != 0; }
 
+/* After the level's op 0x0E and before op 0x0F reads the points: each arterial's points, a straight chord then, go
+ * round the places, the same count evenly along the new line (ops 0x0F, 0x0D and 0x41 take any path: pairs of
+ * points). An end inside a place moves to its edge (RoadsKeepNode). A path that is no chord is left alone. */
+static void RoadsArterialsRound(uintptr_t block, const RoadEdge* e, uint32_t n, uint32_t points)
+{
+    static float line[2 * ROUND_POINTS];
+    const RoadsLayout L = {g_routeEdges, g_routePoints, 0};
+    uint32_t round = 0, narrow = 0, through = 0, ends = 0, curved = 0; float added = 0.0f, widest = 0.0f;
+    float* pts = RoadsKeepCount() != 0 ? RoadsReadPoints(block, &L, &points) : NULL;
+    for (uint32_t i = 0; pts != NULL && i < n; i++)
+    {
+        if (!((g_arterials.bits[i >> 3] >> (i & 7)) & 1) || !RoadEdgeHasPoints(&e[i], points) || e[i].end - e[i].first > ROUND_POINTS) continue;
+        const float* p = pts + 2 * (size_t)e[i].first; const uint32_t count = e[i].end - e[i].first;
+        float a[2] = {p[0], p[1]}, b[2] = {p[2 * count - 2], p[2 * count - 1]}, length = 0.0f, bow = 0.0f; int state = 0;
+        const float chord = sqrtf((b[0] - a[0]) * (b[0] - a[0]) + (b[1] - a[1]) * (b[1] - a[1]));
+        for (uint32_t k = 1; k + 1 < count && chord > 0.0f; k++)
+        {
+            const float off = fabsf((p[2 * k] - a[0]) * (b[1] - a[1]) - (p[2 * k + 1] - a[1]) * (b[0] - a[0])) / chord;
+            if (off > bow) bow = off;
+        }
+        if (bow > 0.5f) { curved++; continue; }
+        RoadsKeepNode(a); RoadsKeepNode(b);
+        const int moved = a[0] != p[0] || a[1] != p[1] || b[0] != p[2 * count - 2] || b[1] != p[2 * count - 1];
+        RoadsKeepLine(a, b, ROADS_NO_NODE, count, 0.0f, count, line, &length, &state);
+        if (state == 0 && !moved) continue;
+        for (uint32_t k = 0; k < count; k++)
+        {
+            uint64_t xy; memcpy(&xy, &line[2 * k], 8);
+            *(volatile uint64_t*)(block + L.pointsAt + 8ull * (e[i].first + k)) = xy;
+        }
+        round += state == 1; narrow += state == 2; through += state == 3; ends += (uint32_t)moved; added += length - chord;
+        if (length / (float)(count - 1) > widest) widest = length / (float)(count - 1);
+    }
+    if (pts != NULL) VirtualFree(pts, 0, MEM_RELEASE);
+    Note("roads: level %ld arterials round the places: %u footprints; %u edges go round at %.0f m from them, %u at a narrower margin, %u stay straight through a place, "
+        "%u have an end moved to a place's edge, %u are no chord and left alone; %.0f m longer in all, the points at most %.1f m apart", (long)g_world.levels,
+        RoadsKeepCount(), round, (double)kRoadsKeep[0], narrow, through, ends, curved, (double)added, (double)widest);
+}
+
 /* After the level's op 0x0E: the arterial edges it left without points have no path and no corridor (none is the aim). */
 static void RoadsArterialsPoints(uintptr_t block)
 {
@@ -421,6 +548,7 @@ static void RoadsArterialsPoints(uintptr_t block)
     if (g_arterials.level != g_world.levels || g_arterials.count == 0) return;
     const uint32_t n = RoadsReadEdges(block, &L, &e);
     if (n == 0 || SafeRead(block + 0x11A71D4u, &points, 4)) { RoadsFreeEdges(e, n); return; }
+    RoadsArterialsRound(block, e, n, points);
     for (uint32_t i = 0; i < n; i++) empty += ((g_arterials.bits[i >> 3] >> (i & 7)) & 1) && !RoadEdgeHasPoints(&e[i], points);
     Note("roads: level %ld arterials after op 0x0E: %u of %u arterial edges without points (%u road points)", (long)g_world.levels, empty, g_arterials.count, points);
     RoadsFreeEdges(e, n);
@@ -436,7 +564,11 @@ static void RoadsArterialsPoints(uintptr_t block)
 #define ROADS_SPUR_MOST 1000.0f  /* a place farther from the network gets none */
 #define ROADS_SPUR_SLACK 40.0f   /* the path's meander about the chord the reserve is counted from */
 #define ROADS_SPURS (2 * ROADS_GROUP_MAX)
-typedef struct RoadSpur { float from[2], to[2]; uint32_t edge, first, end; } RoadSpur; /* place, the arterial's point; points [first, end) */
+#define ROADS_SPUR_ROUND 160.0f  /* more of the same where places stand: the way round them */
+#define ROADS_SPUR_POINTS 128u
+/* from: the place, or the point of its footprint's edge the spur ends at (own: that footprint; ROADS_NO_NODE: none);
+ * to: the arterial's point; points [first, end) */
+typedef struct RoadSpur { float from[2], to[2]; uint32_t edge, first, end, own; } RoadSpur;
 static struct { LONG level; uint32_t terms, reserve, count, points; float xy[2 * ROADS_SPURS]; RoadSpur spur[ROADS_SPURS]; } g_spurs = {.level = -1}; /* points: the count the spurs left */
 typedef void (*RoadCapsuleFn)(uint64_t index, const float* capsule, uint32_t id);
 static RoadCapsuleFn g_roadCapsule; /* tests: in place of the game's 0xFCADC0 */
@@ -446,7 +578,12 @@ static void RoadsSpurTerminals(const float* xy, const float* gap, uint32_t terms
 {
     g_spurs.level = g_world.levels; g_spurs.terms = terms; g_spurs.reserve = 0; g_spurs.count = 0; g_spurs.points = 0;
     memcpy(g_spurs.xy, xy, (size_t)terms * 8);
-    for (uint32_t t = 0; t < terms; t++) g_spurs.reserve += RoadsSpurCount(gap[t] + ROADS_SPUR_SLACK);
+    for (uint32_t t = 0; t < terms; t++)
+    {
+        uint32_t count = RoadsSpurCount(gap[t] + ROADS_SPUR_SLACK);
+        if (RoadsKeepCount() != 0 && RoadsSpurCount(gap[t]) != 0) count = (uint32_t)ceilf((gap[t] + ROADS_SPUR_SLACK + ROADS_SPUR_ROUND) / ROADS_SPUR_STEP) + 1;
+        g_spurs.reserve += count > ROADS_SPUR_POINTS ? ROADS_SPUR_POINTS : count;
+    }
 }
 static uint32_t RoadsSpurReserve(void) { return g_spurs.level == g_world.levels ? g_spurs.reserve : 0; }
 
@@ -476,6 +613,30 @@ static void RoadsSpurPoints(const float from[2], const float to[2], uint32_t cou
     {
         const float t = (float)k / (float)(count - 1);
         out[2 * k] = from[0] + (to[0] - from[0]) * t; out[2 * k + 1] = from[1] + (to[1] - from[1]) * t;
+    }
+}
+
+/* Where a place's spur ends: the point of its footprint's edge towards the arterial, or the nearest of 16 directions
+ * about it that lies in no other place's footprint (places overlap); the first when none does. A spur through its
+ * place's middle would climb the place's own terrain. The directions are a table, so no machine rounds a sine. */
+static void RoadsSpurStart(const float centre[2], const float to[2], uint32_t own, float out[2])
+{
+    static const float kTurn[9][2] = {{1.0f, 0.0f}, {0.9238795f, 0.3826834f}, {0.7071068f, 0.7071068f}, {0.3826834f, 0.9238795f}, {0.0f, 1.0f},
+        {-0.3826834f, 0.9238795f}, {-0.7071068f, 0.7071068f}, {-0.9238795f, 0.3826834f}, {-1.0f, 0.0f}};
+    static RoundDisc d[ROUND_DISCS];
+    const float r = g_roadKeep.d[own].r, dx = to[0] - centre[0], dy = to[1] - centre[1], away = sqrtf(dx * dx + dy * dy);
+    out[0] = centre[0]; out[1] = centre[1];
+    if (!(away > r + 1.0f)) return; /* the arterial lies in the place: the spur runs from its middle as before */
+    const float ux = dx / away, uy = dy / away;
+    const uint32_t feet = RoadsKeepDiscs(0.0f, own, NULL, NULL, d);
+    out[0] = centre[0] + ux * r; out[1] = centre[1] + uy * r;
+    for (int k = 0; k < 17; k++)
+    {
+        const float c = kTurn[(k + 1) / 2][0], sn = (k & 1) ? kTurn[(k + 1) / 2][1] : -kTurn[(k + 1) / 2][1];
+        const float at[2] = {centre[0] + (ux * c - uy * sn) * r, centre[1] + (ux * sn + uy * c) * r};
+        if (RoundDepth(at, d, feet) > 0.0f) continue;
+        out[0] = at[0]; out[1] = at[1];
+        return;
     }
 }
 
@@ -563,19 +724,28 @@ static void RoadsSpursBuild(uintptr_t block, uint64_t context)
         RoadsFreeEdges(e, n); if (pts != NULL) VirtualFree(pts, 0, MEM_RELEASE);
         return;
     }
-    uint32_t onRoad = 0, tooFar = 0, noRoom = 0, noIndex = 0, at = points; double km = 0; float longest = 0;
-    static float line[2 * 128];
+    uint32_t onRoad = 0, tooFar = 0, noRoom = 0, noIndex = 0, at = points, edged = 0, round = 0, narrow = 0, through = 0; double km = 0; float longest = 0;
+    static float line[2 * ROADS_SPUR_POINTS];
     for (uint32_t t = 0; t < g_spurs.terms; t++)
     {
         RoadSpur* s = &g_spurs.spur[g_spurs.count];
         memcpy(s->from, &g_spurs.xy[2 * t], 8);
-        const float d = RoadsSpurAttach(s->from[0], s->from[1], e, n, g_arterials.bits, pts, points, s->to, &s->edge);
-        const uint32_t count = RoadsSpurCount(d);
+        float d = RoadsSpurAttach(s->from[0], s->from[1], e, n, g_arterials.bits, pts, points, s->to, &s->edge);
+        uint32_t count = RoadsSpurCount(d); int state = 0;
         if (d < 1.0f) { onRoad++; continue; }
-        if (count == 0 || count > 128) { tooFar++; continue; }
+        if (count == 0 || count > ROADS_SPUR_POINTS) { tooFar++; continue; }
+        s->own = RoadsKeepAt(s->from);
+        if (s->own != ROADS_NO_NODE)
+        {
+            const float centre[2] = {s->from[0], s->from[1]};
+            RoadsSpurStart(centre, s->to, s->own, s->from);
+            if (s->from[0] == centre[0] && s->from[1] == centre[1]) s->own = ROADS_NO_NODE;
+        }
+        if (RoadsKeepCount() != 0) count = RoadsKeepLine(s->from, s->to, s->own, 0, ROADS_SPUR_STEP, ROADS_SPUR_POINTS, line, &d, &state);
         if (at + count > room) { noRoom++; continue; }
         if (RoadsIndexFree(index, count - 1) < (int)count - 1) { noIndex++; continue; } /* a full index would be written through null */
-        RoadsSpurPoints(s->from, s->to, count, line);
+        if (state == 0) RoadsSpurPoints(s->from, s->to, count, line); /* the straight spur's own points, to the last bit */
+        edged += s->own != ROADS_NO_NODE; round += state == 1; narrow += state == 2; through += state == 3;
         const float r = 0.5f * (e[s->edge].width > ROADS_ARTERIAL_WIDTH ? e[s->edge].width : ROADS_ARTERIAL_WIDTH);
         for (uint32_t k = 0; k < count; k++)
         {
@@ -593,6 +763,8 @@ static void RoadsSpursBuild(uintptr_t block, uint64_t context)
     Note("roads: level %ld spurs: %u of %u places joined to the arterials (%.1f km, the longest %.0f m; %u road points of %u kept for them), "
         "%u on a road already, %u too far, %u without room, %u without a place in the stamp index (%d free after them)", (long)g_world.levels, g_spurs.count,
         g_spurs.terms, km, (double)longest, at - points, g_spurs.reserve, onRoad, tooFar, noRoom, noIndex, RoadsIndexFree(index, ROADS_INDEX_COUNT));
+    Note("roads: level %ld spurs round the places: %u end at their place's edge, %u go round other places at %.0f m, %u at a narrower margin, %u stay straight through one",
+        (long)g_world.levels, edged, round, (double)kRoadsKeep[0], narrow, through);
     RoadsFreeEdges(e, n);
     VirtualFree(pts, 0, MEM_RELEASE);
     RoadsLinesFile(block);

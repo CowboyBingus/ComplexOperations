@@ -38,6 +38,9 @@ void CoXlTestRoadsSlopeNote(uintptr_t block);
 void CoXlTestRoadsIndexNote(uint64_t context, const char* when);
 void CoXlTestRoadsPointsWatch(uintptr_t block, uint32_t op);
 
+void CoXlTestRoadsKeep(const float* discs, uint32_t n);
+uint32_t CoXlTestRoadsKeepCount(const float** discs);
+
 static int g_failed;
 static const char* g_case;
 #define CHECK(what) do { if (!(what)) { printf("FAILED %s: %s\n", g_case, #what); g_failed++; } } while (0)
@@ -775,6 +778,106 @@ static void ArterialsGlue(void)
     CHECK(Lines("the route graph is not readable; no edge widened") == 1);
 }
 
+/* The glue of the places' keep-out: an arterial's points go round a footprint in place and its end leaves one, the
+ * spur ends at its place's edge and goes round another place, and the footprints are read from the important list. */
+static void Far(uint32_t first, uint32_t end, float x, float y, float* least)
+{
+    *least = 1.0e9f;
+    for (uint32_t i = first; i < end; i++)
+    {
+        const float d = sqrtf((Point(i, 0) - x) * (Point(i, 0) - x) + (Point(i, 1) - y) * (Point(i, 1) - y));
+        if (d < *least) *least = d;
+    }
+}
+static void ArterialsRound(void)
+{
+    const uintptr_t block = (uintptr_t)g_block;
+    static const float nodes[2 * 2] = {4200, 5000, 4700, 5000}, place[2] = {4550, 5200};
+    static const uint8_t ops[1] = {0x82};
+    float least = 0.0f;
+    CoXlTestGenLevel(8.0f);
+    Edge(0, 4200, 5000, 4700, 5000, 2, 3, 0, 0, 8);
+    for (int q = 0; q < 2; q++) { const uint64_t p = block + NODES_AT + 0x98ull * (uint32_t)q; memcpy(g_recs + 0x10 + 8 * q, &p, 8); }
+    Edges(1);
+    Put32(g_block + 0x11A71B4u, 2);
+    for (uint32_t v = 0; v < 2; v++) memcpy(g_block + NODES_AT + 0x98u * v, &nodes[2 * v], 8);
+    memset(g_block + LOCATIONS_AT, 0, 0xE0u * 4);
+    memcpy(g_block + LOCATIONS_AT, place, 8);
+
+    g_case = "keep-out: the footprints are the important list's, as op 0x3F reads them";
+    /* entry +0x98 -> the location record, its +0x90 -> the item, the item's +0xD8 the radius; one without an item,
+     * one with a radius that is none, and one with no record are no footprint */
+    static uint8_t item[3][0x200];
+    static const float radius[3] = {30.0f, 0.5f, 55.0f};
+    memset(g_block + IMPORTANT_AT, 0, 0x108u * 5);
+    for (uint32_t i = 0; i < 3; i++)
+    {
+        const uint64_t P = block + LOCATIONS_AT + 0xE0ull * i, it = (uint64_t)(uintptr_t)item[i];
+        memcpy(item[i] + 0xD8, &radius[i], 4);
+        memcpy(g_block + IMPORTANT_AT + 0x108u * i + 0x98, &P, 8);
+        if (i != 2) memcpy(g_block + LOCATIONS_AT + 0xE0u * i + 0x90, &it, 8);
+    }
+    Put32(g_block + 0x11A715Cu, 5);
+    Put32(g_block + 0x11A7108u, 1);
+    g_fake.log[0] = 0;
+    CoXlTestRoadsArterialsApply(block, ops, 1);
+    const float* discs = NULL;
+    CHECK(CoXlTestRoadsKeepCount(&discs) == 1 && discs[0] == 4550 && discs[1] == 5200 && discs[2] == 30);
+    CHECK(CoXlTestRoadsArterial(0));
+    uint32_t reserve = 0; const float* table = NULL;
+    CHECK(CoXlTestRoadsSpurs(&reserve, &table) == 0 && reserve == 41); /* (200 + 40 + 160) / 10 + 1: the way round is kept free too */
+
+    g_case = "keep-out: an arterial's points go round a footprint, the same count in the same places, and an end inside one moves to its edge";
+    /* the place, a footprint on the chord, one between the place and the road, one over the edge's far node */
+    static const float keep[3 * 4] = {4550, 5200, 30, 4350, 5010, 20, 4550, 5090, 8, 4720, 5000, 10};
+    CoXlTestRoadsKeep(keep, 4);
+    for (uint32_t i = 0; i < 51; i++) { const float xy[2] = {4200.0f + 10.0f * (float)i, 5000.0f}; memcpy(g_block + POINTS_AT + 8u * i, xy, 8); }
+    Put32(g_block + 0x11A71D4u, 51);
+    { const uint32_t range[2] = {0, 51}; memcpy(g_block + EDGES_AT + 0x38, range, 8); }
+    g_fake.log[0] = 0;
+    CoXlTestRoadsArterialsPoints(block);
+    CHECK(Count32(0x11A71D4u) == 51 && Point(0, 0) == 4200 && Point(0, 1) == 5000);
+    CHECK(fabsf(Point(50, 0) - 4652.0f) < 0.01f && Point(50, 1) == 5000); /* 68 m west of the footprint's middle */
+    Far(0, 51, 4350, 5010, &least);
+    CHECK(least > 77.4f && least < 78.5f);
+    CHECK(Point(15, 1) < 4950.0f); /* round the nearer side, south */
+    CHECK(Lines("arterials round the places: 4 footprints; 1 edges go round at 58 m from them, 0 at a narrower margin, 0 stay straight through a place, 1 have an end moved "
+        "to a place's edge, 0 are no chord and left alone") == 1);
+    CHECK(Lines("arterials after op 0x0E: 0 of 1 arterial edges without points (51 road points)") == 1);
+
+    g_case = "keep-out: a path that is no chord is left as the game made it";
+    { const float xy[2] = {4450.0f, 5003.0f}; memcpy(g_block + POINTS_AT + 8u * 25, xy, 8); }
+    for (uint32_t i = 0; i < 51; i++) if (i != 25) { const float xy[2] = {4200.0f + 10.0f * (float)i, 5000.0f}; memcpy(g_block + POINTS_AT + 8u * i, xy, 8); }
+    g_fake.log[0] = 0;
+    CoXlTestRoadsArterialsPoints(block);
+    CHECK(Point(15, 1) == 5000 && Point(50, 0) == 4700 && Lines("0 have an end moved to a place's edge, 1 are no chord and left alone") == 1);
+    { const float xy[2] = {4450.0f, 5000.0f}; memcpy(g_block + POINTS_AT + 8u * 25, xy, 8); }
+    CoXlTestRoadsArterialsPoints(block);
+
+    g_case = "keep-out: the spur ends at its place's edge and goes round the place in its way";
+    static uint64_t context[5];
+    static uint8_t index[0x60]; static uint32_t places[64 * 4];
+    { const uint64_t base = (uint64_t)(uintptr_t)places; const uint16_t stride = 16;
+      for (uint32_t i = 0; i < 64; i++) places[4 * i] = i + 1 < 64 ? i + 1 : 0xFFFFFFFFu;
+      Put32(index + 8 + 0x2C, 0); memcpy(index + 8 + 0x24, &stride, 2); memcpy(index + 8 + 0x30, &base, 8); }
+    context[4] = (uint64_t)(uintptr_t)index;
+    g_fake.log[0] = 0; g_capsuleCount = 0;
+    CoXlTestRoadsSpursBuild(block, (uint64_t)(uintptr_t)context, Capsule);
+    CHECK(CoXlTestRoadsSpurs(&reserve, &table) == 1);
+    const uint32_t count = Count32(0x11A71D4u) - 51;
+    CHECK(count >= 22 && count <= 25 && g_capsuleCount == count - 1); /* 225 m round a 66 m circle, 170 m straight */
+    CHECK(fabsf(sqrtf((table[0] - 4550) * (table[0] - 4550) + (table[1] - 5200) * (table[1] - 5200)) - 30.0f) < 0.01f && table[1] < 5171.0f);
+    { uint32_t u[4]; memcpy(u, table + 4, 16); CHECK(u[0] == 0 && u[1] == 51 && u[2] == 51 + count && u[3] == 0); }
+    CHECK(Point(51, 0) == table[0] && Point(51, 1) == table[1] && Point(51 + count - 1, 0) == table[2] && Point(51 + count - 1, 1) == table[3]);
+    Far(51, 51 + count, 4550, 5090, &least);
+    CHECK(least > 65.4f && least < 67.0f);
+    Far(0, 51, table[2], table[3], &least);
+    CHECK(least < 10.0f && fabsf(table[3] - 5000.0f) < 15.0f); /* it meets the arterial's rounded path */
+    CHECK(Lines("spurs round the places: 1 end at their place's edge, 1 go round other places at 58 m, 0 at a narrower margin, 0 stay straight through one") == 1);
+    CoXlTestRoadsKeep(NULL, 0);
+    Put32(g_block + 0x11A715Cu, 0);
+}
+
 int main(void)
 {
     g_coApi = fake_host_reset(CO_GAME_BUILD);
@@ -790,6 +893,7 @@ int main(void)
     InstallTolerance();
     SpacingGlue();
     ArterialsGlue();
+    ArterialsRound();
     VirtualFree(g_block, 0, MEM_RELEASE);
     if (g_failed) { printf("roadbuild: %d check(s) failed\n", g_failed); return 1; }
     printf("roadbuild: all checks passed\n");

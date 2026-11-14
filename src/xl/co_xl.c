@@ -74,6 +74,7 @@ static double HitchNow(void)
 #include "proto/difficulty_world_gates.c"
 #include "proto/difficulty_world_macro.c"
 #include "proto/difficulty_world_roads.c"
+#include "proto/difficulty_world_roadround.c"
 #include "proto/difficulty_world_roadbuild.c"
 #include "proto/difficulty_world_roadgrade.c"
 #include "proto/difficulty_world_roadfield.c"
@@ -1286,12 +1287,53 @@ uint32_t CoXlTestGradeCapped(const float* ground, const uint8_t* pinned, const f
     for (uint32_t i = 0; i < n; i++)
     { s[i].ground = ground[i]; s[i].pinned = pinned != NULL && pinned[i]; s[i].floor = -GRADE_FAR; s[i].earth = earth != NULL ? earth[i] : GRADE_FAR; }
     for (uint32_t k = 0; k < count; k++) GradeLink(s, links[2 * k], links[2 * k + 1], gaps[k]);
-    const uint32_t torn = GradeSolveCapped(s, n, soft, hard, passes);
+    const uint32_t torn = GradeSolveCapped(s, n, soft, hard, hard, 0.0f, passes);
     float worst = 0.0f; uint32_t at = 0; double metres = 0.0;
     out[0] = GradeOverCap(s, n, by, &worst, &at, &metres); out[1] = worst; out[2] = at; out[3] = metres;
     for (uint32_t i = 0; i < n; i++) target[i] = s[i].target;
     free(s);
     return torn;
+}
+/* The same with the steep-ground rule: links may take up to `steep` where `hard` stands over `cap` off the ground.
+ * out: the links that may (GradeRelaxed), their metres, the steepest slope taken on one, its station; then
+ * GradeMeasure's steepest (degrees) and highest fill and deepest cut. */
+uint32_t CoXlTestGradeSteep(const float* ground, const uint8_t* pinned, const float* earth, uint32_t n, const uint32_t* links, const float* gaps, uint32_t count,
+    float soft, float hard, float steep, float cap, uint32_t passes, float* target, double out[7])
+{
+    GradeStation* s = (GradeStation*)calloc(n ? n : 1, sizeof *s);
+    if (s == NULL) return n;
+    for (uint32_t i = 0; i < n; i++)
+    { s[i].ground = ground[i]; s[i].pinned = pinned != NULL && pinned[i]; s[i].floor = -GRADE_FAR; s[i].earth = earth != NULL ? earth[i] : GRADE_FAR; }
+    for (uint32_t k = 0; k < count; k++) GradeLink(s, links[2 * k], links[2 * k + 1], gaps[k]);
+    const uint32_t torn = GradeSolveCapped(s, n, soft, hard, steep, cap, passes);
+    float steepest = 0.0f; uint32_t at = 0; double metres = 0.0;
+    out[0] = GradeRelaxed(s, n, hard, &metres, &steepest, &at); out[1] = metres; out[2] = steepest; out[3] = at;
+    GradeStats g; GradeMeasure(s, n, &g);
+    out[4] = g.steepest; out[5] = g.fill; out[6] = g.cut;
+    for (uint32_t i = 0; i < n; i++) target[i] = s[i].target;
+    free(s);
+    return torn;
+}
+/* The places' keep-out (proto/difficulty_world_roadround.c and RoadsKeep*): n footprints of x, y, r for this level. */
+void CoXlTestRoadsKeep(const float* discs, uint32_t n)
+{
+    g_roadKeep.level = g_world.levels; g_roadKeep.count = n < ROUND_DISCS ? n : ROUND_DISCS;
+    for (uint32_t i = 0; i < g_roadKeep.count; i++) { const RoundDisc d = {discs[3 * i], discs[3 * i + 1], discs[3 * i + 2]}; g_roadKeep.d[i] = d; }
+}
+uint32_t CoXlTestRoadsKeepCount(const float** discs) { *discs = &g_roadKeep.d[0].x; return RoadsKeepCount(); }
+/* The road line from a to b (RoadsKeepLine): out takes up to `most` points; state as RoadsKeepLine gives it. */
+uint32_t CoXlTestRoadsKeepLine(const float* a, const float* b, uint32_t own, uint32_t n, float spacing, uint32_t most, float* out, float* length, int* state)
+{ return RoadsKeepLine(a, b, own, n, spacing, most, out, length, state); }
+void CoXlTestRoadsKeepNode(float* p) { RoadsKeepNode(p); }
+void CoXlTestRoadsSpurStart(const float* centre, const float* to, uint32_t own, float* out) { RoadsSpurStart(centre, to, own, out); }
+float CoXlTestRoundTurn(const float* p, uint32_t n) { return RoundTurn(p, n); }
+/* What a road's share falls with at a point (RoadGradeFade: pads and the places' footprints); *cap: a station's there. */
+float CoXlTestGradeFade(float world, float playable, float x, float y, float* cap)
+{
+    g_grade.world = world; g_grade.playable = playable;
+    RoadGradePadIndex();
+    *cap = RoadGradeEarth(x, y);
+    return RoadGradeFade(x, y);
 }
 /* n flatten zones (op 0x3E) after the pads CoXlTestGradePads gave, as TerrainNearPads keeps them: boxes of x0, y0,
  * x1, y1 from the world's centre. */
