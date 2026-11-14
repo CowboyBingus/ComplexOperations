@@ -72,6 +72,7 @@ static double HitchNow(void)
 #include "proto/difficulty_world_towns.c"
 #include "proto/difficulty_world_gates.c"
 #include "proto/difficulty_world_macro.c"
+#include "proto/difficulty_world_roads.c"
 #include "proto/difficulty_status.c"
 #include "proto/difficulty_map_hud.c"
 #include "proto/difficulty_world_arcs.c"
@@ -878,6 +879,38 @@ void CoXlTestMoveHold(int on) { MoveHold(on); }
 LONG64 CoXlTestMoveHoldSince(void) { return g_moveHoldSince; }
 /* A level init's effect on the generator's side alone: the next level, complex (8) or not (1). */
 void CoXlTestGenLevel(float current) { InterlockedIncrement(&g_world.levels); g_world.current = current; }
+/* The roads' evidence (proto/difficulty_world_roads.c), its parts over raw 0x48 edge records (64 at most) and its
+ * lines over a fake generation block. */
+static uint32_t RoadsTestEdges(const uint8_t* recs, uint32_t n, RoadEdge* e)
+{
+    if (n > 64) n = 64;
+    for (uint32_t i = 0; i < n; i++) RoadEdgeRead(recs + 0x48ull * i, &e[i]);
+    return n;
+}
+void CoXlTestRoadsWidths(const uint8_t* recs, uint32_t n, char* out, size_t size) { RoadEdge e[64]; n = RoadsTestEdges(recs, n, e); RoadsWidths(e, n, out, size); }
+void CoXlTestRoadsPoints(const uint8_t* recs, uint32_t n, uint32_t points, uint32_t counts[4], double km[2])
+{
+    RoadEdge e[64]; RoadsPoints c;
+    n = RoadsTestEdges(recs, n, e);
+    RoadsPointsCount(e, n, points, &c);
+    counts[0] = c.edges; counts[1] = c.drawable; counts[2] = c.empty; counts[3] = c.emptySkeleton; km[0] = c.drawableKm; km[1] = c.emptyKm;
+}
+void CoXlTestRoadsReach(const float* xy, uint32_t n, const uint8_t* recs, uint32_t edges, const float* pts, uint32_t points, float out[7])
+{
+    RoadEdge e[64]; RoadsReach r;
+    edges = RoadsTestEdges(recs, edges, e);
+    RoadsReachOf(xy, n, e, edges, pts, points, &r);
+    out[0] = (float)r.n; out[1] = r.pathMedian; out[2] = r.pathMax; out[3] = r.skelMedian; out[4] = r.skelMax; out[5] = r.lineMedian; out[6] = r.lineMax;
+}
+double CoXlTestRoadsDisc(uint32_t world, float fraction, double* radius) { return RoadsDiscKm2(world, fraction, radius); }
+/* The locations' ops as the dispatcher records them, and the stamp plan's count, for the level set up last. */
+void CoXlTestRoadsLevel(const uint8_t* ops, uint32_t n, uint32_t planned)
+{
+    memcpy(g_locationOp, ops, n);
+    g_plan.level = g_world.levels; g_plan.count = planned;
+}
+void CoXlTestRoadsAfterOp(uintptr_t block, uint64_t context, uint64_t record, uint32_t op, uint32_t before, int counted)
+{ RoadsAfterOp(block, context, record, op, before, counted); }
 /* The stamp packages a level requested early (EarlyPackages): held as a level that ended before its record 94 leaves them. */
 void CoXlTestEarlyHeld(const uint64_t* ids, uint32_t count)
 {

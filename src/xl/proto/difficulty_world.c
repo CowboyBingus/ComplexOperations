@@ -4326,7 +4326,7 @@ static void WorldLocationsNote(uintptr_t block, uint32_t total)
     HANDLE file = OpenLog(name);
     if (file == INVALID_HANDLE_VALUE) return;
     float half = 1024.0f * g_world.current;
-    char line[128];
+    char line[192];
     DWORD wrote;
     uint32_t n = total < DIF_LOCATIONS ? total : DIF_LOCATIONS, written = 0, important = 0;
     SafeRead(block + 0x11A715Cu, &important, 4);
@@ -4349,7 +4349,7 @@ static void WorldLocationsNote(uintptr_t block, uint32_t total)
     CloseHandle(file);
     Note("difficulty: extra large maps: locations-%ld.tsv written (%u locations)", (long)g_world.levels, written);
     /* edges-<level>.tsv: each route edge (0x48: ends +0 / +8 in generator metres, cells +0x20 / +0x28, width +0x30, type
-     * +0x34, flags +0x44) with the type index of the subregion on each side (subregion +0x18 = its route cell, +0xC its
+     * +0x34, points +0x38 / +0x3C, flags +0x44) with the type index of the subregion on each side (subregion +0x18 = its route cell, +0xC its
      * type); types-<level>.tsv: the first 0x240 bytes of each used type descriptor ([[level+0x2D0]] + 8 t), as hex. */
     uint32_t subs = 0, edges = 0, types = 0;
     uint64_t ts = 0, table = 0;
@@ -4377,8 +4377,10 @@ static void WorldLocationsNote(uintptr_t block, uint32_t total)
             if (c1 && cellOf[i] == c1) t1 = typeOf[i];
         }
         if (t0 >= 0 && t0 < 256) used[t0] = 1; if (t1 >= 0 && t1 < 256) used[t1] = 1;
-        int len = snprintf(line, sizeof line, "%u\t%.1f\t%.1f\t%.1f\t%.1f\t%.2f\t%u\t0x%X\t%d\t%d\n", e, (double)(a[0] - half), (double)(a[1] - half),
-            (double)(b[0] - half), (double)(b[1] - half), (double)width, rec[0x34], flags, t0, t1);
+        uint32_t range[2]; /* the edge's road points [first, end), the last columns */
+        memcpy(range, rec + 0x38, 8);
+        int len = snprintf(line, sizeof line, "%u\t%.1f\t%.1f\t%.1f\t%.1f\t%.2f\t%u\t0x%X\t%d\t%d\t%u\t%u\n", e, (double)(a[0] - half), (double)(a[1] - half),
+            (double)(b[0] - half), (double)(b[1] - half), (double)width, rec[0x34], flags, t0, t1, range[0], range[1]);
         WriteFile(file, line, (DWORD)len, &wrote, NULL);
     }
     CloseHandle(file);
@@ -4840,6 +4842,7 @@ static void HiveLordNote(uint64_t b)
     Note("difficulty: extra large maps: Hive Lord graph past 255 regions on a normal level: %u nodes with label 0", first);
 }
 
+static void RoadsAfterOp(uintptr_t block, uint64_t context, uint64_t record, uint32_t op, uint32_t before, int counted); /* difficulty_world_roads.c */
 static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
 {
     WorldDispatchBegins(records, index, (uint32_t)d);
@@ -5068,6 +5071,13 @@ static uint64_t WorldDispatch(uint64_t records, uint64_t b, uint64_t index, uint
     {
         uint32_t now = at;
         if (!SafeRead(index, &now, 4) && now != at) TerrainStamps(records, (uint32_t)d, at, b, g, h, block);
+    }
+    if (watch || vanilla2B) /* the roads' evidence lines on every level, after TerrainStamps has made the plan */
+    {
+        const uint32_t ranAt = watch ? at : vanillaAt;
+        uint32_t now = ranAt;
+        if (!SafeRead(index, &now, 4) && now != ranAt)
+            RoadsAfterOp(watch ? block : vanillaBlock, b, records + (uint64_t)ranAt * 0x19B0u, watch ? op : vanillaOp, watch ? before : vanillaBefore, watch);
     }
     TerrainDiagAfter(records, index, diagAt, diagOp);
     if (mergeSet) *(volatile uint32_t*)(uintptr_t)(mergeSettings + 0x2C) = mergeSize;
