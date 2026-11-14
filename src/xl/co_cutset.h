@@ -26,8 +26,9 @@
 
 typedef struct CoCutCentre { float x, y, in, out; } CoCutCentre;
 typedef struct CoCutRec { uint32_t handle; float x, y; uint32_t next; } CoCutRec;
-/* `at`: the last tick a centre's `out` reached the cell; `metres`: the nearest centre to its middle on that tick. */
-typedef struct CoCutCell { uint32_t head, at, pending, on; uint16_t metres, listed; } CoCutCell;
+/* `at`: the last tick a centre's `out` reached the cell; `metres`: the nearest centre to its middle on that tick;
+ * `epoch`: the set's epoch when a cutter of the cell last went on. */
+typedef struct CoCutCell { uint32_t head, at, pending, on, epoch; uint16_t metres, listed; } CoCutCell;
 typedef struct CoCutCand { float d2; uint32_t rec; } CoCutCand;
 typedef struct CoCutHeld { uint64_t peer; float x, y; uint32_t at; int used; } CoCutHeld;
 
@@ -37,6 +38,7 @@ typedef struct CoCutSet
     uint32_t made, freeHead, records, wanted, on, onCells, now; int dirty;
     uintptr_t world, pool; uint32_t mask;
     uint32_t cap, adds, leaveMs;
+    uint32_t epoch; /* the caller's count of navmesh runs begun so far, kept current by it */
     uint64_t added, removed, shed, replaced, stale, refused, binds, stranded;
     CoCutCand heap[CO_CUTSET_ADDS];
 } CoCutSet;
@@ -49,7 +51,7 @@ typedef struct CoCutTick
     uint32_t add[CO_CUTSET_ADDS], adds, remove[CO_CUTSET_BATCH], removes, waiting, over, shed; int capped;
 } CoCutTick;
 
-/* The memory the set needs (28 MB at these sizes; pages are only touched as slots, records and cells are used). */
+/* The memory the set needs (29 MB at these sizes; pages are only touched as slots, records and cells are used). */
 size_t co_cutset_bytes(void);
 /* `memory` of co_cutset_bytes(), zeroed, for the set's life. */
 void co_cutset_init(CoCutSet* s, void* memory);
@@ -76,6 +78,11 @@ uint32_t co_cutset_gone(CoCutSet* s, const uint32_t* handles, uint32_t count);
  * at most `removes`: cells out of every centre's `out` for leaveMs, the longest out first; at the cap, a cell whose
  * every record is farther than the record it makes room for, the farthest first. The set counts each as done. */
 void co_cutset_tick(CoCutSet* s, const CoCutCentre* centres, uint32_t count, uint32_t nowMs, uint32_t removes, CoCutTick* out);
+/* 1 when the navmesh has every cutter within `r` of (x, y) cut in: no wanted record there waits (`waiting` counts
+ * them), and a run that began after the last add in a cell the disc touches has ended. `epoch` is the count of runs
+ * begun now, `inFlight` whether one is out: a run takes every change queued before it began, so the first to begin
+ * after an add holds it, and it has ended once none is out or a second has begun. */
+int co_cutset_cut(const CoCutSet* s, float x, float y, float r, uint32_t epoch, int inFlight, uint32_t* waiting);
 /* 1 when one of these centres reaches everything `c` does (its `in` disc and its `out` square): `c` would add no
  * cutter and keep none, so a squad beside a player takes no centre. Only the order of adds and sheds can differ. */
 int co_cutset_covered(const CoCutCentre* centres, uint32_t count, const CoCutCentre* c);

@@ -35,7 +35,7 @@ static const Pin kCutterPins[] = {
 
 /* What the record reads and what switching a cutter on will call: the "add now" test, the switch's entry, its
  * handle check and its two halves, the forest's description (place, add-now, world, type, body, the call), the
- * pool's mask and the AI world's slot. */
+ * pool's mask and the AI world's slot; the swap of the queued changes, their count, and "a run is in flight". */
 static const Pin kRecordPins[] = {
     {0x8132F8u, "83 7E 0C 00"},
     {0x812AE0u, "85 D2 0F 84 D1 01 00 00 56 41 54 41 55 41 57 48 83 EC 28"},
@@ -50,6 +50,9 @@ static const Pin kRecordPins[] = {
     {0x815534u, "F3 44 0F 11 7D A8"},
     {0x8155D5u, "89 4D C8 48 8D 44 24 70 48 8D 4D C0 48 89 45 D0 C7 45 C0 03 00 00 00 44 89 75 E0 89 75 D8 E8 C8 D6 FF FF 8B C0"},
     {0x7D7F9Fu, "41 89 40 28 8D 48 01 0D 00 00 C0 FF F7 D0 41 89 48 34"},
+    {0xBB1430u, "40 53 48 83 EC 20 48 8B D9 48 8B 89 A0 04 00 00"},
+    {0xAD4740u, "48 8B 01 8B 40 08 03 41 1C C3"},
+    {0xBD1190u, "48 83 B9 B0 04 00 00 00 0F 95 C0 C3"},
 };
 
 /* The make can run on a thread other than the game's (the forest's spawn has several callers), so the set has its
@@ -60,7 +63,7 @@ static struct
 {
     volatile LONG armed, live, switching, alive, tickAt;
     SwitchFn sw;
-    volatile LONG tickThread;
+    volatile LONG tickThread, took;
     uint64_t held, atOnce, noWorld, stock, sentOn, sentOff, skips;
     struct { LONG id; uint64_t makes, destroys; } thread[THREADS];
     uint64_t makesPast, destroysPast; /* on threads past the table: counted as off the tick's */
@@ -118,7 +121,7 @@ static void Recorded(uint32_t handle, int tree, float x, float y, int wanted, in
     else if ((made = co_cutset_made(&g_rec.set, handle, x, y, wanted)) != 0)
     {
         g_rec.trees++;
-        if (lit) { co_cutset_on(&g_rec.set, handle); g_rec.stock++; }
+        if (lit) { g_rec.set.epoch = (uint32_t)g_rec.took; co_cutset_on(&g_rec.set, handle); g_rec.stock++; }
     }
     if (held && made) g_rec.held++;
     else if (held && Worlds(&world, &pool)) { g_rec.sw(&handle, 1, 1); g_rec.atOnce++; }
@@ -300,7 +303,7 @@ int co_cutters_tick(const CoCutCentre* centres, uint32_t count, uint32_t nowMs, 
     out->bound = g_cut.exe != 0 && Bound();
     out->skipped = skipped;
     if (skipped) { g_rec.skips++; g_rec.tick.adds = g_rec.tick.removes = g_rec.tick.shed = g_rec.tick.waiting = g_rec.tick.over = 0; g_rec.tick.capped = 0; }
-    else co_cutset_tick(&g_rec.set, centres, count, nowMs, removes, &g_rec.tick);
+    else { g_rec.set.epoch = (uint32_t)g_rec.took; co_cutset_tick(&g_rec.set, centres, count, nowMs, removes, &g_rec.tick); }
     if (g_rec.switching && !skipped)
     {
         /* under the set's lock: a destroy on another thread waits in its hook, so no handle here is stale */
@@ -310,7 +313,7 @@ int co_cutters_tick(const CoCutCentre* centres, uint32_t count, uint32_t nowMs, 
         g_rec.sentOn += g_rec.tick.adds; g_rec.sentOff += g_rec.tick.removes;
         if (out->bound && out->hooked) { InterlockedExchange(&g_rec.tickAt, (LONG)nowMs); InterlockedExchange(&g_rec.alive, 1); }
     }
-    out->held = g_rec.held; out->stock = g_rec.stock; out->atOnce = g_rec.atOnce; out->noWorld = g_rec.noWorld; out->stranded = s->stranded; out->sentOn = g_rec.sentOn; out->sentOff = g_rec.sentOff; out->skips = g_rec.skips;
+    out->held = g_rec.held; out->stock = g_rec.stock; out->atOnce = g_rec.atOnce; out->noWorld = g_rec.noWorld; out->took = (uint32_t)g_rec.took; out->stranded = s->stranded; out->sentOn = g_rec.sentOn; out->sentOff = g_rec.sentOff; out->skips = g_rec.skips;
     out->makesOff = g_rec.makesPast; out->destroysOff = g_rec.destroysPast; out->threadsOff = 0;
     for (uint32_t i = 1; i < THREADS && g_rec.thread[i].id != 0; i++)
     {
@@ -327,6 +330,32 @@ int co_cutters_tick(const CoCutCentre* centres, uint32_t count, uint32_t nowMs, 
     out->us = (double)(b.QuadPart - a.QuadPart) * 1e6 / (double)f.QuadPart;
     out->holdUs = (double)(b.QuadPart - h.QuadPart) * 1e6 / (double)f.QuadPart;
     return 1;
+}
+
+/* The count is read as the swap itself reads it next (0xBB1439..0xBB1450, 0xAD4740): a swap with none takes nothing. */
+void co_cutters_swap(uintptr_t scene)
+{
+    if (!g_rec.armed || g_cut.exe == 0 || scene == 0 || scene != *(const uintptr_t*)(g_cut.exe + CO_CUTTERS_AI_WORLDS + 0x80u * CO_CUTTERS_WORLD)) return;
+    const uintptr_t queue = *(const uintptr_t*)(scene + CO_CUTTERS_QUEUE);
+    if (queue != 0 && *(const int32_t*)(*(const uintptr_t*)queue + 8) + *(const int32_t*)(queue + 0x1C) != 0) InterlockedIncrement(&g_rec.took);
+}
+
+/* A run that cannot be read, or an AI step in flight (it may be starting one), counts as a run in flight. */
+int co_cutters_cut(float x, float y, float r, uint32_t* waiting)
+{
+    int cut = -1;
+    *waiting = 0;
+    if (!g_rec.armed || g_cut.exe == 0 || !g_rec.live || !g_rec.switching || !g_rec.alive || (uint32_t)GetTickCount() - (uint32_t)g_rec.tickAt > CO_CUTTERS_ALIVE_MS) return -1;
+    const int step = *(const uintptr_t*)(g_cut.exe + CO_CUTTERS_AI_WORLDS + 0x80u * CO_CUTTERS_WORLD + CO_CUTTERS_STEP_TASK) != 0;
+    AcquireSRWLockExclusive(&g_rec.lock);
+    if (Bound())
+    {
+        uintptr_t run = 0;
+        const int inFlight = step || co_safe_read(g_rec.set.world + CO_CUTTERS_RUN, &run, 8) || run != 0;
+        cut = co_cutset_cut(&g_rec.set, x, y, r, (uint32_t)g_rec.took, inFlight, waiting);
+    }
+    ReleaseSRWLockExclusive(&g_rec.lock);
+    return cut;
 }
 
 #ifdef CO_TEST

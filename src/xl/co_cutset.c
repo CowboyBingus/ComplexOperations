@@ -208,7 +208,7 @@ static void Lit(CoCutSet* s, uint32_t r)
 {
     const uint32_t ci = CellOf(s->rec[r].x, s->rec[r].y);
     CoCutCell* c = &s->cell[ci];
-    s->flag[r] |= F_ON; c->pending--; c->on++; s->on++;
+    s->flag[r] |= F_ON; c->pending--; c->on++; s->on++; c->epoch = s->epoch;
     if (!c->listed) { c->listed = 1; s->onCell[s->onCells++] = ci; }
 }
 
@@ -275,6 +275,26 @@ void co_cutset_tick(CoCutSet* s, const CoCutCentre* centres, uint32_t count, uin
         if (ci == CELLS) break;
         while (s->cell[ci].on != 0 && out->removes < removes) Off(s, &s->cell[ci], out);
     }
+}
+
+int co_cutset_cut(const CoCutSet* s, float x, float y, float r, uint32_t epoch, int inFlight, uint32_t* waiting)
+{
+    const int x0 = Axis(x - r), x1 = Axis(x + r), y0 = Axis(y - r), y1 = Axis(y + r);
+    int32_t runs = 2; /* begun since the youngest add; two are as good as more */
+    *waiting = 0;
+    for (int cy = y0; cy <= y1; cy++)
+        for (int cx = x0; cx <= x1; cx++)
+        {
+            const CoCutCell* cell = &s->cell[(uint32_t)cy * CO_CUTSET_GRID + (uint32_t)cx];
+            if (cell->on != 0 && (int32_t)(epoch - cell->epoch) < runs) runs = (int32_t)(epoch - cell->epoch);
+            if (cell->pending == 0) continue;
+            for (uint32_t k = cell->head; k != 0; k = s->rec[k - 1].next)
+            {
+                const float dx = s->rec[k - 1].x - x, dy = s->rec[k - 1].y - y;
+                if ((s->flag[k - 1] & (F_WANTED | F_ON)) == F_WANTED && dx * dx + dy * dy <= r * r) (*waiting)++;
+            }
+        }
+    return *waiting == 0 && (runs >= 2 || (runs == 1 && !inFlight));
 }
 
 int co_cutset_covered(const CoCutCentre* centres, uint32_t count, const CoCutCentre* c)

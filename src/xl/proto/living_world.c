@@ -1093,8 +1093,10 @@ static int LwOnlinePlace(LwSquad* q, uintptr_t slot, uint32_t cap, float* pos, f
  * it asks again in a second, not every tick: placement with the slot rays costs about 1 ms a try at 8 players. */
 #define LW_ROOM_RETRY_MS 1000u
 static struct { int (*place)(LwSquad*, uintptr_t, uint32_t, float*, float*); int (*room)(uint32_t); } g_lwGates = {LwOnlinePlace, LwRoomFor};
+static int LwCutReady(const LwSquad* q); /* living_world_cutters.c */
 static int LwOnlineGates(LwSquad* q, uintptr_t slot, uint32_t cap, float* pos, float* target)
 {
+    if (!LwCutReady(q)) { g_lwOnlineWhy = "its trees' navmesh cutters are not cut in yet"; return 0; }
     int placeFirst = q->held && !g_lwFarSpawn;
     if (placeFirst && !g_lwGates.place(q, slot, cap, pos, target)) return 0;
     if (!g_lwGates.room(cap))

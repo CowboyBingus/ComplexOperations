@@ -3,13 +3,54 @@
  * set counts what the mod would do, to compare with the "navmesh cutters:" line. 2 holds the makes back and adds the
  * cutters in reach (no removes, no cap). 3 also removes and caps. A client follows HELLFORGE_LW_CUTTERS_CLIENT. */
 #define LW_CUT_NOTE_MS 30000
+/* A squad's request point is within 2 m of its place, its members' slots 5 m around the point and each up to 2.52 m
+ * wide (LwPlace, LwMemberSlot): a tree whose hole could reach one of them is well inside this. */
+#define LW_CUT_PLACE_M 32.0f
+#define LW_CUT_WAIT_MS 5000 /* the longest a request waits for its trees' cutters; then it goes as it would have */
+#define LW_CUT_ASK_MS 5000  /* a squad that asked this lately is a centre: a refused request asks again within 3 s */
+enum { LW_CUT_WAITS, LW_CUT_IS_CUT, LW_CUT_GAMES, LW_CUT_LATE };
 static struct
 {
     int on, mode, client; uint32_t removes; ULONGLONG tickAt, notedAt;
     double holdSum, holdWorst;
     uint32_t ticks, adds, removed, shed, capped, waiting, over, players, last, squads, beside, left; double usSum, usWorst;
     CoCutHeld held[EVT_MAX_PLAYERS];
+    uint32_t gate[4], gateLongest; /* requests by LW_CUT_ verdict since the start; the longest wait in ms */
 } g_lwCut;
+static struct { ULONGLONG first, last; } g_lwCutAsk[LW_SQUADS_MAX]; /* a squad's asks to come online: this wait's first, the last */
+
+/* Squad `i` asks at `now`: how long it has waited, in ms. Asks over LW_CUT_ASK_MS apart are separate waits. */
+static uint32_t LwCutAsked(int i, ULONGLONG now)
+{
+    if (g_lwCutAsk[i].last == 0 || now - g_lwCutAsk[i].last > LW_CUT_ASK_MS) g_lwCutAsk[i].first = now;
+    g_lwCutAsk[i].last = now;
+    return (uint32_t)(now - g_lwCutAsk[i].first);
+}
+/* What an ask gets, from co_cutters_cut's answer and the wait so far: only a place not cut in yet waits, and only
+ * LW_CUT_WAIT_MS. */
+static int LwCutVerdict(int cut, uint32_t waitedMs)
+{
+    return cut > 0 ? LW_CUT_IS_CUT : cut < 0 ? LW_CUT_GAMES : waitedMs > LW_CUT_WAIT_MS ? LW_CUT_LATE : LW_CUT_WAITS;
+}
+/* A squad is a centre while its units are in the world or on their way, and from its first ask to come online: its
+ * place's cutters are then sent before the request that snaps its members onto the navmesh. */
+static int LwCutSquad(int i, ULONGLONG now)
+{
+    const uint8_t state = g_lwSquads[i].state;
+    return state == LW_ONLINE || state == LW_PENDING || (state == LW_OFFLINE && g_lwCutAsk[i].last != 0 && now - g_lwCutAsk[i].last <= LW_CUT_ASK_MS);
+}
+/* Host, before a squad's request is placed: 0 while the trees at its place wait for their cutters or for the navmesh
+ * run that cuts them in. A point snapped onto the uncut navmesh can be inside a tree's hole when the cut lands. */
+static int LwCutReady(const LwSquad* q)
+{
+    if (!g_lwCut.on || g_lwCut.mode < 2) return 1;
+    uint32_t waiting = 0;
+    const uint32_t waited = LwCutAsked((int)(q - g_lwSquads), GetTickCount64());
+    const int verdict = LwCutVerdict(co_cutters_cut(q->pos[0], q->pos[1], LW_CUT_PLACE_M, &waiting), waited);
+    g_lwCut.gate[verdict]++;
+    if (verdict != LW_CUT_GAMES && verdict != LW_CUT_WAITS && waited > g_lwCut.gateLongest) g_lwCut.gateLongest = waited;
+    return verdict != LW_CUT_WAITS;
+}
 
 /* The switch's text into v = {mode, cap, adds, removes}: 1 on, 0 off (empty or a leading 0), -1 not valid. */
 static int LwCutParse(const char* t, unsigned* v)
@@ -25,8 +66,9 @@ static int LwCutParse(const char* t, unsigned* v)
 static int LwCutClient(const char* t) { return t[0] >= '0' && t[0] <= '2' ? t[0] - '0' : 1; }
 
 /* The tick's centres into `c` (room for CO_CUTSET_CENTRES); returns how many, the first out[0] of them players.
- * `peer` and `place` are the streamer's list. out = {players, at the last place, squads, beside a player, left out}. */
-static uint32_t LwCutCentres(const EvpPlayer* list, int count, const uint64_t* peer, float (*place)[2], int streamed, int host, int none, uint32_t now, CoCutCentre* c, uint32_t* out)
+ * `peer` and `place` are the streamer's list. out = {players, at the last place, squads, beside a player, left out}.
+ * The squads are the host's (LwCutSquad). */
+static uint32_t LwCutCentres(const EvpPlayer* list, int count, const uint64_t* peer, float (*place)[2], int streamed, int host, int none, ULONGLONG now, CoCutCentre* c, uint32_t* out)
 {
     uint32_t n = 0;
     out[1] = out[2] = out[3] = out[4] = 0;
@@ -36,7 +78,7 @@ static uint32_t LwCutCentres(const EvpPlayer* list, int count, const uint64_t* p
         int reads = 0;
         for (int p = 0; p < streamed && !reads; p++)
             if (peer[p] == list[i].peer) { at[0] = place[p][0]; at[1] = place[p][1]; reads = 1; }
-        const int kind = co_cutset_player(g_lwCut.held, EVT_MAX_PLAYERS, list[i].peer, reads, at[0], at[1], now, use);
+        const int kind = co_cutset_player(g_lwCut.held, EVT_MAX_PLAYERS, list[i].peer, reads, at[0], at[1], (uint32_t)now, use);
         if (kind == 0) continue;
         c[n++] = (CoCutCentre){use[0], use[1], CO_CUTSET_PLAYER_IN, CO_CUTSET_PLAYER_OUT};
         out[1] += (uint32_t)(kind == 2);
@@ -44,7 +86,7 @@ static uint32_t LwCutCentres(const EvpPlayer* list, int count, const uint64_t* p
     out[0] = n;
     for (int i = 0; host && i < g_lwWorld.count; i++)
     {
-        if (!g_lwEvery[i] || g_lwSquads[i].state != LW_ONLINE) continue;
+        if (!LwCutSquad(i, now)) continue;
         const CoCutCentre q = {g_lwSquads[i].pos[0], g_lwSquads[i].pos[1], CO_CUTSET_SQUAD_IN, CO_CUTSET_SQUAD_OUT};
         if (co_cutset_covered(c, out[0], &q)) out[3]++;
         else if (n < CO_CUTSET_CENTRES) { c[n++] = q; out[2]++; }
@@ -88,15 +130,16 @@ static void LwCutNote(ULONGLONG now, const CoCuttersTick* t)
         (unsigned long long)t->replaced, (unsigned long long)t->stale, (unsigned long long)t->binds, (unsigned long long)t->stranded,
         (unsigned long long)t->makesOff, (unsigned long long)t->destroysOff, t->threadsOff, t->trees == 0 && t->others != 0 ? "; NO TREE RECOGNISED (another mod's hook outside this one?): every cutter is the game's" : "");
     if (g_lwCut.mode >= 2)
-        Note("living world: tree cutters (switching): since the start: %llu makes held back, %llu added by the game with no tick in the last second, %llu added at once (not recorded), %llu not added (the AI world or the pool had gone); %llu switched on, %llu switched off; %llu ticks skipped with the AI step in flight; the set's lock held mean %.0f us, worst %.0f us a tick",
-            (unsigned long long)t->held, (unsigned long long)t->stock, (unsigned long long)t->atOnce, (unsigned long long)t->noWorld, (unsigned long long)t->sentOn, (unsigned long long)t->sentOff, (unsigned long long)t->skips, g_lwCut.holdSum / g_lwCut.ticks, g_lwCut.holdWorst);
+        Note("living world: tree cutters (switching): since the start: %llu makes held back, %llu added by the game with no tick in the last second, %llu added at once (not recorded), %llu not added (the AI world or the pool had gone); %llu switched on, %llu switched off; %llu ticks skipped with the AI step in flight; the set's lock held mean %.0f us, worst %.0f us a tick; %u navmesh runs began with changes; squads' requests: %u placed with their trees cut in (longest wait %u ms), %u where the cutters are the game's, %u let through uncut after %u ms, %u asks made to wait",
+            (unsigned long long)t->held, (unsigned long long)t->stock, (unsigned long long)t->atOnce, (unsigned long long)t->noWorld, (unsigned long long)t->sentOn, (unsigned long long)t->sentOff, (unsigned long long)t->skips, g_lwCut.holdSum / g_lwCut.ticks, g_lwCut.holdWorst,
+            t->took, g_lwCut.gate[LW_CUT_IS_CUT], g_lwCut.gateLongest, g_lwCut.gate[LW_CUT_GAMES], g_lwCut.gate[LW_CUT_LATE], LW_CUT_WAIT_MS, g_lwCut.gate[LW_CUT_WAITS]);
     g_lwCut.ticks = g_lwCut.adds = g_lwCut.removed = g_lwCut.shed = g_lwCut.capped = g_lwCut.waiting = g_lwCut.over = 0;
     g_lwCut.usSum = g_lwCut.usWorst = g_lwCut.holdSum = g_lwCut.holdWorst = 0; g_lwCut.notedAt = now;
 }
 
 /* Game thread, every peer, 4 Hz: a client has the AI world and the forest's cutters too (the make has no host
  * test). Centres: every player's Helldiver, or for 30 s the last place it read at (a dead player's surroundings
- * keep their cutters), and on the host the online squads that a player's reach does not already hold. */
+ * keep their cutters), and on the host the squads (LwCutSquad) that a player's reach does not already hold. */
 static void LwCutFrame(int mission, int host)
 {
     if (!g_lwCut.on || !mission) return;
@@ -119,7 +162,7 @@ static void LwCutFrame(int mission, int host)
     ReleaseSRWLockShared(&g_streamLock);
     g_lwCut.tickAt = now;
     const int none = !host && g_lwCut.mode >= 2 && g_lwCut.client == 2; /* a client that adds none: no centre */
-    const uint32_t n = LwCutCentres(list, count, peer, place, streamed, host, none, (uint32_t)now, c, counts);
+    const uint32_t n = LwCutCentres(list, count, peer, place, streamed, host, none, now, c, counts);
     CoCuttersTick t;
     if (!co_cutters_tick(c, n, (uint32_t)now, g_lwCut.removes, &t)) return;
     g_lwCut.ticks++; g_lwCut.adds += t.adds; g_lwCut.removed += t.removes; g_lwCut.shed += t.shed; g_lwCut.capped += (uint32_t)(t.capped != 0);
@@ -137,5 +180,6 @@ static void LwCutLive(int complex)
 {
     uint32_t dropped = co_cutters_live(complex);
     memset(g_lwCut.held, 0, sizeof g_lwCut.held); /* a last place is of its own level */
+    memset(g_lwCutAsk, 0, sizeof g_lwCutAsk);
     if (g_lwCut.on && !complex && dropped) Note("living world: tree cutters: %u records dropped at the level's end", dropped);
 }

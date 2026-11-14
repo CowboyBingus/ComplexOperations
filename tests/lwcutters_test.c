@@ -14,7 +14,10 @@ static const char* g_case;
 int CoXlTestLwCutParse(const char* text, unsigned* v);
 int CoXlTestLwCutClient(const char* text);
 void CoXlTestLwCutSquad(int i, int state, int every, float x, float y);
-uint32_t CoXlTestLwCutCentres(const uint64_t* players, int count, const uint64_t* peer, float (*place)[2], int streamed, int host, int none, uint32_t now, CoCutCentre* c, uint32_t* out);
+uint32_t CoXlTestLwCutCentres(const uint64_t* players, int count, const uint64_t* peer, float (*place)[2], int streamed, int host, int none, uint64_t now, CoCutCentre* c, uint32_t* out);
+uint32_t CoXlTestLwCutAsked(int i, uint64_t now);
+int CoXlTestLwCutVerdict(int cut, uint32_t waitedMs);
+enum { WAITS, IS_CUT, GAMES, LATE };
 enum { OFFLINE = 1, PENDING = 2, ONLINE = 3 };
 
 int main(void)
@@ -74,18 +77,38 @@ int main(void)
     CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
     CHECK(CoXlTestLwCutCentres(players, 3, peer, place, 2, 0, 1, 1000, c, out) == 0 && out[0] == 0);
 
-    g_case = "the host's online squads: one a player's reach holds takes no centre";
+    g_case = "the host's squads: online, pending, or asking to come online; one a player's reach holds takes no centre";
     CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
     CoXlTestLwCutSquad(0, ONLINE, 1, 5000.0f, 5000.0f);  /* far from every player */
     CoXlTestLwCutSquad(1, ONLINE, 1, 130.0f, 50.0f);     /* 30 m from the first player: its 64 m disc is inside 160 m */
-    CoXlTestLwCutSquad(2, OFFLINE, 1, -5000.0f, 0.0f);
-    CoXlTestLwCutSquad(3, PENDING, 1, -6000.0f, 0.0f);
-    CoXlTestLwCutSquad(4, ONLINE, 0, -7000.0f, 0.0f);    /* not one the squads' tick visits every frame */
+    CoXlTestLwCutSquad(2, OFFLINE, 1, -5000.0f, 0.0f);   /* offline and not asking */
+    CoXlTestLwCutSquad(3, PENDING, 1, -6000.0f, 0.0f);   /* requested: its units are on their way */
+    CoXlTestLwCutSquad(4, ONLINE, 0, -7000.0f, 0.0f);
     CoXlTestLwCutSquad(5, ONLINE, 1, 100.0f, 150.0f);    /* 100 m from the first player: its disc passes 160 m */
-    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 1000, c, out) == 4);
-    CHECK(out[0] == 2 && out[2] == 2 && out[3] == 1 && out[4] == 0);
+    CoXlTestLwCutSquad(6, 0, 1, -8000.0f, 0.0f);         /* a free slot */
+    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 100000, c, out) == 6);
+    CHECK(out[0] == 2 && out[2] == 4 && out[3] == 1 && out[4] == 0);
     CHECK(c[2].x == 5000.0f && c[2].y == 5000.0f && c[2].in == CO_CUTSET_SQUAD_IN && c[2].out == CO_CUTSET_SQUAD_OUT);
-    CHECK(c[3].x == 100.0f && c[3].y == 150.0f);
+    CHECK(c[3].x == -6000.0f && c[4].x == -7000.0f && c[5].x == 100.0f && c[5].y == 150.0f);
+    g_case = "an offline squad is a centre from its ask to come online, for 5 s after its last";
+    CHECK(CoXlTestLwCutAsked(2, 100000) == 0);
+    CoXlTestLwCutAsked(6, 100000); /* a free slot that asked is none */
+    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 100000, c, out) == 7 && out[2] == 5 && c[3].x == -5000.0f);
+    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 105000, c, out) == 7);
+    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 105001, c, out) == 6 && c[4].x == -7000.0f);
+    g_case = "a squad's wait runs from its first ask; asks over 5 s apart are separate waits";
+    CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
+    CHECK(CoXlTestLwCutAsked(3, 1000) == 0 && CoXlTestLwCutAsked(3, 3000) == 2000 && CoXlTestLwCutAsked(3, 8000) == 7000);
+    CHECK(CoXlTestLwCutAsked(3, 13001) == 0 && CoXlTestLwCutAsked(3, 13500) == 499);
+    CHECK(CoXlTestLwCutAsked(4, 50000) == 0 && CoXlTestLwCutAsked(4, 55000) == 5000 && CoXlTestLwCutAsked(3, 55000) == 0);
+    g_case = "what an ask gets";
+    CHECK(CoXlTestLwCutVerdict(1, 0) == IS_CUT && CoXlTestLwCutVerdict(1, 60000) == IS_CUT);
+    CHECK(CoXlTestLwCutVerdict(-1, 0) == GAMES && CoXlTestLwCutVerdict(-1, 60000) == GAMES);
+    CHECK(CoXlTestLwCutVerdict(0, 0) == WAITS && CoXlTestLwCutVerdict(0, 5000) == WAITS && CoXlTestLwCutVerdict(0, 5001) == LATE);
+    CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
+    CoXlTestLwCutSquad(0, ONLINE, 1, 5000.0f, 5000.0f);
+    CoXlTestLwCutSquad(1, ONLINE, 1, 130.0f, 50.0f);
+    CoXlTestLwCutSquad(5, ONLINE, 1, 100.0f, 150.0f);
     g_case = "a client has no squads";
     CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 0, 0, 1000, c, out) == 2 && out[2] == 0 && out[3] == 0);
     g_case = "a squad beside another squad still takes its centre: only players' reaches count";
