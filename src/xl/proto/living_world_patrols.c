@@ -33,6 +33,7 @@ static ULONGLONG g_lwPatrolLookAt[LW_SQUADS_MAX]; /* a standing far squad's next
 static uint16_t g_lwRoadEdge[LW_NODES_MAX];       /* a road node's route edge (the spurs join an edge) */
 static int g_lwArtNodes;
 static int g_lwRoadTail[2] = {LW_SQUADS_MAX, LW_SQUADS_MAX}; /* the squads [from, end) after the world's own: road patrols all */
+_Static_assert(CO_LW_MEET_CALL_HOPS + 1 + CO_LW_MEET_CALL_PAST_MAX <= LW_PATH_MAX, "a called patrol's way fits a plan");
 _Static_assert(LW_SQUADS_BASE + (LW_SQUADS_BASE + LW_ROAD_SHARE_OF - 1) / LW_ROAD_SHARE_OF <= LW_SQUADS_MAX, "the added road patrols fit the table");
 /* Whether each patrol with a goal walks (co_lw_view.h, co_lw_move_*), and its own line every 5 s. */
 /* 5 s lines a mission: 30 patrols online write 360 a minute, so a research run's half hour needs its own limit. */
@@ -755,8 +756,23 @@ static int LwCallFree(LwSquad* q)
         !g_lwCallOf[idx] && !g_lwMeetMark[idx] && !g_lwMeetSince[idx] && LwMeetOver(q) >= CO_LW_MEET_OUTER)) return 0;
     return q->measured; /* read after LwMeetOver filled the band's cache: a guessed band never asks beyond it, so the call would be lost */
 }
+/* The road straight on from junction `at`, come to from `from`: -1 at an end. */
+static int LwCallStraight(int at, int from)
+{
+    float dirs[16][2]; int to[16], n = 0;
+    const float in[2] = {g_lwNodes[at].x - g_lwNodes[from].x, g_lwNodes[at].y - g_lwNodes[from].y};
+    for (int k = 0; k < g_lwNodes[at].degree && n < 16; k++)
+    {
+        const int o = g_lwNodes[at].next[k];
+        if (o == from || !g_lwNodeKind[o]) continue;
+        dirs[n][0] = g_lwNodes[o].x - g_lwNodes[at].x; dirs[n][1] = g_lwNodes[o].y - g_lwNodes[at].y; to[n++] = o;
+    }
+    const int k = co_lw_meet_call_straight(in, (const float (*)[2])dirs, n);
+    return k < 0 ? -1 : to[k];
+}
 /* The called patrol's plan: from the end of its stretch nearer the player (an about turn when that is behind it)
- * along the tree to the player's node, and the road on past it. */
+ * along the tree to the player's node, and on along the road well past it (co_lw_meet_call_on): the patrol passes
+ * by, and a fight is the game's own detection, not the plan's end. */
 static void LwCallSend(LwSquad* q, int toward, int root)
 {
     uint16_t path[LW_PATH_MAX]; int n = 0, at = toward;
@@ -764,9 +780,11 @@ static void LwCallSend(LwSquad* q, int toward, int root)
     path[n++] = (uint16_t)toward;
     while (at != root && n < LW_PATH_MAX) { at = g_lwCallUp[at]; path[n++] = (uint16_t)at; }
     int from = n >= 2 ? path[n - 2] : q->node;
-    for (int k = 0; k < CO_LW_MEET_CALL_PAST && n < LW_PATH_MAX; k++)
+    for (int past = 0; n < LW_PATH_MAX; past++)
     {
-        const int o = LwMeetRoadOn(at, from);
+        int o = LwMeetRoadOn(at, from);
+        if (!co_lw_meet_call_on(past, o < 0)) break;
+        if (o < 0) o = LwCallStraight(at, from);
         if (o < 0 || !LwCallInDisc(o)) break;
         path[n++] = (uint16_t)o; from = at; at = o;
     }

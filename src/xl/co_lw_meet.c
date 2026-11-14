@@ -124,6 +124,19 @@ int co_lw_meet_call_ahead(const float* v, const float (*dirs)[2], int n, int* on
     return best;
 }
 
+int co_lw_meet_call_on(int past, int fork) { return past < CO_LW_MEET_CALL_PAST || (!fork && past < CO_LW_MEET_CALL_PAST_MAX); }
+
+int co_lw_meet_call_straight(const float* in, const float (*dirs)[2], int n)
+{
+    int best = -1; float most = 0.0f;
+    for (int k = 0; k < n; k++)
+    {
+        const float len = sqrtf(dirs[k][0] * dirs[k][0] + dirs[k][1] * dirs[k][1]), along = len > 0.0f ? (in[0] * dirs[k][0] + in[1] * dirs[k][1]) / len : 0.0f;
+        if (along > most) { most = along; best = k; }
+    }
+    return best;
+}
+
 int co_lw_meet_call_lost(float d, float* least)
 {
     if (!(*least > 0.0f) || d < *least) *least = d;

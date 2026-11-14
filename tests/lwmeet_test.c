@@ -72,6 +72,14 @@ int main(void)
       CHECK(co_lw_meet_call_ahead(run, dirs, 2, &only) == 1 && only == 1 && co_lw_meet_call_ahead(back, dirs, 2, &only) == 0 && only == 1);
       CHECK(co_lw_meet_call_ahead(north, cross, 3, &only) == 2 && only == 1);
       CHECK(co_lw_meet_call_ahead(off, dirs, 2, &only) == -1 && only == 0); /* across the road: no side is ahead */ }
+    g_case = "a called patrol's way goes on 400 m past its player whatever the road does, then to the next junction, 800 m at most";
+    CHECK(co_lw_meet_call_on(0, 0) == 1 && co_lw_meet_call_on(0, 1) == 1 && co_lw_meet_call_on(3, 1) == 1 && co_lw_meet_call_on(4, 1) == 0);
+    CHECK(co_lw_meet_call_on(4, 0) == 1 && co_lw_meet_call_on(7, 0) == 1 && co_lw_meet_call_on(8, 0) == 0);
+    CHECK(CO_LW_MEET_CALL_PAST * 100 >= 400 && CO_LW_MEET_CALL_HOPS + 1 + CO_LW_MEET_CALL_PAST_MAX <= 32);
+    g_case = "at a junction the way past goes straight on, never back";
+    { const float in[2] = {100, 0}, fork[2][2] = {{0, 100}, {90, 20}}, side[2][2] = {{0, 100}, {0, -100}}, back[1][2] = {{-100, 10}}, skew[2][2] = {{50, 300}, {40, -30}};
+      CHECK(co_lw_meet_call_straight(in, fork, 2) == 1 && co_lw_meet_call_straight(in, fork, 1) == -1 && co_lw_meet_call_straight(in, side, 2) == -1);
+      CHECK(co_lw_meet_call_straight(in, back, 1) == -1 && co_lw_meet_call_straight(in, skew, 2) == 1); /* by direction, not by length */ }
     g_case = "a called patrol 150 m farther from its player than it has been is let go";
     { float least = 0;
       CHECK(co_lw_meet_call_lost(900.0f, &least) == 0 && least == 900.0f && co_lw_meet_call_lost(1050.0f, &least) == 0 && co_lw_meet_call_lost(1051.0f, &least) == 1);

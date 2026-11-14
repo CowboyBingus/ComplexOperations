@@ -43,8 +43,12 @@
 #define CO_LW_MEET_ROAD_MEMBERS 4    /* a road patrol's units: two squads walk in on the kept half of a solo far share (9 of 18) */
 #define CO_LW_MEET_PACE 2.0f         /* m/s: a patrol's walk (the squads' default speed; 1.97 measured online) */
 #define CO_LW_MEET_CALL_NEAR 150.0f  /* m: a player this near a road node is on or by that road */
-#define CO_LW_MEET_CALL_HOPS 26      /* road nodes out from the player a called patrol may stand: 2.6 km, 31 of a plan's 32 nodes with the way past */
-#define CO_LW_MEET_CALL_PAST 4       /* nodes of road past the player a called patrol walks on, so it passes by */
+#define CO_LW_MEET_CALL_HOPS 23      /* road nodes out from the player a called patrol may stand: 2.3 km, a plan's 32 nodes with the way past */
+/* A called patrol passes the player and walks on: its way ends this many nodes (400 m) past them at least, through
+ * any junction, and from there at the road's next junction, CO_LW_MEET_CALL_PAST_MAX nodes past at most. A way that
+ * ended by the player would bring every patrol to them to fight. */
+#define CO_LW_MEET_CALL_PAST 4
+#define CO_LW_MEET_CALL_PAST_MAX 8
 #define CO_LW_MEET_CALL_MOVING 1.0f  /* m/s: a player this fast has patrols called from ahead of them */
 #define CO_LW_MEET_CALL_LOST 150.0f  /* m farther from its player than it has been: a called patrol is let go */
 #define CO_LW_MEET_CALL_MIN_MS 60000u  /* never more than a patrol a minute for one player */
@@ -110,6 +114,12 @@ uint32_t co_lw_meet_call_ms(float roadFar, int members, int roadPlayers, float w
  * sides then take turns). `only` is set when the player is as fast as a patrol walks: one called from another side
  * would never catch up. */
 int co_lw_meet_call_ahead(const float* v, const float (*dirs)[2], int n, int* only);
+/* 1 while a called patrol's way goes on beyond the `past` nodes it has past its player: `fork` when the road ahead
+ * is a junction or an end (no single way on). */
+int co_lw_meet_call_on(int past, int fork);
+/* At a junction the way past goes straight on: of the `n` directions `dirs`, the one most along `in`. -1 with none
+ * ahead (a turn back is no way on). */
+int co_lw_meet_call_straight(const float* in, const float (*dirs)[2], int n);
 /* 1 when a called patrol `d` m from its player has lost them: `least`, the nearest it has been since the call (0 at
  * the call), is CO_LW_MEET_CALL_LOST behind it. The player walks away faster than it follows, or it has passed. */
 int co_lw_meet_call_lost(float d, float* least);

@@ -415,11 +415,11 @@ int main(void)
         { const float S2 = CoXlTestLwSeenScopedOf(2.0f), S8 = CoXlTestLwSeenScopedOf(8.0f); printf("scoped 2 m %.0f, 8 m %.0f\n", (double)S2, (double)S8); CHECK(S2 > 780.0f && S2 < 880.0f && S8 > S2 + 100.0f); }
         g_case = "a patrol is called to a player's road: the nearest one beyond the zone on the side whose turn it is, about turn";
         CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
-        CHECK(CoXlTestLwCallOne(0, 0, o) == 30 && o[0] == 7 && o[1] == 13 && o[2] == 19 && o[3] == 6 && o[4] == 1);
+        CHECK(CoXlTestLwCallOne(0, 0, o) == 30 && o[0] == 7 && o[1] == 17 && o[2] == 23 && o[3] == 6 && o[4] == 1); /* 800 m past the player */
         g_case = "a called patrol is not called again: the next one out on that side, walking on as it was";
-        CHECK(CoXlTestLwCallOne(0, 0, o) == 0 && o[0] == 3 && o[1] == 17 && o[2] == 19 && o[3] == 2);
+        CHECK(CoXlTestLwCallOne(0, 0, o) == 0 && o[0] == 3 && o[1] == 21 && o[2] == 23 && o[3] == 2);
         g_case = "none left on the side whose turn it is: one from the other side, and its way goes on past the player";
-        CHECK(CoXlTestLwCallOne(0, 0, o) == 10 && o[0] == 23 && o[1] == 13 && o[2] == 11 && o[3] == 24);
+        CHECK(CoXlTestLwCallOne(0, 0, o) == 10 && o[0] == 23 && o[1] == 17 && o[2] == 7 && o[3] == 24);
         g_case = "a patrol inside a player's band is not called: it would be offline in clear view";
         CHECK(CoXlTestLwCallOne(0, 0, o) == -1);
         g_case = "a called patrol's next plan, or an errand, ends its call";
@@ -449,13 +449,18 @@ int main(void)
           CoXlTestLwCallWorld(30, 0, near, 1, sx, dir, none, 4); CHECK(CoXlTestLwCallOne(0, 0, o) == 30);
           CoXlTestLwCallWorld(30, 0, off, 1, sx, dir, none, 4); CHECK(CoXlTestLwCallOne(0, 0, o) == -2);
           CoXlTestLwCallWorld(30, 0, far, 1, sx, dir, none, 4); CHECK(CoXlTestLwCallOne(0, 0, o) == -2); }
-        g_case = "the way past the player ends at a junction; a patrol more than 26 road nodes out is not called";
-        { const float at9[1][2] = {{900, 20}}, at2[1][2] = {{200, 20}}, one[1] = {1850}, last[1] = {2950}; const int back[1] = {-1};
+        g_case = "the way past the player: 400 m at least, straight on through a junction, then to the next junction or 800 m";
+        { const float at9[1][2] = {{900, 20}}, at13[1][2] = {{1300, 20}}, at11[1][2] = {{1100, 20}}, one[1] = {1850}, two[1] = {2250}, mid[1] = {2050}; const int back[1] = {-1};
           CoXlTestLwCallWorld(30, 7, at9, 1, one, back, none, 1);
-          CHECK(CoXlTestLwCallOne(0, 1, o) == 0 && o[0] == 18 && o[1] == 12 && o[2] == 7);
-          CoXlTestLwCallWorld(30, 0, at2, 1, last, back, none, 1); CHECK(CoXlTestLwCallOne(0, 1, o) == -1); /* 27 nodes out, 2750 m */
-          const float at3[1][2] = {{300, 20}};
-          CoXlTestLwCallWorld(30, 0, at3, 1, last, back, none, 1); CHECK(CoXlTestLwCallOne(0, 1, o) == 0 && o[0] == 29 && o[1] == 29 && o[2] == 1); }
+          CHECK(CoXlTestLwCallOne(0, 1, o) == 0 && o[0] == 18 && o[1] == 18 && o[2] == 1); /* 200 m to the junction: on along the road, 800 m past in all */
+          CoXlTestLwCallWorld(30, 7, at13, 1, two, back, none, 1);
+          CHECK(CoXlTestLwCallOne(0, 1, o) == 0 && o[0] == 22 && o[1] == 16 && o[2] == 7); /* 600 m to the junction: it ends there */
+          CoXlTestLwCallWorld(30, 7, at11, 1, mid, back, none, 1);
+          CHECK(CoXlTestLwCallOne(0, 1, o) == 0 && o[0] == 20 && o[1] == 14 && o[2] == 7); /* a junction just 400 m past: it ends there */ }
+        g_case = "a patrol more than 23 road nodes out is not called; one 23 out has a plan of 29 nodes to the road's end";
+        { const float at5[1][2] = {{500, 20}}, at6[1][2] = {{600, 20}}, last[1] = {2950}; const int back[1] = {-1};
+          CoXlTestLwCallWorld(30, 0, at5, 1, last, back, none, 1); CHECK(CoXlTestLwCallOne(0, 1, o) == -1); /* 24 nodes out, 2450 m */
+          CoXlTestLwCallWorld(30, 0, at6, 1, last, back, none, 1); CHECK(CoXlTestLwCallOne(0, 1, o) == 0 && o[0] == 29 && o[1] == 29 && o[2] == 1); }
         g_case = "one call a second at most, and a player's next call a far walk's time on: 103 s solo on a far share of 18";
         { const uint32_t period = co_lw_meet_call_ms(9.0f, 4, 1, B + 50.0f - 250.0f);
           CoXlTestLwCallWorld(30, 0, by, 1, sx, dir, none, 4);
