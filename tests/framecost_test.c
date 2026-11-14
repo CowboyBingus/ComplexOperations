@@ -323,6 +323,14 @@ static void TestCauses(void)
     Causes();
     CHECK(g_over == 1 && g_led[CO_FC_CAUSE_WORLD] == 1 && g_only[CO_FC_CAUSE_WORLD] == 1 && g_only[CO_FC_NAVTICK] == 0 && g_only[CO_FC_CAUSE_JOIN] == 0);
 
+    Reset("a join inside the world update leads over the update's own time; the next frame's update is its own again");
+    Frame(9.0, 0.0, 1);
+    Cost(20.0, 0, 0, 9.0, 12.0, 1);  /* own 3 ms, the rest 8 ms */
+    Cost(20.0, 0, 0, 0, 12.0, 1);    /* own 12 ms: nothing of the frame before comes off */
+    Cost(20.0, 3.3, 0, 0, 0, 0);     /* 16.7 ms without the nav tick: within the target */
+    Causes();
+    CHECK(g_over == 3 && g_led[CO_FC_CAUSE_JOIN] == 1 && g_led[CO_FC_CAUSE_WORLD] == 1 && g_led[CO_FC_CAUSE_REST] == 1 && g_only[CO_FC_NAVTICK] == 1);
+
     Reset("joins and a nav swap outside the world update; the rest");
     Frame(9.0, 0.0, 1);
     Cost(18.0, 0, 0, 9.0, 1.0, 0);   /* joins lead; without the update's 1 ms still 17 ms */

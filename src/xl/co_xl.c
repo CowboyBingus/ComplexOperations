@@ -541,7 +541,6 @@ float CoXlTestLwAibWorld(uintptr_t w, float stock, float lat, int on, ULONGLONG 
     g_lwAib.b.world = w; g_lwAib.b.stock = stock; g_lwAib.b.raised = 0; g_lwAib.on = on;
     LwAibJoin(LwFpJoinTake(), 1);
     LwAibSteer(w, cur, lat, *(float*)(w + 0x484), now);
-    g_lwAib.wasDraining = g_lwAib.b.draining && g_lwAib.b.ran == CO_AIB_RAN_DRAIN;
     return *(float*)(w + 0x47C);
 }
 /* A frame whose AI world did not read, as LwAibFrame leaves it: the joins so far are taken and dropped. */

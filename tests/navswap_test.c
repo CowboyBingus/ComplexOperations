@@ -697,6 +697,14 @@ static void TestSchedPause(void)
     CoXlTestLwNavSched(0, 5010); CHECK(Tick(0, 5010) == 1 && g_steps == 0 && g_waits == 0);
     CHECK(!fake_host_logged("a step finished on the frame thread"));
     CoXlTestLwNavSpanCounts(s); CHECK(s[7] == 1);
+    ResetHold("with a query job reading the world no step is finished here either");
+    SchedOn(0); JobBudget(IDX, 8, 2);
+    Flight(1); Ring(100, 95);
+    Push(0, IDX, 3, 0);
+    CoXlTestLwNavSched(0, 10); CHECK(Tick(0, 10) == 0);
+    Flight(0); g_queued = 8; g_grant = 0;
+    CoXlTestLwNavSched(0, 5010); CHECK(Tick(0, 5010) == 1 && g_steps == 0);
+    CoXlTestLwNavSpanCounts(s); CHECK(s[7] == 1 && !fake_host_logged("a step finished on the frame thread"));
     ResetHold("after the pause's time only the record within one call's starts has its world's step finished");
     SchedOn(0); JobBudget(IDX, 8, 2);
     Flight(1); Put(g_aiw2 + 0x4B0, 1);
@@ -813,6 +821,20 @@ static void TestRingSkip(void)
     CoXlTestLwNavSched(0, 50); CHECK(g_scheds == 1 && g_ringNext == 99);
     Out(IDX, -1);
     CoXlTestLwNavSched(0, 60); CHECK(g_scheds == 1); /* not trusted again before the next moment with nothing out */
+    ResetHold("one more record out than slots marked: a start that did not come through here, the pause as before");
+    RingOn(100, 1); JobBudget(IDX, 8, 2);
+    CoXlTestLwNavSched(0, 0);
+    Flight(1); Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 0);
+    g_ringNext = 95; g_startN = 6; Out(IDX, 1);
+    CoXlTestLwNavSched(0, 10); CHECK(g_scheds == 1 && g_ringNext == 95);
+    ResetHold("counts that cancel out over two navs are no moment with nothing out");
+    RingOn(100, 1); JobBudget(IDX, 8, 2); Out(IDX, -1); Out(IDX2, 1);
+    CoXlTestLwNavSched(0, 0); CHECK(g_scheds == 1 && g_ringNext == 101);
+    Flight(1); Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 0);
+    g_ringNext = 95; g_startN = 6;
+    CoXlTestLwNavSched(0, 10); CHECK(g_scheds == 1 && g_ringNext == 95);
     ResetHold("a listed record whose slot was not marked: the pause as before");
     RingOn(100, 1); JobBudget(IDX, 8, 2);
     CoXlTestLwNavSched(0, 0);
@@ -830,6 +852,16 @@ static void TestRingSkip(void)
     CHECK(g_scheds == 1 && g_ringNext == 95 && s[6] == 1 && s[4] == 0 && v[0] == 1);
     JobBudget(IDX, 7, 2); g_startN = 0; /* 5 can start: they stop short of it */
     CoXlTestLwNavSched(0, 20); CoXlTestLwNavSpanCounts(s); CHECK(g_scheds == 2 && s[6] == 2);
+    ResetHold("more starts than the budgets allow on free slots: said, and job starts wait for a waiting record from then on");
+    RingOn(100, 1); JobBudget(IDX, 8, 2);
+    CoXlTestLwNavSched(0, 0);
+    Flight(1); Push(0, IDX, 3, 0);
+    CHECK(Tick(0, 0) == 0);
+    g_ringNext = 110; g_startN = 7;
+    CoXlTestLwNavSched(0, 10); CHECK(g_scheds == 2 && g_ringNext == 117);
+    CHECK(fake_host_logged("living world: nav: RING: one scheduler call started 7 job(s) where its navs' budgets allow 6, 0 on a slot in use: job starts wait"));
+    g_ringNext = 95; g_startN = 1; /* the marks and the count still agree: only the switch keeps the old rule */
+    CoXlTestLwNavSched(0, 20); CoXlTestLwNavTickCounts(v); CHECK(g_scheds == 2 && g_ringNext == 95 && v[0] == 1);
     ResetHold("more starts in one call than the budgets allow: said once, and job starts wait for a waiting record from then on");
     RingOn(100, 1); JobBudget(IDX, 8, 2);
     CoXlTestLwNavSched(0, 0);

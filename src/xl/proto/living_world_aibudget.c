@@ -173,6 +173,7 @@ static void LwAibSteer(uintptr_t h, float cur, float lat, float runS, ULONGLONG 
     float want = co_aibudget_step(&g_lwAib.b, &g_lwAib.drain, lever, lat, g_lwAib.lowUs, g_lwAib.raiseMs, task != 0, runS, queued, more);
     LwAibDrainNote(was, task != 0, runS, queued);
     LwNavHoldRan(g_lwAib.b.ran == CO_AIB_RAN_MORE);
+    g_lwAib.wasDraining = g_lwAib.b.draining && g_lwAib.b.ran == CO_AIB_RAN_DRAIN; /* the drain's value was the one written */
     if (want > 0 && cur != want) { *(volatile float*)(h + 0x47C) = want; co_aibudget_wrote(&g_lwAib.b, want); }
 }
 
@@ -216,7 +217,6 @@ static void LwAibFrame(void)
     LwAibWatch(h, t[0], t[1]);
 #endif
     LwAibSteer(h, cur, lat, t[1], GetTickCount64());
-    g_lwAib.wasDraining = g_lwAib.b.draining && g_lwAib.b.ran == CO_AIB_RAN_DRAIN; /* the drain's value was the one written */
     g_lwAib.frames++; g_lwAib.raisedFrames += (uint32_t)(g_lwAib.b.raised || !g_lwAib.on);
     if (lat > g_lwAib.worst) g_lwAib.worst = lat;
     g_lwAib.latSum += lat;
