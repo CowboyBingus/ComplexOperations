@@ -565,7 +565,7 @@ static struct
     uint32_t crowded; /* points where a member's slot cast would not reach its slot (30 s) */
     uint32_t seenSlot, spaced; /* points refused: a member's slot in sight; within LW_SPACING of a squad or recent request (30 s) */
     uint32_t swapWaits, swapWaitLines; /* far swaps that waited for an event squad's hold (30 s); their lines this mission */
-    uint32_t stallResent, stallSnapped, stallNewGoal, stallResumed, stallAction, stallBusy, stallNoGoal, stallFixLines, goalSendsAll, goalTypeMiss, goalOwnDest, goalLines, holdRefuseLines, routeLines, routeFailLines; uint8_t goalFailLines[6]; /* stall recoveries (30 s); their lines this mission */
+    uint32_t stallResent, stallSnapped, stallNewGoal, stallResumed, stallAction, stallBusy, stallNoGoal, stallFixLines, goalSendsAll, goalTypeMiss, goalOwnDest, goalLines, holdRefuseLines, routeLines, routeFailLines, notSentLines; uint8_t goalFailLines[6]; /* stall recoveries (30 s); their lines this mission */
     uint32_t stalled, stalledOther, stallLines, stallOtherLines; /* online squads still 30 s: calm with a goal, other (30 s); their lines this mission */
     uint32_t goals, goalNoFace, goalReplans, goalStuck; /* goals sent, next nodes without a face within 25 m, replans, none found (30 s) */
     uint32_t heights, underGround, overGround; float worstUnder, worstOver; /* members against the drawn ground (30 s) */

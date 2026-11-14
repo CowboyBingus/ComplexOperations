@@ -917,6 +917,9 @@ int CoXlTestLwNoise(uint32_t source, float x, float y, uint64_t now, uint32_t of
 }
 /* The noise counters since the world was made: 0 events, 1 squads sent, 2 events asked again, 3 noises of a source with no room. */
 uint32_t CoXlTestLwNoiseCount(int what) { return what == 0 ? g_lwHear.events : what == 1 ? g_lwHear.sent : what == 2 ? g_lwHear.retries : g_lwNoiseSkips[3]; }
+/* Fight f at `now`: 1 when it is over. The mission's lines so far for squads a fight could not send. */
+int CoXlTestLwFightOver(int f, uint64_t now) { return LwFightOver(f, now); }
+void CoXlTestLwNotSentLines(uint32_t n) { g_lwWorld.notSentLines = n; }
 /* The players' avatar entities, in the order of their places. */
 void CoXlTestLwAvatars(const uint32_t* ids, int n) { for (int i = 0; i < n && i < EVT_MAX_PLAYERS; i++) g_lwWorld.avatars[i] = ids[i]; }
 /* Fight f's target was last fought `ago` ms ago. */

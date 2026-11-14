@@ -77,6 +77,8 @@ int CoXlTestLwFightTakeWhom(float x, float y, int n, const uint32_t* ids, const 
 uint32_t CoXlTestLwFightFar(void);
 void CoXlTestLwFightPoint(int f, float x, float y);
 void CoXlTestLwAvatars(const uint32_t* ids, int n);
+int CoXlTestLwFightOver(int f, uint64_t now);
+void CoXlTestLwNotSentLines(uint32_t n);
 void CoXlTestLwNoiseWorld(const float* pl, int np, const float* sq, int n);
 void CoXlTestLwNoiseSquad(int i, int what, float x, float y);
 int CoXlTestLwNoise(uint32_t source, float x, float y, uint64_t now, uint32_t of);
@@ -882,6 +884,23 @@ static void Send(void)
     const int notes = Count("is not sent: no navmesh");
     CHECK(CoXlTestLwSend(t, &moves, &next, &sentAt) == 0 && Count("is not sent: no navmesh") == notes + 1 && sentAt == 1 && moves == (3 | 0x100) && t[0] == 900.0f);
     CHECK(CoXlTestLwSend(t, &moves, &next, &sentAt) == 0 && Count("is not sent: no navmesh") == notes + 1);
+    g_case = "the mission's 24th such line says it is the last; the 25th squad that is not sent has none, and still rests";
+    const int lasts = Count("at its point (1000, 0) (the last such line this mission)");
+    CoXlTestLwSendSetup(1, sq, fight);
+    CoXlTestLwFightTarget(0, 0x400001, p);
+    CoXlTestLwGoalStub(1, p, 200.0f);
+    CoXlTestLwNotSentLines(22);
+    CHECK(CoXlTestLwSend(t, &moves, &next, &sentAt) == 0 && Count("is not sent: no navmesh") == notes + 2 && Count("at its point (1000, 0) (the last such line this mission)") == lasts);
+    CoXlTestLwSendSetup(1, sq, fight);
+    CoXlTestLwFightTarget(0, 0x400001, p);
+    CoXlTestLwGoalStub(1, p, 200.0f);
+    CoXlTestLwNotSentLines(23);
+    CHECK(CoXlTestLwSend(t, &moves, &next, &sentAt) == 0 && Count("is not sent: no navmesh") == notes + 3 && Count("at its point (1000, 0) (the last such line this mission)") == lasts + 1);
+    CoXlTestLwSendSetup(1, sq, fight);
+    CoXlTestLwFightTarget(0, 0x400001, p);
+    CoXlTestLwGoalStub(1, p, 200.0f);
+    CoXlTestLwNotSentLines(24);
+    CHECK(CoXlTestLwSend(t, &moves, &next, &sentAt) == 0 && Count("is not sent: no navmesh") == notes + 3 && sentAt == 1 && t[0] == 900.0f);
     CoXlTestLwFightTarget(0, 0, NULL);
     CoXlTestLwGoalStub(0, NULL, 0);
 }
@@ -1083,6 +1102,16 @@ static void ShotAt(void)
     CHECK(CoXlTestLwFightTake(201, 0, 6, 6, 0, 0, now + 2000, 0, pos, &eng, &seen) == -1 && pos[0] == 200.0f && seen == now + 1000);
     CHECK(CoXlTestLwFightTake(190, 0, 6, 6, 0, 0, now + 3000, 0, pos, &eng, &seen) == 0 && pos[0] == 190.0f && seen == now + 3000);
 
+    g_case = "a fight unseen for 30 s is over; its line names the place rule when its units fought on over 200 m from every player";
+    const int ruled = Count("squads sent); the place rule ended it: its units were engaged to 1 s ago, over 200 m from every player and fighting none");
+    const int over = Count("is over after");
+    CHECK(CoXlTestLwFightOver(0, now + 33000) == 0); /* seen at 3 s */
+    for (int k = 4; k <= 33; k++) CHECK(CoXlTestLwFightTake(210, 0, 6, 6, 0, 0, now + 1000u * (uint64_t)k, 0, pos, &eng, &seen) == -1);
+    CHECK(CoXlTestLwFightOver(0, now + 34000) == 1 && Count("is over after") == over + 1);
+    CHECK(Count("squads sent); the place rule ended it: its units were engaged to 1 s ago, over 200 m from every player and fighting none") == ruled + 1);
+    CHECK(CoXlTestLwFightTake(150, 0, 6, 6, 0, 0, now + 40000, 0, pos, &eng, &seen) == 0);
+    CHECK(CoXlTestLwFightOver(0, now + 71000) == 1 && Count("is over after") == over + 2);
+    CHECK(Count("the place rule ended it") == ruled + 1); /* its units calmed down: no such words */
     g_case = "eight players: units far from all that fight the last player make a fight; an avatar of nobody in the session does not";
     float pts[16]; uint32_t ids[8];
     for (int k = 0; k < 8; k++) { pts[2 * k] = 0; pts[2 * k + 1] = 400.0f * (float)k; ids[k] = 0x600u + (uint32_t)k; }

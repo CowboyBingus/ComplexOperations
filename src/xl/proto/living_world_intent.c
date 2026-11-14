@@ -444,8 +444,9 @@ static void LwStallCheckAt(LwSquad* q, const uint32_t* members, int n, const flo
 #define LW_HEARD_HOLD 30000    /* ms members at alert 1 or 2 keep a squad from a new point: at a fight some member hears something most of the time, and it would never move (D) */
 #define LW_FIGHT_CHASE 60000   /* ms units that lost sight of their target (level 7) keep a fight seen after its last placing unit: one that stays there keeps no fight for good (D) */
 #define LW_FIGHT_STAY 180000u  /* ms a reinforcement stays at its fight, summed over its moves (D) */
+#define LW_NOT_SENT_LINES 24u  /* lines a mission for squads a fight could not send: one with a broken record is offered again every 30 s (D) */
 #define LW_FIGHT_ONLINE 600000u /* ms a reinforcement is online in all: four legs of 240 s and the stay would be 19 min of a fight's squad that draws no replacement (D) */
-typedef struct { float pos[3], tpos[3]; int engaged, peak, placedN; uint32_t target, sent; ULONGLONG born, seen, sentAt, placed, hotAt, foughtAt; uint8_t call, live; } LwFight; /* placed, placedN: the scan that last set pos, and from how many units; hotAt: the last scan with a placing unit or a call; foughtAt: the last scan in which one of its units fought its target */
+typedef struct { float pos[3], tpos[3]; int engaged, peak, placedN; uint32_t target, sent; ULONGLONG born, seen, sentAt, placed, hotAt, foughtAt, farAt; uint8_t call, live; } LwFight; /* placed, placedN: the scan that last set pos, and from how many units; hotAt: the last scan with a placing unit or a call; foughtAt: the last scan in which one of its units fought its target; farAt: the last scan in which its units were where no fight may be */
 static LwFight g_lwFights[16];
 static struct { uint32_t fights, calls, sent, joined, ended, afar; } g_lwRush; /* 30 s counters */
 /* a target that still lives, and where it is now (the Behavior position +0x1C is only where it was last seen or heard) */
@@ -1262,8 +1263,10 @@ static void LwReinforce(int f, int want)
             {
                 /* the fight sends again after LW_FIGHT_RESEND, and not this squad for LW_INTENT_REST */
                 *q = before; q->intentFree = now + LW_INTENT_REST; fi->sentAt = now;
-                if (LwGoToPlace()) Note("living world: fight %d: squad %d (online, %.0f m) is not sent: no navmesh at the fight's target or at its point (%.0f, %.0f)", f, pick[j], (double)sqrtf(d2s[j]), (double)fi->pos[0], (double)fi->pos[1]);
-                else Note("living world: fight %d: squad %d (online, %.0f m) is not sent: no goal for it: %s", f, pick[j], (double)sqrtf(d2s[j]), g_lwGoToWhy ? g_lwGoToWhy : "no word");
+                if (g_lwWorld.notSentLines >= LW_NOT_SENT_LINES) continue;
+                const char* last = ++g_lwWorld.notSentLines == LW_NOT_SENT_LINES ? " (the last such line this mission)" : "";
+                if (LwGoToPlace()) Note("living world: fight %d: squad %d (online, %.0f m) is not sent: no navmesh at the fight's target or at its point (%.0f, %.0f)%s", f, pick[j], (double)sqrtf(d2s[j]), (double)fi->pos[0], (double)fi->pos[1], last);
+                else Note("living world: fight %d: squad %d (online, %.0f m) is not sent: no goal for it: %s%s", f, pick[j], (double)sqrtf(d2s[j]), g_lwGoToWhy ? g_lwGoToWhy : "no word", last);
                 continue;
             }
             uint32_t ms[32]; int mn = LwMembers(q->squad, ms);
@@ -1338,6 +1341,7 @@ static void LwFightFar(const LwCluster* c, const float* at, int f, ULONGLONG now
 {
     char stays[80] = "";
     g_lwFar.since++; g_lwRush.afar++;
+    if (f >= 0) g_lwFights[f].farAt = now;
     if (now < g_lwFar.next) return;
     if (f >= 0) snprintf(stays, sizeof stays, "; fight %d's point stays at (%.0f, %.0f)", f, (double)g_lwFights[f].pos[0], (double)g_lwFights[f].pos[1]);
     Note("living world: %d engaged at (%.0f, %.0f)%s, %.0f m from the nearest player: over %.0f m from every player and from whom they fight, no fight is placed there%s%s (%u such clusters since the last such line)",
@@ -1417,6 +1421,21 @@ static void LwAlertListNote(void)
         (double)LW_ALERT_LIST_R, g_lwAlertList.n, b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[3] + b[5] + b[6] + b[7], g_lwAlertList.text,
         g_lwAlertList.len >= (int)sizeof g_lwAlertList.text - 40 ? " (and more)" : "");
 }
+/* A fight not seen for 30 s is over; 1 when it ended. Its line says when its units fought on where no fight may be
+ * (LwFightPlaceOk), so a fight the place rule ended is told from one whose units calmed down or died. */
+static int LwFightOver(int f, ULONGLONG now)
+{
+    LwFight* fi = &g_lwFights[f];
+    char why[160] = "";
+    if (now - fi->seen <= 30000) return 0;
+    LwFightHandOver(f);
+    fi->live = 0;
+    if (fi->farAt > fi->seen)
+        snprintf(why, sizeof why, "; the place rule ended it: its units were engaged to %.0f s ago, over %.0f m from every player and fighting none", (double)(now - fi->farAt) / 1000.0, (double)LW_FIGHT_OUT);
+    Note("living world: fight %d at (%.0f, %.0f) is over after %.0f s (at most %d engaged, %u squads sent)%s", f, (double)fi->pos[0], (double)fi->pos[1],
+        (double)(fi->seen - fi->born) / 1000.0, fi->peak, fi->sent, why);
+    return 1;
+}
 /* each squads tick: once a second, the fights from the engaged units and the calls for help */
 static void LwFightScan(void)
 {
@@ -1466,14 +1485,7 @@ static void LwFightScan(void)
     {
         LwFight* fi = &g_lwFights[f];
         if (!fi->live) continue;
-        if (now - fi->seen > 30000)
-        {
-            LwFightHandOver(f);
-            fi->live = 0;
-            Note("living world: fight %d at (%.0f, %.0f) is over after %.0f s (at most %d engaged, %u squads sent)", f, (double)fi->pos[0], (double)fi->pos[1],
-                (double)(fi->seen - fi->born) / 1000.0, fi->peak, fi->sent);
-            continue;
-        }
+        if (LwFightOver(f, now)) continue;
         int sends = LwFightSends(f, now);
         if (sends) LwReinforce(f, sends);
     }
