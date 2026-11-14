@@ -653,20 +653,24 @@ static int LwNearestNode(float x, float y)
  * within LW_ROAM of the squad (audit 1e, 7: on XL a squad brought online near a player walked off toward a node anywhere
  * on the 7.8 km disc; squads that roam locally keep the even spread they start with). */
 #define LW_ROAM 1200.0f
+/* A try is a node inside the disc and the roam range: on the 7.8 km disc about 1 node in 50 lies within LW_ROAM, and
+ * 24 blind draws found none in most plans, so an online squad at its route's end stood goal-less for 30 s a time. */
+#define LW_PLAN_DRAWS 128
 static void LwPlan(LwSquad* q)
 {
     int local = g_lwWorld.radius > LW_ROAM;
     int home = LwTerritoryGoalOk(q, -1) && LwUnit() < 0.7f; /* 2d: most goals stay in the home region or a neighbour (D) */
     int most = (local ? 24 : 8) * (home ? 2 : 1);
-    for (int tries = 0; tries < most; tries++)
+    for (int tries = 0, draws = 0; tries < most && draws < most * LW_PLAN_DRAWS && g_lwNodeCount > 0; draws++)
     {
         int goal = (int)(LwRand() % (uint32_t)g_lwNodeCount);
-        if (home && tries < (local ? 24 : 8) && !LwTerritoryGoalOk(q, goal)) continue; /* then any goal, so the squad never stands still */
         float r = g_lwWorld.radius;
         if (g_lwNodes[goal].x * g_lwNodes[goal].x + g_lwNodes[goal].y * g_lwNodes[goal].y > r * r) continue;
         if (local && LwDist2(q->pos, g_lwNodes[goal].x, g_lwNodes[goal].y) > LW_ROAM * LW_ROAM) continue;
+        tries++;
+        if (home && tries <= (local ? 24 : 8) && !LwTerritoryGoalOk(q, goal)) continue; /* then any goal, so the squad never stands still */
         int n = LwPath(q->node, goal, q->path, LW_PATH_MAX);
-        if (n > 0 && q->prevValid && q->path[0] == q->prevNode && tries < most / 2) continue; /* back the way it came: an about-turn (user, real play) */
+        if (n > 0 && q->prevValid && q->path[0] == q->prevNode && tries <= most / 2) continue; /* back the way it came: an about-turn (user, real play) */
         if (n > 0) { q->pathLen = (uint8_t)n; q->pathAt = 0; return; }
     }
     q->pathLen = 0; q->pathAt = 0;

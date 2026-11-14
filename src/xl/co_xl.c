@@ -436,6 +436,38 @@ int CoXlTestNetVec(uintptr_t cfg, float scale, uint32_t* types, uint8_t* widen, 
 }
 float CoXlTestLwFaceReach(int tilesOn, int keeper, float top, float drawn, float wall) { return LwFaceReach(tilesOn, keeper, top, drawn, wall); }
 float CoXlTestLwRequestZ(float top, float face) { return LwRequestZ(top, face); }
+/* A square grid of route nodes `step` apart over a disc of `radius`, squad 0 on the node nearest (x, y): `plans` new
+ * destinations. Returns the plans that found no route; `beyond` counts destinations over LW_ROAM away, `turned` routes that
+ * start with the node it came from (the one before in the last route). */
+int CoXlTestLwPlans(float radius, float step, float x, float y, int plans, int* beyond, int* turned)
+{
+    LwSquad* q = &g_lwSquads[0]; int side = (int)(2 * radius / step) + 1, failed = 0;
+    static int16_t at[128][128];
+    g_lwNodeCount = 0; g_lwTerr.built = 0; *beyond = *turned = 0;
+    for (int j = 0; j < side && j < 128; j++) for (int i = 0; i < side && i < 128; i++)
+    {
+        float nx = -radius + step * (float)i, ny = -radius + step * (float)j;
+        at[j][i] = -1;
+        if (nx * nx + ny * ny > radius * radius || g_lwNodeCount >= LW_NODES_MAX) continue;
+        LwNode* n = &g_lwNodes[g_lwNodeCount]; memset(n, 0, sizeof *n); n->x = nx; n->y = ny; at[j][i] = (int16_t)g_lwNodeCount++;
+        if (i > 0 && at[j][i - 1] >= 0) LwLink(at[j][i], at[j][i - 1]);
+        if (j > 0 && at[j - 1][i] >= 0) LwLink(at[j][i], at[j - 1][i]);
+    }
+    memset(q, 0, sizeof *q); g_lwWorld.radius = radius;
+    q->node = (uint16_t)LwNearestNode(x, y); q->pos[0] = g_lwNodes[q->node].x; q->pos[1] = g_lwNodes[q->node].y;
+    for (int k = 0; k < plans; k++)
+    {
+        float from[2] = {q->pos[0], q->pos[1]};
+        LwPlan(q);
+        if (q->pathLen == 0) { failed++; continue; }
+        int goal = q->path[q->pathLen - 1];
+        if (LwDist2(from, g_lwNodes[goal].x, g_lwNodes[goal].y) > LW_ROAM * LW_ROAM) (*beyond)++;
+        if (q->prevValid && q->path[0] == q->prevNode) (*turned)++;
+        q->prevNode = q->node; q->prevValid = 1; q->node = q->path[0]; q->pos[0] = g_lwNodes[q->node].x; q->pos[1] = g_lwNodes[q->node].y;
+        q->pathLen = q->pathAt = 0;
+    }
+    return failed;
+}
 int CoXlTestLwOnlineSteps(int online, uint64_t wideUntil, uint64_t now) { return LwOnlineSteps(online, wideUntil, now); }
 /* Squad 0 online with no game behind it: its tick finds the squad entity gone and frees it. 1 when it was ticked, +2
  * when its keeper listing was closed, +4 when it was counted online. */
