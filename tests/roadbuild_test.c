@@ -252,9 +252,27 @@ static void Install(void)
     if (why != NULL || stub == NULL) return;
     MEMORY_BASIC_INFORMATION page;
     CHECK(VirtualQuery(stub, &page, sizeof page) == sizeof page && page.State == MEM_COMMIT && page.Protect == PAGE_EXECUTE_READWRITE);
+    if (page.Protect != PAGE_EXECUTE_READWRITE) return; /* running a data page would end the test run, not fail it */
     int32_t rel; memcpy(&rel, g_fake.image + 0xF38D26u, 4);
     CHECK(g_fake.image[0xF38D25u] == 0xE9 && g_fake.image + 0xF38D2Au + rel == stub && g_fake.image[0xF38D2Au] == 0x90 && g_fake.image[0xF38D2Cu] == 0x90);
-    CHECK(stub[0] == 0x48 && stub[0x3F] == 0xCC ? 1 : stub[0] == 0x48); /* the stub's first instruction is there */
+    /* run it where it is installed: a caller in the image enters 0xF38D25 as op 0x0E does, the installed jump goes to
+     * the installed page, and the stub comes back to 0xF38D2D */
+    static const uint8_t enter[] = {0x48, 0x81, 0xEC, 0x88, 0x00, 0x00, 0x00, 0x48, 0x89, 0x4C, 0x24, 0x78, 0xF3, 0x0F, 0x10, 0x02, 0x31, 0xC0, 0xF9, 0xE9, 0, 0, 0, 0};
+    static const uint8_t leave[] = {0xF3, 0x0F, 0x11, 0x02, 0x48, 0x81, 0xC4, 0x88, 0x00, 0x00, 0x00, 0xC3};
+    uint8_t* at = g_fake.image + 0xF38C00u; DWORD was;
+    CHECK(VirtualProtect(g_fake.image + 0xF38000u, 0x2000, PAGE_EXECUTE_READWRITE, &was));
+    memcpy(at, enter, sizeof enter);
+    rel = (int32_t)((g_fake.image + 0xF38D25u) - (at + sizeof enter)); memcpy(at + 20, &rel, 4);
+    memcpy(g_fake.image + 0xF38D2Du, leave, sizeof leave);
+    FlushInstructionCache(GetCurrentProcess(), g_fake.image + 0xF38000u, 0x2000);
+    const DivideFn divide = (DivideFn)(void*)at;
+    float v = 617.3f;
+    divide(0x1234500, &v); CHECK(Bits(v) == Bits(617.3f / 5.0f)); /* no level's op 0x0E in flight: the game's 5.0 */
+    { const uint64_t key = 0x1234500; const float spacing = 7.25f; memcpy(stub + 0x30, &key, 8); memcpy(stub + 0x38, &spacing, 4); }
+    v = 617.3f; divide(0x1234500, &v); CHECK(Bits(v) == Bits(617.3f / 7.25f));
+    v = 617.3f; divide(0x1234508, &v); CHECK(Bits(v) == Bits(617.3f / 5.0f));
+    { const uint64_t none = 0; memcpy(stub + 0x30, &none, 8); }
+    VirtualProtect(g_fake.image + 0xF38000u, 0x2000, was, &was);
 }
 
 static void SpacingGlue(void)

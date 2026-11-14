@@ -94,6 +94,7 @@ static const char* InstallRoadSpacing(uintptr_t game)
     FlushInstructionCache(GetCurrentProcess(), stub, 0x40);
     uint8_t jump[8] = {0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90};
     int32_t rel = DifficultyJumpRel(game + 0xF38D25u, (uintptr_t)stub); memcpy(jump + 1, &rel, 4);
+    /* the jump goes in last: until then the game's own division runs, and a stub with no key divides by the game's 5.0 */
     if (ApiWrite(game + 0xF38D25u, jump, 8)) return "op 0x0E's road point spacing could not be written";
     g_roadSpacing.key = (volatile uint64_t*)(stub + 0x30);
     g_roadSpacing.spacing = (volatile float*)(stub + 0x38);
