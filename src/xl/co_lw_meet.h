@@ -79,6 +79,9 @@ int co_lw_meet_road_room(int roadUnits, int members, int budget);
 /* 1 when a far squad of `members` fits the far share `limit`: `farUnits` far units now, `roadFar` of them patrols on
  * a player's road. With `reserve` the others leave limit / CO_LW_MEET_FAR_RESERVE to those patrols. */
 int co_lw_meet_far_room(int farUnits, int roadFar, int members, int limit, int onRoad, int reserve);
+/* The beside command's point: the first of the `n` candidates (nearest first) with a clear line to the road and no
+ * enemy near. -1 with none; `least` then gets the clear one with the fewest enemies, -1 when none is clear. */
+int co_lw_meet_beside(const uint8_t* clear, const uint16_t* foes, int n, int* least);
 /* The travel command's step for `dt` seconds at `v` m/s: a tick of 0.1 s at most, 2 m at most, so the hellpod rule
  * (co_settle.h) reads it as the speed it stands for. */
 float co_lw_meet_travel_step(float v, float dt);

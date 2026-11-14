@@ -75,6 +75,11 @@ int main(void)
     CHECK(co_lw_meet_act(1, 900.0f, 150.0f, 250.0f, 99.0f, 0, 0, 0, 1) == CO_LW_MEET_ASK_BEYOND && co_lw_meet_act(1, 900.0f, 150.0f, 250.0f, 100.0f, 0, 0, 0, 1) == CO_LW_MEET_WALK);
     g_case = "it stays for its walk in from where it came online to the offline radius";
     CHECK(co_lw_meet_stay_ms(794.0f, 350.0f) == 296000u && co_lw_meet_stay_ms(1011.0f, 350.0f) > 440000u && co_lw_meet_stay_ms(1011.0f, 350.0f) < 441000u && co_lw_meet_stay_ms(300.0f, 350.0f) == 0);
+    g_case = "beside the road: the first point with a clear line and no enemy near; with none, the clear one with the fewest";
+    { const uint8_t clear[4] = {0, 1, 1, 1}; const uint16_t crowd[4] = {0, 41, 0, 0}, all[4] = {0, 41, 7, 9}, none[4] = {0, 0, 0, 0}; const uint8_t blocked[4] = {0, 0, 0, 0}; int least = 9;
+      CHECK(co_lw_meet_beside(clear, crowd, 4, &least) == 2 && co_lw_meet_beside(clear, none, 4, &least) == 1);
+      CHECK(co_lw_meet_beside(clear, all, 4, &least) == -1 && least == 2);
+      CHECK(co_lw_meet_beside(blocked, none, 4, &least) == -1 && least == -1 && co_lw_meet_beside(clear, none, 0, &least) == -1 && least == -1); }
     g_case = "a sighting a player noticed: 5 s of watching it walk without a break, told once";
     { uint8_t run = 0; int told = 0;
       for (int k = 0; k < 4; k++) told += co_lw_meet_watched(&run, 1);

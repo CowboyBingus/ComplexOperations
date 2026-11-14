@@ -99,6 +99,18 @@ int co_lw_meet_watched(uint8_t* run, int seen)
     return 1;
 }
 
+int co_lw_meet_beside(const uint8_t* clear, const uint16_t* foes, int n, int* least)
+{
+    *least = -1;
+    for (int k = 0; k < n; k++)
+    {
+        if (!clear[k]) continue;
+        if (foes[k] == 0) return k;
+        if (*least < 0 || foes[k] < foes[*least]) *least = k;
+    }
+    return -1;
+}
+
 float co_lw_meet_travel_step(float v, float dt)
 {
     const float step = v * (dt > 0.1f ? 0.1f : dt);

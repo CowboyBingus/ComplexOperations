@@ -1002,33 +1002,48 @@ static void LwTravelTick(ULONGLONG now)
     if (!moved) LwTravelEnd("stopped: a step was refused (the line above)");
     else if (step < 0) LwTravelEnd("back at its first node");
 }
-/* Test command "beside D": the Helldiver stands D m to the side of the nearest arterial node, on the side whose eye
- * has a clear line to the road there, so a segment watches the road from beside it. */
+/* Test command "beside D": the Helldiver stands D m to the side of an arterial node, on a side whose eye has a clear
+ * line to the road there, so a segment watches the road from beside it. The nearest node first, then the next ones
+ * along the road: a point with enemies within 120 m is passed over (the guarded teleport refuses it, and a segment
+ * there is a fight, not a watch). Every outcome has its own line: "beside: D m beside ..." or "beside: refused: ...". */
+#define LW_BESIDE_NODES 8
+static int LwEnemiesNear(float x, float y, float r, float* nearest);
 static void LwBesideCmd(int seq, float d)
 {
-    if (g_lwWorld.playersAt <= 0 || !(d > 0) || d > 200.0f) { Note("living world: test command %d: beside: no player position, or no distance over 0 to 200 m", seq); return; }
+    if (g_lwWorld.playersAt <= 0 || !(d > 0) || d > 200.0f) { Note("living world: test command %d: beside: refused: no player position, or no distance over 0 to 200 m", seq); return; }
     int best = -1; float bd = 300.0f * 300.0f; const float* p = g_lwWorld.players[0];
     for (int i = g_lwNodeCount - g_lwRoadNodes; i < g_lwNodeCount; i++)
     {
         const float d2 = LwDist2(p, g_lwNodes[i].x, g_lwNodes[i].y);
         if ((g_lwNodeKind[i] & CO_LW_ROADS_ARTERIAL) && d2 < bd) { bd = d2; best = i; }
     }
-    const int next = best < 0 ? -1 : co_lw_roads_step(g_lwNodes[best].next, g_lwNodes[best].degree, g_lwNodeKind, CO_LW_ROADS_ARTERIAL, -1, 0);
-    if (next < 0) { Note("living world: test command %d: beside: no arterial node within 300 m with a way on", seq); return; }
-    const float dx = g_lwNodes[next].x - g_lwNodes[best].x, dy = g_lwNodes[next].y - g_lwNodes[best].y, len = sqrtf(dx * dx + dy * dy);
-    float road[3] = {g_lwNodes[best].x, g_lwNodes[best].y, 0};
-    if (!(len > 1.0f) || !LwGround(road[0], road[1], &road[2])) { Note("living world: test command %d: beside: no ground or no direction at arterial node %d", seq, best); return; }
-    road[2] += 1.0f;
-    for (int side = 0; side < 2; side++)
+    if (best < 0) { Note("living world: test command %d: beside: refused: no arterial node within 300 m", seq); return; }
+    float feet[2 * LW_BESIDE_NODES][3], road[2 * LW_BESIDE_NODES][2]; uint8_t clear[2 * LW_BESIDE_NODES]; uint16_t foes[2 * LW_BESIDE_NODES]; int node[2 * LW_BESIDE_NODES], n = 0;
+    for (int at = best, from = -1, k = 0; k < LW_BESIDE_NODES; k++)
     {
-        const float sx = (side ? dy : -dy) / len * d, sy = (side ? -dx : dx) / len * d;
-        float feet[3] = {road[0] + sx, road[1] + sy, 0};
-        if (!LwGround(feet[0], feet[1], &feet[2]) || LwSeenFrom(feet, g_lwWorld.units[0], road) != 1) continue;
-        const int moved = LwTestTeleport(seq, feet[0], feet[1]);
-        if (moved) Note("living world: test command %d: beside: %.0f m beside arterial node %d at (%.1f, %.1f), a clear line to the road there", seq, (double)d, best, (double)road[0], (double)road[1]);
-        return;
+        const int next = co_lw_roads_step(g_lwNodes[at].next, g_lwNodes[at].degree, g_lwNodeKind, CO_LW_ROADS_ARTERIAL, from, 0);
+        if (next < 0) break;
+        const float dx = g_lwNodes[next].x - g_lwNodes[at].x, dy = g_lwNodes[next].y - g_lwNodes[at].y, len = sqrtf(dx * dx + dy * dy);
+        float eye[3] = {g_lwNodes[at].x, g_lwNodes[at].y, 0}, nearest;
+        const int ground = len > 1.0f && LwGround(eye[0], eye[1], &eye[2]);
+        eye[2] += 1.0f;
+        for (int side = 0; side < 2; side++, n++)
+        {
+            float* f = feet[n];
+            f[0] = eye[0] + (side ? dy : -dy) / (len > 1.0f ? len : 1.0f) * d; f[1] = eye[1] + (side ? -dx : dx) / (len > 1.0f ? len : 1.0f) * d; f[2] = 0;
+            road[n][0] = eye[0]; road[n][1] = eye[1]; node[n] = at;
+            clear[n] = ground && LwGround(f[0], f[1], &f[2]) && LwSeenFrom(f, g_lwWorld.units[0], eye) == 1;
+            const int count = clear[n] ? LwEnemiesNear(f[0], f[1], 120.0f, &nearest) : 0;
+            foes[n] = (uint16_t)(count > 65535 ? 65535 : count);
+        }
+        from = at; at = next;
     }
-    Note("living world: test command %d: beside: no point %.0f m to either side of arterial node %d has ground and a clear line to the road", seq, (double)d, best);
+    int least = -1; const int pick = co_lw_meet_beside(clear, foes, n, &least);
+    if (pick < 0 && least < 0) { Note("living world: test command %d: beside: refused: no point %.0f m to either side of %d arterial nodes from node %d on has ground and a clear line to the road", seq, (double)d, n / 2, best); return; }
+    if (pick < 0) { Note("living world: test command %d: beside: refused: enemies within 120 m of every point with a clear line %.0f m beside %d arterial nodes from node %d on (the fewest %d, beside node %d)", seq, (double)d, n / 2, best, (int)foes[least], node[least]); return; }
+    if (!LwTestTeleport(seq, feet[pick][0], feet[pick][1])) { Note("living world: test command %d: beside: refused: the teleport beside arterial node %d did not go (its line above says why)", seq, node[pick]); return; }
+    Note("living world: test command %d: beside: %.0f m beside arterial node %d at (%.1f, %.1f), a clear line to the road there and no enemy within 120 m; %d points passed over; the nearest node %d at (%.1f, %.1f)",
+        seq, (double)d, node[pick], (double)road[pick][0], (double)road[pick][1], pick, best, (double)g_lwNodes[best].x, (double)g_lwNodes[best].y);
 }
 #else
 /* A package build has no travel: its commands are a run's tools. */
