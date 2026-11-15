@@ -170,17 +170,21 @@ static void SlFrameEnd(uint64_t world)
     InterlockedExchange(&g_sl.thread, 0);
 }
 
-/* The change frame's layers (leaves and queued removals of layer 4, then 6..9): the drain takes the layer with the most
- * queued, ties to the lower; the spawns go there too unless it holds more than the smallest streamed layer by half a
- * streamed layer's mean, then to the smallest, so the layers stay near a quarter of the streamed leaves each. */
-static void SlPick(const uint32_t leaves[SL_LAYERS], const uint32_t queued[SL_LAYERS], int* drain, uint32_t* spawn)
+/* The change frame's one layer (leaves and queued removals of layer 4, then 6..9), so its step rebuilds one: the one
+ * with the most queued removals, ties to the lower, and its spawns go there too. Layer 4 takes no spawns, nor does a
+ * layer over the smallest streamed one by half a streamed layer's mean: with spawns due, frames then take turns
+ * (`turn`) between its removals and the smallest layer's spawns, so the layers stay near a quarter each. `spawn` 0:
+ * no spawns this frame. */
+static void SlPick(const uint32_t leaves[SL_LAYERS], const uint32_t queued[SL_LAYERS], int due, int* turn, int* drain, uint32_t* spawn)
 {
     uint32_t small = 1, most = 0, total = 0;
     for (uint32_t k = 1; k < SL_LAYERS; k++) { total += leaves[k]; if (leaves[k] < leaves[small]) small = k; }
     for (uint32_t k = 1; k < SL_LAYERS; k++) if (queued[k] > queued[most]) most = k;
-    const uint32_t to = queued[most] > 0 ? most : small;
+    uint32_t to = queued[most] > 0 ? most : small;
+    int spawns = to != 0 && leaves[to] <= leaves[small] + total / (2u * SL_COUNT);
+    if (!spawns && due && (*turn ^= 1)) { to = small; spawns = 1; }
     *drain = to == 0 ? 4 : (int)(SL_FIRST + to - 1);
-    *spawn = SL_FIRST + (to != 0 && leaves[to] <= leaves[small] + total / (2u * SL_COUNT) ? to : small) - 1;
+    *spawn = spawns ? SL_FIRST + to - 1 : 0;
 }
 
 /* The four hooks, all or none; 0 when on. The count is hooked last, so no broad phase gets layers 6..9 without their

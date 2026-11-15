@@ -1749,10 +1749,19 @@ uint32_t CoXlTestSlLayerOf(uint32_t index) { return g_sl.layerOf[index]; }
 void CoXlTestSlFrame(uint32_t layer) { if (layer) SlFrameBegin(layer); else SlFrameEnd(0); }
 int CoXlTestSlFlushDue(uint64_t world) { return SlFlushDue(world); }
 int CoXlTestSlLeaves(uint32_t leaves[5]) { return SlLeaves(leaves); }
-void CoXlTestSlPick(const uint32_t leaves[5], const uint32_t queued[5], int* drain, uint32_t* spawn) { SlPick(leaves, queued, drain, spawn); }
+void CoXlTestSlPick(const uint32_t leaves[5], const uint32_t queued[5], int due, int* turn, int* drain, uint32_t* spawn) { SlPick(leaves, queued, due, turn, drain, spawn); }
 void CoXlTestSlCounts(long* created, long* marked, long* routed) { *created = g_sl.created; *marked = g_sl.marked; *routed = g_sl.routed; }
-/* The change step's layers as it would pick them now: the drained layer (-1: any) and the spawns' (0: none). */
-void CoXlTestStreamLayersPick(int* drain, uint32_t* spawn) { WorldStreamLayersLocked(drain, spawn); }
+/* The change step's layer as it would pick it now with spawns due or not: the drained layer (-1: any), the spawns'
+ * (0: none of its own), and the leaves its step rebuilds. */
+void CoXlTestStreamLayersPick(int due, int* drain, uint32_t* spawn, uint32_t* rebuilt) { WorldStreamLayersLocked(due, drain, spawn, rebuilt); }
+double CoXlTestStreamBudget(double quietHi, double rebuildMs, double moveMs) { return WorldStreamBudget(quietHi, rebuildMs, moveMs); }
+/* The rebuild's ns a leaf (set when `ns` > 0), and the leaves the last change frame left to learn from. */
+double CoXlTestStreamRebuild(double ns, uint32_t* leaves) { if (ns > 0) g_streamRebuild.ns = ns; *leaves = g_streamRebuild.leaves; return g_streamRebuild.ns; }
+void CoXlTestStreamRebuildLeaves(uint32_t leaves) { g_streamRebuild.leaves = leaves; }
+void CoXlTestStreamRebuildLearn(void) { WorldStreamRebuildLearn(); }
+/* Since the note: the change frames' budgets summed, those at the floor, and the frames a tile built in. */
+void CoXlTestStreamBudgetStats(double* sum, uint32_t* floors, uint32_t* builds) { *sum = g_stream.budgetSum; *floors = g_stream.budgetFloors; *builds = g_stream.buildFrames; }
+uint32_t CoXlTestStreamNextTick(void) { return g_stream.nextChangeTick; }
 /* One spawn pass into broad phase layer `layer` under `ms` and `most` locations, as a change frame makes it: 1 when
  * time cut it short, 2 when the location count did, 0 neither. */
 int CoXlTestStreamSpawnInto(uint32_t layer, double ms, uint32_t most)
@@ -1765,11 +1774,18 @@ int CoXlTestStreamSpawnInto(uint32_t layer, double ms, uint32_t most)
     ReleaseSRWLockExclusive(&g_streamLock);
     return cut;
 }
-/* The units' making estimated per location (0: none yet), and the locations spawned since the note. */
-void CoXlTestStreamMakeEstimate(double perLocation) { g_streamFlush.perLocation = perLocation; }
+/* A location's making estimated (0: none yet; the fitted sums start over), and the locations spawned since the note. */
+void CoXlTestStreamMakeEstimate(double slope)
+{
+    g_streamFlush.slope = slope; g_streamFlush.fixed = 0.0;
+    g_streamFlush.sw = g_streamFlush.sn = g_streamFlush.sm = g_streamFlush.snn = g_streamFlush.snm = 0.0;
+}
 uint32_t CoXlTestStreamSpawnedIn(void) { return g_stream.spawnedIn; }
-/* A tile build step ran in the frame the streamer's tick count `tick` belongs to (MoveLevelUpdate's mark). */
-void CoXlTestMoveStepAt(uint32_t tick) { g_moveStepAt = tick; }
+/* A heavy tile build step ran in the frame the streamer's tick count `tick` belongs to (0: none; the build mark too). */
+void CoXlTestMoveStepAt(uint32_t tick) { g_moveStepAt = g_moveBuildAt = tick; }
+/* MoveLevelUpdate's mark for a build frame whose MoveTick took `ms`, in the frame before the streamer's next tick. */
+void CoXlTestMoveStepMark(double ms) { MoveStepMark(ms); }
+int CoXlTestMoveMarks(double* ms) { *ms = MoveStepMsNow(); return MoveStepRecent() | MoveBuildRecent() << 1; }
 uint32_t CoXlTestStreamTicks(void) { return g_streamTicks; }
 void CoXlTestStreamTicksAdd(void) { g_streamTicks++; }
 uint32_t CoXlTestStreamTileDefers(void) { return g_stream.tileDefers; }
@@ -1777,11 +1793,11 @@ uint32_t CoXlTestStreamStaticTile(void) { return g_stream.staticTile; }
 uint32_t CoXlTestStreamSpawnCaps(void) { return g_stream.spawnCaps; }
 int CoXlTestStreamFlushPending(void) { return g_streamFlush.pending; }
 int CoXlTestSlCountFrom(uintptr_t back) { return SlCountFrom(NULL, back); }
-/* The flush's cost noted: the flushes, their ms, the longest, and the estimate per location after it. */
-void CoXlTestStreamFlushCost(double ms, uint32_t locations, uint32_t* frames, double* sum, double* most, double* perLocation)
+/* The flush's cost noted: the flushes, their ms, the longest, and the slope (a location's making) and fixed part after it. */
+void CoXlTestStreamFlushCost(double ms, uint32_t locations, uint32_t* frames, double* sum, double* most, double* slope, double* fixed)
 {
     WorldStreamFlushCost(ms, locations);
-    *frames = g_streamFlush.frames; *sum = g_streamFlush.ms; *most = g_streamFlush.most; *perLocation = g_streamFlush.perLocation;
+    *frames = g_streamFlush.frames; *sum = g_streamFlush.ms; *most = g_streamFlush.most; *slope = g_streamFlush.slope; *fixed = g_streamFlush.fixed;
 }
 /* A change frame's flush asked for under the lock: pending until WorldStreamChangeAfter runs it. */
 int CoXlTestStreamFlushLater(uint32_t locations)
@@ -1805,7 +1821,7 @@ uint32_t CoXlTestStreamChange(unsigned long long now, int layerBusy, unsigned lo
     WorldStreamChangeAfter();
     return changed;
 }
-void CoXlTestStreamChangeAt(unsigned long long next) { g_stream.nextChange = next; }
+void CoXlTestStreamChangeAt(unsigned long long next) { g_stream.nextChange = next; g_stream.nextChangeTick = 0; }
 /* One frame's layer 4 read (skip: a frame with no read), then its change step's answer for the next: the reads, leaf
  * moves, moves after a frame with no streamer change, and the last leaf count. */
 void CoXlTestStreamStatic(int skip, int changed, uint32_t* frames, uint32_t* moved, uint32_t* quiet, uint32_t* leaves)
@@ -1827,7 +1843,7 @@ uint32_t CoXlTestStreamQueue(uint32_t* slots, uint32_t room)
 /* A frame's WorldStreamTick with its scan and change step due, the slots set up counted as deferred. */
 void CoXlTestStreamTick(void)
 {
-    g_stream.nextScan = 0; g_stream.nextChange = 0;
+    g_stream.nextScan = 0; g_stream.nextChange = 0; g_stream.nextChangeTick = 0;
     if (g_stream.deferred == 0) g_stream.deferred = g_stream.count;
     WorldStreamTick(0.016f);
 }

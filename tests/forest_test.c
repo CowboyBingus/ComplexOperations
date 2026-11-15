@@ -223,11 +223,11 @@ int main(void)
     CoXlTestStreamMakeEstimate(1.0);                 /* 1 ms a location: 3 in a 3 ms frame */
     CHECK(CoXlTestStreamSpawnInto(7, 3.0, 24) == 1 && g_calls == 1 && CoXlTestStreamSpawnedIn() == 3);
     CHECK(CoXlTestStreamLayerOf(2) == 7 && CoXlTestStreamLayerOf(3) == 0);
-    CoXlTestStreamMakeEstimate(10.0);                /* more than the frame: one, so a frame always moves on */
-    CHECK(CoXlTestStreamSpawnInto(7, 3.0, 24) == 1 && g_calls == 2 && CoXlTestStreamSpawnedIn() == 4);
-    CHECK(CoXlTestStreamLayerOf(3) == 7 && CoXlTestStreamLayerOf(4) == 0);
+    CoXlTestStreamMakeEstimate(10.0);                /* more than the frame: the floor of 2, so a frame always moves on */
+    CHECK(CoXlTestStreamSpawnInto(7, 3.0, 24) == 1 && g_calls == 2 && CoXlTestStreamSpawnedIn() == 5);
+    CHECK(CoXlTestStreamLayerOf(4) == 7 && CoXlTestStreamLayerOf(5) == 0);
     CoXlTestStreamMakeEstimate(0.1);                 /* 10 fit in 1 ms; 16 a call at most */
-    CHECK(CoXlTestStreamSpawnInto(7, 1.0, 24) == 1 && g_calls == 3 && CoXlTestStreamSpawnedIn() == 14);
+    CHECK(CoXlTestStreamSpawnInto(7, 1.0, 24) == 1 && g_calls == 3 && CoXlTestStreamSpawnedIn() == 15);
     Level(24);
     for (uint32_t k = 0; k < 24; k++) CoXlTestStreamDue(k, unit);
     CoXlTestStreamMakeEstimate(0.25);                /* a call of 16 (4 ms to make), then the 1.6 ms left make 6 */

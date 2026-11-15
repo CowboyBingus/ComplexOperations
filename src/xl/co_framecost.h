@@ -61,6 +61,15 @@ void co_framecost_grass(int out);
  * then splits the world update's own time between such frames and the others, once a mission had one, and a slow
  * frame's line says whether it was one: those hold a broad phase rebuild by design. */
 void co_framecost_bodies(int changed);
+#define CO_FC_BODIES_ROOM 1              /* co_framecost_bodies: a change frame whose budget had room under the target */
+#define CO_FC_BODIES_FLOOR 2             /* ... one at its floor: the quiet frames and the rebuild left none */
+/* Quiet frames the streamer's change-frame budget looks back over: a frame is over the longest of the 32 before it
+ * 1 time in 33 when frames are alike, about 0.3 s at 100 fps */
+#define CO_FC_RECENT 32
+/* The frame just closed, for the streamer's change-frame budget (CoXlTick's thread): the longest whole time of the last
+ * CO_FC_RECENT frames without a change (0 until that many in this play), their world update's own time (a running
+ * mean, 0 until one), and that frame's own world update time. Its co_framecost_bodies value. */
+int co_framecost_recent(double* quietHi, double* quietWorld, double* lastWorld);
 
 #ifdef CO_TEST
 /* The same on a given clock (ticks of `freq` a second) and given CPU times (100 ns units). */
@@ -81,6 +90,8 @@ double co_framecost_test_slow(int k, double* join, double* world, int* grass);
 int co_framecost_test_slow_bodies(int k);
 /* The last window's change frames' whole time: mean, the longest, and how many were over the target. */
 void co_framecost_test_bodies_whole(double* mean, double* most, uint32_t* over);
+/* The last window's change frames whose budget had room, and how many of those were over the target. */
+void co_framecost_test_bodies_room(uint32_t* room, uint32_t* over);
 int co_framecost_test_window_lines(void);
 /* The last closed window's split: frames with a change, their mean and longest world update (own time), the same for
  * the frames without, and how many of those were over CO_FC_TARGET_MS. 0 when the window had no split line. */
