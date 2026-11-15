@@ -1777,6 +1777,7 @@ static LONG CALLBACK WorldTileFault(EXCEPTION_POINTERS* info)
 {
     TileGuard* t = TileGuardSelf();
     if (t->thread == 0 || t->thread != GetCurrentThreadId()) return EXCEPTION_CONTINUE_SEARCH;
+    if (co_safe_owns(info)) return EXCEPTION_CONTINUE_SEARCH; /* a failed SafeRead in the guarded call, not the call's fault */
     DWORD code = info->ExceptionRecord->ExceptionCode;
     if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_INT_DIVIDE_BY_ZERO && code != EXCEPTION_ARRAY_BOUNDS_EXCEEDED)
         return EXCEPTION_CONTINUE_SEARCH;

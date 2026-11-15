@@ -39,6 +39,9 @@ const char* co_shim_build(void);
 
 int co_safe_read(uintptr_t address, void* buffer, size_t size);
 int co_safe_find(uintptr_t list, size_t count, uint64_t value); /* 1 found, 0 absent, -1 unreadable */
+/* 1 when a fault lies inside SafeRead's or SafeFind's in-place copy: SafeReadFault turns it into their failure return,
+ * so a vectored handler registered after it (and so called before it) must pass the fault on. */
+int co_safe_owns(const EXCEPTION_POINTERS* info);
 /* Zeroed read-write pages within reach of a 32-bit offset from all of game.dll; NULL when there are none. `find` with
  * MEM_RESERVE alone only takes the address space. */
 uint8_t* co_find_near_game(uintptr_t game, size_t bytes, DWORD type);

@@ -1385,6 +1385,19 @@ int CoXlTestMove2FRun(void) { return MoveRun2F(); }
 uint32_t CoXlTestMove2FBatch(void) { return g_move2F.batch; }
 const uint8_t* CoXlTestMove2FRecord(void) { return g_move.one; }
 void CoXlTestMove2FPins(void) { g_move2F.pinned = 0; }
+/* A SafeRead that faults inside a guarded call (proto/difficulty_world.c WorldTileFault): its failure return, not the
+ * call's fault; a plain read that faults there is still the call's. */
+static volatile int g_testGuardRead;
+static void TestGuardSafeRead(uint64_t record, uint64_t raw, uint64_t address) { uint8_t b = 0; (void)record; (void)raw; g_testGuardRead = SafeRead((uintptr_t)address, &b, 1); }
+static void TestGuardRawRead(uint64_t record, uint64_t raw, uint64_t address) { (void)record; (void)raw; g_testGuardRead = *(volatile uint8_t*)(uintptr_t)address; }
+LONG CoXlTestGuardedRead(uintptr_t address, int safe, int* read)
+{
+    g_testGuardRead = -1;
+    const LONG fault = WorldTileGuardedCall((uintptr_t)(safe ? TestGuardSafeRead : TestGuardRawRead), NULL, address);
+    *read = g_testGuardRead;
+    return fault;
+}
+int CoXlTestSafeOwns(uintptr_t rip) { CONTEXT c; EXCEPTION_RECORD r; EXCEPTION_POINTERS p = {&r, &c}; memset(&c, 0, sizeof c); memset(&r, 0, sizeof r); c.Rip = rip; return co_safe_owns(&p); }
 /* op 0x63's render timed in the render_world wrapper (proto/difficulty_world_terrain.c NearRunAt): one consumer call
  * with the step's op, then the note the step's end makes. */
 uint64_t CoXlTestStamp63Run(void* original, int op, int consumer)
