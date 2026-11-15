@@ -321,7 +321,7 @@ static void LwInstallFrec(void)
     static int done; char t[4] = ""; LARGE_INTEGER hz;
     if (done++ || GetEnvironmentVariableA("HELLFORGE_LW_FREC", t, sizeof t) == 0 || t[0] != '1') return;
     g_lwFr.exe = (uintptr_t)GetModuleHandleA(NULL); QueryPerformanceFrequency(&hz); g_lwFr.toMs = 1000.0 / (double)hz.QuadPart;
-    g_lwFr.file = OpenLog(L"frames.bin");
+    g_lwFr.file = OpenResearchLog(L"frames.bin");
     if (g_lwFr.file == INVALID_HANDLE_VALUE) { Note("living world: test: frame recorder: frames.bin cannot be opened; off"); return; }
     uint32_t head[4] = {LW_FR_MAGIC, (uint32_t)sizeof(LwFrRec), 2, 0}; DWORD wrote;
     WriteFile(g_lwFr.file, head, sizeof head, &wrote, NULL);

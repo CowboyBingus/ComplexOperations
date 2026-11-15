@@ -140,7 +140,7 @@ static void RoadTrackBuild(void)
     const int flats = RoadTrackFlats();
     wchar_t name[48]; char line[112]; DWORD wrote;
     swprintf(name, 48, L"roadtrack-%ld.tsv", (long)g_world.levels);
-    HANDLE file = OpenLog(name);
+    HANDLE file = OpenResearchLog(name);
     for (uint32_t k = 0; k < n + (g_spurs.level == g_world.levels ? g_spurs.count : 0); k++)
     {
         const int spur = k >= n;

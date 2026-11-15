@@ -1283,14 +1283,169 @@ void CoXlTestMoverSet(int state) { g_move.state = state; }
 /* The build's wall-clock frames (proto/difficulty_world_move.c MoveWallAdd): one frame of `ms` in mover state `mv`; the
  * longest three and the count over 50 ms as the build's note gives them. */
 void CoXlTestMoveWall(double ms, int mv) { MoveWallAdd(ms, mv); }
+/* A build's frames over MOVE_SLOW_MS (wall 0: the mover's own work, 1: the wall clock), then the build's notes. */
+void CoXlTestMoveSlow(int wall, double ms, int mv, int ns, int op, int conf) { MoveSlowAdd(wall ? &g_moveCost.clock : &g_moveCost.tick, ms, mv, ns, op, conf); }
+void CoXlTestMoveCostNote(void) { MoveCostNote(); }
 /* The tile's stamp units as 0x2F left them (`units`, n of them, in the world at the context's +0x40), then one frame's
  * destroys within `budget` ms: 1 once all are gone. */
 void CoXlTestStampUnits(uint64_t* units, uint32_t n) { g_move.stUnit = units; g_move.stTemp = g_move.stUnits = n; g_move.stGone = 0; }
 int CoXlTestStampUnitsDestroy(double budget) { return MoveStampUnitsDestroy(budget); }
 uint32_t CoXlTestStampUnitsGone(void) { return g_move.stGone; }
+/* The stamp units' spawns for a tile at (cx, cy) (MoveStampsSelect): the stream table's poses for slot i, the plan's
+ * buckets (cell m, start[STAMP_PLAN_GRID^2 + 1] over cand), one frame within `budget` ms; then what it staged. */
+void CoXlTestStampPose(uint32_t i, const float* pose) { memcpy(g_streamPose[i], pose, sizeof g_streamPose[i]); }
+void CoXlTestStampPlan(float cell, const uint32_t* start, void* cand, uint32_t count)
+{ g_plan.cell = cell; memcpy(g_plan.start, start, sizeof g_plan.start); g_stamps.cand = (StampCandidate*)cand; g_plan.level = g_world.levels; g_plan.count = count; }
+void CoXlTestStampsSelectAt(float cx, float cy) { g_move.centre[0] = cx; g_move.centre[1] = cy; g_move.sel.on = 0; }
+int CoXlTestStampsSelect(uint64_t locs, uint32_t count, float half, double budget) { return MoveStampsSelect(locs, count, half, budget); }
+/* A tile's band (proto/difficulty_world_terrain.c NearBandStart): the tile at (cx, cy), the level's map as read at load;
+ * the synchronous pass, the thread's pass over a readback at `data`, its state and its end. */
+void CoXlTestBandInputs(float cx, float cy, uint32_t* level)
+{ g_near.centre[0] = cx; g_near.centre[1] = cy; g_levelMat.pixels = level; g_levelMat.level = g_world.levels; g_coarseMat.tex = 0; g_road.on = 0; }
+uint32_t CoXlTestBandSync(uint32_t* tile) { return NearMatBand(tile, g_levelMat.pixels); }
+void CoXlTestBandStart(const void* data)
+{ uint8_t d[24] = {0}; uint32_t w = 4096, f = 1; uint64_t at = (uint64_t)(uintptr_t)data; memcpy(d, &w, 4); memcpy(d + 4, &w, 4); memcpy(d + 8, &f, 4); memcpy(d + 16, &at, 8); NearBandStart(d, g_levelMat.pixels); }
+int CoXlTestBandState(void) { return (g_bandJob.on ? 1 : 0) | (g_bandJob.running ? 2 : 0) | (g_bandJob.abandoned ? 4 : 0); }
+uint32_t* CoXlTestBandCollect(int keep, uint32_t* taken) { *taken = g_bandJob.taken; return NearBandCollect(keep); }
+void CoXlTestBandAbandon(void) { NearBandAbandon(); }
+/* The tile's shape on a worker (proto/difficulty_world_terrain.c NearShapeBegin): the exe's image (pins asked again),
+ * its steps, its state (1 on, 2 running), a join; the ready poll for `handle` with the build's context. */
+void CoXlTestShapeExe(uintptr_t exe) { g_shapeExe = exe; g_shapePins = -1; }
+int CoXlTestShapeBegin(uint64_t world, uint64_t handle) { return NearShapeBegin(world, handle); }
+void CoXlTestShapeEnd(void) { NearShapeEnd(); }
+int CoXlTestShapeState(void) { return (g_shape.on ? 1 : 0) | (g_shape.running ? 2 : 0); }
+void CoXlTestShapeJoin(void) { NearShapeJoin("a test"); }
+/* the shape's other state: 1 stuck, 2 a finished handle kept (done), 4 the job shut out (gate 2); its age, a job inside */
+int CoXlTestShapeFlags(void) { return (g_shape.stuck ? 1 : 0) | (g_shape.done != 0 ? 2 : 0) | (g_shape.gate == 2 ? 4 : 0); }
+void CoXlTestShapeAge(ULONGLONG ms) { g_shape.since -= ms; }
+void CoXlTestShapeInside(void) { InterlockedExchange(&g_shape.gate, 1); }
+void CoXlTestShapeReset(void) { g_shape.stuck = 0; InterlockedExchange(&g_shape.on, 0); InterlockedExchange(&g_shape.running, 0); g_shape.done = 0; }
+void CoXlTestShapeForget(void) { NearShapeForget(); }
+void CoXlTestMoveBuilding(int on) { InterlockedExchange(&g_moveBuilding, on); }
+void CoXlTestShapeLevelLeft(void) { NearJobLevelLeft(); }
+int CoXlTestReadyTile(uint64_t context, uint64_t handle, int* state)
+{ g_near.handle = handle; g_near.polls = 0; g_near.state = NEAR_READY; uint64_t world = 0; int r = NearReadyTile(context, &world); *state = g_near.state; return r; }
+/* a pass as if under way (no thread): the conform's phase 11 must not wait for it */
+void CoXlTestBandPretend(int running) { g_bandJob.on = 1; g_bandJob.thread = NULL; g_bandJob.pixels = NULL; memset(g_bandJob.desc, 0, sizeof g_bandJob.desc); InterlockedExchange(&g_bandJob.running, running); }
+void CoXlTestBandJobTick(void) { NearBandTick(); }
+void CoXlTestBandJoin(void) { NearBandJoin(); }
+/* A moving tile's composite tiles on engine jobs (proto/difficulty_world_terrain.c NearJobTake): the test's build and
+ * submit in place of TerrainBuild's and the engine's, `steps` steps with composite tiles at first..last (tile 100 + s),
+ * the level in play (its object, +0x2C8 a generator), slot 0's block; a step's start, its draws, the joins. */
+void CoXlTestNearJobUse(int (*build)(int, uint64_t, uint8_t*, uint8_t*), uint64_t (*submit)(void*, uint64_t*, const char*, uint32_t, uint32_t, uint32_t, uint64_t))
+{ g_nearJobBuild = build; g_nearJobSubmit = submit; InterlockedExchange(&g_moveBuilding, 1); }
+void CoXlTestNearJobSteps(int steps, int first, int last)
+{
+    g_near.steps = steps;
+    for (int s = 0; s < steps; s++) { g_near.stepKind[s] = s >= first && s <= last ? NEAR_TILE : NEAR_RECORD; g_near.stepTile[s] = 100 + s; g_near.stepOp[s] = 0x3C; }
+}
+void CoXlTestNearJobLevel(uintptr_t level, uint8_t* block) { g_worldLevelLive = level; g_worldLevel = level; g_terrain.block = block; }
+int CoXlTestNearJobTake(int s, uint64_t context) { return NearJobTake(s, 0, 0, context, 0, 0, 0); }
+void CoXlTestNearJobDrawn(int s) { if (g_nearJob.drawing != NULL) NearJobDone(g_nearJob.drawing, s); }
+const uint8_t* CoXlTestNearJobDrawing(void) { return g_nearJob.drawing != NULL ? g_nearJob.drawing->record : NULL; }
+int CoXlTestNearJobOn(long* inflight) { *inflight = g_nearJob.inflight; return g_nearJob.on; }
+int CoXlTestNearRunStep(int s, uint64_t context, void* dispatch)
+{
+    g_worldDispatch = (WorldDispatchFn)dispatch;
+    g_near.step = s;
+    return NearRunStepIn(0, 0, context, 0, 0);
+}
+void CoXlTestNearJobLevelUpdate(uintptr_t level, uintptr_t moving) { NearJobLevelUpdate(level, moving); }
+void CoXlTestMoveLevelUpdate(uint64_t level, uintptr_t moving, void (*update)(uint64_t))
+{ g_move.levelPtr = moving; g_moveUpdate = (MoveUpdateFn)update; MoveLevelUpdate(level); g_moveUpdate = NULL; }
+DWORD CoXlTestNearJobTls(DWORD k) { DWORD old = g_tileRunnerTls; g_tileRunnerTls = k; return old; }
+void CoXlTestNearJobBroken(int broken) { g_tileJobsBroken = broken; }
+/* the slots' jobs as if submitted `ms` earlier; the block a job given up on holds (2 the level's, 1 the second), cleared */
+void CoXlTestNearJobAge(ULONGLONG ms) { for (int i = 0; i < NEAR_JOB_SLOTS; i++) g_nearJob.slot[i].since -= ms; }
+int CoXlTestNearJobStuckTake(void) { const int r = g_nearJobStuck == NULL ? 0 : g_nearJobStuck == g_terrain.block ? 2 : 1; g_nearJobStuck = NULL; return r; }
+void CoXlTestTerrainBuildNote(const char* text) { TerrainBuildNote("%s", text); }
+void CoXlTestNearJobArena(uint64_t context) { NearJobArena(context); }
+/* One conform step of a tile built in mission (`building`) from `phase`; the phase it left, the band's pixels. */
+int CoXlTestConformStep(int phase, int building, int* after, uint32_t** pixels)
+{
+    InterlockedExchange(&g_moveBuilding, building);
+    g_conform.phase = phase;
+    int r = NearConformStep(0, 0, 0, 0, 0);
+    *after = g_conform.phase; *pixels = g_matband.pixels;
+    return r;
+}
+uint32_t CoXlTestStampsStaged(const uint8_t** loc, const uint32_t** index, const uint64_t** unit, uint32_t* temp)
+{ *loc = g_move.stLoc; *index = g_move.stIndex; *unit = g_move.stUnit; *temp = g_move.stTemp; return g_move.stCount; }
 void CoXlTestMoveWallRead(double* wall, int* mv, uint32_t* slow) { for (int k = 0; k < 3; k++) { wall[k] = g_moveCost.wall[k]; mv[k] = g_moveCost.wallMv[k]; } *slow = g_moveCost.slow; }
 void CoXlTestMoveWallClear(void) { memset(&g_moveCost, 0, sizeof g_moveCost); }
 void CoXlTestMoverNear(int state) { g_near.state = state; }
+/* A slot's heights buffer touched off the game thread (proto/difficulty_world_move.c MoveGroundStart): start, the
+ * ready state's wait, the slot's buffer, the slot emptied, the thread out. */
+void CoXlTestGroundStart(int slot) { MoveGroundStart(slot); }
+/* Op 0x2F in slices (proto/difficulty_world_move.c MoveRun2F): the record and context as MV_STAMPS has them, the test's
+ * dispatcher; a call; the next batch; the record after it. */
+void CoXlTestMove2FBegin(const uint8_t* record, const uint8_t* ctx, void* dispatch)
+{ memcpy(g_move.one, record, sizeof g_move.one); memcpy(g_move.ctx, ctx, sizeof g_move.ctx); g_worldDispatch = (WorldDispatchFn)dispatch; g_move.phase = 0; Move2FReset(); }
+int CoXlTestMove2FRun(void) { return MoveRun2F(); }
+uint32_t CoXlTestMove2FBatch(void) { return g_move2F.batch; }
+const uint8_t* CoXlTestMove2FRecord(void) { return g_move.one; }
+void CoXlTestMove2FPins(void) { g_move2F.pinned = 0; }
+/* A SafeRead that faults inside a guarded call (proto/difficulty_world.c WorldTileFault): its failure return, not the
+ * call's fault; a plain read that faults there is still the call's. */
+static volatile int g_testGuardRead;
+static void TestGuardSafeRead(uint64_t record, uint64_t raw, uint64_t address) { uint8_t b = 0; (void)record; (void)raw; g_testGuardRead = SafeRead((uintptr_t)address, &b, 1); }
+static void TestGuardRawRead(uint64_t record, uint64_t raw, uint64_t address) { (void)record; (void)raw; g_testGuardRead = *(volatile uint8_t*)(uintptr_t)address; }
+LONG CoXlTestGuardedRead(uintptr_t address, int safe, int* read)
+{
+    g_testGuardRead = -1;
+    const LONG fault = WorldTileGuardedCall((uintptr_t)(safe ? TestGuardSafeRead : TestGuardRawRead), NULL, address);
+    *read = g_testGuardRead;
+    return fault;
+}
+int CoXlTestSafeOwns(uintptr_t rip) { CONTEXT c; EXCEPTION_RECORD r; EXCEPTION_POINTERS p = {&r, &c}; memset(&c, 0, sizeof c); memset(&r, 0, sizeof r); c.Rip = rip; return co_safe_owns(&p); }
+/* op 0x63's render timed in the render_world wrapper (proto/difficulty_world_terrain.c NearRunAt): one consumer call
+ * with the step's op, then the note the step's end makes. */
+uint64_t CoXlTestStamp63Run(void* original, int op, int consumer, int ran)
+{
+    g_nearRunOriginal = (NearRunFn)original; InterlockedExchange(&g_nearActive, 1);
+    g_near.steps = 1; g_near.step = 0; g_near.stepKind[0] = NEAR_RECORD; g_near.stepOp[0] = (uint8_t)op;
+    g_near.calls = ran == 1 ? 1 : 0; g_near.stampLeave = ran == 2; /* 1: the op mid-way, 2: done, its job queued */
+    const uint64_t r = NearRunAt(consumer, 1, 2, 3, 0, 5, 6, 7, 8);
+    InterlockedExchange(&g_nearActive, 0); g_nearRunOriginal = NULL; g_near.steps = 0; g_near.calls = 0; g_near.stampLeave = 0;
+    return r;
+}
+void CoXlTestStamp63Note(void) { NearStamp63Note(); }
+/* The spawn's material readback a slice a frame (proto/difficulty_world_terrain.c NearMatCopyStep): the band, the
+ * readback call, a slice, the rest, where it is (-1: none pending), a free of the pixels. */
+void CoXlTestMatCopySetup(uint64_t tex, uint32_t* pixels) { g_matband.tex = tex; g_matband.pixels = pixels; }
+uint64_t CoXlTestMatReadAsync(uint64_t src, uint64_t alloc, uint64_t dst, uint64_t done) { return NearMatReadAsync(0, src, alloc, dst, done, 0, 0, 0); }
+int CoXlTestMatCopyStep(double budget) { return NearMatCopyStep(budget); }
+void CoXlTestMatCopyFinish(void) { NearMatCopyFinish(); }
+long long CoXlTestMatCopyAt(void) { return g_matCopy.to != NULL ? (long long)g_matCopy.at : -1; }
+void CoXlTestMoveFreeNow(uint32_t* pixels) { MoveFreeNow(0, 0, 0, pixels); }
+int CoXlTestGroundWait(int slot) { return MoveGroundWait(slot); }
+uint16_t* CoXlTestGroundBuf(int slot) { return g_groundBuf[slot]; }
+void CoXlTestGroundClear(int slot) { if (g_groundBuf[slot] != NULL) VirtualFree(g_groundBuf[slot], 0, MEM_RELEASE); g_groundBuf[slot] = NULL; }
+int CoXlTestGroundRunning(void) { return g_groundPre.thread != NULL; }
+void* CoXlTestGroundThread(void) { return g_groundPre.thread; }
+/* The bounded wait for the job queue (proto/difficulty_world_terrain.c NearQueueWait) on a fake context's queue. */
+int CoXlTestQueueWait(uint64_t context, uint32_t* waits, uint32_t* quiet, uint32_t limit, uint32_t settle)
+{ return NearQueueWait(context, waits, quiet, limit, settle, "the test"); }
+/* MV_READY's bounded waits (proto/difficulty_world_move.c MoveReadyWait): a layer fill or a prefault that has not
+ * finished, the current wait begun `age` ms before (-1: none yet); `since` gets the wait's age after (-1: none). The
+ * fakes are taken down after. */
+const char* CoXlTestReadyWait(int layerBusy, int groundBusy, long long age, long long* since)
+{
+    HANDLE never = CreateEventA(NULL, TRUE, FALSE, NULL);
+    const int slot = g_move.slot;
+    g_move.slot = -1;
+    if (layerBusy) { g_layerJob.thread = never; InterlockedExchange(&g_layerJob.running, 1); }
+    if (groundBusy) { g_groundPre.thread = never; InterlockedExchange(&g_groundPre.done, 0); }
+    const ULONGLONG now = GetTickCount64() + 1000000;
+    g_move.waitSince = age < 0 ? 0 : now - (ULONGLONG)age;
+    const char* why = MoveReadyWait(now);
+    *since = g_move.waitSince == 0 ? -1 : (long long)(now - g_move.waitSince);
+    InterlockedExchange(&g_layerJob.running, 0); g_layerJob.thread = NULL;
+    if (groundBusy) g_groundPre.thread = NULL;
+    g_move.slot = slot;
+    CloseHandle(never);
+    return why;
+}
 uint32_t CoXlTestMoverFrames(void) { return g_move.frames; }
 /* The release's render-fence gate (proto/xl_free.c): the build's world, a tile's terrain handle, the pins asked again. */
 void CoXlTestMoverWorld(uint64_t world) { memcpy(g_move.ctx + 0x40, &world, 8); }

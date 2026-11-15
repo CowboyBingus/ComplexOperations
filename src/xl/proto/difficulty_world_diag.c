@@ -711,14 +711,14 @@ static void TdDump(const char* label, const void* data, uint32_t w, uint32_t h, 
 {
     wchar_t name[96];
     swprintf(name, 96, L"terrain-%ld-%02u-%hs.bin", (long)g_td.level, g_td.images, label);
-    HANDLE file = OpenLog(name);
+    HANDLE file = OpenResearchLog(name);
     if (file == INVALID_HANDLE_VALUE) return;
     DWORD wrote = 0;
     uint64_t bytes = (uint64_t)w * h * bpp, at = 0;
     while (at < bytes) { DWORD chunk = (DWORD)(bytes - at > 0x40000000u ? 0x40000000u : bytes - at); if (!WriteFile(file, (const uint8_t*)data + at, chunk, &wrote, NULL)) break; at += wrote; }
     CloseHandle(file);
     swprintf(name, 96, L"terrain-%ld-%02u-%hs.txt", (long)g_td.level, g_td.images, label);
-    file = OpenLog(name);
+    file = OpenResearchLog(name);
     if (file == INVALID_HANDLE_VALUE) return;
     char text[400];
     int n = snprintf(text, sizeof text, "label %s\nkind %s\ncolumns %u\nrows %u\nbytes_per_sample %u\nmetres_per_sample %g\nworld_m %g\ndisk_m %g\nrows_flipped %d\nworld_scale %g\n",
@@ -939,7 +939,7 @@ static void CcImage(const char* label, const uint8_t* data, uint32_t w, uint32_t
     for (size_t i = 0; i < bytes; i++) hash = (hash ^ data[i]) * 0x100000001B3ull;
     wchar_t name[128];
     swprintf(name, 128, L"coarse-compare-%hs-%hs.bin", CcPipeline(), label);
-    HANDLE file = OpenLog(name);
+    HANDLE file = OpenResearchLog(name);
     if (file != INVALID_HANDLE_VALUE)
     {
         DWORD wrote = 0;
@@ -1146,7 +1146,7 @@ static void TdFlags(void)
 /* One line per level in terrain-diag-index.tsv (the session's logs), for comparing levels and runs at a glance. */
 static void TdIndexLine(void)
 {
-    HANDLE file = OpenLog(L"terrain-diag-index.tsv");
+    HANDLE file = OpenResearchLog(L"terrain-diag-index.tsv");
     if (file == INVALID_HANDLE_VALUE) return;
     DWORD wrote;
     LARGE_INTEGER size = {0};
@@ -1191,7 +1191,7 @@ static void TdReport(void)
     TdFlags();
     wchar_t name[64];
     swprintf(name, 64, L"terrain-diag-%ld.json", (long)g_td.level);
-    HANDLE file = OpenLog(name);
+    HANDLE file = OpenResearchLog(name);
     if (file == INVALID_HANDLE_VALUE) return;
     static char head[1024], ops[96 * 1024];
     DWORD wrote;
