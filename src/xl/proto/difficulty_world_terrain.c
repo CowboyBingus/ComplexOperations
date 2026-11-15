@@ -1765,6 +1765,26 @@ static void NearNamesInstall(uintptr_t game)
     if (g_nearReset.pins < 0) Note("difficulty: near terrain: the game's history reset is not the reviewed code; a tile's finalize leaves the ambient to refill");
 }
 
+/* A build's op 0x63 renders when the job consumer drains its job, later in the frame than the step that queued it, so
+ * the mover's own time leaves it out: the consumer's renders while the step is 0x63 are timed here (op 0x63's split
+ * is sized from it). Written on the consumer's thread, noted on the game thread once the queue is empty. */
+static struct { volatile LONG n; double ms, max; } g_stamp63;
+
+static int NearStepIs63(void)
+{
+    const int s = g_near.step;
+    return g_moveBuilding && s >= 0 && s < g_near.steps && s < NEAR_STEPS && g_near.stepKind[s] == NEAR_RECORD && g_near.stepOp[s] == 0x63;
+}
+
+static void NearStamp63Note(void)
+{
+    if (g_stamp63.n == 0) return;
+    MemoryBarrier();
+    Note("difficulty: moving tiles: op 0x63's render (the job consumer's while its step was live): %ld calls, %.1f ms, the longest %.1f ms",
+        (long)g_stamp63.n, g_stamp63.ms, g_stamp63.max);
+    g_stamp63.ms = g_stamp63.max = 0; InterlockedExchange(&g_stamp63.n, 0);
+}
+
 /* render_world ([api+0x10]+0x28) for the player's view (game 0xAB7AFC) and the merge's job consumer (0xAB0590, return
  * 0xAB07E5), one after the other on one thread: the consumer's calls draw the replay's jobs in the tile's frame. */
 static uint64_t NearRunAt(int consumer, uint64_t a, uint64_t camera, uint64_t c, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
@@ -1790,7 +1810,15 @@ static uint64_t NearRunAt(int consumer, uint64_t a, uint64_t camera, uint64_t c,
             else if (!(hasOffset || hasScale)) { offset(gui, 0.0f, 0.0f); scale(gui, 1.0f, 1.0f); }
         }
     }
-    return g_nearRunOriginal(a, camera, c, d, e, f, g, h);
+    if (!(g_nearActive && consumer && NearStepIs63())) return g_nearRunOriginal(a, camera, c, d, e, f, g, h);
+    LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
+    const uint64_t r = g_nearRunOriginal(a, camera, c, d, e, f, g, h);
+    QueryPerformanceCounter(&t1);
+    const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+    g_stamp63.ms += ms; if (ms > g_stamp63.max) g_stamp63.max = ms;
+    MemoryBarrier();
+    InterlockedIncrement(&g_stamp63.n);
+    return r;
 }
 
 /* [api+0x10]+0x28 from the job consumer (return game 0xAB07E5): r9 points at entry +0x58 of the consumer's copy of the
@@ -2724,6 +2752,7 @@ static int NearRunStepIn(uint64_t records, uint32_t end, uint64_t context, uint6
         if (q != 0 && q != 0xFFFFFFFFu && ++g_near.stampWaits < 1200) return 0;
         NearCameras(NEAR_SIDE / 2, NEAR_SIDE / 2, g_near.centre[0], g_near.centre[1]);
         g_near.stampLeave = 0;
+        NearStamp63Note();
         return q == 0 ? 1 : -1;
     }
     if (g_near.stepKind[s] == NEAR_RECORD && g_near.stepOp[s] == 0x3C && NearBaseOn()) return NearBaseStep(context);
@@ -6520,6 +6549,7 @@ static int TerrainNearReplay(uint64_t records, uint32_t end, uint32_t at, uint64
         if (!NearPlan(records, at)) { g_near.R = 0; Note("difficulty: near terrain: the level's merge records are not all there; no tile"); return 0; }
         g_near.records = records; g_near.end = end; g_near.at65 = at;
         g_near.step = 0; g_near.calls = 0; g_near.building = 0; g_near.tilesDrawn = 0; g_near.tilesFailed = 0; g_near.waits = 0; g_near.frames = 0;
+        g_stamp63.ms = g_stamp63.max = 0; InterlockedExchange(&g_stamp63.n, 0);
         g_near.started = GetTickCount64();
         g_near.state = NEAR_START;
     }
@@ -8494,10 +8524,12 @@ static void NearWorkQuadNote(uint64_t world, uint64_t handle)
     uint8_t* e = ((NearShapeFindFn)(NearShapeExe() + 0x1B86C0u))(world + NEAR_SHAPE_TABLE, &key);
     if (e != NULL && !SafeRead((uintptr_t)e, &tree, 8) && tree != 0) NearQuadRead(tree, 0, &nodes, &low, &high);
     uint64_t obj = 0, data = 0, dims = 0; uint32_t cols = 0, rows = 0; float z[2] = {0, 0}; uint16_t lo = 0, hi = 0;
-    const int scanned = e != NULL && !SafeRead((uintptr_t)e + 0x10, &obj, 8) && obj != 0 && !SafeRead(obj + 0x40, &data, 8) &&
+    const int found = e != NULL && !SafeRead((uintptr_t)e + 0x10, &obj, 8) && obj != 0 && !SafeRead(obj + 0x40, &data, 8) &&
         !SafeRead((uintptr_t)e + 0x38, &dims, 8) && dims != 0 && !SafeRead(dims + 0x14, &cols, 4) && !SafeRead(dims + 0x18, &rows, 4) &&
-        !SafeRead((uintptr_t)e + 0x2C, z, 8) && NearHeightRange(data, cols, rows, &lo, &hi);
+        !SafeRead((uintptr_t)e + 0x2C, z, 8);
     leave(world + NEAR_SHAPE_LOCK);
+    /* the 32 MiB scan after the leave: the heights are the terrain's own until this thread destroys it */
+    const int scanned = found && NearHeightRange(data, cols, rows, &lo, &hi);
     Note("difficulty: near terrain: the tile's render quadtree (work() on the game thread): %u nodes, root %.2f..%.2f m", nodes, (double)low, (double)high);
     if (scanned) NearHeightNote("work()'s, scanned on the game thread", lo, hi, z);
 }

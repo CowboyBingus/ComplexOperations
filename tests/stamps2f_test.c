@@ -17,6 +17,9 @@ int CoXlTestMove2FRun(void);
 uint32_t CoXlTestMove2FBatch(void);
 const uint8_t* CoXlTestMove2FRecord(void);
 void CoXlTestMove2FPins(void);
+uint64_t CoXlTestStamp63Run(void* original, int op, int consumer);
+void CoXlTestStamp63Note(void);
+void CoXlTestMoveBuilding(int on);
 
 static int g_failed;
 static const char* g_case;
@@ -39,11 +42,33 @@ static uint64_t WorldCheck(uint64_t world) { Log(1, world, 0, 0); if (g_worldOff
 static uint32_t UnitId(uint64_t unit, uint32_t index) { Log(2, unit, index, 0); Spin(3.0); return index % 4 == 0 ? 0 : index + 1000; }
 static char Live(uint32_t id) { Log(3, id, 0, 0); return (char)(id % 2 == 1); }
 static void Touch(uint32_t id) { Log(4, id, 0, 0); }
-static uint8_t g_proxy[0x40], g_flagsAt[0x40];
-static uint64_t Obj(uint32_t id, uint32_t zero) { Log(5, id, zero, 0); return id == 1011 ? (uint64_t)(uintptr_t)g_proxy : (uint64_t)id * 16; }
+/* the stamp proxies by id % 32 (live ids are odd): the flags 0x2BD140 reads, through +0x30 (r % 8 == 1) or +0x38 (3, 5), or
+ * none (7); 12 values in all, more than the 8 the tally names */
+static uint8_t g_proxies[32][0x40], g_flagTargets[32][0x40];
+static int FlagsOf(uint32_t id, uint32_t* f)
+{
+    const uint32_t r = id % 32, high = (r / 8) << 8;
+    switch (r % 8) { case 1: *f = (r & 8 ? 0x81u : 0x83u) | high; return 1; case 3: *f = (r == 11 ? 0x02u : 0x01u) | high; return 1; case 5: *f = 0x40 | high; return 1; default: return 0; }
+}
+static void Proxies(void)
+{
+    for (uint32_t r = 1; r < 32; r += 2)
+    {
+        uint32_t f = 0; uint64_t at = (uint64_t)(uintptr_t)g_flagTargets[r];
+        if (!FlagsOf(r, &f)) continue;
+        if (r % 8 == 1) { memcpy(g_proxies[r] + 0x30, &at, 8); memcpy(g_flagTargets[r] + 0x2C, &f, 4); }
+        else { memcpy(g_proxies[r] + 0x38, &at, 8); memcpy(g_flagTargets[r] + 0x20, &f, 4); }
+    }
+}
+static uint64_t Obj(uint32_t id, uint32_t zero) { Log(5, id, zero, 0); return (uint64_t)(uintptr_t)g_proxies[id % 32]; }
 static void SetIndex(uint64_t obj, uint32_t index) { Log(6, obj, index, 0); }
 static uint64_t Mat(uint64_t obj, uint32_t hash) { Log(7, obj, hash, 0); return obj + 1; }
 static void Scalar(uint64_t mat, uint32_t hash, float v) { uint32_t bits; memcpy(&bits, &v, 4); Log(8, mat, hash, bits); }
+
+/* the game's render_world for the 0x63 timing: 2 ms */
+static int g_renders;
+static uint64_t Render2ms(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
+{ (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)g; (void)h; g_renders++; Spin(2000.0); return 0x77; }
 
 /* 0xF44712..0xF4484A transcribed (the reference) */
 static int ReferencePhaseB(uint64_t pass, uint64_t context)
@@ -70,7 +95,7 @@ static int ReferencePhaseB(uint64_t pass, uint64_t context)
 
 /* the case (0xC158AA): phase A up to the bound read from the image, in location order; the gate as the image has it */
 static int g_calls, g_badBound;
-static uint32_t g_lastBound;
+static uint32_t g_lastBound, g_firstBound;
 static uint64_t Dispatch(uint64_t record, uint64_t context, uint64_t index, uint64_t d, uint64_t phase, uint64_t f, uint64_t g, uint64_t h)
 {
     (void)d; (void)f; (void)g; (void)h;
@@ -79,6 +104,7 @@ static uint64_t Dispatch(uint64_t record, uint64_t context, uint64_t index, uint
     memcpy(&bound, g_image + 0xF443FCu, 4);
     memcpy(&idx, (void*)(uintptr_t)(pass + 0x48), 4);
     const int gate = g_image[0xF4470Cu] == 0x0F && g_image[0xF4470Du] == 0x85;
+    if (g_calls == 0) g_firstBound = bound;
     g_lastBound = bound; g_calls++;
     *(uint8_t*)(uintptr_t)phase = 1;
     uint32_t end = idx + bound < g_count ? idx + bound : g_count;
@@ -127,7 +153,7 @@ int main(void)
     api[1] = (uint64_t)(uintptr_t)t8; api[3] = (uint64_t)(uintptr_t)t18; api[5] = (uint64_t)(uintptr_t)t28; api[10] = (uint64_t)(uintptr_t)t50; api[0x22] = (uint64_t)(uintptr_t)t110;
     uint64_t apiAt = (uint64_t)(uintptr_t)api; memcpy(g_image + 0x3326308u, &apiAt, 8);
     GameBytes();
-    { uint64_t at = (uint64_t)(uintptr_t)g_flagsAt; memcpy(g_proxy + 0x38, &at, 8); uint32_t flags = 0x83; memcpy(g_flagsAt + 0x20, &flags, 4); }
+    Proxies();
 
     g_case = "the reference: the game's call whole (phase B in the same call), its calls logged";
     Record();
@@ -139,6 +165,27 @@ int main(void)
     const int refN = g_logN;
     memcpy(ref, g_log, sizeof(Call) * (size_t)(refN < 200000 ? refN : 200000));
     CHECK(refN > COUNT && refN < 200000);
+    /* the tally line the reference's proxies should give: counted as 0x2BD140 reads them, values in first-seen order */
+    char flagsLine[512];
+    {
+        uint32_t n = 0, noop = 0, bit7 = 0, hide = 0, unread = 0, values = 0, other = 0, value[8], times[8];
+        for (int k = 0; k < refN; k++)
+        {
+            if (ref[k].kind != 5) continue;
+            uint32_t f = 0, v = 0;
+            n++;
+            if (!FlagsOf((uint32_t)ref[k].a, &f)) { unread++; continue; }
+            if ((f & 0x83) == 0) noop++; else if (f & 0x80) bit7++; else hide++;
+            while (v < values && value[v] != f) v++;
+            if (v == values && v < 8) { value[v] = f; times[v] = 0; values++; }
+            if (v < values) times[v]++; else other++;
+        }
+        int w = snprintf(flagsLine, sizeof flagsLine, "the stamp terrains' render flags over %u: hide a no-op (no bit of 0x83) %u, bit 7 %u, hideable (bit 0 "
+            "or 1, no bit 7) %u, unread %u; values:", n, noop, bit7, hide, unread);
+        for (uint32_t v = 0; v < values; v++) w += snprintf(flagsLine + w, sizeof flagsLine - (size_t)w, " 0x%X x%u;", value[v], times[v]);
+        snprintf(flagsLine + w, sizeof flagsLine - (size_t)w, " %u of others", other);
+        CHECK(values == 8 && other > 0 && noop > 0 && bit7 > 0 && hide > 0 && unread > 0);
+    }
 
     g_case = "in slices: batches from the last call's time, phase B a slice a frame; the same calls, arguments and order";
     Record();
@@ -155,6 +202,8 @@ int main(void)
     }
     CHECK(r == 1 && restored && boundOk && Restored());
     CHECK(g_calls >= 2 && phaseA >= 2); /* 3000 locations at 20 us: a 3 ms batch is ~150 */
+    CHECK(g_firstBound == 16); /* the first build's first batch */
+    const uint32_t batchEnd = CoXlTestMove2FBatch();
     CHECK(g_lastBound < 1023 && CoXlTestMove2FBatch() >= 1 && CoXlTestMove2FBatch() <= 1023);
     CHECK(slicesB >= 4); /* two world checks that said no, then more than one slice */
     /* the world check: twice more here (it said no twice); every other call the same, in the same order */
@@ -170,11 +219,11 @@ int main(void)
         CHECK(same && k >= refN && m >= g_logN && checksRef == 1 && checks == 3);
     }
     CHECK(fake_host_logged("op 0x2F in") && fake_host_logged("for 3000 locations"));
-    CHECK(fake_host_logged("the first stamp terrain's render flags 0x83 (bits 0/1 1/1, bit 7 1)"));
+    CHECK(fake_host_logged(flagsLine));
 
-    g_case = "in slices with the world there at once: the calls the reference's to the one";
+    g_case = "in slices with the world there at once: the calls the reference's to the one; the next build starts at the last batch";
     Record();
-    g_logN = 0; g_calls = 0; g_worldOff = 0;
+    g_logN = 0; g_calls = 0; g_worldOff = 0; g_fake.log[0] = 0;
     CoXlTestMove2FBegin(g_record, g_ctx, (void*)Dispatch);
     frames = 0; slicesB = 0;
     while ((r = CoXlTestMove2FRun()) == 0 && frames < 100000)
@@ -184,6 +233,7 @@ int main(void)
         if (idx >= COUNT) slicesB++;
     }
     CHECK(r == 1 && Restored() && g_logN == refN && slicesB >= 2);
+    CHECK(g_firstBound == batchEnd && fake_host_logged(flagsLine)); /* the tally counted afresh each build */
     {
         int same = g_logN == refN;
         for (int k = 0; same && k < refN; k++)
@@ -202,6 +252,26 @@ int main(void)
     CHECK(r == 1 && g_lastBound == 0x3FF && g_calls == 3 && Restored() && g_logN == refN);
     CHECK(fake_host_logged("op 0x2F is not the reviewed code"));
     g_fake.strictCode = 0;
+
+    g_case = "op 0x63's render timed in the render_world wrapper: the consumer's calls in a build's 0x63 step only";
+    {
+        CoXlTestMoveBuilding(1);
+        g_fake.log[0] = 0;
+        CHECK(CoXlTestStamp63Run((void*)Render2ms, 0x63, 1) == 0x77 && CoXlTestStamp63Run((void*)Render2ms, 0x63, 1) == 0x77);
+        CHECK(CoXlTestStamp63Run((void*)Render2ms, 0x63, 0) == 0x77 && CoXlTestStamp63Run((void*)Render2ms, 0x40, 1) == 0x77 && g_renders == 4);
+        CoXlTestStamp63Note();
+        const char* at = strstr(g_fake.log, "op 0x63's render (the job consumer's while its step was live): ");
+        long n = 0; double ms = 0, max = 0;
+        CHECK(at != NULL && sscanf(at + strlen("op 0x63's render (the job consumer's while its step was live): "), "%ld calls, %lf ms, the longest %lf ms", &n, &ms,
+            &max) == 3 && n == 2 && ms >= 4.0 && max >= 2.0 && max < ms);
+        g_fake.log[0] = 0;
+        CoXlTestStamp63Note(); /* noted once: nothing more until the next 0x63 */
+        CHECK(!fake_host_logged("op 0x63's render"));
+        CoXlTestMoveBuilding(0);
+        CHECK(CoXlTestStamp63Run((void*)Render2ms, 0x63, 1) == 0x77);
+        CoXlTestStamp63Note();
+        CHECK(!fake_host_logged("op 0x63's render")); /* the level's own replay is not a build */
+    }
 
     if (g_failed) { printf("stamps2f: %d check(s) failed\n", g_failed); return 1; }
     printf("stamps2f: all checks passed\n");

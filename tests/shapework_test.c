@@ -50,7 +50,8 @@ static struct { uint64_t tree, heights, cols, rows, a5, a6, a7, a8, a9, a10, a11
 static struct { void* fn; uint64_t* data; uint32_t queue, priority, count; int calls; } g_submit;
 
 static void Enter(uint64_t lock) { if (lock == g_world + 0x230520u) { g_depth++; if (g_depth > g_maxDepth) g_maxDepth = g_depth; } }
-static void Leave(uint64_t lock) { if (lock == g_world + 0x230520u) g_depth--; }
+static int g_leaveMark; /* the leave after work(): a height written there shows the scan ran after it */
+static void Leave(uint64_t lock) { if (lock == g_world + 0x230520u) { g_depth--; if (g_leaveMark && g_works == 1) { g_hbuf[777] = 65000; g_leaveMark = 0; } } }
 static uint8_t* Find(uint64_t table, uint64_t* key) { g_lockedFind += g_depth == 1; return table == g_world + 0x230550u && *key == g_handle ? g_entry : NULL; }
 static uint64_t Hash(uint64_t text, uint64_t length, uint64_t seed)
 {
@@ -281,10 +282,11 @@ int main(void)
         CoXlTestMoveBuilding(0);
         Entry(4096, 4096);
         { uint32_t n = 21845; memcpy(g_treeHolder + 0x38, &n, 4); g_nodes[0] = -1.25f; g_nodes[1] = 640.5f; }
-        g_works = g_finals = 0; g_submit.calls = 0; g_fake.log[0] = 0;
+        g_works = g_finals = 0; g_submit.calls = 0; g_fake.log[0] = 0; g_leaveMark = 1;
         CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 0 && g_works == 1 && g_finals == 1 && g_submit.calls == 0);
         CHECK(fake_host_logged("the tile's render quadtree (work() on the game thread): 21845 nodes, root -1.25..640.50 m"));
-        CHECK(fake_host_logged("the tile's heights (work()'s, scanned on the game thread): 300..64000 = -495.42..476.58 m"));
+        CHECK(fake_host_logged("the tile's heights (work()'s, scanned on the game thread): 300..65000 = -495.42..")); /* scanned after the leave */
+        g_hbuf[777] = 1000; g_leaveMark = 0;
         CoXlTestNearJobLevelUpdate((uintptr_t)level, 0x1234); /* the load's own level updates: nothing joined, nothing ended */
         CHECK(CoXlTestShapeState() == 0 && g_quad.calls == 0 && g_works == 1);
         CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 0 && g_works == 2 && g_submit.calls == 0); /* never a job */

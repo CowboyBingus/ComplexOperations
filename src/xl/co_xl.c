@@ -1385,6 +1385,17 @@ int CoXlTestMove2FRun(void) { return MoveRun2F(); }
 uint32_t CoXlTestMove2FBatch(void) { return g_move2F.batch; }
 const uint8_t* CoXlTestMove2FRecord(void) { return g_move.one; }
 void CoXlTestMove2FPins(void) { g_move2F.pinned = 0; }
+/* op 0x63's render timed in the render_world wrapper (proto/difficulty_world_terrain.c NearRunAt): one consumer call
+ * with the step's op, then the note the step's end makes. */
+uint64_t CoXlTestStamp63Run(void* original, int op, int consumer)
+{
+    g_nearRunOriginal = (NearRunFn)original; InterlockedExchange(&g_nearActive, 1);
+    g_near.steps = 1; g_near.step = 0; g_near.stepKind[0] = NEAR_RECORD; g_near.stepOp[0] = (uint8_t)op;
+    const uint64_t r = NearRunAt(consumer, 1, 2, 3, 0, 5, 6, 7, 8);
+    InterlockedExchange(&g_nearActive, 0); g_nearRunOriginal = NULL; g_near.steps = 0;
+    return r;
+}
+void CoXlTestStamp63Note(void) { NearStamp63Note(); }
 /* The spawn's material readback a slice a frame (proto/difficulty_world_terrain.c NearMatCopyStep): the band, the
  * readback call, a slice, the rest, where it is (-1: none pending), a free of the pixels. */
 void CoXlTestMatCopySetup(uint64_t tex, uint32_t* pixels) { g_matband.tex = tex; g_matband.pixels = pixels; }

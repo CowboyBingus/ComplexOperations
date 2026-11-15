@@ -544,6 +544,8 @@ static int MoveRunRecord(void)
 #define MOVE_2F_MS 3.0
 static const struct { uint32_t at; const char* bytes; } kMove2FPins[] = {
     {0xF443F9u, "41 8D 8B FF 03 00 00"},
+    {0xF44408u, "44 3B F1 4C 89 A4 24 98 00 00 00 41 0F 42 CE 4C 89 AC 24 90 00 00 00 4C 89 BC 24 88 00 00 00 89"},
+    {0xF44428u, "44 24 24 44 3B D9 0F 83 C9 02 00 00"}, /* the batch's clamp to the count and its loop test */
     {0xF44705u, "44 89 58 48 45 3B DE 0F 85 3A 01 00 00 48 8B 05 EF 1B 3E 02 48 8B 48 08 48 8B 41 48 48 8B 4B 40"},
     {0xF44725u, "FF D0 85 C0 0F 84 1D 01 00 00 45 33 ED 45 85 F6 0F 84 0D 01 00 00 8B 44 24 20 4C 8D 77 08 4C 8D"},
     {0xF44745u, "A6 A8 00 00 00 66 0F 1F 44 00 00 41 83 7E F8 FF 0F 84 D6 00 00 00 41 8B 76 FC 33 FF 49 8B 2C 24"},
@@ -556,7 +558,12 @@ static const struct { uint32_t at; const char* bytes; } kMove2FPins[] = {
     {0xF44825u, "41 28 48 8B C8 41 FF 10 8B 44 24 20 41 FF C5 49 81 C4 E0 00 00 00 49 83 C6 0C 44 3B E8 0F 82 08"},
     {0xF44845u, "FF FF FF 32 C0 EB 02 B0 01"},
 };
-static struct { int pinned, phaseB, done, flagsRead; uint32_t batch, at, calls, slices, flags; double msA, msB; } g_move2F;
+static struct { int pinned, phaseB, done; uint32_t batch, at, calls, slices; double msA, msB; } g_move2F;
+/* Every stamp proxy phase B touches, for the render flags op 0x63's split would hide by (0x2BD140 reads them). They are
+ * read after the slice, outside the guard: a SafeRead fault inside it would be taken for phase B's own. */
+static uint64_t g_move2FObj[MOVE_STAMPS_MAX];
+static uint32_t g_move2FObjN;
+static struct { uint32_t n, noop, bit7, hideable, unread, values, other; uint32_t value[8], times[8]; } g_move2FFlags;
 
 static int Move2FPinned(void)
 {
@@ -625,12 +632,7 @@ static void Move2FPhaseB(uint64_t pass, uint64_t record, uint64_t context)
         if (id == 0) continue;
         ((IdOnlyFn)*(uint64_t*)(uintptr_t)(a18 + 0x450))(id);
         const uint64_t obj = ((ObjFn)*(uint64_t*)(uintptr_t)(a18 + 0x460))(id, 0);
-        if (!g_move2F.flagsRead) /* the show/hide call's flags (0x2BD140): [[obj+0x30]+0x2C], else [[obj+0x38]+0x20] */
-        {
-            uint64_t r30 = 0, r38 = 0;
-            g_move2F.flagsRead = !SafeRead(obj + 0x30, &r30, 8) && (r30 != 0 ? !SafeRead(r30 + 0x2C, &g_move2F.flags, 4) :
-                !SafeRead(obj + 0x38, &r38, 8) && r38 != 0 && !SafeRead(r38 + 0x20, &g_move2F.flags, 4)) ? 1 : -1;
-        }
+        if (g_move2FObjN < MOVE_STAMPS_MAX) g_move2FObj[g_move2FObjN++] = obj;
         ((IndexFn)*(uint64_t*)(uintptr_t)(a110 + 0x18))(obj, i + 1);
         const uint64_t mat = ((MatFn)*(uint64_t*)(uintptr_t)(a110 + 0x10))(obj, 0xF2760503u);
         ((ScalarFn)*(uint64_t*)(uintptr_t)a28)(mat, 0xE0D994FAu, 0.0f);
@@ -642,14 +644,46 @@ static void Move2FPhaseB(uint64_t pass, uint64_t record, uint64_t context)
     g_move2F.done = i >= count;
 }
 
+/* The slice's proxies' flags as 0x2BD140 reads them: [[obj+0x30]+0x2C], else [[obj+0x38]+0x20]. Its hide does nothing
+ * without a bit of 0x83; bits 0 and 1 name the culling sets it moves, bit 7 one it leaves. */
+static void Move2FFlagsTally(void)
+{
+    for (uint32_t k = 0; k < g_move2FObjN; k++)
+    {
+        uint64_t r30 = 0, r38 = 0; uint32_t f = 0;
+        g_move2FFlags.n++;
+        const int read = !SafeRead(g_move2FObj[k] + 0x30, &r30, 8) && (r30 != 0 ? !SafeRead(r30 + 0x2C, &f, 4) :
+            !SafeRead(g_move2FObj[k] + 0x38, &r38, 8) && r38 != 0 && !SafeRead(r38 + 0x20, &f, 4));
+        if (!read) { g_move2FFlags.unread++; continue; }
+        if ((f & 0x83) == 0) g_move2FFlags.noop++;
+        else if (f & 0x80) g_move2FFlags.bit7++;
+        else g_move2FFlags.hideable++;
+        uint32_t v = 0;
+        while (v < g_move2FFlags.values && g_move2FFlags.value[v] != f) v++;
+        if (v == g_move2FFlags.values && v < 8) { g_move2FFlags.value[v] = f; g_move2FFlags.values++; }
+        if (v < g_move2FFlags.values) g_move2FFlags.times[v]++; else g_move2FFlags.other++;
+    }
+    g_move2FObjN = 0;
+}
+
 static int MoveRun2FDone(uint32_t count)
 {
     Note("difficulty: moving tiles: op 0x2F in %u calls (%.1f ms) and %u slices of its last part (%.1f ms) for %u locations", g_move2F.calls, g_move2F.msA,
         g_move2F.slices, g_move2F.msB, count);
-    /* op 0x63's split hides stamps through the culling sets the flags' bits 0 and 1 name; bit 7's set it leaves */
-    if (g_move2F.flagsRead > 0) Note("difficulty: moving tiles: the first stamp terrain's render flags 0x%X (bits 0/1 %u/%u, bit 7 %u)", g_move2F.flags,
-        g_move2F.flags & 1, (g_move2F.flags >> 1) & 1, (g_move2F.flags >> 7) & 1);
-    else if (g_move2F.flagsRead < 0) Note("difficulty: moving tiles: the first stamp terrain's render flags did not read");
+    if (g_move2FFlags.n != 0)
+    {
+        char values[256]; size_t n = 0; values[0] = 0;
+        for (uint32_t v = 0; v < g_move2FFlags.values && n + 1 < sizeof values; v++)
+        {
+            int w = snprintf(values + n, sizeof values - n, " 0x%X x%u;", g_move2FFlags.value[v], g_move2FFlags.times[v]);
+            if (w < 0) break;
+            n += (size_t)w;
+        }
+        Note("difficulty: moving tiles: the stamp terrains' render flags over %u: hide a no-op (no bit of 0x83) %u, bit 7 %u, hideable (bit 0 or 1, no bit 7) %u, "
+            "unread %u; values:%s %u of others", g_move2FFlags.n, g_move2FFlags.noop, g_move2FFlags.bit7, g_move2FFlags.hideable, g_move2FFlags.unread, values,
+            g_move2FFlags.other);
+    }
+    else Note("difficulty: moving tiles: the stamp terrains' render flags were not tallied (no stamp in the mod's last part)");
     uint64_t arena = 0;
     memcpy(&arena, g_move.ctx, 8);
     typedef void (*ArenaFn)(uint64_t arena);
@@ -667,7 +701,7 @@ static int MoveRun2F(void)
     LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz);
     if (!g_move2F.phaseB)
     {
-        if (g_move2F.batch == 0) g_move2F.batch = 64;
+        if (g_move2F.batch == 0) g_move2F.batch = 16; /* the first build's guess; later builds start at the last one's */
         SafeRead(pass + 0x48, &before, 4);
         volatile uint32_t index = 0;
         volatile int calls = 0;
@@ -693,12 +727,24 @@ static int MoveRun2F(void)
     }
     const uint32_t at = g_move2F.at;
     LONG fault = WorldTileGuardedCall((uintptr_t)Move2FPhaseB, g_move.one, (uint64_t)(uintptr_t)g_move.ctx);
-    if (fault) { Note("difficulty: moving tiles: op 0x2F's last part faulted (%08lX)", (unsigned long)fault); return -1; }
+    if (fault)
+    {
+        const uintptr_t where = TileGuardSelf()->at, exe = (uintptr_t)GetModuleHandleW(NULL);
+        Note("difficulty: moving tiles: op 0x2F's last part faulted (%08lX at %p: game.dll+0x%llX, exe+0x%llX)", (unsigned long)fault, (void*)where,
+            (unsigned long long)(where - g_world.game), (unsigned long long)(where - exe));
+        return -1;
+    }
+    Move2FFlagsTally();
     if (g_move2F.at > at) g_move.waits = 0;
     if (!g_move2F.done) return 0;
     return MoveRun2FDone(count);
 }
-static void Move2FReset(void) { const int pinned = g_move2F.pinned; memset(&g_move2F, 0, sizeof g_move2F); g_move2F.pinned = pinned; }
+static void Move2FReset(void)
+{
+    const int pinned = g_move2F.pinned; const uint32_t batch = g_move2F.batch;
+    memset(&g_move2F, 0, sizeof g_move2F); memset(&g_move2FFlags, 0, sizeof g_move2FFlags);
+    g_move2F.pinned = pinned; g_move2F.batch = batch; g_move2FObjN = 0;
+}
 
 static uint64_t MoveWorld(void)
 {
