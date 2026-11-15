@@ -82,6 +82,7 @@ static struct
     int pkgPending; uint32_t pkgFrames;
     uint32_t nodeOld; /* [R+0x18] when the merge began: a camera node destroyed before, never this build's */
     int cutNoted;     /* MoveBuildLeft has ended or noted this build */
+    ULONGLONG readySince; /* MV_READY entered: its waits on other threads are bounded from here */
     int shipSeen;     /* the ship was reached with this build left: its stamp units are never destroyed after that */
     int r108Out;      /* MoveTeardown's R+0x108: 0 none, 1 destroyed, 2 not in the world's list any more */
     uint32_t ringWaits; /* frames the stamp units' destroy waited for the async spawn ring */
@@ -1209,6 +1210,20 @@ static void MoveGroundStart(int slot)
     g_groundPre.thread = CreateThread(NULL, 0, MoveGroundFault, NULL, 0, NULL); /* none: NearGroundOf makes its own */
 }
 /* 1 while the buffer is being touched (a frame at a time); then `slot` gets it if it has none. */
+static int MoveGroundWait(int slot);
+/* MV_READY waits for the last layer change's fill (a thread, about 1.3 s of work on 4 threads below normal priority,
+ * plus at most 8 x 200 ms for spawns reading its grids) and the ground prefault (8192 page touches, ~14 ms). 60 s is
+ * many times both: past it the thread is hung, and the build fails rather than wait for the level's end. */
+#define MOVE_READY_WAIT_MS 60000u
+/* MV_READY's waits: NULL when both are done, "" to wait a frame more, else why the build fails. */
+static const char* MoveReadyWait(ULONGLONG now)
+{
+    const int late = now - g_move.readySince > MOVE_READY_WAIT_MS;
+    if (MoveLayerWait()) return late ? "the layer change did not finish" : "";
+    if (MoveGroundWait(g_move.slot)) return late ? "the ground buffer did not finish" : "";
+    return NULL;
+}
+
 static int MoveGroundWait(int slot)
 {
     if (g_groundPre.thread != NULL)
@@ -1724,13 +1739,14 @@ static void MoveTick(uint64_t level)
     {
         if (g_matband.tex != 0 && (g_matband.holds < NEAR_MAT_HOLD || GetTickCount64() - g_matband.made < 100)) { g_matband.holds++; return; }
         if (!NearSpawnTile((uint64_t)(uintptr_t)g_move.ctx)) { MoveFail("the spawn failed"); return; }
-        g_move.state = MV_READY;
+        g_move.state = MV_READY; g_move.readySince = GetTickCount64();
         return;
     }
     if (g_move.state == MV_READY)
     {
-        if (MoveLayerWait()) return; /* the last change's grids first: the tile's slot buffers and grids are its */
-        if (MoveGroundWait(g_move.slot)) return;
+        /* the last change's grids first: the tile's slot buffers and grids are its */
+        const char* wait = MoveReadyWait(GetTickCount64());
+        if (wait != NULL) { if (wait[0] != 0) MoveFail(wait); return; }
         uint64_t world = 0;
         LARGE_INTEGER t; QueryPerformanceCounter(&t);
         if (NearReadyTile((uint64_t)(uintptr_t)g_move.ctx, &world)) return;

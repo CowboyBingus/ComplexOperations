@@ -1423,6 +1423,24 @@ uint16_t* CoXlTestGroundBuf(int slot) { return g_groundBuf[slot]; }
 void CoXlTestGroundClear(int slot) { if (g_groundBuf[slot] != NULL) VirtualFree(g_groundBuf[slot], 0, MEM_RELEASE); g_groundBuf[slot] = NULL; }
 int CoXlTestGroundRunning(void) { return g_groundPre.thread != NULL; }
 void* CoXlTestGroundThread(void) { return g_groundPre.thread; }
+/* MV_READY's bounded waits (proto/difficulty_world_move.c MoveReadyWait): a layer fill or a prefault that has not
+ * finished, `age` ms into the state; the fakes are taken down after. */
+const char* CoXlTestReadyWait(int layerBusy, int groundBusy, ULONGLONG age)
+{
+    HANDLE never = CreateEventA(NULL, TRUE, FALSE, NULL);
+    const int slot = g_move.slot;
+    g_move.slot = -1;
+    if (layerBusy) { g_layerJob.thread = never; InterlockedExchange(&g_layerJob.running, 1); }
+    if (groundBusy) { g_groundPre.thread = never; InterlockedExchange(&g_groundPre.done, 0); }
+    const ULONGLONG now = GetTickCount64() + 1000000;
+    g_move.readySince = now - age;
+    const char* why = MoveReadyWait(now);
+    InterlockedExchange(&g_layerJob.running, 0); g_layerJob.thread = NULL;
+    if (groundBusy) g_groundPre.thread = NULL;
+    g_move.slot = slot;
+    CloseHandle(never);
+    return why;
+}
 uint32_t CoXlTestMoverFrames(void) { return g_move.frames; }
 /* The release's render-fence gate (proto/xl_free.c): the build's world, a tile's terrain handle, the pins asked again. */
 void CoXlTestMoverWorld(uint64_t world) { memcpy(g_move.ctx + 0x40, &world, 8); }

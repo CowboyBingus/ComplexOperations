@@ -16,6 +16,7 @@ uint16_t* CoXlTestGroundBuf(int slot);
 void CoXlTestGroundClear(int slot);
 int CoXlTestGroundRunning(void);
 void* CoXlTestGroundThread(void);
+const char* CoXlTestReadyWait(int layerBusy, int groundBusy, ULONGLONG age);
 
 typedef union { ULONG_PTR Flags; struct { ULONG_PTR Valid : 1; ULONG_PTR rest : 63; } b; } WsBlock;
 typedef struct { PVOID VirtualAddress; WsBlock VirtualAttributes; } WsInfo;
@@ -79,6 +80,20 @@ int main(void)
     CHECK(CoXlTestGroundWait(3) == 0 && CoXlTestGroundBuf(3) != NULL && CoXlTestGroundBuf(3) != buf && Resident(CoXlTestGroundBuf(3)) == 128);
 
     CoXlTestGroundClear(2); CoXlTestGroundClear(3);
+
+    g_case = "MV_READY's waits: a frame more while the layer fill or the prefault runs, a failure once 60 s are past";
+    {
+        const char* why = CoXlTestReadyWait(0, 0, 0);
+        CHECK(why == NULL);
+        why = CoXlTestReadyWait(1, 0, 59000);
+        CHECK(why != NULL && why[0] == 0);
+        why = CoXlTestReadyWait(0, 1, 60000);
+        CHECK(why != NULL && why[0] == 0);
+        why = CoXlTestReadyWait(1, 1, 60001);
+        CHECK(why != NULL && strcmp(why, "the layer change did not finish") == 0); /* the layer's wait first */
+        why = CoXlTestReadyWait(0, 1, 60001);
+        CHECK(why != NULL && strcmp(why, "the ground buffer did not finish") == 0);
+    }
     if (g_failed) { printf("groundfault: %d check(s) failed\n", g_failed); return 1; }
     printf("groundfault: all checks passed\n");
     return 0;
