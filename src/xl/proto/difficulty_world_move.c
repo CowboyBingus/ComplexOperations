@@ -1297,6 +1297,7 @@ static void MoveTick(uint64_t level)
     MoveGroundKeep(); /* before the frame's ground rays are cast */
     co_framecost_nested(CO_FC_GROUNDKEEP, CO_FC_MOVE, fc);
     MoveFreeTick(0);
+    NearBandTick();
     MovePlayers();
     MoveLayerWait();
     if (MoveReleaseTick(now)) return; /* a release, or a frame held for one: a build's step waits for the next */
@@ -1584,6 +1585,7 @@ static void MoveInstall(uintptr_t game)
  * all of them up after its own level init (0x69, the replay, a build in play), so this clears only an older level's. */
 static void NearLevelLeft(int ship)
 {
+    NearBandJoin(); /* first: the pass reads the level's maps */
     NearLayerSettle();
     MoveBuildLeft(ship); /* the merge cameras go before the terrains they draw */
     /* A release still owed is never sent outside play. A level init has asked for the package before this hook

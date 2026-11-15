@@ -2031,8 +2031,10 @@ static void NearCameras(float half0, float half1, float cx, float cy)
 }
 
 /* Puts the level's merge state back after the replay (or a failed one) and lets the level go on. */
+static void NearBandAbandon(void);
 static void NearReplayEnd(int ok)
 {
+    NearBandAbandon(); /* a conform cut short: its band pass, if one runs, is not this tile's any more */
     InterlockedExchange(&g_nearActive, 0);
     /* the level's queue is drained every frame: no later drain is the replay's, but for a finalize still queued */
     if (g_nearReset.state != 1) g_nearNames.queue = 0;
@@ -4023,7 +4025,7 @@ static void NearMatBandRows(void* ctx, int r0, int r1)
     RoadTrackTally(job->track, tally);
 }
 
-static uint32_t NearMatBand(uint32_t* tile, const uint32_t* coarse)
+static uint32_t NearMatBandWith(uint32_t* tile, const uint32_t* coarse, int helpers, int priority)
 {
     static NearMatCdf cdf;
     NearBandJob job = {tile, coarse, &cdf, 0, g_coarseMat.tex != 0 && g_coarseMat.level == g_world.levels, g_near.centre[0] - NEAR_SIDE / 2 + NEAR_TEXEL / 2,
@@ -4053,7 +4055,7 @@ static uint32_t NearMatBand(uint32_t* tile, const uint32_t* coarse)
     }
     job.own = own;
     const ULONGLONG began = GetTickCount64();
-    NearRows(NearMatBandRows, &job, 4096);
+    NearRowsWith(NearMatBandRows, &job, 4096, helpers, priority);
     const unsigned long took = (unsigned long)(GetTickCount64() - began);
     const int mixed = own != NULL;
     if (own != NULL)
@@ -4067,6 +4069,8 @@ static uint32_t NearMatBand(uint32_t* tile, const uint32_t* coarse)
     PatchNote(job.broken, mixed);
     return (uint32_t)job.taken;
 }
+
+static uint32_t NearMatBand(uint32_t* tile, const uint32_t* coarse) { return NearMatBandWith(tile, coarse, -1, THREAD_PRIORITY_NORMAL); }
 
 /* ---- The tile's material map with the band, as a texture of its own -------------------------------------------------
  * The band (NearMatBand) is built on the CPU from the read-back maps, so it reaches the GPU as a texture created with
@@ -4146,6 +4150,62 @@ static void NearMatTexture(ULONGLONG t0)
     Note("difficulty: near terrain: material band: %u texels of the tile's map take the coarse terrain's (from %.0f m inside the hidden square's edge, "
         "+-%.0f m), %.2f s; texture 0x%llX", g_matband.taken, (double)(NEAR_MAT_EDGE + NEAR_MAT_BAND), (double)(NEAR_MAT_WOBBLE / 2), (double)(GetTickCount64() - t0) / 1000.0,
         (unsigned long long)g_matband.tex);
+}
+
+/* A tile built in mission: its band's copy and pass on a thread of their own (one frame held 172-195 ms: two fresh
+ * 64 MiB buffers and the pass over every texel). The rows are independent, so fewer helpers at a lower priority give
+ * the same texels. The game thread keeps the readback's take and release (the game's allocator) and the texture. */
+#define NEAR_BAND_HELPERS 3
+static struct { int on; volatile LONG running, abandoned; uint8_t desc[24]; const uint32_t* level; uint32_t* pixels; uint32_t taken; ULONGLONG t0; HANDLE thread; } g_bandJob;
+
+static DWORD WINAPI NearBandThread(LPVOID unused)
+{
+    (void)unused;
+    const size_t bytes = (size_t)4096 * 4096 * 4;
+    uint64_t data = 0; memcpy(&data, g_bandJob.desc + 16, 8);
+    uint32_t* copy = g_bandJob.abandoned ? NULL : (uint32_t*)VirtualAlloc(NULL, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (copy != NULL && SafeRead(data, copy, bytes)) { VirtualFree(copy, 0, MEM_RELEASE); copy = NULL; }
+    if (copy != NULL && !g_bandJob.abandoned) g_bandJob.taken = NearMatBandWith(copy, g_bandJob.level, NEAR_BAND_HELPERS, THREAD_PRIORITY_BELOW_NORMAL);
+    g_bandJob.pixels = copy;
+    InterlockedExchange(&g_bandJob.running, 0);
+    return 0;
+}
+
+/* d: the taken readback (released here once the thread is done with it); level: the level's map as read at load. */
+static void NearBandStart(const uint8_t* d, const uint32_t* level)
+{
+    memcpy(g_bandJob.desc, d, 24);
+    g_bandJob.level = level; g_bandJob.pixels = NULL; g_bandJob.taken = 0; g_bandJob.t0 = GetTickCount64(); g_bandJob.on = 1;
+    InterlockedExchange(&g_bandJob.abandoned, 0);
+    InterlockedExchange(&g_bandJob.running, 1);
+    g_bandJob.thread = CreateThread(NULL, 0, NearBandThread, NULL, 0, NULL);
+    if (g_bandJob.thread == NULL) NearBandThread(NULL); /* no thread: here, as before */
+}
+
+/* Once the thread is done: the readback released; its pixels returned (keep) or freed. */
+static uint32_t* NearBandCollect(int keep)
+{
+    if (g_bandJob.thread != NULL) { WaitForSingleObject(g_bandJob.thread, INFINITE); CloseHandle(g_bandJob.thread); g_bandJob.thread = NULL; }
+    NearReadDone(&g_bandJob.desc);
+    memset(g_bandJob.desc, 0, sizeof g_bandJob.desc);
+    uint32_t* pixels = g_bandJob.pixels;
+    g_bandJob.pixels = NULL; g_bandJob.on = 0;
+    InterlockedExchange(&g_bandJob.abandoned, 0);
+    if (!keep && pixels != NULL) { VirtualFree(pixels, 0, MEM_RELEASE); pixels = NULL; }
+    return pixels;
+}
+
+/* A replay that ended with the pass under way: its result is not wanted, and goes once the thread is done
+ * (NearBandTick, every mover frame) without the game thread waiting for it. */
+static void NearBandAbandon(void) { if (g_bandJob.on) InterlockedExchange(&g_bandJob.abandoned, 1); }
+static void NearBandTick(void) { if (g_bandJob.on && g_bandJob.abandoned && !g_bandJob.running) NearBandCollect(0); }
+/* The level's end: its maps go, so the pass is waited for (at most one pass, ~0.5 s, outside play). */
+static void NearBandJoin(void)
+{
+    if (!g_bandJob.on) return;
+    InterlockedExchange(&g_bandJob.abandoned, 1);
+    NearBandCollect(0);
+    Note("difficulty: near terrain: the level ended with a tile's band pass under way; waited for it, its result dropped");
 }
 
 /* The coarse map's texture and pixels gone (a new level, or it was not made). */
@@ -4530,9 +4590,46 @@ static int NearConformStep(uint64_t records, uint32_t end, uint64_t context, uin
         g_conform.id = readback(g_near.tex[1]); g_conform.polls = 0; g_conform.phase = 6; /* both material maps: the band (NearMatBuild), the dumps */
         return 1;
     }
+    if (g_conform.phase == 11) /* a tile built in mission: the band's thread */
+    {
+        if (g_bandJob.running) return 1; /* bounded work on the build's own buffers: it finishes */
+        NearMatDrop();
+        g_matband.pixels = NearBandCollect(1);
+        if (g_matband.pixels != NULL)
+        {
+            g_matband.taken = g_bandJob.taken;
+            Note("difficulty: near terrain: material band: copied and passed on its own thread in %.2f s (%d helpers below normal priority)",
+                (double)(GetTickCount64() - g_bandJob.t0) / 1000.0, NEAR_BAND_HELPERS);
+            NearMatTexture(g_bandJob.t0);
+        }
+        if (g_matband.tex == 0) NearMatDrop();
+        return 0;
+    }
     if (g_conform.phase == 6 || g_conform.phase == 7) /* the tile's and the level's material maps: the band, and the dumps (HELLFORGE_XL_NEAR_DUMP) */
     {
+        if (g_conform.phase == 6 && g_bandJob.on) { NearBandTick(); return 1; } /* an abandoned pass still runs: one at a time */
         if (!ready(g_conform.id)) return ++g_conform.polls < 2000 ? 1 : 0;
+        if (g_conform.phase == 6 && g_moveBuilding)
+        {
+            /* a tile built in mission: the level's map as read at load (the texture under its name is the coarse
+             * terrain's interpolated one now, and the merge's own was released); no coarse rebuild, no dumps */
+            uint8_t out[32] = {0}, d[24] = {0};
+            const uint8_t* p = desc(out, g_conform.id);
+            memcpy(d, p ? p : out, 24);
+            uint32_t w, hgt, format; uint64_t data;
+            memcpy(&w, d, 4); memcpy(&hgt, d + 4, 4); memcpy(&format, d + 8, 4); memcpy(&data, d + 16, 8);
+            NearMatDrop();
+            const int levelOk = g_levelMat.pixels != NULL && g_levelMat.level == g_world.levels && NearMatBandOn();
+            if (data == 0 || w != 4096 || hgt != 4096 || NearTexelBytes(format) != 4 || !levelOk)
+            {
+                if (levelOk) Note("difficulty: near terrain: the tile's material map read back as %u x %u format %u, not 4096 x 4096 x 32 bits", w, hgt, format);
+                NearReadDone(&d);
+                return 0;
+            }
+            NearBandStart(d, g_levelMat.pixels);
+            g_conform.phase = 11;
+            return 1;
+        }
         uint8_t out[32] = {0}; NEAR_TAKEN uint8_t d[24] = {0};
         const uint8_t* p = desc(out, g_conform.id);
         memcpy(d, p ? p : out, 24);
@@ -4555,15 +4652,6 @@ static int NearConformStep(uint64_t records, uint32_t end, uint64_t context, uin
         {
             NearMatDrop();
             g_matband.pixels = (uint32_t*)copy; /* the tile's own map; the band goes in once the level's is read */
-            if (g_moveBuilding)
-            {
-                /* a tile built in mission: the level's map as read at load (the texture under its name is the coarse
-                 * terrain's interpolated one now, and the merge's own was released); no coarse rebuild */
-                if (g_matband.pixels != NULL && g_levelMat.pixels != NULL && g_levelMat.level == g_world.levels && NearMatBandOn())
-                    NearMatBuild(g_levelMat.pixels);
-                if (g_matband.tex == 0) NearMatDrop();
-                return 0;
-            }
             g_conform.id = readback(g_near.config[1]); g_conform.polls = 0; g_conform.phase = 7;
             return 1;
         }

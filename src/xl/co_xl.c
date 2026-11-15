@@ -1295,6 +1295,29 @@ void CoXlTestStampPlan(float cell, const uint32_t* start, void* cand, uint32_t c
 { g_plan.cell = cell; memcpy(g_plan.start, start, sizeof g_plan.start); g_stamps.cand = (StampCandidate*)cand; g_plan.level = g_world.levels; g_plan.count = count; }
 void CoXlTestStampsSelectAt(float cx, float cy) { g_move.centre[0] = cx; g_move.centre[1] = cy; g_move.sel.on = 0; }
 int CoXlTestStampsSelect(uint64_t locs, uint32_t count, float half, double budget) { return MoveStampsSelect(locs, count, half, budget); }
+/* A tile's band (proto/difficulty_world_terrain.c NearBandStart): the tile at (cx, cy), the level's map as read at load;
+ * the synchronous pass, the thread's pass over a readback at `data`, its state and its end. */
+void CoXlTestBandInputs(float cx, float cy, uint32_t* level)
+{ g_near.centre[0] = cx; g_near.centre[1] = cy; g_levelMat.pixels = level; g_levelMat.level = g_world.levels; g_coarseMat.tex = 0; g_road.on = 0; }
+uint32_t CoXlTestBandSync(uint32_t* tile) { return NearMatBand(tile, g_levelMat.pixels); }
+void CoXlTestBandStart(const void* data)
+{ uint8_t d[24] = {0}; uint32_t w = 4096, f = 1; uint64_t at = (uint64_t)(uintptr_t)data; memcpy(d, &w, 4); memcpy(d + 4, &w, 4); memcpy(d + 8, &f, 4); memcpy(d + 16, &at, 8); NearBandStart(d, g_levelMat.pixels); }
+int CoXlTestBandState(void) { return (g_bandJob.on ? 1 : 0) | (g_bandJob.running ? 2 : 0) | (g_bandJob.abandoned ? 4 : 0); }
+uint32_t* CoXlTestBandCollect(int keep, uint32_t* taken) { *taken = g_bandJob.taken; return NearBandCollect(keep); }
+void CoXlTestBandAbandon(void) { NearBandAbandon(); }
+/* a pass as if under way (no thread): the conform's phase 11 must not wait for it */
+void CoXlTestBandPretend(int running) { g_bandJob.on = 1; g_bandJob.thread = NULL; g_bandJob.pixels = NULL; memset(g_bandJob.desc, 0, sizeof g_bandJob.desc); InterlockedExchange(&g_bandJob.running, running); }
+void CoXlTestBandJobTick(void) { NearBandTick(); }
+void CoXlTestBandJoin(void) { NearBandJoin(); }
+/* One conform step of a tile built in mission (`building`) from `phase`; the phase it left, the band's pixels. */
+int CoXlTestConformStep(int phase, int building, int* after, uint32_t** pixels)
+{
+    InterlockedExchange(&g_moveBuilding, building);
+    g_conform.phase = phase;
+    int r = NearConformStep(0, 0, 0, 0, 0);
+    *after = g_conform.phase; *pixels = g_matband.pixels;
+    return r;
+}
 uint32_t CoXlTestStampsStaged(const uint8_t** loc, const uint32_t** index, const uint64_t** unit, uint32_t* temp)
 { *loc = g_move.stLoc; *index = g_move.stIndex; *unit = g_move.stUnit; *temp = g_move.stTemp; return g_move.stCount; }
 void CoXlTestMoveWallRead(double* wall, int* mv, uint32_t* slow) { for (int k = 0; k < 3; k++) { wall[k] = g_moveCost.wall[k]; mv[k] = g_moveCost.wallMv[k]; } *slow = g_moveCost.slow; }
