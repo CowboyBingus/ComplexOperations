@@ -1491,11 +1491,50 @@ static void MoveTick(uint64_t level)
 /* What a build costs the game thread: MoveTick's time in each frame of a build, the six longest with the build's state,
  * the replay's step and the conform's phase at the frame's start; noted once the build is over (the frame after the tile
  * is in, or after a failure). */
+/* Every frame of a build over MOVE_SLOW_MS, the mover's own work and the wall clock apart, counted by the state at the
+ * frame's start (the step's op too): the build's slow frames all named, not only its longest. */
+#define MOVE_SLOW_MS 16.7
+#define MOVE_SLOW_KEYS 12
+typedef struct { int mv, ns, op, conf; uint32_t n; double max; } MoveSlowKey;
+typedef struct { MoveSlowKey key[MOVE_SLOW_KEYS]; uint32_t keys, over, other; } MoveSlow;
 static struct { double ms[6]; int mv[6], ns[6], step[6], conf[6], bld[6]; double sum; uint32_t frames; int pending;
-    double wall[3]; int wallMv[3]; uint32_t slow; } g_moveCost;
+    double wall[3]; int wallMv[3]; uint32_t slow; MoveSlow tick, clock; } g_moveCost;
 /* Wall-clock frames, level update to level update (once a frame on the game thread, 0xAB519E): the whole frame's time,
  * render and other threads' waits included, which the game-thread cost above leaves out. */
-static struct { LARGE_INTEGER last; int mv; } g_moveWall;
+static struct { LARGE_INTEGER last; int mv, ns, op, conf; } g_moveWall;
+
+static void MoveSlowAdd(MoveSlow* t, double ms, int mv, int ns, int op, int conf)
+{
+    if (!(ms > MOVE_SLOW_MS)) return;
+    t->over++;
+    uint32_t k = 0;
+    while (k < t->keys && !(t->key[k].mv == mv && t->key[k].ns == ns && t->key[k].op == op && t->key[k].conf == conf)) k++;
+    if (k == t->keys)
+    {
+        if (t->keys >= MOVE_SLOW_KEYS) { t->other++; return; }
+        t->key[k] = (MoveSlowKey){mv, ns, op, conf, 0, 0.0};
+        t->keys++;
+    }
+    t->key[k].n++;
+    if (ms > t->key[k].max) t->key[k].max = ms;
+}
+
+/* "<mover state>/near <state>/op 0xNN/conform <phase>: <frames>, longest <ms>" for each key, in first-seen order. */
+static void MoveSlowText(const MoveSlow* t, char* out, size_t size)
+{
+    size_t n = 0;
+    out[0] = 0;
+    for (uint32_t k = 0; k < t->keys && n + 1 < size; k++)
+    {
+        const MoveSlowKey* e = &t->key[k];
+        char op[8] = "-";
+        if (e->op >= 0) snprintf(op, sizeof op, "0x%02X", e->op);
+        int w = snprintf(out + n, size - n, " %s/near %d/op %s/conform %d: %u, longest %.0f ms;", MoveStateName(e->mv), e->ns, op, e->conf, e->n, e->max);
+        if (w < 0) break;
+        n += (size_t)w;
+    }
+    if (t->other && n + 1 < size) snprintf(out + n, size - n, " %u more of other states;", t->other);
+}
 static void MoveWallAdd(double ms, int mv)
 {
     if (ms > 50.0) g_moveCost.slow++;
@@ -1531,6 +1570,12 @@ static void MoveCostNote(void)
     Note("difficulty: moving tiles: the build's wall-clock frames: the longest %.0f ms (%s), %.0f ms (%s), %.0f ms (%s); %u over 50 ms",
         g_moveCost.wall[0], MoveStateName(g_moveCost.wallMv[0]), g_moveCost.wall[1], MoveStateName(g_moveCost.wallMv[1]), g_moveCost.wall[2],
         MoveStateName(g_moveCost.wallMv[2]), g_moveCost.slow);
+    {
+        char tick[1200], clock[1200];
+        MoveSlowText(&g_moveCost.tick, tick, sizeof tick); MoveSlowText(&g_moveCost.clock, clock, sizeof clock);
+        Note("difficulty: moving tiles: the build's frames over %.1f ms: the mover's own work %u:%s", MOVE_SLOW_MS, g_moveCost.tick.over, tick);
+        Note("difficulty: moving tiles: the build's frames over %.1f ms: wall clock %u:%s", MOVE_SLOW_MS, g_moveCost.clock.over, clock);
+    }
     memset(&g_moveCost, 0, sizeof g_moveCost);
 }
 
@@ -1546,16 +1591,27 @@ static void MoveLevelUpdate(uint64_t level)
     NearResetTick();
     g_moveUpdate(level);
     int mv = g_move.state, ns = g_near.state, step = g_near.step, conf = g_conform.phase, bld = g_near.building;
+    const int op = step >= 0 && step < g_near.steps && step < NEAR_STEPS ? g_near.stepOp[step] : -1;
     LARGE_INTEGER t0, t1, hz;
     QueryPerformanceCounter(&t0); QueryPerformanceFrequency(&hz);
     if (g_moveWall.last.QuadPart != 0 && (g_moveWall.mv != MV_IDLE || g_moveCost.pending))
-        MoveWallAdd((double)(t0.QuadPart - g_moveWall.last.QuadPart) * 1000.0 / (double)hz.QuadPart, g_moveWall.mv);
-    g_moveWall.last = t0; g_moveWall.mv = mv;
+    {
+        const double wall = (double)(t0.QuadPart - g_moveWall.last.QuadPart) * 1000.0 / (double)hz.QuadPart;
+        MoveWallAdd(wall, g_moveWall.mv);
+        MoveSlowAdd(&g_moveCost.clock, wall, g_moveWall.mv, g_moveWall.ns, g_moveWall.op, g_moveWall.conf);
+    }
+    g_moveWall.last = t0; g_moveWall.mv = mv; g_moveWall.ns = ns; g_moveWall.op = op; g_moveWall.conf = conf;
     MoveTick(level);
     QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
     g_hitchCost.tiles += (float)((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart);
     co_framecost_add(CO_FC_MOVE, t0.QuadPart);
-    if (mv != MV_IDLE || g_move.state != MV_IDLE) { MoveCostAdd((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart, mv, ns, step, conf, bld); g_moveCost.pending = 1; }
+    if (mv != MV_IDLE || g_move.state != MV_IDLE)
+    {
+        const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+        MoveCostAdd(ms, mv, ns, step, conf, bld);
+        MoveSlowAdd(&g_moveCost.tick, ms, mv, ns, op, conf);
+        g_moveCost.pending = 1;
+    }
     else if (g_moveCost.pending) MoveCostNote();
     const double grass = HitchNow();
     fc = co_framecost_now();

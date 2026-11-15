@@ -1283,6 +1283,9 @@ void CoXlTestMoverSet(int state) { g_move.state = state; }
 /* The build's wall-clock frames (proto/difficulty_world_move.c MoveWallAdd): one frame of `ms` in mover state `mv`; the
  * longest three and the count over 50 ms as the build's note gives them. */
 void CoXlTestMoveWall(double ms, int mv) { MoveWallAdd(ms, mv); }
+/* A build's frames over MOVE_SLOW_MS (wall 0: the mover's own work, 1: the wall clock), then the build's notes. */
+void CoXlTestMoveSlow(int wall, double ms, int mv, int ns, int op, int conf) { MoveSlowAdd(wall ? &g_moveCost.clock : &g_moveCost.tick, ms, mv, ns, op, conf); }
+void CoXlTestMoveCostNote(void) { MoveCostNote(); }
 /* The tile's stamp units as 0x2F left them (`units`, n of them, in the world at the context's +0x40), then one frame's
  * destroys within `budget` ms: 1 once all are gone. */
 void CoXlTestStampUnits(uint64_t* units, uint32_t n) { g_move.stUnit = units; g_move.stTemp = g_move.stUnits = n; g_move.stGone = 0; }
