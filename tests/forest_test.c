@@ -14,6 +14,7 @@
 void CoXlTestStreamSetup(uintptr_t game, uint8_t* context, uint8_t* array, uint32_t count);
 void CoXlTestStreamSpawnSetup(void* spawn, uint8_t* pass);
 void CoXlTestStreamDue(uint32_t i, uint64_t unit);
+void CoXlTestStreamFloorDue(uint32_t* due, uint32_t* spawned);
 void CoXlTestStreamSpawnDue(void);
 uint32_t CoXlTestStreamChange(unsigned long long now, int layerBusy, unsigned long long* next);
 void CoXlTestStreamChangeAt(unsigned long long next);
@@ -254,6 +255,11 @@ int main(void)
         CHECK(CoXlTestStreamDropPush(4));
         CoXlTestStreamChangeAt(0);
         CHECK(CoXlTestStreamChange(2000, 0, &next) == 1 && g_calls == 1);       /* 0 and 1 in one call */
+        {
+            uint32_t floorDue = 9, floorSpawned = 9;
+            CoXlTestStreamFloorDue(&floorDue, &floorSpawned);
+            CHECK(floorDue == 1 && floorSpawned == 2);                   /* a judged floor frame, its 2 locations */
+        }
         CoXlTestStreamSpawned(1, &spawned, &due); CHECK(spawned);
         CoXlTestStreamSpawned(2, &spawned, &due); CHECK(!spawned && due);     /* 600 m: it waits */
         CHECK(CoXlTestStreamDropPush(4));
@@ -287,6 +293,11 @@ int main(void)
         CoXlTestStreamChangeAt(0);
         CHECK(CoXlTestStreamChange(2600, 0, &next) == 1 && g_calls == 1);
         CoXlTestStreamSpawned(2, &spawned, &due); CHECK(spawned);
+        {
+            uint32_t floorDue = 9, floorSpawned = 9;
+            CoXlTestStreamFloorDue(&floorDue, &floorSpawned);
+            CHECK(floorDue == 0 && floorSpawned == 0);                   /* a frame with room: not a floor frame's spawns */
+        }
         for (uint32_t k = 0; k < 3; k++) CoXlTestStreamDistance(k, 0.0f);
         CoXlTestStreamExpiredSet(0);
         co_framecost_test_reset(0);

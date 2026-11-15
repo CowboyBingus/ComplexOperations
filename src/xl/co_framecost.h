@@ -97,6 +97,8 @@ void co_framecost_test_bodies_whole(double* mean, double* most, uint32_t* over);
 void co_framecost_test_bodies_room(uint32_t* room, uint32_t* over);
 /* The last window's frames kept apart. */
 uint32_t co_framecost_test_apart(void);
+/* The last window's change frames at their budget's floor: how many, their whole mean and the longest. */
+void co_framecost_test_bodies_floor(uint32_t* floors, double* mean, double* most);
 int co_framecost_test_window_lines(void);
 /* The last closed window's split: frames with a change, their mean and longest world update (own time), the same for
  * the frames without, and how many of those were over CO_FC_TARGET_MS. 0 when the window had no split line. */

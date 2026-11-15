@@ -1877,6 +1877,13 @@ void CoXlTestStreamFloorMore(uint32_t* stuck, uint32_t* dry, double* rebuiltSum,
 }
 int CoXlTestStreamFloorStuck(double quietHi, uint32_t leaves, double moveMs) { return WorldStreamFloorStuck(quietHi, leaves, moveMs); }
 uint32_t CoXlTestStreamSpawnTried(void) { return g_stream.spawnTried; }
+/* The floor's removal minimum as the state stands; the last scan's time, set; the window's rebuild samples. */
+uint32_t CoXlTestStreamLeastNow(void) { return WorldStreamDrainLeast(); }
+void CoXlTestStreamScanAt(unsigned long long at) { g_stream.scanAt = at; }
+void CoXlTestStreamSamples(double* sum, uint32_t* count) { *sum = g_stream.sampleSum; *count = g_stream.samples; }
+void CoXlTestStreamFloorDue(uint32_t* due, uint32_t* spawned) { *due = g_stream.floorDue; *spawned = g_stream.floorSpawned; }
+int CoXlTestStreamDueInReach(float reach2) { return WorldStreamDueInReach(reach2); }
+void CoXlTestStreamSpawnedSet(uint32_t i, int spawned) { g_streamSpawned[i] = (uint8_t)spawned; }
 /* A due stamp's squared distance to its nearest player, as the scan sets it. */
 void CoXlTestStreamDistance(uint32_t i, float distance2) { g_streamDistance[i] = distance2; }
 /* The scan's count of those, set; a slot queued for removal as a scan queues one. */

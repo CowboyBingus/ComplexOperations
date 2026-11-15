@@ -414,6 +414,10 @@ static void TestBodies(void)
     uint32_t room = 0, roomOver = 0;
     co_framecost_test_bodies_room(&room, &roomOver);
     CHECK(room == 39 && roomOver == 38);
+    uint32_t floors = 9; double fMean = 0, fMost = 0;
+    co_framecost_test_bodies_floor(&floors, &fMean, &fMost);
+    CHECK(floors == 1 && fMean == 35.0 && fMost == 35.0);              /* the one at its floor, whole */
+    CHECK(fake_host_logged("38 of those over; 1 at its floor: mean 35.0 ms, the longest 35.0 ms; 0 frame(s) kept out of both"));
     g_mission++; /* a mission with no change frame: no split line */
     for (int i = 0; i < 1200; i++) Cost(9.0, 0, 0, 0, 5.0, 0);
     CHECK(co_framecost_test_bodies(&changed, &cMean, &cMost, &quiet, &qMean, &qMost, &over) == 0);
@@ -421,6 +425,8 @@ static void TestBodies(void)
     CHECK(wMean == 0 && wMost == 0 && wOver == 0); /* each window counts its own */
     co_framecost_test_bodies_room(&room, &roomOver);
     CHECK(room == 0 && roomOver == 0);
+    co_framecost_test_bodies_floor(&floors, &fMean, &fMost);
+    CHECK(floors == 0 && fMean == 0 && fMost == 0);
     /* a moving tile's 0x63 render frames (about 185 ms) are kept out of both, a change frame in one too */
     g_mission++;
     Cost(9.0, 0, 0, 0, 5.0, 0);
@@ -432,7 +438,7 @@ static void TestBodies(void)
     CHECK(changed == 1 && cMost == 12.0 && qMost == 5.0 && over == 0);
     co_framecost_test_bodies_whole(&wMean, &wMost, &wOver);
     CHECK(wMost == 20.0 && wOver == 1 && co_framecost_test_apart() == 2);
-    CHECK(fake_host_logged("1 of them with room in their budget, 1 of those over; 2 frame(s) kept out of both (a moving tile's render)"));
+    CHECK(fake_host_logged("1 of them with room in their budget, 1 of those over; 0 at its floor: mean 0.0 ms, the longest 0.0 ms; 2 frame(s) kept out of both (a moving tile's render)"));
     for (int i = 0; i < 1112; i++) Cost(9.0, 0, 0, 0, 5.0, 0);
     CHECK(co_framecost_test_apart() == 0);                           /* each window counts its own */
 }

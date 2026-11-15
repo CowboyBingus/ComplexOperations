@@ -39,6 +39,7 @@ static struct
     uint32_t bodyOver, lastBodyOver; double bodyWholeSum, bodyWholeMost, lastBodyWholeMean, lastBodyWholeMost;
     uint32_t bodyRoom, bodyRoomOver, lastBodyRoom, lastBodyRoomOver; /* of them, those whose budget had room */
     int apart; uint32_t apartFrames, lastApart; /* frames kept out of both (co_framecost_apart): this one, the window's */
+    uint32_t bodyFloor, lastBodyFloor; double bodyFloorSum, bodyFloorMost, lastBodyFloorMean, lastBodyFloorMost; /* those at the floor, whole */
     /* the streamer's budget inputs, kept over windows within a play: the last quiet frames' whole time, their world
      * update's own time (running mean), and the frame just closed */
     float recentQuiet[CO_FC_RECENT]; uint32_t recentN; double quietWorld; int lastBodies; double lastWorld;
@@ -105,6 +106,7 @@ static void WindowStart(int64_t now)
     g_fc.sum = g_fc.worst = g_fc.worstTimed = g_fc.worstTop = g_fc.timedSum = 0; g_fc.worstTopPart = 0;
     g_fc.bodyFrames = g_fc.quietFrames = g_fc.quietOver = 0; g_fc.bodySum = g_fc.bodyMost = g_fc.quietSum = g_fc.quietMost = 0;
     g_fc.bodyOver = 0; g_fc.bodyWholeSum = g_fc.bodyWholeMost = 0; g_fc.bodyRoom = g_fc.bodyRoomOver = 0; g_fc.apartFrames = 0;
+    g_fc.bodyFloor = 0; g_fc.bodyFloorSum = g_fc.bodyFloorMost = 0;
 }
 
 /* A change frame should hold the static layer's rebuild and the others should not: the two means apart say whether
@@ -115,14 +117,17 @@ static void BodiesLine(void)
     g_fc.lastBodyMean = g_fc.bodyFrames ? g_fc.bodySum / g_fc.bodyFrames : 0; g_fc.lastBodyMost = g_fc.bodyMost;
     g_fc.lastBodyWholeMean = g_fc.bodyFrames ? g_fc.bodyWholeSum / g_fc.bodyFrames : 0; g_fc.lastBodyWholeMost = g_fc.bodyWholeMost;
     g_fc.lastBodyOver = g_fc.bodyOver; g_fc.lastBodyRoom = g_fc.bodyRoom; g_fc.lastBodyRoomOver = g_fc.bodyRoomOver; g_fc.lastApart = g_fc.apartFrames;
+    g_fc.lastBodyFloor = g_fc.bodyFloor; g_fc.lastBodyFloorMean = g_fc.bodyFloor ? g_fc.bodyFloorSum / g_fc.bodyFloor : 0;
+    g_fc.lastBodyFloorMost = g_fc.bodyFloorMost;
     g_fc.lastQuietMean = g_fc.quietFrames ? g_fc.quietSum / g_fc.quietFrames : 0; g_fc.lastQuietMost = g_fc.quietMost;
     g_fc.lastBodyLine = g_fc.bodySeen && g_fc.bodyMission == g_fc.mission;
     if (!g_fc.lastBodyLine) return;
     co_log("frame times, world update's own time by the streamer's body changes: %u frame(s) with a change, mean %.1f ms, the longest %.1f ms; "
         "%u without, mean %.1f ms, the longest %.1f ms; %u of those over %.1f ms in all; the change frames whole: mean %.1f ms, the longest %.1f ms, %u over %.1f ms; "
-        "%u of them with room in their budget, %u of those over; %u frame(s) kept out of both (a moving tile's render)",
+        "%u of them with room in their budget, %u of those over; %u at its floor: mean %.1f ms, the longest %.1f ms; "
+        "%u frame(s) kept out of both (a moving tile's render)",
         g_fc.bodyFrames, g_fc.lastBodyMean, g_fc.bodyMost, g_fc.quietFrames, g_fc.lastQuietMean, g_fc.quietMost, g_fc.quietOver, CO_FC_TARGET_MS,
-        g_fc.lastBodyWholeMean, g_fc.bodyWholeMost, g_fc.bodyOver, CO_FC_TARGET_MS, g_fc.bodyRoom, g_fc.bodyRoomOver, g_fc.apartFrames);
+        g_fc.lastBodyWholeMean, g_fc.bodyWholeMost, g_fc.bodyOver, CO_FC_TARGET_MS, g_fc.bodyRoom, g_fc.bodyRoomOver, g_fc.bodyFloor, g_fc.lastBodyFloorMean, g_fc.bodyFloorMost, g_fc.apartFrames);
 }
 
 /* `count`'s parts beside the nav ones, the most first, CO_FC_CAUSE_OTHERS at most: the line stays under the log's 512. */
@@ -262,6 +267,7 @@ static void FrameClose(int64_t now)
         g_fc.bodyFrames++; g_fc.bodySum += world; if (world > g_fc.bodyMost) g_fc.bodyMost = world;
         g_fc.bodyWholeSum += ms; if (ms > g_fc.bodyWholeMost) g_fc.bodyWholeMost = ms; g_fc.bodyOver += ms > CO_FC_TARGET_MS;
         if (g_fc.bodies == CO_FC_BODIES_ROOM) { g_fc.bodyRoom++; g_fc.bodyRoomOver += ms > CO_FC_TARGET_MS; }
+        else { g_fc.bodyFloor++; g_fc.bodyFloorSum += ms; if (ms > g_fc.bodyFloorMost) g_fc.bodyFloorMost = ms; }
     }
     else
     {
@@ -390,6 +396,7 @@ int co_framecost_test_slow_bodies(int k) { return g_fc.slow[k].bodies; }
 void co_framecost_test_bodies_whole(double* mean, double* most, uint32_t* over) { *mean = g_fc.lastBodyWholeMean; *most = g_fc.lastBodyWholeMost; *over = g_fc.lastBodyOver; }
 void co_framecost_test_bodies_room(uint32_t* room, uint32_t* over) { *room = g_fc.lastBodyRoom; *over = g_fc.lastBodyRoomOver; }
 uint32_t co_framecost_test_apart(void) { return g_fc.lastApart; }
+void co_framecost_test_bodies_floor(uint32_t* floors, double* mean, double* most) { *floors = g_fc.lastBodyFloor; *mean = g_fc.lastBodyFloorMean; *most = g_fc.lastBodyFloorMost; }
 int co_framecost_test_window_lines(void) { return g_fc.windowLines; }
 int co_framecost_test_bodies(uint32_t* changed, double* changedMean, double* changedMost, uint32_t* quiet, double* quietMean, double* quietMost, uint32_t* quietOver)
 {
