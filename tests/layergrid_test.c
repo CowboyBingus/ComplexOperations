@@ -64,6 +64,12 @@ void CoXlTestStreamLooks(uint32_t* bad, uint32_t* fails, int* off);
 uint32_t CoXlTestWindowEvictedFar(void);
 uint32_t CoXlTestStreamDrainLayer(uint32_t most, double ms, int layer, uint32_t* waiting, int* cut);
 uint32_t CoXlTestStreamDrainLeast(uint32_t most, double ms, int layer, uint32_t least, uint32_t* waiting, int* cut);
+uint32_t CoXlTestStreamFloorLeast(uint32_t exits, uint32_t changes);
+uint32_t CoXlTestStreamSpawnTried(void);
+void CoXlTestStreamFloorMore(uint32_t* stuck, uint32_t* dry, double* rebuiltSum, uint32_t* least, uint32_t* exits, uint32_t* exitChanges);
+int CoXlTestStreamFloorStuck(double quietHi, uint32_t leaves, double moveMs);
+int CoXlTestRenderApart(int stampLeave, int step, uint8_t op);
+void CoXlTestStreamTickNear(int stampLeave, int step, uint8_t op);
 void CoXlTestStreamExpiredSet(uint32_t n);
 int CoXlTestStreamDropPush(uint32_t i);
 void CoXlTestStreamFloorStats(uint32_t* held, double* quietHiSum, uint32_t* streamedMoved, uint32_t* streamedQuiet, double* waitMs, double* waitMost);
@@ -803,6 +809,14 @@ int main(void)
     CoXlTestStreamTicksAdd();
     CHECK(CoXlTestStreamChange(5003, 0, &next) == 32 && next == 5003 && g_destroys == 160); /* the scan's 200 still count */
     CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 40);
+    {
+        uint32_t stuck, dry, least, exits = 0, exitChanges = 0; double rebuiltSum;
+        CoXlTestStreamFloorMore(&stuck, &dry, &rebuiltSum, &least, &exits, &exitChanges);
+        CHECK(exits == 40 && exitChanges == 2);                          /* the 40 new to the queue over the 2 change frames since */
+        CHECK(CoXlTestStreamScanFrames(0) == 0);
+        CoXlTestStreamFloorMore(&stuck, &dry, &rebuiltSum, &least, &exits, &exitChanges);
+        CHECK(exits == 0 && exitChanges == 0);                           /* none new, no change frame since the last scan */
+    }
     CoXlTestStreamTicksAdd(); CoXlTestStreamTicksAdd();
     CHECK(CoXlTestStreamChange(5004, 0, &next) == 40 && next == 5254 && CoXlTestStreamNextTick() == 0 && g_destroys == 200); /* no backlog left */
     uint32_t changes = 0, backlogs = 0, drainCuts = 0, spawnCuts = 0, changeRemoved = 0, drains[5];
@@ -810,7 +824,9 @@ int main(void)
     CHECK(changes == 3 && backlogs == 2 && drainCuts == 0 && spawnCuts == 0 && changeRemoved == 200 && drains[0] == 3);
     CoXlTestStreamNote();
     CHECK(fake_host_logged("streaming change frames: 2 of 3 with a backlog (every 2 frames); budget 3.00 ms a frame, 0 at its floor of 0.5 ms (the quiet frames' longest of 32: "
-                           "mean 0.0 ms), 0 of those holding spawns for removals; rebuild 31.0 ns a leaf estimated; 200 removals, 66.7 a frame; removals "));
+                           "mean 0.0 ms), 0 of those not caused by the quiet frames, 0 spawning near stamps only, 0 with stamps due spawning none, "
+                           "the last removing 0 at least; rebuild 31.0 ns a leaf estimated over 0 leaves a change frame"));
+    CHECK(fake_host_logged("streaming change work: 200 removals, 66.7 a frame; removals "));
     CHECK(fake_host_logged("0 locations spawned, 0.0 a frame; their units made in 0 flushes, 0.00 ms each (the most 0.00) after an animation wait of 0.00 ms (the most 0.00), 0.000 ms a location and 0.00 ms fixed estimated; "
                            "cut short by the time limit: removals in 0, spawns in 0; by the location count: 0; deferred for a tile step: 0 frames of 0 a tile built in; "
                            "0 due not spawned at the last scan; drained layer 4 3, 6..9 0 0 0 0; spawned into layer 4 0, 6..9 0 0 0 0"));
@@ -1162,6 +1178,12 @@ int main(void)
     CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 6);
     CoXlTestStreamDue(6, 0); CoXlTestStreamDue(7, 0);                  /* spawns due: a turn would be theirs */
     {
+        uint32_t stuck = 9, dry = 9, least = 9, exits = 9, exitChanges = 9; double rebuiltSum = 9;
+        CoXlTestStreamFloorMore(&stuck, &dry, &rebuiltSum, &least, &exits, &exitChanges);
+        CHECK(exits == 6 && exitChanges == 0 && stuck == 0 && dry == 0 && rebuiltSum == 0.0); /* the scan's 6 new, no change frame before */
+    }
+    CHECK(CoXlTestStreamFloorLeast(5, 2) == 3);                        /* the scan's exits: 5 over 2 change frames */
+    {
         const uint32_t leaves[10] = {10, 0, 0, 0, 1000, 0, 4000, 9000, 3000, 9500};
         unsigned long long at = 0;
         uint32_t changes = 0, backlogs = 0, drainCuts = 0, spawnCuts = 0, changeRemoved = 0, drains[5], left = 0, floors = 0, builds = 0;
@@ -1176,8 +1198,14 @@ int main(void)
         CoXlTestStreamRebuild(31.0, &left);
         CoXlTestStreamChangeAt(0);
         g_destroySpin = 0.6;                                             /* past the drain's 0.25 ms after one */
-        CHECK(CoXlTestStreamChange(10000, 0, &at) == 2 && g_destroys == 2 && at == 10250); /* two of layer 9's three */
+        CHECK(CoXlTestStreamChange(10000, 0, &at) == 3 && g_destroys == 3 && at == 10250); /* layer 9's three, its exits' pace */
         g_destroySpin = 0.0;
+        {
+            uint32_t stuck = 9, dry = 9, least = 9, exits = 9, exitChanges = 9; double rebuiltSum = 9;
+            CoXlTestStreamFloorMore(&stuck, &dry, &rebuiltSum, &least, &exits, &exitChanges);
+            CHECK(least == 3 && dry == 1 && stuck == 0 && rebuiltSum == 9500.0); /* its spawns into over-full layer 9 made none here */
+            CHECK(CoXlTestStreamSpawnTried() == 10);                     /* layer 9 tried: the floor waives the over-full rule */
+        }
         CoXlTestStreamChangeStats(&changes, &backlogs, &drainCuts, &spawnCuts, &changeRemoved, drains);
         CHECK(changes == 1 && drains[4] == 1);
         CoXlTestStreamBudgetStats(&budget, &floors, &builds);
@@ -1186,18 +1214,40 @@ int main(void)
         /* room again (33 quiet frames: the change frame's is none): layer 4 first by the tie, then the smallest layer's
          * turn for the spawns, which drains nothing */
         for (int k = 0; k < 33; k++) { co_framecost_test_begin(t, 1, 1); t += 10000; }
-        CHECK(CoXlTestStreamChange(10250, 0, &at) == 0 && g_destroys == 2);  /* layer 8's turn: no removal, no spawn here */
-        CHECK(CoXlTestStreamChange(10251, 0, &at) == 1 && g_destroys == 3);  /* layer 4's one */
+        CHECK(CoXlTestStreamChange(10250, 0, &at) == 0 && g_destroys == 3);  /* layer 8's turn: no removal, no spawn here */
+        CHECK(CoXlTestStreamChange(10251, 0, &at) == 1 && g_destroys == 4);  /* layer 4's one */
+        CHECK(CoXlTestStreamSpawnTried() == 0);                          /* with room layer 4 takes no spawns */
         CoXlTestStreamChangeStats(&changes, &backlogs, &drainCuts, &spawnCuts, &changeRemoved, drains);
         CHECK(changes == 2 && drains[0] == 1 && drains[4] == 1);
         /* the floor again with the window past its design (65 past their radius): layer 6 by the tie, its spawns held */
         for (int k = 0; k < 32; k++) { co_framecost_test_begin(t, 1, 1); t += 16500; }
         CoXlTestStreamExpiredSet(65);
+        CHECK(CoXlTestStreamFloorLeast(4, 2) == 2);
         CoXlTestStreamChangeAt(0);
-        CHECK(CoXlTestStreamChange(20000, 0, &at) == 1 && g_destroys == 4);
+        CHECK(CoXlTestStreamChange(20000, 0, &at) == 1 && g_destroys == 5);
         CoXlTestStreamBudgetStats(&budget, &floors, &builds);
         CoXlTestStreamFloorStats(&held, &quietSum, &sMoved, &sQuiet, &waitMs, &waitMost);
         CHECK(floors == 2 && held == 1 && quietSum > 42.99 && quietSum < 43.01); /* 16.5 + 10 + 16.5 */
+        /* a floor frame whose most queued layer is layer 4: its spawns go to layer 4 too (the game's own flush makes
+         * them), not none */
+        Slot(8, AX + 1000.0f, AY + 40.0f, 2.0f, 0x9000u, 0); CoXlTestStreamOutSince(8, 1); CoXlTestStreamLayerSet(8, 0);
+        CHECK(CoXlTestStreamDropPush(8));
+        CoXlTestStreamExpiredSet(0);
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(20250, 0, &at) == 1 && g_destroys == 6 && CoXlTestStreamSpawnTried() == 1);
+        /* a floor the learned rebuild made, not the quiet frames: counted as stuck */
+        for (int k = 0; k < 33; k++) { co_framecost_test_begin(t, 1, 1); t += 10000; }
+        Slot(9, AX + 1000.0f, AY + 44.0f, 2.0f, 0xA000u, 0); CoXlTestStreamOutSince(9, 1); CoXlTestStreamLayerSet(9, 0);
+        CHECK(CoXlTestStreamDropPush(9));
+        CoXlTestStreamRebuild(7000.0, &left);                            /* 7 ms for layer 4's 1000: no room at 10 ms */
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(20500, 0, &at) == 1 && g_destroys == 7);
+        {
+            uint32_t stuck = 9, dry = 9, least = 9, exits = 9, exitChanges = 9; double rebuiltSum = 9;
+            CoXlTestStreamFloorMore(&stuck, &dry, &rebuiltSum, &least, &exits, &exitChanges);
+            CHECK(stuck == 1 && dry == 4);
+        }
+        CoXlTestStreamRebuild(31.0, &left);
         /* layers 6..9 moving after a frame the streamer changed nothing in (a tile destroying units a change frame's
          * flush put there): rebuilds out of the budget, counted as layer 4's are */
         uint32_t sFrames = 0, sLeaves = 0, s4Moved = 0, s4Quiet = 0;
@@ -1224,14 +1274,51 @@ int main(void)
         CHECK(sMoved == 2 && sQuiet == 1);
         CoXlTestStreamNote();
         CHECK(fake_host_logged("layers 6..9 changed in 2 frames, 1 of them after a frame the streamer changed nothing in"));
-        CHECK(fake_host_logged("budget 2.33 ms a frame, 2 at its floor of 0.5 ms (the quiet frames' longest of 32: mean 14.3 ms), "
-                               "1 of those holding spawns for removals"));
+        CHECK(fake_host_logged("budget 1.60 ms a frame, 4 at its floor of 0.5 ms (the quiet frames' longest of 32: mean 13.9 ms), "
+                               "1 of those not caused by the quiet frames, 1 spawning near stamps only, 4 with stamps due spawning none, "
+                               "the last removing 2 at least; rebuild 31.0 ns a leaf estimated over 3300 leaves a change frame"));
         CoXlTestStreamFloorStats(&held, &quietSum, &sMoved, &sQuiet, &waitMs, &waitMost);
         CHECK(held == 0 && quietSum == 0.0 && sMoved == 0 && sQuiet == 0); /* since the note */
         co_framecost_test_reset(0);
         CoXlTestSlReset();
     }
     CoXlTestStreamObserver(0, 0.0f, 0.0f);
+
+    /* A floor frame's removal minimum keeps pace with the stamps leaving reach; a floor not caused by the quiet frames is
+     * stuck; a moving tile's 0x63 render frame is kept out of the quiet frames. */
+    Start("the floor's removal minimum, a stuck floor, and the 0x63 render frame kept apart");
+    CHECK(CoXlTestStreamFloorLeast(0, 5) == 2 && CoXlTestStreamFloorLeast(1, 1) == 2);   /* the spawn floor at least */
+    CHECK(CoXlTestStreamFloorLeast(16, 4) == 4 && CoXlTestStreamFloorLeast(17, 4) == 5); /* rounded up */
+    CHECK(CoXlTestStreamFloorLeast(32, 4) == 8 && CoXlTestStreamFloorLeast(100, 3) == 8); /* 8 at most */
+    CHECK(CoXlTestStreamFloorLeast(7, 0) == 7);                                           /* no change frame before: one */
+    CHECK(!CoXlTestStreamFloorStuck(16.5, 9500, 0.0) && CoXlTestStreamFloorStuck(10.0, 100000, 0.0));
+    CHECK(!CoXlTestStreamFloorStuck(10.0, 100000, 2.2) && !CoXlTestStreamFloorStuck(0.0, 0, 0.0));
+    CHECK(CoXlTestStreamFloorStuck(12.09, 100000, 0.0) && !CoXlTestStreamFloorStuck(12.11, 100000, 0.0)); /* 1.5 ms left */
+    CoXlTestStreamFloorLeast(0, 0);
+    {
+        int64_t t = 1000000;
+        double hi = 0, qw = 0, lw = 0;
+        co_framecost_test_reset(1000000);
+        for (int k = 0; k < 34; k++) { co_framecost_test_begin(t, 1, 1); t += 10000; }
+        CHECK(!CoXlTestRenderApart(1, 5, 0x62) && !CoXlTestRenderApart(0, 5, 0x63) && !CoXlTestRenderApart(1, 48, 0x63) && !CoXlTestRenderApart(1, -1, 0x63));
+        co_framecost_test_begin(t, 1, 1);
+        CHECK(CoXlTestRenderApart(1, 5, 0x63));                          /* its push done, the job drains in this frame */
+        t += 185000;
+        co_framecost_test_begin(t, 1, 1);
+        CHECK(co_framecost_recent(&hi, &qw, &lw) == 0 && hi == 10.0);  /* the 185 ms frame is no quiet frame */
+        t += 185000;
+        co_framecost_test_begin(t, 1, 1);
+        CHECK(co_framecost_recent(&hi, &qw, &lw) == 0 && hi == 185.0); /* the same frame not kept apart */
+        for (int k = 0; k < 33; k++) { co_framecost_test_begin(t, 1, 1); t += 10000; }
+        StreamGame();
+        Stream(4);
+        co_framecost_test_begin(t, 1, 1);
+        CoXlTestStreamTickNear(1, 7, 0x63);                              /* the streamer's tick reads it */
+        t += 185000;
+        co_framecost_test_begin(t, 1, 1);
+        CHECK(co_framecost_recent(&hi, &qw, &lw) == 0 && hi == 10.0);
+        co_framecost_test_reset(0);
+    }
 
     /* A turn whose own layer would put the frame at its floor is not taken: the frame keeps the first pick and its room. */
     Start("a change frame with room whose turn would fall to the floor keeps the most queued layer");
@@ -1262,6 +1349,13 @@ int main(void)
         CoXlTestStreamChangeStats(&changes, &backlogs, &drainCuts, &spawnCuts, &changeRemoved, drains);
         CoXlTestStreamBudgetStats(&budget, &floors, &builds);
         CHECK(changes == 1 && drains[0] == 1 && floors == 0 && fabs(budget - (16.7 - 13.0 - 1000 * 31.0e-6)) < 1e-6);
+        /* the turn not taken stays due: once layer 8 is small, the next frame takes it */
+        const uint32_t small8[10] = {10, 0, 0, 0, 1000, 0, 130000, 130000, 1200, 130000};
+        BroadPhase(10, small8);
+        Slot(3, AX + 1000.0f, AY + 12.0f, 2.0f, 0x4000u, 0); CoXlTestStreamOutSince(3, 1); CoXlTestStreamLayerSet(3, 0);
+        CHECK(CoXlTestStreamDropPush(3));
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(10500, 0, &at) == 0 && g_destroys == 2 && CoXlTestStreamSpawnTried() == 9); /* layer 8's turn */
         co_framecost_test_reset(0);
         CoXlTestSlReset();
     }

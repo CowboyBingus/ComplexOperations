@@ -421,6 +421,20 @@ static void TestBodies(void)
     CHECK(wMean == 0 && wMost == 0 && wOver == 0); /* each window counts its own */
     co_framecost_test_bodies_room(&room, &roomOver);
     CHECK(room == 0 && roomOver == 0);
+    /* a moving tile's 0x63 render frames (about 185 ms) are kept out of both, a change frame in one too */
+    g_mission++;
+    Cost(9.0, 0, 0, 0, 5.0, 0);
+    Cost(20.0, 0, 0, 0, 12.0, 0); co_framecost_bodies(1);
+    Cost(185.0, 0, 0, 0, 30.0, 0); co_framecost_apart();
+    Cost(190.0, 0, 0, 0, 40.0, 0); co_framecost_bodies(1); co_framecost_apart();
+    for (int i = 0; i < 1080; i++) Cost(9.0, 0, 0, 0, 5.0, 0);
+    CHECK(co_framecost_test_bodies(&changed, &cMean, &cMost, &quiet, &qMean, &qMost, &over) == 1);
+    CHECK(changed == 1 && cMost == 12.0 && qMost == 5.0 && over == 0);
+    co_framecost_test_bodies_whole(&wMean, &wMost, &wOver);
+    CHECK(wMost == 20.0 && wOver == 1 && co_framecost_test_apart() == 2);
+    CHECK(fake_host_logged("1 of them with room in their budget, 1 of those over; 2 frame(s) kept out of both (a moving tile's render)"));
+    for (int i = 0; i < 1112; i++) Cost(9.0, 0, 0, 0, 5.0, 0);
+    CHECK(co_framecost_test_apart() == 0);                           /* each window counts its own */
 }
 
 /* The streamer's change-frame budget reads the quiet frames just before it: their longest whole time once 32 are in,
@@ -440,6 +454,15 @@ static void TestRecent(void)
     Cost(20.0, 0, 0, 0, 9.0, 0); co_framecost_bodies(2);             /* a change frame at the floor */
     Cost(10.0, 0, 0, 0, 4.0, 0);
     CHECK(co_framecost_recent(&hi, &qw, &lw) == 2 && lw == 9.0 && hi == 10.0); /* a change frame is not a quiet one */
+    Cost(185.0, 0, 0, 0, 4.0, 0); co_framecost_apart();              /* a moving tile's 0x63 render */
+    Cost(10.0, 0, 0, 0, 4.0, 0);
+    CHECK(co_framecost_recent(&hi, &qw, &lw) == 0 && hi == 10.0);  /* kept out of the quiet frames */
+    Cost(190.0, 0, 0, 0, 9.0, 0); co_framecost_bodies(1); co_framecost_apart();
+    Cost(10.0, 0, 0, 0, 4.0, 0);
+    CHECK(co_framecost_recent(&hi, &qw, &lw) == 1 && lw == 9.0 && hi == 10.0); /* a change frame in one: the rebuild still learns */
+    Cost(185.0, 0, 0, 0, 4.0, 0);
+    Cost(10.0, 0, 0, 0, 4.0, 0);
+    CHECK(co_framecost_recent(&hi, &qw, &lw) == 0 && hi == 185.0); /* not kept apart: it holds the budget down */
     g_mission++;
     Cost(10.0, 0, 0, 0, 4.0, 0);
     CHECK(co_framecost_recent(&hi, &qw, &lw) == 0 && hi == 0 && qw == 0); /* a new play starts over */

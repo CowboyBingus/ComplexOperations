@@ -27,6 +27,7 @@ uint32_t CoXlTestStreamSpawnCaps(void);
 uint32_t CoXlTestStreamLayerOf(uint32_t i);
 void CoXlTestStreamExpiredSet(uint32_t n);
 int CoXlTestStreamDropPush(uint32_t i);
+void CoXlTestStreamDistance(uint32_t i, float distance2);
 
 static int g_failed;
 static const char* g_case;
@@ -238,32 +239,55 @@ int main(void)
     CHECK(CoXlTestStreamLayerOf(21) == 7 && CoXlTestStreamLayerOf(22) == 0);
     CoXlTestStreamMakeEstimate(0.0);
 
-    /* At its budget's floor a change frame spawns only while the window holds its design (the live stamps past their
-     * removal radius no more than a frame's removals) or no removal is queued: the removals come first. */
-    Start("a change frame at its floor: spawns wait while the window is past its design and a removal is queued");
+    /* At its budget's floor a change frame past the window's design (the live stamps past their removal radius more than
+     * a frame's removals, some queued) spawns only the nearest due inside kStreamInRadius, kStreamSpawnFloor of them:
+     * near content keeps coming while the removals catch up. */
+    Start("a change frame at its floor past the window's design: the nearest 2 inside 500 m, the rest wait");
     {
         int64_t t = 1000000;
         co_framecost_test_reset(1000000);
         for (int k = 0; k < 34; k++) { co_framecost_test_begin(t, 1, 1); t += 16500; } /* quiet frames of 16.5 ms: no room */
         Level(5);
-        CoXlTestStreamDue(0, unit); CoXlTestStreamDue(1, unit);
+        CoXlTestStreamDue(0, unit); CoXlTestStreamDue(1, unit); CoXlTestStreamDue(2, unit);
+        CoXlTestStreamDistance(0, 100.0f * 100.0f); CoXlTestStreamDistance(1, 400.0f * 400.0f); CoXlTestStreamDistance(2, 600.0f * 600.0f);
         CoXlTestStreamExpiredSet(65);
         CHECK(CoXlTestStreamDropPush(4));
         CoXlTestStreamChangeAt(0);
-        CHECK(CoXlTestStreamChange(2000, 0, &next) == 0 && g_calls == 0); /* held; the queued slot was not live */
+        CHECK(CoXlTestStreamChange(2000, 0, &next) == 1 && g_calls == 1);       /* 0 and 1 in one call */
+        CoXlTestStreamSpawned(1, &spawned, &due); CHECK(spawned);
+        CoXlTestStreamSpawned(2, &spawned, &due); CHECK(!spawned && due);     /* 600 m: it waits */
+        CHECK(CoXlTestStreamDropPush(4));
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(2001, 0, &next) == 0 && g_calls == 1);       /* only the far one left: nothing */
+        CoXlTestStreamSpawned(2, &spawned, &due); CHECK(!spawned && due);
         CHECK(CoXlTestStreamDropPush(4));
         CoXlTestStreamExpiredSet(64);                                     /* a frame's removals: the window holds */
-        CHECK(CoXlTestStreamChange(2001, 0, &next) == 1 && g_calls == 1);       /* one call of the two */
-        CoXlTestStreamDue(0, unit); CoXlTestStreamDue(1, unit);
-        CoXlTestStreamExpiredSet(65);                                     /* nothing queued: the spawns go */
-        CoXlTestStreamChangeAt(0);
-        CHECK(CoXlTestStreamChange(2300, 0, &next) == 1 && g_calls == 2);
-        /* room (the change frames are no quiet frames: 33 push the last 16.5 out): the rule does not apply */
-        for (int k = 0; k < 33; k++) { co_framecost_test_begin(t, 1, 1); t += 10000; }
-        CoXlTestStreamDue(0, unit); CoXlTestStreamDue(1, unit);
+        CHECK(CoXlTestStreamChange(2002, 0, &next) == 1 && g_calls == 2);
+        CoXlTestStreamSpawned(2, &spawned, &due); CHECK(spawned);
+        /* three near ones past the design: the floor's 2 */
+        Level(5);
+        CoXlTestStreamDue(0, unit); CoXlTestStreamDue(1, unit); CoXlTestStreamDue(2, unit);
+        for (uint32_t k = 0; k < 3; k++) CoXlTestStreamDistance(k, 10.0f);
+        CoXlTestStreamExpiredSet(65);
         CHECK(CoXlTestStreamDropPush(4));
         CoXlTestStreamChangeAt(0);
-        CHECK(CoXlTestStreamChange(2600, 0, &next) == 1 && g_calls == 3);
+        CHECK(CoXlTestStreamChange(2300, 0, &next) == 1 && g_calls == 1);
+        CoXlTestStreamSpawned(1, &spawned, &due); CHECK(spawned);
+        CoXlTestStreamSpawned(2, &spawned, &due); CHECK(!spawned && due);
+        /* nothing queued: the window holds, all go */
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(2400, 0, &next) == 1 && g_calls == 2);
+        CoXlTestStreamSpawned(2, &spawned, &due); CHECK(spawned);
+        /* room (the change frames are no quiet frames: 33 push the last 16.5 out): the far one goes too */
+        for (int k = 0; k < 33; k++) { co_framecost_test_begin(t, 1, 1); t += 10000; }
+        Level(5);
+        CoXlTestStreamDue(0, unit); CoXlTestStreamDue(1, unit); CoXlTestStreamDue(2, unit);
+        CoXlTestStreamDistance(2, 600.0f * 600.0f);
+        CHECK(CoXlTestStreamDropPush(4));
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(2600, 0, &next) == 1 && g_calls == 1);
+        CoXlTestStreamSpawned(2, &spawned, &due); CHECK(spawned);
+        for (uint32_t k = 0; k < 3; k++) CoXlTestStreamDistance(k, 0.0f);
         CoXlTestStreamExpiredSet(0);
         co_framecost_test_reset(0);
     }

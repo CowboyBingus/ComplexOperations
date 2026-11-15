@@ -104,9 +104,11 @@ enum
     /* Locations a change frame spawns whatever its budget and the making's estimate say, so a frame without room, or
      * an estimate a burst of the game's own spawns raised, still moves the queue on. */
     kStreamSpawnFloor = 2,
-    /* Removals a change frame at its budget's floor makes whatever the time: as many as the spawn floor, and the spawns
-     * wait while the window is past its design (WorldStreamWindowHolds), so at the floor removals come first. */
+    /* Removals a change frame at its budget's floor makes whatever the time: the stamps that left reach in the last
+     * scan's interval a change frame, at least the spawn floor and at most kStreamDrainFloorMost so one floor frame
+     * stays short. Removals keep pace with exits, and the window stays near its design (WorldStreamDrainLeast). */
     kStreamDrainFloor = 2,
+    kStreamDrainFloorMost = 8,
     kStreamBacklogDue = 64       /* a backlog: more due stamps not spawned than this, or a queue or expired count past a frame's */
 };
 /* A change frame's time for its removals, spawns and their making (WorldStreamBudget): the frame target less the
@@ -189,7 +191,14 @@ typedef struct WorldStreamState
     int pickTurn;            /* SlPick's turn between an overfull layer's removals and the smallest one's spawns */
     double budgetSum;        /* since the note: the change frames' budgets */
     uint32_t budgetFloors, buildFrames; /* since the note: budgets at their floor, frames a tile was building in */
-    uint32_t floorHeld;      /* since the note: floor frames whose spawns waited for removals (WorldStreamWindowHolds) */
+    uint32_t floorHeld;      /* since the note: floor frames that spawned near stamps only (WorldStreamWindowHolds) */
+    uint32_t floorDry;       /* since the note: floor frames with stamps due that spawned none, whatever the cause */
+    uint32_t floorStuck;     /* since the note: floor frames the quiet frames did not cause (WorldStreamFloorStuck) */
+    double rebuiltSum;       /* since the note: the change frames' rebuilt layer's leaves, summed */
+    uint32_t exitsNew, exitsChanges, changesSinceScan; /* the last scan's new out-picks, the change frames before it */
+    uint32_t drainLeast;     /* the last floor frame's removal minimum */
+    uint32_t spawnTried;     /* the last change frame's spawn layer + 1 (1: layer 4), 0 when it tried none */
+    float spawnWithin;       /* the spawn pass's squared reach: due stamps past it wait (0: all) */
     double quietHiSum;       /* since the note: the change frames' quiet frames' longest, summed */
     uint32_t streamedAt, streamedLeaves, streamedMoved, streamedQuiet; /* layers 6..9 as layer 4's static* above */
     uint32_t changes;        /* frames it did since the last note */
@@ -317,6 +326,8 @@ static void WorldStreamClearLocked(void)
     g_stream.spawnCaps = g_stream.tileDefers = g_stream.spawnedIn = 0;
     g_stream.budgetSum = 0.0; g_stream.budgetFloors = g_stream.buildFrames = 0; g_stream.nextChangeTick = 0; g_stream.pickTurn = 0;
     g_stream.floorHeld = 0; g_stream.quietHiSum = 0.0; g_stream.streamedAt = g_stream.streamedLeaves = g_stream.streamedMoved = g_stream.streamedQuiet = 0;
+    g_stream.floorDry = g_stream.floorStuck = 0; g_stream.rebuiltSum = 0.0; g_stream.exitsNew = g_stream.exitsChanges = g_stream.changesSinceScan = 0;
+    g_stream.drainLeast = 0; g_stream.spawnWithin = 0.0f;
     g_streamFlush.waitMs = g_streamFlush.waitMost = 0.0;
     g_streamFlush.frames = 0; g_streamFlush.ms = g_streamFlush.most = 0.0;
     g_streamRebuild.leaves = 0;
@@ -1207,7 +1218,9 @@ static void WorldStreamScanLocked(ULONGLONG now)
     }
     for (uint32_t k = 0; k < picks; k++) WorldStreamDropLocked(pick[k], STREAM_DROP_REPLACE);
     WorldStreamOutOrder(g_streamOutPick, g_streamOutKey, outs);
-    for (uint32_t k = 0; k < outs && g_streamDropCount < kStreamDropQueue - kStreamDropReserve; k++) WorldStreamDropLocked(g_streamOutPick[k], STREAM_DROP_OUT);
+    uint32_t exits = 0; /* new to the queue: stamps that left reach since the last scan (or waited for queue room) */
+    for (uint32_t k = 0; k < outs && g_streamDropCount < kStreamDropQueue - kStreamDropReserve; k++) exits += (uint32_t)WorldStreamDropLocked(g_streamOutPick[k], STREAM_DROP_OUT);
+    g_stream.exitsNew = exits; g_stream.exitsChanges = g_stream.changesSinceScan; g_stream.changesSinceScan = 0;
     g_stream.expired = expired;
     if (expired > g_stream.expiredMost) g_stream.expiredMost = expired;
     g_stream.orderCount = order;
@@ -1263,7 +1276,9 @@ static uint32_t WorldStreamSpawnDueLocked(double ms, uint32_t most)
             else if (fits == 0) { g_stream.spawnCut = 1; break; }
             else room = fits;
         }
-        while (count < kStreamBatch && count < room && cursor < g_stream.orderCount)
+        /* the due order is nearest first: past the pass's reach the rest wait, the cursor on the first of them */
+        while (count < kStreamBatch && count < room && cursor < g_stream.orderCount &&
+            !(g_stream.spawnWithin > 0.0f && g_streamDistance[g_streamOrder[cursor]] >= g_stream.spawnWithin))
         {
             uint32_t i = g_streamOrder[cursor];
             if (g_streamSpawned[i]) { cursor++; continue; }
@@ -1444,9 +1459,13 @@ static void WorldStreamNoteLocked(ULONGLONG now)
         g_stream.changes, (int)kStreamChangeGap, g_streamDropCount, g_stream.expired, (int)(kStreamOutTimeout / 1000), g_stream.expiredMost, leaves,
         g_stream.staticMoved, g_stream.staticFrames, g_stream.staticQuiet, g_stream.staticTile, g_stream.streamedMoved, g_stream.streamedQuiet);
     const double frames = g_stream.changes > 0 ? (double)g_stream.changes : 1.0;
-    Note("difficulty: extra large maps: streaming change frames: %u of %u with a backlog (every %d frames); budget %.2f ms a frame, %u at its floor of %.1f ms (the quiet frames' longest of 32: mean %.1f ms), %u of those holding spawns for removals; rebuild %.1f ns a leaf estimated; %u removals, %.1f a frame; removals %.2f ms a frame (the most %.2f), spawns %.2f ms (the most %.2f); %u locations spawned, %.1f a frame; their units made in %u flushes, %.2f ms each (the most %.2f) after an animation wait of %.2f ms (the most %.2f), %.3f ms a location and %.2f ms fixed estimated; cut short by the time limit: removals in %u, spawns in %u; by the location count: %u; deferred for a tile step: %u frames of %u a tile built in; %u due not spawned at the last scan; drained layer 4 %u, 6..9 %u %u %u %u; spawned into layer 4 %u, 6..9 %u %u %u %u",
+    Note("difficulty: extra large maps: streaming change frames: %u of %u with a backlog (every %d frames); budget %.2f ms a frame, %u at its floor of %.1f ms (the quiet frames' longest of 32: mean %.1f ms), %u of those not caused by the quiet frames, %u spawning near stamps only, %u with stamps due spawning none, the last removing %u at least; rebuild %.1f ns a leaf estimated over %.0f leaves a change frame",
         g_stream.backlogs, g_stream.changes, (int)kStreamChangeTicksBusy, g_stream.budgetSum / frames, g_stream.budgetFloors, kStreamBudgetFloor,
-        g_stream.quietHiSum / frames, g_stream.floorHeld, g_streamRebuild.ns, g_stream.changeRemoved, g_stream.changeRemoved / frames,
+        g_stream.quietHiSum / frames, g_stream.floorStuck, g_stream.floorHeld, g_stream.floorDry, g_stream.drainLeast, g_streamRebuild.ns,
+        g_stream.rebuiltSum / frames);
+    /* the loader writes about 1000 characters a line (HellForge logging.c WriteLog): the change frames' work apart */
+    Note("difficulty: extra large maps: streaming change work: %u removals, %.1f a frame; removals %.2f ms a frame (the most %.2f), spawns %.2f ms (the most %.2f); %u locations spawned, %.1f a frame; their units made in %u flushes, %.2f ms each (the most %.2f) after an animation wait of %.2f ms (the most %.2f), %.3f ms a location and %.2f ms fixed estimated; cut short by the time limit: removals in %u, spawns in %u; by the location count: %u; deferred for a tile step: %u frames of %u a tile built in; %u due not spawned at the last scan; drained layer 4 %u, 6..9 %u %u %u %u; spawned into layer 4 %u, 6..9 %u %u %u %u",
+        g_stream.changeRemoved, g_stream.changeRemoved / frames,
         g_stream.drainMs / frames, g_stream.drainMost, g_stream.spawnMs / frames, g_stream.spawnMost, g_stream.spawnedIn, g_stream.spawnedIn / frames,
         g_streamFlush.frames, g_streamFlush.frames > 0 ? g_streamFlush.ms / g_streamFlush.frames : 0.0, g_streamFlush.most,
         g_streamFlush.frames > 0 ? g_streamFlush.waitMs / g_streamFlush.frames : 0.0, g_streamFlush.waitMost, g_streamFlush.slope, g_streamFlush.fixed,
@@ -1460,6 +1479,7 @@ static void WorldStreamNoteLocked(ULONGLONG now)
     g_stream.spawnCaps = g_stream.tileDefers = g_stream.spawnedIn = 0;
     g_stream.budgetSum = 0.0; g_stream.budgetFloors = g_stream.buildFrames = 0;
     g_stream.floorHeld = 0; g_stream.quietHiSum = 0.0; g_stream.streamedMoved = g_stream.streamedQuiet = 0;
+    g_stream.floorDry = g_stream.floorStuck = 0; g_stream.rebuiltSum = 0.0;
     g_streamFlush.frames = 0; g_streamFlush.ms = g_streamFlush.most = 0.0; g_streamFlush.waitMs = g_streamFlush.waitMost = 0.0;
     g_stream.drainMs = g_stream.spawnMs = g_stream.drainMost = g_stream.spawnMost = 0.0;
     memset(g_stream.layerDrains, 0, sizeof g_stream.layerDrains); memset(g_stream.layerSpawns, 0, sizeof g_stream.layerSpawns);
@@ -1658,11 +1678,27 @@ static void WorldStreamChangeAfter(void)
  * frame's removals. A change frame at its floor spawns only then, or with no removal queued. */
 static int WorldStreamWindowHolds(void) { return g_stream.expired <= kStreamChangeDrops || g_streamDropCount == 0; }
 
+/* A floor frame's removal minimum: the last scan's new exits over the change frames in its interval, rounded up, in
+ * [kStreamDrainFloor, kStreamDrainFloorMost]. */
+static uint32_t WorldStreamDrainLeast(void)
+{
+    const uint32_t frames = g_stream.exitsChanges > 0 ? g_stream.exitsChanges : 1u, n = (g_stream.exitsNew + frames - 1u) / frames;
+    return n < kStreamDrainFloor ? kStreamDrainFloor : n > kStreamDrainFloorMost ? kStreamDrainFloorMost : n;
+}
+
+/* A floor frame the quiet frames did not cause: with the KB's rebuild a leaf (kStreamRebuildNs) instead of the learned
+ * one it would have had 1.5 ms. Many of them say the learned estimate holds the change frames down. */
+static int WorldStreamFloorStuck(double quietHi, uint32_t leaves, double moveMs)
+{
+    return quietHi > 0.0 && CO_FC_TARGET_MS - quietHi - moveMs - (double)leaves * kStreamRebuildNs * 1.0e-6 >= 1.5;
+}
+
 /* At most one frame each kStreamChangeGap ms, or every kStreamChangeTicksBusy frames with a backlog of removals or
  * spawns, adds and removes stamp bodies, all in one broad phase layer so the step rebuilds one. Its removals, spawns
  * and their making share one budget (WorldStreamBudget); with spawns due the removals take half of it at most. At the
- * budget's floor the removals come first: the layer with the most queued, kStreamDrainFloor of them, and spawns only
- * while the window holds. A try that changed nothing leaves the next frame free to try. The changes made. */
+ * budget's floor the removals come first: the layer with the most queued, as many as the stamps leaving reach
+ * (WorldStreamDrainLeast), and the spawns go to that layer; past the window's design only the nearest few. A try that
+ * changed nothing leaves the next frame free to try. The changes made. */
 static uint32_t WorldStreamChangeLocked(ULONGLONG now, int layerBusy)
 {
     WorldStreamRebuildLearn();
@@ -1681,30 +1717,37 @@ static uint32_t WorldStreamChangeLocked(ULONGLONG now, int layerBusy)
     if (ms > kStreamBudgetFloor && pending > 0 && !layerBusy)
     {
         int drain2; uint32_t spawn2, rebuilt2;
+        const int turn = g_stream.pickTurn;
         WorldStreamLayersLocked(1, &drain2, &spawn2, &rebuilt2);
         const double ms2 = WorldStreamBudget(quietHi, (double)rebuilt2 * g_streamRebuild.ns * 1.0e-6, MoveStepMsNow());
         if (ms2 > kStreamBudgetFloor) { drain = drain2; spawn = spawn2; rebuilt = rebuilt2; ms = ms2; } /* never a turn at the floor */
+        else g_stream.pickTurn = turn; /* the turn not taken stays due */
     }
     const int room = ms > kStreamBudgetFloor;
-    int spawnGo = drain < 0 || spawn != 0; /* split off: the spawns go to layer 4 with the removals */
-    const int held = !room && spawnGo && pending > 0 && !layerBusy && !WorldStreamWindowHolds();
-    if (held) spawnGo = 0;
+    /* at the floor the spawns go to the drain's own layer, over-full or layer 4 (the drain takes at least as many out of
+     * it); past the window's design only the nearest due inside kStreamInRadius, kStreamSpawnFloor of them */
+    if (!room && drain > 4) spawn = (uint32_t)drain; /* layer 4's own: SlPick's spawn is 0 already */
+    const int spawnGo = !room || drain < 0 || spawn != 0; /* split off: the spawns go to layer 4 with the removals */
+    const int held = !room && pending > 0 && !layerBusy && !WorldStreamWindowHolds();
     const int spawnsDue = spawnGo && !layerBusy && pending > 0;
+    const uint32_t least = room ? 1u : WorldStreamDrainLeast();
+    if (!room) g_stream.drainLeast = least;
     const uint32_t removed = g_stream.removed;
     const double t0 = HitchNow();
-    uint32_t changed = WorldStreamDrainLocked(backlog ? kStreamChangeDropsBusy : kStreamChangeDrops, spawnsDue ? ms * 0.5 : ms, drain,
-        room ? 1u : kStreamDrainFloor);
+    uint32_t changed = WorldStreamDrainLocked(backlog ? kStreamChangeDropsBusy : kStreamChangeDrops, spawnsDue ? ms * 0.5 : ms, drain, least);
     const double t1 = HitchNow();
     /* a tile's layer fill takes grids out of use while it writes them (NearLayerChangeFill): a stamp spawned then would
      * miss its grid and stand on the coarse heights, so the spawns wait the few frames until it is done */
     uint32_t made = 0;
     g_stream.spawnCut = g_stream.spawnCapped = 0;
+    g_stream.spawnTried = !layerBusy && spawnGo ? spawn + 1u : 0u;
     if (!layerBusy && spawnGo)
     {
         const uint32_t spawned = g_stream.spawnedIn;
         g_stream.spawnLayer = spawn;
         SlFrameBegin(spawn);
-        made = WorldStreamSpawnDueLocked(ms - (t1 - t0), backlog ? kStreamChangeSpawnsBusy : kStreamChangeSpawns);
+        g_stream.spawnWithin = held ? kStreamInRadius * kStreamInRadius : 0.0f;
+        made = WorldStreamSpawnDueLocked(ms - (t1 - t0), held ? kStreamSpawnFloor : backlog ? kStreamChangeSpawnsBusy : kStreamChangeSpawns);
         if (made && spawn) WorldStreamFlushLaterLocked(g_stream.spawnedIn - spawned); else SlFrameEnd(0);
         g_stream.spawnLayer = 0;
     }
@@ -1720,6 +1763,9 @@ static uint32_t WorldStreamChangeLocked(ULONGLONG now, int layerBusy)
     g_streamRebuild.leaves = rebuilt;
     g_stream.changes++;
     g_stream.budgetSum += ms; g_stream.budgetFloors += !room; g_stream.floorHeld += held; g_stream.quietHiSum += quietHi;
+    g_stream.floorDry += !room && pending > 0 && made == 0;
+    g_stream.floorStuck += !room && WorldStreamFloorStuck(quietHi, rebuilt, MoveStepMsNow());
+    g_stream.rebuiltSum += rebuilt; g_stream.changesSinceScan++;
     g_stream.backlogs += backlog != 0; g_stream.drainCuts += g_stream.drainCut != 0; g_stream.spawnCuts += g_stream.spawnCut != 0;
     g_stream.changeRemoved += g_stream.removed - removed;
     g_stream.drainMs += t1 - t0; g_stream.spawnMs += t2 - t1;
@@ -1733,9 +1779,20 @@ static uint32_t WorldStreamChangeLocked(ULONGLONG now, int layerBusy)
 
 /* Called from TickDetour (packages.c) every frame: nothing until a level is captured and the generator's op is done,
  * nothing once g_worldLevel is another level (all state is dropped), nothing while the world is back to vanilla. */
+/* A moving tile's 0x63 job drains in this frame's render callback, after this tick (A: difficulty_world_terrain.c sets
+ * stampLeave at the push and clears it at the next poll once drained). Its long frame (about 185 ms) is kept out of
+ * the quiet frames and the change frames; the change frame is not deferred for it. 1 when kept apart. */
+static int WorldStreamRenderApart(void)
+{
+    if (!g_near.stampLeave || g_near.step < 0 || g_near.step >= NEAR_STEPS || g_near.stepOp[g_near.step] != 0x63) return 0;
+    co_framecost_apart();
+    return 1;
+}
+
 static void WorldStreamTick(float dt)
 {
     if (g_streamInstallState != 1) return;
+    WorldStreamRenderApart();
     g_streamTicks++;
     g_layerGameThread = GetCurrentThreadId();
     DestroyTick(); /* destroys that waited for their unit (difficulty_world_destroy.c) */

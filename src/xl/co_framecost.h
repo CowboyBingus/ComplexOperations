@@ -63,6 +63,9 @@ void co_framecost_grass(int out);
 void co_framecost_bodies(int changed);
 #define CO_FC_BODIES_ROOM 1              /* co_framecost_bodies: a change frame whose budget had room under the target */
 #define CO_FC_BODIES_FLOOR 2             /* ... one at its floor: the quiet frames and the rebuild left none */
+/* This frame is kept out of the quiet frames and the change frames alike (a moving tile's 0x63 render, about 185 ms,
+ * drained in it): one such frame would hold every change frame's budget at its floor for the next 32 quiet frames. */
+void co_framecost_apart(void);
 /* Quiet frames the streamer's change-frame budget looks back over: a frame is over the longest of the 32 before it
  * 1 time in 33 when frames are alike, about 0.3 s at 100 fps */
 #define CO_FC_RECENT 32
@@ -92,6 +95,8 @@ int co_framecost_test_slow_bodies(int k);
 void co_framecost_test_bodies_whole(double* mean, double* most, uint32_t* over);
 /* The last window's change frames whose budget had room, and how many of those were over the target. */
 void co_framecost_test_bodies_room(uint32_t* room, uint32_t* over);
+/* The last window's frames kept apart. */
+uint32_t co_framecost_test_apart(void);
 int co_framecost_test_window_lines(void);
 /* The last closed window's split: frames with a change, their mean and longest world update (own time), the same for
  * the frames without, and how many of those were over CO_FC_TARGET_MS. 0 when the window had no split line. */

@@ -1843,6 +1843,42 @@ void CoXlTestStreamStatic(int skip, int changed, uint32_t* frames, uint32_t* mov
 }
 /* The last scan's live stamps past their removal radius and timer, and the most since the note. */
 void CoXlTestStreamExpired(uint32_t* now, uint32_t* most) { *now = g_stream.expired; *most = g_stream.expiredMost; }
+/* A moving tile's state as the 0x63 render frame test reads it. */
+void CoXlTestNearStamp(int stampLeave, int step, uint8_t op)
+{
+    g_near.stampLeave = stampLeave; g_near.step = step;
+    if (step >= 0 && step < NEAR_STEPS) g_near.stepOp[step] = op;
+}
+void CoXlTestStreamTick(void);
+/* The streamer's tick with a moving tile's state set, the layer spawns' game thread kept for the cases after. */
+void CoXlTestStreamTickNear(int stampLeave, int step, uint8_t op)
+{
+    const DWORD game = g_layerGameThread;
+    CoXlTestNearStamp(stampLeave, step, op);
+    CoXlTestStreamTick();
+    CoXlTestNearStamp(0, 0, 0);
+    g_layerGameThread = game;
+}
+/* The same, and that test. */
+int CoXlTestRenderApart(int stampLeave, int step, uint8_t op)
+{
+    g_near.stampLeave = stampLeave; g_near.step = step;
+    if (step >= 0 && step < NEAR_STEPS) g_near.stepOp[step] = op;
+    const int apart = WorldStreamRenderApart();
+    g_near.stampLeave = 0; g_near.step = 0;
+    return apart;
+}
+/* The floor's removal minimum from a scan's new exits over its change frames; floor frames: stuck, dry; rebuilt summed. */
+uint32_t CoXlTestStreamFloorLeast(uint32_t exits, uint32_t changes) { g_stream.exitsNew = exits; g_stream.exitsChanges = changes; return WorldStreamDrainLeast(); }
+void CoXlTestStreamFloorMore(uint32_t* stuck, uint32_t* dry, double* rebuiltSum, uint32_t* least, uint32_t* exits, uint32_t* exitChanges)
+{
+    *stuck = g_stream.floorStuck; *dry = g_stream.floorDry; *rebuiltSum = g_stream.rebuiltSum; *least = g_stream.drainLeast;
+    *exits = g_stream.exitsNew; *exitChanges = g_stream.exitsChanges;
+}
+int CoXlTestStreamFloorStuck(double quietHi, uint32_t leaves, double moveMs) { return WorldStreamFloorStuck(quietHi, leaves, moveMs); }
+uint32_t CoXlTestStreamSpawnTried(void) { return g_stream.spawnTried; }
+/* A due stamp's squared distance to its nearest player, as the scan sets it. */
+void CoXlTestStreamDistance(uint32_t i, float distance2) { g_streamDistance[i] = distance2; }
 /* The scan's count of those, set; a slot queued for removal as a scan queues one. */
 void CoXlTestStreamExpiredSet(uint32_t n) { g_stream.expired = n; }
 int CoXlTestStreamDropPush(uint32_t i) { return WorldStreamDropLocked(i, STREAM_DROP_OUT); }
