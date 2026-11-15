@@ -1308,6 +1308,16 @@ void CoXlTestBandStart(const void* data)
 int CoXlTestBandState(void) { return (g_bandJob.on ? 1 : 0) | (g_bandJob.running ? 2 : 0) | (g_bandJob.abandoned ? 4 : 0); }
 uint32_t* CoXlTestBandCollect(int keep, uint32_t* taken) { *taken = g_bandJob.taken; return NearBandCollect(keep); }
 void CoXlTestBandAbandon(void) { NearBandAbandon(); }
+/* The tile's shape on a worker (proto/difficulty_world_terrain.c NearShapeBegin): the exe's image (pins asked again),
+ * its steps, its state (1 on, 2 running), a join; the ready poll for `handle` with the build's context. */
+void CoXlTestShapeExe(uintptr_t exe) { g_shapeExe = exe; g_shapePins = -1; }
+int CoXlTestShapeBegin(uint64_t world, uint64_t handle) { return NearShapeBegin(world, handle); }
+void CoXlTestShapeEnd(void) { NearShapeEnd(); }
+int CoXlTestShapeState(void) { return (g_shape.on ? 1 : 0) | (g_shape.running ? 2 : 0); }
+void CoXlTestShapeJoin(void) { NearShapeJoin("a test"); }
+void CoXlTestShapeLevelLeft(void) { NearJobLevelLeft(); }
+int CoXlTestReadyTile(uint64_t context, uint64_t handle, int* state)
+{ g_near.handle = handle; g_near.polls = 0; g_near.state = NEAR_READY; uint64_t world = 0; int r = NearReadyTile(context, &world); *state = g_near.state; return r; }
 /* a pass as if under way (no thread): the conform's phase 11 must not wait for it */
 void CoXlTestBandPretend(int running) { g_bandJob.on = 1; g_bandJob.thread = NULL; g_bandJob.pixels = NULL; memset(g_bandJob.desc, 0, sizeof g_bandJob.desc); InterlockedExchange(&g_bandJob.running, running); }
 void CoXlTestBandJobTick(void) { NearBandTick(); }

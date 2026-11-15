@@ -658,6 +658,7 @@ static int MoveTeardown(int left)
 /* The rest of a failed build, once its stamp terrains are away. */
 static void MoveFailRest(void)
 {
+    NearShapeJoin("a failed build"); /* the terrain below may be destroyed: its shape job first */
     MoveStampUnitsDestroy(1e30);
     MoveTeardown(0);
     if (g_move.failState >= MV_SPAWN && g_near.handle != 0 && g_near.handle != g_move.dropHandle)

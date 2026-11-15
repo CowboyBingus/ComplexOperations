@@ -2455,8 +2455,10 @@ static void NearJobRelease(void)
 }
 
 /* A level init or the ship (NearLevelLeft): the job joined; the level may be gone, so its marker is left alone. */
+static void NearShapeJoin(const char* why);
 static void NearJobLevelLeft(void)
 {
+    NearShapeJoin("the level went"); /* before the tiles' terrains go */
     NearJobStop("the level went", 0);
     NearJobRelease();
 }
@@ -2466,10 +2468,11 @@ static void NearJobLevelLeft(void)
  * is joined while the level is there; the marker goes back on the run's own level only. */
 static void NearJobLevelUpdate(uintptr_t level, uintptr_t moving)
 {
-    if (!g_nearJob.on) return;
     uint32_t state = 0;
     const int read = !SafeRead(level + 0x1E4, &state, 4);
     if (level == moving && read && state == 3) return;
+    NearShapeJoin("the level left play");
+    if (!g_nearJob.on) return;
     Note("difficulty: moving tiles: composite tiles: joined at generator state %u, a job in flight %s", state, g_nearJob.inflight > 0 ? "yes" : "no");
     NearJobStop("the level left play", level == g_nearJob.level);
 }
@@ -8303,6 +8306,176 @@ static int NearSpawnTile(uint64_t context)
 
 /* The tile ready (polled each call: 1 while waiting), then SpawnTerrainWork and the finalize with its body moved to the
  * tile; 0 when finalized (or failed: NEAR_FAILED). *world gets the world. */
+static void MoveHold(int on); /* difficulty_world_move.c */
+/* ---- The tile's collision shape on a worker ----------------------------------------------------------------------------
+ * The ready frame held the game thread 136-140 ms, nearly all of it SpawnTerrainWork (exe 0x1AC210, [api+8]+0x1A8): under
+ * the world's terrain lock (world+0x230520, 0x1AC24C..0x1AC754) it fills the terrain object from its table entry, builds
+ * the physics height field from every sample (0x786130 at 0x1AC4C9: two fresh arrays, a pass over the heights and
+ * materials, a min/max tree) and then the render quadtree (0x2F2CB0 at 0x1AC58A). Vanilla runs it in the generator's
+ * job (op 0x6A, record flags 0), and 0x786130 reads the object and writes only what it allocates. So the steps are the
+ * function's own, in its order, with the shape build alone as an engine job on the regular workers (as the tile
+ * runners, which the game thread's waits never run); craters are held meanwhile. Not the reviewed code: work() as before. */
+#define NEAR_SHAPE_LOCK 0x230520u
+#define NEAR_SHAPE_TABLE 0x230550u
+static const struct { uint32_t at; const char* bytes; } kNearShapeWork[] = {
+    {0x1AC210u, "48 89 54 24 10 55 53 56 57 41 54 41 55 41 56 41 57 48 8d ac 24 18 f8 ff ff 48 81 ec e8 08 00 00 48 8d b1 20 05 23 00 0f 29 b4 24 d0 08 00 00 4c 8b f9 48 89 b5 48 08 00 00 48 8b ce ff 15 66 a4"},
+    {0x1AC250u, "24 01 49 8d 8f 50 05 23 00 48 8d 95 38 08 00 00 e8 5b c4 00 00 4c 8b e0 c7 85 c0 07 00 00 ff ff ff ff 33 c9 48 8d 05 ed 51 4a 01 48 89 44 24 70 48 8d 15 a9 e8 60 02 48 89 4c 24 78 48 8d 45 90"},
+    {0x1AC290u, "48 89 85 90 07 00 00 0f 57 c0 66 0f 7f 45 80 48 8d 05 9a 4c 4a 01 48 89 85 98 07 00 00 66 0f 7f 85 a0 07 00 00 48 89 8d b0 07 00 00 48 89 8d b8 07 00 00 49 8b 44 24 38 49 8b 5c 24 24 49 8b 7c"},
+    {0x1AC2D0u, "24 2c 48 89 9d 30 08 00 00 44 8b 68 14 44 8b 70 18 8b c1 48 89 bd 40 08 00 00 66 0f 1f 44 00 00 8b c8 4c 39 3c ca 74 0c ff c0 83 f8 04 75 f1 e9 d6 01 00 00 83 f8 04 0f 83 cd 01 00 00 48 69 c1"},
+    {0x1AC310u, "b0 00 00 00 48 8d 0d 55 e5 60 02 48 03 c1 0f 84 b6 01 00 00 49 8b 74 24 10 48 8d 0d 0c 56 4c 01 f3 0f 10 85 30 08 00 00 45 33 c0 f3 0f 10 8d 34 08 00 00 f3 0f 11 86 68 01 00 00 f3 0f 10 85 40"},
+    {0x1AC350u, "08 00 00 41 8d 50 06 f3 0f 11 8e 6c 01 00 00 f3 0f 10 8d 44 08 00 00 f3 0f 11 86 70 01 00 00 f3 0f 11 8e 74 01 00 00 c7 86 7c 01 00 00 01 00 00 00 44 89 6e 50 44 89 76 54 c7 86 78 01 00 00 80"},
+    {0x1AC390u, "00 00 00 e8 a8 94 42 00 48 c1 e8 20 41 8d 50 07 48 8d 0d 01 56 4c 01 89 46 58 e8 91 94 42 00 0f 10 46 60 48 c1 e8 20 48 8b d6 89 46 5c 49 8b cf 41 0f 11 44 24 58 0f 10 4e 70 41 0f 11 4c 24 68"},
+    {0x1AC3D0u, "0f 10 86 80 00 00 00 41 0f 11 44 24 78 0f 10 8e 90 00 00 00 41 0f 11 8c 24 88 00 00 00 0f 10 86 a0 00 00 00 41 0f 11 84 24 98 00 00 00 0f 10 8e b0 00 00 00 41 0f 11 8c 24 a8 00 00 00 0f 10 86"},
+    {0x1AC410u, "c0 00 00 00 41 0f 11 84 24 b8 00 00 00 0f 10 8e d0 00 00 00 41 0f 11 8c 24 c8 00 00 00 8b 86 e0 00 00 00 41 89 84 24 d8 00 00 00 0f 10 86 e4 00 00 00 41 0f 11 84 24 dc 00 00 00 0f 10 8e f4 00"},
+    {0x1AC450u, "00 00 41 0f 11 8c 24 ec 00 00 00 0f 10 86 04 01 00 00 41 0f 11 84 24 fc 00 00 00 0f 10 8e 14 01 00 00 41 0f 11 8c 24 0c 01 00 00 0f 10 86 24 01 00 00 41 0f 11 84 24 1c 01 00 00 0f 10 8e 34 01"},
+    {0x1AC490u, "00 00 41 0f 11 8c 24 2c 01 00 00 0f 10 86 44 01 00 00 41 0f 11 84 24 3c 01 00 00 0f 10 8e 54 01 00 00 41 0f 11 8c 24 4c 01 00 00 8b 86 64 01 00 00 41 89 84 24 5c 01 00 00 e8 62 9c 5d 00 48 8b"},
+    {0x1AC4D0u, "b5 48 08 00 00 49 89 44 24 18 41 8b ce 41 83 fe 20 72 29 41 8d 46 ff 41 85 c6 75 07 b9 20 00 00 00 eb 19 41 f6 c6 01 75 13 0f 1f 80 00 00 00 00 83 f9 20 76 07 d1 e9 f6 c1 01 74 f4 41 8b c5 48"},
+    {0x1AC510u, "c7 85 30 08 00 00 00 00 00 00 99 f7 f9 66 0f 6e c0 0f 5b c0 e8 e7 05 12 01 0f 28 f0 f3 0f 10 05 ac d5 4f 01 e8 d7 05 12 01 49 8b 54 24 10 45 33 ff 49 8b 0c 24 45 8b ce 4c 89 7c 24 60 48 83 c1"},
+    {0x1AC550u, "38 4c 89 7c 24 58 45 8b c5 48 8b 52 40 f3 0f 5e f0 f3 48 0f 2c c6 89 44 24 50 48 8b 85 30 08 00 00 44 89 7c 24 48 48 89 7c 24 40 48 89 5c 24 38 48 89 5c 24 30 48 89 44 24 28 e8 21 67 14 00 44"},
+    {0x1AC590u, "8b 85 c0 07 00 00 48 8d 05 cb 4e 4a 01 48 89 44 24 70 48 8d 05 97 49 4a 01 48 89 85 98 07 00 00 41 83 f8 ff 0f 84 c4 00 00 00 48 8b 9d b8 07 00 00 48 85 db 75 16 e8 c5 b9 40 00 44 8b 85 c0 07"},
+    {0x1AC5D0u, "00 00 48 8b d8 48 89 85 b8 07 00 00 8b 53 30 4c 8b 4b 38 8d 42 ff 45 3b 04 81 75 05 89 43 30 eb 40 41 8b c7 85 d2 74 39 8b c8 45 39 04 89 74 08 ff c0 3b c2 72 f2 eb 29 4c 8b c2 49 8d 0c 89 49"},
+    {0x1AC610u, "c1 e0 02 48 8d 51 04 4c 2b c1 4d 03 c1 49 c1 f8 02 4e 8d 04 85 fc ff ff ff e8 22 b2 0b 01 ff 4b 30 48 8b cb e8 a7 db 40 00 84 c0 74 41 0f 1f 00 8b 53 18 8b 43 48 ff ca 48 c1 e2 05 48 03 53 20"},
+    {0x1AC650u, "39 43 50 73 0b 48 8d 4b 50 e8 72 e7 40 00 eb 0f 48 8b 0b 45 33 c0 48 8b 12 48 8b 01 ff 50 40 ff 4b 18 48 8b cb e8 66 db 40 00 84 c0 75 c2 4c 8d 35 4b ea 4d 01 48 8b 1d f4 6a 96 01 4c 89 b5 98"},
+    {0x1AC690u, "07 00 00 4c 39 bd a0 07 00 00 74 61 48 85 db 74 5c 48 8d 4b 08 ff 15 0d a0 24 01 48 8b 8d b0 07 00 00 48 8b 85 a8 07 00 00 48 85 c9 74 06 48 89 41 10 eb 03 48 89 03 48 8b 95 a8 07 00 00 48 85"},
+    {0x1AC6D0u, "d2 74 0b 48 8b 85 b0 07 00 00 48 89 42 18 48 8d 4b 08 4c 89 bd a8 07 00 00 4c 89 bd b0 07 00 00 ff 15 ca 9f 24 01 48 8b 1d 83 6a 96 01 4c 89 74 24 70 4c 39 7c 24 78 74 48 48 85 db 74 43 48 8d"},
+    {0x1AC710u, "4b 08 ff 15 a0 9f 24 01 48 8b 4d 88 48 8b 45 80 48 85 c9 74 06 48 89 41 10 eb 03 48 89 03 48 8b 55 80 48 85 d2 74 08 48 8b 45 88 48 89 42 18 0f 57 c0 48 8d 4b 08 66 0f 7f 45 80 ff 15 6f 9f 24"},
+    {0x1AC750u, "01 48 8b ce ff 15 66 9f 24 01 0f 28 b4 24 d0 08 00 00 48 81 c4 e8 08 00 00 41 5f 41 5e 41 5d 41 5c 5f 5e 5b 5d c3"},
+};
+static struct { int on, inList; volatile LONG running; uint64_t world, handle, obj, shape, element; double jobMs; uint32_t frames, onGame; DWORD game; ULONGLONG since; } g_shape;
+static uintptr_t g_shapeExe; /* a test's image; 0: the game's */
+static uintptr_t NearShapeExe(void) { return g_shapeExe != 0 ? g_shapeExe : (uintptr_t)GetModuleHandleW(NULL); }
+
+static int g_shapePins = -1;
+static int NearShapePinned(void)
+{
+    int ok = g_shapePins;
+    if (ok >= 0) return ok;
+    const uintptr_t exe = NearShapeExe();
+    ok = ExeCodeMatches(exe + 0x167193Cu, "73 74 61 74 69 63") && ExeCodeMatches(exe + 0x16719A8u, "74 65 72 72 61 69 6E");
+    for (size_t k = 0; ok && k < sizeof kNearShapeWork / sizeof kNearShapeWork[0]; k++) ok = ExeCodeMatches(exe + kNearShapeWork[k].at, kNearShapeWork[k].bytes);
+    if (!ok) Note("difficulty: near terrain: SpawnTerrainWork is not the reviewed code; the tile's shape is built on the game thread");
+    g_shapePins = ok;
+    return ok;
+}
+
+typedef void (*NearLockFn)(uint64_t lock);
+typedef uint8_t* (*NearShapeFindFn)(uint64_t table, uint64_t* key);
+static int NearShapeLocks(uintptr_t exe, NearLockFn* enter, NearLockFn* leave)
+{
+    return !SafeRead(exe + 0x13F66B8u, enter, 8) && *enter != NULL && !SafeRead(exe + 0x13F66C0u, leave, 8) && *leave != NULL;
+}
+
+static uint64_t NearShapeJob(uint64_t a, uint64_t b, uint64_t c, uint64_t data)
+{
+    (void)a; (void)b; (void)c; (void)data;
+    typedef uint64_t (*ShapeFn)(uint64_t world, uint64_t obj);
+    if (GetCurrentThreadId() == g_shape.game) g_shape.onGame++;
+    LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
+    g_shape.shape = ((ShapeFn)(NearShapeExe() + 0x786130u))(g_shape.world, g_shape.obj);
+    QueryPerformanceCounter(&t1);
+    g_shape.jobMs = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+    MemoryBarrier();
+    InterlockedExchange(&g_shape.running, 0);
+    return 0;
+}
+
+/* 0x1AC24C..0x1AC4C8: under the lock, the entry found (0x1B86C0) and the object filled from it, the world checked
+ * against the physics list (exe 0x27BAB30, 4); then the shape's job. 0: not begun (work() instead). */
+static int NearShapeBegin(uint64_t world, uint64_t handle)
+{
+    typedef uint64_t (*SubmitFn)(void* fn, uint64_t* data, const char* name, uint32_t queue, uint32_t priority, uint32_t count, uint64_t zero);
+    typedef uint64_t (*HashFn)(uint64_t text, uint64_t length, uint64_t seed);
+    static const char name[] = "hellforge tile collision shape";
+    const uintptr_t exe = NearShapeExe();
+    uint64_t api = 0, submit = 0;
+    NearLockFn enter, leave;
+    if (g_tileJobsBroken || !NearShapePinned() || !NearShapeLocks(exe, &enter, &leave) || SafeRead(g_world.game + 0x33263E8u, &api, 8) || api == 0 ||
+        SafeRead(api + 0x88, &submit, 8) || submit == 0) return 0;
+    enter(world + NEAR_SHAPE_LOCK);
+    uint64_t key = handle;
+    uint8_t* e = ((NearShapeFindFn)(exe + 0x1B86C0u))(world + NEAR_SHAPE_TABLE, &key);
+    uint64_t obj = 0, dims = 0, list[4] = {0};
+    uint32_t cols = 0, rows = 0;
+    if (e == NULL || SafeRead((uintptr_t)e + 0x10, &obj, 8) || obj == 0 || SafeRead((uintptr_t)e + 0x38, &dims, 8) || dims == 0 ||
+        SafeRead(dims + 0x14, &cols, 4) || SafeRead(dims + 0x18, &rows, 4) || SafeRead(exe + 0x27BAB30u, list, sizeof list))
+    { leave(world + NEAR_SHAPE_LOCK); return 0; }
+    g_shape.inList = list[0] == world || list[1] == world || list[2] == world || list[3] == world;
+    if (g_shape.inList)
+    {
+        uint8_t* o = (uint8_t*)(uintptr_t)obj;
+        const uint32_t one = 1, hold = 0x80;
+        memcpy(o + 0x168, e + 0x24, 16);
+        memcpy(o + 0x17C, &one, 4);
+        memcpy(o + 0x50, &cols, 4); memcpy(o + 0x54, &rows, 4);
+        memcpy(o + 0x178, &hold, 4);
+        const uint32_t hs = (uint32_t)(((HashFn)(exe + 0x5D5840u))(exe + 0x167193Cu, 6, 0) >> 32);
+        memcpy(o + 0x58, &hs, 4);
+        const uint32_t ht = (uint32_t)(((HashFn)(exe + 0x5D5840u))(exe + 0x16719A8u, 7, 0) >> 32);
+        memcpy(o + 0x5C, &ht, 4);
+        memcpy(e + 0x58, o + 0x60, 0x108);
+    }
+    leave(world + NEAR_SHAPE_LOCK);
+    g_shape.world = world; g_shape.handle = handle; g_shape.obj = obj; g_shape.shape = 0; g_shape.jobMs = 0; g_shape.frames = 0;
+    g_shape.game = GetCurrentThreadId(); g_shape.since = GetTickCount64(); g_shape.on = 1;
+    if (!g_shape.inList) return 1; /* no shape (0x1AC2FF): the quadtree alone, next */
+    MoveHold(1);
+    InterlockedExchange(&g_shape.running, 1);
+    ((SubmitFn)(uintptr_t)submit)((void*)NearShapeJob, &g_shape.element, name, 1, 3, 1, 0);
+    return 1;
+}
+
+/* 0x1AC4CE..0x1AC58A once the job is done, under the lock again: the shape into the entry (found again: other
+ * terrains may have moved it), then the quadtree over the heights (leaf from the rows, depth log(cols / leaf) / log 2
+ * with the exe's own log and constant). */
+static void NearShapeEnd(void)
+{
+    typedef float (*LogFn)(float v);
+    typedef uint64_t (*QuadFn)(uint64_t tree, uint64_t heights, uint64_t cols, uint64_t rows, uint64_t a5, uint64_t a6, uint64_t a7, uint64_t a8,
+        uint64_t a9, uint64_t depth, uint64_t a11, uint64_t a12);
+    const uintptr_t exe = NearShapeExe();
+    NearLockFn enter = NULL, leave = NULL;
+    NearShapeLocks(exe, &enter, &leave);
+    const uint64_t world = g_shape.world;
+    enter(world + NEAR_SHAPE_LOCK);
+    uint64_t key = g_shape.handle;
+    uint8_t* e = ((NearShapeFindFn)(exe + 0x1B86C0u))(world + NEAR_SHAPE_TABLE, &key);
+    uint64_t dims = 0, tree = 0, heights = 0, xy0 = 0, xy1 = 0; uint32_t cols = 0, rows = 0; float two = 0;
+    if (e != NULL && !SafeRead((uintptr_t)e + 0x38, &dims, 8) && dims != 0 && !SafeRead(dims + 0x14, &cols, 4) && !SafeRead(dims + 0x18, &rows, 4) &&
+        !SafeRead((uintptr_t)e, &tree, 8) && tree != 0 && !SafeRead(g_shape.obj + 0x40, &heights, 8) && !SafeRead((uintptr_t)e + 0x24, &xy0, 8) &&
+        !SafeRead((uintptr_t)e + 0x2C, &xy1, 8) && !SafeRead(exe + 0x16A9AE0u, &two, 4))
+    {
+        if (g_shape.inList) memcpy(e + 0x18, &g_shape.shape, 8);
+        uint32_t leaf = rows;
+        if (rows >= 32)
+        {
+            if ((rows & (rows - 1)) == 0) leaf = 32;
+            else if (!(rows & 1)) do { if (leaf <= 32) break; leaf >>= 1; } while (!(leaf & 1));
+        }
+        const int per = (int)cols / (int)leaf;
+        const float a = ((LogFn)(exe + 0x12CCB10u))((float)per), b = ((LogFn)(exe + 0x12CCB10u))(two);
+        const int64_t depth = (int64_t)(a / b);
+        ((QuadFn)(exe + 0x2F2CB0u))(tree + 0x38, heights, cols, rows, 0, xy0, xy0, xy1, 0, (uint32_t)depth, 0, 0);
+    }
+    else Note("difficulty: near terrain: the tile's terrain entry did not read after its shape; no quadtree");
+    leave(world + NEAR_SHAPE_LOCK);
+    if (g_shape.inList) MoveHold(0);
+    g_shape.on = 0;
+    Note("difficulty: near terrain: the tile's collision shape built on a worker: %.0f ms of work, %u frames, %.2f s; jobs on the game thread %u",
+        g_shape.jobMs, g_shape.frames, (double)(GetTickCount64() - g_shape.since) / 1000.0, g_shape.onGame);
+}
+
+/* The level's end or a build's failure with the job out: it is waited for (at most one shape, ~0.15 s) and its
+ * result left in the entry, as work() leaves it, for the terrain's destroy. */
+static void NearShapeJoin(const char* why)
+{
+    if (!g_shape.on) return;
+    ULONGLONG since = GetTickCount64();
+    while (g_shape.running && GetTickCount64() - since < 30000) Sleep(1);
+    if (g_shape.running) { Note("difficulty: near terrain: %s: the tile's shape job did not return in 30 s; no more jobs this session", why); g_tileJobsBroken = 1; g_shape.on = 0; return; }
+    NearShapeEnd();
+    Note("difficulty: near terrain: %s with the tile's shape job out: waited %.0f ms", why, (double)(GetTickCount64() - since));
+}
+
 static int NearReadyTile(uint64_t context, uint64_t* worldOut)
 {
     uintptr_t api = 0, table = 0, world = 0;
@@ -8312,13 +8485,22 @@ static int NearReadyTile(uint64_t context, uint64_t* worldOut)
     ReadyFn ready = NULL; WorkFn work = NULL;
     SafeRead(table + 0x1A0, &ready, 8); SafeRead(table + 0x1A8, &work, 8);
     if (ready == NULL || work == NULL || world == 0) { g_near.state = NEAR_FAILED; return 0; }
-    if (!ready(world, g_near.handle))
+    if (g_shape.on)
     {
-        if (++g_near.polls < 3000) return 1;
-        Note("difficulty: near terrain: the tile was not ready after %u polls; left as it is", g_near.polls);
-        g_near.state = NEAR_FAILED; return 0;
+        if (g_shape.running) { g_shape.frames++; return 1; } /* the shape's job: the frame goes on */
+        NearShapeEnd();
     }
-    work(world, g_near.handle);
+    else
+    {
+        if (!ready(world, g_near.handle))
+        {
+            if (++g_near.polls < 3000) return 1;
+            Note("difficulty: near terrain: the tile was not ready after %u polls; left as it is", g_near.polls);
+            g_near.state = NEAR_FAILED; return 0;
+        }
+        if (NearShapeBegin(world, g_near.handle)) return 1;
+        work(world, g_near.handle);
+    }
     g_near.handleCell = g_near.handle;
     uint64_t cell = (uint64_t)(uintptr_t)&g_near.handleCell;
     memcpy(g_near.one6B + 8, &cell, 8);
@@ -8331,7 +8513,7 @@ static int NearReadyTile(uint64_t context, uint64_t* worldOut)
     {
         typedef uint8_t* (*FindFn)(uint64_t table, uint64_t* key);
         uint64_t key = g_near.handle;
-        uint8_t* e = ((FindFn)((uintptr_t)GetModuleHandleW(NULL) + 0x1B86C0u))(world + 0x230550u, &key);
+        uint8_t* e = ((FindFn)(NearShapeExe() + 0x1B86C0u))(world + 0x230550u, &key);
         if (e != NULL && !SafeRead((uintptr_t)e + 0x10, &body, 8) && body != 0 && !SafeRead(body + 0x168, sizes, 8) && sizes[0] > 0 && sizes[1] > 0)
         {
             shifted[0] = sizes[0] - 2.0f * g_near.centre[0]; shifted[1] = sizes[1] + 2.0f * g_near.centre[1];
