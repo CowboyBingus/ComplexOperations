@@ -1966,7 +1966,7 @@ static void TerrainNearDrop(void)
     if (candidates == 0) { Note("difficulty: near terrain: no dry, gentle drop point within 1200 m; no drop file"); return; }
     char line[64];
     int len = snprintf(line, sizeof line, "%.1f,%.1f\n", (double)bestX, (double)bestY);
-    HANDLE file = OpenLog(L"xl-drop.txt");
+    HANDLE file = OpenResearchLog(L"xl-drop.txt");
     if (file != INVALID_HANDLE_VALUE) { DWORD wrote; WriteFile(file, line, (DWORD)len, &wrote, NULL); CloseHandle(file); }
     g_worldDrop[0] = bestX; g_worldDrop[1] = bestY; g_worldDropLevel = g_world.levels;
     g_near.centre[0] = 256.0f * floorf(bestX / 256.0f + 0.5f); g_near.centre[1] = 256.0f * floorf(bestY / 256.0f + 0.5f);
@@ -3010,7 +3010,7 @@ static void NearDumpPre(void)
     wchar_t name[64];
     if (g_moveBuilding) swprintf(name, 64, L"near-tile-pre-%d-%d.u16", (int)lroundf(g_near.centre[0]), (int)lroundf(g_near.centre[1]));
     else wcscpy(name, L"near-tile-pre.u16");
-    HANDLE f = OpenLog(name);
+    HANDLE f = OpenResearchLog(name);
     if (f != INVALID_HANDLE_VALUE) { DWORD wrote; WriteFile(f, u, 4096u * 4096u * 2u, &wrote, NULL); CloseHandle(f); }
     VirtualFree(u, 0, MEM_RELEASE);
 }
@@ -4106,7 +4106,7 @@ static int NearMatBandOn(void)
 
 static void NearWriteMap(const wchar_t* name, const uint8_t* data, size_t bytes)
 {
-    HANDLE f = OpenLog(name);
+    HANDLE f = OpenResearchLog(name);
     if (f == INVALID_HANDLE_VALUE) return;
     DWORD wrote = 0;
     for (size_t at = 0; at < bytes; at += 4096 * 4096) WriteFile(f, data + at, (DWORD)(bytes - at < 4096 * 4096 ? bytes - at : 4096 * 4096), &wrote, NULL);
@@ -4784,7 +4784,7 @@ static int NearStepDump(uint64_t records, uint32_t end, uint64_t context, uint64
                 g_near.stepKind[s] == NEAR_TILE ? L"t" : L"");
         else swprintf(name, 64, L"near-step-%02d-%02X%ls.u16", s, (unsigned)g_near.stepOp[s], g_near.stepKind[s] == NEAR_TILE ? L"t" : L"");
         /* =2: the heights' line alone, no 32 MB file a step */
-        HANDLE f = NearStepDumpOn() == 1 ? OpenLog(name) : INVALID_HANDLE_VALUE;
+        HANDLE f = NearStepDumpOn() == 1 ? OpenResearchLog(name) : INVALID_HANDLE_VALUE;
         if (copy != NULL && (f != INVALID_HANDLE_VALUE || NearStepDumpOn() == 2) && !SafeRead(data, copy, (size_t)4096 * 4096 * 2))
         {
             DWORD wrote = 0;
@@ -5028,7 +5028,7 @@ static void StampPlanWrite(void)
 {
     wchar_t name[48];
     swprintf(name, 48, L"plan-%ld.tsv", (long)g_world.levels);
-    HANDLE file = OpenLog(name);
+    HANDLE file = OpenResearchLog(name);
     if (file == INVALID_HANDLE_VALUE) return;
     static char buffer[1 << 16];
     size_t used = 0;
@@ -7619,7 +7619,7 @@ static void NearLayerTrace(char kind, uint32_t caller, float x, float y, float z
         if (g_layerTrace.file != INVALID_HANDLE_VALUE) CloseHandle(g_layerTrace.file);
         wchar_t name[64];
         swprintf(name, 64, L"layer-trace-%ld.tsv", (long)g_world.levels);
-        g_layerTrace.file = OpenLog(name);
+        g_layerTrace.file = OpenResearchLog(name);
         g_layerTrace.level = g_world.levels;
         g_layerTrace.start = GetTickCount64();
         if (g_layerTrace.file != INVALID_HANDLE_VALUE)
@@ -7691,14 +7691,14 @@ static void NearDumpGrounds(void)
     for (int k = 0; k < 2; k++)
     {
         if (both[k]->v == NULL) continue;
-        HANDLE f = OpenLog(files[k]);
+        HANDLE f = OpenResearchLog(files[k]);
         if (f == INVALID_HANDLE_VALUE) continue;
         uint64_t bytes = (uint64_t)both[k]->n * both[k]->n * 2, at = 0; DWORD wrote = 0;
         while (at < bytes) { DWORD chunk = (DWORD)(bytes - at > 0x10000000u ? 0x10000000u : bytes - at); if (!WriteFile(f, (const uint8_t*)both[k]->v + at, chunk, &wrote, NULL) || !wrote) break; at += wrote; }
         CloseHandle(f);
         len += snprintf(text + len, sizeof text - len, "%ls n %u size %.2f centre %.2f %.2f\n", files[k], both[k]->n, (double)both[k]->size, (double)both[k]->cx, (double)both[k]->cy);
     }
-    HANDLE f = OpenLog(L"near-dump.txt");
+    HANDLE f = OpenResearchLog(L"near-dump.txt");
     if (f != INVALID_HANDLE_VALUE) { DWORD wrote; WriteFile(f, text, (DWORD)len, &wrote, NULL); CloseHandle(f); }
     Note("difficulty: near terrain: both terrains' heights written (HELLFORGE_XL_NEAR_DUMP)");
 }
@@ -7858,7 +7858,7 @@ static void NearCraterReport(void)
                 "%u over 5 m", gpu.which ? "the tile" : "the level's global map", gpu.mip, k, k, signedSum / ((double)k * k), sum / ((double)k * k), (double)big, over1, over5);
             wchar_t name[48];
             swprintf(name, 48, L"near-%ls-gpu-mip%d.u16", gpu.which ? L"tile" : L"coarse", gpu.mip);
-            HANDLE fh = OpenLog(name);
+            HANDLE fh = OpenResearchLog(name);
             if (fh != INVALID_HANDLE_VALUE) { DWORD wrote; WriteFile(fh, img, k * k * 2u, &wrote, NULL); CloseHandle(fh); }
         }
         else Note("difficulty: near terrain: drawn heights: readback %d mip %d is %u x %u format %u", gpu.which, gpu.mip, w, hgt, format);

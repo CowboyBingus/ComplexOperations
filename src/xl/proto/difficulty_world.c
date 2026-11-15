@@ -1488,13 +1488,13 @@ static void WorldDumpHeight(void)
     if (g_worldLevel != 0) SafeRead(g_worldLevel + 0xF9, &difficulty, 1);
     wchar_t name[64];
     swprintf(name, 64, L"heightfield-%ld.f32", (long)n);
-    HANDLE file = OpenLog(name);
+    HANDLE file = OpenResearchLog(name);
     if (file == INVALID_HANDLE_VALUE) return;
     DWORD wrote = 0;
     BOOL ok = WriteFile(file, g_heightCopy, (DWORD)g_heightBytes, &wrote, NULL);
     CloseHandle(file);
     swprintf(name, 64, L"heightfield-%ld.txt", (long)n);
-    file = OpenLog(name);
+    file = OpenResearchLog(name);
     if (file != INVALID_HANDLE_VALUE)
     {
         char text[256];
@@ -1631,7 +1631,7 @@ static void WorldRecordMap(uint64_t records, uint32_t end)
     if (SafeRead(g_worldLevel + 0x2C8, &gen, 8) || gen == 0) return;
     wchar_t name[64];
     swprintf(name, 64, L"records-%ld.txt", (long)g_world.levels);
-    HANDLE file = OpenLog(name);
+    HANDLE file = OpenResearchLog(name);
     if (file == INVALID_HANDLE_VALUE) return;
     static uint8_t record[0x19B0];
     char line[4096];
@@ -2046,7 +2046,7 @@ static int WorldTilePasses(uint64_t records, uint32_t end, uint64_t context, uin
     if (vertices == 0 || vertices > 6000) return 1;
     wchar_t name[64];
     swprintf(name, 64, L"tile-vertices-%ld.f32", (long)g_world.levels);
-    HANDLE file = OpenLog(name);
+    HANDLE file = OpenResearchLog(name);
     if (file == INVALID_HANDLE_VALUE) return 1;
     float lo = 1e30f, hi = -1e30f;
     for (uint32_t v = 0; v < vertices; v++)
@@ -2198,7 +2198,7 @@ static void WorldTerrainProbe(uint64_t records, uint32_t at, uint32_t op)
     if (levels > 2) return;
     wchar_t name[64];
     swprintf(name, 64, L"terrain-probe-%ld.txt", (long)g_world.levels);
-    HANDLE file = OpenLog(name);
+    HANDLE file = OpenResearchLog(name);
     if (file == INVALID_HANDLE_VALUE) return;
     char title[96];
     DWORD wrote;
@@ -2293,7 +2293,7 @@ static void WorldTileGpuCaptures(void)
             if (k == 0 && g_tileExtent > 0) TerrainDiagTile("tile-heights", copy, w, hgt, format == 0x16 ? 2u : 4u, (double)g_tileExtent / w);
             wchar_t name[64];
             swprintf(name, 64, L"tile-capture-%ld-%d.bin", (long)g_world.levels, k);
-            HANDLE file = OpenLog(name);
+            HANDLE file = OpenResearchLog(name);
             if (file != INVALID_HANDLE_VALUE)
             {
                 DWORD wrote;
@@ -2576,7 +2576,7 @@ static void WorldScatterNote(void)
         {
             wchar_t name[64];
             swprintf(name, 64, L"scatter-%d-%dx-%ld.bin", k, (int)g_world.current, (long)notes);
-            HANDLE file = OpenLog(name);
+            HANDLE file = OpenResearchLog(name);
             if (file != INVALID_HANDLE_VALUE) { DWORD wrote; WriteFile(file, copy, (DWORD)bytes, &wrote, NULL); CloseHandle(file); }
         }
         VirtualFree(copy, 0, MEM_RELEASE);
@@ -2695,7 +2695,7 @@ static void WorldSubregionNote(void)
     if (SafeRead(g_worldLevel + 0x2C8, &gen, 8) || gen == 0 || SafeRead(gen + 0x11A71C4u, &count, 4) || count == 0 || count > 8192) return;
     wchar_t name[48];
     swprintf(name, 48, L"subregions-%ld.tsv", (long)g_world.levels);
-    HANDLE file = OpenLog(name);
+    HANDLE file = OpenResearchLog(name);
     uint32_t types[256] = {0};
     static uint32_t byGroup[8][256]; /* height group (0x74/0x77, entry +4; -1..6) x type */
     memset(byGroup, 0, sizeof byGroup);
@@ -4458,7 +4458,7 @@ static void WorldLocationsNote(uintptr_t block, uint32_t total)
     if (SafeRead(g_world.game + 0xC176A7 + 3, &offset, 4) || offset < 0x90) return;
     wchar_t name[48];
     swprintf(name, 48, L"locations-%ld.tsv", (long)g_world.levels);
-    HANDLE file = OpenLog(name);
+    HANDLE file = OpenResearchLog(name);
     if (file == INVALID_HANDLE_VALUE) return;
     float half = 1024.0f * g_world.current;
     char line[192];
@@ -4496,7 +4496,7 @@ static void WorldLocationsNote(uintptr_t block, uint32_t total)
         SafeRead(block + 0x92F328u + 0x20ull * i + 0x18, &cellOf[i], 8); SafeRead(block + 0x92F328u + 0x20ull * i + 0xC, &typeOf[i], 4);
     }
     swprintf(name, 48, L"edges-%ld.tsv", (long)g_world.levels);
-    file = OpenLog(name);
+    file = OpenResearchLog(name);
     if (file == INVALID_HANDLE_VALUE) return;
     uint8_t used[256] = {0};
     for (uint32_t e = 0; e < edges; e++)
@@ -4522,7 +4522,7 @@ static void WorldLocationsNote(uintptr_t block, uint32_t total)
     for (uint32_t i = 0; i < subs; i++) if (typeOf[i] >= 0 && typeOf[i] < 256) used[typeOf[i]] = 1;
     if (SafeRead(g_worldLevel + 0x2D0, &ts, 8) || ts == 0 || SafeRead(ts, &table, 8) || table == 0 || SafeRead(ts + 0xA0, &types, 4)) return;
     swprintf(name, 48, L"types-%ld.tsv", (long)g_world.levels);
-    file = OpenLog(name);
+    file = OpenResearchLog(name);
     if (file == INVALID_HANDLE_VALUE) return;
     for (uint32_t t = 0; t < types && t < 256; t++)
     {

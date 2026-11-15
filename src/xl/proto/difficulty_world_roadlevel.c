@@ -433,7 +433,7 @@ static void RoadGradeReport(uintptr_t block, const char* what, const wchar_t* fi
     const uint32_t spurs = g_spurs.level == g_world.levels ? g_spurs.count : 0;
     wchar_t name[64];
     swprintf(name, 64, L"%ls-%ld.tsv", file, (long)g_world.levels);
-    HANDLE out = pts != NULL ? OpenLog(name) : INVALID_HANDLE_VALUE;
+    HANDLE out = pts != NULL ? OpenResearchLog(name) : INVALID_HANDLE_VALUE;
     static GradeRoad sum[2], sumClear[2], sumOpen[2], one, clear, open;
     memset(sum, 0, sizeof sum); memset(sumClear, 0, sizeof sumClear); memset(sumOpen, 0, sizeof sumOpen);
     uint32_t parts[2] = {0, 0}, deep[2] = {0, 0}; float cut[2] = {0, 0}, fill[2] = {0, 0};
@@ -518,7 +518,7 @@ static void RoadGradeStationsFile(void)
     const float half = g_grade.world / 2;
     wchar_t name[48];
     swprintf(name, 48, L"grade-stations-%ld.tsv", (long)g_world.levels);
-    HANDLE out = OpenLog(name);
+    HANDLE out = OpenResearchLog(name);
     if (out == INVALID_HANDLE_VALUE) return;
     for (uint32_t i = 0; i < f->stations; i++)
     {
@@ -545,7 +545,7 @@ static void RoadGradePadsFile(void)
 {
     wchar_t name[40];
     swprintf(name, 40, L"pads-%ld.tsv", (long)g_world.levels);
-    HANDLE out = g_pads.level == g_world.levels && g_pads.count > 0 ? OpenLog(name) : INVALID_HANDLE_VALUE;
+    HANDLE out = g_pads.level == g_world.levels && g_pads.count > 0 ? OpenResearchLog(name) : INVALID_HANDLE_VALUE;
     if (out == INVALID_HANDLE_VALUE) return;
     for (int q = 0; q < g_pads.count; q++)
     {

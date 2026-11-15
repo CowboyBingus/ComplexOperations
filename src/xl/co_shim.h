@@ -105,6 +105,13 @@ static inline void ApiLog(HfMod* mod, const char* format, ...)
     co_note("%s", text);
 }
 static inline HANDLE OpenLog(const wchar_t* name) { return co_open_log(name); }
+/* The prototype's research files (heightfields, plans, grade and road reports, tile captures: ~90 MB a session) are for
+ * offline study; a package build writes none of them, and their summary lines stay in the log. */
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+static inline HANDLE OpenResearchLog(const wchar_t* name) { return co_open_log(name); }
+#else
+static inline HANDLE OpenResearchLog(const wchar_t* name) { (void)name; return INVALID_HANDLE_VALUE; }
+#endif
 static inline int SafeRead(uintptr_t address, void* buffer, size_t size) { return co_safe_read(address, buffer, size); }
 static inline int SafeFind(uintptr_t list, size_t count, uint64_t value) { return co_safe_find(list, count, value); }
 static inline int ApiWrite(uintptr_t address, const void* data, size_t size) { return g_coApi->write(address, data, size); }
