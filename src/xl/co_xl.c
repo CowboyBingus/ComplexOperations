@@ -1377,6 +1377,22 @@ void CoXlTestMoverNear(int state) { g_near.state = state; }
 /* A slot's heights buffer touched off the game thread (proto/difficulty_world_move.c MoveGroundStart): start, the
  * ready state's wait, the slot's buffer, the slot emptied, the thread out. */
 void CoXlTestGroundStart(int slot) { MoveGroundStart(slot); }
+/* Op 0x2F in slices (proto/difficulty_world_move.c MoveRun2F): the record and context as MV_STAMPS has them, the test's
+ * dispatcher; a call; the next batch; the record after it. */
+void CoXlTestMove2FBegin(const uint8_t* record, const uint8_t* ctx, void* dispatch)
+{ memcpy(g_move.one, record, sizeof g_move.one); memcpy(g_move.ctx, ctx, sizeof g_move.ctx); g_worldDispatch = (WorldDispatchFn)dispatch; g_move.phase = 0; Move2FReset(); }
+int CoXlTestMove2FRun(void) { return MoveRun2F(); }
+uint32_t CoXlTestMove2FBatch(void) { return g_move2F.batch; }
+const uint8_t* CoXlTestMove2FRecord(void) { return g_move.one; }
+void CoXlTestMove2FPins(void) { g_move2F.pinned = 0; }
+/* The spawn's material readback a slice a frame (proto/difficulty_world_terrain.c NearMatCopyStep): the band, the
+ * readback call, a slice, the rest, where it is (-1: none pending), a free of the pixels. */
+void CoXlTestMatCopySetup(uint64_t tex, uint32_t* pixels) { g_matband.tex = tex; g_matband.pixels = pixels; }
+uint64_t CoXlTestMatReadAsync(uint64_t src, uint64_t alloc, uint64_t dst, uint64_t done) { return NearMatReadAsync(0, src, alloc, dst, done, 0, 0, 0); }
+int CoXlTestMatCopyStep(double budget) { return NearMatCopyStep(budget); }
+void CoXlTestMatCopyFinish(void) { NearMatCopyFinish(); }
+long long CoXlTestMatCopyAt(void) { return g_matCopy.to != NULL ? (long long)g_matCopy.at : -1; }
+void CoXlTestMoveFreeNow(uint32_t* pixels) { MoveFreeNow(0, 0, 0, pixels); }
 int CoXlTestGroundWait(int slot) { return MoveGroundWait(slot); }
 uint16_t* CoXlTestGroundBuf(int slot) { return g_groundBuf[slot]; }
 void CoXlTestGroundClear(int slot) { if (g_groundBuf[slot] != NULL) VirtualFree(g_groundBuf[slot], 0, MEM_RELEASE); g_groundBuf[slot] = NULL; }

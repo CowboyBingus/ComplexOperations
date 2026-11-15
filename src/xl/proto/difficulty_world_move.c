@@ -151,6 +151,7 @@ static void MoveFreeLater(uint64_t tex0, uint64_t tex1, uint64_t band, uint32_t*
 
 static void MoveFreeNow(uint64_t tex0, uint64_t tex1, uint64_t band, uint32_t* pixels)
 {
+    if (pixels != NULL && (const uint8_t*)pixels == g_matCopy.from) NearMatCopyFinish(); /* the spawn's readback reads them */
     NearReleaseFn release = (NearReleaseFn)NearApi(0x10, 0x198);
     typedef void (*DestroyFn)(uint64_t tex);
     DestroyFn destroy = (DestroyFn)NearApi(0x10, 0x6B0);
@@ -535,6 +536,160 @@ static int MoveRunRecord(void)
     return 1;
 }
 
+/* Op 0x2F (0xF44380) in budgeted slices. Phase A spawns the stamp terrain of up to 1023 locations a call (the bound
+ * 0x3FF at 0xF443FC), in location order, each its own table entry; once every location is done (0xF44709) phase B walks
+ * all of them in the same call: for 32768 locations 196608 engine calls and more on one frame. Here a call's batch is
+ * sized to MOVE_2F_MS, phase B is skipped by jumping to its "not done" exit (0xF4470C) and run below as it is in the
+ * code, a slice a frame; the batches change only where the calls split, not what is spawned or in which order. */
+#define MOVE_2F_MS 3.0
+static const struct { uint32_t at; const char* bytes; } kMove2FPins[] = {
+    {0xF443F9u, "41 8D 8B FF 03 00 00"},
+    {0xF44705u, "44 89 58 48 45 3B DE 0F 85 3A 01 00 00 48 8B 05 EF 1B 3E 02 48 8B 48 08 48 8B 41 48 48 8B 4B 40"},
+    {0xF44725u, "FF D0 85 C0 0F 84 1D 01 00 00 45 33 ED 45 85 F6 0F 84 0D 01 00 00 8B 44 24 20 4C 8D 77 08 4C 8D"},
+    {0xF44745u, "A6 A8 00 00 00 66 0F 1F 44 00 00 41 83 7E F8 FF 0F 84 D6 00 00 00 41 8B 76 FC 33 FF 49 8B 2C 24"},
+    {0xF44765u, "45 8B 3E 85 F6 0F 84 C1 00 00 00 48 8B 05 91 1B 3E 02 42 8D 14 3F 48 8B 48 50 48 8B 41 30 48 8B"},
+    {0xF44785u, "CD FF D0 8B D8 85 C0 74 1A 48 8B 05 73 1B 3E 02 48 8B 48 18 48 8B 81 20 07 00 00 8B CB FF D0 84"},
+    {0xF447A5u, "C0 75 08 FF C7 3B FE 72 C2 EB 7D 48 8B 05 51 1B 3E 02 8B CB 48 8B 50 18 FF 92 50 04 00 00 48 8B"},
+    {0xF447C5u, "05 3E 1B 3E 02 33 D2 48 8B 48 18 48 8B 81 60 04 00 00 8B CB FF D0 48 8B 0D 26 1B 3E 02 41 8D 55"},
+    {0xF447E5u, "01 48 8B D8 4C 8B 81 10 01 00 00 48 8B C8 41 FF 50 18 48 8B 0D 0A 1B 3E 02 48 8B 91 10 01 00 00"},
+    {0xF44805u, "48 8B CB 4C 8B 42 10 BA 03 05 76 F2 41 FF D0 48 8B 0D ED 1A 3E 02 0F 57 D2 BA FA 94 D9 E0 4C 8B"},
+    {0xF44825u, "41 28 48 8B C8 41 FF 10 8B 44 24 20 41 FF C5 49 81 C4 E0 00 00 00 49 83 C6 0C 44 3B E8 0F 82 08"},
+    {0xF44845u, "FF FF FF 32 C0 EB 02 B0 01"},
+};
+static struct { int pinned, phaseB, done; uint32_t batch, at, calls, slices; double msA, msB; } g_move2F;
+
+static int Move2FPinned(void)
+{
+    if (g_move2F.pinned == 0)
+    {
+        g_move2F.pinned = 1;
+        for (size_t k = 0; k < sizeof kMove2FPins / sizeof kMove2FPins[0]; k++)
+            if (!ApiCodeMatches(g_world.game + kMove2FPins[k].at, kMove2FPins[k].bytes)) g_move2F.pinned = -1;
+        if (g_move2F.pinned < 0) Note("difficulty: moving tiles: op 0x2F is not the reviewed code; it runs whole, a call a frame");
+    }
+    return g_move2F.pinned > 0;
+}
+
+/* The batch bound and phase B's gate: `batch` locations a call and the gate a jump to the exit, or the game's bytes. */
+static void Move2FPatch(uint32_t batch)
+{
+    uint8_t* at = (uint8_t*)(uintptr_t)(g_world.game + 0xF443F9u);
+    DWORD old = 0;
+    if (!VirtualProtect(at, 0x320, PAGE_EXECUTE_READWRITE, &old)) return;
+    const uint32_t bound = batch != 0 ? batch : 0x3FFu;
+    memcpy(at + 3, &bound, 4);
+    static const uint8_t jump[6] = {0xE9, 0x3B, 0x01, 0x00, 0x00, 0x90}, gate[6] = {0x0F, 0x85, 0x3A, 0x01, 0x00, 0x00};
+    memcpy((uint8_t*)(uintptr_t)(g_world.game + 0xF4470Cu), batch != 0 ? jump : gate, 6);
+    VirtualProtect(at, 0x320, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), at, 0x320);
+}
+
+/* Phase B as 0xF44712..0xF4484A has it, from location g_move2F.at until MOVE_2F_MS are spent (checked each 16). */
+static void Move2FPhaseB(uint64_t pass, uint64_t record, uint64_t context)
+{
+    (void)record;
+    typedef uint64_t (*WorldFn)(uint64_t world);
+    typedef uint32_t (*IdFn)(uint64_t unit, uint32_t index);
+    typedef char (*LiveFn)(uint32_t id);
+    typedef void (*IdOnlyFn)(uint32_t id);
+    typedef uint64_t (*ObjFn)(uint32_t id, uint32_t zero);
+    typedef void (*IndexFn)(uint64_t obj, uint32_t index);
+    typedef uint64_t (*MatFn)(uint64_t obj, uint32_t hash);
+    typedef void (*ScalarFn)(uint64_t mat, uint32_t hash, float value);
+    const uint64_t api = *(volatile uint64_t*)(uintptr_t)(g_world.game + 0x3326308u);
+    const uint64_t a8 = *(uint64_t*)(uintptr_t)(api + 0x08), a18 = *(uint64_t*)(uintptr_t)(api + 0x18), a28 = *(uint64_t*)(uintptr_t)(api + 0x28);
+    const uint64_t a50 = *(uint64_t*)(uintptr_t)(api + 0x50), a110 = *(uint64_t*)(uintptr_t)(api + 0x110);
+    const uint32_t count = **(uint32_t**)(uintptr_t)(pass + 0x28);
+    const uint8_t* locs = *(const uint8_t**)(uintptr_t)(pass + 0x08);
+    const uint32_t* table = *(const uint32_t**)(uintptr_t)(pass + 0x50);
+    if (g_move2F.at == 0 && ((WorldFn)*(uint64_t*)(uintptr_t)(a8 + 0x48))(*(uint64_t*)(uintptr_t)(context + 0x40)) == 0) return; /* again next call */
+    LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
+    uint32_t i = g_move2F.at;
+    for (; i < count; i++)
+    {
+        if (i != g_move2F.at && (i & 15) == 0)
+        {
+            QueryPerformanceCounter(&t1);
+            if ((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart >= MOVE_2F_MS) break;
+        }
+        const uint32_t* e = table + (size_t)i * 3;
+        if (e[0] == 0xFFFFFFFFu || e[1] == 0) continue;
+        const uint64_t unit = *(const uint64_t*)(locs + (size_t)i * 0xE0 + 0xA8);
+        uint32_t id = 0;
+        for (uint32_t j = 0; j < e[1]; j++)
+        {
+            id = ((IdFn)*(uint64_t*)(uintptr_t)(a50 + 0x30))(unit, j + e[2]);
+            if (id != 0 && ((LiveFn)*(uint64_t*)(uintptr_t)(a18 + 0x720))(id)) break;
+            id = 0;
+        }
+        if (id == 0) continue;
+        ((IdOnlyFn)*(uint64_t*)(uintptr_t)(a18 + 0x450))(id);
+        const uint64_t obj = ((ObjFn)*(uint64_t*)(uintptr_t)(a18 + 0x460))(id, 0);
+        ((IndexFn)*(uint64_t*)(uintptr_t)(a110 + 0x18))(obj, i + 1);
+        const uint64_t mat = ((MatFn)*(uint64_t*)(uintptr_t)(a110 + 0x10))(obj, 0xF2760503u);
+        ((ScalarFn)*(uint64_t*)(uintptr_t)a28)(mat, 0xE0D994FAu, 0.0f);
+    }
+    QueryPerformanceCounter(&t1);
+    g_move2F.msB += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+    g_move2F.slices++;
+    g_move2F.at = i;
+    g_move2F.done = i >= count;
+}
+
+static int MoveRun2FDone(uint32_t count)
+{
+    Note("difficulty: moving tiles: op 0x2F in %u calls (%.1f ms) and %u slices of its last part (%.1f ms) for %u locations", g_move2F.calls, g_move2F.msA,
+        g_move2F.slices, g_move2F.msB, count);
+    uint64_t arena = 0;
+    memcpy(&arena, g_move.ctx, 8);
+    typedef void (*ArenaFn)(uint64_t arena);
+    if (arena != 0) ((ArenaFn)(g_world.game + 0x173BAB0u))(arena);
+    return 1;
+}
+
+/* MV_STAMPS' call: 1 done (the arena reset as MoveRunRecord does), 0 more next frame, -1 a fault. */
+static int MoveRun2F(void)
+{
+    if (!Move2FPinned()) return MoveRunRecord();
+    uint64_t pass = (uint64_t)(uintptr_t)g_move.one + 8, countAt = 0;
+    uint32_t count = 0, before = 0, after = 0;
+    if (SafeRead(pass + 0x28, &countAt, 8) || countAt == 0 || SafeRead(countAt, &count, 4)) return MoveRunRecord();
+    LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz);
+    if (!g_move2F.phaseB)
+    {
+        if (g_move2F.batch == 0) g_move2F.batch = 64;
+        SafeRead(pass + 0x48, &before, 4);
+        volatile uint32_t index = 0;
+        volatile int calls = 0;
+        Move2FPatch(g_move2F.batch);
+        QueryPerformanceCounter(&t0);
+        LONG fault = WorldTileGuarded(g_move.one, (uint64_t)(uintptr_t)g_move.ctx, &index, &g_move.phase, 0, 0, 1, &calls);
+        QueryPerformanceCounter(&t1);
+        Move2FPatch(0);
+        if (fault) { Note("difficulty: moving tiles: op 0x2F faulted (%08lX at game.dll+0x%llX)", (unsigned long)fault, (unsigned long long)(TileGuardSelf()->at - g_world.game)); return -1; }
+        SafeRead(pass + 0x48, &after, 4);
+        const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+        g_move2F.msA += ms; g_move2F.calls++;
+        if (index != 0) return MoveRun2FDone(count); /* the game's call finished it whole */
+        if (after > before) g_move.waits = 0; /* moving on */
+        /* the next batch from this one's time a location, within 1..1023 */
+        const double per = after > before ? ms / (double)(after - before) : 0;
+        double next = per > 0 ? MOVE_2F_MS / per : (double)g_move2F.batch * 2;
+        if (next > (double)g_move2F.batch * 2) next = (double)g_move2F.batch * 2;
+        g_move2F.batch = next < 1 ? 1u : next > 1023 ? 1023u : (uint32_t)next;
+        if (after < count) return 0;
+        g_move2F.phaseB = 1; g_move2F.at = 0;
+        return 0;
+    }
+    const uint32_t at = g_move2F.at;
+    LONG fault = WorldTileGuardedCall((uintptr_t)Move2FPhaseB, g_move.one, (uint64_t)(uintptr_t)g_move.ctx);
+    if (fault) { Note("difficulty: moving tiles: op 0x2F's last part faulted (%08lX)", (unsigned long)fault); return -1; }
+    if (g_move2F.at > at) g_move.waits = 0;
+    if (!g_move2F.done) return 0;
+    return MoveRun2FDone(count);
+}
+static void Move2FReset(void) { const int pinned = g_move2F.pinned; memset(&g_move2F, 0, sizeof g_move2F); g_move2F.pinned = pinned; }
+
 static uint64_t MoveWorld(void)
 {
     uint64_t world = 0;
@@ -659,6 +814,7 @@ static int MoveTeardown(int left)
 static void MoveFailRest(void)
 {
     NearShapeJoin("a failed build"); /* the terrain below may be destroyed: its shape job first */
+    NearMatCopyFinish(); /* and its readback's rest, into the terrain's memory */
     MoveStampUnitsDestroy(1e30);
     MoveTeardown(0);
     if (g_move.failState >= MV_SPAWN && g_near.handle != 0 && g_near.handle != g_move.dropHandle)
@@ -1400,6 +1556,7 @@ static void MoveTick(uint64_t level)
             if (r == 0) return; /* the rest of the spawns next frame */
         }
         if (g_move.stCount != 0 && !MoveStampsRecord(g_move.at2F, 0x2F)) { MoveFail("record 0x2F did not read"); return; }
+        Move2FReset();
         g_move.state = g_move.stCount != 0 ? MV_STAMPS : MV_KICK;
         if (g_move.state == MV_KICK && SafeRead(g_near.records + (uint64_t)g_move.at37 * 0x19B0u, g_move.one, sizeof g_move.one)) { MoveFail("record 0x37 did not read"); return; }
         g_move.phase = g_move.state == MV_KICK ? 0 : g_move.phase;
@@ -1408,7 +1565,7 @@ static void MoveTick(uint64_t level)
     if (g_move.state == MV_STAMPS)
     {
         g_move.stamped = 1; /* from the first call some of the terrains may be spawned */
-        int r = MoveRunRecord();
+        int r = MoveRun2F();
         if (r < 0) { MoveFail("0x2F faulted"); return; }
         if (r == 0) { if (++g_move.waits > 1200) MoveFail("0x2F did not finish (the spawns did not come)"); return; }
         Note("difficulty: moving tiles: the stamp terrains of %u locations spawned for the tile (%.1f s)", g_move.stCount, (double)(GetTickCount64() - g_move.started) / 1000.0);

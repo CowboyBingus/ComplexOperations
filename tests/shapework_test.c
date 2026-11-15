@@ -25,6 +25,10 @@ void CoXlTestShapeReset(void);
 void CoXlTestShapeForget(void);
 void CoXlTestMoveBuilding(int on);
 void CoXlTestNearJobBroken(int broken);
+void CoXlTestMatCopySetup(uint64_t tex, uint32_t* pixels);
+uint64_t CoXlTestMatReadAsync(uint64_t src, uint64_t alloc, uint64_t dst, uint64_t done);
+void CoXlTestMatCopyFinish(void);
+long long CoXlTestMatCopyAt(void);
 void CoXlTestShapeLevelLeft(void);
 void CoXlTestMoveHold(int on);
 LONG64 CoXlTestMoveHoldSince(void);
@@ -40,7 +44,8 @@ static int g_depth, g_maxDepth, g_lockedFind, g_lockedQuad, g_shapeLocked, g_wor
 static uint64_t g_world, g_handle, g_shapeObj, g_shapeWorld;
 static uint8_t g_entry[0x200], g_obj[0x200], g_dims[0x20], g_treeHolder[0x50];
 static float g_nodes[6 * 4];
-static uint64_t g_heights = 0x7700;
+static uint64_t g_heights;
+static uint16_t g_hbuf[4096 * 4096];
 static struct { uint64_t tree, heights, cols, rows, a5, a6, a7, a8, a9, a10, a11, a12, a13; uint32_t first; int calls; } g_quad;
 static struct { void* fn; uint64_t* data; uint32_t queue, priority, count; int calls; } g_submit;
 
@@ -78,6 +83,10 @@ static void RunJob(void) { if (g_submit.fn) ((uint64_t (*)(uint64_t, uint64_t, u
 static char Ready(uint64_t world, uint64_t handle) { (void)world; (void)handle; return 1; }
 static void Work(uint64_t world, uint64_t handle) { (void)world; (void)handle; g_works++; }
 static char Finalize(uint64_t pass, uint64_t unused, uint64_t context) { (void)pass; (void)unused; (void)context; g_finals++; return 1; }
+
+static void* g_matBlock;
+static void** MatAllocate(void* self, void** out, uint64_t bytes, uint64_t align)
+{ (void)self; (void)align; g_matBlock = *out = VirtualAlloc(NULL, (size_t)bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE); return out; }
 
 /* mov rax, imm64; jmp rax */
 static void Stub(uint8_t* at, void* fn)
@@ -138,6 +147,9 @@ int main(void)
     uint64_t jobsAt = (uint64_t)(uintptr_t)jobs; memcpy(image + 0x33263E8u, &jobsAt, 8);
     uint64_t (*submit)(void*, uint64_t*, const char*, uint32_t, uint32_t, uint32_t, uint64_t) = Submit; memcpy(jobs + 0x88, &submit, 8);
 
+    for (size_t i = 0; i < 4096u * 4096u; i++) g_hbuf[i] = 1000;
+    g_hbuf[12345] = 300; g_hbuf[4096u * 4096u - 7] = 64000;
+    g_heights = (uint64_t)(uintptr_t)g_hbuf;
     CoXlTestMoveHold(0);
     CoXlTestMoveBuilding(1); /* a tile builds in play */
     g_case = "begin: under the lock the object filled from the entry as 0x1AC343..0x1AC4C1 does; the shape a job on channel 10";
@@ -179,6 +191,7 @@ int main(void)
     CHECK(fake_host_logged("the tile's collision shape built on a worker"));
     CHECK(g_quad.first == 3 && fake_host_logged("the tile's render quadtree: 21848 nodes (21845 for 4096 x 4096 at depth 7), root -3.50..812.25 m"));
     CHECK((CoXlTestShapeFlags() & 2) != 0); /* its handle kept as done */
+    CHECK(fake_host_logged("the tile's heights (scanned on the job): 300..64000 = -495.42..476.58 m; its quadtree root should be -495.67..477.83 m"));
 
     g_case = "end once: a second end (or a join after it) does nothing";
     CoXlTestShapeEnd();
@@ -271,6 +284,7 @@ int main(void)
         g_works = g_finals = 0; g_submit.calls = 0; g_fake.log[0] = 0;
         CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 0 && g_works == 1 && g_finals == 1 && g_submit.calls == 0);
         CHECK(fake_host_logged("the tile's render quadtree (work() on the game thread): 21845 nodes, root -1.25..640.50 m"));
+        CHECK(fake_host_logged("the tile's heights (work()'s, scanned on the game thread): 300..64000 = -495.42..476.58 m"));
         CoXlTestNearJobLevelUpdate((uintptr_t)level, 0x1234); /* the load's own level updates: nothing joined, nothing ended */
         CHECK(CoXlTestShapeState() == 0 && g_quad.calls == 0 && g_works == 1);
         CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 0 && g_works == 2 && g_submit.calls == 0); /* never a job */
@@ -322,6 +336,26 @@ int main(void)
         { ULONGLONG t = GetTickCount64(); CoXlTestShapeJoin(); CHECK(GetTickCount64() - t < 1000 && g_quad.calls == 0); }
         CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle + 1, &state) == 0 && g_works == 1 && g_finals == 1 && g_submit.calls == 1);
         CoXlTestShapeReset(); CoXlTestNearJobBroken(0); g_submit.fn = NULL;
+
+        g_case = "the ready poll moves the spawn's readback copy on a slice each call";
+        {
+            static void* vt[8]; void* allocator[2] = {vt, NULL}; vt[6] = (void*)MatAllocate;
+            uint32_t* pixels = (uint32_t*)VirtualAlloc(NULL, (size_t)4096 * 4096 * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            uint64_t dst = 0; uint8_t done = 0;
+            CoXlTestMatCopySetup(0xBA0D, pixels);
+            CoXlTestMatReadAsync(0xBA0D, (uint64_t)(uintptr_t)allocator, (uint64_t)(uintptr_t)&dst, (uint64_t)(uintptr_t)&done);
+            const long long at = CoXlTestMatCopyAt();
+            CHECK(at > 0);
+            Entry(4096, 4096);
+            CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 1);
+            CHECK(CoXlTestMatCopyAt() > at || (CoXlTestMatCopyAt() == -1 && done == 1));
+            RunJob();
+            CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 0);
+            CoXlTestMatCopyFinish();
+            CHECK(done == 1 && dst == (uint64_t)(uintptr_t)g_matBlock);
+            VirtualFree(g_matBlock, 0, MEM_RELEASE); VirtualFree(pixels, 0, MEM_RELEASE);
+            CoXlTestMatCopySetup(0, NULL);
+        }
 
         g_case = "SpawnTerrainWork not the reviewed code: work() on the game thread as before, no job";
         g_fake.strictCode = 1; /* the host compares the bytes: the fake exe holds none of them */

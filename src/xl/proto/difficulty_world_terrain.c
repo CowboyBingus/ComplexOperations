@@ -2474,11 +2474,47 @@ static void NearJobRelease(void)
     TileRunnerLoneIdle();
 }
 
+/* The spawn's material readback in play (NearMatReadAsync): 64 MiB into the world allocator's memory, which is rpmalloc's
+ * huge path, freshly mapped each time (0x669D20 -> 0x669B90 -> VirtualAlloc at 0x6678B4, no large pages): 16384 page
+ * faults at ~1.66 us in game, ~30 ms on one frame. Copied a slice a frame instead; dst and done are stored once it is
+ * all there, as the render thread stores them for the game's own readback (0x10B200 only posts message 0x12). */
+#define NEAR_MAT_COPY_BYTES ((size_t)4096 * 4096 * 4)
+#define NEAR_MAT_COPY_CHUNK ((size_t)1 << 20)
+#define NEAR_MAT_COPY_MS 3.0
+static struct { uint8_t* to; const uint8_t* from; size_t at; uint64_t dst, done; double ms; uint32_t frames; } g_matCopy;
+/* 1 while bytes are left: at least one chunk, then chunks until `budget` ms are spent. */
+static int NearMatCopyStep(double budget)
+{
+    if (g_matCopy.to == NULL) return 0;
+    LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
+    double ms = 0;
+    do
+    {
+        const size_t n = NEAR_MAT_COPY_BYTES - g_matCopy.at < NEAR_MAT_COPY_CHUNK ? NEAR_MAT_COPY_BYTES - g_matCopy.at : NEAR_MAT_COPY_CHUNK;
+        memcpy(g_matCopy.to + g_matCopy.at, g_matCopy.from + g_matCopy.at, n);
+        g_matCopy.at += n;
+        QueryPerformanceCounter(&t1);
+        ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+    } while (g_matCopy.at < NEAR_MAT_COPY_BYTES && ms < budget);
+    g_matCopy.ms += ms; g_matCopy.frames++;
+    if (g_matCopy.at < NEAR_MAT_COPY_BYTES) return 1;
+    *(volatile uint64_t*)(uintptr_t)g_matCopy.dst = (uint64_t)(uintptr_t)g_matCopy.to;
+    MemoryBarrier();
+    *(volatile uint8_t*)(uintptr_t)g_matCopy.done = 1;
+    Note("difficulty: near terrain: the material pixels served to the spawn's readback: 64 MiB in %u slices, %.1f ms on the game thread",
+        g_matCopy.frames, g_matCopy.ms);
+    g_matCopy.to = NULL;
+    return 0;
+}
+/* Before the pixels are freed or the terrain that waits for them goes: the rest copied now. */
+static void NearMatCopyFinish(void) { if (g_matCopy.to != NULL) NearMatCopyStep(1e30); }
+
 /* A level init or the ship (NearLevelLeft): the job joined; the level may be gone, so its marker is left alone. */
 static void NearShapeJoin(const char* why);
 static void NearJobLevelLeft(void)
 {
     NearShapeJoin("the level went"); /* before the tiles' terrains go */
+    NearMatCopyFinish();
     NearJobStop("the level went", 0);
     NearJobRelease();
 }
@@ -2491,7 +2527,7 @@ static void NearJobLevelUpdate(uintptr_t level, uintptr_t moving)
     uint32_t state = 0;
     const int read = !SafeRead(level + 0x1E4, &state, 4);
     if (level == moving && read && state == 3) return;
-    if (g_moveBuilding && level == moving) NearShapeJoin("the level left play"); /* the build's own level only: the load (state 5) never begins one */
+    if (g_moveBuilding && level == moving) { NearShapeJoin("the level left play"); NearMatCopyFinish(); } /* the build's own level only: the load (state 5) never begins one */
     if (!g_nearJob.on) return;
     Note("difficulty: moving tiles: composite tiles: joined at generator state %u, a job in flight %s", state, g_nearJob.inflight > 0 ? "yes" : "no");
     NearJobStop("the level left play", level == g_nearJob.level);
@@ -4469,6 +4505,7 @@ static void NearWriteMap(const wchar_t* name, const uint8_t* data, size_t bytes)
 /* The band's texture and pixels gone (a new level: the world that drew them is gone; or the band was not made). */
 static void NearMatDrop(void)
 {
+    NearMatCopyFinish();
     if (g_matband.tex != 0)
     {
         typedef void (*DestroyFn)(uint64_t tex);
@@ -4764,6 +4801,14 @@ static uint64_t NearMatReadAsync(uint64_t renderer, uint64_t src, uint64_t alloc
         {
             void** r = allocate(alloc, &p, (uint64_t)4096 * 4096 * 4, 8);
             if (r != NULL) p = *r;
+        }
+        if (p != NULL && g_moveBuilding && g_matCopy.to == NULL)
+        {
+            g_matCopy.to = (uint8_t*)p; g_matCopy.from = (const uint8_t*)pixels; g_matCopy.at = 0; g_matCopy.dst = dst; g_matCopy.done = done;
+            g_matCopy.ms = 0; g_matCopy.frames = 0;
+            if (src == g_matband.tex) g_matband.served = 1; else g_coarseMat.served = 1;
+            NearMatCopyStep(NEAR_MAT_COPY_MS);
+            return 0;
         }
         if (p != NULL)
         {
@@ -8385,7 +8430,7 @@ static const struct { uint32_t at; const char* bytes; } kNearShapeWork[] = {
  * finalizes instead of starting them again; gate: 1 once the job is in, 2 once it is shut out (it never ran in time);
  * stuck: a job inside the steps that never came back (nothing waits for it again, its terrain is left alone). */
 static struct { volatile LONG on, gate; int inList, stuck; volatile LONG running; uint64_t world, handle, obj, shape, element, done; double jobMs, quadMs;
-    uint32_t frames, onGame, nodes; float rootMin, rootMax; DWORD game; ULONGLONG since; } g_shape;
+    uint32_t frames, onGame, nodes, cols, rows; float rootMin, rootMax, z[2]; uint16_t low, high; int scanned; DWORD game; ULONGLONG since; } g_shape;
 #define NEAR_SHAPE_WAIT_MS 30000u
 static uintptr_t g_shapeExe; /* a test's image; 0: the game's */
 static uintptr_t NearShapeExe(void) { return g_shapeExe != 0 ? g_shapeExe : (uintptr_t)GetModuleHandleW(NULL); }
@@ -8421,6 +8466,24 @@ static void NearQuadRead(uint64_t tree, uint32_t first, uint32_t* nodes, float* 
 }
 static double g_nearFinalMs; /* the last finalize's time (the ready frame's line) */
 
+/* The heights' own u16 range: what the quadtree's root must span (0x2F32C7..0x2F3319: z lo + span x v / 65535, minus
+ * 0.25 below, plus 1.25 above). The run compares the two lines; a wrong height range still gives 21845 nodes. */
+static int NearHeightRange(uint64_t data, uint32_t cols, uint32_t rows, uint16_t* low, uint16_t* high)
+{
+    const uint16_t* h = (const uint16_t*)(uintptr_t)data;
+    uint16_t probe = 0, lo = 0xFFFF, hi = 0;
+    if (h == NULL || cols == 0 || rows == 0 || SafeRead(data + ((uint64_t)cols * rows - 1) * 2, &probe, 2)) return 0;
+    for (size_t i = 0, n = (size_t)cols * rows; i < n; i++) { const uint16_t v = h[i]; lo = v < lo ? v : lo; hi = v > hi ? v : hi; }
+    *low = lo; *high = hi;
+    return 1;
+}
+static void NearHeightNote(const char* where, uint16_t low, uint16_t high, const float z[2])
+{
+    const double span = (double)z[1] - (double)z[0], a = z[0] + span * low / 65535.0, b = z[0] + span * high / 65535.0;
+    Note("difficulty: near terrain: the tile's heights (%s): %u..%u = %.2f..%.2f m; its quadtree root should be %.2f..%.2f m", where, low, high, a, b,
+        a - 0.25, b + 1.25);
+}
+
 /* work() on the game thread (the drop tile, or the shape not on a job): the same quadtree line, the control. */
 static void NearWorkQuadNote(uint64_t world, uint64_t handle)
 {
@@ -8430,8 +8493,13 @@ static void NearWorkQuadNote(uint64_t world, uint64_t handle)
     enter(world + NEAR_SHAPE_LOCK); /* the load runs this on the generator's thread too */
     uint8_t* e = ((NearShapeFindFn)(NearShapeExe() + 0x1B86C0u))(world + NEAR_SHAPE_TABLE, &key);
     if (e != NULL && !SafeRead((uintptr_t)e, &tree, 8) && tree != 0) NearQuadRead(tree, 0, &nodes, &low, &high);
+    uint64_t obj = 0, data = 0, dims = 0; uint32_t cols = 0, rows = 0; float z[2] = {0, 0}; uint16_t lo = 0, hi = 0;
+    const int scanned = e != NULL && !SafeRead((uintptr_t)e + 0x10, &obj, 8) && obj != 0 && !SafeRead(obj + 0x40, &data, 8) &&
+        !SafeRead((uintptr_t)e + 0x38, &dims, 8) && dims != 0 && !SafeRead(dims + 0x14, &cols, 4) && !SafeRead(dims + 0x18, &rows, 4) &&
+        !SafeRead((uintptr_t)e + 0x2C, z, 8) && NearHeightRange(data, cols, rows, &lo, &hi);
     leave(world + NEAR_SHAPE_LOCK);
     Note("difficulty: near terrain: the tile's render quadtree (work() on the game thread): %u nodes, root %.2f..%.2f m", nodes, (double)low, (double)high);
+    if (scanned) NearHeightNote("work()'s, scanned on the game thread", lo, hi, z);
 }
 
 static uint64_t NearShapeJob(uint64_t a, uint64_t b, uint64_t c, uint64_t data)
@@ -8442,6 +8510,8 @@ static uint64_t NearShapeJob(uint64_t a, uint64_t b, uint64_t c, uint64_t data)
     if (GetCurrentThreadId() == g_shape.game) g_shape.onGame++;
     LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
     g_shape.shape = ((ShapeFn)(NearShapeExe() + 0x786130u))(g_shape.world, g_shape.obj);
+    uint64_t heights = 0; /* what NearGroundOf copies to the slot later (obj+0x40), craters held meanwhile */
+    g_shape.scanned = !SafeRead(g_shape.obj + 0x40, &heights, 8) && NearHeightRange(heights, g_shape.cols, g_shape.rows, &g_shape.low, &g_shape.high);
     QueryPerformanceCounter(&t1);
     g_shape.jobMs = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
     MemoryBarrier();
@@ -8489,6 +8559,7 @@ static int NearShapeBegin(uint64_t world, uint64_t handle)
     leave(world + NEAR_SHAPE_LOCK);
     g_shape.world = world; g_shape.handle = handle; g_shape.obj = obj; g_shape.shape = 0; g_shape.jobMs = 0; g_shape.frames = 0;
     g_shape.game = GetCurrentThreadId(); g_shape.since = GetTickCount64(); g_shape.done = 0; g_shape.quadMs = 0; g_shape.nodes = 0;
+    g_shape.cols = cols; g_shape.rows = rows; g_shape.scanned = 0;
     InterlockedExchange(&g_shape.gate, 0);
     InterlockedExchange(&g_shape.on, 1);
     if (!g_shape.inList) return 1; /* no shape (0x1AC2FF): the quadtree alone, next */
@@ -8522,6 +8593,7 @@ static int NearShapeEnd(void)
         !SafeRead((uintptr_t)e + 0x2C, &xy1, 8) && !SafeRead(exe + 0x16A9AE0u, &two, 4))
     {
         if (g_shape.inList) memcpy(e + 0x18, &g_shape.shape, 8);
+        memcpy(g_shape.z, &xy1, 8); /* arg9: the z range the nodes' floats are made from */
         uint32_t leaf = rows;
         if (rows >= 32)
         {
@@ -8546,6 +8618,8 @@ static int NearShapeEnd(void)
         g_shape.jobMs, g_shape.frames, (double)(GetTickCount64() - g_shape.since) / 1000.0, g_shape.onGame);
     Note("difficulty: near terrain: the tile's render quadtree: %u nodes (21845 for 4096 x 4096 at depth 7), root %.2f..%.2f m, %.1f ms on the game thread",
         g_shape.nodes, (double)g_shape.rootMin, (double)g_shape.rootMax, g_shape.quadMs);
+    if (g_shape.scanned) NearHeightNote("scanned on the job", g_shape.low, g_shape.high, g_shape.z);
+    else Note("difficulty: near terrain: the tile's heights were not scanned (no shape job)");
     return 1;
 }
 
@@ -8585,6 +8659,7 @@ static int NearReadyTile(uint64_t context, uint64_t* worldOut)
     ReadyFn ready = NULL; WorkFn work = NULL;
     SafeRead(table + 0x1A0, &ready, 8); SafeRead(table + 0x1A8, &work, 8);
     if (ready == NULL || work == NULL || world == 0) { g_near.state = NEAR_FAILED; return 0; }
+    NearMatCopyStep(NEAR_MAT_COPY_MS); /* the spawn's readback: ready() waits for its done */
     int ended = 0;
     if (g_shape.on && !g_shape.stuck)
     {
