@@ -665,7 +665,9 @@ static void MoveFailRest(void)
     {
         typedef void (*DestroyFn)(uint64_t world, uint64_t handle);
         DestroyFn destroy = (DestroyFn)NearApi(0x08, 0x1E0);
-        if (destroy != NULL) { destroy(MoveWorld(), g_near.handle); g_near.handle = 0; }
+        /* a shape job stuck in this terrain's steps still writes its object: the terrain is left, not freed under it */
+        if (g_shape.stuck && g_shape.handle == g_near.handle) Note("difficulty: moving tiles: the failed tile's terrain is left in the world: its shape job is stuck in it");
+        else if (destroy != NULL) { destroy(MoveWorld(), g_near.handle); g_near.handle = 0; }
     }
     if (g_move.stashed)
     {
@@ -1564,9 +1566,9 @@ static void MoveCostNote(void)
         n += snprintf(line + n, sizeof line - n, " %.0f ms (%s, near state %d, step %d, building %d, conform phase %d);", g_moveCost.ms[k],
             MoveStateName(g_moveCost.mv[k]), g_moveCost.ns[k], g_moveCost.step[k], g_moveCost.bld[k], g_moveCost.conf[k]);
     Note("difficulty: moving tiles: the build's cost on the game thread: %.0f ms over %u frames; the longest:%s", g_moveCost.sum, g_moveCost.frames, line);
-    Note("difficulty: moving tiles: the ready frame: ready and finalize %.1f ms, coarse hidden %.1f, heights copied %.1f, band %.1f, hide union %.1f, "
-        "layer change started %.1f, stamps flagged %.1f", g_moveReadyMs[0], g_moveReadyMs[1], g_moveReadyMs[2], g_moveReadyMs[3], g_moveReadyMs[4],
-        g_moveReadyMs[5], g_moveReadyMs[6]);
+    Note("difficulty: moving tiles: the ready frame: ready and finalize %.1f ms (the quadtree %.1f, the finalize %.1f), coarse hidden %.1f, heights copied %.1f, "
+        "band %.1f, hide union %.1f, layer change started %.1f, stamps flagged %.1f", g_moveReadyMs[0], g_shape.quadMs, g_nearFinalMs, g_moveReadyMs[1],
+        g_moveReadyMs[2], g_moveReadyMs[3], g_moveReadyMs[4], g_moveReadyMs[5], g_moveReadyMs[6]);
     memset(g_moveReadyMs, 0, sizeof g_moveReadyMs);
     Note("difficulty: moving tiles: the build's wall-clock frames: the longest %.0f ms (%s), %.0f ms (%s), %.0f ms (%s); %u over 50 ms",
         g_moveCost.wall[0], MoveStateName(g_moveCost.wallMv[0]), g_moveCost.wall[1], MoveStateName(g_moveCost.wallMv[1]), g_moveCost.wall[2],

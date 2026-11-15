@@ -3,7 +3,8 @@
  * into two slots; a step draws only its own built slot; the run holds the level's tile marker and spacing from its
  * start to its end and leaves the build settings' +0x5C alone; the replay's end, a draw's fault, the last step, the
  * level's end and a level update out of play join it; without a low TLS slot or after a lost job the game thread
- * builds the tiles as before. The test's submit keeps the job and runs it when the test says. */
+ * builds the tiles as before; a job that never comes back is given up on after 30 s, and while one may still be inside
+ * its build no tile is built under it. The test's submit keeps the job and runs it when the test says. */
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -24,6 +25,8 @@ void CoXlTestNearJobLevelUpdate(uintptr_t level, uintptr_t moving);
 void CoXlTestMoveLevelUpdate(uint64_t level, uintptr_t moving, void (*update)(uint64_t));
 DWORD CoXlTestNearJobTls(DWORD k);
 void CoXlTestNearJobBroken(int broken);
+void CoXlTestNearJobAge(ULONGLONG ms);
+int CoXlTestNearJobStuckTake(void);
 void CoXlTestTerrainBuildNote(const char* text);
 void CoXlTestNearJobArena(uint64_t context);
 void CoXlTestNearReplayEnd(void);
@@ -89,10 +92,17 @@ static int RunJob(int worker, DWORD delay)
 static void LateDone(void) { if (g_late != NULL) { WaitForSingleObject(g_late, INFINITE); CloseHandle(g_late); g_late = NULL; } }
 
 /* the test's TerrainBuild: what the run holds while a tile builds, the order, the block, a note */
-static int g_order[64], g_builds, g_failTile = -1, g_tookFailed = -1, g_badMarker, g_badSpacing, g_bad5C;
+static int g_order[64], g_builds, g_failTile = -1, g_tookFailed = -1, g_badMarker, g_badSpacing, g_bad5C, g_bad50;
 static uint8_t* g_blocks[64];
+static HANDLE g_holdBuild; /* set: a build waits on it (a job stuck inside its build) */
+static volatile LONG g_inBuild;
 static int Build(int tile, uint64_t context, uint8_t* block, uint8_t* record)
 {
+    uint64_t queue = 1;
+    memcpy(&queue, (const void*)(uintptr_t)(context + 0x50), 8);
+    if (queue != 0) g_bad50++; /* the level's GPU job queue is not the runner's */
+    InterlockedExchange(&g_inBuild, 1);
+    if (g_holdBuild != NULL) WaitForSingleObject(g_holdBuild, INFINITE);
     if (Marker() != (g_disk ^ 1u)) g_badMarker++;
     if (g_spacing != 16.0f) g_badSpacing++;
     uint64_t settings = 0; uint32_t v = 0;
@@ -181,6 +191,7 @@ int main(void)
     v = (uint64_t)(uintptr_t)g_settings; memcpy(g_ctx + 8, &v, 8);
     v = (uint64_t)(uintptr_t)g_lg; memcpy(g_ctx + 0x18, &v, 8);
     v = 0x1234; memcpy(g_ctx + 0x20, &v, 8);
+    v = 0x5150; memcpy(g_ctx + 0x50, &v, 8); /* the level's job queue */
     v = (uint64_t)(uintptr_t)g_p; memcpy(g_level + 0x2C8, &v, 8); /* any generator */
     LevelState(g_other, 3);
     CoXlTestNearJobLevel((uintptr_t)g_level, g_block0);
@@ -191,7 +202,7 @@ int main(void)
     CHECK(g_builds == 5 && g_submits == 5 && g_twoAtOnce == 0 && g_badQueue == 0);
     for (int k = 0; k < 5; k++) CHECK(g_order[k] == 102 + k);
     CHECK(g_blocks[0] == g_block0 && g_blocks[1] != g_block0 && g_blocks[1] != NULL && g_blocks[2] == g_block0 && g_blocks[3] == g_blocks[1]);
-    CHECK(g_badMarker == 0 && g_badSpacing == 0 && g_bad5C == 0);
+    CHECK(g_badMarker == 0 && g_badSpacing == 0 && g_bad5C == 0 && g_bad50 == 0 && g_builds > 0);
     CHECK(!On() && Marker() == g_disk && g_spacing == 18.5f); /* put back once, after the last step */
     CHECK(fake_host_logged("composite tiles on a worker: 5 built, 0 failed, longest") && fake_host_logged("jobs seen on the game thread 0;"));
     CHECK(fake_host_logged("arena peak 9.0 MiB")); /* the most, not the last tile's */
@@ -320,6 +331,37 @@ int main(void)
     CHECK(CoXlTestNearJobTake(2, Context()) == -1 && g_submits == 0 && !On() && Marker() == g_disk);
     CoXlTestNearJobBroken(0);
     CHECK(CoXlTestNearJobTake(2, Context()) == 0 && On()); /* and jobs again once the session has them */
+    RunJob(1, 0);
+    CoXlTestNearReplayEnd();
+
+    Begin("a job that never runs: given up on after 30 s; none inside, so the step builds here; the late job builds nothing", 9, 2, 6);
+    CHECK(CoXlTestNearJobTake(2, Context()) == 0 && g_pending == 1);
+    CHECK(CoXlTestNearJobTake(2, Context()) == 0 && On()); /* under 30 s it waits */
+    CoXlTestNearJobAge(30001);
+    CHECK(CoXlTestNearJobTake(2, Context()) == -1 && !On() && Marker() == g_disk && g_spacing == 18.5f);
+    CHECK(fake_host_logged("did not return within 30 s (none is building)"));
+    RunJob(1, 0);
+    CHECK(g_builds == 0 && Inflight() == 0);
+    CHECK(CoXlTestNearJobStuckTake() == 0);
+    CoXlTestNearJobBroken(0);
+
+    Begin("a job stuck in its build: given up on; it holds the level's block, so no composite tile is built under it", 9, 2, 6);
+    g_holdBuild = CreateEventW(NULL, TRUE, FALSE, NULL);
+    CHECK(CoXlTestNearJobTake(2, Context()) == 0 && g_pending == 1);
+    RunJob(1, 1); /* on a worker, into its build, where it stays */
+    InterlockedExchange(&g_inBuild, 0);
+    { int k = 0; while (!g_inBuild && k++ < 2000) Sleep(1); }
+    CHECK(g_inBuild == 1 && g_builds == 0);
+    CoXlTestNearJobAge(30001);
+    CHECK(CoXlTestNearJobTake(2, Context()) == 1 && !On());
+    CHECK(fake_host_logged("did not return within 30 s (one builds in the level's block)"));
+    CHECK(CoXlTestNearJobTake(3, Context()) == 1 && g_submits == 1 && fake_host_logged("composite tiles fail from now on"));
+    SetEvent(g_holdBuild);
+    LateDone();
+    CloseHandle(g_holdBuild); g_holdBuild = NULL;
+    CHECK(Inflight() == 0 && g_builds == 1 && CoXlTestNearJobStuckTake() == 2);
+    CoXlTestNearJobBroken(0);
+    CHECK(CoXlTestNearJobTake(2, Context()) == 0 && On()); /* jobs again once nothing holds a block */
     RunJob(1, 0);
     CoXlTestNearReplayEnd();
 

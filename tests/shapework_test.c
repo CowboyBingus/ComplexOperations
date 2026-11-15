@@ -1,8 +1,9 @@
 /* The tile's collision shape on a worker (proto/difficulty_world_terrain.c NearShapeBegin / NearShapeEnd): the ready
  * frame held the game thread 136-140 ms in SpawnTerrainWork (exe 0x1AC210). Its steps are the function's own in its
  * order: under the terrain lock the object filled from the entry, the shape build (0x786130) alone as an engine job,
- * then under the lock again the shape into the entry and the quadtree (0x2F2CB0) with the function's leaf and depth.
- * Fakes stand at the exe's addresses; the test runs the job when it chooses. */
+ * then under the lock again the shape into the entry and the quadtree (0x2F2CB0) with the function's 13 arguments,
+ * leaf and depth. Only a build in play takes the job (the load keeps work()); a joined shape is finalized, never begun
+ * again; a job that never comes back is given up on. Fakes stand at the exe's addresses; the test runs the job. */
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -17,6 +18,13 @@ int CoXlTestShapeBegin(uint64_t world, uint64_t handle);
 void CoXlTestShapeEnd(void);
 int CoXlTestShapeState(void);
 void CoXlTestShapeJoin(void);
+int CoXlTestShapeFlags(void);
+void CoXlTestShapeAge(ULONGLONG ms);
+void CoXlTestShapeInside(void);
+void CoXlTestShapeReset(void);
+void CoXlTestShapeForget(void);
+void CoXlTestMoveBuilding(int on);
+void CoXlTestNearJobBroken(int broken);
 void CoXlTestShapeLevelLeft(void);
 void CoXlTestMoveHold(int on);
 LONG64 CoXlTestMoveHoldSince(void);
@@ -30,9 +38,10 @@ static const char* g_case;
 static uint8_t* g_exe;
 static int g_depth, g_maxDepth, g_lockedFind, g_lockedQuad, g_shapeLocked, g_works, g_finals;
 static uint64_t g_world, g_handle, g_shapeObj, g_shapeWorld;
-static uint8_t g_entry[0x200], g_obj[0x200], g_dims[0x20], g_treeHolder[0x40];
+static uint8_t g_entry[0x200], g_obj[0x200], g_dims[0x20], g_treeHolder[0x50];
+static float g_nodes[6 * 4];
 static uint64_t g_heights = 0x7700;
-static struct { uint64_t tree, heights, cols, rows, a5, a6, a7, a8, a9, depth, a11, a12; int calls; } g_quad;
+static struct { uint64_t tree, heights, cols, rows, a5, a6, a7, a8, a9, a10, a11, a12, a13; uint32_t first; int calls; } g_quad;
 static struct { void* fn; uint64_t* data; uint32_t queue, priority, count; int calls; } g_submit;
 
 static void Enter(uint64_t lock) { if (lock == g_world + 0x230520u) { g_depth++; if (g_depth > g_maxDepth) g_maxDepth = g_depth; } }
@@ -46,11 +55,17 @@ static uint64_t Hash(uint64_t text, uint64_t length, uint64_t seed)
 }
 static uint64_t Shape(uint64_t world, uint64_t obj) { g_shapeWorld = world; g_shapeObj = obj; g_shapeLocked = g_depth; return 0x5A5A0001ull; }
 static float Log(float v) { return logf(v); }
+/* 0x2F2CB0's list at tree+0x38: {count, capacity, nodes}; a depth-7 tree adds 21845 nodes of 24 bytes, the root first
+ * at the old count, its minimum and maximum height floats at +0 / +4 */
 static uint64_t Quad(uint64_t tree, uint64_t heights, uint64_t cols, uint64_t rows, uint64_t a5, uint64_t a6, uint64_t a7, uint64_t a8, uint64_t a9,
-    uint64_t depth, uint64_t a11, uint64_t a12)
+    uint64_t a10, uint64_t a11, uint64_t a12, uint64_t a13)
 {
     g_quad.tree = tree; g_quad.heights = heights; g_quad.cols = cols; g_quad.rows = rows; g_quad.a5 = a5; g_quad.a6 = a6; g_quad.a7 = a7; g_quad.a8 = a8;
-    g_quad.a9 = a9; g_quad.depth = depth; g_quad.a11 = a11; g_quad.a12 = a12; g_quad.calls++; g_lockedQuad = g_depth;
+    g_quad.a9 = a9; g_quad.a10 = a10; g_quad.a11 = a11; g_quad.a12 = a12; g_quad.a13 = a13; g_quad.calls++; g_lockedQuad = g_depth;
+    uint32_t count = 0; memcpy(&count, (void*)(uintptr_t)tree, 4);
+    g_quad.first = count;
+    if (count < 4) { g_nodes[6 * count] = -3.5f; g_nodes[6 * count + 1] = 812.25f; }
+    count += 21845; memcpy((void*)(uintptr_t)tree, &count, 4);
     return 0;
 }
 static uint64_t Submit(void* fn, uint64_t* data, const char* name, uint32_t queue, uint32_t priority, uint32_t count, uint64_t zero)
@@ -82,6 +97,8 @@ static void Entry(uint32_t cols, uint32_t rows)
     memcpy(g_obj + 0x40, &g_heights, 8);
     for (int k = 0x60; k < 0x168; k++) g_obj[k] = (uint8_t)(k * 7 + 3);
     memset(&g_quad, 0, sizeof g_quad);
+    memset(g_treeHolder, 0, sizeof g_treeHolder); memset(g_nodes, 0, sizeof g_nodes);
+    uint64_t nodes = (uint64_t)(uintptr_t)g_nodes; memcpy(g_treeHolder + 0x40, &nodes, 8);
 }
 
 static int Leaf(uint32_t rows)
@@ -122,6 +139,7 @@ int main(void)
     uint64_t (*submit)(void*, uint64_t*, const char*, uint32_t, uint32_t, uint32_t, uint64_t) = Submit; memcpy(jobs + 0x88, &submit, 8);
 
     CoXlTestMoveHold(0);
+    CoXlTestMoveBuilding(1); /* a tile builds in play */
     g_case = "begin: under the lock the object filled from the entry as 0x1AC343..0x1AC4C1 does; the shape a job on channel 10";
     Entry(4096, 4096);
     CHECK(CoXlTestShapeBegin(g_world, g_handle) == 1);
@@ -142,17 +160,30 @@ int main(void)
     CHECK(g_shapeWorld == g_world && g_shapeObj == (uint64_t)(uintptr_t)g_obj && g_shapeLocked == 0);
     CHECK(CoXlTestShapeState() == 1);
 
-    g_case = "end: under the lock the shape into the entry, then the quadtree with the function's arguments";
+    g_case = "end: under the lock the shape into the entry, then the quadtree as 0x1AC539..0x1AC585 stacks its 13 arguments";
     g_maxDepth = 0; g_lockedFind = 0;
+    { uint32_t had = 3; memcpy(g_treeHolder + 0x38, &had, 4); } /* nodes already in the list: the root goes in after them */
     CoXlTestShapeEnd();
     CHECK(g_depth == 0 && g_maxDepth == 1 && g_lockedFind == 1 && g_lockedQuad == 1);
     { uint64_t s; memcpy(&s, g_entry + 0x18, 8); CHECK(s == 0x5A5A0001ull); }
     CHECK(g_quad.calls == 1 && g_quad.tree == (uint64_t)(uintptr_t)g_treeHolder + 0x38 && g_quad.heights == g_heights);
-    CHECK(g_quad.cols == 4096 && g_quad.rows == 4096 && g_quad.a5 == 0 && g_quad.a9 == 0 && g_quad.a11 == 0 && g_quad.a12 == 0);
-    { uint64_t xy0, xy1; memcpy(&xy0, g_entry + 0x24, 8); memcpy(&xy1, g_entry + 0x2C, 8); CHECK(g_quad.a6 == xy0 && g_quad.a7 == xy0 && g_quad.a8 == xy1); }
-    CHECK(g_quad.depth == (uint64_t)(int64_t)(logf(128.0f) / logf(2.0f)));
+    CHECK(g_quad.cols == 4096 && g_quad.rows == 4096);
+    {
+        uint64_t xy0, xy1; memcpy(&xy0, g_entry + 0x24, 8); memcpy(&xy1, g_entry + 0x2C, 8);
+        /* rcx, rdx, r8, r9; [rsp+0x20] never written (0 here); +0x28 0; +0x30 / +0x38 the corner; +0x40 the far corner;
+         * +0x48 the depth so far 0; +0x50 the depth; +0x58 / +0x60 no min / max out */
+        CHECK(g_quad.a5 == 0 && g_quad.a6 == 0 && g_quad.a7 == xy0 && g_quad.a8 == xy0 && g_quad.a9 == xy1);
+        CHECK(g_quad.a10 == 0 && g_quad.a11 == (uint64_t)(int64_t)(logf(128.0f) / logf(2.0f)) && g_quad.a11 == 7 && g_quad.a12 == 0 && g_quad.a13 == 0);
+    }
     CHECK(CoXlTestShapeState() == 0 && CoXlTestMoveHoldSince() == 0);
     CHECK(fake_host_logged("the tile's collision shape built on a worker"));
+    CHECK(g_quad.first == 3 && fake_host_logged("the tile's render quadtree: 21848 nodes (21845 for 4096 x 4096 at depth 7), root -3.50..812.25 m"));
+    CHECK((CoXlTestShapeFlags() & 2) != 0); /* its handle kept as done */
+
+    g_case = "end once: a second end (or a join after it) does nothing";
+    CoXlTestShapeEnd();
+    CoXlTestShapeJoin();
+    CHECK(g_quad.calls == 1);
 
     g_case = "the leaf from the rows (0x1AC4DA..0x1AC50A): under 32 as is, a power of two 32, odd as is, even halved to odd or 32";
     {
@@ -164,7 +195,7 @@ int main(void)
             RunJob();
             CoXlTestShapeEnd();
             const int per = 4096 / Leaf(rows[k]);
-            CHECK(g_quad.rows == rows[k] && g_quad.depth == (uint64_t)(int64_t)(logf((float)per) / logf(2.0f)));
+            CHECK(g_quad.rows == rows[k] && g_quad.a11 == (uint64_t)(int64_t)(logf((float)per) / logf(2.0f)) && g_quad.a10 == 0);
         }
         CHECK(Leaf(96) == 24 && Leaf(100) == 25 && Leaf(4000) == 125 && Leaf(33) == 33 && Leaf(20) == 20);
     }
@@ -223,12 +254,74 @@ int main(void)
         VirtualProtect(image + 0xF45000u, 0x1000, PAGE_EXECUTE_READWRITE, &old);
         Entry(4096, 4096);
         g_works = g_finals = 0; g_submit.calls = 0;
+        CoXlTestShapeForget(); /* a new tile's spawn (NearSpawnTile): the joins above left this handle done */
         int state = 0;
         CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 1 && g_submit.calls == 1 && g_finals == 0);
         CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 1 && g_finals == 0 && g_submit.calls == 1); /* the job not run yet */
         RunJob();
         CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 0 && g_finals == 1 && g_works == 0 && g_quad.calls == 1);
-        CHECK(CoXlTestShapeState() == 0);
+        CHECK(CoXlTestShapeState() == 0 && (CoXlTestShapeFlags() & 2) == 0);
+
+        static uint8_t level[0x200];
+        uint32_t st = 5; memcpy(level + 0x1E4, &st, 4);
+        g_case = "the load (no build in play, level state 5): work() as the game has it, no job; its quadtree line the control";
+        CoXlTestMoveBuilding(0);
+        Entry(4096, 4096);
+        { uint32_t n = 21845; memcpy(g_treeHolder + 0x38, &n, 4); g_nodes[0] = -1.25f; g_nodes[1] = 640.5f; }
+        g_works = g_finals = 0; g_submit.calls = 0; g_fake.log[0] = 0;
+        CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 0 && g_works == 1 && g_finals == 1 && g_submit.calls == 0);
+        CHECK(fake_host_logged("the tile's render quadtree (work() on the game thread): 21845 nodes, root -1.25..640.50 m"));
+        CoXlTestNearJobLevelUpdate((uintptr_t)level, 0x1234); /* the load's own level updates: nothing joined, nothing ended */
+        CHECK(CoXlTestShapeState() == 0 && g_quad.calls == 0 && g_works == 1);
+        CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 0 && g_works == 2 && g_submit.calls == 0); /* never a job */
+        CoXlTestMoveBuilding(1);
+
+        g_case = "a join in play (the level leaves play), then the ready poll: finalized from the joined shape, never begun again";
+        Entry(4096, 4096);
+        g_works = g_finals = 0; g_submit.calls = 0;
+        CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 1 && g_submit.calls == 1);
+        RunJob();
+        st = 2; memcpy(level + 0x1E4, &st, 4);
+        CoXlTestNearJobLevelUpdate((uintptr_t)level, (uintptr_t)level);
+        CHECK(CoXlTestShapeState() == 0 && g_quad.calls == 1 && (CoXlTestShapeFlags() & 2) != 0);
+        CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 0 && g_finals == 1 && g_works == 0 && g_submit.calls == 1 && g_quad.calls == 1);
+        CHECK((CoXlTestShapeFlags() & 2) == 0);
+
+        g_case = "a new tile's handle forgets a joined shape: a reused handle starts its own";
+        Entry(4096, 4096);
+        g_submit.calls = 0;
+        CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 1 && g_submit.calls == 1);
+        RunJob();
+        CoXlTestShapeJoin();
+        CoXlTestShapeForget();
+        CHECK((CoXlTestShapeFlags() & 2) == 0);
+        CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 1 && g_submit.calls == 2);
+        RunJob();
+        CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 0);
+
+        g_case = "a job that never ran in 30 s: shut out, the tile built by work() here; the late job builds nothing";
+        Entry(4096, 4096);
+        g_works = g_finals = 0; g_submit.calls = 0; g_shapeObj = 0;
+        CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 1 && g_submit.calls == 1);
+        CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 1 && g_works == 0); /* under 30 s it waits */
+        CoXlTestShapeAge(30001);
+        CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 0 && state == 6 && g_works == 1 && g_finals == 1);
+        CHECK((CoXlTestShapeFlags() & 5) == 4 && CoXlTestMoveHoldSince() == 0 && fake_host_logged("(it never ran); no more jobs this session"));
+        RunJob();
+        CHECK(g_shapeObj == 0 && CoXlTestShapeState() == 0);
+        CoXlTestNearJobBroken(0);
+
+        g_case = "a job stuck in the shape's steps: the tile fails, nothing waits for it again, the next tile is built by work()";
+        Entry(4096, 4096);
+        g_works = g_finals = 0; g_submit.calls = 0;
+        CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 1 && g_submit.calls == 1);
+        CoXlTestShapeInside();
+        CoXlTestShapeAge(30001);
+        CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle, &state) == 0 && state == 8 && g_finals == 0 && g_works == 0);
+        CHECK((CoXlTestShapeFlags() & 1) != 0 && fake_host_logged("(it is still in the shape's steps)"));
+        { ULONGLONG t = GetTickCount64(); CoXlTestShapeJoin(); CHECK(GetTickCount64() - t < 1000 && g_quad.calls == 0); }
+        CHECK(CoXlTestReadyTile((uint64_t)(uintptr_t)context, g_handle + 1, &state) == 0 && g_works == 1 && g_finals == 1 && g_submit.calls == 1);
+        CoXlTestShapeReset(); CoXlTestNearJobBroken(0); g_submit.fn = NULL;
 
         g_case = "SpawnTerrainWork not the reviewed code: work() on the game thread as before, no job";
         g_fake.strictCode = 1; /* the host compares the bytes: the fake exe holds none of them */

@@ -1315,6 +1315,13 @@ int CoXlTestShapeBegin(uint64_t world, uint64_t handle) { return NearShapeBegin(
 void CoXlTestShapeEnd(void) { NearShapeEnd(); }
 int CoXlTestShapeState(void) { return (g_shape.on ? 1 : 0) | (g_shape.running ? 2 : 0); }
 void CoXlTestShapeJoin(void) { NearShapeJoin("a test"); }
+/* the shape's other state: 1 stuck, 2 a finished handle kept (done), 4 the job shut out (gate 2); its age, a job inside */
+int CoXlTestShapeFlags(void) { return (g_shape.stuck ? 1 : 0) | (g_shape.done != 0 ? 2 : 0) | (g_shape.gate == 2 ? 4 : 0); }
+void CoXlTestShapeAge(ULONGLONG ms) { g_shape.since -= ms; }
+void CoXlTestShapeInside(void) { InterlockedExchange(&g_shape.gate, 1); }
+void CoXlTestShapeReset(void) { g_shape.stuck = 0; InterlockedExchange(&g_shape.on, 0); InterlockedExchange(&g_shape.running, 0); g_shape.done = 0; }
+void CoXlTestShapeForget(void) { NearShapeForget(); }
+void CoXlTestMoveBuilding(int on) { InterlockedExchange(&g_moveBuilding, on); }
 void CoXlTestShapeLevelLeft(void) { NearJobLevelLeft(); }
 int CoXlTestReadyTile(uint64_t context, uint64_t handle, int* state)
 { g_near.handle = handle; g_near.polls = 0; g_near.state = NEAR_READY; uint64_t world = 0; int r = NearReadyTile(context, &world); *state = g_near.state; return r; }
@@ -1348,6 +1355,9 @@ void CoXlTestMoveLevelUpdate(uint64_t level, uintptr_t moving, void (*update)(ui
 { g_move.levelPtr = moving; g_moveUpdate = (MoveUpdateFn)update; MoveLevelUpdate(level); g_moveUpdate = NULL; }
 DWORD CoXlTestNearJobTls(DWORD k) { DWORD old = g_tileRunnerTls; g_tileRunnerTls = k; return old; }
 void CoXlTestNearJobBroken(int broken) { g_tileJobsBroken = broken; }
+/* the slots' jobs as if submitted `ms` earlier; the block a job given up on holds (2 the level's, 1 the second), cleared */
+void CoXlTestNearJobAge(ULONGLONG ms) { for (int i = 0; i < NEAR_JOB_SLOTS; i++) g_nearJob.slot[i].since -= ms; }
+int CoXlTestNearJobStuckTake(void) { const int r = g_nearJobStuck == NULL ? 0 : g_nearJobStuck == g_terrain.block ? 2 : 1; g_nearJobStuck = NULL; return r; }
 void CoXlTestTerrainBuildNote(const char* text) { TerrainBuildNote("%s", text); }
 void CoXlTestNearJobArena(uint64_t context) { NearJobArena(context); }
 /* One conform step of a tile built in mission (`building`) from `phase`; the phase it left, the band's pixels. */
