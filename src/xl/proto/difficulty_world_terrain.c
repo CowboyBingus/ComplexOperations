@@ -1766,21 +1766,23 @@ static void NearNamesInstall(uintptr_t game)
 }
 
 /* A build's op 0x63 renders when the job consumer drains its job, later in the frame than the step that queued it, so
- * the mover's own time leaves it out: the consumer's renders while the step is 0x63 are timed here (op 0x63's split
- * is sized from it). Written on the consumer's thread, noted on the game thread once the queue is empty. */
+ * the mover's own time leaves it out: the consumer's renders once the step's op has run are timed here (op 0x63's split
+ * is sized from it); before that they are an earlier step's jobs (the replay moves on without the queue empty).
+ * Written on the consumer's thread, noted on the game thread once the queue is empty. */
 static struct { volatile LONG n; double ms, max; } g_stamp63;
 
 static int NearStepIs63(void)
 {
     const int s = g_near.step;
-    return g_moveBuilding && s >= 0 && s < g_near.steps && s < NEAR_STEPS && g_near.stepKind[s] == NEAR_RECORD && g_near.stepOp[s] == 0x63;
+    return g_moveBuilding && s >= 0 && s < g_near.steps && s < NEAR_STEPS && g_near.stepKind[s] == NEAR_RECORD && g_near.stepOp[s] == 0x63 &&
+        (g_near.calls > 0 || g_near.stampLeave);
 }
 
 static void NearStamp63Note(void)
 {
     if (g_stamp63.n == 0) return;
     MemoryBarrier();
-    Note("difficulty: moving tiles: op 0x63's render (the job consumer's while its step was live): %ld calls, %.1f ms, the longest %.1f ms",
+    Note("difficulty: moving tiles: op 0x63's render (the job consumer's once its op had run): %ld calls, %.1f ms, the longest %.1f ms",
         (long)g_stamp63.n, g_stamp63.ms, g_stamp63.max);
     g_stamp63.ms = g_stamp63.max = 0; InterlockedExchange(&g_stamp63.n, 0);
 }

@@ -17,7 +17,7 @@ int CoXlTestMove2FRun(void);
 uint32_t CoXlTestMove2FBatch(void);
 const uint8_t* CoXlTestMove2FRecord(void);
 void CoXlTestMove2FPins(void);
-uint64_t CoXlTestStamp63Run(void* original, int op, int consumer);
+uint64_t CoXlTestStamp63Run(void* original, int op, int consumer, int ran);
 void CoXlTestStamp63Note(void);
 void CoXlTestMoveBuilding(int on);
 
@@ -257,18 +257,19 @@ int main(void)
     {
         CoXlTestMoveBuilding(1);
         g_fake.log[0] = 0;
-        CHECK(CoXlTestStamp63Run((void*)Render2ms, 0x63, 1) == 0x77 && CoXlTestStamp63Run((void*)Render2ms, 0x63, 1) == 0x77);
-        CHECK(CoXlTestStamp63Run((void*)Render2ms, 0x63, 0) == 0x77 && CoXlTestStamp63Run((void*)Render2ms, 0x40, 1) == 0x77 && g_renders == 4);
+        CHECK(CoXlTestStamp63Run((void*)Render2ms, 0x63, 1, 0) == 0x77); /* an earlier step's job, drained before 0x63's op ran */
+        CHECK(CoXlTestStamp63Run((void*)Render2ms, 0x63, 1, 1) == 0x77 && CoXlTestStamp63Run((void*)Render2ms, 0x63, 1, 2) == 0x77);
+        CHECK(CoXlTestStamp63Run((void*)Render2ms, 0x63, 0, 2) == 0x77 && CoXlTestStamp63Run((void*)Render2ms, 0x40, 1, 2) == 0x77 && g_renders == 5);
         CoXlTestStamp63Note();
-        const char* at = strstr(g_fake.log, "op 0x63's render (the job consumer's while its step was live): ");
+        const char* at = strstr(g_fake.log, "op 0x63's render (the job consumer's once its op had run): ");
         long n = 0; double ms = 0, max = 0;
-        CHECK(at != NULL && sscanf(at + strlen("op 0x63's render (the job consumer's while its step was live): "), "%ld calls, %lf ms, the longest %lf ms", &n, &ms,
+        CHECK(at != NULL && sscanf(at + strlen("op 0x63's render (the job consumer's once its op had run): "), "%ld calls, %lf ms, the longest %lf ms", &n, &ms,
             &max) == 3 && n == 2 && ms >= 4.0 && max >= 2.0 && max < ms);
         g_fake.log[0] = 0;
         CoXlTestStamp63Note(); /* noted once: nothing more until the next 0x63 */
         CHECK(!fake_host_logged("op 0x63's render"));
         CoXlTestMoveBuilding(0);
-        CHECK(CoXlTestStamp63Run((void*)Render2ms, 0x63, 1) == 0x77);
+        CHECK(CoXlTestStamp63Run((void*)Render2ms, 0x63, 1, 2) == 0x77);
         CoXlTestStamp63Note();
         CHECK(!fake_host_logged("op 0x63's render")); /* the level's own replay is not a build */
     }

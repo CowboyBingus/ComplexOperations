@@ -1400,12 +1400,13 @@ LONG CoXlTestGuardedRead(uintptr_t address, int safe, int* read)
 int CoXlTestSafeOwns(uintptr_t rip) { CONTEXT c; EXCEPTION_RECORD r; EXCEPTION_POINTERS p = {&r, &c}; memset(&c, 0, sizeof c); memset(&r, 0, sizeof r); c.Rip = rip; return co_safe_owns(&p); }
 /* op 0x63's render timed in the render_world wrapper (proto/difficulty_world_terrain.c NearRunAt): one consumer call
  * with the step's op, then the note the step's end makes. */
-uint64_t CoXlTestStamp63Run(void* original, int op, int consumer)
+uint64_t CoXlTestStamp63Run(void* original, int op, int consumer, int ran)
 {
     g_nearRunOriginal = (NearRunFn)original; InterlockedExchange(&g_nearActive, 1);
     g_near.steps = 1; g_near.step = 0; g_near.stepKind[0] = NEAR_RECORD; g_near.stepOp[0] = (uint8_t)op;
+    g_near.calls = ran == 1 ? 1 : 0; g_near.stampLeave = ran == 2; /* 1: the op mid-way, 2: done, its job queued */
     const uint64_t r = NearRunAt(consumer, 1, 2, 3, 0, 5, 6, 7, 8);
-    InterlockedExchange(&g_nearActive, 0); g_nearRunOriginal = NULL; g_near.steps = 0;
+    InterlockedExchange(&g_nearActive, 0); g_nearRunOriginal = NULL; g_near.steps = 0; g_near.calls = 0; g_near.stampLeave = 0;
     return r;
 }
 void CoXlTestStamp63Note(void) { NearStamp63Note(); }
