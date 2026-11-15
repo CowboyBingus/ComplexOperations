@@ -1483,6 +1483,13 @@ static void MoveCostNote(void)
 /* Before the level's own update: the scatter cut's close counts this update (difficulty_world_diag.c). */
 static void MoveScatterTick(void) { TdScatterMergeTick((uint64_t)(uintptr_t)g_move.ctx); }
 
+/* The streamer's tick count (g_streamTicks) of the last frame a tile build step ran in. The level update (0xAB519E)
+ * runs before the late update with the streamer's tick (0xAB612D) in the frame function 0xAB5000, so the step of
+ * this frame is known when the streamer asks (MoveStepRecent). */
+static uint32_t g_moveStepAt;
+/* A tile build step ran in this frame or the last: the streamer's change frame waits (it never adds to a slice). */
+static int MoveStepRecent(void) { return g_moveStepAt != 0 && g_streamTicks - g_moveStepAt <= 1u; }
+
 /* The mod's parts are timed for the frame-time lines (co_framecost.h); the game's own update between them is not. */
 static void MoveLevelUpdate(uint64_t level)
 {
@@ -1501,6 +1508,7 @@ static void MoveLevelUpdate(uint64_t level)
     QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
     g_hitchCost.tiles += (float)((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart);
     co_framecost_add(CO_FC_MOVE, t0.QuadPart);
+    if (mv != MV_IDLE || g_move.state != MV_IDLE) g_moveStepAt = g_streamTicks + 1; /* the streamer's tick of this frame */
     if (mv != MV_IDLE || g_move.state != MV_IDLE) { MoveCostAdd((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart, mv, ns, step, conf, bld); g_moveCost.pending = 1; }
     else if (g_moveCost.pending) MoveCostNote();
     const double grass = HitchNow();

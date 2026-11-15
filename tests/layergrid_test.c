@@ -81,6 +81,17 @@ int CoXlTestSlLeaves(uint32_t leaves[5]);
 void CoXlTestSlPick(const uint32_t leaves[5], const uint32_t queued[5], int* drain, uint32_t* spawn);
 void CoXlTestSlCounts(long* created, long* marked, long* routed);
 void CoXlTestStreamLayersPick(int* drain, uint32_t* spawn);
+void CoXlTestMoveStepAt(uint32_t tick);
+uint32_t CoXlTestStreamStaticTile(void);
+void CoXlTestStreamMakeEstimate(double perLocation);
+uint32_t CoXlTestStreamTicks(void);
+void CoXlTestStreamTicksAdd(void);
+uint32_t CoXlTestStreamTileDefers(void);
+int CoXlTestSlCountFrom(uintptr_t back);
+void CoXlTestStreamFlushCost(double ms, uint32_t locations, uint32_t* frames, double* sum, double* most, double* perLocation);
+int CoXlTestStreamFlushLater(uint32_t locations);
+int CoXlTestStreamFlushAfter(void);
+int CoXlTestStreamFlushPending(void);
 void co_shim_install(void);
 int co_safe_find(uintptr_t list, size_t count, uint64_t value);
 void CoXlTestMission(uintptr_t level, int complex);
@@ -315,8 +326,10 @@ static void Flagged(void)
     Slot(2, BX + 400.0f, AY, 20.0f, 0x3000, 0);
     Generator(3);
     const int leaves = Lines("the level left play");
+    CHECK(CoXlTestStreamFlushLater(0) == 1);
     CoXlTestStreamTick(); /* in play, nothing to take out */
     CHECK(g_destroys == 0 && Lines("the level left play") == leaves);
+    CHECK(!CoXlTestStreamFlushPending()); /* a change frame's flush runs in its tick, once the lock is released */
     CHECK(CoXlTestStampsReplace(g_tileOfB, BX, AY) == 2 && CoXlTestStreamFlag(0) && CoXlTestStreamFlag(2));
 }
 
@@ -335,7 +348,7 @@ static void StaticLayer(uint32_t leaves, uint32_t capacity, int32_t layers, uint
     uint64_t a = (uint64_t)(uintptr_t)(exe + 0x27E1000u), bp = (uint64_t)(uintptr_t)(exe + 0x27E2000u), vt = (uint64_t)(uintptr_t)(exe + 0x27E3000u);
     uint64_t array = (uint64_t)(uintptr_t)(exe + 0x27E4000u), l4 = (uint64_t)(uintptr_t)(exe + 0x27E5000u);
     update += (uint64_t)(uintptr_t)exe;
-    memcpy(exe + 0x27E0000u + 0x410, &a, 8); memcpy(exe + 0x27E1000u + 0xA0, &bp, 8);
+    (void)a; memcpy(exe + 0x27E0000u + 0x4C0, &bp, 8); /* the mission world's broad phase, [W+0x4C0] */
     memcpy(exe + 0x27E2000u, &vt, 8); memcpy(exe + 0x27E3000u + 0x38, &update, 8);
     memcpy(exe + 0x27E2000u + 0x10, &array, 8); memcpy(exe + 0x27E2000u + 0x18, &layers, 4);
     memcpy(exe + 0x27E4000u + 4 * 8, &l4, 8);
@@ -768,7 +781,9 @@ int main(void)
     CHECK(changes == 3 && backlogs == 2 && drainCuts == 0 && spawnCuts == 0 && changeRemoved == 200 && drains[0] == 3);
     CoXlTestStreamNote();
     CHECK(fake_host_logged("streaming change frames: 2 of 3 with a backlog (125 ms apart, 6 ms each); 200 removals, 66.7 a frame; removals "));
-    CHECK(fake_host_logged("cut short by the time limit: removals in 0, spawns in 0; 0 due not spawned at the last scan; drained layer 4 3, 6..9 0 0 0 0; spawned into layer 4 0, 6..9 0 0 0 0"));
+    CHECK(fake_host_logged("0 locations spawned, 0.0 a frame; their units made in 0 flushes, 0.00 ms each (the most 0.00), 0.000 ms a location estimated; "
+                           "cut short by the time limit: removals in 0, spawns in 0; by the location count: 0; deferred for a tile step: 0 frames; "
+                           "0 due not spawned at the last scan; drained layer 4 3, 6..9 0 0 0 0; spawned into layer 4 0, 6..9 0 0 0 0"));
     CHECK(fake_host_logged("streamed layers off: static leaves layer 4 0, layers 6..9 0 0 0 0 (not read"));
     CoXlTestStreamChangeStats(&changes, &backlogs, &drainCuts, &spawnCuts, &changeRemoved, drains);
     CHECK(changes == 0 && backlogs == 0 && changeRemoved == 0);
@@ -802,6 +817,51 @@ int main(void)
     CoXlTestStreamChangeAt(0);
     CHECK(CoXlTestStreamChange(6000, 1, &next) == 4 && next == 6125 && g_destroys == 4);
     CoXlTestStreamObserver(0, 0.0f, 0.0f);
+
+    /* Issue A's tile build steps and B's change frames never share a frame: the change frame waits while a step ran in
+     * this frame or the last (the level update runs before the streamer's tick in the frame, 0xAB519E before 0xAB612D). */
+    Start("a change frame waits while a tile build step ran in this frame or the last");
+    StreamGame();
+    Stream(10);
+    for (uint32_t k = 0; k < 4; k++) { Slot(k, AX + 1000.0f + 4.0f * (float)k, AY, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
+    CoXlTestStreamObserver(1, AX, AY);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 4);
+    CoXlTestStreamChangeAt(0);
+    CoXlTestStreamTicksAdd();
+    CoXlTestMoveStepAt(CoXlTestStreamTicks());       /* a step in this frame */
+    CHECK(CoXlTestStreamChange(4000, 0, &next) == 0 && g_destroys == 0 && next == 0 && CoXlTestStreamTileDefers() == 1);
+    CoXlTestStreamTicksAdd();                        /* the next frame: the step was the last frame's */
+    CHECK(CoXlTestStreamChange(4016, 0, &next) == 0 && g_destroys == 0 && CoXlTestStreamTileDefers() == 2);
+    CoXlTestStreamTicksAdd();
+    CHECK(CoXlTestStreamChange(4032, 0, &next) == 4 && g_destroys == 4 && next == 4282 && CoXlTestStreamTileDefers() == 2);
+    CoXlTestMoveStepAt(CoXlTestStreamTicks());
+    CHECK(CoXlTestStreamChange(4300, 0, &next) == 0 && CoXlTestStreamTileDefers() == 2); /* nothing to do: not counted */
+    CoXlTestMoveStepAt(0);
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
+
+    /* The flush makes the change frame's units after the lock is released, and its time a location sizes the next. */
+    Start("the change frame's flush waits for the lock's release; its time a location is the next frames' estimate");
+    StreamGame();
+    Stream(2);
+    {
+        uint32_t flushes = 0; double sum = 0, most = 0, each = 0;
+        CoXlTestStreamMakeEstimate(0.0);
+        CoXlTestStreamFlushCost(4.0, 8, &flushes, &sum, &most, &each);
+        CHECK(flushes == 1 && sum == 4.0 && most == 4.0 && each == 0.5);
+        CoXlTestStreamFlushCost(2.0, 2, &flushes, &sum, &most, &each);
+        CHECK(flushes == 2 && sum == 6.0 && most == 4.0 && each == 0.625);   /* a quarter of the new 1 ms */
+        CoXlTestStreamFlushCost(1.0, 0, &flushes, &sum, &most, &each);
+        CHECK(flushes == 3 && most == 4.0 && each == 0.625);                 /* no location: the estimate stays */
+        CHECK(CoXlTestStreamFlushLater(8) == 1);
+        CoXlTestStreamFlushCost(0.0, 0, &flushes, &sum, &most, &each);
+        CHECK(flushes == 4);                                                 /* pending: not run under the lock (4: this call) */
+        CHECK(CoXlTestStreamFlushAfter() == 0);
+        CoXlTestStreamFlushCost(0.0, 0, &flushes, &sum, &most, &each);
+        CHECK(flushes == 6);                                                 /* the flush after the release, and this */
+        CoXlTestStreamMakeEstimate(0.0);
+        memcpy(g_fake.image + TABLE + 0x410, &(uint64_t){0}, 8);             /* the animation wait does not read: no flush */
+        CHECK(CoXlTestStreamFlushLater(8) == 0);
+    }
 
     /* A change frame rebuilds the layers it touched: the removals of one streamed layer only, the others wait their turn. */
     Start("a drain of one broad phase layer: its stamps alone, the others kept in order; its count limit and its time");
@@ -916,6 +976,8 @@ int main(void)
     CoXlTestSlReset();
     CoXlTestSlSet(1, (uintptr_t)g_fake.exe, (void*)OrigCount6, (void*)OrigInfo, (void*)OrigRule, (void*)OrigCreate);
     CHECK(CoXlTestSlCount() == 10);
+    CHECK(CoXlTestSlCountFrom((uintptr_t)g_fake.exe + 0xD3C675u) == 10);
+    CHECK(CoXlTestSlCountFrom((uintptr_t)g_fake.exe + 0xD2DC4Au) == 6);  /* the hybrid broad phase: 8 layers inline */
     {
         uint8_t info[12];
         for (uint8_t layer = 6; layer <= 9; layer++)
@@ -1056,6 +1118,8 @@ int main(void)
         CHECK(CoXlTestSlInstall((uintptr_t)exe) != NULL && !CoXlTestSlOn() && g_fake.hookCount == 0);
         g_fake.noMatchExe[0] = 0x12D600u;
         CHECK(CoXlTestSlInstall((uintptr_t)exe) != NULL && !CoXlTestSlOn() && g_fake.hookCount == 0);
+        g_fake.noMatchExe[0] = 0xD3C66Cu;                             /* the count's call site in the constructor */
+        CHECK(CoXlTestSlInstall((uintptr_t)exe) != NULL && !CoXlTestSlOn() && g_fake.hookCount == 0);
         g_fake.noMatchExe[0] = 0;
         g_fake.noHook = (uintptr_t)exe + 0xDB9EE0u - image;          /* the count refused: the other three pass through */
         CHECK(CoXlTestSlInstall((uintptr_t)exe) != NULL && !CoXlTestSlOn() && g_fake.hookCount == 3);
@@ -1101,6 +1165,18 @@ int main(void)
     StaticLayer(0x1000u, 0x1000u, 5, 0xD40550u); /* full, and layer 4 the last */
     CoXlTestStreamStatic(0, 0, &sFrames, &sMoved, &sQuiet, &sLeaves);
     CHECK(sFrames == 6 && sLeaves == 0x1000u);
+    /* moves in a tile build step's window: the step's frame and the next; outside them the count stays */
+    CoXlTestMoveStepAt(CoXlTestStreamTicks() + 1);
+    StaticLayer(0xF00u, 0x1000u, 5, 0xD40550u);
+    CoXlTestStreamStatic(0, 0, &sFrames, &sMoved, &sQuiet, &sLeaves);
+    CHECK(sMoved == 3 && sQuiet == 2 && CoXlTestStreamStaticTile() == 1);
+    StaticLayer(0xE00u, 0x1000u, 5, 0xD40550u);
+    CoXlTestStreamStatic(0, 0, &sFrames, &sMoved, &sQuiet, &sLeaves);
+    CHECK(sMoved == 4 && sQuiet == 3 && CoXlTestStreamStaticTile() == 2);
+    StaticLayer(0xD00u, 0x1000u, 5, 0xD40550u);
+    CoXlTestStreamStatic(0, 0, &sFrames, &sMoved, &sQuiet, &sLeaves);
+    CHECK(sMoved == 5 && sQuiet == 4 && CoXlTestStreamStaticTile() == 2);
+    CoXlTestMoveStepAt(0);
 
     Start("far stamps evicted over the budget: no more while the last eviction still drains");
     StreamGame();

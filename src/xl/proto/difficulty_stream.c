@@ -97,6 +97,10 @@ enum
      * layer whatever it holds, so the extra work costs the streamer's own time, up to 8 x 6 ms a second a budget. */
     kStreamChangeGapBusy = 125,
     kStreamChangeDropsBusy = 128,
+    /* Locations a change frame spawns at most: their units are made in the same frame (the ring's flush), about 30
+     * bodies each, which the spawn calls' own time does not see. 24 every 125 ms is 192/s, over the 165/s peak entry. */
+    kStreamChangeSpawns = 16,
+    kStreamChangeSpawnsBusy = 24,
     kStreamBacklogDue = 64       /* a backlog: more due stamps not spawned than this, or a queue or expired count past a frame's */
 };
 static const double kStreamChangeMs = 3.0; /* a change frame's removals stop once they took this long, and so do its spawns */
@@ -173,13 +177,23 @@ typedef struct WorldStreamState
     uint32_t expired, expiredMost; /* live stamps past their removal radius and timer at the last scan, the most since the note */
     uint32_t staticAt, staticLeaves; /* g_streamTicks and the leaf count at the last layer 4 read */
     uint32_t staticFrames, staticMoved, staticQuiet; /* since the note: reads, leaf counts changed, changed after no streamer change */
+    uint32_t staticTile; /* changed in a tile build step's window: the step's frame or the next (MoveStepRecent) */
     int changedLast;         /* the last tick's change step added or removed bodies */
     int drainCut, spawnCut;  /* the last drain or spawn pass stopped at its time limit with work left */
     uint32_t spawnLayer;     /* the broad phase layer the change frame's spawns go to (6..9), 0: none of its own */
     uint32_t backlogs, drainCuts, spawnCuts, changeRemoved; /* since the note: change frames with a backlog, cut short, removals */
     double drainMs, spawnMs, drainMost, spawnMost; /* since the note: change frames' removal and spawn time, and the longest */
     uint32_t layerDrains[5], layerSpawns[5]; /* since the note: change frames that drained, spawned into layer 4, 6..9 */
+    int spawnCapped;         /* the last spawn pass stopped at its location count with due ones left */
+    uint32_t spawnCaps, tileDefers, spawnedIn; /* since the note: passes capped, frames deferred for a tile step, locations */
 } WorldStreamState;
+/* The change frame's flush of the spawn ring, run after g_streamLock is released (WorldStreamChangeAfter), and its
+ * cost: the units of the frame's spawns are made there. perLocation estimates the next frame's creation time. */
+static struct
+{
+    int pending; uint64_t world; uintptr_t wait; uint32_t locations;
+    uint32_t frames; double ms, most, perLocation;
+} g_streamFlush;
 static WorldStreamState g_stream;
 /* The engine calls made with a stamp unit's address this session, and what the last level to leave play left: the
  * line some frames after it says how many destroys came since (none can). Not a level's state: kept over the clear. */
@@ -275,6 +289,8 @@ static void WorldStreamClearLocked(void)
     g_stream.changes = g_stream.backlogs = g_stream.drainCuts = g_stream.spawnCuts = g_stream.changeRemoved = 0; /* the next level's note */
     g_stream.drainMs = g_stream.spawnMs = g_stream.drainMost = g_stream.spawnMost = 0.0;
     memset(g_stream.layerDrains, 0, sizeof g_stream.layerDrains); memset(g_stream.layerSpawns, 0, sizeof g_stream.layerSpawns);
+    g_stream.spawnCaps = g_stream.tileDefers = g_stream.spawnedIn = 0;
+    g_streamFlush.frames = 0; g_streamFlush.ms = g_streamFlush.most = 0.0;
     memset(g_streamUnit, 0, sizeof g_streamUnit);         /* a unit's address means nothing once its level is not this one */
     memset(g_streamResource, 0, sizeof g_streamResource);
     memset(g_streamDeferred, 0, sizeof g_streamDeferred);
@@ -359,6 +375,8 @@ static void SlFrameBegin(uint32_t layer);
 static void SlFrameEnd(uint64_t world);
 static void SlNote(void);
 static const char* SlInstall(uintptr_t exe);
+static int SlWorld(uintptr_t exe, uintptr_t* w, uintptr_t* bp);
+static int MoveStepRecent(void); /* difficulty_world_move.c */
 /* A player passing in a hellpod streams no stamps on the way, and the ones at the place held stay (co_settle.h). */
 static CoSettle g_streamSettle;
 static void WorldStreamPlayersLocked(void)
@@ -1176,9 +1194,10 @@ static uint32_t WorldStreamDueCountLocked(void)
 
 /* Up to kStreamBatch due records per call, nearest first. The original queues their layers on the engine world's
  * asynchronous spawn queue; a full queue leaves the rest for the next frame (the returned resume index). Its records
- * are copied back (the call may write them), their +0xA8 kept as the real unit. Calls stop once they took `ms`. The
- * calls made and the new stamp units: 0 when no body can have come of it. */
-static uint32_t WorldStreamSpawnDueLocked(double ms)
+ * are copied back (the call may write them), their +0xA8 kept as the real unit. At most `most` locations; calls stop
+ * once their time and the units' estimated making (g_streamFlush.perLocation each) reach `ms`. The calls made and the
+ * new stamp units: 0 when no body can have come of it. */
+static uint32_t WorldStreamSpawnDueLocked(double ms, uint32_t most)
 {
     if (!g_stream.captured || !g_stream.generatorDone || g_stream.deferred == 0 || g_stream.orderCount == 0) return 0;
     if (g_streamSpawn == NULL) return 0;
@@ -1196,13 +1215,21 @@ static uint32_t WorldStreamSpawnDueLocked(double ms)
     int gates[2] = {-1, -1}; /* the near and far budgets for a level location's new unit, read once (WindowRespawnRoomLocked) */
     LARGE_INTEGER start, now;
     QueryPerformanceCounter(&start);
-    g_stream.spawnCut = 0;
+    g_stream.spawnCut = g_stream.spawnCapped = 0;
     const uint32_t respawned = g_stream.respawned;
-    uint32_t cursor = g_stream.orderCursor;
+    uint32_t cursor = g_stream.orderCursor, queued = 0;
+    double elapsed = 0.0;
     while (cursor < g_stream.orderCount)
     {
-        uint32_t picked[kStreamBatch], pickedAt[kStreamBatch], count = 0;
-        while (count < kStreamBatch && cursor < g_stream.orderCount)
+        if (queued >= most) { g_stream.spawnCapped = 1; g_stream.spawnCaps++; break; }
+        uint32_t picked[kStreamBatch], pickedAt[kStreamBatch], count = 0, room = most - queued;
+        if (g_streamFlush.perLocation > 0.0) /* what the time left after the queued ones' making makes; the first batch */
+        {                                    /* takes one at least, so a frame always moves on */
+            const double fit = (ms - elapsed - g_streamFlush.perLocation * queued) / g_streamFlush.perLocation;
+            if (fit < 1.0 && queued > 0) { g_stream.spawnCut = 1; break; }
+            if (fit < (double)room) room = fit >= 1.0 ? (uint32_t)fit : 1u;
+        }
+        while (count < kStreamBatch && count < room && cursor < g_stream.orderCount)
         {
             uint32_t i = g_streamOrder[cursor];
             if (g_streamSpawned[i]) { cursor++; continue; }
@@ -1305,6 +1332,7 @@ static uint32_t WorldStreamSpawnDueLocked(double ms)
                 g_streamLive[picked[k]] = 1;
                 g_streamLayer[picked[k]] = (uint8_t)g_stream.spawnLayer;
                 g_stream.spawned++;
+                queued++;
             }
         }
         if (resume < count)
@@ -1314,9 +1342,10 @@ static uint32_t WorldStreamSpawnDueLocked(double ms)
         }
         g_stream.orderCursor = cursor;
         QueryPerformanceCounter(&now);
-        double elapsed = g_streamFrequency > 0 ? (double)(now.QuadPart - start.QuadPart) * 1000.0 / (double)g_streamFrequency : 0.0;
-        if (elapsed >= ms) { g_stream.spawnCut = cursor < g_stream.orderCount; break; }
+        elapsed = g_streamFrequency > 0 ? (double)(now.QuadPart - start.QuadPart) * 1000.0 / (double)g_streamFrequency : 0.0;
+        if (elapsed >= ms) { g_stream.spawnCut = cursor < g_stream.orderCount; break; } /* the making: at the next batch */
     }
+    g_stream.spawnedIn += queued;
     QueryPerformanceCounter(&now);
     if (g_streamFrequency > 0)
         g_stream.spentMs += (double)(now.QuadPart - start.QuadPart) * 1000.0 / (double)g_streamFrequency;
@@ -1377,19 +1406,23 @@ static void WorldStreamNoteLocked(ULONGLONG now)
     g_streamFrames = 0; g_streamFrameSum = g_streamFrameMax = 0;
     char leaves[24] = "not read";
     if (g_stream.staticFrames > 0) snprintf(leaves, sizeof leaves, "%u", g_stream.staticLeaves);
-    Note("difficulty: extra large maps: streaming changes: %u change frames in 10 s (%d ms apart at least), %u removals queued; %u live stamps past their removal radius for %d s at the last scan (the most %u); static broad phase layer 4: %s leaves, changed in %u of %u frames, %u of them after a frame the streamer changed nothing in",
+    Note("difficulty: extra large maps: streaming changes: %u change frames in 10 s (%d ms apart at least), %u removals queued; %u live stamps past their removal radius for %d s at the last scan (the most %u); static broad phase layer 4: %s leaves, changed in %u of %u frames, %u of them after a frame the streamer changed nothing in, %u in a tile build step's window",
         g_stream.changes, (int)kStreamChangeGap, g_streamDropCount, g_stream.expired, (int)(kStreamOutTimeout / 1000), g_stream.expiredMost, leaves,
-        g_stream.staticMoved, g_stream.staticFrames, g_stream.staticQuiet);
+        g_stream.staticMoved, g_stream.staticFrames, g_stream.staticQuiet, g_stream.staticTile);
     const double frames = g_stream.changes > 0 ? (double)g_stream.changes : 1.0;
-    Note("difficulty: extra large maps: streaming change frames: %u of %u with a backlog (%d ms apart, %.0f ms each); %u removals, %.1f a frame; removals %.2f ms a frame (the most %.2f), spawns %.2f ms (the most %.2f); cut short by the time limit: removals in %u, spawns in %u; %u due not spawned at the last scan; drained layer 4 %u, 6..9 %u %u %u %u; spawned into layer 4 %u, 6..9 %u %u %u %u",
+    Note("difficulty: extra large maps: streaming change frames: %u of %u with a backlog (%d ms apart, %.0f ms each); %u removals, %.1f a frame; removals %.2f ms a frame (the most %.2f), spawns %.2f ms (the most %.2f); %u locations spawned, %.1f a frame; their units made in %u flushes, %.2f ms each (the most %.2f), %.3f ms a location estimated; cut short by the time limit: removals in %u, spawns in %u; by the location count: %u; deferred for a tile step: %u frames; %u due not spawned at the last scan; drained layer 4 %u, 6..9 %u %u %u %u; spawned into layer 4 %u, 6..9 %u %u %u %u",
         g_stream.backlogs, g_stream.changes, (int)kStreamChangeGapBusy, kStreamChangeMsBusy, g_stream.changeRemoved, g_stream.changeRemoved / frames,
-        g_stream.drainMs / frames, g_stream.drainMost, g_stream.spawnMs / frames, g_stream.spawnMost, g_stream.drainCuts, g_stream.spawnCuts,
+        g_stream.drainMs / frames, g_stream.drainMost, g_stream.spawnMs / frames, g_stream.spawnMost, g_stream.spawnedIn, g_stream.spawnedIn / frames,
+        g_streamFlush.frames, g_streamFlush.frames > 0 ? g_streamFlush.ms / g_streamFlush.frames : 0.0, g_streamFlush.most, g_streamFlush.perLocation,
+        g_stream.drainCuts, g_stream.spawnCuts, g_stream.spawnCaps, g_stream.tileDefers,
         g_stream.orderCount > g_stream.orderCursor ? g_stream.orderCount - g_stream.orderCursor : 0u,
         g_stream.layerDrains[0], g_stream.layerDrains[1], g_stream.layerDrains[2], g_stream.layerDrains[3], g_stream.layerDrains[4],
         g_stream.layerSpawns[0], g_stream.layerSpawns[1], g_stream.layerSpawns[2], g_stream.layerSpawns[3], g_stream.layerSpawns[4]);
     SlNote();
-    g_stream.changes = g_stream.expiredMost = g_stream.staticFrames = g_stream.staticMoved = g_stream.staticQuiet = 0;
+    g_stream.changes = g_stream.expiredMost = g_stream.staticFrames = g_stream.staticMoved = g_stream.staticQuiet = g_stream.staticTile = 0;
     g_stream.backlogs = g_stream.drainCuts = g_stream.spawnCuts = g_stream.changeRemoved = 0;
+    g_stream.spawnCaps = g_stream.tileDefers = g_stream.spawnedIn = 0;
+    g_streamFlush.frames = 0; g_streamFlush.ms = g_streamFlush.most = 0.0;
     g_stream.drainMs = g_stream.spawnMs = g_stream.drainMost = g_stream.spawnMost = 0.0;
     memset(g_stream.layerDrains, 0, sizeof g_stream.layerDrains); memset(g_stream.layerSpawns, 0, sizeof g_stream.layerSpawns);
     WindowNoteLocked();
@@ -1443,15 +1476,15 @@ static void WorldStreamLeftNoteLocked(void)
 static int WorldStreamLayerBusy(void) { return NearLayerBusy(); }
 
 static uint32_t g_streamTicks; /* WorldStreamTick's calls: two layer reads compare only from one frame to the next */
-/* The static bodies' broad phase layer and its leaf count. The broad phase as living_world_bp.c finds it (vtable +0x38
- * 0xD40550); its layers are an array of pointers [bp+0x10], count [bp+0x18] (0xD3C6B0..0xD3C72A). The layer rule
- * (0xDB9E60) puts static bodies in layer 4; an add (0xD3CFD0) appends a 16-byte leaf, size [L+0x50], capacity [L+0x54]. */
+/* The static bodies' broad phase layer and its leaf count. The mission world's broad phase as the streamed layers
+ * read it (SlWorld: [W+0x4C0], vtable +0x38 0xD40550); its layers are an array of pointers [bp+0x10], count [bp+0x18]
+ * (0xD3C6B0..0xD3C72A). The layer rule (0xDB9E60) puts static bodies in layer 4; an add (0xD3CFD0) appends a 16-byte
+ * leaf, size [L+0x50], capacity [L+0x54]. */
 static int WorldStreamStaticLeaves(uint32_t* leaves)
 {
-    uintptr_t exe = ApiModuleBase("helldivers2.exe", NULL), w = 0, a = 0, bp = 0, vt = 0, fn = 0, layers = 0, l4 = 0;
+    uintptr_t w = 0, bp = 0, layers = 0, l4 = 0;
     int32_t count = 0; uint32_t capacity = 0;
-    if (exe == 0 || SafeRead(exe + 0x27BA9F0u, &w, 8) || w == 0 || SafeRead(w + 0x410, &a, 8) || a == 0 || SafeRead(a + 0xA0, &bp, 8) ||
-        bp == 0 || SafeRead(bp, &vt, 8) || SafeRead(vt + 0x38, &fn, 8) || fn != exe + 0xD40550u) return 0;
+    if (!SlWorld(ApiModuleBase("helldivers2.exe", NULL), &w, &bp)) return 0;
     if (SafeRead(bp + 0x18, &count, 4) || count < 5 || count > 64 || SafeRead(bp + 0x10, &layers, 8) || layers == 0 ||
         SafeRead(layers + 4 * 8, &l4, 8) || l4 == 0 || SafeRead(l4 + 0x50, leaves, 4) || SafeRead(l4 + 0x54, &capacity, 4)) return 0;
     return *leaves <= (capacity & 0x3FFFFFFFu);
@@ -1468,6 +1501,8 @@ static void WorldStreamStaticLocked(void)
     {
         g_stream.staticMoved++;
         if (!g_stream.changedLast) g_stream.staticQuiet++;
+        /* a tile's bodies go in during the engine's world update after the step: seen here in the step's frame + 1 */
+        g_stream.staticTile += MoveStepRecent() != 0;
     }
     g_stream.staticFrames++;
     g_stream.staticAt = g_streamTicks; g_stream.staticLeaves = leaves;
@@ -1489,16 +1524,39 @@ static void WorldStreamLayersLocked(int* drain, uint32_t* spawn)
     SlPick(leaves, queued, drain, spawn);
 }
 
-/* The spawns' units wait on the world's async spawn ring: made now, inside the change frame, after the animation wait a
- * destroy has too. Nothing when the world interface does not read (the world's own flush makes them later). */
-static void WorldStreamFlushLocked(void)
+/* The spawns' units wait on the world's async spawn ring: they are made in this frame, after g_streamLock is released
+ * (WorldStreamChangeAfter), with the animation wait a destroy has too. Nothing pending when the world interface does
+ * not read (the world's own flush makes them later). */
+static void WorldStreamFlushLaterLocked(uint32_t locations)
 {
     uint64_t world = 0;
     uintptr_t wi = 0, table = 0, wait = 0;
     if (SafeRead((uintptr_t)g_stream.context + 0x40, &world, 8) || world == 0 || SafeRead(g_stream.game + DIF_STREAM_INTERFACE, &wi, 8) || wi == 0 ||
         SafeRead(wi + DIF_STREAM_TABLE, &table, 8) || table == 0 || (wait = WorldStreamAnimWait(table)) == 0) { SlFrameEnd(0); return; }
-    ((WorldStreamAnimWaitFn)wait)(world);
-    SlFrameEnd(world);
+    g_streamFlush.pending = 1; g_streamFlush.world = world; g_streamFlush.wait = wait; g_streamFlush.locations = locations;
+}
+
+static void WorldStreamFlushCost(double ms, uint32_t locations)
+{
+    g_streamFlush.frames++; g_streamFlush.ms += ms;
+    if (ms > g_streamFlush.most) g_streamFlush.most = ms;
+    if (locations == 0) return;
+    const double each = ms / (double)locations;
+    g_streamFlush.perLocation = g_streamFlush.perLocation > 0.0 ? g_streamFlush.perLocation * 0.75 + each * 0.25 : each;
+}
+
+/* After the tick released g_streamLock: the change frame's flush, timed. Its time per location is the next frames'
+ * estimate (a quarter of the new one each time), so a frame's spawns and their making stay in its budget. */
+static void WorldStreamChangeAfter(void)
+{
+    if (!g_streamFlush.pending) return;
+    g_streamFlush.pending = 0;
+    ((WorldStreamAnimWaitFn)g_streamFlush.wait)(g_streamFlush.world);
+    const double t0 = HitchNow();
+    SlFrameEnd(g_streamFlush.world);
+    const double ms = HitchNow() - t0;
+    g_hitchCost.spawn += (float)ms;
+    WorldStreamFlushCost(ms, g_streamFlush.locations);
 }
 
 /* At most one frame each kStreamChangeGap ms takes the queued removals (kStreamChangeDrops, kStreamChangeMs) and the
@@ -1509,6 +1567,8 @@ static uint32_t WorldStreamChangeLocked(ULONGLONG now, int layerBusy)
 {
     if (now < g_stream.nextChange) return 0;
     const uint32_t pending = g_stream.orderCount > g_stream.orderCursor ? g_stream.orderCount - g_stream.orderCursor : 0;
+    /* a moving tile's build step this frame or the last: the change frame waits a frame, so it never adds to a slice */
+    if (MoveStepRecent()) { g_stream.tileDefers += pending > 0 || g_streamDropCount > 0; return 0; }
     const int backlog = pending > kStreamBacklogDue || g_streamDropCount > kStreamChangeDrops || g_stream.expired > 2u * kStreamChangeDrops;
     const double ms = backlog ? kStreamChangeMsBusy : kStreamChangeMs;
     int drain; uint32_t spawn;
@@ -1520,13 +1580,14 @@ static uint32_t WorldStreamChangeLocked(ULONGLONG now, int layerBusy)
     /* a tile's layer fill takes grids out of use while it writes them (NearLayerChangeFill): a stamp spawned then would
      * miss its grid and stand on the coarse heights, so the spawns wait the few frames until it is done */
     uint32_t made = 0;
-    g_stream.spawnCut = 0;
+    g_stream.spawnCut = g_stream.spawnCapped = 0;
     if (!layerBusy)
     {
+        const uint32_t spawned = g_stream.spawnedIn;
         g_stream.spawnLayer = spawn;
         SlFrameBegin(spawn);
-        made = WorldStreamSpawnDueLocked(ms);
-        if (made && spawn) WorldStreamFlushLocked(); else SlFrameEnd(0);
+        made = WorldStreamSpawnDueLocked(ms, backlog ? kStreamChangeSpawnsBusy : kStreamChangeSpawns);
+        if (made && spawn) WorldStreamFlushLaterLocked(g_stream.spawnedIn - spawned); else SlFrameEnd(0);
         g_stream.spawnLayer = 0;
     }
     changed += made;
@@ -1600,6 +1661,7 @@ static void WorldStreamTick(float dt)
     g_hitchCost.entered += (uint16_t)(WindowEntered() - entered);
     WorldStreamNoteLocked(now);
     ReleaseSRWLockExclusive(&g_streamLock);
+    WorldStreamChangeAfter();
     /* Removal and respawn run in WorldStreamChangeLocked, called above on this thread under this lock and only when no
      * generator call is inside; only a location this streamer queued is removed. */
 }

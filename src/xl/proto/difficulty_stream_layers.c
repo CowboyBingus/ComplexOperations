@@ -23,11 +23,14 @@
 #define SL_RULE_RVA 0xDB9E60u
 #define SL_CREATE_RVA 0xD09080u
 #define SL_FLUSH_RVA 0x12D600u
+#define SL_COUNT_SITE 0xD3C66Cu     /* the broad phase constructor 0xD3C450's call of the count; it returns to +9 */
+#define SL_COUNT_BACK 0xD3C675u
 static const char kSlCountPin[] = "B8 06 00 00 00 C3";
 static const char kSlInfoPin[] = "0F B6 C2 83 F8 05 0F 87 8A 00 00 00 48 8D 15";
 static const char kSlRulePin[] = "4D 63 D8 4C 8B D2 45 85 C0 7E 6E 48 8B 44 24 28 45 33 C0 41 8B 0A 81 E1";
 static const char kSlCreatePin[] = "48 89 54 24 10 48 89 4C 24 08 55 53 56 57 41 56 41 57 48 8D AC 24 C8 FE FF FF";
 static const char kSlFlushPin[] = "48 89 4C 24 08 55 53 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 98 F6 FF FF";
+static const char kSlCountSitePin[] = "49 8B 06 49 8B CE FF 50 18 8B 53 1C";
 
 typedef char SlLayersMatch[SL_LAYERS == 1u + SL_COUNT ? 1 : -1]; /* difficulty_stream.c's count: layer 4, then these */
 static int MoveSpawnRingEmpty(uint64_t world); /* difficulty_world_move.c */
@@ -77,11 +80,15 @@ static int SlBroadPhaseReady(uintptr_t bp)
     return 1;
 }
 
-static int SlCount(void* cfg)
+/* 10 layers only for the broad phase whose layers grow with the count (0xD3C450, called back at SL_COUNT_BACK): the
+ * hybrid broad phase 0xD2DA60 asks the same config (0xD2DC47) and keeps 8 layers in inline arrays (`cmp cl,8`
+ * 0xD2DCFA), so a 9th would write over its count at +0x88. */
+static int SlCountFrom(void* cfg, uintptr_t back)
 {
     const int n = ((SlCountFn)g_sl.countOrig)(cfg);
-    return g_sl.on && n == 6 ? (int)(SL_FIRST + SL_COUNT) : n;
+    return g_sl.on && n == 6 && back == g_sl.exe + SL_COUNT_BACK ? (int)(SL_FIRST + SL_COUNT) : n;
 }
+static int SlCount(void* cfg) { return SlCountFrom(cfg, (uintptr_t)__builtin_return_address(0)); }
 
 static void SlInfo(void* cfg, uint8_t layer, uint8_t* out)
 {
@@ -185,7 +192,8 @@ static const char* SlInstall(uintptr_t exe)
     if (exe == 0) return "the exe is not loaded";
     if (GetEnvironmentVariableA("HELLFORGE_LW_BP", t, sizeof t) > 0 && t[0] == '1') return "the living world's layer research (HELLFORGE_LW_BP) hooks the same layer rule";
     if (!ApiCodeMatches(exe + SL_COUNT_RVA, kSlCountPin) || !ApiCodeMatches(exe + SL_INFO_RVA, kSlInfoPin) || !ApiCodeMatches(exe + SL_RULE_RVA, kSlRulePin) ||
-        !ApiCodeMatches(exe + SL_CREATE_RVA, kSlCreatePin) || !ApiCodeMatches(exe + SL_FLUSH_RVA, kSlFlushPin))
+        !ApiCodeMatches(exe + SL_CREATE_RVA, kSlCreatePin) || !ApiCodeMatches(exe + SL_FLUSH_RVA, kSlFlushPin) ||
+        !ApiCodeMatches(exe + SL_COUNT_SITE, kSlCountSitePin))
         return "the broad phase's layer config, the body maker or the spawn flush is not the reviewed code";
     g_sl.exe = exe;
     if (LoaderHook("extra large maps: streamed layers' info", exe + SL_INFO_RVA, (void*)SlInfo, &g_sl.infoOrig) || g_sl.infoOrig == NULL ||

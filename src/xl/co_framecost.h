@@ -79,6 +79,8 @@ void co_framecost_test_causes(uint32_t* over, uint32_t led[CO_FC_CAUSES], uint32
 double co_framecost_test_slow(int k, double* join, double* world, int* grass);
 /* Whether that frame was a streamer change frame. */
 int co_framecost_test_slow_bodies(int k);
+/* The last window's change frames' whole time: mean, the longest, and how many were over the target. */
+void co_framecost_test_bodies_whole(double* mean, double* most, uint32_t* over);
 int co_framecost_test_window_lines(void);
 /* The last closed window's split: frames with a change, their mean and longest world update (own time), the same for
  * the frames without, and how many of those were over CO_FC_TARGET_MS. 0 when the window had no split line. */

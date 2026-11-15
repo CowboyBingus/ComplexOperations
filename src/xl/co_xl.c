@@ -1674,7 +1674,7 @@ uint32_t CoXlTestSpawnDue(uint32_t i, float distance2)
     g_streamSpawn = TestSpawnNone; g_heightSource = 1;
     g_streamDue[i] = 1; g_streamSpawned[i] = 0; g_streamLive[i] = 0; g_streamNeedsUnit[i] = 1; g_streamDistance[i] = distance2;
     g_stream.deferred = 1; g_streamOrder[0] = i; g_stream.orderCount = 1; g_stream.orderCursor = 0;
-    WorldStreamSpawnDueLocked(kStreamChangeMs);
+    WorldStreamSpawnDueLocked(kStreamChangeMs, kStreamChangeSpawns);
     g_streamSpawn = spawn; g_heightSource = source;
     return g_stream.respawnHeld;
 }
@@ -1741,7 +1741,7 @@ void CoXlTestSlSet(int on, uintptr_t exe, void* count, void* info, void* rule, v
 }
 int CoXlTestSlOn(void) { return g_sl.on; }
 const char* CoXlTestSlInstall(uintptr_t exe) { return SlInstall(exe); }
-int CoXlTestSlCount(void) { return SlCount(NULL); }
+int CoXlTestSlCount(void) { return SlCountFrom(NULL, g_sl.exe + SL_COUNT_BACK); }
 void CoXlTestSlInfo(uint8_t layer, uint8_t* out) { SlInfo(NULL, layer, out); }
 void CoXlTestSlRule(const uint32_t* ids, int n, const uint8_t* bodies, uint8_t* out) { SlRule(NULL, ids, n, bodies, out); }
 void* CoXlTestSlCreate(void* writer, uint32_t* id) { return SlCreate(writer, id, NULL, NULL); }
@@ -1753,17 +1753,46 @@ void CoXlTestSlPick(const uint32_t leaves[5], const uint32_t queued[5], int* dra
 void CoXlTestSlCounts(long* created, long* marked, long* routed) { *created = g_sl.created; *marked = g_sl.marked; *routed = g_sl.routed; }
 /* The change step's layers as it would pick them now: the drained layer (-1: any) and the spawns' (0: none). */
 void CoXlTestStreamLayersPick(int* drain, uint32_t* spawn) { WorldStreamLayersLocked(drain, spawn); }
-/* One spawn pass into broad phase layer `layer` under `ms`, as a change frame makes it: whether time cut it short. */
-int CoXlTestStreamSpawnInto(uint32_t layer, double ms)
+/* One spawn pass into broad phase layer `layer` under `ms` and `most` locations, as a change frame makes it: 1 when
+ * time cut it short, 2 when the location count did, 0 neither. */
+int CoXlTestStreamSpawnInto(uint32_t layer, double ms, uint32_t most)
 {
     AcquireSRWLockExclusive(&g_streamLock);
     g_stream.spawnLayer = layer;
-    WorldStreamSpawnDueLocked(ms);
+    WorldStreamSpawnDueLocked(ms, most);
     g_stream.spawnLayer = 0;
-    const int cut = g_stream.spawnCut;
+    const int cut = g_stream.spawnCut ? 1 : g_stream.spawnCapped ? 2 : 0;
     ReleaseSRWLockExclusive(&g_streamLock);
     return cut;
 }
+/* The units' making estimated per location (0: none yet), and the locations spawned since the note. */
+void CoXlTestStreamMakeEstimate(double perLocation) { g_streamFlush.perLocation = perLocation; }
+uint32_t CoXlTestStreamSpawnedIn(void) { return g_stream.spawnedIn; }
+/* A tile build step ran in the frame the streamer's tick count `tick` belongs to (MoveLevelUpdate's mark). */
+void CoXlTestMoveStepAt(uint32_t tick) { g_moveStepAt = tick; }
+uint32_t CoXlTestStreamTicks(void) { return g_streamTicks; }
+void CoXlTestStreamTicksAdd(void) { g_streamTicks++; }
+uint32_t CoXlTestStreamTileDefers(void) { return g_stream.tileDefers; }
+uint32_t CoXlTestStreamStaticTile(void) { return g_stream.staticTile; }
+uint32_t CoXlTestStreamSpawnCaps(void) { return g_stream.spawnCaps; }
+int CoXlTestStreamFlushPending(void) { return g_streamFlush.pending; }
+int CoXlTestSlCountFrom(uintptr_t back) { return SlCountFrom(NULL, back); }
+/* The flush's cost noted: the flushes, their ms, the longest, and the estimate per location after it. */
+void CoXlTestStreamFlushCost(double ms, uint32_t locations, uint32_t* frames, double* sum, double* most, double* perLocation)
+{
+    WorldStreamFlushCost(ms, locations);
+    *frames = g_streamFlush.frames; *sum = g_streamFlush.ms; *most = g_streamFlush.most; *perLocation = g_streamFlush.perLocation;
+}
+/* A change frame's flush asked for under the lock: pending until WorldStreamChangeAfter runs it. */
+int CoXlTestStreamFlushLater(uint32_t locations)
+{
+    AcquireSRWLockExclusive(&g_streamLock);
+    WorldStreamFlushLaterLocked(locations);
+    const int pending = g_streamFlush.pending;
+    ReleaseSRWLockExclusive(&g_streamLock);
+    return pending;
+}
+int CoXlTestStreamFlushAfter(void) { WorldStreamChangeAfter(); return g_streamFlush.pending; }
 /* A change frame's removals under `ms`. */
 uint32_t CoXlTestStreamDrain(double ms, uint32_t* waiting) { return CoXlTestStreamDrainMost(kStreamChangeDrops, ms, waiting); }
 /* The change step at tick `now` (ms) with a layer fill running or not: the changes made, and the next tick it may run. */
@@ -1773,6 +1802,7 @@ uint32_t CoXlTestStreamChange(unsigned long long now, int layerBusy, unsigned lo
     uint32_t changed = WorldStreamChangeLocked(now, layerBusy);
     *next = g_stream.nextChange;
     ReleaseSRWLockExclusive(&g_streamLock);
+    WorldStreamChangeAfter();
     return changed;
 }
 void CoXlTestStreamChangeAt(unsigned long long next) { g_stream.nextChange = next; }
@@ -1845,7 +1875,7 @@ void CoXlTestStreamDue(uint32_t i, uint64_t unit)
 void CoXlTestStreamSpawnDue(void)
 {
     AcquireSRWLockExclusive(&g_streamLock);
-    WorldStreamSpawnDueLocked(kStreamChangeMs);
+    WorldStreamSpawnDueLocked(kStreamChangeMs, kStreamChangeSpawnsBusy);
     ReleaseSRWLockExclusive(&g_streamLock);
 }
 void CoXlTestStreamSpawned(uint32_t i, int* spawned, int* due) { *spawned = g_streamSpawned[i]; *due = g_streamDue[i]; }

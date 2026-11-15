@@ -396,18 +396,25 @@ static void TestBodies(void)
     CHECK(!fake_host_logged("by the streamer's body changes"));
     for (int c = 0; c < 40; c++)
     {
-        if (c > 0) { Cost(25.0, 2.0, 0, 0, 20.0, 1); co_framecost_bodies(0); co_framecost_bodies(1); } /* 18 ms of its own */
+        /* 18 ms of its own; the longest whole is not the last, and one change frame is under 16.7 ms whole (10 ms own) */
+        if (c > 0) { Cost(c == 10 ? 35.0 : c == 20 ? 15.0 : c == 39 ? 30.0 : 25.0, 2.0, 0, 0, c == 20 ? 12.0 : 20.0, 1); co_framecost_bodies(0); co_framecost_bodies(1); }
         Cost(18.0, 0, 0, 0, 5.0, 0); co_framecost_bodies(0); /* a 0 flags nothing */
         for (int k = 0; k < 23; k++) Cost(9.0, 0, 0, 0, 5.0, 0);
     }
     Cost(9.0, 0, 0, 0, 5.0, 0);
     CHECK(co_framecost_test_bodies(&changed, &cMean, &cMost, &quiet, &qMean, &qMost, &over) == 1);
-    CHECK(changed == 40 && cMean == 18.0 && cMost == 18.0 && quiet == 960 && qMean == 5.0 && qMost == 5.0 && over == 40);
-    CHECK(fake_host_logged("frame times, world update's own time by the streamer's body changes: 40 frame(s) with a change, mean 18.0 ms, "
-        "the longest 18.0 ms; 960 without, mean 5.0 ms, the longest 5.0 ms; 40 of those over 16.7 ms in all"));
+    CHECK(changed == 40 && cMean > 17.79 && cMean < 17.81 && cMost == 18.0 && quiet == 960 && qMean == 5.0 && qMost == 5.0 && over == 40);
+    CHECK(fake_host_logged("frame times, world update's own time by the streamer's body changes: 40 frame(s) with a change, mean 17.8 ms, "
+        "the longest 18.0 ms; 960 without, mean 5.0 ms, the longest 5.0 ms; 40 of those over 16.7 ms in all; the change frames whole: mean 25.1 ms, "
+        "the longest 35.0 ms, 39 over 16.7 ms"));
+    double wMean = 0, wMost = 0; uint32_t wOver = 0;
+    co_framecost_test_bodies_whole(&wMean, &wMost, &wOver);
+    CHECK(wMean > 25.12 && wMean < 25.13 && wMost == 35.0 && wOver == 39);
     g_mission++; /* a mission with no change frame: no split line */
     for (int i = 0; i < 1200; i++) Cost(9.0, 0, 0, 0, 5.0, 0);
     CHECK(co_framecost_test_bodies(&changed, &cMean, &cMost, &quiet, &qMean, &qMost, &over) == 0);
+    co_framecost_test_bodies_whole(&wMean, &wMost, &wOver);
+    CHECK(wMean == 0 && wMost == 0 && wOver == 0); /* each window counts its own */
 }
 
 int main(void)

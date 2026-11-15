@@ -19,7 +19,10 @@ void CoXlTestStreamChangeAt(unsigned long long next);
 void CoXlTestStreamSpawned(uint32_t i, int* spawned, int* due);
 void CoXlTestStreamTrees(uint32_t* holds, uint32_t* most, uint32_t* cursor);
 int CoXlTestWindowTreesOver(float share);
-int CoXlTestStreamSpawnInto(uint32_t layer, double ms);
+int CoXlTestStreamSpawnInto(uint32_t layer, double ms, uint32_t most);
+void CoXlTestStreamMakeEstimate(double perLocation);
+uint32_t CoXlTestStreamSpawnedIn(void);
+uint32_t CoXlTestStreamSpawnCaps(void);
 uint32_t CoXlTestStreamLayerOf(uint32_t i);
 
 static int g_failed;
@@ -185,7 +188,7 @@ int main(void)
     Level(3);
     CoXlTestStreamDue(0, unit);
     CoXlTestStreamDue(1, unit);
-    CHECK(CoXlTestStreamSpawnInto(7, 1.0e9) == 0 && g_calls == 1);
+    CHECK(CoXlTestStreamSpawnInto(7, 1.0e9, 24) == 0 && g_calls == 1);
     CHECK(CoXlTestStreamLayerOf(0) == 7 && CoXlTestStreamLayerOf(1) == 7 && CoXlTestStreamLayerOf(2) == 0);
     CoXlTestStreamDue(2, unit);
     CoXlTestStreamSpawnDue();                      /* no layer of its own: layer 4 */
@@ -193,14 +196,44 @@ int main(void)
     Forest(ROOM, 0, ROOM);                         /* the forest full: the call waits */
     Level(1);
     CoXlTestStreamDue(0, unit);
-    CHECK(CoXlTestStreamSpawnInto(8, 1.0e9) == 0 && g_calls == 0 && CoXlTestStreamLayerOf(0) == 0);
+    CHECK(CoXlTestStreamSpawnInto(8, 1.0e9, 24) == 0 && g_calls == 0 && CoXlTestStreamLayerOf(0) == 0);
     Forest(1000, 0, ROOM);
     Level(20);
     for (uint32_t k = 0; k < 20; k++) CoXlTestStreamDue(k, unit);
-    CHECK(CoXlTestStreamSpawnInto(9, 0.0) == 1 && g_calls == 1);   /* one call of 16, then the time is used */
+    CHECK(CoXlTestStreamSpawnInto(9, 0.0, 24) == 1 && g_calls == 1);   /* one call of 16, then the time is used */
     CHECK(CoXlTestStreamLayerOf(15) == 9 && CoXlTestStreamLayerOf(16) == 0);
-    CHECK(CoXlTestStreamSpawnInto(9, 0.0) == 0 && g_calls == 2);   /* the last 4: nothing left when it stops */
+    CHECK(CoXlTestStreamSpawnInto(9, 0.0, 24) == 0 && g_calls == 2);   /* the last 4: nothing left when it stops */
     CHECK(CoXlTestStreamLayerOf(19) == 9);
+
+    /* The units of a change frame's spawns are made in that frame (the ring's flush), about 30 bodies a location, which
+     * the spawn calls' own time does not see: a count caps the locations, and the last flush's time each the rest. */
+    Start("a change frame's spawns: at most its location count, and its time takes the units' making in");
+    Level(20);
+    for (uint32_t k = 0; k < 20; k++) CoXlTestStreamDue(k, unit);
+    CHECK(CoXlTestStreamSpawnInto(7, 1.0e9, 10) == 2 && g_calls == 1 && CoXlTestStreamSpawnedIn() == 10); /* one call of 10 */
+    CHECK(CoXlTestStreamLayerOf(9) == 7 && CoXlTestStreamLayerOf(10) == 0);
+    CHECK(CoXlTestStreamSpawnInto(7, 1.0e9, 10) == 0 && g_calls == 2 && CoXlTestStreamSpawnedIn() == 20); /* the last 10 */
+    CHECK(CoXlTestStreamSpawnCaps() == 1);
+    Level(24);
+    for (uint32_t k = 0; k < 24; k++) CoXlTestStreamDue(k, unit);
+    CHECK(CoXlTestStreamSpawnInto(7, 1.0e9, 20) == 2 && g_calls == 2 && CoXlTestStreamSpawnedIn() == 20); /* 16, then the 4 left */
+    CHECK(CoXlTestStreamLayerOf(19) == 7 && CoXlTestStreamLayerOf(20) == 0);
+    Level(20);
+    for (uint32_t k = 0; k < 20; k++) CoXlTestStreamDue(k, unit);
+    CoXlTestStreamMakeEstimate(1.0);                 /* 1 ms a location: 3 in a 3 ms frame */
+    CHECK(CoXlTestStreamSpawnInto(7, 3.0, 24) == 1 && g_calls == 1 && CoXlTestStreamSpawnedIn() == 3);
+    CHECK(CoXlTestStreamLayerOf(2) == 7 && CoXlTestStreamLayerOf(3) == 0);
+    CoXlTestStreamMakeEstimate(10.0);                /* more than the frame: one, so a frame always moves on */
+    CHECK(CoXlTestStreamSpawnInto(7, 3.0, 24) == 1 && g_calls == 2 && CoXlTestStreamSpawnedIn() == 4);
+    CHECK(CoXlTestStreamLayerOf(3) == 7 && CoXlTestStreamLayerOf(4) == 0);
+    CoXlTestStreamMakeEstimate(0.1);                 /* 10 fit in 1 ms; 16 a call at most */
+    CHECK(CoXlTestStreamSpawnInto(7, 1.0, 24) == 1 && g_calls == 3 && CoXlTestStreamSpawnedIn() == 14);
+    Level(24);
+    for (uint32_t k = 0; k < 24; k++) CoXlTestStreamDue(k, unit);
+    CoXlTestStreamMakeEstimate(0.25);                /* a call of 16 (4 ms to make), then the 1.6 ms left make 6 */
+    CHECK(CoXlTestStreamSpawnInto(7, 5.6, 40) == 1 && g_calls == 2 && CoXlTestStreamSpawnedIn() == 22);
+    CHECK(CoXlTestStreamLayerOf(21) == 7 && CoXlTestStreamLayerOf(22) == 0);
+    CoXlTestStreamMakeEstimate(0.0);
 
     Start("the forest near full: the call waits and its records stay due");
     Forest(ROOM - ROOM / 10u + 1u, 0, ROOM);
