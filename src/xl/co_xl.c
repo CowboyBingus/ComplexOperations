@@ -1688,7 +1688,7 @@ uint32_t CoXlTestStreamScanFrames(int frames)
     g_stream.nextScan = 0;
     WorldStreamScanLocked(GetTickCount64());
     uint32_t done = 0;
-    for (int f = 0; frames < 0 ? g_streamDropCount > 0 : f < frames; f++) done += WorldStreamDrainLocked(kStreamChangeDrops, 1.0e9, -1);
+    for (int f = 0; frames < 0 ? g_streamDropCount > 0 : f < frames; f++) done += WorldStreamDrainLocked(kStreamChangeDrops, 1.0e9, -1, 1);
     ReleaseSRWLockExclusive(&g_streamLock);
     return done;
 }
@@ -1697,8 +1697,18 @@ void CoXlTestStreamScan(void) { CoXlTestStreamScanFrames(-1); }
 uint32_t CoXlTestStreamDrainMost(uint32_t most, double ms, uint32_t* waiting)
 {
     AcquireSRWLockExclusive(&g_streamLock);
-    uint32_t done = WorldStreamDrainLocked(most, ms, -1);
+    uint32_t done = WorldStreamDrainLocked(most, ms, -1, 1);
     *waiting = g_streamDropCount;
+    ReleaseSRWLockExclusive(&g_streamLock);
+    return done;
+}
+/* A drain of the stamps in broad phase layer `layer` alone, `least` of them whatever the time: how many went, how
+ * many wait, and whether time cut it. */
+uint32_t CoXlTestStreamDrainLeast(uint32_t most, double ms, int layer, uint32_t least, uint32_t* waiting, int* cut)
+{
+    AcquireSRWLockExclusive(&g_streamLock);
+    uint32_t done = WorldStreamDrainLocked(most, ms, layer, least);
+    *waiting = g_streamDropCount; *cut = g_stream.drainCut;
     ReleaseSRWLockExclusive(&g_streamLock);
     return done;
 }
@@ -1706,7 +1716,7 @@ uint32_t CoXlTestStreamDrainMost(uint32_t most, double ms, uint32_t* waiting)
 uint32_t CoXlTestStreamDrainLayer(uint32_t most, double ms, int layer, uint32_t* waiting, int* cut)
 {
     AcquireSRWLockExclusive(&g_streamLock);
-    uint32_t done = WorldStreamDrainLocked(most, ms, layer);
+    uint32_t done = WorldStreamDrainLocked(most, ms, layer, 1);
     *waiting = g_streamDropCount; *cut = g_stream.drainCut;
     ReleaseSRWLockExclusive(&g_streamLock);
     return done;
@@ -1833,6 +1843,16 @@ void CoXlTestStreamStatic(int skip, int changed, uint32_t* frames, uint32_t* mov
 }
 /* The last scan's live stamps past their removal radius and timer, and the most since the note. */
 void CoXlTestStreamExpired(uint32_t* now, uint32_t* most) { *now = g_stream.expired; *most = g_stream.expiredMost; }
+/* The scan's count of those, set; a slot queued for removal as a scan queues one. */
+void CoXlTestStreamExpiredSet(uint32_t n) { g_stream.expired = n; }
+int CoXlTestStreamDropPush(uint32_t i) { return WorldStreamDropLocked(i, STREAM_DROP_OUT); }
+/* Since the note: the floor frames that held spawns for removals, the quiet frames' longest summed, and the frames
+ * layers 6..9 moved in (after one the streamer changed nothing in); the animation wait before the flushes, all and most. */
+void CoXlTestStreamFloorStats(uint32_t* held, double* quietHiSum, uint32_t* streamedMoved, uint32_t* streamedQuiet, double* waitMs, double* waitMost)
+{
+    *held = g_stream.floorHeld; *quietHiSum = g_stream.quietHiSum; *streamedMoved = g_stream.streamedMoved; *streamedQuiet = g_stream.streamedQuiet;
+    *waitMs = g_streamFlush.waitMs; *waitMost = g_streamFlush.waitMost;
+}
 /* The queued removals in drain order. */
 uint32_t CoXlTestStreamQueue(uint32_t* slots, uint32_t room)
 {

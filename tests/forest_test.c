@@ -8,6 +8,7 @@
 
 #include "harness/fake_host.h"
 #include "xl/co_forest.h"
+#include "xl/co_framecost.h"
 #include "xl/co_shim.h"
 
 void CoXlTestStreamSetup(uintptr_t game, uint8_t* context, uint8_t* array, uint32_t count);
@@ -24,6 +25,8 @@ void CoXlTestStreamMakeEstimate(double perLocation);
 uint32_t CoXlTestStreamSpawnedIn(void);
 uint32_t CoXlTestStreamSpawnCaps(void);
 uint32_t CoXlTestStreamLayerOf(uint32_t i);
+void CoXlTestStreamExpiredSet(uint32_t n);
+int CoXlTestStreamDropPush(uint32_t i);
 
 static int g_failed;
 static const char* g_case;
@@ -234,6 +237,36 @@ int main(void)
     CHECK(CoXlTestStreamSpawnInto(7, 5.6, 40) == 1 && g_calls == 2 && CoXlTestStreamSpawnedIn() == 22);
     CHECK(CoXlTestStreamLayerOf(21) == 7 && CoXlTestStreamLayerOf(22) == 0);
     CoXlTestStreamMakeEstimate(0.0);
+
+    /* At its budget's floor a change frame spawns only while the window holds its design (the live stamps past their
+     * removal radius no more than a frame's removals) or no removal is queued: the removals come first. */
+    Start("a change frame at its floor: spawns wait while the window is past its design and a removal is queued");
+    {
+        int64_t t = 1000000;
+        co_framecost_test_reset(1000000);
+        for (int k = 0; k < 34; k++) { co_framecost_test_begin(t, 1, 1); t += 16500; } /* quiet frames of 16.5 ms: no room */
+        Level(5);
+        CoXlTestStreamDue(0, unit); CoXlTestStreamDue(1, unit);
+        CoXlTestStreamExpiredSet(65);
+        CHECK(CoXlTestStreamDropPush(4));
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(2000, 0, &next) == 0 && g_calls == 0); /* held; the queued slot was not live */
+        CHECK(CoXlTestStreamDropPush(4));
+        CoXlTestStreamExpiredSet(64);                                     /* a frame's removals: the window holds */
+        CHECK(CoXlTestStreamChange(2001, 0, &next) == 1 && g_calls == 1);       /* one call of the two */
+        CoXlTestStreamDue(0, unit); CoXlTestStreamDue(1, unit);
+        CoXlTestStreamExpiredSet(65);                                     /* nothing queued: the spawns go */
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(2300, 0, &next) == 1 && g_calls == 2);
+        /* room (the change frames are no quiet frames: 33 push the last 16.5 out): the rule does not apply */
+        for (int k = 0; k < 33; k++) { co_framecost_test_begin(t, 1, 1); t += 10000; }
+        CoXlTestStreamDue(0, unit); CoXlTestStreamDue(1, unit);
+        CHECK(CoXlTestStreamDropPush(4));
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(2600, 0, &next) == 1 && g_calls == 3);
+        CoXlTestStreamExpiredSet(0);
+        co_framecost_test_reset(0);
+    }
 
     Start("the forest near full: the call waits and its records stay due");
     Forest(ROOM - ROOM / 10u + 1u, 0, ROOM);
