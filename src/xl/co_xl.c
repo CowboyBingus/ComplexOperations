@@ -1312,6 +1312,34 @@ void CoXlTestBandAbandon(void) { NearBandAbandon(); }
 void CoXlTestBandPretend(int running) { g_bandJob.on = 1; g_bandJob.thread = NULL; g_bandJob.pixels = NULL; memset(g_bandJob.desc, 0, sizeof g_bandJob.desc); InterlockedExchange(&g_bandJob.running, running); }
 void CoXlTestBandJobTick(void) { NearBandTick(); }
 void CoXlTestBandJoin(void) { NearBandJoin(); }
+/* A moving tile's composite tiles on engine jobs (proto/difficulty_world_terrain.c NearJobTake): the test's build and
+ * submit in place of TerrainBuild's and the engine's, `steps` steps with composite tiles at first..last (tile 100 + s),
+ * the level in play (its object, +0x2C8 a generator), slot 0's block; a step's start, its draws, the joins. */
+void CoXlTestNearJobUse(int (*build)(int, uint64_t, uint8_t*, uint8_t*), uint64_t (*submit)(void*, uint64_t*, const char*, uint32_t, uint32_t, uint32_t, uint64_t))
+{ g_nearJobBuild = build; g_nearJobSubmit = submit; InterlockedExchange(&g_moveBuilding, 1); }
+void CoXlTestNearJobSteps(int steps, int first, int last)
+{
+    g_near.steps = steps;
+    for (int s = 0; s < steps; s++) { g_near.stepKind[s] = s >= first && s <= last ? NEAR_TILE : NEAR_RECORD; g_near.stepTile[s] = 100 + s; g_near.stepOp[s] = 0x3C; }
+}
+void CoXlTestNearJobLevel(uintptr_t level, uint8_t* block) { g_worldLevelLive = level; g_worldLevel = level; g_terrain.block = block; }
+int CoXlTestNearJobTake(int s, uint64_t context) { return NearJobTake(s, 0, 0, context, 0, 0, 0); }
+void CoXlTestNearJobDrawn(int s) { if (g_nearJob.drawing != NULL) NearJobDone(g_nearJob.drawing, s); }
+const uint8_t* CoXlTestNearJobDrawing(void) { return g_nearJob.drawing != NULL ? g_nearJob.drawing->record : NULL; }
+int CoXlTestNearJobOn(long* inflight) { *inflight = g_nearJob.inflight; return g_nearJob.on; }
+int CoXlTestNearRunStep(int s, uint64_t context, void* dispatch)
+{
+    g_worldDispatch = (WorldDispatchFn)dispatch;
+    g_near.step = s;
+    return NearRunStepIn(0, 0, context, 0, 0);
+}
+void CoXlTestNearJobLevelUpdate(uintptr_t level, uintptr_t moving) { NearJobLevelUpdate(level, moving); }
+void CoXlTestMoveLevelUpdate(uint64_t level, uintptr_t moving, void (*update)(uint64_t))
+{ g_move.levelPtr = moving; g_moveUpdate = (MoveUpdateFn)update; MoveLevelUpdate(level); g_moveUpdate = NULL; }
+DWORD CoXlTestNearJobTls(DWORD k) { DWORD old = g_tileRunnerTls; g_tileRunnerTls = k; return old; }
+void CoXlTestNearJobBroken(int broken) { g_tileJobsBroken = broken; }
+void CoXlTestTerrainBuildNote(const char* text) { TerrainBuildNote("%s", text); }
+void CoXlTestNearJobArena(uint64_t context) { NearJobArena(context); }
 /* One conform step of a tile built in mission (`building`) from `phase`; the phase it left, the band's pixels. */
 int CoXlTestConformStep(int phase, int building, int* after, uint32_t** pixels)
 {

@@ -1916,6 +1916,39 @@ static void TileRunnersRelease(void)
     }
 }
 
+/* The runner of a moving tile's composite tile jobs (difficulty_world_terrain.c NearJobStart): one tile build at a time,
+ * so none of op 0x2B's job regions (128 MiB, only TileJobsInline uses them) and no stamp index; not one of
+ * g_tileRunners, whose ids the load's sections hand out. Made once; its arena is committed while a run uses it. */
+static TileRunner* g_tileRunnerLone;
+static TileRunner* TileRunnerLone(void)
+{
+    TileRunner* r = g_tileRunnerLone;
+    if (r == NULL)
+    {
+        r = (TileRunner*)VirtualAlloc(NULL, sizeof(TileRunner), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (r == NULL) return NULL;
+        void* chunk = VirtualAlloc(NULL, TILE_RUNNER_ARENA, MEM_RESERVE, PAGE_READWRITE);
+        if (chunk == NULL) { VirtualFree(r, 0, MEM_RELEASE); return NULL; }
+        r->id = -1; r->scale = 1.0f; r->decommitted = 1;
+        r->chunk.data = (uint64_t)(uintptr_t)chunk; r->chunk.capacity = TILE_RUNNER_ARENA;
+        g_tileRunnerLone = r;
+    }
+    if (r->decommitted)
+    {
+        if (VirtualAlloc((void*)(uintptr_t)r->chunk.data, TILE_RUNNER_ARENA, MEM_COMMIT, PAGE_READWRITE) == NULL) return NULL;
+        r->decommitted = 0;
+    }
+    return r;
+}
+static void TileRunnerLoneIdle(void)
+{
+    TileRunner* r = g_tileRunnerLone;
+    if (r == NULL || r->decommitted) return;
+    VirtualFree((void*)(uintptr_t)r->chunk.data, TILE_RUNNER_ARENA, MEM_DECOMMIT);
+    if (r->moved != NULL) { VirtualFree(r->moved, 0, MEM_RELEASE); r->moved = NULL; }
+    r->decommitted = 1;
+}
+
 /* The runner's context for one op 0x2B run: the level's context and settings as the section took them, its own arena
  * (empty, as WorldArenaReset leaves one), the settings `settings`, the stamp index `index`. */
 static void TileRunnerContext(TileRunner* r, const uint8_t* levelContext, const uint8_t* settings, uintptr_t index)

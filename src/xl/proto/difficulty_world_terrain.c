@@ -376,6 +376,17 @@ static int TerrainTemplate(uintptr_t gen)
     return 1;
 }
 
+/* A tile build's notes. A composite tile job's (NearJobNote) are kept with its slot and noted by the game thread when
+ * its step takes the tile: a worker's lines would land in the middle of the game thread's. */
+static int NearJobNote(const char* text);
+static void NearJobArena(uint64_t context);
+static void TerrainBuildNote(const char* format, ...)
+{
+    char text[640];
+    va_list arguments; va_start(arguments, format); vsnprintf(text, sizeof text, format, arguments); va_end(arguments);
+    if (!NearJobNote(text)) Note("%s", text);
+}
+
 /* The template into a block: copied, its pointers moved from the block TerrainTemplate made it for onto `T`. 0 when
  * `T` is another block and the list is missing. */
 static int TerrainCopyTemplate(uint8_t* T)
@@ -452,7 +463,7 @@ static void TerrainTileZones(uintptr_t gen, float ox, float oy)
     }
     LONG n = InterlockedIncrement(&stats[0]); InterlockedExchangeAdd(&stats[1], (LONG)written); InterlockedExchangeAdd(&stats[2], (LONG)left);
     if (n == 1 || n == 16 || n == 169 || n % 1000 == 0)
-        Note("difficulty: terrain: tiles take the level's open zones: %ld tiles so far, %ld cells given the level's zone, %ld left to roll (city)", (long)n, (long)stats[1], (long)stats[2]);
+        TerrainBuildNote("difficulty: terrain: tiles take the level's open zones: %ld tiles so far, %ld cells given the level's zone, %ld left to roll (city)", (long)n, (long)stats[1], (long)stats[2]);
 }
 
 /* One tile: the game's GenerateVoronoi and height passes on the tile's block, then (move) moved to its world position.
@@ -494,7 +505,7 @@ static int TerrainBuild(int tile, uint64_t records, uint32_t end, uint64_t conte
             noted[k] = g_world.levels;
             uint32_t s20 = 0, s3C = 0; float f1C = 0;
             SafeRead(settings + 0x20, &s20, 4); SafeRead(settings + 0x3C, &s3C, 4); SafeRead(settings + 0x1C, &f1C, 4);
-            Note("difficulty: terrain: tile %d built %s: disk %u, size %u, lo %.1f, hi %.1f, radius %.1f, spacing %.1f, settings+0x1C %.4f +0x20 0x%X +0x3C 0x%X, rec25 at %u",
+            TerrainBuildNote("difficulty: terrain: tile %d built %s: disk %u, size %u, lo %.1f, hi %.1f, radius %.1f, spacing %.1f, settings+0x1C %.4f +0x20 0x%X +0x3C 0x%X, rec25 at %u",
                 tile, k ? "for the near tile" : "for the level", disk, size, (double)lo, (double)hi, (double)radius, (double)spacing, (double)f1C, s20, s3C,
                 (unsigned)((g_rec25 - records) / 0x19B0u));
         }
@@ -509,6 +520,7 @@ static int TerrainBuild(int tile, uint64_t records, uint32_t end, uint64_t conte
     typedef void (*Handler)(uint64_t, uint64_t, uint64_t);
     if (runner != NULL) { runner->tile = tile; runner->op = 0x25; runner->where = TILE_AT_VORONOI; }
     ((Handler)(g_world.game + 0xF3F8E0u))((uint64_t)(uintptr_t)one + 8, (uint64_t)(uintptr_t)one, context);
+    NearJobArena(context);
     WorldArenaReset(context); /* GenerateVoronoi is done: the arena as the game leaves it after an op */
     int ok = 1, seen04 = 0;
     uint32_t start = 0xFFFFFFFFu, op = 0;
@@ -529,11 +541,12 @@ static int TerrainBuild(int tile, uint64_t records, uint32_t end, uint64_t conte
         LONG fault = WorldTileGuarded(one, context, &index, &phase, g, h, 10000, &calls);
         if (fault || index == 0 || TileGuardSelf()->weldFailed)
         {
-            Note("difficulty: terrain: tile %d (%.0f, %.0f) %s in op 0x%02X%s", tile, (double)ox, (double)oy,
+            TerrainBuildNote("difficulty: terrain: tile %d (%.0f, %.0f) %s in op 0x%02X%s", tile, (double)ox, (double)oy,
                 fault ? "faulted" : TileGuardSelf()->weldFailed ? "failed its weld" : "did not finish", op, fault || TileGuardSelf()->weldFailed ? "; the level's own cells stay there" : "");
             ok = 0;
             break;
         }
+        NearJobArena(context);
         WorldArenaReset(context);
         if (op == 0x04) seen04 = 1;
         if (op == 0x2D && seen04) break;
@@ -564,7 +577,7 @@ static int TerrainBuild(int tile, uint64_t records, uint32_t end, uint64_t conte
                 for (int a = 0; a < 2; a++) { if (xy[a] < lo[a]) lo[a] = xy[a]; if (xy[a] > hi[a]) hi[a] = xy[a]; }
             }
             uint32_t cellCount0 = 0; memcpy(&cellCount0, T + 0x11A70B8, 4);
-            Note("difficulty: terrain: tile %d (%s): %u vertices over x %.0f..%.0f, y %.0f..%.0f (tile-local), %u cells, %u route cells", tile,
+            TerrainBuildNote("difficulty: terrain: tile %d (%s): %u vertices over x %.0f..%.0f, y %.0f..%.0f (tile-local), %u cells, %u route cells", tile,
                 k ? "near replay" : "level", vertices, (double)lo[0], (double)hi[0], (double)lo[1], (double)hi[1], cellCount0, cells);
         }
     }
@@ -2032,9 +2045,13 @@ static void NearCameras(float half0, float half1, float cx, float cy)
 
 /* Puts the level's merge state back after the replay (or a failed one) and lets the level go on. */
 static void NearBandAbandon(void);
+static void NearJobStop(const char* why, int restore);
+static void NearJobRelease(void);
 static void NearReplayEnd(int ok)
 {
     NearBandAbandon(); /* a conform cut short: its band pass, if one runs, is not this tile's any more */
+    NearJobStop("the replay ended", 1); /* called from the level's own update: the level is there */
+    NearJobRelease();
     InterlockedExchange(&g_nearActive, 0);
     /* the level's queue is drained every frame: no later drain is the replay's, but for a finalize still queued */
     if (g_nearReset.state != 1) g_nearNames.queue = 0;
@@ -2270,6 +2287,300 @@ static void NearRecordEdit(uint8_t op, uint8_t* one)
     }
 }
 
+/* ---- A moving tile's composite tiles on engine jobs ------------------------------------------------------------------
+ * In play TerrainBuild held the game thread 35-110 ms a composite tile, 16-20 tiles a build. One engine job at a time
+ * builds them ahead, in plan order, into two slots on a runner of its own, as the load's coarse section does
+ * (CoarseOne); each step draws its slot on the game thread once it is built, one draw a frame as before. */
+#define NEAR_JOB_SLOTS 2
+#define NEAR_JOB_NOTES 1536
+enum { NEAR_JOB_FREE, NEAR_JOB_BUILDING, NEAR_JOB_BUILT };
+typedef struct
+{
+    volatile LONG state;
+    int step, tile, ok;
+    uint8_t* T;                 /* the block it builds in: g_terrain.block or the run's second one */
+    uint8_t record[0x19B0];     /* the level's RenderHeightmapVoronoi record on T */
+    uint8_t phase;
+    int notesLen, notesLost;
+    char notes[NEAR_JOB_NOTES]; /* the build's notes (TerrainBuildNote), a line each */
+} NearJobSlot;
+typedef int (*NearJobBuildFn)(int tile, uint64_t context, uint8_t* block, uint8_t* record);
+typedef uint64_t (*NearJobSubmitFn)(void* fn, uint64_t* data, const char* name, uint32_t queue, uint32_t priority, uint32_t count, uint64_t zero);
+static struct
+{
+    int on, first, last, next, take; /* the run's composite steps, the next one a job builds, the next one drawn */
+    volatile LONG stop, inflight, onGame;
+    uintptr_t level; LONG levels, inits; /* the level object the run is for, g_world.levels and g_levelInits then */
+    DWORD gameThread;
+    TileRunner* r;
+    NearJobSlot* volatile building; /* the slot the job builds now (NearJobNote) */
+    NearJobSlot* drawing;           /* the slot the current step draws; NULL: it built its own tile */
+    NearJobSlot slot[NEAR_JOB_SLOTS];
+    uint64_t element[NEAR_JOB_SLOTS]; /* each slot's job element: the slot */
+    uint8_t* block1;
+    uint64_t records, g, h, submit; uint32_t end; uintptr_t gen, P, lg, spacingAt; uint32_t disk; float spacing;
+    uint8_t ctx[0xE8], buildS[0x120];
+    int built, failed, waits; long jobs; double longest; uint64_t arenaPeak;
+    LONG refused;
+} g_nearJob = {.refused = -1};
+static NearJobBuildFn g_nearJobBuild;   /* a test's build in place of NearJobBuildTile */
+static NearJobSubmitFn g_nearJobSubmit; /* a test's submit in place of the engine's */
+
+static int NearJobNote(const char* text)
+{
+    NearJobSlot* p = g_nearJob.building;
+    if (p == NULL || g_nearJob.r == NULL || TileRunnerSelf() != g_nearJob.r) return 0;
+    const int n = (int)strlen(text);
+    if (p->notesLen + n + 2 > NEAR_JOB_NOTES) { p->notesLost++; return 1; }
+    memcpy(p->notes + p->notesLen, text, (size_t)n);
+    p->notesLen += n; p->notes[p->notesLen++] = '\n'; p->notes[p->notesLen] = 0;
+    return 1;
+}
+
+/* Before each arena reset of a job's build: the runner's arena in use, its chunks' used bytes ({used, data, capacity,
+ * next}, the grown ones in front of the runner's own: MoveArena). */
+static void NearJobArena(uint64_t context)
+{
+    TileRunner* r = g_nearJob.r;
+    if (r == NULL || context != (uint64_t)(uintptr_t)r->ctx || TileRunnerSelf() != r) return;
+    uint64_t used = 0, c = r->arena.head;
+    for (int k = 0; k < 256 && c != 0; k++) { uint64_t f[4]; if (SafeRead(c, f, sizeof f)) break; used += f[0]; c = f[3]; }
+    if (used > g_nearJob.arenaPeak) g_nearJob.arenaPeak = used;
+}
+
+/* The job's tile: TerrainBuild with the runner's context, then the draw's record on the slot's block (as
+ * TerrainDrawPrepare makes it on g_terrain.block). */
+static int NearJobBuildTile(int tile, uint64_t context, uint8_t* block, uint8_t* record)
+{
+    if (!TerrainBuild(tile, g_nearJob.records, g_nearJob.end, context, g_nearJob.g, g_nearJob.h, g_nearJob.gen, 1) ||
+        SafeRead(g_nearJob.records + (uint64_t)g_terrain.draw * 0x19B0u, record, 0x19B0)) return 0;
+    uint64_t keep[2];
+    memcpy(keep, record + 8, 16);
+    WorldTileRelocate(record, g_nearJob.gen, (uintptr_t)block);
+    memcpy(record + 8, keep, 16);
+    memset(record + 8 + 0x108, 0, 8);
+    return 1;
+}
+
+/* Under g_sectionLock, which a level init takes first (LevelInitBegins): the run's level is still the one in play. */
+static int NearJobLive(void)
+{
+    uint32_t state = 0;
+    return !g_nearJob.stop && g_world.levels == g_nearJob.levels && g_levelInits == g_nearJob.inits && !SafeRead(g_nearJob.level + 0x1E4, &state, 4) &&
+        state == 3;
+}
+
+/* One composite tile on an engine worker (r9: the slot submitted). It never waits: the game thread frees the slot once
+ * drawn and submits the next. Nothing is noted here (NearJobNote keeps the build's lines for the game thread). */
+static uint64_t NearJobRun(uint64_t a, uint64_t b, uint64_t c, uint64_t element)
+{
+    (void)a; (void)b; (void)c;
+    NearJobSlot* p = (NearJobSlot*)(uintptr_t)element;
+    TileRunner* r = g_nearJob.r;
+    if (GetCurrentThreadId() == g_nearJob.gameThread) InterlockedIncrement(&g_nearJob.onGame);
+    p->ok = 0; p->phase = 0; p->notesLen = 0; p->notesLost = 0; p->notes[0] = 0;
+    TlsSetValue(g_tileRunnerTls, r);
+    AcquireSRWLockShared(&g_sectionLock);
+    if (NearJobLive())
+    {
+        LARGE_INTEGER hz, b0, b1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&b0);
+        g_nearJob.building = p;
+        r->block = p->T;
+        TileRunnerContext(r, g_nearJob.ctx, g_nearJob.buildS, g_nearJob.P);
+        p->ok = (g_nearJobBuild != NULL ? g_nearJobBuild : NearJobBuildTile)(p->tile, (uint64_t)(uintptr_t)r->ctx, p->T, p->record);
+        r->block = NULL;
+        g_nearJob.building = NULL;
+        QueryPerformanceCounter(&b1);
+        const double ms = (double)(b1.QuadPart - b0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+        if (ms > g_nearJob.longest) g_nearJob.longest = ms;
+        if (p->ok) g_nearJob.built++; else g_nearJob.failed++;
+    }
+    ReleaseSRWLockShared(&g_sectionLock);
+    TlsSetValue(g_tileRunnerTls, NULL);
+    MemoryBarrier();
+    InterlockedExchange(&p->state, NEAR_JOB_BUILT);
+    InterlockedDecrement(&g_nearJob.inflight);
+    return 0;
+}
+
+/* Game thread: the next step's job once its slot is free and no job is in flight. One at a time: a tile job holds a
+ * regular worker ~60 ms, and the frame's own job is popped only by the lower half of them (StampRunnerCap). The queue
+ * is 1 + 3 x 3 = 10, which the game thread's own waits never pop (exe 0x626900: role 0 takes 15, 0, 3, 16, 1, 4, 17, 2, 5). */
+static void NearJobFeed(void)
+{
+    static const char name[] = "hellforge moving tile composite tile";
+    if (!g_nearJob.on || g_nearJob.stop || g_nearJob.inflight != 0 || g_nearJob.next > g_nearJob.last) return;
+    const int i = (g_nearJob.next - g_nearJob.first) % NEAR_JOB_SLOTS;
+    NearJobSlot* p = &g_nearJob.slot[i];
+    if (p->state != NEAR_JOB_FREE) return;
+    p->step = g_nearJob.next; p->tile = g_near.stepTile[p->step]; p->state = NEAR_JOB_BUILDING;
+    g_nearJob.next++; g_nearJob.jobs++;
+    InterlockedIncrement(&g_nearJob.inflight);
+    NearJobSubmitFn submit = g_nearJobSubmit != NULL ? g_nearJobSubmit : (NearJobSubmitFn)(uintptr_t)g_nearJob.submit;
+    submit((void*)NearJobRun, &g_nearJob.element[i], name, 1, 3, 1, 0);
+}
+
+/* Game thread: the run's job joined (30 s at most, then no tile jobs for the session, as CoarseEnd), the marker and the
+ * spacing put back when the level is known to be there (`restore`; never once it may have gone), the run's line. */
+static void NearJobStop(const char* why, int restore)
+{
+    if (!g_nearJob.on) return;
+    InterlockedExchange(&g_nearJob.stop, 1);
+    ULONGLONG since = GetTickCount64();
+    while (g_nearJob.inflight > 0)
+    {
+        if (GetTickCount64() - since > 30000)
+        {
+            Note("difficulty: moving tiles: a composite tile job did not return within 30 s; no tile jobs for the rest of the session");
+            g_tileJobsBroken = 1;
+            break;
+        }
+        Sleep(1);
+    }
+    if (restore) { *(volatile uint32_t*)(g_nearJob.lg + 0x2D7C) = g_nearJob.disk; *(volatile float*)g_nearJob.spacingAt = g_nearJob.spacing; }
+    g_tileSectionHeld = 0;
+    g_nearJob.on = 0;
+    Note("difficulty: moving tiles: composite tiles on a worker: %d built, %d failed, longest %.0f ms, arena peak %.1f MiB, jobs seen on the game thread %ld; "
+        "%ld jobs, the steps waited %d frames for their tiles (%s)", g_nearJob.built, g_nearJob.failed, g_nearJob.longest,
+        (double)g_nearJob.arenaPeak / (1024.0 * 1024.0), (long)g_nearJob.onGame, g_nearJob.jobs, g_nearJob.waits, why);
+}
+
+/* Once no step draws a slot any more: the second block and the runner's arena given back, unless a job may still run. */
+static void NearJobRelease(void)
+{
+    g_nearJob.drawing = NULL;
+    if (g_nearJob.on || g_tileJobsBroken) return;
+    if (g_nearJob.block1 != NULL) { VirtualFree(g_nearJob.block1, 0, MEM_RELEASE); g_nearJob.block1 = NULL; }
+    TileRunnerLoneIdle();
+}
+
+/* A level init or the ship (NearLevelLeft): the job joined; the level may be gone, so its marker is left alone. */
+static void NearJobLevelLeft(void)
+{
+    NearJobStop("the level went", 0);
+    NearJobRelease();
+}
+
+/* The level update's entry (difficulty_world_move.c MoveLevelUpdate), before the game's own: a level leaving play
+ * comes through here with its state off 3 before its destructor (game 0xAB3CCD, after the reset 0xF70D10), so the job
+ * is joined while the level is there; the marker goes back on the run's own level only. */
+static void NearJobLevelUpdate(uintptr_t level, uintptr_t moving)
+{
+    if (!g_nearJob.on) return;
+    uint32_t state = 0;
+    const int read = !SafeRead(level + 0x1E4, &state, 4);
+    if (level == moving && read && state == 3) return;
+    Note("difficulty: moving tiles: composite tiles: joined at generator state %u, a job in flight %s", state, g_nearJob.inflight > 0 ? "yes" : "no");
+    NearJobStop("the level left play", level == g_nearJob.level);
+}
+
+static void NearJobRefused(const char* why)
+{
+    if (g_nearJob.refused == g_world.levels) return;
+    g_nearJob.refused = g_world.levels;
+    Note("difficulty: moving tiles: the composite tiles are built on the game thread: %s", why);
+}
+
+/* A runner's TLS slot must be one of the TEB's 64: the dispatcher's tail stub skips its shared writes only then
+ * (TileDispatchInstall). */
+static int NearJobTls(void)
+{
+    if (g_tileRunnerTls == TLS_OUT_OF_INDEXES) { DWORD k = TlsAlloc(); if (k != TLS_OUT_OF_INDEXES) g_tileRunnerTls = k; }
+    return g_tileRunnerTls != TLS_OUT_OF_INDEXES && g_tileRunnerTls < 64;
+}
+
+/* Game thread, a composite step with no run: the run of composite steps from `s` on jobs; 0 when they are built here. */
+static int NearJobStart(int s, uint64_t records, uint32_t end, uint64_t context, uint64_t g, uint64_t h, uintptr_t gen)
+{
+    if (!g_moveBuilding || s < 0 || s >= g_near.steps || g_near.stepKind[s] != NEAR_TILE) return 0;
+    uintptr_t settings = 0, lg = 0, p = 0, spacingAt = 0, P = 0;
+    uint64_t api = 0, submit = 0;
+    const char* why = NULL;
+    if (g_coarse.on || g_tileSectionHeld) why = "a tile section holds the level";
+    else if (g_tileJobsBroken) why = "a tile job did not return earlier";
+    else if (!NearJobTls()) why = "no TLS slot under 64 for the runner";
+    else if (g_nearJobBuild == NULL && (!TileBuildsOn() || !TileDispatchInstall())) why = "tile builds are off or the dispatcher's tail is not patched";
+    else if (g_terrain.block == NULL || (g_nearJobBuild == NULL && (g_terrain.offsets == NULL || g_terrain.tmplBase != g_terrain.block)))
+        why = "the tile template does not move to another block";
+    else if (SafeRead(context + 8, &settings, 8) || settings == 0 || SafeRead(context + 0x18, &lg, 8) || lg == 0 || SafeRead(lg + 0x2D0, &p, 8) || p == 0 ||
+        SafeRead(p + 0x68, &spacingAt, 8) || spacingAt == 0 || SafeRead(lg + 0x2D7C, &g_nearJob.disk, 4) || SafeRead(spacingAt, &g_nearJob.spacing, 4) ||
+        SafeRead(settings, g_nearJob.buildS, sizeof g_nearJob.buildS) || SafeRead(context, g_nearJob.ctx, sizeof g_nearJob.ctx) || SafeRead(context + 0x20, &P, 8))
+        why = "the build's context did not read";
+    else if (g_nearJobSubmit == NULL && (SafeRead(g_world.game + 0x33263E8u, &api, 8) || api == 0 || SafeRead(api + 0x88, &submit, 8) || submit == 0))
+        why = "no engine job submit";
+    else if ((g_nearJob.r = TileRunnerLone()) == NULL ||
+        (g_nearJob.block1 == NULL && (g_nearJob.block1 = (uint8_t*)VirtualAlloc(NULL, GEN_BLOCK_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)) == NULL))
+    { why = "no memory for the runner and a second block"; TileRunnerLoneIdle(); }
+    if (why != NULL) { NearJobRefused(why); return 0; }
+    int last = s;
+    while (last + 1 < g_near.steps && g_near.stepKind[last + 1] == NEAR_TILE) last++;
+    g_nearJob.records = records; g_nearJob.end = end; g_nearJob.g = g; g_nearJob.h = h; g_nearJob.gen = gen; g_nearJob.P = P; g_nearJob.submit = submit;
+    g_nearJob.lg = lg; g_nearJob.spacingAt = spacingAt;
+    g_nearJob.first = s; g_nearJob.last = last; g_nearJob.next = s; g_nearJob.take = s;
+    g_nearJob.level = g_worldLevelLive; g_nearJob.levels = g_world.levels; g_nearJob.inits = g_levelInits; g_nearJob.gameThread = GetCurrentThreadId();
+    g_nearJob.built = g_nearJob.failed = g_nearJob.waits = 0; g_nearJob.jobs = 0; g_nearJob.longest = 0; g_nearJob.arenaPeak = 0; g_nearJob.onGame = 0;
+    for (int i = 0; i < NEAR_JOB_SLOTS; i++)
+    {
+        NearJobSlot* q = &g_nearJob.slot[i];
+        q->state = NEAR_JOB_FREE; q->step = -1; q->T = i == 0 ? g_terrain.block : g_nearJob.block1;
+        g_nearJob.element[i] = (uint64_t)(uintptr_t)q;
+    }
+    TerrainTileZonesPrepare(gen); /* a runner never prepares them (TerrainTileZones) */
+    /* held for the run at the values TerrainBuild sets around each build here; the build settings are the build's copy
+     * as read (+0x5C too: here it is not lg+0x2D7C, and TerrainBuild leaves it) */
+    *(volatile uint32_t*)(lg + 0x2D7C) = g_nearJob.disk ^ 1u;
+    *(volatile float*)spacingAt = 16.0f;
+    g_tileSectionHeld = 1;
+    g_nearJob.stop = 0; g_nearJob.inflight = 0;
+    g_nearJob.on = 1;
+    return 1;
+}
+
+/* Game thread, a composite step's start: its slot, or NULL when the step builds its tile here. Steps are drawn in plan
+ * order; a step out of it ends the run (the next run starts there). */
+static NearJobSlot* NearJobFor(int s, uint64_t records, uint32_t end, uint64_t context, uint64_t g, uint64_t h, uintptr_t gen)
+{
+    if (g_nearJob.on && s != g_nearJob.take) NearJobStop("the steps left the run", 1);
+    if (!g_nearJob.on && !NearJobStart(s, records, end, context, g, h, gen)) return NULL;
+    NearJobFeed();
+    return &g_nearJob.slot[(s - g_nearJob.first) % NEAR_JOB_SLOTS];
+}
+
+/* Game thread, after step `s`'s draw from slot `p` (or its failed build): the slot free for the next job; the run ends
+ * after its last step. A run stopped meanwhile keeps its blocks until the replay or the level ends (NearJobRelease). */
+static void NearJobDone(NearJobSlot* p, int s)
+{
+    InterlockedExchange(&p->state, NEAR_JOB_FREE);
+    if (g_nearJob.drawing == p) g_nearJob.drawing = NULL;
+    if (!g_nearJob.on) return;
+    g_nearJob.take = s + 1;
+    if (s >= g_nearJob.last) { NearJobStop("the run is drawn", 1); NearJobRelease(); return; }
+    NearJobFeed();
+}
+
+/* Game thread, a composite step's first call: -1 it builds its tile here, 0 its job still runs (the replay waits a
+ * frame, the game's frames do not), 1 its build failed (the level's own cells stay there), 2 it draws its slot. */
+static int NearJobTake(int s, uint64_t records, uint32_t end, uint64_t context, uint64_t g, uint64_t h, uintptr_t gen)
+{
+    g_nearJob.drawing = NULL;
+    NearJobSlot* p = NearJobFor(s, records, end, context, g, h, gen);
+    if (p == NULL) return -1;
+    if (p->state != NEAR_JOB_BUILT || p->step != s) { g_nearJob.waits++; return 0; }
+    for (char* line = p->notes; *line != 0;) /* the build's notes, where TerrainBuild on this thread made them */
+    {
+        char* nl = strchr(line, '\n');
+        if (nl != NULL) *nl = 0;
+        Note("%s", line);
+        if (nl == NULL) break;
+        line = nl + 1;
+    }
+    if (p->notesLost) Note("difficulty: moving tiles: %d notes of composite tile %d's build did not fit", p->notesLost, p->tile);
+    p->notes[0] = 0; p->notesLen = 0; p->notesLost = 0;
+    if (!p->ok) { NearJobDone(p, s); return 1; }
+    g_nearJob.drawing = p;
+    return 2;
+}
+
 /* One replayed record (or tile) step: 1 when it finished, 0 while it runs, -1 when it failed. */
 static int NearBaseOn(void);
 static int NearBaseStep(uint64_t context);
@@ -2307,20 +2618,24 @@ static int NearRunStepIn(uint64_t records, uint32_t end, uint64_t context, uint6
     {
         if (!g_near.building)
         {
-            if (!(TerrainBuild(g_near.stepTile[s], records, end, context, g, h, gen, 1) && TerrainDrawPrepare(records, gen)))
+            const int job = NearJobTake(s, records, end, context, g, h, gen);
+            if (job == 0) return 0;
+            if (job == 1 || (job < 0 && !(TerrainBuild(g_near.stepTile[s], records, end, context, g, h, gen, 1) && TerrainDrawPrepare(records, gen))))
             {
                 g_near.tilesFailed++; g_near.calls = 0;
                 return 1; /* the level's own cells stay there */
             }
             g_near.building = 1; g_near.calls = 0;
         }
+        NearJobSlot* pre = g_nearJob.drawing;
         int clip = TerrainClipBegin(g_near.stepTile[s], gen);
-        fault = WorldTileGuarded(g_terrain.record, context, &index, &g_terrain.phase, g, h, 1, &calls);
+        fault = WorldTileGuarded(pre != NULL ? pre->record : g_terrain.record, context, &index, pre != NULL ? &pre->phase : &g_terrain.phase, g, h, 1, &calls);
         if (clip) TerrainClipEnd();
-        if (fault) return -1; /* the merge's state is unknown after a fault */
+        if (fault) { NearJobStop("a draw faulted", 1); return -1; } /* the merge's state is unknown after a fault */
         if (index == 0 && ++g_near.calls < TERRAIN_DRAW_CALLS) return 0;
         g_near.building = 0; g_near.calls = 0;
         if (index != 0) { WorldArenaReset(context); g_near.tilesDrawn++; } else g_near.tilesFailed++;
+        if (pre != NULL) NearJobDone(pre, s);
         return 1;
     }
     if (g_near.matLeave)

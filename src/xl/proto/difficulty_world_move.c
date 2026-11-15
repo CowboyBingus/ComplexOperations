@@ -1589,6 +1589,7 @@ static void MoveLevelUpdate(uint64_t level)
     MoveScatterTick();
     co_framecost_add(CO_FC_SCATTER, fc);
     NearResetTick();
+    NearJobLevelUpdate((uintptr_t)level, g_move.levelPtr); /* a level leaving play: its tile job joined before the game's update */
     g_moveUpdate(level);
     int mv = g_move.state, ns = g_near.state, step = g_near.step, conf = g_conform.phase, bld = g_near.building;
     const int op = step >= 0 && step < g_near.steps && step < NEAR_STEPS ? g_near.stepOp[step] : -1;
@@ -1642,6 +1643,7 @@ static void MoveInstall(uintptr_t game)
 static void NearLevelLeft(int ship)
 {
     NearBandJoin(); /* first: the pass reads the level's maps */
+    NearJobLevelLeft(); /* and a composite tile job reads its records */
     NearLayerSettle();
     MoveBuildLeft(ship); /* the merge cameras go before the terrains they draw */
     /* A release still owed is never sent outside play. A level init has asked for the package before this hook
