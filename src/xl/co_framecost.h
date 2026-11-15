@@ -57,6 +57,22 @@ void co_framecost_world(int enter);
 enum { CO_FC_CAUSE_JOIN = CO_FC_PARTS, CO_FC_CAUSE_WORLD, CO_FC_CAUSE_REST, CO_FC_CAUSES };
 #define CO_FC_CAUSE_OTHERS 2             /* parts named in the causes line beside the four it always names */
 void co_framecost_grass(int out);
+/* The streamer added or removed stamp bodies in this frame (its change step, run before the world update). Each window
+ * then splits the world update's own time between such frames and the others, once a mission had one, and a slow
+ * frame's line says whether it was one: those hold a broad phase rebuild by design. */
+void co_framecost_bodies(int changed);
+#define CO_FC_BODIES_ROOM 1              /* co_framecost_bodies: a change frame whose budget had room under the target */
+#define CO_FC_BODIES_FLOOR 2             /* ... one at its floor: the quiet frames and the rebuild left none */
+/* This frame is kept out of the quiet frames and the change frames alike (a moving tile's 0x63 render, about 185 ms,
+ * drained in it): one such frame would hold every change frame's budget at its floor for the next 32 quiet frames. */
+void co_framecost_apart(void);
+/* Quiet frames the streamer's change-frame budget looks back over: a frame is over the longest of the 32 before it
+ * 1 time in 33 when frames are alike, about 0.3 s at 100 fps */
+#define CO_FC_RECENT 32
+/* The frame just closed, for the streamer's change-frame budget (CoXlTick's thread): the longest whole time of the last
+ * CO_FC_RECENT frames without a change (0 until that many in this play), their world update's own time (a running
+ * mean, 0 until one), and that frame's own world update time. Its co_framecost_bodies value. */
+int co_framecost_recent(double* quietHi, double* quietWorld, double* lastWorld);
 
 #ifdef CO_TEST
 /* The same on a given clock (ticks of `freq` a second) and given CPU times (100 ns units). */
@@ -73,7 +89,20 @@ void co_framecost_test_world(int enter, int64_t now);
 void co_framecost_test_causes(uint32_t* over, uint32_t led[CO_FC_CAUSES], uint32_t only[CO_FC_CAUSES]);
 /* The window being filled, its slow frame `k` (0 the slowest): its ms beside the AI joins, the world update and the far-grass flag. */
 double co_framecost_test_slow(int k, double* join, double* world, int* grass);
+/* Whether that frame was a streamer change frame. */
+int co_framecost_test_slow_bodies(int k);
+/* The last window's change frames' whole time: mean, the longest, and how many were over the target. */
+void co_framecost_test_bodies_whole(double* mean, double* most, uint32_t* over);
+/* The last window's change frames whose budget had room, and how many of those were over the target. */
+void co_framecost_test_bodies_room(uint32_t* room, uint32_t* over);
+/* The last window's frames kept apart. */
+uint32_t co_framecost_test_apart(void);
+/* The last window's change frames at their budget's floor: how many, their whole mean and the longest. */
+void co_framecost_test_bodies_floor(uint32_t* floors, double* mean, double* most);
 int co_framecost_test_window_lines(void);
+/* The last closed window's split: frames with a change, their mean and longest world update (own time), the same for
+ * the frames without, and how many of those were over CO_FC_TARGET_MS. 0 when the window had no split line. */
+int co_framecost_test_bodies(uint32_t* changed, double* changedMean, double* changedMost, uint32_t* quiet, double* quietMean, double* quietMost, uint32_t* quietOver);
 int co_framecost_test_detail_lines(void);
 /* The last closed window: 1% and 0.1% lows (fps), frames over 25 ms, 33 ms and 1 s, the CPU verdict. */
 void co_framecost_test_last(double* low1, double* low01, uint32_t* over25, uint32_t* over33, uint32_t* over1s, int* starved);

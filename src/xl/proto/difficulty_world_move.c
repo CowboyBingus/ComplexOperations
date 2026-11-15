@@ -1855,6 +1855,27 @@ static void MoveCostNote(void)
 /* Before the level's own update: the scatter cut's close counts this update (difficulty_world_diag.c). */
 static void MoveScatterTick(void) { TdScatterMergeTick((uint64_t)(uintptr_t)g_move.ctx); }
 
+/* A build frame whose MoveTick took more than this holds a step of game-thread work: the stamp slices run to
+ * MOVE_UNSTAMP_MS / MOVE_SELECT_MS. The other frames poll jobs: 2209 ms over 980 frames with 22 over 50 ms leaves
+ * the rest about 1.1 ms or less each (session f8a9e7ce, a tile's build). */
+#define MOVE_STEP_MS 1.5
+/* The streamer's tick (g_streamTicks) of the last build frame and of the last heavy step, and that frame's MoveTick
+ * time. The level update (0xAB519E) runs before the late update with the streamer's tick (0xAB612D) in the frame
+ * function 0xAB5000, so this frame's are known when the streamer asks. */
+static uint32_t g_moveBuildAt, g_moveStepAt;
+static double g_moveStepMs;
+static void MoveStepMark(double ms)
+{
+    g_moveBuildAt = g_streamTicks + 1; g_moveStepMs = ms; /* the streamer's tick of this frame */
+    if (ms > MOVE_STEP_MS) g_moveStepAt = g_moveBuildAt;
+}
+/* A heavy build step ran in this frame or the last: the streamer's change frame waits (it never adds to a slice). */
+static int MoveStepRecent(void) { return g_moveStepAt != 0 && g_streamTicks - g_moveStepAt <= 1u; }
+/* A tile was building in this frame or the last: its bodies change layer 4 then. */
+static int MoveBuildRecent(void) { return g_moveBuildAt != 0 && g_streamTicks - g_moveBuildAt <= 1u; }
+/* This frame's MoveTick time while a tile builds, else 0: the streamer's change frame leaves it room. */
+static double MoveStepMsNow(void) { return g_moveBuildAt != 0 && g_moveBuildAt == g_streamTicks ? g_moveStepMs : 0.0; }
+
 /* The mod's parts are timed for the frame-time lines (co_framecost.h); the game's own update between them is not. */
 static void MoveLevelUpdate(uint64_t level)
 {
@@ -1882,6 +1903,7 @@ static void MoveLevelUpdate(uint64_t level)
     if (mv != MV_IDLE || g_move.state != MV_IDLE)
     {
         const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+        MoveStepMark(ms);
         MoveCostAdd(ms, mv, ns, step, conf, bld);
         MoveSlowAdd(&g_moveCost.tick, ms, mv, ns, op, conf);
         g_moveCost.pending = 1;
