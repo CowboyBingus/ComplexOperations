@@ -10,6 +10,21 @@
 #include "harness/fake_host.h"
 
 int CoXlTestQueueWait(uint64_t context, uint32_t* waits, uint32_t* quiet, uint32_t limit, uint32_t settle);
+void co_shim_install(void);
+
+/* A queue pointer to reserved memory: any access outside SafeRead lands here (after SafeRead's own handler), which
+ * counts it and commits the page so the test goes on to its checks. */
+static uint8_t* g_reserved;
+static volatile LONG g_stray;
+static LONG CALLBACK Stray(EXCEPTION_POINTERS* info)
+{
+    const uintptr_t at = info->ExceptionRecord->NumberParameters > 1 ? (uintptr_t)info->ExceptionRecord->ExceptionInformation[1] : 0;
+    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || g_reserved == NULL || at < (uintptr_t)g_reserved ||
+        at >= (uintptr_t)g_reserved + 0x10000) return EXCEPTION_CONTINUE_SEARCH;
+    InterlockedIncrement(&g_stray);
+    VirtualAlloc(g_reserved, 0x1000, MEM_COMMIT, PAGE_READWRITE);
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
 
 static int g_failed;
 static const char* g_case;
@@ -30,6 +45,9 @@ int main(void)
 {
     g_coApi = fake_host_reset(CO_GAME_BUILD);
     g_coMod = (HfMod*)&g_fake;
+    co_shim_install(); /* SafeRead in place, as in the game */
+    g_reserved = (uint8_t*)VirtualAlloc(NULL, 0x10000, MEM_RESERVE, PAGE_NOACCESS);
+    AddVectoredExceptionHandler(0, Stray);
     uint64_t q = (uint64_t)(uintptr_t)&g_queue;
     memcpy(g_ctx + 0x50, &q, 8);
     int frames = 0;
@@ -54,6 +72,14 @@ int main(void)
     memset(g_ctx + 0x50, 0, 8); g_fake.log[0] = 0;
     CHECK(Run(600, 4, &frames) == -1 && frames == 601);
     CHECK(fake_host_logged("so its jobs stay"));
+
+    g_case = "a queue pointer that does not read: never touched, its jobs left";
+    {
+        uint64_t bad = (uint64_t)(uintptr_t)g_reserved;
+        memcpy(g_ctx + 0x50, &bad, 8); g_fake.log[0] = 0;
+        CHECK(g_reserved != NULL && Run(600, 4, &frames) == -1 && frames == 601);
+        CHECK(g_stray == 0 && fake_host_logged("so its jobs stay"));
+    }
 
     g_case = "a queue that empties after a while: done once it has, after the settle frames";
     memcpy(g_ctx + 0x50, &q, 8);

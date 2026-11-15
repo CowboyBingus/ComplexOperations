@@ -2826,9 +2826,11 @@ static uint32_t NearQueued(uint64_t context)
 static int NearQueueDrop(uint64_t context)
 {
     uint64_t queue = 0;
-    if (SafeRead(context + 0x50, &queue, 8) || queue == 0) return -1;
+    uint8_t head[0x18];
+    LONG64 served = 0;
+    if (SafeRead(context + 0x50, &queue, 8) || queue == 0 || SafeRead(queue, head, sizeof head)) return -1; /* not touched unless it reads */
+    memcpy(&served, head + 8, 8);
     volatile LONG64* ticket = (volatile LONG64*)(uintptr_t)queue;
-    const LONG64 served = ticket[1];
     if (InterlockedCompareExchange64(ticket, served + 1, served) != served) return -1;
     volatile uint32_t* count = (volatile uint32_t*)(uintptr_t)(queue + 0x10);
     const uint32_t n = *count;
