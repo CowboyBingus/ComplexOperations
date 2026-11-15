@@ -57,6 +57,9 @@ void co_framecost_world(int enter);
 enum { CO_FC_CAUSE_JOIN = CO_FC_PARTS, CO_FC_CAUSE_WORLD, CO_FC_CAUSE_REST, CO_FC_CAUSES };
 #define CO_FC_CAUSE_OTHERS 2             /* parts named in the causes line beside the four it always names */
 void co_framecost_grass(int out);
+/* The streamer added or removed stamp bodies in this frame (its change step, run before the world update). Each window
+ * then splits the world update's own time between such frames and the others, once a mission had one. */
+void co_framecost_bodies(int changed);
 
 #ifdef CO_TEST
 /* The same on a given clock (ticks of `freq` a second) and given CPU times (100 ns units). */
@@ -74,6 +77,9 @@ void co_framecost_test_causes(uint32_t* over, uint32_t led[CO_FC_CAUSES], uint32
 /* The window being filled, its slow frame `k` (0 the slowest): its ms beside the AI joins, the world update and the far-grass flag. */
 double co_framecost_test_slow(int k, double* join, double* world, int* grass);
 int co_framecost_test_window_lines(void);
+/* The last closed window's split: frames with a change, their mean and longest world update (own time), the same for
+ * the frames without, and how many of those were over CO_FC_TARGET_MS. 0 when the window had no split line. */
+int co_framecost_test_bodies(uint32_t* changed, double* changedMean, double* changedMost, uint32_t* quiet, double* quietMean, double* quietMost, uint32_t* quietOver);
 int co_framecost_test_detail_lines(void);
 /* The last closed window: 1% and 0.1% lows (fps), frames over 25 ms, 33 ms and 1 s, the CPU verdict. */
 void co_framecost_test_last(double* low1, double* low01, uint32_t* over25, uint32_t* over33, uint32_t* over1s, int* starved);

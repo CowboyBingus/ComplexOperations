@@ -380,6 +380,32 @@ static void TestCauses(void)
         "joins, the world update's own time, the rest): nav swaps 1,"));
 }
 
+/* The streamer's change frames should hold the static layer's rebuilds: each window splits the world update's own time
+ * between them and the other frames, once the mission had one. */
+static void TestBodies(void)
+{
+    Reset("the world update split by the streamer's body changes");
+    uint32_t changed = 9, quiet = 9, over = 9; double cMean = 9, cMost = 9, qMean = 9, qMost = 9;
+    for (int i = 0; i < 1112; i++) Cost(9.0, 0, 0, 0, 5.0, 0);
+    Cost(25.0, 2.0, 0, 0, 20.0, 1); co_framecost_bodies(1); /* closes the first window: no change in it yet */
+    CHECK(co_framecost_test_bodies(&changed, &cMean, &cMost, &quiet, &qMean, &qMost, &over) == 0);
+    CHECK(!fake_host_logged("by the streamer's body changes"));
+    for (int c = 0; c < 40; c++)
+    {
+        if (c > 0) { Cost(25.0, 2.0, 0, 0, 20.0, 1); co_framecost_bodies(0); co_framecost_bodies(1); } /* 18 ms of its own */
+        Cost(18.0, 0, 0, 0, 5.0, 0); co_framecost_bodies(0); /* a 0 flags nothing */
+        for (int k = 0; k < 23; k++) Cost(9.0, 0, 0, 0, 5.0, 0);
+    }
+    Cost(9.0, 0, 0, 0, 5.0, 0);
+    CHECK(co_framecost_test_bodies(&changed, &cMean, &cMost, &quiet, &qMean, &qMost, &over) == 1);
+    CHECK(changed == 40 && cMean == 18.0 && cMost == 18.0 && quiet == 960 && qMean == 5.0 && qMost == 5.0 && over == 40);
+    CHECK(fake_host_logged("frame times, world update's own time by the streamer's body changes: 40 frame(s) with a change, mean 18.0 ms, "
+        "the longest 18.0 ms; 960 without, mean 5.0 ms, the longest 5.0 ms; 40 of those over 16.7 ms in all"));
+    g_mission++; /* a mission with no change frame: no split line */
+    for (int i = 0; i < 1200; i++) Cost(9.0, 0, 0, 0, 5.0, 0);
+    CHECK(co_framecost_test_bodies(&changed, &cMean, &cMost, &quiet, &qMean, &qMost, &over) == 0);
+}
+
 int main(void)
 {
     TestLows();
@@ -397,6 +423,7 @@ int main(void)
     TestOffThread();
     TestCpuAndContext();
     TestCauses();
+    TestBodies();
     if (g_failed) { printf("%d check(s) failed\n", g_failed); return 1; }
     printf("framecost: all checks passed\n");
     return 0;

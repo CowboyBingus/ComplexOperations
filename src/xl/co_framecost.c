@@ -19,7 +19,7 @@ static struct
     int lastPlay, cores;
     long mission, budgetMission;
     int64_t part[CO_FC_PARTS]; /* the frame being closed: its parts so far */
-    int64_t extra[CO_FX_COUNT]; int grass;
+    int64_t extra[CO_FX_COUNT]; int grass, bodies;
     int64_t worldAt, inside; /* the world update under way since; ticks of parts and joins timed inside it this frame */
     volatile LONG64 offThread; /* ticks timed on other threads since the window began */
     CoFcContextFn context;
@@ -32,6 +32,9 @@ static struct
     double sum, worst, worstTimed, worstTop, timedSum;
     int worstTopPart;
     int windowLines, detailLines;
+    /* the world update's own time in the frames the streamer changed bodies in, and in the others; once a mission had one */
+    uint32_t bodyFrames, quietFrames, quietOver; double bodySum, bodyMost, quietSum, quietMost; long bodyMission; int bodySeen;
+    uint32_t lastBodyFrames, lastQuietFrames, lastQuietOver; double lastBodyMean, lastBodyMost, lastQuietMean, lastQuietMost; int lastBodyLine;
     /* the window's slowest frames over CO_FC_SLOW_MS, slowest first, noted at its close */
     struct { double ms, timed, top, at, extra[CO_FX_COUNT]; int part, grass; const char* front; } slow[CO_FC_SLOW_LINES_WINDOW];
     /* the last window, for the tests */
@@ -93,6 +96,21 @@ static void WindowStart(int64_t now)
     memset(g_fc.led, 0, sizeof g_fc.led); memset(g_fc.only, 0, sizeof g_fc.only);
     memset(g_fc.slow, 0, sizeof g_fc.slow);
     g_fc.sum = g_fc.worst = g_fc.worstTimed = g_fc.worstTop = g_fc.timedSum = 0; g_fc.worstTopPart = 0;
+    g_fc.bodyFrames = g_fc.quietFrames = g_fc.quietOver = 0; g_fc.bodySum = g_fc.bodyMost = g_fc.quietSum = g_fc.quietMost = 0;
+}
+
+/* A change frame should hold the static layer's rebuild and the others should not: the two means apart say whether
+ * coalescing the streamer's changes took the rebuild out of the frames between. */
+static void BodiesLine(void)
+{
+    g_fc.lastBodyFrames = g_fc.bodyFrames; g_fc.lastQuietFrames = g_fc.quietFrames; g_fc.lastQuietOver = g_fc.quietOver;
+    g_fc.lastBodyMean = g_fc.bodyFrames ? g_fc.bodySum / g_fc.bodyFrames : 0; g_fc.lastBodyMost = g_fc.bodyMost;
+    g_fc.lastQuietMean = g_fc.quietFrames ? g_fc.quietSum / g_fc.quietFrames : 0; g_fc.lastQuietMost = g_fc.quietMost;
+    g_fc.lastBodyLine = g_fc.bodySeen && g_fc.bodyMission == g_fc.mission;
+    if (!g_fc.lastBodyLine) return;
+    co_log("frame times, world update's own time by the streamer's body changes: %u frame(s) with a change, mean %.1f ms, the longest %.1f ms; "
+        "%u without, mean %.1f ms, the longest %.1f ms; %u of those over %.1f ms in all", g_fc.bodyFrames, g_fc.lastBodyMean, g_fc.bodyMost,
+        g_fc.quietFrames, g_fc.lastQuietMean, g_fc.quietMost, g_fc.quietOver, CO_FC_TARGET_MS);
 }
 
 /* `count`'s parts beside the nav ones, the most first, CO_FC_CAUSE_OTHERS at most: the line stays under the log's 512. */
@@ -161,6 +179,7 @@ static void WindowClose(int64_t now)
         kPartNames[g_fc.worstTopPart], g_fc.worstTop, g_fc.over16, CO_FC_TARGET_MS, g_fc.over25, CO_FC_SLOW_MS, g_fc.over33, CO_FC_HITCH_MS, g_fc.over1s, g_fc.timedSum / g_fc.frames, offMs);
     co_log("frame times, CPU: the PC %.0f%% busy (%.1f of %d cores), the game %.1f cores, everything else %.1f%s; AI %d; the nearest garrison with living spawners %s",
         busyPct, sysCores, g_fc.cores, gameCores, elseCores, starved, ai, nestText);
+    BodiesLine();
 }
 
 /* A slow frame kept for the window's close if it is among the window's slowest: the first ones were the lines before,
@@ -224,6 +243,9 @@ static void FrameClose(int64_t now)
         if (t > top) { top = t; topPart = p; }
     }
     if (g_fc.kept < CO_FC_FRAMES) g_fc.ms[g_fc.kept++] = (float)ms;
+    const double world = Ms(g_fc.extra[CO_FX_WORLD]) > Ms(g_fc.inside) ? Ms(g_fc.extra[CO_FX_WORLD]) - Ms(g_fc.inside) : 0.0;
+    if (g_fc.bodies) { g_fc.bodyFrames++; g_fc.bodySum += world; if (world > g_fc.bodyMost) g_fc.bodyMost = world; }
+    else { g_fc.quietFrames++; g_fc.quietSum += world; if (world > g_fc.quietMost) g_fc.quietMost = world; g_fc.quietOver += ms > CO_FC_TARGET_MS; }
     g_fc.frames++; g_fc.sum += ms; g_fc.timedSum += timed;
     if (ms > g_fc.worst) { g_fc.worst = ms; g_fc.worstTimed = timed; g_fc.worstTop = top; g_fc.worstTopPart = topPart; }
     if (ms > CO_FC_TARGET_MS) FrameCause(ms, timed);
@@ -248,7 +270,7 @@ static void Begin(int64_t now, int play, long mission)
         if (Ms(now - g_fc.windowAt) >= CO_FC_WINDOW_MS) { WindowClose(now); WindowStart(now); }
     }
     for (int p = 0; p < CO_FC_PARTS; p++) g_fc.part[p] = 0;
-    memset(g_fc.extra, 0, sizeof g_fc.extra); g_fc.grass = 0; g_fc.inside = 0;
+    memset(g_fc.extra, 0, sizeof g_fc.extra); g_fc.grass = 0; g_fc.bodies = 0; g_fc.inside = 0;
     g_fc.last = g_fc.at = now; g_fc.lastPlay = play; g_fc.mission = mission;
 }
 
@@ -307,6 +329,11 @@ void co_framecost_nested(int inner, int outer, int64_t since) { Nested(inner, ou
 void co_framecost_extra(int which, int64_t since) { Extra(which, since, co_framecost_now()); }
 void co_framecost_world(int enter) { World(enter, co_framecost_now()); }
 void co_framecost_grass(int out) { if (out && GetCurrentThreadId() == g_fc.thread) g_fc.grass = 1; }
+void co_framecost_bodies(int changed)
+{
+    if (!changed || GetCurrentThreadId() != g_fc.thread) return;
+    g_fc.bodies = 1; g_fc.bodySeen = 1; g_fc.bodyMission = g_fc.mission;
+}
 
 #ifdef CO_TEST
 void co_framecost_test_reset(int64_t freq) { memset((void*)&g_fc, 0, sizeof g_fc); g_fc.freq = freq; g_fc.cores = 16; }
@@ -323,6 +350,12 @@ void co_framecost_test_causes(uint32_t* over, uint32_t led[CO_FC_CAUSES], uint32
 double co_framecost_test_slow(int k, double* join, double* world, int* grass)
 { *join = g_fc.slow[k].extra[CO_FX_JOIN]; *world = g_fc.slow[k].extra[CO_FX_WORLD]; *grass = g_fc.slow[k].grass; return g_fc.slow[k].ms; }
 int co_framecost_test_window_lines(void) { return g_fc.windowLines; }
+int co_framecost_test_bodies(uint32_t* changed, double* changedMean, double* changedMost, uint32_t* quiet, double* quietMean, double* quietMost, uint32_t* quietOver)
+{
+    *changed = g_fc.lastBodyFrames; *changedMean = g_fc.lastBodyMean; *changedMost = g_fc.lastBodyMost;
+    *quiet = g_fc.lastQuietFrames; *quietMean = g_fc.lastQuietMean; *quietMost = g_fc.lastQuietMost; *quietOver = g_fc.lastQuietOver;
+    return g_fc.lastBodyLine;
+}
 int co_framecost_test_detail_lines(void) { return g_fc.detailLines; }
 void co_framecost_test_last(double* low1, double* low01, uint32_t* over25, uint32_t* over33, uint32_t* over1s, int* starved)
 { *low1 = g_fc.low1; *low01 = g_fc.low01; *over25 = g_fc.lastOver25; *over33 = g_fc.lastOver33; *over1s = g_fc.lastOver1s; *starved = g_fc.lastStarved; }

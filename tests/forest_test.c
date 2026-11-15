@@ -14,6 +14,8 @@ void CoXlTestStreamSetup(uintptr_t game, uint8_t* context, uint8_t* array, uint3
 void CoXlTestStreamSpawnSetup(void* spawn, uint8_t* pass);
 void CoXlTestStreamDue(uint32_t i, uint64_t unit);
 void CoXlTestStreamSpawnDue(void);
+uint32_t CoXlTestStreamChange(unsigned long long now, int layerBusy, unsigned long long* next);
+void CoXlTestStreamChangeAt(unsigned long long next);
 void CoXlTestStreamSpawned(uint32_t i, int* spawned, int* due);
 void CoXlTestStreamTrees(uint32_t* holds, uint32_t* most, uint32_t* cursor);
 int CoXlTestWindowTreesOver(float share);
@@ -164,6 +166,17 @@ int main(void)
     CoXlTestStreamSpawned(1, &spawned, &due);
     CHECK(spawned);
     CHECK(!CoXlTestWindowTreesOver(0.80f));
+
+    Start("the spawns go in a change frame, none while a layer fill runs, and a frame that spawned nothing leaves the next free");
+    Level(2);
+    CoXlTestStreamDue(0, unit);
+    CoXlTestStreamDue(1, unit);
+    unsigned long long next = 7;
+    CoXlTestStreamChangeAt(0);
+    CHECK(CoXlTestStreamChange(1000, 1, &next) == 0 && g_calls == 0 && next == 0);
+    CHECK(CoXlTestStreamChange(1001, 0, &next) == 1 && g_calls == 1 && next == 1251);
+    CoXlTestStreamSpawned(1, &spawned, &due);
+    CHECK(spawned);
 
     Start("the forest near full: the call waits and its records stay due");
     Forest(ROOM - ROOM / 10u + 1u, 0, ROOM);
