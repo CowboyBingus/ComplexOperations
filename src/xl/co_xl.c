@@ -1288,6 +1288,15 @@ void CoXlTestMoveWall(double ms, int mv) { MoveWallAdd(ms, mv); }
 void CoXlTestStampUnits(uint64_t* units, uint32_t n) { g_move.stUnit = units; g_move.stTemp = g_move.stUnits = n; g_move.stGone = 0; }
 int CoXlTestStampUnitsDestroy(double budget) { return MoveStampUnitsDestroy(budget); }
 uint32_t CoXlTestStampUnitsGone(void) { return g_move.stGone; }
+/* The stamp units' spawns for a tile at (cx, cy) (MoveStampsSelect): the stream table's poses for slot i, the plan's
+ * buckets (cell m, start[STAMP_PLAN_GRID^2 + 1] over cand), one frame within `budget` ms; then what it staged. */
+void CoXlTestStampPose(uint32_t i, const float* pose) { memcpy(g_streamPose[i], pose, sizeof g_streamPose[i]); }
+void CoXlTestStampPlan(float cell, const uint32_t* start, void* cand, uint32_t count)
+{ g_plan.cell = cell; memcpy(g_plan.start, start, sizeof g_plan.start); g_stamps.cand = (StampCandidate*)cand; g_plan.level = g_world.levels; g_plan.count = count; }
+void CoXlTestStampsSelectAt(float cx, float cy) { g_move.centre[0] = cx; g_move.centre[1] = cy; g_move.sel.on = 0; }
+int CoXlTestStampsSelect(uint64_t locs, uint32_t count, float half, double budget) { return MoveStampsSelect(locs, count, half, budget); }
+uint32_t CoXlTestStampsStaged(const uint8_t** loc, const uint32_t** index, const uint64_t** unit, uint32_t* temp)
+{ *loc = g_move.stLoc; *index = g_move.stIndex; *unit = g_move.stUnit; *temp = g_move.stTemp; return g_move.stCount; }
 void CoXlTestMoveWallRead(double* wall, int* mv, uint32_t* slow) { for (int k = 0; k < 3; k++) { wall[k] = g_moveCost.wall[k]; mv[k] = g_moveCost.wallMv[k]; } *slow = g_moveCost.slow; }
 void CoXlTestMoveWallClear(void) { memset(&g_moveCost, 0, sizeof g_moveCost); }
 void CoXlTestMoverNear(int state) { g_near.state = state; }

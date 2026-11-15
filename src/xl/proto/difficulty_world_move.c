@@ -59,6 +59,9 @@ enum { MV_IDLE, MV_PACKAGE, MV_STAMPS, MV_KICK, MV_SETUP, MV_LOOKUP, MV_REPLAY, 
 #define MOVE_STAMP_MARGIN 512.0f /* locations this far past the tile's texels: a stamp's terrain reaches ~256 m from it */
 #define MOVE_STAMP_REACH 256.0f /* a stamp's terrain reaches about this far from it: these go in first */
 #define MOVE_UNSTAMP_MS 2.0 /* game-thread time a frame for the stamp units' destroys */
+#define MOVE_SELECT_MS 2.0  /* game-thread time a frame for the stamp units' spawns (MoveStampsSelect) */
+/* MoveStampsSelect's place between frames: the table index, then the plan's pass, bucket row/column and entry. */
+typedef struct { int on, plan; LONG level; uint32_t i; int pass, j, ii; uint32_t e, planned, past, pastInner, failed, frames; double ms, longest; } MoveSel;
 
 typedef void (*MoveUpdateFn)(uint64_t level);
 typedef void (*MoveCraterUpdateFn)(void* system, float dt, uint64_t r8, uint64_t r9);
@@ -87,6 +90,7 @@ static struct
      * copies of their records, the real indices, their units, the counts the two ops read through pointers */
     uint8_t* stLoc; uint32_t* stIndex; uint64_t* stUnit; uint32_t stCount, stUnits, stTemp; int stamped;
     uint32_t stGone, stFrames; double stMs, stLongest; /* the stamp units' destroys so far, spread over frames */
+    MoveSel sel; /* the spawns so far, spread over frames */
     ULONGLONG since, started;
     uint8_t ctx[0xE8];
     uint8_t settings[0xD0];
@@ -367,86 +371,129 @@ static int MoveStampUnitsDestroy(double budget)
 }
 
 /* The locations whose stamps reach the cell's tile (their record xy +0 in generator metres, world + half), each with a
- * stamp unit of its own at the offset, copied for 0x2F. */
-static uint32_t MoveStampsSelect(uint64_t locs, uint32_t count, float half)
+ * stamp unit of its own at the offset, copied for 0x2F. A tile's ~32768 spawns took 83-120 ms in one frame, so a frame
+ * makes them within `budget` ms (at least one) and the next goes on from the same place: the same units in the same
+ * order. 1 done (g_move.stCount final), 0 more next frame, -1 the level's stamp data went in between. */
+static int MoveStampsSelect(uint64_t locs, uint32_t count, float half, double budget)
 {
-    g_move.stCount = 0; g_move.stUnits = 0; g_move.stTemp = 0; g_move.stGone = 0;
-    if (g_move.stLoc == NULL)
+    MoveSel* s = &g_move.sel;
+    if (!s->on)
     {
-        g_move.stLoc = (uint8_t*)VirtualAlloc(NULL, (size_t)MOVE_STAMPS_MAX * 0xE0, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        g_move.stIndex = (uint32_t*)VirtualAlloc(NULL, (size_t)MOVE_STAMPS_MAX * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        g_move.stUnit = (uint64_t*)VirtualAlloc(NULL, (size_t)MOVE_STAMPS_MAX * 8, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        if (g_move.stLoc == NULL || g_move.stIndex == NULL || g_move.stUnit == NULL) return 0;
+        g_move.stCount = 0; g_move.stUnits = 0; g_move.stTemp = 0; g_move.stGone = 0;
+        if (g_move.stLoc == NULL)
+        {
+            g_move.stLoc = (uint8_t*)VirtualAlloc(NULL, (size_t)MOVE_STAMPS_MAX * 0xE0, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            g_move.stIndex = (uint32_t*)VirtualAlloc(NULL, (size_t)MOVE_STAMPS_MAX * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            g_move.stUnit = (uint64_t*)VirtualAlloc(NULL, (size_t)MOVE_STAMPS_MAX * 8, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            if (g_move.stLoc == NULL || g_move.stIndex == NULL || g_move.stUnit == NULL) return 1;
+        }
+        if (!g_stream.captured || g_stream.level != g_worldLevel || g_stream.levels != g_world.levels)
+        { Note("difficulty: moving tiles: the streamer has no stamp poses for this level; the tile gets no stamp terrains"); return 1; }
+        memset(s, 0, sizeof *s);
+        s->on = 1; s->level = g_world.levels; s->plan = g_plan.level == g_world.levels && g_plan.count != 0; s->j = -1;
     }
-    if (!g_stream.captured || g_stream.level != g_worldLevel || g_stream.levels != g_world.levels)
-    { Note("difficulty: moving tiles: the streamer has no stamp poses for this level; the tile gets no stamp terrains"); return 0; }
+    else if (g_world.levels != s->level || !g_stream.captured || g_stream.level != g_worldLevel || g_stream.levels != s->level ||
+        (s->plan && g_plan.level != s->level))
+    { s->on = 0; return -1; }
     uint64_t world = MoveWorld();
     uintptr_t wi = 0, table = 0, spawn = 0;
     if (world == 0 || SafeRead(g_world.game + DIF_STREAM_INTERFACE, &wi, 8) || wi == 0 || SafeRead(wi + DIF_STREAM_TABLE, &table, 8) || table == 0 ||
-        SafeRead(table + DIF_STREAM_SPAWN_ENTRY, &spawn, 8) || spawn == 0) return 0;
+        SafeRead(table + DIF_STREAM_SPAWN_ENTRY, &spawn, 8) || spawn == 0)
+    { const int some = g_move.stTemp != 0; s->on = 0; return some ? -1 : 1; }
+    LARGE_INTEGER hz, t0, t;
+    QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
+    const LONGLONG limit = budget >= 1e6 ? INT64_MAX : (LONGLONG)(budget * (double)hz.QuadPart / 1000.0);
+    uint32_t made = 0;
+#define MOVE_SEL_YIELD() do { if (made != 0) { QueryPerformanceCounter(&t); if (t.QuadPart - t0.QuadPart >= limit) goto frame; } } while (0)
     const float reach = NEAR_SIDE / 2 + MOVE_STAMP_MARGIN;
     uint8_t rec[0xE0];
-    uint32_t failed = 0;
     const uint32_t tableEnd = g_win.on && g_win.level == g_stream.level ? g_win.base : count; /* window slots come from the plan below */
-    for (uint32_t i = 0; i < count && i < tableEnd && i < kStreamMaxLocations && g_move.stCount < MOVE_STAMPS_MAX; i++)
+    for (; s->i < count && s->i < tableEnd && s->i < kStreamMaxLocations && g_move.stCount < MOVE_STAMPS_MAX; s->i++)
     {
+        const uint32_t i = s->i;
         if (!g_streamPoseGood[i] || g_streamResource[i] == 0 || SafeRead(locs + (uint64_t)i * 0xE0, rec, sizeof rec)) continue;
         float at[2];
         memcpy(at, rec, 8);
         if (!isfinite(at[0]) || !isfinite(at[1])) continue;
         if (fabsf(at[0] - half - g_move.centre[0]) > reach || fabsf(at[1] - half - g_move.centre[1]) > reach) continue;
+        MOVE_SEL_YIELD();
         float pose[16];
         memcpy(pose, g_streamPose[i], sizeof pose);
         pose[13] += MOVE_STAMP_OFFSET;
         uint64_t unit = ((WorldStreamSpawnUnitFn)spawn)(world, g_streamResource[i], pose, 0, 0);
-        if (unit == 0) { failed++; continue; }
+        made++;
+        if (unit == 0) { s->failed++; continue; }
         memcpy(rec + 0xA8, &unit, 8);
         memcpy(g_move.stLoc + (size_t)g_move.stCount * 0xE0, rec, sizeof rec);
         g_move.stIndex[g_move.stCount] = i; g_move.stUnit[g_move.stUnits++] = unit;
         g_move.stCount++; g_move.stTemp = g_move.stUnits;
     }
-    /* the plan's stamps in reach (g_plan: buckets of the map in generator metres), with op 0x31's pose (WindowPose) */
-    uint32_t planned = 0, past = 0, pastInner = 0;
-    if (g_plan.level == g_world.levels && g_plan.count != 0)
+    s->i = kStreamMaxLocations; /* the table is done (also when the room filled) */
+    /* the plan's stamps in reach (g_plan: buckets of the map in generator metres), with op 0x31's pose (WindowPose); the
+     * cursor (pass, j, ii, e) resumes the loops where the last frame stopped, -1 / UINT32_MAX = enter that loop afresh */
+    if (s->plan)
     {
         const float cell = g_plan.cell, gx = g_move.centre[0] + half, gy = g_move.centre[1] + half;
         int i0 = (int)floorf((gx - reach) / cell), i1 = (int)floorf((gx + reach) / cell), j0 = (int)floorf((gy - reach) / cell), j1 = (int)floorf((gy + reach) / cell);
         /* pass 0: the stamps whose terrain reaches the tile (MOVE_STAMP_REACH past its texels); pass 1: the rest of the
          * margin. A full room then leaves out only the outer margin, never a stamp that shapes the tile. */
         const float inner = NEAR_SIDE / 2 + MOVE_STAMP_REACH;
-        for (int pass = 0; pass < 2; pass++)
-        for (int j = j0 < 0 ? 0 : j0; j <= j1 && j < STAMP_PLAN_GRID; j++)
-            for (int i = i0 < 0 ? 0 : i0; i <= i1 && i < STAMP_PLAN_GRID; i++)
+        for (; s->pass < 2; s->pass++, s->j = -1)
+        {
+            if (s->j < 0) { s->j = j0 < 0 ? 0 : j0; s->ii = -1; }
+            for (; s->j <= j1 && s->j < STAMP_PLAN_GRID; s->j++, s->ii = -1)
             {
-                int b = j * STAMP_PLAN_GRID + i;
-                for (uint32_t e = g_plan.start[b]; e < g_plan.start[b + 1]; e++)
+                if (s->ii < 0) { s->ii = i0 < 0 ? 0 : i0; s->e = UINT32_MAX; }
+                for (; s->ii <= i1 && s->ii < STAMP_PLAN_GRID; s->ii++, s->e = UINT32_MAX)
                 {
-                    const uint8_t* loc = g_stamps.cand[e].loc;
-                    float at[2]; memcpy(at, loc, 8);
-                    const float dx = fabsf(at[0] - half - g_move.centre[0]), dy = fabsf(at[1] - half - g_move.centre[1]);
-                    if (dx > reach || dy > reach || (pass == 0) != (dx <= inner && dy <= inner)) continue;
-                    if (g_move.stCount >= MOVE_STAMPS_MAX) { past++; pastInner += pass == 0; continue; }
-                    uint64_t holder = 0, resource = 0;
-                    memcpy(&holder, loc + DIF_STREAM_LOC_RESOURCE, 8);
-                    if (holder == 0 || SafeRead((uintptr_t)holder + 8, &resource, 8) || resource == 0) continue;
-                    float pose[16];
-                    WindowPose(loc, 2.0f * half, pose);
-                    pose[13] += MOVE_STAMP_OFFSET;
-                    uint64_t unit = ((WorldStreamSpawnUnitFn)spawn)(world, resource, pose, 0, 0);
-                    if (unit == 0) { failed++; continue; }
-                    memcpy(rec, loc, sizeof rec);
-                    memcpy(rec + 0xA8, &unit, 8);
-                    memcpy(g_move.stLoc + (size_t)g_move.stCount * 0xE0, rec, sizeof rec);
-                    g_move.stIndex[g_move.stCount] = 0xFFFFFFFFu; g_move.stUnit[g_move.stUnits++] = unit;
-                    g_move.stCount++; g_move.stTemp = g_move.stUnits; planned++;
+                    const int b = s->j * STAMP_PLAN_GRID + s->ii;
+                    if (s->e == UINT32_MAX) s->e = g_plan.start[b];
+                    for (; s->e < g_plan.start[b + 1]; s->e++)
+                    {
+                        const uint8_t* loc = g_stamps.cand[s->e].loc;
+                        float at[2]; memcpy(at, loc, 8);
+                        const float dx = fabsf(at[0] - half - g_move.centre[0]), dy = fabsf(at[1] - half - g_move.centre[1]);
+                        if (dx > reach || dy > reach || (s->pass == 0) != (dx <= inner && dy <= inner)) continue;
+                        if (g_move.stCount >= MOVE_STAMPS_MAX) { s->past++; s->pastInner += s->pass == 0; continue; }
+                        uint64_t holder = 0, resource = 0;
+                        memcpy(&holder, loc + DIF_STREAM_LOC_RESOURCE, 8);
+                        if (holder == 0 || SafeRead((uintptr_t)holder + 8, &resource, 8) || resource == 0) continue;
+                        MOVE_SEL_YIELD();
+                        float pose[16];
+                        WindowPose(loc, 2.0f * half, pose);
+                        pose[13] += MOVE_STAMP_OFFSET;
+                        uint64_t unit = ((WorldStreamSpawnUnitFn)spawn)(world, resource, pose, 0, 0);
+                        made++;
+                        if (unit == 0) { s->failed++; continue; }
+                        memcpy(rec, loc, sizeof rec);
+                        memcpy(rec + 0xA8, &unit, 8);
+                        memcpy(g_move.stLoc + (size_t)g_move.stCount * 0xE0, rec, sizeof rec);
+                        g_move.stIndex[g_move.stCount] = 0xFFFFFFFFu; g_move.stUnit[g_move.stUnits++] = unit;
+                        g_move.stCount++; g_move.stTemp = g_move.stUnits; s->planned++;
+                    }
                 }
             }
+        }
     }
-    Note("difficulty: moving tiles: %u stamp terrains for the tile (%u of them the plan's%s)", g_move.stCount, planned, past ? "; more in reach than the tile's room" : "");
-    if (past) Note("difficulty: moving tiles: %u of the plan's stamps in reach left out (room %u), %u of them within %.0f m of the tile", past, MOVE_STAMPS_MAX, pastInner, MOVE_STAMP_REACH);
-    if (failed) Note("difficulty: moving tiles: %u stamp units could not be made at the offset", failed);
+#undef MOVE_SEL_YIELD
+    QueryPerformanceCounter(&t);
+    s->on = 0;
+    {
+        const double ms = (double)(t.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+        s->frames++; s->ms += ms; if (ms > s->longest) s->longest = ms;
+    }
+    Note("difficulty: moving tiles: %u stamp terrains for the tile (%u of them the plan's%s); their units made over %u frames (%.0f ms in all, the longest frame %.1f ms)",
+        g_move.stCount, s->planned, s->past ? "; more in reach than the tile's room" : "", s->frames, s->ms, s->longest);
+    if (s->past) Note("difficulty: moving tiles: %u of the plan's stamps in reach left out (room %u), %u of them within %.0f m of the tile", s->past, MOVE_STAMPS_MAX, s->pastInner, MOVE_STAMP_REACH);
+    if (s->failed) Note("difficulty: moving tiles: %u stamp units could not be made at the offset", s->failed);
     if (g_move.stCount) { g_nearStampOffset[0] = 0.0f; g_nearStampOffset[1] = MOVE_STAMP_OFFSET; }
-    return g_move.stCount;
+    return 1;
+frame:
+    {
+        const double ms = (double)(t.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+        s->frames++; s->ms += ms; if (ms > s->longest) s->longest = ms;
+    }
+    return 0;
 }
 
 /* The level's 0x2F (op = 0x2F) or 0x65 record on the staging lists: locations pass+8 / count [pass+0x28] for both, units
@@ -870,6 +917,7 @@ static int MoveStart(void)
     g_move.stashed = 1;
     g_near.tex[0] = g_near.tex[1] = 0; g_matband.tex = 0; g_matband.pixels = NULL;
     InterlockedExchange(&g_moveBuilding, 1);
+    g_move.sel.on = 0;
     g_move.acquired = 0; g_move.merge = 0; g_move.cutNoted = 0; g_move.shipSeen = 0; g_move.waits = 0; g_move.frames = 0; g_move.started = GetTickCount64();
     g_move.state = MV_PACKAGE;
     Note("difficulty: moving tiles: building cell (%d, %d) at (%.0f, %.0f) for a player %.0f m from it; %d tiles live", g_move.cell[0], g_move.cell[1],
@@ -1298,14 +1346,19 @@ static void MoveTick(uint64_t level)
             if (++g_move.waits > 3600) MoveFail("the merge package did not load");
             return;
         }
-        g_move.waits = 0; g_move.stamped = 0; g_move.stCount = g_move.stUnits = 0;
+        if (!g_move.sel.on) { g_move.waits = 0; g_move.stamped = 0; g_move.stCount = g_move.stUnits = 0; }
         uint64_t locs = 0, countAt = 0; uint32_t count = 0;
         uint64_t rec = g_near.records + (uint64_t)g_move.at2F * 0x19B0u;
         if (SafeRead(rec + 8 + 8, &locs, 8) || SafeRead(rec + 8 + 0x28, &countAt, 8) || locs == 0 || countAt == 0 || SafeRead(countAt, &count, 4))
         { MoveFail("the 0x2F record's locations did not read"); return; }
         static int stamps = -1; /* HELLFORGE_XL_MOVE_STAMPS=0: no stamp terrains for the tile (0x63 draws none) */
         if (stamps < 0) { char t[4] = ""; stamps = !(GetEnvironmentVariableA("HELLFORGE_XL_MOVE_STAMPS", t, sizeof t) > 0 && t[0] == '0'); }
-        if (stamps) MoveStampsSelect(locs, count, g_near.world_size > 0 ? g_near.world_size / 2 : 8192.0f);
+        if (stamps)
+        {
+            const int r = MoveStampsSelect(locs, count, g_near.world_size > 0 ? g_near.world_size / 2 : 8192.0f, MOVE_SELECT_MS);
+            if (r < 0) { MoveFail("the level's stamp data went while the stamp units were made"); return; }
+            if (r == 0) return; /* the rest of the spawns next frame */
+        }
         if (g_move.stCount != 0 && !MoveStampsRecord(g_move.at2F, 0x2F)) { MoveFail("record 0x2F did not read"); return; }
         g_move.state = g_move.stCount != 0 ? MV_STAMPS : MV_KICK;
         if (g_move.state == MV_KICK && SafeRead(g_near.records + (uint64_t)g_move.at37 * 0x19B0u, g_move.one, sizeof g_move.one)) { MoveFail("record 0x37 did not read"); return; }
