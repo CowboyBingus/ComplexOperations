@@ -900,6 +900,7 @@ static int MoveArena(void)
     return 1;
 }
 
+static void MoveGroundStart(int slot);
 static int MoveStart(void)
 {
     uint64_t block = 0;
@@ -920,6 +921,7 @@ static int MoveStart(void)
     g_move.stashed = 1;
     g_near.tex[0] = g_near.tex[1] = 0; g_matband.tex = 0; g_matband.pixels = NULL;
     InterlockedExchange(&g_moveBuilding, 1);
+    MoveGroundStart(g_move.slot);
     g_move.sel.on = 0;
     g_move.acquired = 0; g_move.merge = 0; g_move.cutNoted = 0; g_move.shipSeen = 0; g_move.waits = 0; g_move.frames = 0; g_move.started = GetTickCount64();
     g_move.state = MV_PACKAGE;
@@ -971,6 +973,40 @@ static double MoveMsSince(LARGE_INTEGER* t)
     double ms = (double)(now.QuadPart - t->QuadPart) * 1000.0 / (double)hz.QuadPart;
     *t = now;
     return ms;
+}
+
+/* A slot's first heights copy (NearGroundOf) went into a fresh 32 MiB buffer, every page faulted in on the ready frame
+ * (14.8 ms in game against 1.2 ms into touched memory). The buffer is made and touched on a thread of its own while
+ * the tile builds; the ready state waits for it and the first slot without a buffer takes it. */
+static struct { HANDLE thread; volatile LONG done; uint16_t* buf; } g_groundPre;
+static DWORD WINAPI MoveGroundFault(LPVOID unused)
+{
+    (void)unused;
+    const size_t bytes = (size_t)4096 * 4096 * 2;
+    volatile uint8_t* b = (volatile uint8_t*)VirtualAlloc(NULL, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    for (size_t i = 0; b != NULL && i < bytes; i += 4096) b[i] = 0;
+    g_groundPre.buf = (uint16_t*)b;
+    MemoryBarrier();
+    InterlockedExchange(&g_groundPre.done, 1);
+    return 0;
+}
+static void MoveGroundStart(int slot)
+{
+    if (slot < 0 || slot >= NEAR_TILES_MAX || g_groundBuf[slot] != NULL || g_groundPre.thread != NULL || g_groundPre.buf != NULL) return;
+    InterlockedExchange(&g_groundPre.done, 0);
+    g_groundPre.thread = CreateThread(NULL, 0, MoveGroundFault, NULL, 0, NULL); /* none: NearGroundOf makes its own */
+}
+/* 1 while the buffer is being touched (a frame at a time); then `slot` gets it if it has none. */
+static int MoveGroundWait(int slot)
+{
+    if (g_groundPre.thread != NULL)
+    {
+        if (!g_groundPre.done) return 1;
+        WaitForSingleObject(g_groundPre.thread, INFINITE); /* past its last store */
+        CloseHandle(g_groundPre.thread); g_groundPre.thread = NULL;
+    }
+    if (slot >= 0 && slot < NEAR_TILES_MAX && g_groundBuf[slot] == NULL && g_groundPre.buf != NULL) { g_groundBuf[slot] = g_groundPre.buf; g_groundPre.buf = NULL; }
+    return 0;
 }
 
 static void MoveTileIn(uint64_t world)
@@ -1481,6 +1517,7 @@ static void MoveTick(uint64_t level)
     if (g_move.state == MV_READY)
     {
         if (MoveLayerWait()) return; /* the last change's grids first: the tile's slot buffers and grids are its */
+        if (MoveGroundWait(g_move.slot)) return;
         uint64_t world = 0;
         LARGE_INTEGER t; QueryPerformanceCounter(&t);
         if (NearReadyTile((uint64_t)(uintptr_t)g_move.ctx, &world)) return;

@@ -1374,6 +1374,14 @@ uint32_t CoXlTestStampsStaged(const uint8_t** loc, const uint32_t** index, const
 void CoXlTestMoveWallRead(double* wall, int* mv, uint32_t* slow) { for (int k = 0; k < 3; k++) { wall[k] = g_moveCost.wall[k]; mv[k] = g_moveCost.wallMv[k]; } *slow = g_moveCost.slow; }
 void CoXlTestMoveWallClear(void) { memset(&g_moveCost, 0, sizeof g_moveCost); }
 void CoXlTestMoverNear(int state) { g_near.state = state; }
+/* A slot's heights buffer touched off the game thread (proto/difficulty_world_move.c MoveGroundStart): start, the
+ * ready state's wait, the slot's buffer, the slot emptied, the thread out. */
+void CoXlTestGroundStart(int slot) { MoveGroundStart(slot); }
+int CoXlTestGroundWait(int slot) { return MoveGroundWait(slot); }
+uint16_t* CoXlTestGroundBuf(int slot) { return g_groundBuf[slot]; }
+void CoXlTestGroundClear(int slot) { if (g_groundBuf[slot] != NULL) VirtualFree(g_groundBuf[slot], 0, MEM_RELEASE); g_groundBuf[slot] = NULL; }
+int CoXlTestGroundRunning(void) { return g_groundPre.thread != NULL; }
+void* CoXlTestGroundThread(void) { return g_groundPre.thread; }
 uint32_t CoXlTestMoverFrames(void) { return g_move.frames; }
 /* The release's render-fence gate (proto/xl_free.c): the build's world, a tile's terrain handle, the pins asked again. */
 void CoXlTestMoverWorld(uint64_t world) { memcpy(g_move.ctx + 0x40, &world, 8); }

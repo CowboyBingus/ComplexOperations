@@ -4759,6 +4759,7 @@ static uint64_t NearMatReadAsync(uint64_t renderer, uint64_t src, uint64_t alloc
         typedef void** (*AllocFn)(uint64_t self, void** out, uint64_t bytes, uint64_t align);
         uint64_t vt = 0; AllocFn allocate = NULL;
         void* p = NULL;
+        LARGE_INTEGER hz, c0, c1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&c0);
         if (!SafeRead(alloc, &vt, 8) && vt != 0 && !SafeRead(vt + 0x30, &allocate, 8) && allocate != NULL)
         {
             void** r = allocate(alloc, &p, (uint64_t)4096 * 4096 * 4, 8);
@@ -4770,6 +4771,9 @@ static uint64_t NearMatReadAsync(uint64_t renderer, uint64_t src, uint64_t alloc
             *(uint64_t*)(uintptr_t)dst = (uint64_t)(uintptr_t)p;
             *(volatile uint8_t*)(uintptr_t)done = 1;
             if (src == g_matband.tex) g_matband.served = 1; else g_coarseMat.served = 1;
+            QueryPerformanceCounter(&c1); /* the spawn's frame: the allocator's fresh pages fault in under the copy */
+            Note("difficulty: near terrain: the material pixels served to the spawn's readback: 64 MiB in %.1f ms on the game thread",
+                (double)(c1.QuadPart - c0.QuadPart) * 1000.0 / (double)hz.QuadPart);
             return 0;
         }
         /* no memory from the world's allocator: the render target's own readback (the physics keep the game's map) */
