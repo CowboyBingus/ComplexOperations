@@ -1423,9 +1423,13 @@ uint16_t* CoXlTestGroundBuf(int slot) { return g_groundBuf[slot]; }
 void CoXlTestGroundClear(int slot) { if (g_groundBuf[slot] != NULL) VirtualFree(g_groundBuf[slot], 0, MEM_RELEASE); g_groundBuf[slot] = NULL; }
 int CoXlTestGroundRunning(void) { return g_groundPre.thread != NULL; }
 void* CoXlTestGroundThread(void) { return g_groundPre.thread; }
+/* The bounded wait for the job queue (proto/difficulty_world_terrain.c NearQueueWait) on a fake context's queue. */
+int CoXlTestQueueWait(uint64_t context, uint32_t* waits, uint32_t* quiet, uint32_t limit, uint32_t settle)
+{ return NearQueueWait(context, waits, quiet, limit, settle, "the test"); }
 /* MV_READY's bounded waits (proto/difficulty_world_move.c MoveReadyWait): a layer fill or a prefault that has not
- * finished, `age` ms into the state; the fakes are taken down after. */
-const char* CoXlTestReadyWait(int layerBusy, int groundBusy, ULONGLONG age)
+ * finished, the current wait begun `age` ms before (-1: none yet); `since` gets the wait's age after (-1: none). The
+ * fakes are taken down after. */
+const char* CoXlTestReadyWait(int layerBusy, int groundBusy, long long age, long long* since)
 {
     HANDLE never = CreateEventA(NULL, TRUE, FALSE, NULL);
     const int slot = g_move.slot;
@@ -1433,8 +1437,9 @@ const char* CoXlTestReadyWait(int layerBusy, int groundBusy, ULONGLONG age)
     if (layerBusy) { g_layerJob.thread = never; InterlockedExchange(&g_layerJob.running, 1); }
     if (groundBusy) { g_groundPre.thread = never; InterlockedExchange(&g_groundPre.done, 0); }
     const ULONGLONG now = GetTickCount64() + 1000000;
-    g_move.readySince = now - age;
+    g_move.waitSince = age < 0 ? 0 : now - (ULONGLONG)age;
     const char* why = MoveReadyWait(now);
+    *since = g_move.waitSince == 0 ? -1 : (long long)(now - g_move.waitSince);
     InterlockedExchange(&g_layerJob.running, 0); g_layerJob.thread = NULL;
     if (groundBusy) g_groundPre.thread = NULL;
     g_move.slot = slot;

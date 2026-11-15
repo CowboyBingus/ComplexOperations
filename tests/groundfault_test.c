@@ -16,7 +16,7 @@ uint16_t* CoXlTestGroundBuf(int slot);
 void CoXlTestGroundClear(int slot);
 int CoXlTestGroundRunning(void);
 void* CoXlTestGroundThread(void);
-const char* CoXlTestReadyWait(int layerBusy, int groundBusy, ULONGLONG age);
+const char* CoXlTestReadyWait(int layerBusy, int groundBusy, long long age, long long* since);
 
 typedef union { ULONG_PTR Flags; struct { ULONG_PTR Valid : 1; ULONG_PTR rest : 63; } b; } WsBlock;
 typedef struct { PVOID VirtualAddress; WsBlock VirtualAttributes; } WsInfo;
@@ -81,17 +81,20 @@ int main(void)
 
     CoXlTestGroundClear(2); CoXlTestGroundClear(3);
 
-    g_case = "MV_READY's waits: a frame more while the layer fill or the prefault runs, a failure once 60 s are past";
+    g_case = "MV_READY's waits: a frame more while the layer fill or the prefault runs, a failure 60 s after the wait began";
     {
-        const char* why = CoXlTestReadyWait(0, 0, 0);
-        CHECK(why == NULL);
-        why = CoXlTestReadyWait(1, 0, 59000);
+        long long since = 0;
+        const char* why = CoXlTestReadyWait(0, 0, 90000, &since);
+        CHECK(why == NULL && since == -1); /* both done: the wait's start cleared */
+        why = CoXlTestReadyWait(1, 0, -1, &since);
+        CHECK(why != NULL && why[0] == 0 && since == 0); /* a wait begins now, however long the state has lasted */
+        why = CoXlTestReadyWait(1, 0, 59000, &since);
+        CHECK(why != NULL && why[0] == 0 && since == 59000);
+        why = CoXlTestReadyWait(0, 1, 60000, &since);
         CHECK(why != NULL && why[0] == 0);
-        why = CoXlTestReadyWait(0, 1, 60000);
-        CHECK(why != NULL && why[0] == 0);
-        why = CoXlTestReadyWait(1, 1, 60001);
+        why = CoXlTestReadyWait(1, 1, 60001, &since);
         CHECK(why != NULL && strcmp(why, "the layer change did not finish") == 0); /* the layer's wait first */
-        why = CoXlTestReadyWait(0, 1, 60001);
+        why = CoXlTestReadyWait(0, 1, 60001, &since);
         CHECK(why != NULL && strcmp(why, "the ground buffer did not finish") == 0);
     }
     if (g_failed) { printf("groundfault: %d check(s) failed\n", g_failed); return 1; }

@@ -1362,7 +1362,7 @@ static struct {
     uint64_t tex[2], config[2], oldTex[2];
     uint32_t stepRecord[NEAR_STEPS]; int stepTile[NEAR_STEPS]; uint8_t stepKind[NEAR_STEPS], stepOp[NEAR_STEPS];
     int steps, step, building, tilesDrawn, tilesFailed;
-    uint8_t one[0x19B0]; uint8_t phase; int calls; uint32_t frames, waits;
+    uint8_t one[0x19B0]; uint8_t phase; int calls; uint32_t frames, waits, quiet;
     int loggedStep; /* a mid-mission build: the last step whose start was noted, + 1 */
     int stampLeave; /* the replayed 0x63 drew at the stamp offset: the cameras go back once its job is drained */
     uint32_t stampWaits;
@@ -2820,6 +2820,40 @@ static uint32_t NearQueued(uint64_t context)
     return n;
 }
 
+/* The queue's jobs dropped as the consumer drains them, without their renders: under the queue's ticket lock (+0 the next
+ * ticket, +8 the one served; 0xAB05D4 / 0xAB07F4, the producers' 0xF4A1BA / 0xF4A254), taken only when free. The count of
+ * jobs dropped, or -1 (no queue, or the lock held). */
+static int NearQueueDrop(uint64_t context)
+{
+    uint64_t queue = 0;
+    if (SafeRead(context + 0x50, &queue, 8) || queue == 0) return -1;
+    volatile LONG64* ticket = (volatile LONG64*)(uintptr_t)queue;
+    const LONG64 served = ticket[1];
+    if (InterlockedCompareExchange64(ticket, served + 1, served) != served) return -1;
+    volatile uint32_t* count = (volatile uint32_t*)(uintptr_t)(queue + 0x10);
+    const uint32_t n = *count;
+    *count = 0;
+    InterlockedExchangeAdd64(&ticket[1], 1);
+    return (int)n;
+}
+
+/* The queue empty, then `settle` frames for the consumer's last jobs: 1 wait, 0 done, -1 when it stayed non-empty (or did
+ * not read) for `limit` frames. The consumer (0xAB0590) drains every job a call and zeroes the count (0xAB07F0), so a
+ * queue that stays full is one it is not called for: the jobs, the replay's or the build's, are dropped before the
+ * failure path frees what they render through, so none runs later if the consumer comes back. */
+static int NearQueueWait(uint64_t context, uint32_t* waits, uint32_t* quiet, uint32_t limit, uint32_t settle, const char* what)
+{
+    if (NearQueued(context) != 0)
+    {
+        if (++*waits <= limit) return 1;
+        const int dropped = NearQueueDrop(context);
+        if (dropped >= 0) Note("difficulty: near terrain: %s: the job queue did not empty in %u frames; its %d jobs were dropped", what, limit, dropped);
+        else Note("difficulty: near terrain: %s: the job queue did not empty in %u frames; it did not read or its lock is held, so its jobs stay", what, limit);
+        return -1;
+    }
+    return ++*quiet < settle ? 1 : 0;
+}
+
 /* ---- Calibration (HELLFORGE_XL_NEAR_CALIBRATE=1, research): can the tile's heights be written from the CPU? -----------
  * RenderHeightmapVoronoi (0xF499B0) draws each cell as gui triangles (gui [R+0x110], [api+0xD0]+0x0 = exe 0x33D140:
  * gui, float3* p0, p1, p2, layer, float4* colour (255,0,0,0 from game 0x23C8540; quantized to bytes), material, uv*3
@@ -3014,7 +3048,7 @@ static int NearCalStep(uint64_t records, uint32_t end, uint64_t context, uint64_
 #define NEAR_SHIFT_RADIUS 128 /* the shift's box passes: 257 texels (~129 m), three of them */
 #define NEAR_GRID 1025 /* grid lines: texel -0.5, 4, 8, ..., 4092, 4095.5 */
 #define NEAR_BLOCKS ((NEAR_GRID - 1) / 2) /* 2 x 2 grid cells: a 4.5 m block */
-static struct { int phase; uint32_t id, polls, next, waits; uint16_t* coarse; float* low; float* delta; float* ring; double ms; int seq[4], seqN, seqI;
+static struct { int phase; uint32_t id, polls, next, waits, quiet; uint16_t* coarse; float* low; float* delta; float* ring; double ms; int seq[4], seqN, seqI;
     uint8_t* block; int allBlocks; uint32_t blocksCoarse; /* blocks drawn as two triangles (NearConformDraw) */
     volatile LONG planDone, planRunning; int planOk; ULONGLONG planSince; } g_conform;
 
@@ -5143,11 +5177,12 @@ static int NearConformStep(uint64_t records, uint32_t end, uint64_t context, uin
         if (r > 0)
         {
             if (++g_conform.seqI < g_conform.seqN) { g_near.step = g_conform.seq[g_conform.seqI]; g_near.calls = 0; return 1; }
-            g_conform.phase = 4; g_conform.waits = 0;
+            g_conform.phase = 4; g_conform.waits = g_conform.quiet = 0;
         }
         return 1;
     }
-    if (NearQueued(context) != 0 || ++g_conform.waits < 4) return g_conform.waits < 600 ? 1 : 0;
+    const int q = NearQueueWait(context, &g_conform.waits, &g_conform.quiet, 600, 4, "conform");
+    if (q != 0) return q > 0;
     g_conform.id = readback(g_near.tex[0]); g_conform.polls = 0; g_conform.phase = 5;
     return 1;
 }
@@ -6599,7 +6634,7 @@ static int TerrainNearReplay(uint64_t records, uint32_t end, uint32_t at, uint64
         {
             int d = NearStepDump(records, end, context, g, h);
             if (d < 0) { Note("difficulty: near terrain: a step dump failed; no tile"); g_stepDump.phase = 0; NearReplayEnd(0); return 0; }
-            if (d == 0 && g_near.step == g_near.steps) { g_near.state = NEAR_DRAIN; g_near.waits = 0; }
+            if (d == 0 && g_near.step == g_near.steps) { g_near.state = NEAR_DRAIN; g_near.waits = g_near.quiet = 0; }
             return 1;
         }
         int r = NearRunStep(records, end, context, g, h);
@@ -6615,13 +6650,15 @@ static int TerrainNearReplay(uint64_t records, uint32_t end, uint32_t at, uint64
             for (int s = 0; s < g_near.steps; s++) if (g_near.stepKind[s] == NEAR_RECORD && g_near.stepOp[s] == 0x64) g_stepDump.s64 = s;
             if (g_stepDump.s64 >= 0) { g_stepDump.back = g_near.step + 1; g_stepDump.phase = 1; g_stepDump.waits = 0; return 1; }
         }
-        if (r > 0 && ++g_near.step == g_near.steps) { g_near.state = NEAR_DRAIN; g_near.waits = 0; }
+        if (r > 0 && ++g_near.step == g_near.steps) { g_near.state = NEAR_DRAIN; g_near.waits = g_near.quiet = 0; }
         return 1;
     }
     if (g_near.state == NEAR_DRAIN)
     {
         /* the queue empty, then a few frames for the consumer's last jobs; then the readback (after them on the GPU) */
-        if (NearQueued(context) != 0 || ++g_near.waits < 4) { if (g_near.waits < 600) return 1; NearReplayEnd(0); return 0; }
+        const int q = NearQueueWait(context, &g_near.waits, &g_near.quiet, 600, 4, "the replay's drain");
+        if (q > 0) return 1;
+        if (q < 0) { NearReplayEnd(0); return 0; }
         NearReadbackFn readback = (NearReadbackFn)NearApi(0x10, 0x1A8);
         if (readback == NULL) { NearReplayEnd(0); return 0; }
         g_near.readId = readback(g_near.tex[0]);

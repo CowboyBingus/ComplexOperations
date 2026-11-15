@@ -78,11 +78,11 @@ static struct
     LONG level; int on, state, slot, cell[2], acquired, merge;
     uintptr_t levelPtr;
     float origin[2], centre[2];
-    uint32_t at2F, at37, at38, at4C, at66, frames, waits, calls;
+    uint32_t at2F, at37, at38, at4C, at66, frames, waits, calls, quiet;
     int pkgPending; uint32_t pkgFrames;
     uint32_t nodeOld; /* [R+0x18] when the merge began: a camera node destroyed before, never this build's */
     int cutNoted;     /* MoveBuildLeft has ended or noted this build */
-    ULONGLONG readySince; /* MV_READY entered: its waits on other threads are bounded from here */
+    ULONGLONG waitSince; /* MV_READY's current wait on another thread began (0: none): bounded from here */
     int shipSeen;     /* the ship was reached with this build left: its stamp units are never destroyed after that */
     int r108Out;      /* MoveTeardown's R+0x108: 0 none, 1 destroyed, 2 not in the world's list any more */
     uint32_t ringWaits; /* frames the stamp units' destroy waited for the async spawn ring */
@@ -1213,15 +1213,17 @@ static void MoveGroundStart(int slot)
 static int MoveGroundWait(int slot);
 /* MV_READY waits for the last layer change's fill (a thread, about 1.3 s of work on 4 threads below normal priority,
  * plus at most 8 x 200 ms for spawns reading its grids) and the ground prefault (8192 page touches, ~14 ms). 60 s is
- * many times both: past it the thread is hung, and the build fails rather than wait for the level's end. */
+ * many times both: past it the thread is hung, and the build fails rather than wait for the level's end. Counted from
+ * when the current wait began: a release in the state may start a healthy change late. */
 #define MOVE_READY_WAIT_MS 60000u
 /* MV_READY's waits: NULL when both are done, "" to wait a frame more, else why the build fails. */
 static const char* MoveReadyWait(ULONGLONG now)
 {
-    const int late = now - g_move.readySince > MOVE_READY_WAIT_MS;
-    if (MoveLayerWait()) return late ? "the layer change did not finish" : "";
-    if (MoveGroundWait(g_move.slot)) return late ? "the ground buffer did not finish" : "";
-    return NULL;
+    const int layer = MoveLayerWait();
+    if (!layer && !MoveGroundWait(g_move.slot)) { g_move.waitSince = 0; return NULL; }
+    if (g_move.waitSince == 0) g_move.waitSince = now;
+    if (now - g_move.waitSince <= MOVE_READY_WAIT_MS) return "";
+    return layer ? "the layer change did not finish" : "the ground buffer did not finish";
 }
 
 static int MoveGroundWait(int slot)
@@ -1686,12 +1688,14 @@ static void MoveTick(uint64_t level)
         if (g_near.state == NEAR_FAILED) { MoveFail("the replay failed"); return; }
         if (g_near.state != NEAR_SPAWN) return;
         MoveHold(0); /* NearReplayEnd unpublished the tile's textures */
-        g_move.waits = 0; g_move.state = MV_TEARDOWN;
+        g_move.waits = g_move.quiet = 0; g_move.state = MV_TEARDOWN;
         return;
     }
     if (g_move.state == MV_TEARDOWN)
     {
-        if (NearQueued((uint64_t)(uintptr_t)g_move.ctx) != 0 || ++g_move.waits < 3) { if (g_move.waits > 600) MoveFail("the job queue did not empty"); return; }
+        const int q = NearQueueWait((uint64_t)(uintptr_t)g_move.ctx, &g_move.waits, &g_move.quiet, 600, 3, "a build's teardown");
+        if (q < 0) MoveFail("the job queue did not empty");
+        if (q != 0) return;
         if (g_move.stamped)
         {
             if (!MoveStampsRecord(g_near.at65, 0x65)) { MoveFail("record 0x65 did not read"); return; }
@@ -1739,7 +1743,7 @@ static void MoveTick(uint64_t level)
     {
         if (g_matband.tex != 0 && (g_matband.holds < NEAR_MAT_HOLD || GetTickCount64() - g_matband.made < 100)) { g_matband.holds++; return; }
         if (!NearSpawnTile((uint64_t)(uintptr_t)g_move.ctx)) { MoveFail("the spawn failed"); return; }
-        g_move.state = MV_READY; g_move.readySince = GetTickCount64();
+        g_move.state = MV_READY; g_move.waitSince = 0;
         return;
     }
     if (g_move.state == MV_READY)
