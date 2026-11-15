@@ -39,7 +39,8 @@ static uint64_t WorldCheck(uint64_t world) { Log(1, world, 0, 0); if (g_worldOff
 static uint32_t UnitId(uint64_t unit, uint32_t index) { Log(2, unit, index, 0); Spin(3.0); return index % 4 == 0 ? 0 : index + 1000; }
 static char Live(uint32_t id) { Log(3, id, 0, 0); return (char)(id % 2 == 1); }
 static void Touch(uint32_t id) { Log(4, id, 0, 0); }
-static uint64_t Obj(uint32_t id, uint32_t zero) { Log(5, id, zero, 0); return (uint64_t)id * 16; }
+static uint8_t g_proxy[0x40], g_flagsAt[0x40];
+static uint64_t Obj(uint32_t id, uint32_t zero) { Log(5, id, zero, 0); return id == 1011 ? (uint64_t)(uintptr_t)g_proxy : (uint64_t)id * 16; }
 static void SetIndex(uint64_t obj, uint32_t index) { Log(6, obj, index, 0); }
 static uint64_t Mat(uint64_t obj, uint32_t hash) { Log(7, obj, hash, 0); return obj + 1; }
 static void Scalar(uint64_t mat, uint32_t hash, float v) { uint32_t bits; memcpy(&bits, &v, 4); Log(8, mat, hash, bits); }
@@ -126,6 +127,7 @@ int main(void)
     api[1] = (uint64_t)(uintptr_t)t8; api[3] = (uint64_t)(uintptr_t)t18; api[5] = (uint64_t)(uintptr_t)t28; api[10] = (uint64_t)(uintptr_t)t50; api[0x22] = (uint64_t)(uintptr_t)t110;
     uint64_t apiAt = (uint64_t)(uintptr_t)api; memcpy(g_image + 0x3326308u, &apiAt, 8);
     GameBytes();
+    { uint64_t at = (uint64_t)(uintptr_t)g_flagsAt; memcpy(g_proxy + 0x38, &at, 8); uint32_t flags = 0x83; memcpy(g_flagsAt + 0x20, &flags, 4); }
 
     g_case = "the reference: the game's call whole (phase B in the same call), its calls logged";
     Record();
@@ -168,6 +170,7 @@ int main(void)
         CHECK(same && k >= refN && m >= g_logN && checksRef == 1 && checks == 3);
     }
     CHECK(fake_host_logged("op 0x2F in") && fake_host_logged("for 3000 locations"));
+    CHECK(fake_host_logged("the first stamp terrain's render flags 0x83 (bits 0/1 1/1, bit 7 1)"));
 
     g_case = "in slices with the world there at once: the calls the reference's to the one";
     Record();

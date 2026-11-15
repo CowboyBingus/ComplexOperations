@@ -556,7 +556,7 @@ static const struct { uint32_t at; const char* bytes; } kMove2FPins[] = {
     {0xF44825u, "41 28 48 8B C8 41 FF 10 8B 44 24 20 41 FF C5 49 81 C4 E0 00 00 00 49 83 C6 0C 44 3B E8 0F 82 08"},
     {0xF44845u, "FF FF FF 32 C0 EB 02 B0 01"},
 };
-static struct { int pinned, phaseB, done; uint32_t batch, at, calls, slices; double msA, msB; } g_move2F;
+static struct { int pinned, phaseB, done, flagsRead; uint32_t batch, at, calls, slices, flags; double msA, msB; } g_move2F;
 
 static int Move2FPinned(void)
 {
@@ -625,6 +625,12 @@ static void Move2FPhaseB(uint64_t pass, uint64_t record, uint64_t context)
         if (id == 0) continue;
         ((IdOnlyFn)*(uint64_t*)(uintptr_t)(a18 + 0x450))(id);
         const uint64_t obj = ((ObjFn)*(uint64_t*)(uintptr_t)(a18 + 0x460))(id, 0);
+        if (!g_move2F.flagsRead) /* the show/hide call's flags (0x2BD140): [[obj+0x30]+0x2C], else [[obj+0x38]+0x20] */
+        {
+            uint64_t r30 = 0, r38 = 0;
+            g_move2F.flagsRead = !SafeRead(obj + 0x30, &r30, 8) && (r30 != 0 ? !SafeRead(r30 + 0x2C, &g_move2F.flags, 4) :
+                !SafeRead(obj + 0x38, &r38, 8) && r38 != 0 && !SafeRead(r38 + 0x20, &g_move2F.flags, 4)) ? 1 : -1;
+        }
         ((IndexFn)*(uint64_t*)(uintptr_t)(a110 + 0x18))(obj, i + 1);
         const uint64_t mat = ((MatFn)*(uint64_t*)(uintptr_t)(a110 + 0x10))(obj, 0xF2760503u);
         ((ScalarFn)*(uint64_t*)(uintptr_t)a28)(mat, 0xE0D994FAu, 0.0f);
@@ -640,6 +646,10 @@ static int MoveRun2FDone(uint32_t count)
 {
     Note("difficulty: moving tiles: op 0x2F in %u calls (%.1f ms) and %u slices of its last part (%.1f ms) for %u locations", g_move2F.calls, g_move2F.msA,
         g_move2F.slices, g_move2F.msB, count);
+    /* op 0x63's split hides stamps through the culling sets the flags' bits 0 and 1 name; bit 7's set it leaves */
+    if (g_move2F.flagsRead > 0) Note("difficulty: moving tiles: the first stamp terrain's render flags 0x%X (bits 0/1 %u/%u, bit 7 %u)", g_move2F.flags,
+        g_move2F.flags & 1, (g_move2F.flags >> 1) & 1, (g_move2F.flags >> 7) & 1);
+    else if (g_move2F.flagsRead < 0) Note("difficulty: moving tiles: the first stamp terrain's render flags did not read");
     uint64_t arena = 0;
     memcpy(&arena, g_move.ctx, 8);
     typedef void (*ArenaFn)(uint64_t arena);
