@@ -19,6 +19,8 @@ void CoXlTestStreamChangeAt(unsigned long long next);
 void CoXlTestStreamSpawned(uint32_t i, int* spawned, int* due);
 void CoXlTestStreamTrees(uint32_t* holds, uint32_t* most, uint32_t* cursor);
 int CoXlTestWindowTreesOver(float share);
+int CoXlTestStreamSpawnInto(uint32_t layer, double ms);
+uint32_t CoXlTestStreamLayerOf(uint32_t i);
 
 static int g_failed;
 static const char* g_case;
@@ -78,7 +80,7 @@ static uint8_t Spawn(uint8_t* pass, uint8_t* record, uint8_t* context)
     return 1;
 }
 
-static uint8_t g_context[0x100], g_pass[0x100], g_array[8 * 0xE0];
+static uint8_t g_context[0x100], g_pass[0x100], g_array[24 * 0xE0];
 /* A captured level of `count` locations, each with a stamp unit in the world above; none due yet. */
 static void Level(uint32_t count)
 {
@@ -177,6 +179,28 @@ int main(void)
     CHECK(CoXlTestStreamChange(1001, 0, &next) == 1 && g_calls == 1 && next == 1251);
     CoXlTestStreamSpawned(1, &spawned, &due);
     CHECK(spawned);
+
+    /* A change frame's stamps are rebuilt in one broad phase layer: each slot keeps the layer it went to, for its removal. */
+    Start("spawns into a broad phase layer tag their slots; a held call tags none; a pass cut by its time says so");
+    Level(3);
+    CoXlTestStreamDue(0, unit);
+    CoXlTestStreamDue(1, unit);
+    CHECK(CoXlTestStreamSpawnInto(7, 1.0e9) == 0 && g_calls == 1);
+    CHECK(CoXlTestStreamLayerOf(0) == 7 && CoXlTestStreamLayerOf(1) == 7 && CoXlTestStreamLayerOf(2) == 0);
+    CoXlTestStreamDue(2, unit);
+    CoXlTestStreamSpawnDue();                      /* no layer of its own: layer 4 */
+    CHECK(g_calls == 2 && CoXlTestStreamLayerOf(2) == 0 && CoXlTestStreamLayerOf(0) == 7);
+    Forest(ROOM, 0, ROOM);                         /* the forest full: the call waits */
+    Level(1);
+    CoXlTestStreamDue(0, unit);
+    CHECK(CoXlTestStreamSpawnInto(8, 1.0e9) == 0 && g_calls == 0 && CoXlTestStreamLayerOf(0) == 0);
+    Forest(1000, 0, ROOM);
+    Level(20);
+    for (uint32_t k = 0; k < 20; k++) CoXlTestStreamDue(k, unit);
+    CHECK(CoXlTestStreamSpawnInto(9, 0.0) == 1 && g_calls == 1);   /* one call of 16, then the time is used */
+    CHECK(CoXlTestStreamLayerOf(15) == 9 && CoXlTestStreamLayerOf(16) == 0);
+    CHECK(CoXlTestStreamSpawnInto(9, 0.0) == 0 && g_calls == 2);   /* the last 4: nothing left when it stops */
+    CHECK(CoXlTestStreamLayerOf(19) == 9);
 
     Start("the forest near full: the call waits and its records stay due");
     Forest(ROOM - ROOM / 10u + 1u, 0, ROOM);

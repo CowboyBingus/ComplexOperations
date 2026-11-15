@@ -58,7 +58,8 @@ enum { CO_FC_CAUSE_JOIN = CO_FC_PARTS, CO_FC_CAUSE_WORLD, CO_FC_CAUSE_REST, CO_F
 #define CO_FC_CAUSE_OTHERS 2             /* parts named in the causes line beside the four it always names */
 void co_framecost_grass(int out);
 /* The streamer added or removed stamp bodies in this frame (its change step, run before the world update). Each window
- * then splits the world update's own time between such frames and the others, once a mission had one. */
+ * then splits the world update's own time between such frames and the others, once a mission had one, and a slow
+ * frame's line says whether it was one: those hold a broad phase rebuild by design. */
 void co_framecost_bodies(int changed);
 
 #ifdef CO_TEST
@@ -76,6 +77,8 @@ void co_framecost_test_world(int enter, int64_t now);
 void co_framecost_test_causes(uint32_t* over, uint32_t led[CO_FC_CAUSES], uint32_t only[CO_FC_CAUSES]);
 /* The window being filled, its slow frame `k` (0 the slowest): its ms beside the AI joins, the world update and the far-grass flag. */
 double co_framecost_test_slow(int k, double* join, double* world, int* grass);
+/* Whether that frame was a streamer change frame. */
+int co_framecost_test_slow_bodies(int k);
 int co_framecost_test_window_lines(void);
 /* The last closed window's split: frames with a change, their mean and longest world update (own time), the same for
  * the frames without, and how many of those were over CO_FC_TARGET_MS. 0 when the window had no split line. */

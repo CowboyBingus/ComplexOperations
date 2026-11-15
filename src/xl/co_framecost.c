@@ -36,7 +36,7 @@ static struct
     uint32_t bodyFrames, quietFrames, quietOver; double bodySum, bodyMost, quietSum, quietMost; long bodyMission; int bodySeen;
     uint32_t lastBodyFrames, lastQuietFrames, lastQuietOver; double lastBodyMean, lastBodyMost, lastQuietMean, lastQuietMost; int lastBodyLine;
     /* the window's slowest frames over CO_FC_SLOW_MS, slowest first, noted at its close */
-    struct { double ms, timed, top, at, extra[CO_FX_COUNT]; int part, grass; const char* front; } slow[CO_FC_SLOW_LINES_WINDOW];
+    struct { double ms, timed, top, at, extra[CO_FX_COUNT]; int part, grass, bodies; const char* front; } slow[CO_FC_SLOW_LINES_WINDOW];
     /* the last window, for the tests */
     double low1, low01; uint32_t lastOver25, lastOver33, lastOver1s; int lastStarved;
     uint32_t lastOver16, lastLed[CO_FC_CAUSES], lastOnly[CO_FC_CAUSES];
@@ -191,7 +191,7 @@ static void SlowKeep(double ms, double timed, int topPart, double top, double at
     if (k == CO_FC_SLOW_LINES_WINDOW) return;
     memmove(&g_fc.slow[k + 1], &g_fc.slow[k], (CO_FC_SLOW_LINES_WINDOW - 1 - k) * sizeof g_fc.slow[0]);
     g_fc.slow[k].ms = ms; g_fc.slow[k].timed = timed; g_fc.slow[k].top = top; g_fc.slow[k].part = topPart; g_fc.slow[k].at = at;
-    g_fc.slow[k].front = Front(); g_fc.slow[k].grass = g_fc.grass;
+    g_fc.slow[k].front = Front(); g_fc.slow[k].grass = g_fc.grass; g_fc.slow[k].bodies = g_fc.bodies;
     for (int x = 0; x < CO_FX_COUNT; x++) g_fc.slow[k].extra[x] = Ms(g_fc.extra[x]);
 }
 
@@ -203,9 +203,9 @@ static void SlowLines(void)
         if (g_fc.detailLines >= CO_FC_DETAIL_LINES_SESSION) break;
         g_fc.slowNoted++;
         co_log("frame times: a %.1f ms frame (QPC; the game's window %s): timed parts (CoXlTick, the level update) %.2f ms (the most: %s %.2f ms), untimed %.1f ms; "
-            "%.1f s into the window; AI joins %.1f ms, world update %.1f ms, far-grass job %s", g_fc.slow[k].ms, g_fc.slow[k].front, g_fc.slow[k].timed,
+            "%.1f s into the window; AI joins %.1f ms, world update %.1f ms, far-grass job %s, streamer change frame %s", g_fc.slow[k].ms, g_fc.slow[k].front, g_fc.slow[k].timed,
             kPartNames[g_fc.slow[k].part], g_fc.slow[k].top, g_fc.slow[k].ms - g_fc.slow[k].timed, g_fc.slow[k].at, g_fc.slow[k].extra[CO_FX_JOIN],
-            g_fc.slow[k].extra[CO_FX_WORLD], g_fc.slow[k].grass ? "out" : "not out");
+            g_fc.slow[k].extra[CO_FX_WORLD], g_fc.slow[k].grass ? "out" : "not out", g_fc.slow[k].bodies ? "yes" : "no");
         if (++g_fc.detailLines == CO_FC_DETAIL_LINES_SESSION) co_log("frame times: %d slow-frame lines this session; the window lines go on", CO_FC_DETAIL_LINES_SESSION);
     }
     memset(g_fc.slow, 0, sizeof g_fc.slow);
@@ -349,6 +349,7 @@ void co_framecost_test_causes(uint32_t* over, uint32_t led[CO_FC_CAUSES], uint32
 { *over = g_fc.lastOver16; memcpy(led, g_fc.lastLed, sizeof g_fc.lastLed); memcpy(only, g_fc.lastOnly, sizeof g_fc.lastOnly); }
 double co_framecost_test_slow(int k, double* join, double* world, int* grass)
 { *join = g_fc.slow[k].extra[CO_FX_JOIN]; *world = g_fc.slow[k].extra[CO_FX_WORLD]; *grass = g_fc.slow[k].grass; return g_fc.slow[k].ms; }
+int co_framecost_test_slow_bodies(int k) { return g_fc.slow[k].bodies; }
 int co_framecost_test_window_lines(void) { return g_fc.windowLines; }
 int co_framecost_test_bodies(uint32_t* changed, double* changedMean, double* changedMost, uint32_t* quiet, double* quietMean, double* quietMost, uint32_t* quietOver)
 {

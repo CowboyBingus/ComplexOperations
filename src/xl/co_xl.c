@@ -95,6 +95,7 @@ static double HitchNow(void)
 #include "proto/difficulty_world_probe.c"
 #include "proto/difficulty_stream.c"
 #include "proto/difficulty_stream_window.c"
+#include "proto/difficulty_stream_layers.c"
 #include "proto/difficulty_world_destroy.c"
 #include "proto/difficulty_net_patience.c"
 #include "proto/difficulty_world_move.c"
@@ -1687,7 +1688,7 @@ uint32_t CoXlTestStreamScanFrames(int frames)
     g_stream.nextScan = 0;
     WorldStreamScanLocked(GetTickCount64());
     uint32_t done = 0;
-    for (int f = 0; frames < 0 ? g_streamDropCount > 0 : f < frames; f++) done += WorldStreamDrainLocked(kStreamChangeDrops, 1.0e9);
+    for (int f = 0; frames < 0 ? g_streamDropCount > 0 : f < frames; f++) done += WorldStreamDrainLocked(kStreamChangeDrops, 1.0e9, -1);
     ReleaseSRWLockExclusive(&g_streamLock);
     return done;
 }
@@ -1696,10 +1697,72 @@ void CoXlTestStreamScan(void) { CoXlTestStreamScanFrames(-1); }
 uint32_t CoXlTestStreamDrainMost(uint32_t most, double ms, uint32_t* waiting)
 {
     AcquireSRWLockExclusive(&g_streamLock);
-    uint32_t done = WorldStreamDrainLocked(most, ms);
+    uint32_t done = WorldStreamDrainLocked(most, ms, -1);
     *waiting = g_streamDropCount;
     ReleaseSRWLockExclusive(&g_streamLock);
     return done;
+}
+/* A drain of the stamps in broad phase layer `layer` alone: how many went, how many wait, and whether time cut it. */
+uint32_t CoXlTestStreamDrainLayer(uint32_t most, double ms, int layer, uint32_t* waiting, int* cut)
+{
+    AcquireSRWLockExclusive(&g_streamLock);
+    uint32_t done = WorldStreamDrainLocked(most, ms, layer);
+    *waiting = g_streamDropCount; *cut = g_stream.drainCut;
+    ReleaseSRWLockExclusive(&g_streamLock);
+    return done;
+}
+void CoXlTestStreamLayerSet(uint32_t i, uint32_t layer) { g_streamLayer[i] = (uint8_t)layer; }
+uint32_t CoXlTestStreamLayerOf(uint32_t i) { return g_streamLayer[i]; }
+/* Since the last note: change frames, with a backlog, cut short (removals, spawns), removals in them, and the change
+ * frames that drained layer 4 or 6..9 (drains[5]). */
+void CoXlTestStreamChangeStats(uint32_t* changes, uint32_t* backlogs, uint32_t* drainCuts, uint32_t* spawnCuts, uint32_t* removed, uint32_t drains[5])
+{
+    *changes = g_stream.changes; *backlogs = g_stream.backlogs; *drainCuts = g_stream.drainCuts; *spawnCuts = g_stream.spawnCuts;
+    *removed = g_stream.changeRemoved; memcpy(drains, g_stream.layerDrains, sizeof g_stream.layerDrains);
+}
+/* The 10 s note now, the slots set up counted as deferred. */
+void CoXlTestStreamNote(void)
+{
+    AcquireSRWLockExclusive(&g_streamLock);
+    if (g_stream.deferred == 0) g_stream.deferred = g_stream.count;
+    g_stream.nextNote = 1; WorldStreamNoteLocked(2);
+    ReleaseSRWLockExclusive(&g_streamLock);
+}
+/* The streamed layers (difficulty_stream_layers.c): their state cleared, then on or off over the image `exe` with
+ * the given originals (NULL keeps the one there). */
+void CoXlTestSlReset(void) { memset(&g_sl, 0, sizeof g_sl); }
+void CoXlTestSlSet(int on, uintptr_t exe, void* count, void* info, void* rule, void* create)
+{
+    g_sl.on = on; g_sl.exe = exe;
+    if (count) g_sl.countOrig = count;
+    if (info) g_sl.infoOrig = info;
+    if (rule) g_sl.ruleOrig = rule;
+    if (create) g_sl.createOrig = create;
+}
+int CoXlTestSlOn(void) { return g_sl.on; }
+const char* CoXlTestSlInstall(uintptr_t exe) { return SlInstall(exe); }
+int CoXlTestSlCount(void) { return SlCount(NULL); }
+void CoXlTestSlInfo(uint8_t layer, uint8_t* out) { SlInfo(NULL, layer, out); }
+void CoXlTestSlRule(const uint32_t* ids, int n, const uint8_t* bodies, uint8_t* out) { SlRule(NULL, ids, n, bodies, out); }
+void* CoXlTestSlCreate(void* writer, uint32_t* id) { return SlCreate(writer, id, NULL, NULL); }
+uint32_t CoXlTestSlLayerOf(uint32_t index) { return g_sl.layerOf[index]; }
+void CoXlTestSlFrame(uint32_t layer) { if (layer) SlFrameBegin(layer); else SlFrameEnd(0); }
+int CoXlTestSlFlushDue(uint64_t world) { return SlFlushDue(world); }
+int CoXlTestSlLeaves(uint32_t leaves[5]) { return SlLeaves(leaves); }
+void CoXlTestSlPick(const uint32_t leaves[5], const uint32_t queued[5], int* drain, uint32_t* spawn) { SlPick(leaves, queued, drain, spawn); }
+void CoXlTestSlCounts(long* created, long* marked, long* routed) { *created = g_sl.created; *marked = g_sl.marked; *routed = g_sl.routed; }
+/* The change step's layers as it would pick them now: the drained layer (-1: any) and the spawns' (0: none). */
+void CoXlTestStreamLayersPick(int* drain, uint32_t* spawn) { WorldStreamLayersLocked(drain, spawn); }
+/* One spawn pass into broad phase layer `layer` under `ms`, as a change frame makes it: whether time cut it short. */
+int CoXlTestStreamSpawnInto(uint32_t layer, double ms)
+{
+    AcquireSRWLockExclusive(&g_streamLock);
+    g_stream.spawnLayer = layer;
+    WorldStreamSpawnDueLocked(ms);
+    g_stream.spawnLayer = 0;
+    const int cut = g_stream.spawnCut;
+    ReleaseSRWLockExclusive(&g_streamLock);
+    return cut;
 }
 /* A change frame's removals under `ms`. */
 uint32_t CoXlTestStreamDrain(double ms, uint32_t* waiting) { return CoXlTestStreamDrainMost(kStreamChangeDrops, ms, waiting); }
