@@ -19,7 +19,7 @@ static struct
     int lastPlay, cores;
     long mission, budgetMission;
     int64_t part[CO_FC_PARTS]; /* the frame being closed: its parts so far */
-    int64_t extra[CO_FX_COUNT]; int grass;
+    int64_t extra[CO_FX_COUNT]; int grass, bodies;
     int64_t worldAt, inside; /* the world update under way since; ticks of parts and joins timed inside it this frame */
     volatile LONG64 offThread; /* ticks timed on other threads since the window began */
     CoFcContextFn context;
@@ -32,8 +32,32 @@ static struct
     double sum, worst, worstTimed, worstTop, timedSum;
     int worstTopPart;
     int windowLines, detailLines;
+    /* the world update's own time in the frames the streamer changed bodies in, and in the others; once a mission had one */
+    uint32_t bodyFrames, quietFrames, quietOver; double bodySum, bodyMost, quietSum, quietMost; long bodyMission; int bodySeen;
+    uint32_t lastBodyFrames, lastQuietFrames, lastQuietOver; double lastBodyMean, lastBodyMost, lastQuietMean, lastQuietMost; int lastBodyLine;
+    /* those change frames' whole time: the run's bound on them (each holds a rebuild and the streamer's work) */
+    uint32_t bodyOver, lastBodyOver; double bodyWholeSum, bodyWholeMost, lastBodyWholeMean, lastBodyWholeMost;
+    uint32_t bodyRoom, bodyRoomOver, lastBodyRoom, lastBodyRoomOver; /* of them, those whose budget had room */
+    int apart; uint32_t apartFrames, lastApart; /* frames kept out of both (co_framecost_apart): this one, the window's */
+    uint32_t bodyFloor, lastBodyFloor; double bodyFloorSum, bodyFloorMost, lastBodyFloorMean, lastBodyFloorMost; /* those at the floor, whole */
+    /* the streamer's budget inputs, kept over windows within a play: the last quiet frames' whole time, their world
+     * update's own time (running mean), and the frame just closed */
+    float recentQuiet[CO_FC_RECENT]; uint32_t recentN; double quietWorld; int lastBodies; double lastWorld;
+    /* the same ring with the far-grass frames in (the rule before they were kept out), the frame just closed's whole
+     * time and flags, and this frame's change kind (co_framecost_change) */
+    float recentAll[CO_FC_RECENT]; uint32_t recentAllN; double lastWhole; int lastGrass, lastWasApart, lastKind, kind;
+    /* the frame just closed after a change frame: that frame's kind, the two frames' world update, neither with a far-grass job or apart */
+    int lastAfter, lastAfterKind, pairClean; double pairWorld;
+    /* the window: frames with a far-grass job out and no change, by kind the change frames, and the change frames with a job out */
+    uint32_t grassFrames, grassOver, bodyGrass; double grassWorldSum, grassWorldMost, grassWholeSum;
+    uint32_t kindFrames[4]; double kindWorldSum[4], kindWorldMost[4], kindWholeSum[4];
+    uint32_t lastGrassFrames, lastBodyGrass, lastKindFrames[4]; double lastGrassWorldMean, lastKindWorldMean[4];
+    /* the window: after-change frames by the change frame's kind, and the change frames by kind and budget (1 room, 2 floor) */
+    uint32_t afterFrames[4], afterOver[4]; double afterWorldSum[4], afterWorldMost[4], afterWholeSum[4];
+    uint32_t kindBudget[4][3], kindBudgetOver[4][3];
+    uint32_t lastAfterFrames[4], lastAfterOver[4], lastKindBudget[4][3], lastKindBudgetOver[4][3]; double lastAfterWorldMean[4], lastAfterWorldMost[4];
     /* the window's slowest frames over CO_FC_SLOW_MS, slowest first, noted at its close */
-    struct { double ms, timed, top, at, extra[CO_FX_COUNT]; int part, grass; const char* front; } slow[CO_FC_SLOW_LINES_WINDOW];
+    struct { double ms, timed, top, at, extra[CO_FX_COUNT]; int part, grass, bodies; const char* front; } slow[CO_FC_SLOW_LINES_WINDOW];
     /* the last window, for the tests */
     double low1, low01; uint32_t lastOver25, lastOver33, lastOver1s; int lastStarved;
     uint32_t lastOver16, lastLed[CO_FC_CAUSES], lastOnly[CO_FC_CAUSES];
@@ -93,6 +117,87 @@ static void WindowStart(int64_t now)
     memset(g_fc.led, 0, sizeof g_fc.led); memset(g_fc.only, 0, sizeof g_fc.only);
     memset(g_fc.slow, 0, sizeof g_fc.slow);
     g_fc.sum = g_fc.worst = g_fc.worstTimed = g_fc.worstTop = g_fc.timedSum = 0; g_fc.worstTopPart = 0;
+    g_fc.bodyFrames = g_fc.quietFrames = g_fc.quietOver = 0; g_fc.bodySum = g_fc.bodyMost = g_fc.quietSum = g_fc.quietMost = 0;
+    g_fc.bodyOver = 0; g_fc.bodyWholeSum = g_fc.bodyWholeMost = 0; g_fc.bodyRoom = g_fc.bodyRoomOver = 0; g_fc.apartFrames = 0;
+    g_fc.bodyFloor = 0; g_fc.bodyFloorSum = g_fc.bodyFloorMost = 0;
+    g_fc.grassFrames = g_fc.grassOver = g_fc.bodyGrass = 0; g_fc.grassWorldSum = g_fc.grassWorldMost = g_fc.grassWholeSum = 0;
+    memset(g_fc.kindFrames, 0, sizeof g_fc.kindFrames); memset(g_fc.kindWorldSum, 0, sizeof g_fc.kindWorldSum);
+    memset(g_fc.kindWorldMost, 0, sizeof g_fc.kindWorldMost); memset(g_fc.kindWholeSum, 0, sizeof g_fc.kindWholeSum);
+    memset(g_fc.afterFrames, 0, sizeof g_fc.afterFrames); memset(g_fc.afterOver, 0, sizeof g_fc.afterOver);
+    memset(g_fc.afterWorldSum, 0, sizeof g_fc.afterWorldSum); memset(g_fc.afterWorldMost, 0, sizeof g_fc.afterWorldMost);
+    memset(g_fc.afterWholeSum, 0, sizeof g_fc.afterWholeSum);
+    memset(g_fc.kindBudget, 0, sizeof g_fc.kindBudget); memset(g_fc.kindBudgetOver, 0, sizeof g_fc.kindBudgetOver);
+}
+
+/* A change frame should hold the static layer's rebuild and the others should not: the two means apart say whether
+ * coalescing the streamer's changes took the rebuild out of the frames between. */
+static void BodiesLine(void)
+{
+    g_fc.lastBodyFrames = g_fc.bodyFrames; g_fc.lastQuietFrames = g_fc.quietFrames; g_fc.lastQuietOver = g_fc.quietOver;
+    g_fc.lastBodyMean = g_fc.bodyFrames ? g_fc.bodySum / g_fc.bodyFrames : 0; g_fc.lastBodyMost = g_fc.bodyMost;
+    g_fc.lastBodyWholeMean = g_fc.bodyFrames ? g_fc.bodyWholeSum / g_fc.bodyFrames : 0; g_fc.lastBodyWholeMost = g_fc.bodyWholeMost;
+    g_fc.lastBodyOver = g_fc.bodyOver; g_fc.lastBodyRoom = g_fc.bodyRoom; g_fc.lastBodyRoomOver = g_fc.bodyRoomOver; g_fc.lastApart = g_fc.apartFrames;
+    g_fc.lastBodyFloor = g_fc.bodyFloor; g_fc.lastBodyFloorMean = g_fc.bodyFloor ? g_fc.bodyFloorSum / g_fc.bodyFloor : 0;
+    g_fc.lastBodyFloorMost = g_fc.bodyFloorMost;
+    g_fc.lastQuietMean = g_fc.quietFrames ? g_fc.quietSum / g_fc.quietFrames : 0; g_fc.lastQuietMost = g_fc.quietMost;
+    g_fc.lastBodyLine = g_fc.bodySeen && g_fc.bodyMission == g_fc.mission;
+    if (!g_fc.lastBodyLine) return;
+    co_log("frame times, world update's own time by the streamer's body changes: %u frame(s) with a change, mean %.1f ms, the longest %.1f ms; "
+        "%u without, mean %.1f ms, the longest %.1f ms; %u of those over %.1f ms in all; the change frames whole: mean %.1f ms, the longest %.1f ms, %u over %.1f ms; "
+        "%u of them with room in their budget, %u of those over; %u at its floor: mean %.1f ms, the longest %.1f ms; "
+        "%u frame(s) kept out of both (a moving tile's render)",
+        g_fc.bodyFrames, g_fc.lastBodyMean, g_fc.bodyMost, g_fc.quietFrames, g_fc.lastQuietMean, g_fc.quietMost, g_fc.quietOver, CO_FC_TARGET_MS,
+        g_fc.lastBodyWholeMean, g_fc.bodyWholeMost, g_fc.bodyOver, CO_FC_TARGET_MS, g_fc.bodyRoom, g_fc.bodyRoomOver, g_fc.bodyFloor, g_fc.lastBodyFloorMean, g_fc.bodyFloorMost, g_fc.apartFrames);
+}
+
+/* The change frames by what they did, and the frames a far-grass bake job was out in (kept out of the quiet frames and
+ * their longest of 32): a removal's step cost and the bake's are told apart from the rest (ANALYSIS-r2a §2.3, §3.3). */
+static void KindsLine(void)
+{
+    static const char* const kKind[4] = {"", "removal only", "spawn only", "both"};
+    double world[4], whole[4];
+    for (int k = 1; k < 4; k++)
+    {
+        g_fc.lastKindFrames[k] = g_fc.kindFrames[k];
+        world[k] = g_fc.kindFrames[k] ? g_fc.kindWorldSum[k] / g_fc.kindFrames[k] : 0; whole[k] = g_fc.kindFrames[k] ? g_fc.kindWholeSum[k] / g_fc.kindFrames[k] : 0;
+        g_fc.lastKindWorldMean[k] = world[k];
+    }
+    g_fc.lastGrassFrames = g_fc.grassFrames; g_fc.lastBodyGrass = g_fc.bodyGrass;
+    g_fc.lastGrassWorldMean = g_fc.grassFrames ? g_fc.grassWorldSum / g_fc.grassFrames : 0;
+    if (!g_fc.lastBodyLine && g_fc.grassFrames == 0) return;
+    char kinds[3][96];
+    for (int k = 1; k < 4; k++)
+        snprintf(kinds[k - 1], sizeof kinds[0], "%u %s (world update mean %.1f ms, the longest %.1f ms; whole mean %.1f ms)", g_fc.kindFrames[k], kKind[k], world[k],
+            g_fc.kindWorldMost[k], whole[k]);
+    co_log("frame times, change frames by kind: %s, %s, %s; %u of them with a far-grass job out; %u frame(s) without a change with a far-grass job out "
+        "(world update mean %.1f ms, the longest %.1f ms; whole mean %.1f ms, %u over %.1f ms), kept out of the quiet frames and their longest of 32",
+        kinds[0], kinds[1], kinds[2], g_fc.bodyGrass, g_fc.grassFrames, g_fc.lastGrassWorldMean, g_fc.grassWorldMost,
+        g_fc.grassFrames ? g_fc.grassWholeSum / g_fc.grassFrames : 0.0, g_fc.grassOver, CO_FC_TARGET_MS);
+}
+
+/* The frames right after a change frame by its kind (kept out of the quiet frames: run 2c's ran 2.5-4.8 ms of world
+ * update over the change frames'), and the change frames over the target by kind and budget: a removal frame with
+ * room was chosen, one at the floor forced (difficulty_stream.c WorldStreamChangeLocked). */
+static void AfterLine(void)
+{
+    static const char* const kKind[4] = {"", "removal only", "spawn only", "both"};
+    char after[3][128];
+    for (int k = 0; k < 4; k++)
+    {
+        g_fc.lastAfterFrames[k] = g_fc.afterFrames[k]; g_fc.lastAfterOver[k] = g_fc.afterOver[k]; g_fc.lastAfterWorldMost[k] = g_fc.afterWorldMost[k];
+        g_fc.lastAfterWorldMean[k] = g_fc.afterFrames[k] ? g_fc.afterWorldSum[k] / g_fc.afterFrames[k] : 0;
+        memcpy(g_fc.lastKindBudget[k], g_fc.kindBudget[k], sizeof g_fc.kindBudget[k]); memcpy(g_fc.lastKindBudgetOver[k], g_fc.kindBudgetOver[k], sizeof g_fc.kindBudgetOver[k]);
+    }
+    if (!g_fc.lastBodyLine) return;
+    for (int k = 1; k < 4; k++)
+        snprintf(after[k - 1], sizeof after[0], "%u after %s (world update mean %.1f ms, the longest %.1f ms; whole mean %.1f ms, %u over %.1f ms)", g_fc.afterFrames[k],
+            kKind[k], g_fc.lastAfterWorldMean[k], g_fc.afterWorldMost[k], g_fc.afterFrames[k] ? g_fc.afterWholeSum[k] / g_fc.afterFrames[k] : 0.0, g_fc.afterOver[k], CO_FC_TARGET_MS);
+    co_log("frame times, the frames right after a change frame (none of their own; kept out of the quiet frames, their longest of 32 and the governor): %s, %s, %s",
+        after[0], after[1], after[2]);
+    co_log("frame times, change frames over %.1f ms by kind and budget: removal only chosen %u of %u, forced %u of %u; spawn only with room %u of %u, at the floor %u of %u; "
+        "both with room %u of %u, at the floor %u of %u", CO_FC_TARGET_MS, g_fc.kindBudgetOver[1][1], g_fc.kindBudget[1][1], g_fc.kindBudgetOver[1][2], g_fc.kindBudget[1][2],
+        g_fc.kindBudgetOver[2][1], g_fc.kindBudget[2][1], g_fc.kindBudgetOver[2][2], g_fc.kindBudget[2][2], g_fc.kindBudgetOver[3][1], g_fc.kindBudget[3][1],
+        g_fc.kindBudgetOver[3][2], g_fc.kindBudget[3][2]);
 }
 
 /* `count`'s parts beside the nav ones, the most first, CO_FC_CAUSE_OTHERS at most: the line stays under the log's 512. */
@@ -161,6 +266,9 @@ static void WindowClose(int64_t now)
         kPartNames[g_fc.worstTopPart], g_fc.worstTop, g_fc.over16, CO_FC_TARGET_MS, g_fc.over25, CO_FC_SLOW_MS, g_fc.over33, CO_FC_HITCH_MS, g_fc.over1s, g_fc.timedSum / g_fc.frames, offMs);
     co_log("frame times, CPU: the PC %.0f%% busy (%.1f of %d cores), the game %.1f cores, everything else %.1f%s; AI %d; the nearest garrison with living spawners %s",
         busyPct, sysCores, g_fc.cores, gameCores, elseCores, starved, ai, nestText);
+    BodiesLine();
+    KindsLine();
+    AfterLine();
 }
 
 /* A slow frame kept for the window's close if it is among the window's slowest: the first ones were the lines before,
@@ -172,7 +280,7 @@ static void SlowKeep(double ms, double timed, int topPart, double top, double at
     if (k == CO_FC_SLOW_LINES_WINDOW) return;
     memmove(&g_fc.slow[k + 1], &g_fc.slow[k], (CO_FC_SLOW_LINES_WINDOW - 1 - k) * sizeof g_fc.slow[0]);
     g_fc.slow[k].ms = ms; g_fc.slow[k].timed = timed; g_fc.slow[k].top = top; g_fc.slow[k].part = topPart; g_fc.slow[k].at = at;
-    g_fc.slow[k].front = Front(); g_fc.slow[k].grass = g_fc.grass;
+    g_fc.slow[k].front = Front(); g_fc.slow[k].grass = g_fc.grass; g_fc.slow[k].bodies = g_fc.bodies;
     for (int x = 0; x < CO_FX_COUNT; x++) g_fc.slow[k].extra[x] = Ms(g_fc.extra[x]);
 }
 
@@ -184,9 +292,9 @@ static void SlowLines(void)
         if (g_fc.detailLines >= CO_FC_DETAIL_LINES_SESSION) break;
         g_fc.slowNoted++;
         co_log("frame times: a %.1f ms frame (QPC; the game's window %s): timed parts (CoXlTick, the level update) %.2f ms (the most: %s %.2f ms), untimed %.1f ms; "
-            "%.1f s into the window; AI joins %.1f ms, world update %.1f ms, far-grass job %s", g_fc.slow[k].ms, g_fc.slow[k].front, g_fc.slow[k].timed,
+            "%.1f s into the window; AI joins %.1f ms, world update %.1f ms, far-grass job %s, streamer change frame %s", g_fc.slow[k].ms, g_fc.slow[k].front, g_fc.slow[k].timed,
             kPartNames[g_fc.slow[k].part], g_fc.slow[k].top, g_fc.slow[k].ms - g_fc.slow[k].timed, g_fc.slow[k].at, g_fc.slow[k].extra[CO_FX_JOIN],
-            g_fc.slow[k].extra[CO_FX_WORLD], g_fc.slow[k].grass ? "out" : "not out");
+            g_fc.slow[k].extra[CO_FX_WORLD], g_fc.slow[k].grass ? "out" : "not out", g_fc.slow[k].bodies ? "yes" : "no");
         if (++g_fc.detailLines == CO_FC_DETAIL_LINES_SESSION) co_log("frame times: %d slow-frame lines this session; the window lines go on", CO_FC_DETAIL_LINES_SESSION);
     }
     memset(g_fc.slow, 0, sizeof g_fc.slow);
@@ -224,6 +332,49 @@ static void FrameClose(int64_t now)
         if (t > top) { top = t; topPart = p; }
     }
     if (g_fc.kept < CO_FC_FRAMES) g_fc.ms[g_fc.kept++] = (float)ms;
+    const double world = Ms(g_fc.extra[CO_FX_WORLD]) > Ms(g_fc.inside) ? Ms(g_fc.extra[CO_FX_WORLD]) - Ms(g_fc.inside) : 0.0;
+    const int after = !g_fc.apart && !g_fc.bodies && g_fc.lastBodies != 0;
+    g_fc.lastAfter = after; g_fc.lastAfterKind = after ? g_fc.lastKind : 0;
+    g_fc.pairWorld = after ? g_fc.lastWorld + world : 0.0; g_fc.pairClean = after && !g_fc.grass && !g_fc.lastGrass && !g_fc.lastWasApart;
+    if (g_fc.apart) g_fc.apartFrames++;
+    else if (g_fc.bodies)
+    {
+        const int k = g_fc.kind & 3;
+        g_fc.kindFrames[k]++; g_fc.kindWorldSum[k] += world; g_fc.kindWholeSum[k] += ms; if (world > g_fc.kindWorldMost[k]) g_fc.kindWorldMost[k] = world;
+        const int budget = g_fc.bodies == CO_FC_BODIES_ROOM ? 1 : 2;
+        g_fc.kindBudget[k][budget]++; g_fc.kindBudgetOver[k][budget] += ms > CO_FC_TARGET_MS;
+        g_fc.bodyGrass += g_fc.grass != 0;
+        g_fc.bodyFrames++; g_fc.bodySum += world; if (world > g_fc.bodyMost) g_fc.bodyMost = world;
+        g_fc.bodyWholeSum += ms; if (ms > g_fc.bodyWholeMost) g_fc.bodyWholeMost = ms; g_fc.bodyOver += ms > CO_FC_TARGET_MS;
+        if (g_fc.bodies == CO_FC_BODIES_ROOM) { g_fc.bodyRoom++; g_fc.bodyRoomOver += ms > CO_FC_TARGET_MS; }
+        else { g_fc.bodyFloor++; g_fc.bodyFloorSum += ms; if (ms > g_fc.bodyFloorMost) g_fc.bodyFloorMost = ms; }
+    }
+    else if (g_fc.grass)
+    {
+        /* a far-grass bake job's frame (about 21 ms against 13 before, run 2a) would hold every change frame's budget
+         * at its floor for the next 32 quiet frames, as a tile's render did */
+        g_fc.grassFrames++; g_fc.grassWorldSum += world; g_fc.grassWholeSum += ms; g_fc.grassOver += ms > CO_FC_TARGET_MS;
+        if (world > g_fc.grassWorldMost) g_fc.grassWorldMost = world;
+        g_fc.recentAll[g_fc.recentAllN++ % CO_FC_RECENT] = (float)ms;
+    }
+    else if (after)
+    {
+        /* the change frame's after-cost: as a quiet frame it raised the quiet world update and their longest with the
+         * change rhythm (run 2c: 7.7-10.4 ms at change frames every other frame, 3.9-4.0 ms with few) */
+        const int k = g_fc.lastKind & 3;
+        g_fc.afterFrames[k]++; g_fc.afterWorldSum[k] += world; g_fc.afterWholeSum[k] += ms; g_fc.afterOver[k] += ms > CO_FC_TARGET_MS;
+        if (world > g_fc.afterWorldMost[k]) g_fc.afterWorldMost[k] = world;
+        g_fc.recentAll[g_fc.recentAllN++ % CO_FC_RECENT] = (float)ms;
+    }
+    else
+    {
+        g_fc.recentAll[g_fc.recentAllN++ % CO_FC_RECENT] = (float)ms;
+        g_fc.quietFrames++; g_fc.quietSum += world; if (world > g_fc.quietMost) g_fc.quietMost = world; g_fc.quietOver += ms > CO_FC_TARGET_MS;
+        g_fc.recentQuiet[g_fc.recentN++ % CO_FC_RECENT] = (float)ms;
+        g_fc.quietWorld = g_fc.recentN > 1 ? g_fc.quietWorld + (world - g_fc.quietWorld) / CO_FC_RECENT : world;
+    }
+    g_fc.lastBodies = g_fc.bodies; g_fc.lastWorld = world;
+    g_fc.lastWhole = ms; g_fc.lastGrass = g_fc.grass; g_fc.lastWasApart = g_fc.apart; g_fc.lastKind = g_fc.bodies ? g_fc.kind & 3 : 0;
     g_fc.frames++; g_fc.sum += ms; g_fc.timedSum += timed;
     if (ms > g_fc.worst) { g_fc.worst = ms; g_fc.worstTimed = timed; g_fc.worstTop = top; g_fc.worstTopPart = topPart; }
     if (ms > CO_FC_TARGET_MS) FrameCause(ms, timed);
@@ -241,14 +392,20 @@ static void Begin(int64_t now, int play, long mission)
     if (g_fc.worldAt) { g_fc.extra[CO_FX_WORLD] += now - g_fc.worldAt; g_fc.worldAt = now; }
     if (g_fc.lastPlay && (!play || mission != g_fc.mission) && g_fc.frames > 0)
     { SlowLines(); CausesLine(Ms(now - g_fc.windowAt)); } /* a window cut short still names its stalls and their causes */
-    if (play && (!g_fc.lastPlay || g_fc.windowAt == 0 || mission != g_fc.mission)) WindowStart(now); /* windows count play only */
+    if (play && (!g_fc.lastPlay || g_fc.windowAt == 0 || mission != g_fc.mission))
+    {
+        WindowStart(now); /* windows count play only */
+        g_fc.recentN = 0; g_fc.quietWorld = 0; g_fc.lastBodies = 0; /* a new play's frames say nothing of the last one's */
+        g_fc.recentAllN = 0; g_fc.lastWhole = 0; g_fc.lastGrass = g_fc.lastWasApart = g_fc.lastKind = 0;
+        g_fc.lastAfter = g_fc.lastAfterKind = g_fc.pairClean = 0; g_fc.pairWorld = 0;
+    }
     else if (play)
     {
         FrameClose(now);
         if (Ms(now - g_fc.windowAt) >= CO_FC_WINDOW_MS) { WindowClose(now); WindowStart(now); }
     }
     for (int p = 0; p < CO_FC_PARTS; p++) g_fc.part[p] = 0;
-    memset(g_fc.extra, 0, sizeof g_fc.extra); g_fc.grass = 0; g_fc.inside = 0;
+    memset(g_fc.extra, 0, sizeof g_fc.extra); g_fc.grass = 0; g_fc.bodies = 0; g_fc.inside = 0; g_fc.apart = 0; g_fc.kind = 0;
     g_fc.last = g_fc.at = now; g_fc.lastPlay = play; g_fc.mission = mission;
 }
 
@@ -313,6 +470,37 @@ double co_framecost_world_ms(void)
     return Ms(g_fc.extra[CO_FX_WORLD] + (g_fc.worldAt ? now - g_fc.worldAt : 0));
 }
 void co_framecost_grass(int out) { if (out && GetCurrentThreadId() == g_fc.thread) g_fc.grass = 1; }
+void co_framecost_apart(void) { if (GetCurrentThreadId() == g_fc.thread) g_fc.apart = 1; }
+void co_framecost_bodies(int changed)
+{
+    if (!changed || GetCurrentThreadId() != g_fc.thread) return;
+    if (changed > g_fc.bodies) g_fc.bodies = changed;
+    g_fc.bodySeen = 1; g_fc.bodyMission = g_fc.mission;
+}
+void co_framecost_change(int removed, int spawned)
+{
+    if (GetCurrentThreadId() == g_fc.thread) g_fc.kind |= (removed ? 1 : 0) | (spawned ? 2 : 0);
+}
+static double RingHi(const float* ring, uint32_t n)
+{
+    double hi = 0;
+    for (uint32_t k = 0; n >= CO_FC_RECENT && k < CO_FC_RECENT; k++) if (ring[k] > hi) hi = ring[k];
+    return hi;
+}
+void co_framecost_recent_all(CoFcRecent* r)
+{
+    r->quietHi = RingHi(g_fc.recentQuiet, g_fc.recentN); r->quietHiGrass = RingHi(g_fc.recentAll, g_fc.recentAllN);
+    r->quietWorld = g_fc.quietWorld; r->lastWorld = g_fc.lastWorld; r->lastWhole = g_fc.lastWhole;
+    r->lastBodies = g_fc.lastBodies; r->lastKind = g_fc.lastKind; r->lastGrass = g_fc.lastGrass; r->lastApart = g_fc.lastWasApart;
+    r->lastAfter = g_fc.lastAfter; r->lastAfterKind = g_fc.lastAfterKind; r->pairWorld = g_fc.pairWorld; r->pairClean = g_fc.pairClean;
+}
+int co_framecost_recent(double* quietHi, double* quietWorld, double* lastWorld)
+{
+    double hi = 0;
+    for (uint32_t k = 0; g_fc.recentN >= CO_FC_RECENT && k < CO_FC_RECENT; k++) if (g_fc.recentQuiet[k] > hi) hi = g_fc.recentQuiet[k];
+    *quietHi = hi; *quietWorld = g_fc.quietWorld; *lastWorld = g_fc.lastWorld;
+    return g_fc.lastBodies;
+}
 
 #ifdef CO_TEST
 void co_framecost_test_reset(int64_t freq) { memset((void*)&g_fc, 0, sizeof g_fc); g_fc.freq = freq; g_fc.cores = 16; }
@@ -328,8 +516,30 @@ void co_framecost_test_causes(uint32_t* over, uint32_t led[CO_FC_CAUSES], uint32
 { *over = g_fc.lastOver16; memcpy(led, g_fc.lastLed, sizeof g_fc.lastLed); memcpy(only, g_fc.lastOnly, sizeof g_fc.lastOnly); }
 double co_framecost_test_slow(int k, double* join, double* world, int* grass)
 { *join = g_fc.slow[k].extra[CO_FX_JOIN]; *world = g_fc.slow[k].extra[CO_FX_WORLD]; *grass = g_fc.slow[k].grass; return g_fc.slow[k].ms; }
+int co_framecost_test_slow_bodies(int k) { return g_fc.slow[k].bodies; }
+void co_framecost_test_bodies_whole(double* mean, double* most, uint32_t* over) { *mean = g_fc.lastBodyWholeMean; *most = g_fc.lastBodyWholeMost; *over = g_fc.lastBodyOver; }
+void co_framecost_test_bodies_room(uint32_t* room, uint32_t* over) { *room = g_fc.lastBodyRoom; *over = g_fc.lastBodyRoomOver; }
+uint32_t co_framecost_test_apart(void) { return g_fc.lastApart; }
+void co_framecost_test_bodies_floor(uint32_t* floors, double* mean, double* most) { *floors = g_fc.lastBodyFloor; *mean = g_fc.lastBodyFloorMean; *most = g_fc.lastBodyFloorMost; }
 int co_framecost_test_window_lines(void) { return g_fc.windowLines; }
+int co_framecost_test_bodies(uint32_t* changed, double* changedMean, double* changedMost, uint32_t* quiet, double* quietMean, double* quietMost, uint32_t* quietOver)
+{
+    *changed = g_fc.lastBodyFrames; *changedMean = g_fc.lastBodyMean; *changedMost = g_fc.lastBodyMost;
+    *quiet = g_fc.lastQuietFrames; *quietMean = g_fc.lastQuietMean; *quietMost = g_fc.lastQuietMost; *quietOver = g_fc.lastQuietOver;
+    return g_fc.lastBodyLine;
+}
 int co_framecost_test_detail_lines(void) { return g_fc.detailLines; }
+void co_framecost_test_kinds(uint32_t frames[4], double world[4], uint32_t* grass, double* grassWorld, uint32_t* bodyGrass)
+{
+    for (int k = 0; k < 4; k++) { frames[k] = g_fc.lastKindFrames[k]; world[k] = g_fc.lastKindWorldMean[k]; }
+    *grass = g_fc.lastGrassFrames; *grassWorld = g_fc.lastGrassWorldMean; *bodyGrass = g_fc.lastBodyGrass;
+}
+void co_framecost_test_after(uint32_t frames[4], double world[4], double most[4], uint32_t over[4])
+{
+    for (int k = 0; k < 4; k++) { frames[k] = g_fc.lastAfterFrames[k]; world[k] = g_fc.lastAfterWorldMean[k]; most[k] = g_fc.lastAfterWorldMost[k]; over[k] = g_fc.lastAfterOver[k]; }
+}
+void co_framecost_test_kind_over(uint32_t frames[4][3], uint32_t over[4][3])
+{ memcpy(frames, g_fc.lastKindBudget, sizeof g_fc.lastKindBudget); memcpy(over, g_fc.lastKindBudgetOver, sizeof g_fc.lastKindBudgetOver); }
 void co_framecost_test_last(double* low1, double* low01, uint32_t* over25, uint32_t* over33, uint32_t* over1s, int* starved)
 { *low1 = g_fc.low1; *low01 = g_fc.low01; *over25 = g_fc.lastOver25; *over33 = g_fc.lastOver33; *over1s = g_fc.lastOver1s; *starved = g_fc.lastStarved; }
 #endif
