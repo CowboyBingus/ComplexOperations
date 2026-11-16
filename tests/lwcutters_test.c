@@ -21,6 +21,7 @@ void CoXlTestLwCutSquad(int i, int state, int every, float x, float y);
 uint32_t CoXlTestLwCutCentres(const uint64_t* players, int count, const uint64_t* peer, float (*place)[2], int streamed, int host, int none, uint64_t now,
     float (*units)[2], uint32_t unitCount, float (*garrisons)[3], uint32_t garrisonCount, CoCutCentre* c, uint32_t* out);
 uint32_t CoXlTestLwCutAsked(int i, uint64_t now);
+uint32_t CoXlTestLwCutWait(int i, int cut, uint64_t now);
 int CoXlTestLwCutVerdict(int cut, uint32_t waitedMs);
 enum { WAITS, IS_CUT, GAMES, LATE };
 enum { OFFLINE = 1, PENDING = 2, ONLINE = 3 };
@@ -170,13 +171,19 @@ static void Gate(void)
     CHECK(CoXlTestLwGates(0, 1, 1, &places, &rooms, &retry) == 1 && places == 1 && rooms == 1);
     CoXlTestLwCutGate(g);
     CHECK(g[WAITS] == 3 && g[IS_CUT] == 1 && g[LATE] == 0 && g[4] < 5000);
+    /* refused by the room for 6 s with its trees cut in: no wait of this gate, so the tree below waits its 5 s */
+    CHECK(CoXlTestLwGates(0, 1, 0, &places, &rooms, &retry) == 0 && rooms == 1);
+    CoXlTestLwCutWaited(0, 6000);
+    CHECK(CoXlTestLwGates(0, 1, 0, &places, &rooms, &retry) == 0 && rooms == 1);
+    CoXlTestLwCutGate(g);
+    CHECK(g[IS_CUT] == 3 && g[LATE] == 0 && g[4] < 5000);
     /* another tree, and the wait runs out: the request goes as it would have, counted */
     g_makeAnswer = 0x81010502u; co_cutters_test_make(&d, (uintptr_t)exe + CO_CUTTERS_FOREST_RETURN);
     CHECK(CoXlTestLwGates(0, 1, 1, &places, &rooms, &retry) == 0);
     CoXlTestLwCutWaited(0, 5001);
     CHECK(CoXlTestLwGates(0, 1, 1, &places, &rooms, &retry) == 1 && places == 1);
     CoXlTestLwCutGate(g);
-    CHECK(g[WAITS] == 4 && g[IS_CUT] == 1 && g[LATE] == 1 && g[4] >= 5001 && g[4] < 10000);
+    CHECK(g[WAITS] == 4 && g[IS_CUT] == 3 && g[LATE] == 1 && g[4] >= 5001 && g[4] < 6000);
     /* no tick for over a second: the cutters are the game's and nothing waits */
     CHECK(co_cutters_tick(c, 1, GetTickCount() - 1500u, 0, &t) == 1);
     CHECK(CoXlTestLwGates(0, 1, 1, &places, &rooms, &retry) == 1);
@@ -276,6 +283,13 @@ int main(void)
     CHECK(CoXlTestLwCutAsked(3, 1000) == 0 && CoXlTestLwCutAsked(3, 3000) == 2000 && CoXlTestLwCutAsked(3, 8000) == 7000);
     CHECK(CoXlTestLwCutAsked(3, 13001) == 0 && CoXlTestLwCutAsked(3, 13500) == 499);
     CHECK(CoXlTestLwCutAsked(4, 50000) == 0 && CoXlTestLwCutAsked(4, 55000) == 5000 && CoXlTestLwCutAsked(3, 55000) == 0);
+    g_case = "the cut gate's wait: only the asks it refused, from the first of them";
+    CHECK(CoXlTestLwCutWait(5, 1, 1000) == 0 && CoXlTestLwCutWait(5, 1, 4000) == 0 && CoXlTestLwCutWait(5, 1, 8000) == 0);
+    CHECK(CoXlTestLwCutWait(5, 0, 9000) == 0 && CoXlTestLwCutWait(5, 0, 12000) == 3000 && CoXlTestLwCutWait(5, 0, 14100) == 5100);
+    CHECK(CoXlTestLwCutWait(5, 1, 15000) == 6000 && CoXlTestLwCutWait(5, 1, 16000) == 0 && CoXlTestLwCutWait(5, -1, 17000) == 0);
+    CHECK(CoXlTestLwCutWait(5, 0, 18000) == 0 && CoXlTestLwCutWait(5, -1, 19000) == 1000 && CoXlTestLwCutWait(5, 0, 20000) == 0);
+    CHECK(CoXlTestLwCutWait(6, 0, 20000) == 0 && CoXlTestLwCutWait(6, 0, 24000) == 4000 && CoXlTestLwCutWait(6, 0, 29001) == 0); /* asks 5 s apart: a new wait */
+    CHECK(CoXlTestLwCutWait(6, 0, 34001) == 5000);
     g_case = "what an ask gets";
     CHECK(CoXlTestLwCutVerdict(1, 0) == IS_CUT && CoXlTestLwCutVerdict(1, 60000) == IS_CUT);
     CHECK(CoXlTestLwCutVerdict(-1, 0) == GAMES && CoXlTestLwCutVerdict(-1, 60000) == GAMES);

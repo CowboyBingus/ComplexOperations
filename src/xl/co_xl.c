@@ -625,7 +625,8 @@ void CoXlTestLwCutSquad(int i, int state, int every, float x, float y)
 }
 uint32_t CoXlTestLwCutAsked(int i, uint64_t now) { return LwCutAsked(i, now); }
 void CoXlTestLwCutMode(int mode) { g_lwCut.on = mode != 0; g_lwCut.mode = mode; memset(g_lwCut.gate, 0, sizeof g_lwCut.gate); g_lwCut.gateLongest = 0; }
-void CoXlTestLwCutWaited(int i, uint32_t ms) { g_lwCutAsk[i].first -= ms; }
+void CoXlTestLwCutWaited(int i, uint32_t ms) { g_lwCutAsk[i].first -= ms; if (g_lwCutAsk[i].cut != 0) g_lwCutAsk[i].cut -= ms; }
+uint32_t CoXlTestLwCutWait(int i, int cut, uint64_t now) { return LwCutWaited(i, cut, now); }
 void CoXlTestLwCutGate(uint32_t* five) { memcpy(five, g_lwCut.gate, sizeof g_lwCut.gate); five[4] = g_lwCut.gateLongest; }
 int CoXlTestLwCutVerdict(int cut, uint32_t waitedMs) { return LwCutVerdict(cut, waitedMs); }
 /* The launch measurements: a navigator handle's place in its pool, a watched member's samples a second apart (`reset`

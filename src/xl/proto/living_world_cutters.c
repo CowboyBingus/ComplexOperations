@@ -20,7 +20,8 @@ static struct
     CoCutHeld held[EVT_MAX_PLAYERS];
     uint32_t gate[4], gateLongest; /* requests by LW_CUT_ verdict since the start; the longest wait in ms */
 } g_lwCut;
-static struct { ULONGLONG first, last; } g_lwCutAsk[LW_SQUADS_MAX]; /* a squad's asks to come online: this wait's first, the last */
+/* a squad's asks to come online: this wait's first, the last; the first of the asks the cut gate refused, 0 with none */
+static struct { ULONGLONG first, last, cut; } g_lwCutAsk[LW_SQUADS_MAX];
 
 /* Squad `i` asks at `now`: how long it has waited, in ms. Asks over LW_CUT_ASK_MS apart are separate waits. */
 static uint32_t LwCutAsked(int i, ULONGLONG now)
@@ -28,6 +29,18 @@ static uint32_t LwCutAsked(int i, ULONGLONG now)
     if (g_lwCutAsk[i].last == 0 || now - g_lwCutAsk[i].last > LW_CUT_ASK_MS) g_lwCutAsk[i].first = now;
     g_lwCutAsk[i].last = now;
     return (uint32_t)(now - g_lwCutAsk[i].first);
+}
+/* Squad `i` asks at `now` and the cut gate answers `cut`: how long this gate has held it, in ms, from the first ask it
+ * refused. The other gates' refusals before that (sight, room, placement) are no wait for its trees: counted in, a
+ * squad refused elsewhere for 5 s went uncut at once when its next place was not cut in yet. */
+static uint32_t LwCutWaited(int i, int cut, ULONGLONG now)
+{
+    if (g_lwCutAsk[i].last == 0 || now - g_lwCutAsk[i].last > LW_CUT_ASK_MS) g_lwCutAsk[i].cut = 0; /* a new wait */
+    (void)LwCutAsked(i, now);
+    const uint32_t waited = g_lwCutAsk[i].cut != 0 ? (uint32_t)(now - g_lwCutAsk[i].cut) : 0;
+    if (cut != 0) g_lwCutAsk[i].cut = 0;
+    else if (g_lwCutAsk[i].cut == 0) g_lwCutAsk[i].cut = now;
+    return waited;
 }
 /* What an ask gets, from co_cutters_cut's answer and the wait so far: only a place not cut in yet waits, and only
  * LW_CUT_WAIT_MS. */
@@ -48,8 +61,9 @@ static int LwCutReady(const LwSquad* q)
 {
     if (!g_lwCut.on || g_lwCut.mode < 2) return 1;
     uint32_t waiting = 0;
-    const uint32_t waited = LwCutAsked((int)(q - g_lwSquads), GetTickCount64());
-    const int verdict = LwCutVerdict(co_cutters_cut(q->pos[0], q->pos[1], LW_CUT_PLACE_M, &waiting), waited);
+    const int cut = co_cutters_cut(q->pos[0], q->pos[1], LW_CUT_PLACE_M, &waiting);
+    const uint32_t waited = LwCutWaited((int)(q - g_lwSquads), cut, GetTickCount64());
+    const int verdict = LwCutVerdict(cut, waited);
     g_lwCut.gate[verdict]++;
     if (verdict != LW_CUT_GAMES && verdict != LW_CUT_WAITS && waited > g_lwCut.gateLongest) g_lwCut.gateLongest = waited;
     return verdict != LW_CUT_WAITS;
