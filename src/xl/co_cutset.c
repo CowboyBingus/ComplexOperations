@@ -244,7 +244,7 @@ void co_cutset_tick(CoCutSet* s, const CoCutCentre* centres, uint32_t count, uin
     if (nowMs == 0) nowMs = 1;
     s->now = nowMs; s->dirty = 1;
     if (count > CO_CUTSET_CENTRES) count = CO_CUTSET_CENTRES;
-    if (removes > CO_CUTSET_BATCH) removes = CO_CUTSET_BATCH;
+    if (removes > CO_CUTSET_REMOVES_MOST) removes = CO_CUTSET_REMOVES_MOST;
     const uint32_t most = s->adds < CO_CUTSET_ADDS ? s->adds : CO_CUTSET_ADDS;
     uint32_t n = 0;
     for (uint32_t i = 0; i < count; i++) if (Usable(&centres[i])) Mark(s, &centres[i]);
@@ -335,12 +335,76 @@ int co_cutset_player(CoCutHeld* held, uint32_t slots, uint64_t peer, int reads, 
     }
     if (reads && isfinite(x) && isfinite(y))
     {
+        float vx = 0.0f, vy = 0.0f;
+        if (h != NULL && nowMs == h->at) { vx = h->vx; vy = h->vy; } /* read twice in a tick: no time to take a speed from */
+        else if (h != NULL && nowMs - h->at <= CO_CUTSET_LEAD_GAP_MS)
+        {
+            const float dt = (float)(nowMs - h->at) / 1000.0f, ux = (x - h->x) / dt, uy = (y - h->y) / dt;
+            /* half the last speed and half this one: one late place does not throw the lead about */
+            if (ux * ux + uy * uy <= CO_CUTSET_LEAD_FASTEST * CO_CUTSET_LEAD_FASTEST) { vx = 0.5f * (h->vx + ux); vy = 0.5f * (h->vy + uy); }
+        }
         if (h == NULL) h = spare;
-        if (h != NULL) *h = (CoCutHeld){peer, x, y, nowMs, 1};
+        if (h != NULL) *h = (CoCutHeld){peer, x, y, vx, vy, nowMs, 1};
         place[0] = x; place[1] = y;
         return 1;
     }
     if (h == NULL || nowMs - h->at > CO_CUTSET_HOLD_MS) return 0;
     place[0] = h->x; place[1] = h->y;
     return 2;
+}
+
+int co_cutset_lead(const CoCutHeld* held, uint32_t slots, uint64_t peer, float (*ahead)[2])
+{
+    for (uint32_t i = 0; i < slots; i++)
+    {
+        const CoCutHeld* h = &held[i];
+        if (!h->used || h->peer != peer) continue;
+        if (!(h->vx * h->vx + h->vy * h->vy >= CO_CUTSET_LEAD_SLOWEST * CO_CUTSET_LEAD_SLOWEST)) return 0;
+        const float t = (float)CO_CUTSET_LEAD_MS / 1000.0f;
+        ahead[0][0] = h->x + 0.5f * t * h->vx; ahead[0][1] = h->y + 0.5f * t * h->vy;
+        ahead[1][0] = h->x + t * h->vx; ahead[1][1] = h->y + t * h->vy;
+        return 2;
+    }
+    return 0;
+}
+
+int co_cutset_holds(const CoCutCentre* centres, uint32_t count, float x, float y, float need)
+{
+    for (uint32_t i = 0; i < count; i++)
+    {
+        const float dx = x - centres[i].x, dy = y - centres[i].y;
+        if (Usable(&centres[i]) && sqrtf(dx * dx + dy * dy) + need <= centres[i].in) return 1;
+    }
+    return 0;
+}
+
+uint32_t co_cutset_removes(uint32_t added, int queued, uint32_t most)
+{
+    if (most > CO_CUTSET_REMOVES_MOST) most = CO_CUTSET_REMOVES_MOST;
+    if (queued >= CO_CUTSET_QUEUE_SHORT) return 0;
+    uint32_t n = queued < 0 ? CO_CUTSET_REMOVES : CO_CUTSET_SCANS / (added > 0 ? added : 1u);
+    if (n < CO_CUTSET_REMOVES) n = CO_CUTSET_REMOVES;
+    return n < most ? n : most;
+}
+
+uint32_t co_cutset_adds(int queued, uint32_t most)
+{
+    if (queued < 0) return most;
+    const uint32_t least = most < CO_CUTSET_ADDS_LEAST ? most : CO_CUTSET_ADDS_LEAST;
+    const uint32_t room = queued >= CO_CUTSET_QUEUE_ROOM ? 0u : (uint32_t)(CO_CUTSET_QUEUE_ROOM - queued);
+    return room < least ? least : room < most ? room : most;
+}
+
+uint32_t co_cutset_flush(CoCutSet* s, uint32_t* cursor, uint32_t* out, uint32_t room)
+{
+    uint32_t n = 0;
+    while (*cursor < CELLS && n < room)
+    {
+        const CoCutCell* c = &s->cell[*cursor];
+        uint32_t r = c->pending != 0 ? c->head : 0;
+        for (; r != 0 && n < room; r = s->rec[r - 1].next)
+            if ((s->flag[r - 1] & (F_WANTED | F_ON)) == F_WANTED) { Lit(s, r - 1); s->added++; out[n++] = s->rec[r - 1].handle; }
+        if (r == 0 || c->pending == 0) (*cursor)++; /* a cell left with some waits for the next call */
+    }
+    return n;
 }

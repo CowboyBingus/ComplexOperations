@@ -11,10 +11,20 @@
 #define CO_CUTSET_CELL 32.0f        /* a grid cell's side in metres: about 30 trees at 0.03 a m2 */
 #define CO_CUTSET_GRID 512          /* cells a side, 16 km; a place past it falls in the edge cell */
 #define CO_CUTSET_SLOTS (1u << 20)  /* pool slots: the mod's early room, the most that leaves a generation bit */
-#define CO_CUTSET_CENTRES 128       /* 8 players and 120 online squads; one inside a player's reach needs none */
+#define CO_CUTSET_CENTRES 512       /* players and their leads, squads, garrisons, units; one inside another's reach needs none */
 #define CO_CUTSET_BATCH 64          /* handles one 0x812AE0 call takes here, as the destroy's batches (0x815D04) */
 #define CO_CUTSET_ADDS 512          /* most adds a tick: 2048 a second at 4 Hz against a need of about 1230 */
-#define CO_CUTSET_REMOVES 16        /* removes a tick: each scans every added cutter, and one left on is harmless */
+#define CO_CUTSET_REMOVES 16        /* the fewest removes a tick with a short queue: each scans every added cutter */
+#define CO_CUTSET_REMOVES_MOST 256  /* the most a tick: a player at 45 m/s leaves about 110 trees a tick behind */
+/* Each remove scans the AI world's added cutters twice (0xBE8D32 on the game thread, 0xC45810 in the run), so a tick's
+ * removes are held to this many entries scanned: about 0.75 ms of the tick's frame at the game thread's 0.5 ns an
+ * entry (75 us a remove at 150 000). With the AI world's queue this long the removes wait for the run to catch up. */
+#define CO_CUTSET_SCANS 1500000u
+#define CO_CUTSET_QUEUE_SHORT 256
+/* A tick's adds keep the AI world's queue under the drain's start (CO_AIB_DRAIN_QUEUE 1024): a landing's 3 000 trees
+ * go over seconds at the runs' pace instead of 8 ms drain frames. The least still goes, so units' discs move on. */
+#define CO_CUTSET_QUEUE_ROOM 768
+#define CO_CUTSET_ADDS_LEAST 64
 #define CO_CUTSET_CAP 48000         /* most cutters switched on: 8 player discs hold about 19 000 */
 #define CO_CUTSET_LEAVE_MS 5000     /* a cell out of every centre's reach this long before its cutters go */
 #define CO_CUTSET_TICK_MS 250
@@ -23,6 +33,23 @@
 #define CO_CUTSET_SQUAD_IN 64.0f
 #define CO_CUTSET_SQUAD_OUT 96.0f
 #define CO_CUTSET_HOLD_MS 30000     /* a player whose Helldiver does not read keeps the last place, as the squads' */
+/* A moving player's reach also lies ahead of it: units and garrisons are placed within 150 m of a player, on the
+ * navmesh as it is then, so the cuts there must land first. A tick, a queued add and the run that cuts it take about a
+ * second or two; 4 s ahead is 180 m at 45 m/s. Two lead discs and the player's own leave no gap between them. */
+#define CO_CUTSET_LEAD_MS 4000
+#define CO_CUTSET_LEAD_SLOWEST 2.0f   /* m/s: a player walking about needs no lead */
+#define CO_CUTSET_LEAD_FASTEST 120.0f /* m/s: a faster move between two places is a teleport or a drop, not a speed */
+#define CO_CUTSET_LEAD_GAP_MS 2000    /* two places further apart in time give no speed */
+/* Every navigator's unit is a centre (a unit walks the navmesh only, so a trunk with no cut is walked through): a
+ * unit whose disc of UNIT_NEED is inside another centre's reach takes none, so a squad's members share one. */
+#define CO_CUTSET_UNIT_IN 64.0f
+#define CO_CUTSET_UNIT_OUT 96.0f
+#define CO_CUTSET_UNIT_NEED 48.0f
+/* A garrison fills its guard points when a player comes within 150 m; its points can be farther than a player's reach
+ * then. One within this of a player or a lead is a centre covering its points (reach + 16 m). */
+#define CO_CUTSET_GARRISON_NEAR 400.0f
+#define CO_CUTSET_GARRISON_LEAST 48.0f
+#define CO_CUTSET_GARRISON_MOST 192.0f
 
 typedef struct CoCutCentre { float x, y, in, out; } CoCutCentre;
 typedef struct CoCutRec { uint32_t handle; float x, y; uint32_t next; } CoCutRec;
@@ -30,7 +57,7 @@ typedef struct CoCutRec { uint32_t handle; float x, y; uint32_t next; } CoCutRec
  * `epoch`: the set's epoch when a cutter of the cell last went on. */
 typedef struct CoCutCell { uint32_t head, at, pending, on, epoch; uint16_t metres, listed; } CoCutCell;
 typedef struct CoCutCand { float d2; uint32_t rec; } CoCutCand;
-typedef struct CoCutHeld { uint64_t peer; float x, y; uint32_t at; int used; } CoCutHeld;
+typedef struct CoCutHeld { uint64_t peer; float x, y, vx, vy; uint32_t at; int used; } CoCutHeld; /* v: m/s from the last two places */
 
 typedef struct CoCutSet
 {
@@ -48,7 +75,7 @@ typedef struct CoCutSet
  * `shed` of the removes made room at the cap. */
 typedef struct CoCutTick
 {
-    uint32_t add[CO_CUTSET_ADDS], adds, remove[CO_CUTSET_BATCH], removes, waiting, over, shed; int capped;
+    uint32_t add[CO_CUTSET_ADDS], adds, remove[CO_CUTSET_REMOVES_MOST], removes, waiting, over, shed; int capped;
 } CoCutTick;
 
 /* The memory the set needs (29 MB at these sizes; pages are only touched as slots, records and cells are used). */
@@ -92,5 +119,20 @@ int co_cutset_covered(const CoCutCentre* centres, uint32_t count, const CoCutCen
  * 2: the Helldiver does not read (dead, waiting, dropping in) and the last place read stands in, for
  * CO_CUTSET_HOLD_MS: the cutters around a dead player stay for whoever is still there. 0: no place. */
 int co_cutset_player(CoCutHeld* held, uint32_t slots, uint64_t peer, int reads, float x, float y, uint32_t nowMs, float* place);
+/* The places ahead of a player (CO_CUTSET_LEAD_MS and half of it at its speed), after this tick's co_cutset_player
+ * read its place: 2, or 0 when it is slower than CO_CUTSET_LEAD_SLOWEST, its place did not read or it is not held. */
+int co_cutset_lead(const CoCutHeld* held, uint32_t slots, uint64_t peer, float (*ahead)[2]);
+/* 1 when one of these centres' `in` holds the disc of `need` around (x, y): a unit there needs no centre of its own. */
+int co_cutset_holds(const CoCutCentre* centres, uint32_t count, float x, float y, float need);
+/* A tick's removes at most `most`: CO_CUTSET_SCANS over the AI world's added cutters, at least CO_CUTSET_REMOVES; none
+ * while `queued` changes wait (CO_CUTSET_QUEUE_SHORT or more), and the least when the queue does not read (under 0). */
+uint32_t co_cutset_removes(uint32_t added, int queued, uint32_t most);
+/* A tick's adds at most `most`: the room left under CO_CUTSET_QUEUE_ROOM queued changes, at least CO_CUTSET_ADDS_LEAST
+ * (never more than `most`); `most` when the queue does not read (under 0). */
+uint32_t co_cutset_adds(int queued, uint32_t most);
+/* Marks on up to `room` wanted records that are not on, cell by cell from `*cursor`, with their handles in `out`; the
+ * cursor moves past the cells done. Returns how many, 0 once every cell is done. Past the cap: this is the
+ * game's own "add every cutter", for a level whose tick never came. */
+uint32_t co_cutset_flush(CoCutSet* s, uint32_t* cursor, uint32_t* out, uint32_t room);
 
 #endif
