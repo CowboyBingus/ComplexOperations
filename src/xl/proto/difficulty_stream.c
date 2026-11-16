@@ -270,7 +270,8 @@ static struct
     double ownSum; uint32_t ownSamples; /* since the note: learned per-removal own time samples */
     double exitRate;         /* the scans' new exits a second, a quarter of the way each scan */
     uint32_t exitsSum, noteExpired, noteQueued; /* since the note: new exits; at the last note: live past radius, queued */
-    uint32_t farNearSkipped; /* since the note: far removals not done at the drain, a player within kStreamOutRadius */
+    uint32_t farNearSkipped; /* since the note: the governor's removals not done at the drain, a player within kStreamOutRadius */
+    uint32_t farNearRemoved[2]; /* since the note: far removals done with a player within kStreamOutRadius: the window's, the governor's */
     /* the governor */
     int govOn; ULONGLONG govAt, govTurnAt; double govSum; uint32_t govN; double govLast; /* govTurnAt: the last turn (0: none) */
     uint32_t govOnTurns, govOffTurns, govSeconds, govHeldScans, govHeldRespawns, govDrained, govNearKept; /* since the note */
@@ -311,7 +312,10 @@ static uint8_t g_streamReplace[kStreamMaxLocations];     /* 1: the ground under 
 static float g_streamSeen2[kStreamMaxLocations];         /* a flagged one's distance its meshes are drawn to, squared (WindowVisible) */
 /* Removals the scans decide, done a few a frame: a scan after a long move or a tile change asked for 64 DestroyUnit
  * calls and a far eviction for 64 more, each taking its stamp's layer units down in that one frame. */
-enum { STREAM_DROP_OUT = 1, STREAM_DROP_REPLACE, STREAM_DROP_FAR };
+/* STREAM_DROP_FAR: the window's far eviction over the near budget (from 550 m: it makes room near the players);
+ * STREAM_DROP_GOV: the governor's (past 800 m only, asked again at the drain). Both are far removals otherwise. */
+enum { STREAM_DROP_OUT = 1, STREAM_DROP_REPLACE, STREAM_DROP_FAR, STREAM_DROP_GOV };
+#define STREAM_DROP_IS_FAR(kind) ((kind) == STREAM_DROP_FAR || (kind) == STREAM_DROP_GOV)
 static uint8_t g_streamDrop[kStreamMaxLocations];        /* the queued removal's kind, 0: none */
 static uint8_t g_streamLayer[kStreamMaxLocations];       /* the broad phase layer its bodies went to (6..9), 0: layer 4 */
 static uint32_t g_streamDropList[kStreamDropQueue], g_streamDropHead, g_streamDropCount, g_streamDropFar;
@@ -1050,7 +1054,7 @@ static int WorldStreamDropLocked(uint32_t i, int kind)
 {
     if (g_streamDrop[i] || g_streamDropCount >= kStreamDropQueue) return 0;
     g_streamDrop[i] = (uint8_t)kind;
-    if (kind == STREAM_DROP_FAR) g_streamDropFar++;
+    if (STREAM_DROP_IS_FAR(kind)) g_streamDropFar++;
     g_streamDropList[(g_streamDropHead + g_streamDropCount++) % kStreamDropQueue] = i;
     return 1;
 }
@@ -1070,8 +1074,9 @@ static int WorldStreamWithinOut(uint32_t s)
 /* A change frame: up to `most` queued removals, until they took `ms`; with `layer` 4 or 6..9, only stamps whose bodies
  * are in that broad phase layer, so the frame rebuilds one layer (the others go to the queue's tail). Each is asked
  * again, as frames went by since its scan: still live with its own unit, and still out of reach (its timer runs),
- * flagged for new ground, or a far slot no player came within kStreamOutRadius of (its wait in the queue, 2-8 s, is
- * 90-360 m at 45 m/s; the near ring would take it again). A slot whose look did not read goes back to the queue's head
+ * flagged for new ground, or a far slot; the governor's only while no player came within kStreamOutRadius (its wait
+ * in the queue, 2-8 s, is 90-360 m at 45 m/s; the near ring would take it again), the window's whatever the distance
+ * (it makes room for the near stamps). A slot whose look did not read goes back to the queue's head
  * and ends the frame's removals. The removals done. */
 static uint32_t WorldStreamDrainLocked(uint32_t most, double ms, int layer, uint32_t least)
 {
@@ -1085,10 +1090,11 @@ static uint32_t WorldStreamDrainLocked(uint32_t most, double ms, int layer, uint
         g_streamDropHead = (g_streamDropHead + 1) % kStreamDropQueue; g_streamDropCount--;
         const int kind = g_streamDrop[i];
         g_streamDrop[i] = 0;
-        if (kind == STREAM_DROP_FAR) g_streamDropFar--;
+        if (STREAM_DROP_IS_FAR(kind)) g_streamDropFar--;
         if (i >= g_stream.count || !g_streamLive[i] || !g_streamPoseGood[i] || g_streamNeedsUnit[i] || g_streamUnit[i] == 0) continue;
         if (kind == STREAM_DROP_OUT ? g_streamOutSince[i] == 0 : kind == STREAM_DROP_REPLACE ? !g_streamReplace[i] : !(g_streamOut2[i] > 0.0f)) continue;
-        if (kind == STREAM_DROP_FAR && WorldStreamWithinOut(i)) { g_streamPace.farNearSkipped++; continue; }
+        const int nearPlayer = STREAM_DROP_IS_FAR(kind) && WorldStreamWithinOut(i);
+        if (kind == STREAM_DROP_GOV && nearPlayer) { g_streamPace.farNearSkipped++; continue; }
         if (layer >= 0 && (g_streamLayer[i] ? g_streamLayer[i] : 4) != layer)
         {
             WorldStreamDropLocked(i, kind); /* the slot just freed takes it */
@@ -1101,7 +1107,7 @@ static uint32_t WorldStreamDrainLocked(uint32_t most, double ms, int layer, uint
             g_streamDropHead = (g_streamDropHead + kStreamDropQueue - 1) % kStreamDropQueue; g_streamDropCount++;
             g_streamDropList[g_streamDropHead] = i;
             g_streamDrop[i] = (uint8_t)kind;
-            if (kind == STREAM_DROP_FAR) g_streamDropFar++;
+            if (STREAM_DROP_IS_FAR(kind)) g_streamDropFar++;
             break;
         }
         const int left = removed || g_stream.gone != gone; /* the slot left the world's count: destroyed, or given up */
@@ -1112,7 +1118,8 @@ static uint32_t WorldStreamDrainLocked(uint32_t most, double ms, int layer, uint
             g_stream.replaced++;
             if (g_streamDeferred[i]) g_streamDue[i] = 1;
         }
-        else if (kind == STREAM_DROP_FAR) WindowEvictedLocked(); /* a far slot given up is free as well */
+        else if (STREAM_DROP_IS_FAR(kind)) WindowEvictedLocked(); /* a far slot given up is free as well */
+        if (removed && nearPlayer) g_streamPace.farNearRemoved[kind == STREAM_DROP_GOV]++;
         if (HitchNow() - t0 >= ms && done + given >= least) { g_stream.drainCut = g_streamDropCount > 0 && looked + 1 < queued && done + given < most; break; }
     }
     return done;
@@ -1576,13 +1583,15 @@ static void WorldStreamNoteLocked(ULONGLONG now)
     }
     Note("difficulty: extra large maps: streaming governor (%s): %s (the quiet frames' world update, a second's mean, after-change frames out: the last %.1f ms; on over %.1f, off under %.1f); "
         "on %u of the last 10 s, turned on %u and off %u times; far ring scans held %u, far respawns held %u, far stamps queued out %u, near ones kept %u times; "
-        "far removals not done at the drain, a player within %.0f m: %u; live stamps within %.0f m %u, past it %u",
+        "the governor's removals not done at the drain, a player within %.0f m: %u; far removals done with a player within it: the governor's %u, the window's near budget's %u; "
+        "live stamps within %.0f m %u, past it %u",
         g_streamGovActs ? "acting" : "observing only: would be", g_streamPace.govOn ? "ON" : "off", g_streamPace.govLast, kGovOnMs, kGovOffMs, g_streamPace.govSeconds,
         g_streamPace.govOnTurns, g_streamPace.govOffTurns, g_streamPace.govHeldScans, g_streamPace.govHeldRespawns, g_streamPace.govDrained, g_streamPace.govNearKept,
-        (double)kStreamOutRadius, g_streamPace.farNearSkipped, (double)kStreamOutRadius, nearLive, farLive);
+        (double)kStreamOutRadius, g_streamPace.farNearSkipped, g_streamPace.farNearRemoved[1], g_streamPace.farNearRemoved[0], (double)kStreamOutRadius, nearLive, farLive);
     g_streamPace.removeFrames = g_streamPace.removeForced = g_streamPace.spawnFrames = g_streamPace.grassHolds = g_streamPace.grassForced = 0;
     g_streamPace.removeSum = g_streamPace.spawnSum = 0.0; g_streamPace.removeSamples = g_streamPace.spawnSamples = 0; g_streamPace.quietHiGrassSum = 0.0;
     g_streamPace.ownSum = 0.0; g_streamPace.ownSamples = 0; g_streamPace.farNearSkipped = 0;
+    g_streamPace.farNearRemoved[0] = g_streamPace.farNearRemoved[1] = 0;
     g_streamPace.govSeconds = g_streamPace.govOnTurns = g_streamPace.govOffTurns = g_streamPace.govHeldScans = g_streamPace.govHeldRespawns = g_streamPace.govDrained = g_streamPace.govNearKept = 0;
     /* the loader writes about 1000 characters a line (HellForge logging.c WriteLog): the change frames' work apart */
     Note("difficulty: extra large maps: streaming change work: %u removals, %.1f a frame; removals %.2f ms a frame (the most %.2f), spawns %.2f ms (the most %.2f); %u locations spawned, %.1f a frame; their units made in %u flushes, %.2f ms each (the most %.2f) after an animation wait of %.2f ms (the most %.2f), %.3f ms a location and %.2f ms fixed estimated; cut short by the time limit: removals in %u, spawns in %u; by the location count: %u; deferred for a tile step: %u frames of %u a tile built in; %u due not spawned at the last scan; drained layer 4 %u, 6..9 %u %u %u %u; spawned into layer 4 %u, 6..9 %u %u %u %u",

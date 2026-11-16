@@ -1982,6 +1982,9 @@ void CoXlTestStreamDistance(uint32_t i, float distance2) { g_streamDistance[i] =
 void CoXlTestStreamExpiredSet(uint32_t n) { g_stream.expired = n; }
 int CoXlTestStreamDropPush(uint32_t i) { return WorldStreamDropLocked(i, STREAM_DROP_OUT); }
 int CoXlTestStreamDropFarPush(uint32_t i) { return WorldStreamDropLocked(i, STREAM_DROP_FAR); }
+int CoXlTestStreamDropGovPush(uint32_t i) { return WorldStreamDropLocked(i, STREAM_DROP_GOV); }
+void CoXlTestStreamFarNearRemoved(uint32_t* window, uint32_t* governor) { *window = g_streamPace.farNearRemoved[0]; *governor = g_streamPace.farNearRemoved[1]; }
+int CoXlTestStreamDropKind(uint32_t i) { return g_streamDrop[i]; }
 /* Far removals skipped at the drain since the note (a player within kStreamOutRadius). */
 uint32_t CoXlTestStreamFarNearSkipped(void) { return g_streamPace.farNearSkipped; }
 /* A removal's learned own time (set when > 0), a learn from a drain of `ms` for `removed`, the chosen frames' room, the

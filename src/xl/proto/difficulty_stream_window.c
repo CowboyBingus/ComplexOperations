@@ -350,7 +350,7 @@ static void WindowGovernEvictLocked(void)
         for (uint32_t k = 1; k < n; k++) if (far2[k] < far2[m]) m = k;
         if (best > far2[m]) { pick[m] = s; far2[m] = best; }
     }
-    for (uint32_t k = 0; k < n; k++) g_streamPace.govDrained += WorldStreamDropLocked(pick[k], STREAM_DROP_FAR) != 0;
+    for (uint32_t k = 0; k < n; k++) g_streamPace.govDrained += WorldStreamDropLocked(pick[k], STREAM_DROP_GOV) != 0;
 }
 
 /* A window scan's far ring while the governor acts: held and its farthest evicted (1); else scanned (0). Observing only,

@@ -67,6 +67,9 @@ uint32_t CoXlTestStreamDrainLayer(uint32_t most, double ms, int layer, uint32_t*
 uint32_t CoXlTestStreamDrainLeast(uint32_t most, double ms, int layer, uint32_t least, uint32_t* waiting, int* cut);
 uint32_t CoXlTestStreamFloorLeast(uint32_t expired, double ownMs);
 int CoXlTestStreamDropFarPush(uint32_t i);
+int CoXlTestStreamDropGovPush(uint32_t i);
+void CoXlTestStreamFarNearRemoved(uint32_t* window, uint32_t* governor);
+int CoXlTestStreamDropKind(uint32_t i);
 uint32_t CoXlTestStreamFarNearSkipped(void);
 double CoXlTestStreamOwn(double ownMs);
 void CoXlTestStreamOwnLearn(double ms, uint32_t removed);
@@ -1191,23 +1194,66 @@ int main(void)
     Start("a far removal is not done at the drain once a player came within 800 m; the others go");
     {
         const float players[2] = {AX, AY};
-        uint32_t left = 9; int cutFar = 0, liveFar = 0, dueFar = 0; uint64_t unitFar = 0;
+        uint32_t left = 9, nearWindow = 9, nearGov = 9; int cutFar = 0, liveFar = 0, dueFar = 0; uint64_t unitFar = 0;
         StreamGame();
         Stream(10);
         for (uint32_t k = 0; k < 4; k++)
         {
             Slot(k, AX + (k == 0 ? 700.0f : k == 1 ? 800.0f : 1000.0f + 100.0f * (float)k), AY, 2.0f, 0x1000u * (k + 1), 0);
             CoXlTestStreamOut2(k, 1500.0f);
-            CHECK(CoXlTestStreamDropFarPush(k));
+            CHECK(CoXlTestStreamDropGovPush(k) && CoXlTestStreamDropKind(k) == 4);
         }
         CoXlTestStreamPlayers(1, players);
-        const uint32_t before = g_destroys, skipped = CoXlTestStreamFarNearSkipped();
+        uint32_t w0 = 0, g0 = 0;
+        CoXlTestStreamFarNearRemoved(&w0, &g0);
+        const uint32_t before = g_destroys, skipped = CoXlTestStreamFarNearSkipped(), evicted = CoXlTestWindowEvictedFar();
         CHECK(CoXlTestStreamDrainLayer(64, 1.0e9, -1, &left, &cutFar) == 2 && g_destroys == before + 2 && left == 0);
-        CHECK(CoXlTestStreamFarNearSkipped() == skipped + 2);
+        CHECK(CoXlTestStreamFarNearSkipped() == skipped + 2 && CoXlTestWindowEvictedFar() == evicted + 2); /* far slots freed */
+        CoXlTestStreamFarNearRemoved(&nearWindow, &nearGov);
+        CHECK(nearWindow == w0 && nearGov == g0);                        /* the governor's: none within 800 m */
         CoXlTestStreamSlotState(0, &liveFar, &dueFar, &unitFar); CHECK(liveFar);  /* 700 m: kept */
         CoXlTestStreamSlotState(1, &liveFar, &dueFar, &unitFar); CHECK(liveFar);  /* 800 m: kept */
         CoXlTestStreamSlotState(2, &liveFar, &dueFar, &unitFar); CHECK(!liveFar); /* 1200 m: removed */
         CoXlTestStreamSlotState(3, &liveFar, &dueFar, &unitFar); CHECK(!liveFar);
+        CoXlTestStreamPlayers(0, players);
+    }
+
+    /* The window's own far eviction over the near budget takes far stamps from 550 m: it makes the room the near
+     * stamps need, so the drain removes them however near; the governor's queued past 800 m and met at 700 m stays. */
+    Start("the window's far eviction removes at 600-750 m and counts it; the governor's entry met at 700 m is kept");
+    {
+        float players[2] = {AX, AY};
+        uint32_t left = 9, nearWindow = 9, nearGov = 9; int cutFar = 0, liveFar = 0, dueFar = 0; uint64_t unitFar = 0;
+        StreamGame();
+        Stream(10);
+        for (uint32_t k = 0; k < 4; k++) Slot(k, AX + 600.0f + 50.0f * (float)k, AY, 2.0f, 0x1000u * (k + 1), 0); /* 600-750 m */
+        CoXlTestStreamPlayers(1, players);
+        CHECK(CoXlTestWindowEvictFar(0, 4) == 4);
+        for (uint32_t k = 0; k < 4; k++) CHECK(CoXlTestStreamDropKind(k) == 3); /* the window's kind */
+        uint32_t w0 = 0, g0 = 0;
+        CoXlTestStreamFarNearRemoved(&w0, &g0);
+        const uint32_t before = g_destroys, skipped = CoXlTestStreamFarNearSkipped();
+        CHECK(CoXlTestStreamDrainLayer(64, 1.0e9, -1, &left, &cutFar) == 4 && g_destroys == before + 4 && left == 0);
+        CHECK(CoXlTestStreamFarNearSkipped() == skipped);
+        CoXlTestStreamFarNearRemoved(&nearWindow, &nearGov);
+        CHECK(nearWindow == w0 + 4 && nearGov == g0);
+        for (uint32_t k = 0; k < 4; k++) { CoXlTestStreamSlotState(k, &liveFar, &dueFar, &unitFar); CHECK(!liveFar); }
+        /* the governor queues one at 1000 m; the player comes to 700 m of it before the drain */
+        Slot(5, AX + 1000.0f, AY, 2.0f, 0x6000u, 0);
+        CoXlTestStreamOut2(5, 1500.0f);
+        CoXlTestStreamGovernSet(1);
+        CHECK(CoXlTestWindowGovernEvictRange(5, 6) == 1 && CoXlTestStreamDropKind(5) == 4);
+        CoXlTestStreamGovernSet(0);
+        players[0] = AX + 300.0f;
+        CoXlTestStreamPlayers(1, players);
+        CHECK(CoXlTestStreamDrainLayer(64, 1.0e9, -1, &left, &cutFar) == 0 && g_destroys == before + 4 && left == 0);
+        CHECK(CoXlTestStreamFarNearSkipped() == skipped + 1 && CoXlTestStreamDropKind(5) == 0);
+        CoXlTestStreamSlotState(5, &liveFar, &dueFar, &unitFar); CHECK(liveFar);
+        CoXlTestStreamFarNearRemoved(&nearWindow, &nearGov);
+        CHECK(nearWindow == w0 + 4 && nearGov == g0);
+        CoXlTestStreamNote();
+        CHECK(fake_host_logged("the governor's removals not done at the drain, a player within 800 m: 1; far removals done with a player within it: "
+                               "the governor's 0, the window's near budget's 4; live stamps within 800 m "));
         CoXlTestStreamPlayers(0, players);
     }
 
@@ -2685,6 +2731,29 @@ int main(void)
     for (int f = 0; f < 20 && left > 0; f++) CoXlTestStreamDrain(1.0e9, &left);
     CHECK(left == 0 && CoXlTestWindowEvictedFar() == farBefore + 64);
     CHECK(CoXlTestWindowEvictFar(0, 100) == 36); /* the far count came back to 0 with the queue: the rest may go */
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestMission(0, 0);
+
+    /* The governor's far removals count as far ones in the queue's far count, put back with their kind too: the
+     * window's eviction is free again once they are gone. */
+    Start("a governor's far removal whose look did not read goes back with its kind; the far count comes back to 0");
+    CoXlTestMission((uintptr_t)g_lg, 1);
+    StreamGame();
+    InMission();
+    Stream(20);
+    for (uint32_t k = 0; k < 20; k++) { Slot(k, AX + 3000.0f, AY + 4.0f * (float)k, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOut2(k, 1500.0f); }
+    Generator(3);
+    CoXlTestStreamObserver(1, AX, AY);
+    for (uint32_t k = 0; k < 10; k++) CHECK(CoXlTestStreamDropGovPush(k));
+    CHECK(CoXlTestWindowEvictFar(10, 20) == 0);                     /* the governor's are queued: none more */
+    ListSet(0);
+    memcpy(g_worldMem + 0x230590u, &listBad, 8); ListSet(1);
+    for (int f = 0; f < 3; f++) CHECK(CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 10);
+    CHECK(CoXlTestStreamDropKind(0) == 4);                           /* back at the head with its kind */
+    memcpy(g_worldMem + 0x230590u, &listGood, 8); ListSet(0);
+    for (int f = 0; f < 20 && left > 0; f++) CoXlTestStreamDrain(1.0e9, &left);
+    CHECK(left == 0 && CoXlTestWindowEvictFar(10, 20) == 10);        /* the far count came back to 0 */
     CoXlTestStreamObserver(0, 0.0f, 0.0f);
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
     CoXlTestMission(0, 0);
