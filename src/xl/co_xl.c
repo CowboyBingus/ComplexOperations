@@ -1342,6 +1342,52 @@ void CoXlTestNearJobSteps(int steps, int first, int last)
 }
 void CoXlTestNearJobLevel(uintptr_t level, uint8_t* block) { g_worldLevelLive = level; g_worldLevel = level; g_terrain.block = block; }
 int CoXlTestNearJobTake(int s, uint64_t context) { return NearJobTake(s, 0, 0, context, 0, 0, 0); }
+/* Op 0x63's split (proto/difficulty_world_move.c): phase B on a pass, phase B's ids as given, its steps one by one,
+ * the replay's 0x63 step through NearRunStepIn, render_world as the consumer calls it, and the split's state. */
+void CoXlTestMove2FPhaseB(uint8_t* pass, uint64_t context) { SplitClear(); g_move2F.at = 0; g_move2FObjN = 0; Move2FPhaseB((uint64_t)(uintptr_t)pass, 0, context); }
+void CoXlTestSplitL2(uint32_t* out, const uint32_t** ids)
+{
+    out[0] = g_split.l2Locs; out[1] = g_split.l2Multi; out[2] = g_split.l2Extra; out[3] = g_split.l2Most; out[4] = g_split.m; out[5] = (uint32_t)g_split.idsOk;
+    *ids = g_splitId;
+}
+void CoXlTestSplitIds(const uint32_t* ids, uint32_t m, uint32_t extra, int idsOk)
+{
+    SplitClear(); memcpy(g_splitId, ids, (size_t)m * 4); memset(g_splitHidden, 0, sizeof g_splitHidden);
+    g_split.m = m; g_split.l2Extra = extra; g_split.idsOk = idsOk;
+}
+void CoXlTestSplitHooks(void* consume, void* run, uint64_t camera)
+{ g_nearConsume = (NearConsumeFn)consume; g_nearRunOriginal = (NearRunFn)run; g_near.cam[0] = camera; }
+int CoXlTestSplitPrepare(uint32_t queued) { return Split63Prepare(queued); }
+int CoXlTestSplitQueued(uint64_t context) { return Split63Queued(context); }
+int CoXlTestSplitLeave(void) { return Split63Leave(); }
+void CoXlTestSplitFail(const char* why) { Split63Fail(why); }
+int CoXlTestSplitRestore(void) { return Split63Restore(); }
+void CoXlTestSplitLeft(const char* why) { Split63Left(why); }
+void CoXlTestSplitBuildLeft(int ship) { MoveBuildLeft(ship); }
+/* A build failing in its replay with stamp terrains up: its 0x65 record from `records` (MV_FAILING next); the state after. */
+int CoXlTestSplitMoveFail(uint8_t* records)
+{
+    g_near.records = (uint64_t)(uintptr_t)records; g_near.at65 = 0; g_move.stamped = 1; g_move.state = MV_REPLAY;
+    MoveFail("the replay failed");
+    const int state = g_move.state;
+    g_move.state = MV_IDLE; g_move.stamped = 0;
+    return state == MV_FAILING;
+}
+int CoXlTestSplitState(uint32_t* k, uint32_t* K, uint32_t* hidden, int* pending)
+{ *k = g_split.k; *K = g_split.K; *hidden = g_split.hiddenN; *pending = g_split.pending; return g_split.state; }
+void CoXlTestNearStampLeave(int on) { g_near.stampLeave = on; }
+uint64_t CoXlTestNearRunAt(int consumer, uint64_t a, uint64_t camera, uint64_t c, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h)
+{ return NearRunAt(consumer, a, camera, c, d, e, f, g, h); }
+int CoXlTestNearRunStep63(int s, uint8_t* records, uint64_t context, void* dispatch, int first)
+{
+    g_worldDispatch = (WorldDispatchFn)dispatch;
+    if (first) { g_near.calls = 0; g_near.stampLeave = 0; }
+    g_near.steps = s + 1; g_near.step = s; g_near.stepKind[s] = NEAR_RECORD; g_near.stepOp[s] = 0x63; g_near.stepRecord[s] = 0;
+    g_nearStampOffset[0] = 0.0f; g_nearStampOffset[1] = MOVE_STAMP_OFFSET;
+    return NearRunStepIn((uint64_t)(uintptr_t)records, 0, context, 0, 0);
+}
+int CoXlTestNearStampLeaving(void) { return g_near.stampLeave; }
+void CoXlTestMoveRun2FDone(uint32_t count) { MoveRun2FDone(count); }
 void CoXlTestNearJobDrawn(int s) { if (g_nearJob.drawing != NULL) NearJobDone(g_nearJob.drawing, s); }
 const uint8_t* CoXlTestNearJobDrawing(void) { return g_nearJob.drawing != NULL ? g_nearJob.drawing->record : NULL; }
 int CoXlTestNearJobOn(long* inflight) { *inflight = g_nearJob.inflight; return g_nearJob.on; }

@@ -1669,6 +1669,16 @@ static struct
     LONG done, level;    /* resets applied; g_world.levels when the 0x64 was queued */
     int bare;            /* its jobs ran with no bracket open: the real LUTs took the clear */
 } g_nearReset;
+/* op 0x63's render in ranges (proto/difficulty_world_move.c) */
+static int Split63Prepare(uint32_t queued);
+static int Split63Queued(uint64_t context);
+static int Split63Leave(void);
+static void Split63Replay(void);
+static void Split63Seen(const uint8_t* job, double ms);
+static void Split63Fail(const char* why);
+static int Split63Restore(void);
+static void Split63Left(const char* why);
+static void SplitClear(void);
 typedef void (*NearConsumeFn)(uint64_t queue);
 static NearConsumeFn g_nearConsume;
 
@@ -1680,6 +1690,7 @@ static void NearConsume(uint64_t queue)
     if (opened) { g_nearNames.consumers++; g_nearNames.consumerThread = GetCurrentThreadId(); }
     g_nearConsume(queue);
     NearNamesClose(opened);
+    if (queue != 0 && queue == g_nearNames.queue) Split63Replay(); /* after the game's jobs, as the next one would be */
     if (!mine) return;
     /* a finalize left queued by a failed replay runs here under the level's names, or never if its level ended */
     LONG was = g_nearReset.level == g_world.levels ? InterlockedCompareExchange(&g_nearReset.state, 2, 1) : InterlockedCompareExchange(&g_nearReset.state, 0, 1);
@@ -1819,6 +1830,7 @@ static uint64_t NearRunAt(int consumer, uint64_t a, uint64_t camera, uint64_t c,
     QueryPerformanceCounter(&t1);
     const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
     g_stamp63.ms += ms; if (ms > g_stamp63.max) g_stamp63.max = ms;
+    Split63Seen(d > 0x58 ? (const uint8_t*)(uintptr_t)(d - 0x58) : NULL, ms);
     MemoryBarrier();
     InterlockedIncrement(&g_stamp63.n);
     return r;
@@ -2902,10 +2914,23 @@ static int NearRunStepIn(uint64_t records, uint32_t end, uint64_t context, uint6
         /* 0x63's job renders through the merge camera when the queue runs it: the camera stays at the offset until then */
         uint32_t q = NearQueued(context);
         if (q != 0 && q != 0xFFFFFFFFu && ++g_near.stampWaits < 1200) return 0;
+        if (q == 0) /* the job rendered; its split's ranges, if any, with the cameras still there */
+        {
+            const int r = Split63Leave();
+            if (r == 0) return 0;
+            if (r < 0) q = 0xFFFFFFFFu;
+        }
         NearCameras(NEAR_SIDE / 2, NEAR_SIDE / 2, g_near.centre[0], g_near.centre[1]);
         g_near.stampLeave = 0;
         NearStamp63Note();
         return q == 0 ? 1 : -1;
+    }
+    /* a build's 0x63: the stamps below its first range hidden before its op queues the job (Split63Prepare) */
+    if (g_near.stepKind[s] == NEAR_RECORD && g_near.stepOp[s] == 0x63 && g_near.calls == 0 && g_moveBuilding &&
+        (g_nearStampOffset[0] != 0 || g_nearStampOffset[1] != 0))
+    {
+        const int p = Split63Prepare(NearQueued(context));
+        if (p <= 0) return p;
     }
     if (g_near.stepKind[s] == NEAR_RECORD && g_near.stepOp[s] == 0x3C && NearBaseOn()) return NearBaseStep(context);
     int mat = 0;
@@ -2962,7 +2987,7 @@ static int NearRunStepIn(uint64_t records, uint32_t end, uint64_t context, uint6
     QueryPerformanceCounter(&c1); QueryPerformanceFrequency(&chz);
     if (seeds)
     {
-        NearSeedPatch(0);
+        if (!NearSeedPatch(0)) Note("difficulty: near terrain: op 0x41's seed lookups were not put back (state %d); its timing stub stays in their calls", g_nearSeed.state);
         g_matUnits.seedTicks = (uint64_t)(g_nearSeed.data[1] - seedTicks); g_matUnits.seedCalls = (uint32_t)(g_nearSeed.data[2] - seedCalls);
         g_matUnits.setupTicks = r1 - r0;
     }
@@ -2988,7 +3013,12 @@ static int NearRunStepIn(uint64_t records, uint32_t end, uint64_t context, uint6
         g_near.calls = 0;
         if (mat) { g_near.matLeave = 1; g_near.matArena = 1; return 0; } /* nothing allocates from it before the next op */
         WorldArenaReset(context);
-        if (g_near.stepOp[s] == 0x63 && (g_nearStampOffset[0] != 0 || g_nearStampOffset[1] != 0)) { g_near.stampLeave = 1; g_near.stampWaits = 0; return 0; }
+        if (g_near.stepOp[s] == 0x63 && (g_nearStampOffset[0] != 0 || g_nearStampOffset[1] != 0))
+        {
+            if (g_moveBuilding && Split63Queued(context) < 0) return -1;
+            g_near.stampLeave = 1; g_near.stampWaits = 0;
+            return 0;
+        }
         return 1;
     }
     return g_near.calls < 3000 ? 0 : -1;

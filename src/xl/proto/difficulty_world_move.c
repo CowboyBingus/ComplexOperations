@@ -232,6 +232,7 @@ static void MoveLevelGone(void)
     g_move.stTemp = g_move.stGone = 0; g_move.stamped = 0;
     g_nearStampOffset[0] = g_nearStampOffset[1] = 0.0f; /* else this level's own 0x63 would look 20 km off */
     g_moveReplace.on = 0;
+    SplitClear();
     InterlockedExchange(&g_moveBuilding, 0);
     MoveHold(0);
 }
@@ -566,6 +567,34 @@ static uint64_t g_move2FObj[MOVE_STAMPS_MAX];
 static uint32_t g_move2FObjN;
 static struct { uint32_t n, noop, bit7, hideable, unread, values, other; uint32_t value[8], times[8]; } g_move2FFlags;
 
+/* ---- Op 0x63's stamp render in ranges ---------------------------------------------------------------------------------
+ * The render of a tile's ~29000 stamp terrains costs the render thread 147-180 ms, which the game thread waits for in
+ * the next frame. Its cull reads rw+0x268 only (0x1EA3E0; 0x107400 zeroes property 0x81C3BDDD), which a hide takes a
+ * terrain out of (0x3486C0 -> 0x2BD140, applied by the flush at 0x58E6A0), and its draws sort by depth i+1 of the
+ * location, highest first. So the stamps go in ranges from the highest location down, one a frame: the job's own render
+ * with range 0 shown, then its saved copy again per range; the same adds in the same order (scratch/u63g, u63h). */
+#define SPLIT_STAMP_US 5.5    /* render side a stamp: the whole render's 147-180 ms over its 28600-29277 stamps */
+#define SPLIT_RANGE_MS 3.0    /* render side a range */
+#define SPLIT_TOGGLE_MS 1.0   /* game-thread time a frame for the shows and hides */
+#define SPLIT_PER_MIN 64u
+#define SPLIT_RANGES_MAX 256u
+#define SPLIT_STALL 600       /* frames a range's render may wait for the job consumer */
+#define SPLIT_FRESH 0xFFFFFFFFu
+enum { SP_NONE, SP_WHOLE, SP_HIDING, SP_READY, SP_QUEUED, SP_RANGES, SP_SHOWING, SP_DONE, SP_RESTORE };
+static struct
+{
+    int state, over, idsOk, pending;
+    LONG level;
+    uint32_t m, per, K, k, cursor, hiddenN, stall, qBefore;
+    uint32_t l2Locs, l2Multi, l2Extra, l2Most;
+    uint32_t shows, hides, dead, frames;
+    double toggleMs, toggleMax, renderMs, renderMax, renderFirst, frameMs, frameMax, frameLeast;
+    LARGE_INTEGER frameAt;
+    __attribute__((aligned(16))) uint8_t job[0x1D0]; /* the 0x63 job as queued: the consumer's copy of it (0xAB0600) */
+} g_split;
+static uint32_t g_splitId[MOVE_STAMPS_MAX]; /* phase B's live terrain id of each drawn location, in location order */
+static uint8_t g_splitHidden[MOVE_STAMPS_MAX];
+
 static int Move2FPinned(void)
 {
     if (g_move2F.pinned == 0)
@@ -623,14 +652,30 @@ static void Move2FPhaseB(uint64_t pass, uint64_t record, uint64_t context)
         const uint32_t* e = table + (size_t)i * 3;
         if (e[0] == 0xFFFFFFFFu || e[1] == 0) continue;
         const uint64_t unit = *(const uint64_t*)(locs + (size_t)i * 0xE0 + 0xA8);
-        uint32_t id = 0;
-        for (uint32_t j = 0; j < e[1]; j++)
+        uint32_t id = 0, j = 0;
+        for (; j < e[1]; j++)
         {
             id = ((IdFn)*(uint64_t*)(uintptr_t)(a50 + 0x30))(unit, j + e[2]);
             if (id != 0 && ((LiveFn)*(uint64_t*)(uintptr_t)(a18 + 0x720))(id)) break;
             id = 0;
         }
+        /* the later live ids keep the default depth and would draw in every range of 0x63's split: counted (reads only,
+         * 0x32B8E0 and 0x9D8C0), and any one turns the split off */
+        g_split.l2Locs++;
+        if (e[1] > 1) g_split.l2Multi++;
+        if (id != 0 && e[1] > 1)
+        {
+            uint32_t extra = 0;
+            for (uint32_t k = j + 1; k < e[1]; k++)
+            {
+                const uint32_t other = ((IdFn)*(uint64_t*)(uintptr_t)(a50 + 0x30))(unit, k + e[2]);
+                if (other != 0 && ((LiveFn)*(uint64_t*)(uintptr_t)(a18 + 0x720))(other)) extra++;
+            }
+            g_split.l2Extra += extra;
+            if (extra > g_split.l2Most) g_split.l2Most = extra;
+        }
         if (id == 0) continue;
+        if (g_split.m < MOVE_STAMPS_MAX) g_splitId[g_split.m++] = id; else g_split.over = 1;
         ((IdOnlyFn)*(uint64_t*)(uintptr_t)(a18 + 0x450))(id);
         const uint64_t obj = ((ObjFn)*(uint64_t*)(uintptr_t)(a18 + 0x460))(id, 0);
         if (g_move2FObjN < MOVE_STAMPS_MAX) g_move2FObj[g_move2FObjN++] = obj;
@@ -643,6 +688,7 @@ static void Move2FPhaseB(uint64_t pass, uint64_t record, uint64_t context)
     g_move2F.slices++;
     g_move2F.at = i;
     g_move2F.done = i >= count;
+    if (g_move2F.done) g_split.idsOk = 1;
 }
 
 /* The slice's proxies' flags as 0x2BD140 reads them: [[obj+0x30]+0x2C], else [[obj+0x38]+0x20]. Its hide does nothing
@@ -685,6 +731,10 @@ static int MoveRun2FDone(uint32_t count)
             g_move2FFlags.other);
     }
     else Note("difficulty: moving tiles: the stamp terrains' render flags were not tallied (no stamp in the mod's last part)");
+    if (g_split.idsOk)
+        Note("difficulty: moving tiles: 0x63 terrains: %u locations, %u with e[1] > 1, %u extra live ids (most at one location %u)", g_split.l2Locs,
+            g_split.l2Multi, g_split.l2Extra, g_split.l2Most);
+    else Note("difficulty: moving tiles: 0x63 terrains: not counted (op 0x2F's last part ran in the game's call)");
     uint64_t arena = 0;
     memcpy(&arena, g_move.ctx, 8);
     typedef void (*ArenaFn)(uint64_t arena);
@@ -740,11 +790,285 @@ static int MoveRun2F(void)
     if (!g_move2F.done) return 0;
     return MoveRun2FDone(count);
 }
+static void SplitClear(void)
+{
+    memset(&g_split, 0, sizeof g_split);
+    g_split.level = g_world.levels; g_split.cursor = SPLIT_FRESH;
+}
 static void Move2FReset(void)
 {
     const int pinned = g_move2F.pinned; const uint32_t batch = g_move2F.batch;
     memset(&g_move2F, 0, sizeof g_move2F); memset(&g_move2FFlags, 0, sizeof g_move2FFlags);
     g_move2F.pinned = pinned; g_move2F.batch = batch; g_move2FObjN = 0;
+    SplitClear();
+}
+
+/* ---- The split's steps (game thread) ---- */
+typedef char (*SplitLiveFn)(uint32_t id);
+typedef uint64_t (*SplitObjFn)(uint32_t id, uint32_t zero);
+typedef void (*SplitShowFn)(uint64_t obj, uint32_t show);
+static struct { uint32_t from, to, showBelow; double budget; int done; SplitLiveFn live; SplitObjFn obj; SplitShowFn show; } g_splitWalk;
+
+/* Range k: stamps [lo, hi) of g_splitId, from the top down; the last one reaches 0. */
+static uint32_t SplitHi(uint32_t k) { return g_split.m - k * g_split.per; }
+static uint32_t SplitLo(uint32_t k)
+{
+    const uint32_t top = (k + 1) * g_split.per;
+    return k + 1 >= g_split.K || top >= g_split.m ? 0 : g_split.m - top;
+}
+
+/* Under the tile guard: stamps [cursor, to) shown below showBelow, hidden from it, each looked up by its id first (a
+ * stamp can be gone; its object is never kept, 0x203E20 has no null test). Only a change is posted. */
+static void SplitWalkIn(uint64_t unused0, uint64_t unused1, uint64_t unused2)
+{
+    (void)unused0; (void)unused1; (void)unused2;
+    LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
+    uint32_t x = g_split.cursor;
+    for (uint32_t n = 0; x < g_splitWalk.to; x++, n++)
+    {
+        if (n != 0 && (n & 15) == 0)
+        {
+            QueryPerformanceCounter(&t1);
+            if ((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart >= g_splitWalk.budget) break;
+        }
+        const uint8_t want = x < g_splitWalk.showBelow ? 0 : 1; /* 1: hidden */
+        if (g_splitHidden[x] == want) continue;
+        const uint32_t id = g_splitId[x];
+        if (id == 0 || !g_splitWalk.live(id))
+        {
+            if (id != 0) { g_split.dead++; g_splitId[x] = 0; } /* never looked up again */
+            if (g_splitHidden[x]) { g_splitHidden[x] = 0; g_split.hiddenN--; } /* nothing left to show */
+            continue;
+        }
+        g_splitWalk.show(g_splitWalk.obj(id, 0), want ? 0u : 1u);
+        g_splitHidden[x] = want;
+        if (want) { g_split.hides++; g_split.hiddenN++; } else { g_split.shows++; g_split.hiddenN--; }
+    }
+    g_split.cursor = x;
+    g_splitWalk.done = x >= g_splitWalk.to;
+}
+
+/* One walk's slice within `budget` ms: 1 done, 0 more next frame, -1 a fault (the walk's state stays as far as it got). */
+static int SplitWalk(uint32_t from, uint32_t to, uint32_t showBelow, double budget)
+{
+    g_splitWalk.live = (SplitLiveFn)NearApi(0x18, 0x720); g_splitWalk.obj = (SplitObjFn)NearApi(0x18, 0x460);
+    g_splitWalk.show = (SplitShowFn)NearApi(0x110, 0x20);
+    if (g_splitWalk.live == NULL || g_splitWalk.obj == NULL || g_splitWalk.show == NULL) return -1;
+    if (g_split.cursor == SPLIT_FRESH || g_split.cursor < from) g_split.cursor = from;
+    g_splitWalk.from = from; g_splitWalk.to = to; g_splitWalk.showBelow = showBelow; g_splitWalk.budget = budget; g_splitWalk.done = 0;
+    LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
+    const LONG fault = WorldTileGuardedCall((uintptr_t)SplitWalkIn, NULL, 0);
+    QueryPerformanceCounter(&t1);
+    const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+    g_split.toggleMs += ms; if (ms > g_split.toggleMax) g_split.toggleMax = ms;
+    if (fault)
+    {
+        const uintptr_t where = TileGuardSelf()->at, exe = (uintptr_t)GetModuleHandleW(NULL);
+        Note("difficulty: moving tiles: 0x63 split: a show or hide faulted (%08lX at exe+0x%llX)", (unsigned long)fault, (unsigned long long)(where - exe));
+        return -1;
+    }
+    if (!g_splitWalk.done) return 0;
+    g_split.cursor = SPLIT_FRESH;
+    return 1;
+}
+
+static void SplitFrame(void)
+{
+    LARGE_INTEGER now; QueryPerformanceCounter(&now);
+    if (g_split.frameAt.QuadPart != 0)
+    {
+        LARGE_INTEGER hz; QueryPerformanceFrequency(&hz);
+        const double ms = (double)(now.QuadPart - g_split.frameAt.QuadPart) * 1000.0 / (double)hz.QuadPart;
+        g_split.frameMs += ms; g_split.frames++;
+        if (ms > g_split.frameMax) g_split.frameMax = ms;
+        if (g_split.frameLeast == 0 || ms < g_split.frameLeast) g_split.frameLeast = ms;
+    }
+    g_split.frameAt = now;
+}
+
+/* Whole or in ranges, decided once a build before any hide: the ids are phase B's, none extra, the calls there. */
+static void SplitDecide(void)
+{
+    char why[160] = "";
+#ifdef CO_RESEARCH
+    { char t[4] = ""; if (GetEnvironmentVariableA("HELLFORGE_XL_MOVE_SPLIT63", t, sizeof t) > 0 && t[0] == '0') snprintf(why, sizeof why, "turned off (HELLFORGE_XL_MOVE_SPLIT63=0, research)"); }
+#endif
+    if (why[0] != 0) {}
+    else if (!g_split.idsOk || g_split.level != g_world.levels) snprintf(why, sizeof why, "op 0x2F's last part did not run in the mod, so its terrain ids were not kept");
+    else if (g_split.over) snprintf(why, sizeof why, "more than %u stamp terrains", MOVE_STAMPS_MAX);
+    else if (g_split.l2Extra != 0) snprintf(why, sizeof why, "%u extra live terrain ids at its locations would draw in every range", g_split.l2Extra);
+    else if (NearApi(0x18, 0x720) == 0 || NearApi(0x18, 0x460) == 0 || NearApi(0x110, 0x20) == 0 || NearApi(0x10, 0x30) == 0)
+        snprintf(why, sizeof why, "the live, object, show or flush call did not resolve");
+    else if (g_nearRunOriginal == NULL || g_nearConsume == NULL) snprintf(why, sizeof why, "the render wrapper or the job consumer's hook is not in");
+    else
+    {
+        uint32_t per = (uint32_t)(SPLIT_RANGE_MS * 1000.0 / SPLIT_STAMP_US);
+        if (per < SPLIT_PER_MIN) per = SPLIT_PER_MIN;
+        uint32_t K = (g_split.m + per - 1) / per;
+        if (K > SPLIT_RANGES_MAX) { K = SPLIT_RANGES_MAX; per = (g_split.m + K - 1) / K; }
+        g_split.per = per; g_split.K = K;
+        if (K < 2) snprintf(why, sizeof why, "its %u stamps fit one range", g_split.m);
+    }
+    if (why[0] != 0)
+    {
+        g_split.state = SP_WHOLE;
+        Note("difficulty: moving tiles: 0x63 split: off: %s; the stamps render whole in one frame", why);
+        return;
+    }
+    g_split.state = SP_HIDING; g_split.cursor = SPLIT_FRESH;
+    Note("difficulty: moving tiles: 0x63 split: on: %u stamps in %u ranges of %u (%.1f us a stamp, %.1f ms a range)", g_split.m, g_split.K, g_split.per,
+        SPLIT_STAMP_US, SPLIT_RANGE_MS);
+}
+
+/* Before 0x63's op (its first call): every stamp below range 0 hidden, a slice a frame. 1 the op may run, 0 more next
+ * frame, -1 a fault. `queued`: the job queue's count now, against which the op's one job is found. */
+static int Split63Prepare(uint32_t queued)
+{
+    if (g_split.state == SP_NONE) SplitDecide();
+    if (g_split.state == SP_HIDING)
+    {
+        const int r = SplitWalk(0, SplitLo(0), 0, SPLIT_TOGGLE_MS);
+        if (r <= 0) return r;
+        g_split.state = SP_READY;
+    }
+    g_split.qBefore = queued;
+    return 1;
+}
+
+/* After 0x63's op: its one job is the one the split renders again, checked as the producer writes it (0xC178B1,
+ * 0xC14DCE) and copied. Any mismatch shows every stamp again in this frame, before the consumer renders the job (same
+ * thread, later in the frame), so it renders whole. -1: the shows faulted and the build must fail. */
+static int Split63Queued(uint64_t context)
+{
+    if (g_split.state != SP_READY) return 0;
+    char why[160] = "";
+    uint64_t queue = 0, world = 0, w0 = 0, cam = 0;
+    uint32_t q = 0, kind = 0;
+    if (SafeRead(context + 0x50, &queue, 8) || queue == 0 || SafeRead(queue + 0x10, &q, 4) || SafeRead(context + 0x40, &world, 8))
+        snprintf(why, sizeof why, "the job queue did not read");
+    else if (q != g_split.qBefore + 1) snprintf(why, sizeof why, "the op queued %d jobs, not one", (int)(q - g_split.qBefore));
+    else if (SafeRead(queue + 0x18 + (uint64_t)(q - 1) * 0x1D0, g_split.job, sizeof g_split.job)) snprintf(why, sizeof why, "its job did not read");
+    else
+    {
+        memcpy(&w0, g_split.job, 8); memcpy(&cam, g_split.job + 8, 8); memcpy(&kind, g_split.job + 0x68, 4);
+        if (kind != 0xFFFFFFFFu || g_split.job[0x24] != 0 || g_split.job[0x38] != 0 || g_split.job[0x39] != 0)
+            snprintf(why, sizeof why, "its job is not a plain render (+0x68 %08X, +0x24 %u, +0x38 %u, +0x39 %u)", kind, g_split.job[0x24], g_split.job[0x38], g_split.job[0x39]);
+        else if (w0 == 0 || w0 != world) snprintf(why, sizeof why, "its job's world is not the build's");
+        else if (cam == 0 || cam != g_near.cam[0]) snprintf(why, sizeof why, "its job's camera is not the merge camera");
+    }
+    if (why[0] == 0)
+    {
+        g_split.state = SP_QUEUED; g_split.frameAt.QuadPart = 0;
+        SplitFrame();
+        return 0;
+    }
+    const uint32_t hidden = g_split.hiddenN;
+    const double before = g_split.toggleMs;
+    const int r = SplitWalk(0, g_split.m, g_split.m, 1e30);
+    g_split.state = SP_WHOLE;
+    Note("difficulty: moving tiles: 0x63 split: off after the hides: %s; %u stamps shown again in this frame (%.1f ms%s), the stamps render whole in one frame",
+        why, hidden, g_split.toggleMs - before, r < 0 ? ", the shows FAULTED: the build fails" : "");
+    return r < 0 ? -1 : 0;
+}
+
+/* The job's copy again for the range whose shows and hides are posted, from the job consumer's hook after the game's
+ * consumer (0xAB07A0 / 0xAB07E1 as it calls them for this job, through the wrapper so the gui's offset and scale
+ * apply), under the tile's names. Only while this build's replay waits in 0x63. */
+static void Split63Replay(void)
+{
+    if (!g_split.pending || g_split.state != SP_RANGES || !g_nearActive || !g_moveBuilding || !g_near.stampLeave || g_split.level != g_world.levels) return;
+    typedef void (*FlushFn)(uint64_t world);
+    FlushFn flush = (FlushFn)NearApi(0x10, 0x30);
+    if (flush == NULL) return; /* the range stalls and the build fails */
+    uint64_t a = 0, camera = 0, c = 0, e = 0; uint32_t flags = 0;
+    memcpy(&a, g_split.job, 8); memcpy(&camera, g_split.job + 8, 8); memcpy(&c, g_split.job + 0x10, 8); memcpy(&e, g_split.job + 0x18, 8);
+    memcpy(&flags, g_split.job + 0x20, 4);
+    const int opened = NearNamesOpen();
+    LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
+    flush(a);
+    NearRunAt(1, a, camera, c, (uint64_t)(uintptr_t)(g_split.job + 0x58), e, 0, (uint64_t)(flags | 0x10000u), 0);
+    QueryPerformanceCounter(&t1);
+    NearNamesClose(opened);
+    const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+    g_split.renderMs += ms; if (ms > g_split.renderMax) g_split.renderMax = ms;
+    g_split.pending = 0;
+}
+
+/* The game's consumer rendering the queued job (range 0): its time. `job` is the consumer's copy. */
+static void Split63Seen(const uint8_t* job, double ms)
+{
+    if (g_split.state != SP_QUEUED || job == NULL || memcmp(job, g_split.job, 0x70) != 0) return;
+    g_split.renderFirst = ms; g_split.renderMs += ms; if (ms > g_split.renderMax) g_split.renderMax = ms;
+}
+
+/* 0x63's leave, once its job has drained (the consumer rendered it with range 0 shown: every queued render-path job is
+ * rendered, 0xAB07E1): per frame, range k hidden and range k+1 shown, then its render in the consumer; after the last
+ * range every stamp shown again. 1 done (or whole), 0 more next frame, -1 the build fails. */
+static int Split63Leave(void)
+{
+    if (g_split.state == SP_NONE || g_split.state == SP_WHOLE || g_split.state == SP_DONE) return 1;
+    if (g_split.state != SP_QUEUED && g_split.state != SP_RANGES && g_split.state != SP_SHOWING) return -1;
+    SplitFrame();
+    if (g_split.state == SP_QUEUED) { g_split.state = SP_RANGES; g_split.k = 0; g_split.pending = 0; g_split.cursor = SPLIT_FRESH; }
+    if (g_split.state == SP_RANGES)
+    {
+        if (g_split.pending)
+        {
+            if (++g_split.stall < SPLIT_STALL) return 0;
+            Note("difficulty: moving tiles: 0x63 split: range %u of %u was not rendered in %u frames; the build fails", g_split.k + 1, g_split.K, SPLIT_STALL);
+            return -1;
+        }
+        if (g_split.k + 1 < g_split.K)
+        {
+            /* ranges k+1 and k are one span: shown below range k's start, hidden from it */
+            const int r = SplitWalk(SplitLo(g_split.k + 1), SplitHi(g_split.k), SplitLo(g_split.k), SPLIT_TOGGLE_MS);
+            if (r <= 0) return r;
+            g_split.k++; g_split.pending = 1; g_split.stall = 0;
+            return 0;
+        }
+        g_split.state = SP_SHOWING; g_split.cursor = SPLIT_FRESH;
+    }
+    const int r = SplitWalk(0, g_split.m, g_split.m, SPLIT_TOGGLE_MS);
+    if (r <= 0) return r;
+    g_split.state = SP_DONE;
+    Note("difficulty: moving tiles: 0x63 split: %u ranges of %u stamps, toggles %.1f ms (frame max %.2f ms, %u shows, %u hides, %u skipped dead), "
+        "renders %.1f ms (range max %.2f ms, first %.2f ms), frames %.1f ms over %u (max %.2f ms, least %.2f ms)", g_split.K, g_split.per, g_split.toggleMs,
+        g_split.toggleMax, g_split.shows, g_split.hides, g_split.dead, g_split.renderMs, g_split.renderMax, g_split.renderFirst, g_split.frameMs, g_split.frames,
+        g_split.frameMax, g_split.frameLeast);
+    return 1;
+}
+
+/* A build that fails while stamps are hidden: no range renders again, and MV_FAILING shows them before 0x65. */
+static void Split63Fail(const char* why)
+{
+    if (g_split.state == SP_NONE || g_split.state == SP_WHOLE || g_split.state == SP_DONE || g_split.state == SP_RESTORE) return;
+    g_split.pending = 0;
+    Note("difficulty: moving tiles: 0x63 split: cut short in range %u of %u (%s): %u stamps hidden, shown again before 0x65", g_split.k + 1, g_split.K, why,
+        g_split.hiddenN);
+    g_split.state = g_split.hiddenN != 0 ? SP_RESTORE : SP_DONE; g_split.cursor = SPLIT_FRESH;
+}
+
+/* MV_FAILING's first work: 1 once nothing is hidden. Shows that fault leave the rest hidden for the destroy, which
+ * takes a hidden terrain from the set's parked list as well (0x58E240, 0x58E2BF). */
+static int Split63Restore(void)
+{
+    if (g_split.state != SP_RESTORE) return 1;
+    const int r = SplitWalk(0, g_split.m, g_split.m, SPLIT_TOGGLE_MS);
+    if (r == 0) return 0;
+    if (r < 0) Note("difficulty: moving tiles: 0x63 split: %u stamps stay hidden for their destroy", g_split.hiddenN);
+    g_split.state = SP_DONE;
+    return 1;
+}
+
+/* The ship or a level init with a build under way: no frame of it follows, so nothing is shown. Hidden stamps go with
+ * the build's units through the teardown: a hidden terrain's destroy (0x1E81B4) takes it from the parked list
+ * (0x58E240), the inverse of the hide's own bookkeeping (0x58E6A0). */
+static void Split63Left(const char* why)
+{
+    if (g_split.hiddenN != 0 && g_split.state != SP_NONE && g_split.state != SP_WHOLE)
+        Note("difficulty: moving tiles: 0x63 split: %s in range %u of %u: %u stamps stay hidden; they go with the build's units", why, g_split.k + 1, g_split.K,
+            g_split.hiddenN);
+    SplitClear();
 }
 
 static uint64_t MoveWorld(void)
@@ -899,6 +1223,7 @@ static void MoveFailRest(void)
 static void MoveFail(const char* why)
 {
     Note("difficulty: moving tiles: the tile of cell (%d, %d) is not built: %s", g_move.cell[0], g_move.cell[1], why);
+    Split63Fail(why);
     if (g_nearActive) NearReplayEnd(0);
     if (g_move.state != MV_FAILING) g_move.failState = g_move.state;
     if (g_move.stamped && g_move.state != MV_FAILING && MoveStampsRecord(g_near.at65, 0x65))
@@ -1709,6 +2034,7 @@ static void MoveTick(uint64_t level)
     }
     if (g_move.state == MV_FAILING)
     {
+        if (!Split63Restore()) return; /* hidden stamps shown before 0x65 takes them */
         if (g_move.stamped && DestroyListCount(MoveWorld()) >= MOVE_DESTROY_ROOM) { if (++g_move.waits > 600) { g_move.stamped = 0; g_move.ringWaits = 0; Note("difficulty: moving tiles: the destroy list did not empty; the stamp terrains were not all taken away"); } return; }
         if (g_move.stamped)
         {

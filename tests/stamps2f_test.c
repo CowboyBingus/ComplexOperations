@@ -35,6 +35,22 @@ typedef struct { int kind; uint64_t a, b, c; } Call;
 static Call g_log[200000];
 static int g_logN;
 static void Log(int kind, uint64_t a, uint64_t b, uint64_t c) { if (g_logN < 200000) { g_log[g_logN].kind = kind; g_log[g_logN].a = a; g_log[g_logN].b = b; g_log[g_logN].c = c; } g_logN++; }
+/* The mod's phase B also counts each location's later live ids for op 0x63's split (read-only id and live calls between
+ * the first live id and its Touch); taken out before the call lists are compared. Returns the length left. */
+static int g_scanned;
+static int Unscanned(void)
+{
+    int n = 0, found = 0;
+    for (int k = 0; k < g_logN && k < 200000; k++)
+    {
+        const Call c = g_log[k];
+        if (found && (c.kind == 2 || c.kind == 3)) { g_scanned++; continue; }
+        if (c.kind == 3 && c.a % 2 == 1) found = 1;
+        if (c.kind == 4) found = 0;
+        g_log[n++] = c;
+    }
+    return g_logN = n;
+}
 static void Spin(double us) { LARGE_INTEGER hz, t0, t; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0); do QueryPerformanceCounter(&t); while ((double)(t.QuadPart - t0.QuadPart) * 1e6 / (double)hz.QuadPart < us); }
 
 static int g_worldOff; /* calls of the world check that say no first */
@@ -206,6 +222,8 @@ int main(void)
     const uint32_t batchEnd = CoXlTestMove2FBatch();
     CHECK(g_lastBound < 1023 && CoXlTestMove2FBatch() >= 1 && CoXlTestMove2FBatch() <= 1023);
     CHECK(slicesB >= 4); /* two world checks that said no, then more than one slice */
+    g_scanned = 0; Unscanned();
+    CHECK(g_scanned > 0); /* the later live ids looked up */
     /* the world check: twice more here (it said no twice); every other call the same, in the same order */
     {
         int same = 1, k = 0, m = 0, checksRef = 0, checks = 0;
@@ -232,7 +250,8 @@ int main(void)
         uint32_t idx = 0; memcpy(&idx, CoXlTestMove2FRecord() + 8 + 0x48, 4);
         if (idx >= COUNT) slicesB++;
     }
-    CHECK(r == 1 && Restored() && g_logN == refN && slicesB >= 2);
+    g_scanned = 0; Unscanned();
+    CHECK(r == 1 && Restored() && g_logN == refN && slicesB >= 2 && g_scanned > 0);
     CHECK(g_firstBound == batchEnd && fake_host_logged(flagsLine)); /* the tally counted afresh each build */
     {
         int same = g_logN == refN;

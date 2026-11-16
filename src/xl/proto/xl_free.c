@@ -552,6 +552,7 @@ static int MoveGeneratorIdle(int ship, uint32_t* state, int* job)
 static void MoveBuildLeft(int ship)
 {
     const char* why = ship ? "the ship" : "a level init";
+    Split63Left(why); /* first: no range of its renders again */
     const int state = g_move.state, merge = g_move.merge, held = g_move.acquired;
     const uint32_t units = g_move.stTemp > g_move.stGone ? g_move.stTemp - g_move.stGone : 0;
     if (units == 0 && !merge && !held)
