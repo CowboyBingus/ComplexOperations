@@ -8571,7 +8571,8 @@ static const struct { uint32_t at; const char* bytes; } kNearShapeWork[] = {
  * finalizes instead of starting them again; gate: 1 once the job is in, 2 once it is shut out (it never ran in time);
  * stuck: a job inside the steps that never came back (nothing waits for it again, its terrain is left alone). */
 static struct { volatile LONG on, gate; int inList, stuck; volatile LONG running; uint64_t world, handle, obj, shape, element, done; double jobMs, quadMs;
-    uint32_t frames, onGame, nodes, cols, rows; float rootMin, rootMax, z[2]; uint16_t low, high; int scanned; DWORD game; ULONGLONG since; } g_shape;
+    uint32_t frames, onGame, nodes, cols, rows; float rootMin, rootMax, z[2]; uint16_t low, high; int scanned; DWORD game; ULONGLONG since;
+    uint64_t tree, xy0, xy1; uint32_t first, csr; int64_t depth; volatile LONG quadDone; } g_shape;
 #define NEAR_SHAPE_WAIT_MS 30000u
 static uintptr_t g_shapeExe; /* a test's image; 0: the game's */
 static uintptr_t NearShapeExe(void) { return g_shapeExe != 0 ? g_shapeExe : (uintptr_t)GetModuleHandleW(NULL); }
@@ -8645,6 +8646,37 @@ static void NearWorkQuadNote(uint64_t world, uint64_t handle)
     if (scanned) NearHeightNote("work()'s, scanned on the game thread", lo, hi, z);
 }
 
+/* 13 arguments as the call site stacks them (0x1AC539..0x1AC585): [rsp+0x20] never written, +0x28 0, +0x30 and +0x38 the
+ * corner, +0x40 the far corner, +0x48 the depth so far (0), +0x50 the depth, +0x58 / +0x60 no min/max out */
+typedef uint64_t (*NearQuadFn)(uint64_t tree, uint64_t heights, uint64_t cols, uint64_t rows, uint64_t unused, uint64_t offset, uint64_t corner,
+    uint64_t divisor, uint64_t range, uint64_t level, uint64_t depth, uint64_t lowOut, uint64_t highOut);
+
+/* 0x1AC4DA..0x1AC52A: the leaf from the rows, the depth log(cols / leaf) / log 2 with the exe's own log and constant */
+static int64_t NearQuadDepth(uintptr_t exe, uint32_t cols, uint32_t rows, float two)
+{
+    typedef float (*LogFn)(float v);
+    uint32_t leaf = rows;
+    if (rows >= 32)
+    {
+        if ((rows & (rows - 1)) == 0) leaf = 32;
+        else if (!(rows & 1)) do { if (leaf <= 32) break; leaf >>= 1; } while (!(leaf & 1));
+    }
+    const int per = (int)cols / (int)leaf;
+    const float a = ((LogFn)(exe + 0x12CCB10u))((float)per), b = ((LogFn)(exe + 0x12CCB10u))(two);
+    return (int64_t)(a / b);
+}
+
+/* The quadtree over the heights (0x2F2CB0 at 0x1AC58A), timed. It writes only the tree's list (grown through the
+ * world's allocator, rpmalloc's per-thread heap as the shape's own allocations) and reads only the heights. */
+static void NearQuadBuild(uintptr_t exe, uint64_t heights)
+{
+    LARGE_INTEGER hz, q0, q1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&q0);
+    ((NearQuadFn)(exe + 0x2F2CB0u))(g_shape.tree + 0x38, heights, g_shape.cols, g_shape.rows, 0, 0, g_shape.xy0, g_shape.xy0, g_shape.xy1, 0,
+        (uint32_t)g_shape.depth, 0, 0);
+    QueryPerformanceCounter(&q1);
+    g_shape.quadMs = (double)(q1.QuadPart - q0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+}
+
 static uint64_t NearShapeJob(uint64_t a, uint64_t b, uint64_t c, uint64_t data)
 {
     (void)a; (void)b; (void)c; (void)data;
@@ -8655,6 +8687,17 @@ static uint64_t NearShapeJob(uint64_t a, uint64_t b, uint64_t c, uint64_t data)
     g_shape.shape = ((ShapeFn)(NearShapeExe() + 0x786130u))(g_shape.world, g_shape.obj);
     uint64_t heights = 0; /* what NearGroundOf copies to the slot later (obj+0x40), craters held meanwhile */
     g_shape.scanned = !SafeRead(g_shape.obj + 0x40, &heights, 8) && NearHeightRange(heights, g_shape.cols, g_shape.rows, &g_shape.low, &g_shape.high);
+    /* the quadtree here too, off the lock: nothing else holds this tree before the finalize hands it to the render
+     * side (0x1DD330 -> 0x2F2240 keeps its node pointer), craters are held and the destroys join the job first */
+    if (g_shape.tree != 0 && heights != 0)
+    {
+        /* under the game thread's MXCSR (rounding, FZ/DAZ), so the nodes' floats are the ones work() makes there */
+        const unsigned int own = _mm_getcsr();
+        _mm_setcsr(g_shape.csr);
+        NearQuadBuild(NearShapeExe(), heights);
+        _mm_setcsr(own);
+        g_shape.quadDone = 1;
+    }
     QueryPerformanceCounter(&t1);
     g_shape.jobMs = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
     MemoryBarrier();
@@ -8679,11 +8722,15 @@ static int NearShapeBegin(uint64_t world, uint64_t handle)
     enter(world + NEAR_SHAPE_LOCK);
     uint64_t key = handle;
     uint8_t* e = ((NearShapeFindFn)(exe + 0x1B86C0u))(world + NEAR_SHAPE_TABLE, &key);
-    uint64_t obj = 0, dims = 0, list[4] = {0};
-    uint32_t cols = 0, rows = 0;
+    uint64_t obj = 0, dims = 0, list[4] = {0}, tree = 0, xy0 = 0, xy1 = 0;
+    uint32_t cols = 0, rows = 0, first = 0; float two = 0;
     if (e == NULL || SafeRead((uintptr_t)e + 0x10, &obj, 8) || obj == 0 || SafeRead((uintptr_t)e + 0x38, &dims, 8) || dims == 0 ||
         SafeRead(dims + 0x14, &cols, 4) || SafeRead(dims + 0x18, &rows, 4) || SafeRead(exe + 0x27BAB30u, list, sizeof list))
     { leave(world + NEAR_SHAPE_LOCK); return 0; }
+    /* the quadtree's inputs as NearShapeEnd read them (written at the spawn only); 0: it is built there instead */
+    if (SafeRead((uintptr_t)e, &tree, 8) || tree == 0 || SafeRead((uintptr_t)e + 0x24, &xy0, 8) || SafeRead((uintptr_t)e + 0x2C, &xy1, 8) ||
+        SafeRead(tree + 0x38, &first, 4) || SafeRead(exe + 0x16A9AE0u, &two, 4))
+        tree = 0;
     g_shape.inList = list[0] == world || list[1] == world || list[2] == world || list[3] == world;
     if (g_shape.inList)
     {
@@ -8703,6 +8750,8 @@ static int NearShapeBegin(uint64_t world, uint64_t handle)
     g_shape.world = world; g_shape.handle = handle; g_shape.obj = obj; g_shape.shape = 0; g_shape.jobMs = 0; g_shape.frames = 0;
     g_shape.game = GetCurrentThreadId(); g_shape.since = GetTickCount64(); g_shape.done = 0; g_shape.quadMs = 0; g_shape.nodes = 0;
     g_shape.cols = cols; g_shape.rows = rows; g_shape.scanned = 0;
+    g_shape.tree = tree; g_shape.xy0 = xy0; g_shape.xy1 = xy1; g_shape.first = first; g_shape.quadDone = 0; g_shape.csr = _mm_getcsr();
+    g_shape.depth = tree != 0 ? NearQuadDepth(exe, cols, rows, two) : 0;
     InterlockedExchange(&g_shape.gate, 0);
     InterlockedExchange(&g_shape.on, 1);
     if (!g_shape.inList) return 1; /* no shape (0x1AC2FF): the quadtree alone, next */
@@ -8713,15 +8762,9 @@ static int NearShapeBegin(uint64_t world, uint64_t handle)
 }
 
 /* 0x1AC4CE..0x1AC58A once the job is done, under the lock again: the shape into the entry (found again: other
- * terrains may have moved it), then the quadtree over the heights (leaf from the rows, depth log(cols / leaf) / log 2
- * with the exe's own log and constant). */
+ * terrains may have moved it), then the quadtree over the heights unless the job built it. */
 static int NearShapeEnd(void)
 {
-    typedef float (*LogFn)(float v);
-    /* 13 arguments as the call site stacks them (0x1AC539..0x1AC585): [rsp+0x20] never written, +0x28 0, +0x30 and +0x38
-     * the corner, +0x40 the far corner, +0x48 the depth so far (0), +0x50 the depth, +0x58 / +0x60 no min/max out */
-    typedef uint64_t (*QuadFn)(uint64_t tree, uint64_t heights, uint64_t cols, uint64_t rows, uint64_t unused, uint64_t offset, uint64_t corner,
-        uint64_t divisor, uint64_t range, uint64_t level, uint64_t depth, uint64_t lowOut, uint64_t highOut);
     if (InterlockedExchange(&g_shape.on, 0) == 0) return 0; /* another caller ended it */
     const uintptr_t exe = NearShapeExe();
     NearLockFn enter = NULL, leave = NULL;
@@ -8737,21 +8780,14 @@ static int NearShapeEnd(void)
     {
         if (g_shape.inList) memcpy(e + 0x18, &g_shape.shape, 8);
         memcpy(g_shape.z, &xy1, 8); /* arg9: the z range the nodes' floats are made from */
-        uint32_t leaf = rows;
-        if (rows >= 32)
+        if (!g_shape.quadDone)
         {
-            if ((rows & (rows - 1)) == 0) leaf = 32;
-            else if (!(rows & 1)) do { if (leaf <= 32) break; leaf >>= 1; } while (!(leaf & 1));
+            g_shape.tree = tree; g_shape.xy0 = xy0; g_shape.xy1 = xy1; g_shape.cols = cols; g_shape.rows = rows;
+            g_shape.depth = NearQuadDepth(exe, cols, rows, two);
+            g_shape.first = 0; SafeRead(tree + 0x38, &g_shape.first, 4);
+            NearQuadBuild(exe, heights);
         }
-        const int per = (int)cols / (int)leaf;
-        const float a = ((LogFn)(exe + 0x12CCB10u))((float)per), b = ((LogFn)(exe + 0x12CCB10u))(two);
-        const int64_t depth = (int64_t)(a / b);
-        uint32_t first = 0; SafeRead(tree + 0x38, &first, 4);
-        LARGE_INTEGER hz, q0, q1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&q0);
-        ((QuadFn)(exe + 0x2F2CB0u))(tree + 0x38, heights, cols, rows, 0, 0, xy0, xy0, xy1, 0, (uint32_t)depth, 0, 0);
-        QueryPerformanceCounter(&q1);
-        g_shape.quadMs = (double)(q1.QuadPart - q0.QuadPart) * 1000.0 / (double)hz.QuadPart;
-        NearQuadRead(tree, first, &g_shape.nodes, &g_shape.rootMin, &g_shape.rootMax);
+        NearQuadRead(tree, g_shape.first, &g_shape.nodes, &g_shape.rootMin, &g_shape.rootMax);
     }
     else Note("difficulty: near terrain: the tile's terrain entry did not read after its shape; no quadtree");
     leave(world + NEAR_SHAPE_LOCK);
@@ -8759,8 +8795,8 @@ static int NearShapeEnd(void)
     g_shape.done = g_shape.handle;
     Note("difficulty: near terrain: the tile's collision shape built on a worker: %.0f ms of work, %u frames, %.2f s; jobs on the game thread %u",
         g_shape.jobMs, g_shape.frames, (double)(GetTickCount64() - g_shape.since) / 1000.0, g_shape.onGame);
-    Note("difficulty: near terrain: the tile's render quadtree: %u nodes (21845 for 4096 x 4096 at depth 7), root %.2f..%.2f m, %.1f ms on the game thread",
-        g_shape.nodes, (double)g_shape.rootMin, (double)g_shape.rootMax, g_shape.quadMs);
+    Note("difficulty: near terrain: the tile's render quadtree: %u nodes (21845 for 4096 x 4096 at depth 7), root %.2f..%.2f m, %.1f ms on %s",
+        g_shape.nodes, (double)g_shape.rootMin, (double)g_shape.rootMax, g_shape.quadMs, g_shape.quadDone ? "the shape job" : "the game thread");
     if (g_shape.scanned) NearHeightNote("scanned on the job", g_shape.low, g_shape.high, g_shape.z);
     else Note("difficulty: near terrain: the tile's heights were not scanned (no shape job)");
     return 1;

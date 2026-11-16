@@ -1,14 +1,16 @@
 /* The tile's collision shape on a worker (proto/difficulty_world_terrain.c NearShapeBegin / NearShapeEnd): the ready
  * frame held the game thread 136-140 ms in SpawnTerrainWork (exe 0x1AC210). Its steps are the function's own in its
  * order: under the terrain lock the object filled from the entry, the shape build (0x786130) alone as an engine job,
- * then under the lock again the shape into the entry and the quadtree (0x2F2CB0) with the function's 13 arguments,
- * leaf and depth. Only a build in play takes the job (the load keeps work()); a joined shape is finalized, never begun
+ * then under the lock again the shape into the entry. The quadtree (0x2F2CB0, the function's 13 arguments, leaf and
+ * depth) is built in the same job after the shape, off the lock, from the entry's values read under it at the begin;
+ * on the game thread at the end only when there is no job. Only a build in play takes the job (the load keeps work()); a joined shape is finalized, never begun
  * again; a job that never comes back is given up on. Fakes stand at the exe's addresses; the test runs the job. */
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
+#include <xmmintrin.h>
 
 #include "harness/fake_host.h"
 
@@ -46,7 +48,7 @@ static uint8_t g_entry[0x200], g_obj[0x200], g_dims[0x20], g_treeHolder[0x50];
 static float g_nodes[6 * 4];
 static uint64_t g_heights;
 static uint16_t g_hbuf[4096 * 4096];
-static struct { uint64_t tree, heights, cols, rows, a5, a6, a7, a8, a9, a10, a11, a12, a13; uint32_t first; int calls; } g_quad;
+static struct { uint64_t tree, heights, cols, rows, a5, a6, a7, a8, a9, a10, a11, a12, a13; uint32_t first, csr; int calls; } g_quad;
 static struct { void* fn; uint64_t* data; uint32_t queue, priority, count; int calls; } g_submit;
 
 static void Enter(uint64_t lock) { if (lock == g_world + 0x230520u) { g_depth++; if (g_depth > g_maxDepth) g_maxDepth = g_depth; } }
@@ -68,6 +70,7 @@ static uint64_t Quad(uint64_t tree, uint64_t heights, uint64_t cols, uint64_t ro
 {
     g_quad.tree = tree; g_quad.heights = heights; g_quad.cols = cols; g_quad.rows = rows; g_quad.a5 = a5; g_quad.a6 = a6; g_quad.a7 = a7; g_quad.a8 = a8;
     g_quad.a9 = a9; g_quad.a10 = a10; g_quad.a11 = a11; g_quad.a12 = a12; g_quad.a13 = a13; g_quad.calls++; g_lockedQuad = g_depth;
+    g_quad.csr = _mm_getcsr() & ~0x3Fu; /* the mode, not the sticky flags */
     uint32_t count = 0; memcpy(&count, (void*)(uintptr_t)tree, 4);
     g_quad.first = count;
     if (count < 4) { g_nodes[6 * count] = -3.5f; g_nodes[6 * count + 1] = 812.25f; }
@@ -155,7 +158,14 @@ int main(void)
     CoXlTestMoveBuilding(1); /* a tile builds in play */
     g_case = "begin: under the lock the object filled from the entry as 0x1AC343..0x1AC4C1 does; the shape a job on channel 10";
     Entry(4096, 4096);
+    { uint32_t had = 3; memcpy(g_treeHolder + 0x38, &had, 4); } /* nodes already in the list: the root goes in after them */
+    const unsigned int csr0 = _mm_getcsr();
+    _mm_setcsr(0x7F80u); /* the game thread rounds toward zero here: the job must build under it, not its own */
     CHECK(CoXlTestShapeBegin(g_world, g_handle) == 1);
+    /* the depth as the game thread works it out under that mode (volatile: not folded at compile time) */
+    volatile float per128 = 128.0f, base2 = 2.0f;
+    const int64_t depthCsr = (int64_t)(logf(per128) / logf(base2));
+    _mm_setcsr(0x1F80u);
     CHECK(g_depth == 0 && g_maxDepth == 1 && g_lockedFind == 1);
     CHECK(memcmp(g_obj + 0x168, g_entry + 0x24, 16) == 0);
     { uint32_t v; memcpy(&v, g_obj + 0x17C, 4); CHECK(v == 1); memcpy(&v, g_obj + 0x178, 4); CHECK(v == 0x80);
@@ -168,16 +178,19 @@ int main(void)
     CHECK(g_quad.calls == 0);
     CHECK(CoXlTestMoveHoldSince() != 0); /* craters held while the shape reads the heights */
 
-    g_case = "the job: the shape built off the lock from the world and the object";
+    g_case = "the job: the shape built off the lock from the world and the object, then the quadtree off the lock too";
+    g_lockedQuad = -1;
     RunJob();
     CHECK(g_shapeWorld == g_world && g_shapeObj == (uint64_t)(uintptr_t)g_obj && g_shapeLocked == 0);
     CHECK(CoXlTestShapeState() == 1);
+    CHECK(g_quad.calls == 1 && g_lockedQuad == 0);
+    CHECK(g_quad.csr == 0x7F80u && (_mm_getcsr() & ~0x3Fu) == 0x1F80u); /* the begin's MXCSR in the build, the job's own after */
+    _mm_setcsr(csr0);
 
-    g_case = "end: under the lock the shape into the entry, then the quadtree as 0x1AC539..0x1AC585 stacks its 13 arguments";
-    g_maxDepth = 0; g_lockedFind = 0;
-    { uint32_t had = 3; memcpy(g_treeHolder + 0x38, &had, 4); } /* nodes already in the list: the root goes in after them */
+    g_case = "end: under the lock the shape into the entry; the job's quadtree (as 0x1AC539..0x1AC585 stacks its 13 arguments) not built again";
+    g_maxDepth = 0; g_lockedFind = 0; g_fake.log[0] = 0;
     CoXlTestShapeEnd();
-    CHECK(g_depth == 0 && g_maxDepth == 1 && g_lockedFind == 1 && g_lockedQuad == 1);
+    CHECK(g_depth == 0 && g_maxDepth == 1 && g_lockedFind == 1 && g_lockedQuad == 0);
     { uint64_t s; memcpy(&s, g_entry + 0x18, 8); CHECK(s == 0x5A5A0001ull); }
     CHECK(g_quad.calls == 1 && g_quad.tree == (uint64_t)(uintptr_t)g_treeHolder + 0x38 && g_quad.heights == g_heights);
     CHECK(g_quad.cols == 4096 && g_quad.rows == 4096);
@@ -186,11 +199,12 @@ int main(void)
         /* rcx, rdx, r8, r9; [rsp+0x20] never written (0 here); +0x28 0; +0x30 / +0x38 the corner; +0x40 the far corner;
          * +0x48 the depth so far 0; +0x50 the depth; +0x58 / +0x60 no min / max out */
         CHECK(g_quad.a5 == 0 && g_quad.a6 == 0 && g_quad.a7 == xy0 && g_quad.a8 == xy0 && g_quad.a9 == xy1);
-        CHECK(g_quad.a10 == 0 && g_quad.a11 == (uint64_t)(int64_t)(logf(128.0f) / logf(2.0f)) && g_quad.a11 == 7 && g_quad.a12 == 0 && g_quad.a13 == 0);
+        CHECK(g_quad.a10 == 0 && g_quad.a11 == (uint64_t)depthCsr && g_quad.a12 == 0 && g_quad.a13 == 0);
     }
     CHECK(CoXlTestShapeState() == 0 && CoXlTestMoveHoldSince() == 0);
     CHECK(fake_host_logged("the tile's collision shape built on a worker"));
     CHECK(g_quad.first == 3 && fake_host_logged("the tile's render quadtree: 21848 nodes (21845 for 4096 x 4096 at depth 7), root -3.50..812.25 m"));
+    CHECK(fake_host_logged("m, 0.0 ms on the shape job") && !fake_host_logged("ms on the game thread"));
     CHECK((CoXlTestShapeFlags() & 2) != 0); /* its handle kept as done */
     CHECK(fake_host_logged("the tile's heights (scanned on the job): 300..64000 = -495.42..476.58 m; its quadtree root should be -495.67..477.83 m"));
 
@@ -210,6 +224,7 @@ int main(void)
             CoXlTestShapeEnd();
             const int per = 4096 / Leaf(rows[k]);
             CHECK(g_quad.rows == rows[k] && g_quad.a11 == (uint64_t)(int64_t)(logf((float)per) / logf(2.0f)) && g_quad.a10 == 0);
+            if (rows[k] == 4096) CHECK(g_quad.a11 == 7); /* 4096 x 4096 at depth 7 under the default mode */
         }
         CHECK(Leaf(96) == 24 && Leaf(100) == 25 && Leaf(4000) == 125 && Leaf(33) == 33 && Leaf(20) == 20);
     }
@@ -221,8 +236,10 @@ int main(void)
         g_submit.calls = 0;
         CHECK(CoXlTestShapeBegin(g_world, g_handle) == 1 && g_submit.calls == 0 && CoXlTestShapeState() == 1);
         { uint32_t v; memcpy(&v, g_obj + 0x17C, 4); CHECK(v == 0); }
+        g_fake.log[0] = 0;
         CoXlTestShapeEnd();
-        uint64_t s; memcpy(&s, g_entry + 0x18, 8); CHECK(s == 0 && g_quad.calls == 1);
+        uint64_t s; memcpy(&s, g_entry + 0x18, 8); CHECK(s == 0 && g_quad.calls == 1 && g_lockedQuad == 1);
+        CHECK(fake_host_logged("ms on the game thread"));
         memcpy(g_exe + 0x27BAB30u, list, sizeof list);
     }
 

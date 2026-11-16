@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <xmmintrin.h>
 #include <tlhelp32.h>
 #include "co_unwind.h"
 #include "co_shim.h"
