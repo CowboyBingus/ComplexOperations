@@ -2014,9 +2014,13 @@ static uint32_t WorldStreamChangeLocked(ULONGLONG now, int layerBusy)
         const float reach = held ? kStreamInRadius * kStreamInRadius : 0.0f;
         floorDue = !room && WorldStreamDueInReach(reach);
         g_stream.spawnLayer = spawn;
+        /* the makers' sampler counts bodies the spawn call itself makes (its forest) as this change frame's */
+        const uint32_t tickWas = g_slChangeTick;
+        g_slChangeTick = g_streamTicks;
         SlFrameBegin(spawn);
         g_stream.spawnWithin = reach;
         made = WorldStreamSpawnDueLocked(ms, most);
+        if (!made) g_slChangeTick = tickWas;
         if (made && spawn) WorldStreamFlushLaterLocked(g_stream.spawnedIn - spawned); else SlFrameEnd(0);
         g_stream.spawnLayer = 0;
         changed = made;

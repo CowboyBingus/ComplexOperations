@@ -151,6 +151,8 @@ void CoXlTestStreamLayersPick(int due, int* drain, uint32_t* spawn, uint32_t* re
 double CoXlTestStreamBudget(double quietHi, double rebuildMs, double moveMs);
 void CoXlTestStreamCost(double removeMs, double spawnMs, double* removeNow, double* spawnNow, int* kind);
 void CoXlTestStreamCostLayer(uint32_t* layer, uint32_t* leaves);
+uint32_t CoXlTestStreamLayerOf(uint32_t i);
+void CoXlTestStreamSpawnSetup(void* spawn, uint8_t* pass);
 void CoXlTestStreamCostLayerSet(int kind, uint32_t layer, uint32_t leaves);
 void CoXlTestStreamLayerCostNote(void);
 void CoXlTestStreamCostKind(int kind);
@@ -527,6 +529,23 @@ static void FakeFlush(uint64_t world)
     HANDLE t = CreateThread(NULL, 0, CreateElsewhere, NULL, 0, NULL);
     WaitForSingleObject(t, INFINITE); CloseHandle(t);
     if (!g_flushLeaves) g_ringHead = g_ringTail;
+}
+/* SpawnLevelLayers for the change step: every record of the call done, one body made inside the call on this thread
+ * (its forest's, 0x8152DF), and the call's units queued on the spawn ring. */
+static uint8_t g_spawnPass[0x100];
+static int g_spawnCalls;
+static uint8_t SpawnBodies(uint8_t* pass, uint8_t* record, uint8_t* context)
+{
+    uint64_t countAt = 0;
+    uint32_t count = 0, id = 0;
+    (void)record; (void)context;
+    memcpy(&countAt, pass + 0x48, 8);
+    memcpy(&count, (void*)(uintptr_t)countAt, 4);
+    memcpy(pass + 0xD8, &count, 4);
+    g_spawnCalls++;
+    g_nextId = 20; CoXlTestSlCreate(WriterW(), &id);
+    g_ringHead = g_ringTail + 0x10;
+    return 1;
 }
 
 /* The game's state as WorldStreamTick asks it: [game+0x3326340]+0xAC21C, 4 in a mission (and through its unload). */
@@ -1375,6 +1394,12 @@ int main(void)
                                "spawn frames: layer 4 2 at 4.00 ms (the most 5.00) over 200000 leaves, 20.0 ns a leaf over 2"));
         CoXlTestStreamLayerCostNote();                                   /* each note starts again */
         CHECK(fake_host_logged("over two quiet frames'): removal frames: none; spawn frames: none"));
+        COST_PAIR(19.0, 1, 0, 11.0, (void)0);
+        CoXlTestStreamCostLayerSet(1, 2, 80000); CoXlTestStreamCostLearn();
+        Stream(10);                                                      /* a new level: none kept */
+        g_fake.log[0] = 0;
+        CoXlTestStreamLayerCostNote();
+        CHECK(fake_host_logged("over two quiet frames'): removal frames: none; spawn frames: none"));
         /* a pair a far-grass job was out in, or one kept apart, says nothing of its cost */
         COST_PAIR(20.0, 1, 0, 5.0, co_framecost_grass(1));
         CoXlTestStreamCost(3.0, 0.5, &rm, &sp, &kind); CoXlTestStreamCostKind(1); CoXlTestStreamCostLearn();
@@ -1982,8 +2007,10 @@ int main(void)
         CoXlTestSlFlushWith(FakeFlush);
         g_flushCalls = g_flushLeaves = 0;
         g_ringHead = 0x110; g_ringTail = 0x100;
+        wl[0x170038] = 1;                                            /* a destroy list holds entries: due, not a leftover */
         CoXlTestSlFrame(9);
         CoXlTestSlFrameEnd(wlv);
+        wl[0x170038] = 0;
         CHECK(g_flushCalls == 1 && CoXlTestSlLayerOf(11) == 9 && CoXlTestSlLayerOf(12) == 9);
         CoXlTestSlWindowCounts(&off, &left);
         CHECK(off == 2 && left == 0);
@@ -2138,6 +2165,93 @@ int main(void)
         CHECK(CoXlTestSlFlushDue(world));
         w[0x10030] = 0; memset(ring + 8, 0, 8);
         CHECK(!CoXlTestSlFlushDue(world));                           /* the ring does not read: left to the world's flush */
+    }
+
+    /* The real change step with the layers on (WorldStreamChangeLocked, then WorldStreamChangeAfter): a spawn frame opens
+     * the window with the smallest streamed layer; the bodies its spawn call and its flush make, on either thread, take
+     * it; the window closes after the flush, when nothing was made, and when the flush cannot be made. */
+    Start("a spawn frame through the change step with the layers on: its window, its bodies' layer, its cost layer, closed on every path");
+    {
+        uint32_t id = 0, costLayer = 9, costLeaves = 0;
+        unsigned long long at = 0;
+        char text[640];
+        StreamGame();
+        Stream(8);
+        const uint32_t small8[10] = {0, 0, 0, 0, 1000, 0, 4000, 9000, 3000, 9500};
+        BroadPhase(10, small8);
+        CoXlTestSlReset();
+        CoXlTestSlSet(1, (uintptr_t)g_fake.exe, (void*)OrigCount6, (void*)OrigInfo, (void*)OrigRule, (void*)OrigCreate);
+        g_ruleOther = -1;
+        const DWORD gameWas = CoXlTestSlGameThread(GetCurrentThreadId());
+        static uint8_t ring[0x20];
+        const uint64_t rv = (uint64_t)(uintptr_t)ring, hv = (uint64_t)(uintptr_t)&g_ringHead, tv = (uint64_t)(uintptr_t)&g_ringTail;
+        memcpy(g_worldMem + 0x20, &rv, 8); memcpy(ring + 8, &hv, 8); memcpy(ring + 0x10, &tv, 8);
+        g_ringHead = g_ringTail = 0x100;
+        const uint64_t array = (uint64_t)(uintptr_t)g_array;
+        memset(g_spawnPass, 0, sizeof g_spawnPass); memcpy(g_spawnPass + 8, &array, 8);
+        CoXlTestStreamSpawnSetup((void*)SpawnBodies, g_spawnPass);
+        CoXlTestSlFlushWith(FakeFlush);
+        g_flushCalls = g_flushLeaves = g_spawnCalls = 0;
+        co_framecost_test_reset(1000000);
+        CoXlTestStreamRemoveWait(0, 0);
+        CoXlTestSlChangeTickSet(0);
+        CoXlTestSlSampleText(text, sizeof text);                      /* a fresh table */
+        /* layer 8 the smallest: the spawn call's body (game thread) and the flush's two (game thread, a worker) */
+        CoXlTestStreamDue(0, U(0x100)); CoXlTestStreamDue(1, U(0x200));
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(10000, 0, &at) == 1 && g_spawnCalls == 1 && g_flushCalls == 1 && CoXlTestStreamSpawnTried() == 9);
+        CHECK(CoXlTestSlLayerOf(20) == 8 && CoXlTestSlLayerOf(11) == 8 && CoXlTestSlLayerOf(12) == 8);
+        CHECK(CoXlTestStreamLayerOf(0) == 8 && CoXlTestStreamLayerOf(1) == 8);
+        CoXlTestStreamCostLayer(&costLayer, &costLeaves);
+        CHECK(costLayer == 3 && costLeaves == 3000);                 /* layer 8's cost, by its leaves */
+        CoXlTestSlSampleText(text, sizeof text);                      /* the spawn call's body is the change frame's too */
+        CHECK(strncmp(text, "3 bodies made (3 in change frames, 0 in the frames after them, 0 in others)", 75) == 0);
+        g_nextId = 13; CoXlTestSlCreate(WriterW(), &id);             /* the window closed with the flush */
+        CHECK(CoXlTestSlLayerOf(13) == 0);
+        /* a spawn frame that made nothing (its only due slot spawned already) closes the window it opened */
+        CoXlTestStreamDue(2, U(0x300)); CoXlTestStreamSpawnedSet(2, 1);
+        CoXlTestStreamChangeAt(0);
+        CoXlTestSlChangeTickSet(0);
+        CHECK(CoXlTestStreamChange(10001, 0, &at) == 0 && g_spawnCalls == 1 && g_flushCalls == 1 && CoXlTestStreamSpawnTried() == 9);
+        g_nextId = 14; CoXlTestSlCreate(WriterW(), &id);
+        CHECK(CoXlTestSlLayerOf(14) == 0 && CoXlTestSlChangeMark() == 0); /* no change frame for the sampler either */
+        /* layer 6 the smallest, and the world not read for the flush: made, not flushed, the window closed */
+        const uint32_t small6[10] = {0, 0, 0, 0, 1000, 0, 1500, 9000, 3000, 9500};
+        BroadPhase(10, small6);
+        uint64_t world = 0, none = 0;
+        memcpy(&world, g_context + 0x40, 8); memcpy(g_context + 0x40, &none, 8);
+        CoXlTestStreamDue(3, U(0x400));
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(10002, 0, &at) == 1 && g_spawnCalls == 2 && g_flushCalls == 1 && CoXlTestStreamSpawnTried() == 7);
+        CHECK(CoXlTestSlLayerOf(20) == 6 && CoXlTestStreamLayerOf(3) == 6);
+        CoXlTestStreamCostLayer(&costLayer, &costLeaves);
+        CHECK(costLayer == 1 && costLeaves == 1500);
+        memcpy(g_context + 0x40, &world, 8);
+        g_nextId = 15; CoXlTestSlCreate(WriterW(), &id);
+        CHECK(CoXlTestSlLayerOf(15) == 0);
+        /* layers 9 and 7: flushed, each its own cost layer */
+        const uint32_t small9[10] = {0, 0, 0, 0, 1000, 0, 4000, 9000, 3000, 2000}, small7[10] = {0, 0, 0, 0, 1000, 0, 4000, 2500, 3000, 9500};
+        const uint32_t layers[2] = {9, 7};
+        for (int k = 0; k < 2; k++)
+        {
+            BroadPhase(10, k == 0 ? small9 : small7);
+            CoXlTestStreamDue(4 + (uint32_t)k, U(0x500 + 0x100 * (uint32_t)k));
+            CoXlTestStreamChangeAt(0);
+            CHECK(CoXlTestStreamChange(10003 + (unsigned long long)k, 0, &at) == 1 && g_flushCalls == 2 + k && CoXlTestStreamSpawnTried() == layers[k] + 1);
+            CHECK(CoXlTestSlLayerOf(20) == layers[k] && CoXlTestSlLayerOf(11) == layers[k] && CoXlTestSlLayerOf(12) == layers[k]);
+            CoXlTestStreamCostLayer(&costLayer, &costLeaves);
+            CHECK(costLayer == layers[k] - 5 && costLeaves == (k == 0 ? 2000u : 2500u));
+            g_nextId = 16; CoXlTestSlCreate(WriterW(), &id);
+            CHECK(CoXlTestSlLayerOf(16) == 0);
+        }
+        long off = 0, left = 0;
+        CoXlTestSlWindowCounts(&off, &left);
+        CHECK(off == 3 && left == 0);                                 /* the workers' bodies of the three flushes */
+        CoXlTestSlFlushWith(NULL);
+        CoXlTestSlGameThread(gameWas);
+        CoXlTestStreamSpawnSetup(NULL, NULL);
+        memset(g_worldMem + 0x20, 0, 8);
+        CoXlTestSlReset();
     }
 
     /* The count and info go in before the game's set-up (SlEarly), the rule and body maker with the streamer (SlInstall),
