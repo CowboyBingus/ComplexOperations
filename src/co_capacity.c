@@ -38,7 +38,7 @@ static struct
     const char* render;        /* why the main world's culling pools did not, once the room did */
     int asked, settled, on;
 } g_capacity;
-static uint32_t g_commitTest; /* tests: the commit to report instead of the machine's */
+static uint32_t g_ramTest; /* tests: the RAM to report instead of the machine's */
 
 static int Has(size_t end) { return g_coApi != NULL && g_coApi->size >= end; }
 #define HAS(call) Has(offsetof(HfApi, call) + sizeof(void*))
@@ -75,15 +75,13 @@ void co_capacity_init(void)
 
 void co_capacity_game(uintptr_t game) { g_capacity.game = game; }
 
-/* The commit this process can reach, in MB: what it holds now plus what the system can still give. An extra large map
- * was measured to bring the whole process to CO_COMPLEX_COMMIT_MB, so what the game already holds counts towards it. */
+/* The commit this process can reach, in MB: what it holds now plus what the system can still give. Logged only. */
 typedef struct { DWORD cb, faults; SIZE_T peakWs, ws, quotaPeakPaged, quotaPaged, quotaPeakNonPaged, quotaNonPaged, page, peakPage, priv; } CoMemCounters;
 static uint32_t CommitFree(void)
 {
     MEMORYSTATUSEX m = {.dwLength = sizeof m};
     static BOOL (WINAPI* info)(HANDLE, void*, DWORD);
     static int looked;
-    if (g_commitTest != 0) return g_commitTest;
     if (!GlobalMemoryStatusEx(&m)) return 0;
     if (!looked) { looked = 1; HMODULE k = GetModuleHandleA("kernel32.dll"); if (k) info = (BOOL (WINAPI*)(HANDLE, void*, DWORD))(void*)GetProcAddress(k, "K32GetProcessMemoryInfo"); }
     CoMemCounters c = {.cb = sizeof c};
@@ -91,6 +89,21 @@ static uint32_t CommitFree(void)
     /* Wine leaves PrivateUsage 0 and keeps the commit in PagefileUsage */
     if (info != NULL && info(GetCurrentProcess(), &c, sizeof c)) held = c.priv ? c.priv : c.page;
     const uint64_t mb = (m.ullAvailPageFile + held) >> 20;
+    return mb > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)mb;
+}
+
+/* The PC's RAM, in MB: the installed modules where Windows can say (GetPhysicallyInstalledSystemMemory), else the
+ * memory the system manages. An extra large map's game peaked at 16.6 GB working set, so the part asks for 16 GB. */
+static uint32_t RamMb(void)
+{
+    static BOOL (WINAPI* installed)(PULONGLONG);
+    static int looked;
+    ULONGLONG kb = 0;
+    MEMORYSTATUSEX m = {.dwLength = sizeof m};
+    if (g_ramTest != 0) return g_ramTest;
+    if (!looked) { looked = 1; HMODULE k = GetModuleHandleA("kernel32.dll"); if (k) installed = (BOOL (WINAPI*)(PULONGLONG))(void*)GetProcAddress(k, "GetPhysicallyInstalledSystemMemory"); }
+    uint64_t mb = installed != NULL && installed(&kb) && kb != 0 ? kb >> 10 : 0;
+    if (mb == 0 && GlobalMemoryStatusEx(&m)) mb = m.ullTotalPhys >> 20;
     return mb > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)mb;
 }
 
@@ -115,10 +128,11 @@ void co_capacity_early(void)
     const uintptr_t game = g_capacity.game;
     if (!g_capacity.asked || game == 0 || n->early) return;
     if (!n->capacity_call || !n->regions || n->live_load || !n->capacity_granted) return; /* the poll names the reason */
-    if ((n->commit_free_mb = CommitFree()) < CO_COMPLEX_COMMIT_MB)
+    n->ram_mb = RamMb();
+    co_log("complex operations: %u MB of RAM, %u MB of commit within reach", n->ram_mb, CommitFree());
+    if (n->ram_mb < CO_COMPLEX_RAM_MB)
     {
-        g_capacity.early = "not enough memory free for an extra large map";
-        co_log("complex operations: %u MB of commit within reach, %u needed", n->commit_free_mb, CO_COMPLEX_COMMIT_MB);
+        g_capacity.early = "this PC has less than 16 GB of RAM";
         return;
     }
     if ((g_capacity.early = OwnSites(game)) != NULL || (g_capacity.early = co_stamps_room_check(game)) != NULL) return;
@@ -174,7 +188,7 @@ static void Settle(void)
             co_spawners_check(g_capacity.game) == NULL &&
             co_rows_level_check(g_capacity.game) == NULL;
         n->own_sites = (site = OwnSites(g_capacity.game)) == NULL;
-        n->commit_free_mb = CommitFree();
+        n->ram_mb = RamMb();
         why = co_complex_refusal(n);
     }
     else if (capacity && g_capacity.game == 0) why = NULL; /* no game to ask: the line below says what this build is */
@@ -183,7 +197,7 @@ static void Settle(void)
     else if (why != NULL && capacity && n->early && !n->render && g_capacity.render != NULL) co_log("complex operations are off: %s (%s)", why, g_capacity.render);
     else if (why != NULL && site != NULL && n->stock_stubs) co_log("complex operations are off: %s (%s)", why, site);
     else if (why != NULL && n->stock_stubs && n->own_sites && n->records && capacity && g_capacity.game != 0)
-        co_log("complex operations are off: %s (%u MB can be committed, %u are needed)", why, n->commit_free_mb, CO_COMPLEX_COMMIT_MB);
+        co_log("complex operations are off: %s (%u MB of RAM, %u are needed)", why, n->ram_mb, CO_COMPLEX_RAM_MB);
     else if (why != NULL) co_log("complex operations are off: %s", why);
     else if (!g_capacity.on)
         co_log("complex operations are off: this build has the map generator's room (%u locations, a block of 0x%X bytes) and makes none yet",
@@ -240,7 +254,7 @@ uint32_t co_gen_places(int region) { return region >= 0 && region < HF_GEN_REGIO
 uint32_t co_gen_block(void) { return g_capacity.have.block_bytes; }
 
 #ifdef CO_TEST
-void co_capacity_test_commit(uint32_t mb) { g_commitTest = mb; }
+void co_capacity_test_ram(uint32_t mb) { g_ramTest = mb; }
 /* A machine whose complex part is on or off, for the parts that only ask. */
 void co_capacity_test_on(int on) { g_capacity.settled = 1; g_capacity.on = on; }
 void co_capacity_test_unsettled(void) { g_capacity.settled = 0; g_capacity.on = 0; }

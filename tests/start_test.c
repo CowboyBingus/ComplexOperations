@@ -13,7 +13,7 @@
 #include "xl/co_pages.h"
 #include "xl/co_page_sites.h"
 
-void co_capacity_test_commit(uint32_t mb);
+void co_capacity_test_ram(uint32_t mb);
 void co_early_test_reset(void);
 void CoXlTestRecords(int state);
 void CoXlTestRenderReset(void);
@@ -80,7 +80,7 @@ static void Start(const char* name)
     co_join_test_image(image, 4); co_drain_test_image(image);
     fake_stock_nav(image);          /* its navigation steps, and the engine they retile */
     fake_stock_early(image);        /* its pool sizes, in a game whose setup has not begun */
-    co_capacity_test_commit(CO_COMPLEX_COMMIT_MB);
+    co_capacity_test_ram(CO_COMPLEX_RAM_MB);
     co_capacity_init();
     co_capacity_game((uintptr_t)image);
     /* the engine's room goes in as the game loads, whatever is decided later: not what the cases below count */
@@ -109,7 +109,7 @@ int main(void)
     Start("everything there");
     CHECK(co_capacity_poll(1) == 1);
     const CoComplexNeeds* n = co_capacity_needs();
-    CHECK(n->stock_stubs && n->own_sites && n->commit_free_mb == CO_COMPLEX_COMMIT_MB && co_complex_refusal(n) == NULL);
+    CHECK(n->stock_stubs && n->own_sites && n->ram_mb == CO_COMPLEX_RAM_MB && co_complex_refusal(n) == NULL);
     /* the part is on, with no line, and nothing has gone in before its start (the last case below) */
     CHECK(CO_COMPLEX_COMPLETE == 1 && co_complex_on() && Untouched());
     CHECK(Lines("complex operations are off") == 0 && co_complex_rolls(1, co_complex_on(), CO_HOST_ROW_NONE));
@@ -181,14 +181,14 @@ int main(void)
     }
 
     Start("too little memory");
-    co_capacity_test_commit(CO_COMPLEX_COMMIT_MB - 1u);
+    co_capacity_test_ram(CO_COMPLEX_RAM_MB - 1u);
     CHECK(co_capacity_poll(1) == 1 && co_capacity_needs()->own_sites && !co_complex_on() && co_complex_start() == 0 && Untouched());
-    CHECK(Lines("complex operations are off") == 1 && fake_host_logged("not enough memory free") && fake_host_logged("28671 MB can be committed, 28672 are needed"));
+    CHECK(Lines("complex operations are off") == 1 && fake_host_logged("this PC has less than 16 GB of RAM") && fake_host_logged("15359 MB of RAM, 15360 are needed"));
 
     Start("the machine's own memory");
-    co_capacity_test_commit(0); /* asked of Windows: the part is on exactly when this machine has the commit */
-    CHECK(co_capacity_poll(1) == 1 && co_capacity_needs()->commit_free_mb != 0 && Untouched() &&
-          co_complex_on() == (co_capacity_needs()->commit_free_mb >= CO_COMPLEX_COMMIT_MB));
+    co_capacity_test_ram(0); /* asked of Windows: the part is on exactly when this machine has the RAM */
+    CHECK(co_capacity_poll(1) == 1 && co_capacity_needs()->ram_mb != 0 && Untouched() &&
+          co_complex_on() == (co_capacity_needs()->ram_mb >= CO_COMPLEX_RAM_MB));
 
     Start("no level 11");
     g_fake.levelRow = 0;
@@ -209,7 +209,7 @@ int main(void)
 
     /* the engine's room is in and the part is off: every level still gets its navigation plan, in front of HellForge's */
     Start("a normal level's navigation with the room made");
-    co_capacity_test_commit(CO_COMPLEX_COMMIT_MB - 1u);
+    co_capacity_test_ram(CO_COMPLEX_RAM_MB - 1u);
     CHECK(co_capacity_poll(1) == 1 && !co_complex_on() && Untouched());
     /* 2 navigation stubs, then the 2 tile stubs that give a normal level stock's 8 x 8 tiles; one hook, the ship's
      * early retile in the PrepareShip enter */

@@ -161,13 +161,13 @@ int co_seed_is_complex(uint32_t mission_seed);
 /* The complex part of the mod (co_complex.c): what it needs, and what a machine does with a level-11 mission. */
 #define CO_COMPLEX_LEVEL 11u
 #define CO_COMPLEX_CHANCE 16384u     /* in 1/65536: each level-11 operation but a planet's guaranteed one */
-#define CO_COMPLEX_COMMIT_MB 28672u  /* commit an extra large map was measured to reach */
+#define CO_COMPLEX_RAM_MB 15360u     /* a 16 GB PC: the firmware, an integrated GPU or the kernel keep some back */
 #define CO_COMPLEX_MISSIONS 3u      /* an operation's missions, all on the one map */
 typedef struct CoComplexNeeds
 {
     int capacity_call, regions, live_load, capacity_granted; /* at the mod's start */
     int level_11, moved, stock_stubs, own_sites;             /* once level 11 is installed */
-    uint32_t commit_free_mb;
+    uint32_t ram_mb;                                         /* installed memory, in MB */
     int early, records;                                      /* as game.dll is loaded: the engine's room, the records' hook */
     int render;                                              /* and the main world's culling pools */
 } CoComplexNeeds;

@@ -25,7 +25,7 @@ const char* co_complex_refusal(const CoComplexNeeds* n)
     if (!n->stock_stubs) return "difficulty 11's larger-map steps are not the ones this mod was built for";
     if (!n->own_sites) return kNotThisBuild;
     if (!n->records) return "the entity records kept the game's 2048 places";
-    if (n->commit_free_mb < CO_COMPLEX_COMMIT_MB) return "not enough memory free for an extra large map";
+    if (n->ram_mb < CO_COMPLEX_RAM_MB) return "this PC has less than 16 GB of RAM";
     return NULL;
 }
 
