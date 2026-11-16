@@ -15,7 +15,14 @@
 #define FG_N 64               /* views a side */
 #define FG_WANT 768.0f        /* a batch starts when unbaked ground is this close to a player ... */
 #define FG_REACH 1536.0f      /* ... and bakes the views this close to one, nearest first */
-#define FG_BATCH 64           /* views a batch at most */
+#define FG_BATCH 64           /* the planner's list at most */
+#define FG_BATCH_VIEWS 8      /* views a batch: it ends, builds and looks again while the player is still near them */
+/* A view's square is drawn in FG_SPLIT_X x FG_SPLIT_Y jobs of 64 x 128 m: a scatter layer's update gathers the cells
+ * under its view's box and pad (exe 0x9548C0), 18 x 18 of 16 m for 256 m, 6 x 10 for one job, so the render frame
+ * that runs a job carries a fifth of a whole view's scatter work. */
+#define FG_SPLIT_X 4
+#define FG_SPLIT_Y 2
+#define FG_SUBS (FG_SPLIT_X * FG_SPLIT_Y)
 #define FG_PICK_FRAMES 30u    /* level updates between looks for unbaked ground */
 #define FG_SETTING_FRAMES 60u /* the setting is set again this often: an options apply resets the render settings */
 #define FG_EMPTY_UPDATES 3u   /* the queue read empty this many level updates in a row: the builder's job has run */
@@ -53,12 +60,12 @@ static struct
     LONG level; /* the level (g_world.levels) the kept textures and the map belong to; -1 none */
     uint64_t tex[FG_TEXTURES];
     FgMap map;
-    int state, count, next, published, off;
+    int state, count, next, sub, last, published, off;
     uint16_t list[FG_BATCH];
     uint64_t world, queue, settings, vp, camera, env; uint32_t unit;
     uint32_t frames, empty, waits, deferred;
     int setting, settingNotes, clearNoted, edited; uint32_t settingFrames;
-    uint32_t batches, baked;
+    uint32_t batches, baked, jobs;
     ULONGLONG started;
 } g_fg = {.level = -1};
 
@@ -129,6 +136,18 @@ static void FgCentre(int i, int j, float* c)
 static void FgRect(int i, int j, float* r)
 {
     r[0] = (float)i / FG_N; r[1] = (float)(FG_N - 1 - j) / FG_N; r[2] = 1.0f / FG_N; r[3] = 1.0f / FG_N;
+}
+
+/* Job q of view (i, j): column q % FG_SPLIT_X from the west, row q / FG_SPLIT_X from the south. Its camera stays over
+ * the view's centre with an off-centre box (l, r, b, t in metres from it: x east, y north, as the camera's own axes
+ * from 0x173F150), and its rectangle is that box's part of the view's, the north row on top as in FgRect. */
+static void FgSubRect(int i, int j, int q, float* box, float* r)
+{
+    const int qx = q % FG_SPLIT_X, qy = q / FG_SPLIT_X;
+    const float w = FG_TILE / FG_SPLIT_X, h = FG_TILE / FG_SPLIT_Y;
+    box[0] = -FG_TILE / 2 + (float)qx * w; box[1] = box[0] + w; box[2] = -FG_TILE / 2 + (float)qy * h; box[3] = box[2] + h;
+    r[0] = (float)(i * FG_SPLIT_X + qx) / (FG_N * FG_SPLIT_X); r[1] = (float)((FG_N - 1 - j) * FG_SPLIT_Y + (FG_SPLIT_Y - 1 - qy)) / (FG_N * FG_SPLIT_Y);
+    r[2] = 1.0f / (FG_N * FG_SPLIT_X); r[3] = 1.0f / (FG_N * FG_SPLIT_Y);
 }
 
 /* Metres from (x, y) to view (i, j)'s square, 0 inside. */
@@ -314,10 +333,10 @@ static void FgFree(void)
     if (g_fg.state != FG_IDLE) Note("difficulty: far grass: the level ended inside a batch; its viewport, camera and environment are left to the world");
     g_fg.state = FG_IDLE; g_fg.vp = g_fg.camera = g_fg.env = 0; g_fg.unit = 0;
     memset(&g_fg.map, 0, sizeof g_fg.map);
-    memset(&g_fgLinker.pending, 0, sizeof g_fgLinker.pending); g_fgLinker.builder = 0;
+    memset(&g_fgLinker.pending, 0, sizeof g_fgLinker.pending); g_fgLinker.builder = 0; g_fgLinker.keepNotes = 0; /* 4 lines a level: batches are many */
     /* the game's own entries back, only this level's: a level whose op 0x4A gave none has its own upload already */
     if (g_fgLinker.dirty && (g_fgLinker.level != g_world.levels || FgLinkerSend(g_fgLinker.game) == NULL)) g_fgLinker.dirty = 0;
-    g_fg.level = -1; g_fg.off = 0; g_fg.batches = g_fg.baked = 0; g_fg.edited = 0; g_tdScatWaitUs = g_tdScatWaitMaxUs = 0; g_scatBakeOver = 0;
+    g_fg.level = -1; g_fg.off = 0; g_fg.batches = g_fg.baked = g_fg.jobs = 0; g_fg.edited = 0; g_tdScatWaitUs = g_tdScatWaitMaxUs = 0; g_scatBakeOver = 0;
     g_fgFrames.filled = g_fgFrames.at = 0; g_fgFrames.last = 0;
 }
 
@@ -450,6 +469,22 @@ static void FgObjectsDestroy(void)
     g_fg.vp = g_fg.camera = g_fg.env = 0; g_fg.unit = 0;
 }
 
+/* The camera's box setter, [api+0x20]+0x98 (exe 0x30D9D0): l, r, b, t to camera +0x38..+0x44 and the box mode +0x50,
+ * then the camera's message (0x4CFAB0) on the world's stream, as the viewport's rectangle (0x332FD0) goes, so a job's
+ * box arrives with its rectangle. The bake's own aim (game 0xF48990) calls it with the same arguments. */
+#define FG_BOX_SETTER 0x30D9D0u
+typedef void (*FgBoxFn)(uint64_t camera, float l, float r, float b, float t);
+static int FgBoxSetter(void)
+{
+    const uintptr_t f = NearApi(0x20, 0x98);
+#ifdef CO_TEST
+    return f != 0; /* the fake engine's */
+#else
+    return f != 0 && f == (uintptr_t)GetModuleHandleW(NULL) + FG_BOX_SETTER &&
+        ApiCodeMatches(f, "F3 0F 10 44 24 28 F3 0F 11 41 44 F3 0F 11 49 38 F3 0F 11 51 3C F3 0F 11 59 40 C7 41 50 01 00 00 00 E9 BA 20 1C 00") == 1;
+#endif
+}
+
 /* The batch's viewport, camera and environment, made as op 0x49 makes phase B's on the level's world. The far plane at
  * 1002 marks the bake's view (TD_SCAT_BAKE_FAR); the load-time scatter cuts look for 1001. */
 static int FgObjects(void)
@@ -479,11 +514,12 @@ static int FgObjects(void)
     return 1;
 }
 
-/* One view: the camera over its square, the viewport's rectangle, op 0x4A's job (game 0xF616B0..0xF61832). Not op 0x4A's
- * next call, [api+8]+0x640 (exe 0x339690): its message 0xB rebuilds every scatter layer tree of the world (exe
- * 0x216FE8), which in play would throw the players' cells away each view. A cell's instances depend on the cell and the
- * layer only (exe 0x21343B..0x213479), and the view's records are freed for reuse at the next update (0x953A11). */
-static int FgView(int index)
+/* Job q of a view: the camera over the view's centre, its box and the viewport's rectangle for the job, op 0x4A's job
+ * (game 0xF616B0..0xF61832 moves the camera, sets the rectangle and queues in one call). Not op 0x4A's next call,
+ * [api+8]+0x640 (exe 0x339690): its message 0xB rebuilds every scatter layer tree of the world (exe 0x216FE8), which in
+ * play would throw the players' cells away each view. A cell's instances depend on the cell and the layer only (exe
+ * 0x21343B..0x213479), and the view's records are freed for reuse at the next update (0x953A11). */
+static int FgView(int index, int q)
 {
     typedef void (*MoveFn)(uint64_t camera, uint32_t unit, const float* xyz);
     typedef void (*UnitFn)(uint64_t world, uint32_t unit);
@@ -491,17 +527,19 @@ static int FgView(int index)
     MoveFn move = (MoveFn)NearApi(0x20, 0x20);
     UnitFn update = (UnitFn)NearApi(0x08, 0x100);
     RectFn rect = (RectFn)NearApi(0xE0, 0x0);
-    if (move == NULL || update == NULL || rect == NULL) return 0;
+    FgBoxFn box = (FgBoxFn)NearApi(0x20, 0x98);
+    if (move == NULL || update == NULL || rect == NULL || box == NULL) return 0;
     const int i = index % FG_N, j = index / FG_N;
-    float c[2], r[4];
-    FgCentre(i, j, c); FgRect(i, j, r);
+    float c[2], b[4], r[4];
+    FgCentre(i, j, c); FgSubRect(i, j, q, b, r);
     const float at[3] = {c[0], c[1], 501.0f};
     move(g_fg.camera, g_fg.unit, at);
     update(g_fg.world, g_fg.unit);
+    box(g_fg.camera, b[0], b[1], b[2], b[3]);
     rect(g_fg.vp, r[0], r[1], r[2], r[3]);
     FgQueueView();
-    FgMark(&g_fg.map, i, j); FgMark(&g_fgLinker.pending, i, j);
-    g_fg.baked++;
+    if (q == 0) { FgMark(&g_fg.map, i, j); FgMark(&g_fgLinker.pending, i, j); g_fg.baked++; }
+    g_fg.last = index; g_fg.jobs++;
     return 1;
 }
 
@@ -511,6 +549,14 @@ static void FgEnd(int stop, const char* why)
     if (g_fg.published) FgPublish(0);
     g_fg.state = FG_IDLE; g_fg.frames = 0;
     if (stop) { g_fg.off = 1; Note("difficulty: far grass: %s; no more bakes this level", why); }
+}
+
+/* The cells a layer's update gathers for a job's box: per axis ceil((side + 2 pad) / size) + 1 (0x9548C0 grows the
+ * box by the pad, 0x21304B, and counts the cells under it, 0x954CB9). */
+static uint64_t FgJobCells(float size, float grow)
+{
+    const uint64_t x = (uint64_t)ceilf((FG_TILE / FG_SPLIT_X + 2.0f * grow) / size) + 1, y = (uint64_t)ceilf((FG_TILE / FG_SPLIT_Y + 2.0f * grow) / size) + 1;
+    return x * y;
 }
 
 /* After a batch: SpeedTree's memory (the speedtree_plugin proxy [exe+0x1A100D8]: live bytes +0x30, peak +0x40; every
@@ -532,14 +578,14 @@ static void FgScatterNote(void)
             uintptr_t tree = 0; uint64_t cap = 0;
             if (SafeRead(layers + (uint64_t)i * 0x238u + 0x40, &tree, 8) || tree == 0 || SafeRead(tree + 0x98, &cap, 8)) continue;
             nodes += cap; if (cap > most) most = cap; read++;
-            /* the cells a 256 m view can touch: its square and the layer's pad (cell size +0x22C, pad +0x230) */
+            /* the cells a job can touch: its box and the layer's pad (cell size +0x22C, pad +0x230) */
             float size = 0, grow = 0;
             if (SafeRead(layers + (uint64_t)i * 0x238u + 0x22C, &size, 4) || SafeRead(layers + (uint64_t)i * 0x238u + 0x230, &grow, 4) || !(size >= 1.0f)) continue;
-            const uint64_t side = (uint64_t)ceilf((FG_TILE + 2.0f * grow) / size) + 1;
-            if (side * side > bound) { bound = side * side; finest = size; }
+            const uint64_t cells = FgJobCells(size, grow);
+            if (cells > bound) { bound = cells; finest = size; }
         }
     Note("difficulty: far grass: SpeedTree memory %llu MiB (peak %llu MiB); node vectors %llu KiB over %u of %u layers, the largest %llu nodes; "
-        "a bake view's layer touches %llu cells at most (%.1f m cells); %ld bake views over the limit this level",
+        "a bake job's layer touches %llu cells at most (%.1f m cells); %ld bake jobs over the limit this level",
         (unsigned long long)(live >> 20), (unsigned long long)(peak >> 20), (unsigned long long)(nodes * 0xE0u >> 10), read, count, (unsigned long long)most,
         (unsigned long long)bound, finest, g_scatBakeOver);
 }
@@ -548,10 +594,11 @@ static void FgBatchNote(void)
 {
     g_fg.batches++;
     if (g_fg.batches > 8 && g_fg.batches % 16 != 0) return;
-    Note("difficulty: far grass: batch %u: %d views of 256 m in %.1f s (%lld scatter updates of its views; %lld updates waited for their layer, "
+    Note("difficulty: far grass: batch %u: %d views of 256 m, %d jobs of %.0f x %.0f m each, in %.1f s (%lld scatter updates of its jobs; %lld updates waited for their layer, "
         "other views %.2f ms in all this level, %.2f ms at most); %u of %d views baked this level; frames (wall clock) with a job out %u, worst %.1f ms, "
         "mean %.1f ms; the %u before the batch worst %.1f ms, mean %.1f ms; its build kept %u views' texels", g_fg.batches,
-        g_fg.count, (double)(GetTickCount64() - g_fg.started) / 1000.0, (long long)(g_tdScatBakeUpdates - g_fgFrames.scat),
+        g_fg.count, FG_SUBS, (double)(FG_TILE / FG_SPLIT_X), (double)(FG_TILE / FG_SPLIT_Y), (double)(GetTickCount64() - g_fg.started) / 1000.0,
+        (long long)(g_tdScatBakeUpdates - g_fgFrames.scat),
         (long long)(g_tdScatOverlap - g_fgFrames.overlap), (double)g_tdScatWaitUs / 1000.0, (double)g_tdScatWaitMaxUs / 1000.0, g_fg.baked, FG_N * FG_N,
         g_fgFrames.n, g_fgFrames.worst,
         g_fgFrames.n ? g_fgFrames.sum / g_fgFrames.n : 0.0, g_fgFrames.filled, g_fgFrames.before[0], g_fgFrames.before[1], g_fgLinker.kept);
@@ -585,11 +632,12 @@ static void FarGrassTick(uint64_t level)
         if (g_move.state != MV_IDLE || TdScatterMergeWindow() || NearQueued(context) != 0) return;
         g_fg.frames = 0;
         if (!FgEye(eye) || FgBatch(&g_fg.map, (const float (*)[2])eye, 1, FG_WANT, g_fg.list, 1) == 0) return;
-        g_fg.count = FgBatch(&g_fg.map, (const float (*)[2])eye, 1, FG_REACH, g_fg.list, FG_BATCH);
+        g_fg.count = FgBatch(&g_fg.map, (const float (*)[2])eye, 1, FG_REACH, g_fg.list, FG_BATCH_VIEWS);
         if (SafeRead(context + 0x40, &g_fg.world, 8) || g_fg.world == 0 || SafeRead(context + 0x50, &g_fg.queue, 8) || g_fg.queue == 0 ||
             SafeRead(context + 8, &g_fg.settings, 8) || g_fg.settings == 0) return;
+        if (!FgBoxSetter()) { FgEnd(1, "the camera's box setter ([api+0x20]+0x98) is not the reviewed exe 0x30D9D0"); return; }
         if (!FgObjects()) { FgEnd(1, "the bake's viewport, camera or environment could not be made"); return; }
-        g_fg.next = 0; g_fg.waits = 0; g_fg.deferred = 0; g_fg.started = GetTickCount64();
+        g_fg.next = 0; g_fg.sub = 0; g_fg.waits = 0; g_fg.deferred = 0; g_fg.started = GetTickCount64();
         FgFramesStart();
         g_fg.state = FG_VIEWS;
         return;
@@ -601,7 +649,8 @@ static void FarGrassTick(uint64_t level)
         FgPublish(1);
         if (g_fg.state == FG_VIEWS)
         {
-            if (!FgView(g_fg.list[g_fg.next++])) { FgEnd(1, "a view's camera or viewport call is missing"); return; }
+            if (!FgView(g_fg.list[g_fg.next], g_fg.sub)) { FgEnd(1, "a view's camera or viewport call is missing"); return; }
+            if (++g_fg.sub == FG_SUBS) { g_fg.sub = 0; g_fg.next++; }
             g_fg.state = FG_VIEW_WAIT;
         }
         else
@@ -622,15 +671,16 @@ static void FarGrassTick(uint64_t level)
     }
     if (++g_fg.empty < FG_EMPTY_UPDATES) return;
     FgPublish(0);
-    /* a view over the node limit had z-0 boxes: its texels stay as they are, the views before it are built */
+    /* a job over the node limit had z-0 boxes: its view's texels stay as they are, the views before it are built */
     if (g_fg.state == FG_VIEW_WAIT && g_scatBakeOver != 0 && !g_fg.off)
     {
-        const int last = g_fg.list[g_fg.next - 1];
-        FgUnmark(&g_fgLinker.pending, last % FG_N, last / FG_N);
-        g_fg.off = 1; g_fg.next = g_fg.count;
+        FgUnmark(&g_fgLinker.pending, g_fg.last % FG_N, g_fg.last / FG_N);
+        g_fg.off = 1; g_fg.next = g_fg.count; g_fg.sub = 0;
     }
     if (g_fg.state == FG_VIEW_WAIT) { g_fg.state = g_fg.next >= g_fg.count ? FG_BUILD : FG_VIEWS; return; }
     FgEnd(0, NULL);
+    /* a full batch likely left unbaked ground near: the next one is picked now, not FG_PICK_FRAMES later */
+    if (g_fg.count == FG_BATCH_VIEWS) g_fg.frames = FG_PICK_FRAMES - 1;
     FgBatchNote();
 }
 

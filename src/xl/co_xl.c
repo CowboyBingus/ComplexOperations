@@ -2856,6 +2856,12 @@ int CoXlTestTacWaypoint(uint32_t i, float* x, float* y)
 int CoXlTestFgBatch(const float (*players)[2], int count, float reach, uint16_t* list, int max) { return FgBatch(&g_fg.map, players, count, reach, list, max); }
 void CoXlTestFgMark(int i, int j) { FgMark(&g_fg.map, i, j); }
 void CoXlTestFgView(int i, int j, float* centre, float* rect) { FgCentre(i, j, centre); FgRect(i, j, rect); }
+/* Job q of view (i, j): its camera box (l, r, b, t from the view's centre) and its rectangle; the jobs a view and the
+ * cells a job's layer gathers. */
+void CoXlTestFgSub(int i, int j, int q, float* box, float* rect) { FgSubRect(i, j, q, box, rect); }
+int CoXlTestFgSubs(void) { return FG_SUBS; }
+uint64_t CoXlTestFgJobCells(float size, float grow) { return FgJobCells(size, grow); }
+uint32_t CoXlTestFgJobs(void) { return g_fg.jobs; }
 void CoXlTestFgInstall(void* aim, void* generate) { g_fg.installed = 1; g_fg.aim = (FgAimFn)aim; g_fg.generate = (FgGenerateFn)generate; }
 void CoXlTestFgKeep(uint64_t record, uint32_t op) { FarGrassKeep(record, op); }
 uint64_t CoXlTestFgTex(int k) { return g_fg.tex[k]; }

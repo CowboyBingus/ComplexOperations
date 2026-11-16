@@ -17,6 +17,10 @@ void CoXlTestWorldShip(void);
 int CoXlTestFgBatch(const float (*players)[2], int count, float reach, uint16_t* list, int max);
 void CoXlTestFgMark(int i, int j);
 void CoXlTestFgView(int i, int j, float* centre, float* rect);
+void CoXlTestFgSub(int i, int j, int q, float* box, float* rect);
+int CoXlTestFgSubs(void);
+uint64_t CoXlTestFgJobCells(float size, float grow);
+uint32_t CoXlTestFgJobs(void);
 void CoXlTestFgInstall(void* aim, void* generate);
 void CoXlTestFgKeep(uint64_t record, uint32_t op);
 uint64_t CoXlTestFgTex(int k);
@@ -119,7 +123,7 @@ static struct
     float aimSize, aimK, farZ;
     uint64_t output[2];
     float at[3]; uint32_t moveUnit;
-    float rect[4];
+    float rect[4], box[4]; int boxes;
     uint32_t generateHash, generateBehind; uint64_t generateQueue, generateWorld;
     uint32_t vpName; uint64_t unitHash, envHash;
 } g_saw;
@@ -152,6 +156,10 @@ static void FakeFar(uint64_t camera, float farZ) { if (camera == CAMERA) g_saw.f
 static void FakeOutput(uint64_t vp, uint64_t tex) { g_saw.output[0] = vp; g_saw.output[1] = tex; }
 static void FakeMove(uint64_t camera, uint32_t unit, const float* xyz) { if (camera == CAMERA) { memcpy(g_saw.at, xyz, 12); g_saw.moveUnit = unit; } }
 static void FakeUnitUpdate(uint64_t world, uint32_t unit) { (void)world; (void)unit; }
+static void FakeBox(uint64_t camera, float l, float r, float b, float t)
+{
+    if (camera == CAMERA) { g_saw.box[0] = l; g_saw.box[1] = r; g_saw.box[2] = b; g_saw.box[3] = t; g_saw.boxes++; }
+}
 static void FakeRect(uint64_t vp, float x, float y, float w, float h) { if (vp == VP) { g_saw.rect[0] = x; g_saw.rect[1] = y; g_saw.rect[2] = w; g_saw.rect[3] = h; } }
 static void FakeAim(uint64_t world, uint32_t unit, uint64_t camera, float size, float k)
 {
@@ -225,7 +233,7 @@ static void Start(const char* name)
     Slot(0x10, 0x88, (void*)FakeVpDestroy); Slot(0x08, 0x08, (void*)FakeSpawn); Slot(0x08, 0x60, (void*)FakeUnitDestroy);
     Slot(0x08, 0x100, (void*)FakeUnitUpdate); Slot(0x08, 0x468, (void*)FakeEnv); Slot(0x08, 0x478, (void*)FakeEnvDestroy);
     Slot(0x18, 0x6B0, (void*)FakeCamera); Slot(0x20, 0x20, (void*)FakeMove); Slot(0x20, 0x70, (void*)FakeFar);
-    Slot(0xE0, 0x0, (void*)FakeRect); Slot(0xE0, 0x10, (void*)FakeOutput);
+    Slot(0xE0, 0x0, (void*)FakeRect); Slot(0x20, 0x98, (void*)FakeBox); Slot(0xE0, 0x10, (void*)FakeOutput);
     Slot(0x10, 0x388, (void*)FakeCanGet); Slot(0x10, 0x3F8, (void*)FakeGet); Slot(0x10, 0x158, (void*)FakeFind); Slot(0x10, 0x208, (void*)FakeUpdate);
     g_linkerSends = 0; memset(g_linkerSent, 0, sizeof g_linkerSent);
     Libraries(1);
@@ -311,6 +319,51 @@ int main(void)
         CHECK(wrong == 0);
     }
 
+    g_case = "a view's jobs: their rectangles tile the view's without overlap, each box's ground in its own rectangle";
+    {
+        CHECK(CoXlTestFgSubs() == 8);
+        int wrong = 0;
+        static const int views[4][2] = {{0, 0}, {63, 0}, {5, 60}, {31, 33}};
+        for (int v = 0; v < 4; v++)
+        {
+            const int i = views[v][0], j = views[v][1];
+            float c[2], r[4];
+            CoXlTestFgView(i, j, c, r);
+            static uint8_t cover[64][64]; /* the view's 64 x 64 texels */
+            memset(cover, 0, sizeof cover);
+            for (int q = 0; q < 8; q++)
+            {
+                float b[4], s[4];
+                CoXlTestFgSub(i, j, q, b, s);
+                /* 64 x 128 m boxes inside the view's square, at whole texels of the 4096 target */
+                wrong += !(b[1] - b[0] == 64.0f && b[3] - b[2] == 128.0f && b[0] >= -128.0f && b[1] <= 128.0f && b[2] >= -128.0f && b[3] <= 128.0f);
+                wrong += !(s[2] * 4096.0f == 16.0f && s[3] * 4096.0f == 32.0f);
+                const float x0 = s[0] * 4096.0f - r[0] * 4096.0f, y0 = s[1] * 4096.0f - r[1] * 4096.0f;
+                wrong += x0 != floorf(x0) || y0 != floorf(y0);
+                for (int ty = 0; ty < 32; ty++)
+                    for (int tx = 0; tx < 16; tx++)
+                    {
+                        const int cx = (int)x0 + tx, cy = (int)y0 + ty;
+                        if (cx < 0 || cx >= 64 || cy < 0 || cy >= 64) { wrong++; continue; }
+                        cover[cy][cx]++;
+                    }
+                /* the ortho box maps x east, y north onto the rectangle with the top row north (clip +y up): a texel's
+                 * centre from the box must be the overlay's texel (u = x / 16384 + 0.5, v = 0.5 - y / 16384) */
+                for (int ty = 0; ty < 32; ty += 7)
+                    for (int tx = 0; tx < 16; tx += 5)
+                    {
+                        const float wx = c[0] + b[0] + (tx + 0.5f) * 4.0f, wy = c[1] + b[3] - (ty + 0.5f) * 4.0f;
+                        const float u = (wx / 16384.0f + 0.5f) * 4096.0f, vv = (0.5f - wy / 16384.0f) * 4096.0f;
+                        wrong += (int)floorf(u) != (int)(s[0] * 4096.0f) + tx || (int)floorf(vv) != (int)(s[1] * 4096.0f) + ty;
+                    }
+            }
+            for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++) wrong += cover[y][x] != 1;
+        }
+        CHECK(wrong == 0);
+        /* a 16 m layer with an 8 m pad: 18 x 18 cells for the whole square, 6 x 10 for a job */
+        CHECK(CoXlTestFgJobCells(16.0f, 8.0f) == 60 && CoXlTestFgJobCells(16.0f, 4.0f) == 60 && CoXlTestFgJobCells(4.0f, 2.0f) == 18 * 34);
+    }
+
     Start("the planner: unbaked views near a player, nearest first");
     {
         uint16_t list[64];
@@ -387,7 +440,15 @@ int main(void)
         g_saw.envHash == 0x9F09B0185B47408Full);
     CHECK(g_saw.aims == 1 && Near(g_saw.aimSize, 2048.0f) && Near(g_saw.aimK, 8.0f) && Near(g_saw.farZ, 1002.0f));
     CHECK(g_saw.output[0] == VP && g_saw.output[1] == DENSITY);
-    int views = (int)CoXlTestFgBaked(), entriesOk = 1, rectsOk = 1, ticks = 0, busyWhileQueued = 1, freeBetween = 0; /* the first view is out */
+    int jobs = (int)CoXlTestFgJobs(), entriesOk = 1, rectsOk = 1, ticks = 0, busyWhileQueued = 1, freeBetween = 0; /* the first job is out */
+    CHECK(jobs == 1 && g_saw.boxes == 1);
+    /* the first job's own rectangle and box (checked in the loop for the rest) */
+    {
+        int i = (int)floorf((g_saw.at[0] + 8192.0f) / 256.0f), j = (int)floorf((g_saw.at[1] + 8192.0f) / 256.0f);
+        float b[4], r[4];
+        CoXlTestFgSub(i, j, 0, b, r);
+        CHECK(Near(g_saw.rect[0], r[0]) && Near(g_saw.rect[1], r[1]) && memcmp(g_saw.box, b, sizeof b) == 0);
+    }
     while (!(g_saw.generates == 1 && !CoXlTestFgBusy()) && ticks < 4000)
     {
         uint32_t before = Queued();
@@ -401,29 +462,52 @@ int main(void)
             entriesOk &= Queued() == 1 && At(e, 0) == WORLD && At(e, 8) == CAMERA && At(e, 0x10) == VP && At(e, 0x18) == ENV && flags == 0x10400u &&
                 id == 0xFFFFFFFFu && e[0x58] == 0xAB && e[0x67] == 0xAB;
             int i = (int)floorf((g_saw.at[0] + 8192.0f) / 256.0f), j = (int)floorf((g_saw.at[1] + 8192.0f) / 256.0f);
-            rectsOk &= Near(g_saw.rect[0], i / 64.0f) && Near(g_saw.rect[1], (63 - j) / 64.0f) && Near(g_saw.at[2], 501.0f) && g_saw.moveUnit == UNIT;
-            views++;
+            float b[4], r[4];
+            CoXlTestFgSub(i, j, jobs % 8, b, r); /* a view's eight jobs in order, the camera over its centre */
+            rectsOk &= Near(g_saw.rect[0], r[0]) && Near(g_saw.rect[1], r[1]) && Near(g_saw.rect[2], r[2]) && Near(g_saw.rect[3], r[3]) &&
+                g_saw.boxes == jobs + 1 && memcmp(g_saw.box, b, sizeof b) == 0 && Near(g_saw.at[0], -8192.0f + (i + 0.5f) * 256) &&
+                Near(g_saw.at[1], -8192.0f + (j + 0.5f) * 256) && Near(g_saw.at[2], 501.0f) && g_saw.moveUnit == UNIT;
+            jobs++;
         }
         if (Queued() != 0 && !CoXlTestFgBusy()) busyWhileQueued = 0;
-        if (Queued() == 0 && !CoXlTestFgBusy() && g_saw.generates == 0) freeBetween++; /* a moving tile may build between views */
+        if (Queued() == 0 && !CoXlTestFgBusy() && g_saw.generates == 0) freeBetween++; /* a moving tile may build between jobs */
         if (ticks % 3 == 0 && Queued() == before) Drain(); /* the render callback, not every frame, never with a job just queued */
     }
-    CHECK(views > 4 && views <= 64 && (uint32_t)views == CoXlTestFgBaked() && entriesOk && rectsOk && busyWhileQueued && freeBetween >= views - 1);
+    const int views = jobs / 8;
+    CHECK(jobs % 8 == 0 && views == 8 && (uint32_t)views == CoXlTestFgBaked() && (uint32_t)jobs == CoXlTestFgJobs() && entriesOk && rectsOk && busyWhileQueued &&
+        freeBetween >= jobs - 1);
     CHECK(g_saw.generates == 1 && g_saw.generateBehind == 0 && g_saw.generateHash == 0xC4933EE1u && g_saw.generateQueue == (uint64_t)(uintptr_t)g_queue &&
         g_saw.generateWorld == WORLD);
-    /* the names go out with each job and come back once it has run: views + the builder */
-    CHECK(!CoXlTestFgBusy() && g_saw.published == 4 * (views + 1) && g_saw.unpublished == 4 * (views + 1) && g_saw.vpDestroys == 1 &&
+    /* the names go out with each job and come back once it has run: jobs + the builder */
+    CHECK(!CoXlTestFgBusy() && g_saw.published == 4 * (jobs + 1) && g_saw.unpublished == 4 * (jobs + 1) && g_saw.vpDestroys == 1 &&
         g_saw.unitDestroys == 1 && g_saw.envDestroys == 1);
     CHECK(g_saw.setTrue >= 2); /* set again while the batch ran */
-    /* the ground near the player is baked: no second batch while the player stays */
-    for (int k = 0; k < 200; k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
-    CHECK(g_saw.vps == 1);
+    /* a full batch: the next is picked at the next update, not 30 later */
+    CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+    CHECK(g_saw.vps == 2);
+    /* batches go on until the ground within 768 m of the player is baked, then stop while the player stays */
+    for (int k = 0; k < 20000; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+    {
+        int close = 0, closeBaked = 0;
+        for (int j = 0; j < 64; j++)
+            for (int i = 0; i < 64; i++)
+            {
+                float cx = -8192.0f + (i + 0.5f) * 256, cy = -8192.0f + (j + 0.5f) * 256;
+                float dx = fmaxf(0, fabsf(100.0f - cx) - 128), dy = fmaxf(0, fabsf(-300.0f - cy) - 128);
+                if (sqrtf(dx * dx + dy * dy) <= 768.0f) { close++; closeBaked += CoXlTestFgViewBaked(i, j); }
+            }
+        CHECK(close > 8 && closeBaked == close && !CoXlTestFgBusy() && CoXlTestFgJobs() == 8 * CoXlTestFgBaked());
+    }
+    const int vps = g_saw.vps, builds = g_saw.generates;
+    for (int k = 0; k < 200; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+    CHECK(g_saw.vps == vps && g_saw.generates == builds && vps >= 2);
     /* the builder's job still queued when the batch waits to end: the names stay */
     CoXlTestFgObserver(1, 4000.0f, 4000.0f);
-    const uint32_t baked = CoXlTestFgBaked();
-    for (int k = 0; k < 1000 && g_saw.generates < 2; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
-    const int u = 4 * (views + 1) + 4 * (int)(CoXlTestFgBaked() - baked);
-    CHECK(g_saw.generates == 2 && CoXlTestFgBusy() && g_saw.unpublished == u);
+    const uint32_t jobsBefore = CoXlTestFgJobs();
+    const int published = g_saw.unpublished;
+    for (int k = 0; k < 1000 && g_saw.generates < builds + 1; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+    const int u = published + 4 * (int)(CoXlTestFgJobs() - jobsBefore);
+    CHECK(g_saw.generates == builds + 1 && CoXlTestFgBusy() && g_saw.unpublished == u);
     for (int k = 0; k < 10; k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
     CHECK(CoXlTestFgBusy() && g_saw.unpublished == u);
     Drain();
@@ -537,7 +621,7 @@ int main(void)
         CHECK(Queued() == 0 && CoXlTestFgBaked() == 1 && g_saw.setFalse >= 1 && CoXlTestFgSetting() == 0);
         three = 3; memcpy(g_level + 0x1E4, &three, 4);
         CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
-        CHECK(CoXlTestFgBusy() && Queued() == 1 && CoXlTestFgBaked() == 2 && CoXlTestFgSetting() == 1);
+        CHECK(CoXlTestFgBusy() && Queued() == 1 && CoXlTestFgBaked() == 1 && CoXlTestFgJobs() == 2 && CoXlTestFgSetting() == 1); /* the view's next job */
         CoXlTestWorldShip();
     }
 
