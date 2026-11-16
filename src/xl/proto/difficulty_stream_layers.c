@@ -141,15 +141,17 @@ static void SlRule(void* cfg, const uint32_t* ids, int n, const uint8_t* bodies,
 
 /* Who makes the mission world's bodies (run 2c: ~38k a 10 s window outside the change frames, ANALYSIS-r2a §2.4): one
  * in SL_SAMPLE_EVERY has its first SL_SAMPLE_DEPTH return addresses outside this module kept, as exe or game.dll RVAs,
- * with how often each chain came, on the game thread and in a change frame. The 10 s note names the most frequent. */
+ * with how often each chain came, on the game thread, in a change frame and in the frame after one (by the streamer's
+ * tick, g_slChangeTick: with the layers off no spawn window is open). The 10 s note names the most frequent. */
 #define SL_SAMPLE_EVERY 64u
 #define SL_SAMPLE_DEPTH 4
 #define SL_SAMPLE_KEEP 48
 #define SL_SAMPLE_NAMED 4
-typedef struct { uint32_t rva[SL_SAMPLE_DEPTH]; char mod[SL_SAMPLE_DEPTH]; uint32_t count, game, frame; } SlChain;
+typedef struct { uint32_t rva[SL_SAMPLE_DEPTH]; char mod[SL_SAMPLE_DEPTH]; uint32_t count, game, change, after; } SlChain;
 static struct
 {
     volatile LONG calls;        /* the mission world's bodies made since the note */
+    volatile LONG made[3];      /* ... in other frames, in a change frame, in the frame after one */
     SRWLOCK lock;
     SlChain e[SL_SAMPLE_KEEP];
     uint32_t used, missed, sampled;
@@ -166,7 +168,7 @@ static char SlWhere(uintptr_t a, uint32_t* rva)
 }
 
 /* A chain into the table: counted on the one it matches, else a new entry while there is room. */
-static void SlChainAdd(const uintptr_t* frames, int n, int game, int frame)
+static void SlChainAdd(const uintptr_t* frames, int n, int game, int mark)
 {
     SlChain c;
     memset(&c, 0, sizeof c);
@@ -176,13 +178,22 @@ static void SlChainAdd(const uintptr_t* frames, int n, int game, int frame)
     uint32_t k = 0;
     while (k < g_slSample.used && (memcmp(g_slSample.e[k].rva, c.rva, sizeof c.rva) != 0 || memcmp(g_slSample.e[k].mod, c.mod, sizeof c.mod) != 0)) k++;
     if (k == g_slSample.used && k < SL_SAMPLE_KEEP) g_slSample.e[g_slSample.used++] = c;
-    if (k < g_slSample.used) { g_slSample.e[k].count++; g_slSample.e[k].game += game != 0; g_slSample.e[k].frame += frame != 0; }
+    if (k < g_slSample.used) { g_slSample.e[k].count++; g_slSample.e[k].game += game != 0; g_slSample.e[k].change += mark == 1; g_slSample.e[k].after += mark == 2; }
     else g_slSample.missed++;
     ReleaseSRWLockExclusive(&g_slSample.lock);
 }
 
-static void SlSample(int frame)
+/* 1 in a change frame that changed something, 2 in the frame after it, 0 else: a frame runs from one streamer tick to
+ * the next, and a change frame's bodies are made after its tick (its flush, the world's flush, the world update). */
+static int SlChangeMark(void)
 {
+    const uint32_t c = g_slChangeTick, t = g_streamTicks;
+    return c == 0 ? 0 : t == c ? 1 : t == c + 1u ? 2 : 0;
+}
+
+static void SlSample(int mark)
+{
+    InterlockedIncrement(&g_slSample.made[mark >= 0 && mark < 3 ? mark : 0]);
     if ((uint32_t)InterlockedIncrement(&g_slSample.calls) % SL_SAMPLE_EVERY != 0) return;
     if (g_slSample.selfHi == 0)
     {
@@ -205,7 +216,7 @@ static void SlSample(int frame)
         if (a >= g_slSample.selfLo && a < g_slSample.selfHi) continue;
         keep[n++] = a;
     }
-    SlChainAdd(keep, n, g_layerGameThread != 0 && (DWORD)g_layerGameThread == GetCurrentThreadId(), frame);
+    SlChainAdd(keep, n, g_layerGameThread != 0 && (DWORD)g_layerGameThread == GetCurrentThreadId(), mark);
 }
 
 /* The note's part: the bodies made, the samples, and the SL_SAMPLE_NAMED most frequent chains; the table starts again. */
@@ -213,8 +224,9 @@ static void SlSampleText(char* out, size_t room)
 {
     size_t o = 0;
     AcquireSRWLockExclusive(&g_slSample.lock);
-    o += (size_t)snprintf(out + o, room - o, "%ld bodies made, %u sampled (1 in %u), %u not kept", (long)InterlockedExchange(&g_slSample.calls, 0), g_slSample.sampled,
-        SL_SAMPLE_EVERY, g_slSample.missed);
+    const long change = InterlockedExchange(&g_slSample.made[1], 0), after = InterlockedExchange(&g_slSample.made[2], 0), other = InterlockedExchange(&g_slSample.made[0], 0);
+    o += (size_t)snprintf(out + o, room - o, "%ld bodies made (%ld in change frames, %ld in the frames after them, %ld in others), %u sampled (1 in %u), %u not kept",
+        (long)InterlockedExchange(&g_slSample.calls, 0), change, after, other, g_slSample.sampled, SL_SAMPLE_EVERY, g_slSample.missed);
     uint8_t named[SL_SAMPLE_KEEP] = {0};
     for (int n = 0; n < SL_SAMPLE_NAMED && o < room; n++)
     {
@@ -225,7 +237,7 @@ static void SlSampleText(char* out, size_t room)
         const SlChain* c = &g_slSample.e[best];
         o += (size_t)snprintf(out + o, room - o, "; %u from", c->count);
         for (int d = 0; d < SL_SAMPLE_DEPTH && o < room && c->mod[d]; d++) o += (size_t)snprintf(out + o, room - o, "%s%c+0x%X", d ? " < " : " ", c->mod[d], c->rva[d]);
-        if (o < room) o += (size_t)snprintf(out + o, room - o, " (%u on the game thread, %u in a change frame)", c->game, c->frame);
+        if (o < room) o += (size_t)snprintf(out + o, room - o, " (%u on the game thread, %u in a change frame, %u in the frame after)", c->game, c->change, c->after);
     }
     memset(g_slSample.e, 0, sizeof g_slSample.e); g_slSample.used = g_slSample.missed = g_slSample.sampled = 0;
     ReleaseSRWLockExclusive(&g_slSample.lock);
@@ -250,7 +262,7 @@ static void* SlCreate(void* writer, uint32_t* id, void* cinfo, void* r9)
     const int frame = g_sl.thread != 0 && g_sl.thread == (LONG)GetCurrentThreadId();
     if (g_sl.on) SlMade(*id, frame ? (uint32_t)g_sl.current : 0);
     else InterlockedIncrement(&g_sl.created);
-    SlSample(frame);
+    SlSample(SlChangeMark());
     return r;
 }
 
@@ -364,8 +376,10 @@ static const char* SlInstall(uintptr_t exe)
     return NULL;
 }
 
+#if defined(CO_RESEARCH) || defined(CO_TEST)
 /* With the layers off, the body maker alone, so the note can say who makes the mission world's bodies (SlSample): a
- * pass-through on 0xD09080 (hooked as when the layers are on, runs 2a and 2c). NULL when in. */
+ * pass-through on 0xD09080 (hooked as when the layers are on, runs 2a and 2c). NULL when in. A research instrument: a
+ * package build has no such hook. */
 static const char* SlSamplerInstall(uintptr_t exe)
 {
     if (g_sl.createOrig != NULL) return NULL;
@@ -376,6 +390,7 @@ static const char* SlSamplerInstall(uintptr_t exe)
     { g_sl.createOrig = NULL; return "the hook was refused"; }
     return NULL;
 }
+#endif
 
 /* The static layers' leaves (4, then 6..9) of the mission world's broad phase; 0 when the hooks are off, or it does not
  * read or holds no streamed layers. */
@@ -404,7 +419,7 @@ static int SlLayerCount(void)
 static void SlNote(void)
 {
     uint32_t leaves[SL_LAYERS] = {0};
-    char why[160] = "", made[640];
+    char why[160] = "", made[800];
     const int read = SlLeaves(leaves), count = read ? (int)(SL_FIRST + SL_COUNT) : SlLayerCount();
     if (!read && count < 0) snprintf(why, sizeof why, " (not read: no main world)");
     else if (!read && count < (int)(SL_FIRST + SL_COUNT)) snprintf(why, sizeof why, " (not read: the main world's broad phase has %d layers, made before the layer count was hooked)", count);

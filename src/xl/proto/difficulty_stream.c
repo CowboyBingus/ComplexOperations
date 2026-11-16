@@ -123,17 +123,21 @@ static const double kStreamBudgetMost = 6.0;
 static const double kStreamRemoveMsStart = 3.0;
 static const double kStreamSpawnMsStart = 0.5;
 /* Removals go in frames of their own, gathered: their step cost is mostly per frame, so one frame of 8 costs about what
- * one of 1 does. A removal frame comes when its frame before was kStreamRemoveRoomMs under the target (the step's 3 ms
- * and the drain's own time), with kStreamRemoveGather queued or the oldest waiting kStreamRemoveGatherMs; whatever the
- * frames, once the oldest has waited kStreamRemoveWaitMs (then kStreamRemoveGather..kStreamRemoveForcedMost go). */
-static const double kStreamRemoveRoomMs = 4.0;
-enum { kStreamRemoveGather = 8, kStreamRemoveGatherMs = 250, kStreamRemoveWaitMs = 500, kStreamRemoveForcedMost = 16 };
+ * one of 1 does. A removal frame comes when its frame before left room under the target for the learned step cost and
+ * kStreamRemoveGather removals' own time (the drain's, learned per removal from kStreamRemoveOwnMsStart: run 2c 0.31),
+ * with kStreamRemoveGather queued or the oldest waiting kStreamRemoveGatherMs; whatever the frames, once the oldest has
+ * waited kStreamRemoveWaitMs, or kStreamRemoveWaitBusyMs while the backlog or the exits' pace is past one forced
+ * frame's most (WorldStreamDrainLeast): forced frames then remove up to 240 a second (run 2c needed 60-154). */
+static const double kStreamRemoveOwnMsStart = 0.3;
+static const double kStreamRemoveForcedOwnMs = 8.0; /* a forced frame's own time at most, past its kStreamRemoveGather */
+enum { kStreamRemoveGather = 8, kStreamRemoveGatherMs = 250, kStreamRemoveWaitMs = 500, kStreamRemoveWaitBusyMs = 100, kStreamRemoveForcedMost = 24 };
 /* No change frame while a far-grass bake job is out (its frames ran 21 ms against 13, run 2a), at most this long: a
  * view's job is out about 3 frames (195 job frames for 64 views), so this fires only for a job that stalls. */
 enum { kStreamGrassHoldMs = 500 };
 /* The governor: while the quiet frames' world update (their own time, kGovWindowMs means) is over kGovOnMs, the far
  * ring takes no new stamps and its farthest go, never one within kStreamOutRadius of a player; off under kGovOffMs.
- * Run 2a's quiet frames ran 3.6-5.2 ms at 460k bodies (never on), run 2c's 6.4 ms at 310k and 10.4 ms at 489k. */
+ * Its turns are only counted unless a research build asks it to act (g_streamGovActs): run 2c's 6.4 and 10.4 ms were
+ * frames right after change frames, its quiet ones 3.9-4.0 ms at 484-497k bodies (adv REPORT-3c1ad6b BL1). */
 static const double kGovOnMs = 7.0;
 static const double kGovOffMs = 6.0;
 /* A turn at most each kGovHoldMs: an on/off cycle takes 6 s at least, whatever the far ring's coming back does to the
@@ -250,9 +254,10 @@ static struct
 /* A layer rebuild's cost per leaf, learned from each change frame's world update over the quiet frames' (ns), and the
  * leaves of the layer the last change frame rebuilt (0: none to learn from). Kept over levels: the machine's. */
 static struct { double ns; uint32_t leaves; } g_streamRebuild = {0.0, 0}; /* the leaves of the last change frame's layer */
-/* The change frames' world update over the quiet frames' by kind, learned from each (ms; kept over levels: the
- * machine's), and the kind the frame just closed was (1 removal, 2 spawn; 0 none to learn from). */
-static struct { double removeMs, spawnMs; int kind; } g_streamCost = {kStreamRemoveMsStart, kStreamSpawnMsStart, 0};
+/* A change frame's world update and its after-change frame's over two quiet frames' by kind, learned from each pair
+ * (ms; kept over levels: the machine's), a removal's own drain time, and the kind of the last change frame not yet
+ * learned from (1 removal, 2 spawn; 0 none). */
+static struct { double removeMs, spawnMs, ownMs; int kind; } g_streamCost = {kStreamRemoveMsStart, kStreamSpawnMsStart, kStreamRemoveOwnMsStart, 0};
 /* Removal frames, far-grass holds and the governor: their state for the level, and the counts since the note. */
 static struct
 {
@@ -262,10 +267,17 @@ static struct
     uint32_t removeFrames, removeForced, spawnFrames, grassHolds, grassForced; /* since the note */
     double removeSum, spawnSum; uint32_t removeSamples, spawnSamples; /* since the note: learned samples */
     double quietHiGrassSum;  /* since the note: the change frames' quiet frames' longest with the far-grass frames in */
+    double ownSum; uint32_t ownSamples; /* since the note: learned per-removal own time samples */
+    double exitRate;         /* the scans' new exits a second, a quarter of the way each scan */
+    uint32_t exitsSum, noteExpired, noteQueued; /* since the note: new exits; at the last note: live past radius, queued */
+    uint32_t farNearSkipped; /* since the note: far removals not done at the drain, a player within kStreamOutRadius */
     /* the governor */
     int govOn; ULONGLONG govAt, govTurnAt; double govSum; uint32_t govN; double govLast; /* govTurnAt: the last turn (0: none) */
     uint32_t govOnTurns, govOffTurns, govSeconds, govHeldScans, govHeldRespawns, govDrained, govNearKept; /* since the note */
 } g_streamPace;
+/* A research switch (HELLFORGE_XL_GOVERNOR=1, read at install): the governor holds and evicts the far ring; else it only
+ * counts the turns it would make. Not a level's state. */
+static int g_streamGovActs;
 static WorldStreamState g_stream;
 /* The engine calls made with a stamp unit's address this session, and what the last level to leave play left: the
  * line some frames after it says how many destroys came since (none can). Not a level's state: kept over the clear. */
@@ -457,8 +469,14 @@ static void SlNote(void);
 static const char* SlInstall(uintptr_t exe);
 static int SlMainLayers(void);
 static int SlWorld(uintptr_t exe, uintptr_t* w, uintptr_t* bp);
+/* The streamer's tick of its last change frame that changed something (0: none): the makers' sampler tells bodies made
+ * in it and in the frame after it from the others by the tick. */
+static volatile uint32_t g_slChangeTick;
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+/* Research instruments only: a package build has neither hook (adv REPORT-3c1ad6b). */
 static const char* SlSamplerInstall(uintptr_t exe);
 static const char* StInstall(uintptr_t exe); /* difficulty_stream_steptime.c */
+#endif
 static void StFrame(int kind);
 static void StNote(void);
 static int MoveStepRecent(void); /* difficulty_world_move.c */
@@ -1038,11 +1056,23 @@ static int WorldStreamDropLocked(uint32_t i, int kind)
 }
 
 static void WindowEvictedLocked(void); /* difficulty_stream_window.c */
+/* A player (or the observer) within kStreamOutRadius of slot s: the near stamps' keep radius, which no far removal may
+ * cross. */
+static int WorldStreamWithinOut(uint32_t s)
+{
+    for (int p = 0; p < g_stream.playerCount; p++)
+    {
+        const float dx = g_streamAt[s][0] - g_streamPlayerAt[p][0], dy = g_streamAt[s][1] - g_streamPlayerAt[p][1];
+        if (dx * dx + dy * dy <= kStreamOutRadius * kStreamOutRadius) return 1;
+    }
+    return 0;
+}
 /* A change frame: up to `most` queued removals, until they took `ms`; with `layer` 4 or 6..9, only stamps whose bodies
  * are in that broad phase layer, so the frame rebuilds one layer (the others go to the queue's tail). Each is asked
  * again, as frames went by since its scan: still live with its own unit, and still out of reach (its timer runs),
- * flagged for new ground, or a far slot. A slot whose look did not read goes back to the queue's head and ends the
- * frame's removals. The removals done. */
+ * flagged for new ground, or a far slot no player came within kStreamOutRadius of (its wait in the queue, 2-8 s, is
+ * 90-360 m at 45 m/s; the near ring would take it again). A slot whose look did not read goes back to the queue's head
+ * and ends the frame's removals. The removals done. */
 static uint32_t WorldStreamDrainLocked(uint32_t most, double ms, int layer, uint32_t least)
 {
     uint32_t done = 0, given = 0; /* a slot given up cost a search of the world's unit list: it counts as a removal here */
@@ -1058,6 +1088,7 @@ static uint32_t WorldStreamDrainLocked(uint32_t most, double ms, int layer, uint
         if (kind == STREAM_DROP_FAR) g_streamDropFar--;
         if (i >= g_stream.count || !g_streamLive[i] || !g_streamPoseGood[i] || g_streamNeedsUnit[i] || g_streamUnit[i] == 0) continue;
         if (kind == STREAM_DROP_OUT ? g_streamOutSince[i] == 0 : kind == STREAM_DROP_REPLACE ? !g_streamReplace[i] : !(g_streamOut2[i] > 0.0f)) continue;
+        if (kind == STREAM_DROP_FAR && WorldStreamWithinOut(i)) { g_streamPace.farNearSkipped++; continue; }
         if (layer >= 0 && (g_streamLayer[i] ? g_streamLayer[i] : 4) != layer)
         {
             WorldStreamDropLocked(i, kind); /* the slot just freed takes it */
@@ -1268,6 +1299,9 @@ static void WorldStreamScanLocked(ULONGLONG now)
     for (uint32_t k = 0; k < picks; k++) WorldStreamDropLocked(pick[k], STREAM_DROP_REPLACE);
     WorldStreamOutOrder(g_streamOutPick, g_streamOutKey, outs);
     for (uint32_t k = 0; k < outs && g_streamDropCount < kStreamDropQueue - kStreamDropReserve; k++) WorldStreamDropLocked(g_streamOutPick[k], STREAM_DROP_OUT);
+    if (g_stream.scanAt != 0 && now > g_stream.scanAt) /* the forced removal frames' pace (WorldStreamRemoveWait) */
+        g_streamPace.exitRate += ((double)exits * 1000.0 / (double)(now - g_stream.scanAt) - g_streamPace.exitRate) * 0.25;
+    g_streamPace.exitsSum += exits;
     g_stream.exitsNew = exits; g_stream.exitsChanges = g_stream.changesSinceScan; g_stream.changesSinceScan = 0; g_stream.scanAt = now;
     g_stream.expired = expired;
     if (expired > g_stream.expiredMost) g_stream.expiredMost = expired;
@@ -1485,6 +1519,9 @@ static void WorldStreamObjectivesNote(void)
         TasksUsed(), g_tasksLeftOut != NULL ? (long)*g_tasksLeftOut : -1L, shown[0], shown[1]);
 }
 
+static double WorldStreamRemoveRoom(void);
+static uint32_t WorldStreamForcedMost(void);
+static ULONGLONG WorldStreamRemoveWait(void);
 /* Every 10 s while streaming: what is spawned now, what is due, removals and respawns so far, the players and time,
  * and the frame rate over those 10 s (mean and the slowest frame). */
 static void WorldStreamNoteLocked(ULONGLONG now)
@@ -1507,16 +1544,24 @@ static void WorldStreamNoteLocked(ULONGLONG now)
         g_stream.changes, (int)kStreamChangeGap, g_streamDropCount, g_stream.expired, (int)(kStreamOutTimeout / 1000), g_stream.expiredMost, leaves,
         g_stream.staticMoved, g_stream.staticFrames, g_stream.staticQuiet, g_stream.staticTile, g_stream.streamedMoved, g_stream.streamedQuiet);
     const double frames = g_stream.changes > 0 ? (double)g_stream.changes : 1.0;
-    Note("difficulty: extra large maps: streaming change frames: %u of %u with a backlog (every %d frames); budget %.2f ms a frame, %u at its floor of %.1f ms (the quiet frames' longest of 32: mean %.1f ms), %u of those not caused by the quiet frames, %u spawning near stamps only, %u with a due stamp in reach and no layer fill (%u locations spawned in them, %u of them none), the last removal frame removing %u at least (exits %u over %u removal frames); change frame cost estimated: removal %.2f ms (its %u samples' mean %.2f), spawn %.2f ms (its %u samples' mean %.2f)",
+    Note("difficulty: extra large maps: streaming change frames: %u of %u with a backlog (every %d frames); budget %.2f ms a frame, %u at its floor of %.1f ms (the quiet frames' longest of 32: mean %.1f ms), %u of those not caused by the quiet frames, %u spawning near stamps only, %u with a due stamp in reach and no layer fill (%u locations spawned in them, %u of them none), the last removal frame removing %u at least (exits %u over %u removal frames); change frame cost with its after-change frame estimated: removal %.2f ms (its %u samples' mean %.2f), spawn %.2f ms (its %u samples' mean %.2f)",
         g_stream.backlogs, g_stream.changes, (int)kStreamChangeTicksBusy, g_stream.budgetSum / frames, g_stream.budgetFloors, kStreamBudgetFloor,
         g_stream.quietHiSum / frames, g_stream.floorStuck, g_stream.floorHeld, g_stream.floorDue, g_stream.floorSpawned, g_stream.floorDry,
         g_stream.drainLeast, g_stream.exitsNew, g_stream.exitsChanges, g_streamCost.removeMs, g_streamPace.removeSamples,
         g_streamPace.removeSamples > 0 ? g_streamPace.removeSum / g_streamPace.removeSamples : 0.0, g_streamCost.spawnMs, g_streamPace.spawnSamples,
         g_streamPace.spawnSamples > 0 ? g_streamPace.spawnSum / g_streamPace.spawnSamples : 0.0);
-    Note("difficulty: extra large maps: streaming pace: %u removal frames (%u forced by a %d ms wait), %u spawn frames; %u change tries held for a far-grass job, %u let through after %d ms; "
-        "the quiet frames' longest of 32: mean %.1f ms without the far-grass frames, %.1f ms with them",
-        g_streamPace.removeFrames, g_streamPace.removeForced, (int)kStreamRemoveWaitMs, g_streamPace.spawnFrames, g_streamPace.grassHolds, g_streamPace.grassForced,
-        (int)kStreamGrassHoldMs, g_stream.quietHiSum / frames, g_streamPace.quietHiGrassSum / frames);
+    Note("difficulty: extra large maps: streaming pace: %u removal frames (%u forced by a %d ms wait, %d ms with a backlog), %u spawn frames; %u change tries held for a far-grass job, %u let through after %d ms; "
+        "the quiet frames' longest of 32: mean %.1f ms without the far-grass and after-change frames, %.1f ms with them; a removal's own time %.3f ms estimated (its %u samples' mean %.3f), "
+        "a chosen removal frame's room %.2f ms, a forced one's most %u",
+        g_streamPace.removeFrames, g_streamPace.removeForced, (int)kStreamRemoveWaitMs, (int)kStreamRemoveWaitBusyMs, g_streamPace.spawnFrames, g_streamPace.grassHolds, g_streamPace.grassForced,
+        (int)kStreamGrassHoldMs, g_stream.quietHiSum / frames, g_streamPace.quietHiGrassSum / frames, g_streamCost.ownMs, g_streamPace.ownSamples,
+        g_streamPace.ownSamples > 0 ? g_streamPace.ownSum / g_streamPace.ownSamples : 0.0, WorldStreamRemoveRoom(), WorldStreamForcedMost());
+    /* keeping up (adv REPORT-3c1ad6b BL3): neither may grow over consecutive windows of a traversal */
+    Note("difficulty: extra large maps: streaming keep-up: %u live stamps past their removal radius at the last scan (%+d since the last note), %u removals queued (%+d); "
+        "in 10 s %u new exits and %u removals (the exits' pace %.0f a second); the oldest removal forces a frame after %d ms now",
+        g_stream.expired, (int)g_stream.expired - (int)g_streamPace.noteExpired, g_streamDropCount, (int)g_streamDropCount - (int)g_streamPace.noteQueued,
+        g_streamPace.exitsSum, g_stream.changeRemoved, g_streamPace.exitRate, (int)WorldStreamRemoveWait());
+    g_streamPace.noteExpired = g_stream.expired; g_streamPace.noteQueued = g_streamDropCount; g_streamPace.exitsSum = 0;
     uint32_t nearLive = 0, farLive = 0;
     for (uint32_t i = 0; i < g_stream.count && i < kStreamMaxLocations; i++)
     {
@@ -1529,13 +1574,15 @@ static void WorldStreamNoteLocked(ULONGLONG now)
         }
         if (d2 <= kStreamOutRadius * kStreamOutRadius) nearLive++; else farLive++;
     }
-    Note("difficulty: extra large maps: streaming governor: %s (the quiet frames' world update, a second's mean: the last %.1f ms; on over %.1f, off under %.1f); "
+    Note("difficulty: extra large maps: streaming governor (%s): %s (the quiet frames' world update, a second's mean, after-change frames out: the last %.1f ms; on over %.1f, off under %.1f); "
         "on %u of the last 10 s, turned on %u and off %u times; far ring scans held %u, far respawns held %u, far stamps queued out %u, near ones kept %u times; "
-        "live stamps within %.0f m %u, past it %u",
-        g_streamPace.govOn ? "ON" : "off", g_streamPace.govLast, kGovOnMs, kGovOffMs, g_streamPace.govSeconds, g_streamPace.govOnTurns, g_streamPace.govOffTurns,
-        g_streamPace.govHeldScans, g_streamPace.govHeldRespawns, g_streamPace.govDrained, g_streamPace.govNearKept, (double)kStreamOutRadius, nearLive, farLive);
+        "far removals not done at the drain, a player within %.0f m: %u; live stamps within %.0f m %u, past it %u",
+        g_streamGovActs ? "acting" : "observing only: would be", g_streamPace.govOn ? "ON" : "off", g_streamPace.govLast, kGovOnMs, kGovOffMs, g_streamPace.govSeconds,
+        g_streamPace.govOnTurns, g_streamPace.govOffTurns, g_streamPace.govHeldScans, g_streamPace.govHeldRespawns, g_streamPace.govDrained, g_streamPace.govNearKept,
+        (double)kStreamOutRadius, g_streamPace.farNearSkipped, (double)kStreamOutRadius, nearLive, farLive);
     g_streamPace.removeFrames = g_streamPace.removeForced = g_streamPace.spawnFrames = g_streamPace.grassHolds = g_streamPace.grassForced = 0;
     g_streamPace.removeSum = g_streamPace.spawnSum = 0.0; g_streamPace.removeSamples = g_streamPace.spawnSamples = 0; g_streamPace.quietHiGrassSum = 0.0;
+    g_streamPace.ownSum = 0.0; g_streamPace.ownSamples = 0; g_streamPace.farNearSkipped = 0;
     g_streamPace.govSeconds = g_streamPace.govOnTurns = g_streamPace.govOffTurns = g_streamPace.govHeldScans = g_streamPace.govHeldRespawns = g_streamPace.govDrained = g_streamPace.govNearKept = 0;
     /* the loader writes about 1000 characters a line (HellForge logging.c WriteLog): the change frames' work apart */
     Note("difficulty: extra large maps: streaming change work: %u removals, %.1f a frame; removals %.2f ms a frame (the most %.2f), spawns %.2f ms (the most %.2f); %u locations spawned, %.1f a frame; their units made in %u flushes, %.2f ms each (the most %.2f) after an animation wait of %.2f ms (the most %.2f), %.3f ms a location and %.2f ms fixed estimated; cut short by the time limit: removals in %u, spawns in %u; by the location count: %u; deferred for a tile step: %u frames of %u a tile built in; %u due not spawned at the last scan; drained layer 4 %u, 6..9 %u %u %u %u; spawned into layer 4 %u, 6..9 %u %u %u %u",
@@ -1682,20 +1729,23 @@ static double WorldStreamBudget(double quietHi, double rebuildMs, double moveMs)
     return t < kStreamBudgetFloor ? kStreamBudgetFloor : t > kStreamBudgetMost ? kStreamBudgetMost : t;
 }
 
-/* The frame just closed, when it was a change frame: its world update over the quiet frames' is that kind's cost
- * (removal or spawn frame), a quarter of the estimate. A frame a far-grass job was out in, or kept apart, says nothing
- * of it; one sample is held to 4 x the estimate (1 ms at least, 12 at most). */
+/* A change frame's cost (removal or spawn frame), learned once its after-change frame closed: the two frames' world
+ * update over two quiet frames', a quarter of the estimate (the frame after one ran 2.5-4.8 ms over the change frames,
+ * run 2c, and was taken for a quiet one). A pair a far-grass job was out in or kept apart says nothing of it, nor do
+ * quiet frames not measured yet; one sample is held to 4 x the estimate (1 ms at least, 12 at most). */
 static void WorldStreamCostLearn(void)
 {
     const int kind = g_streamCost.kind;
-    g_streamCost.kind = 0;
+    if (kind == 0) return;
     CoFcRecent r;
     co_framecost_recent_all(&r);
-    if (kind == 0 || r.lastBodies == 0 || r.lastGrass || r.lastApart || !(r.quietWorld > 0.0)) return;
+    if (r.lastBodies != 0) return; /* the change frame itself just closed: the next frame is its after-change frame */
+    g_streamCost.kind = 0;
+    if (!r.lastAfter || r.lastAfterKind != kind || !r.pairClean || !(r.quietHi > 0.0) || !(r.quietWorld > 0.0)) return;
     double* est = kind == 1 ? &g_streamCost.removeMs : &g_streamCost.spawnMs;
     double most = *est * 4.0;
     most = most < 1.0 ? 1.0 : most > 12.0 ? 12.0 : most;
-    double ms = r.lastWorld - r.quietWorld;
+    double ms = r.pairWorld - 2.0 * r.quietWorld;
     ms = ms < 0.0 ? 0.0 : ms > most ? most : ms;
     *est = *est * 0.75 + ms * 0.25;
     if (kind == 1) { g_streamPace.removeSum += ms; g_streamPace.removeSamples++; }
@@ -1758,15 +1808,50 @@ static void WorldStreamChangeAfter(void)
  * frame's removals. A change frame at its floor spawns only then, or with no removal queued. */
 static int WorldStreamWindowHolds(void) { return g_stream.expired <= kStreamChangeDrops || g_streamDropCount == 0; }
 
-/* A forced removal frame's minimum: the last scan's new exits, plus an eighth of the stamps past the window's design
- * (catching up), over the removal frames in its interval, rounded up, in [kStreamRemoveGather, kStreamRemoveForcedMost]:
- * one such frame each kStreamRemoveWaitMs keeps up with 16-32 exits a second when no frame has room. */
+/* A removal frame's drain time over its removals is a removal's own time (the look, DestroyUnit's own part, the slot's
+ * leave), learned a quarter of the way; one sample is held to 2 ms. */
+static void WorldStreamOwnLearn(double ms, uint32_t removed)
+{
+    if (removed == 0) return;
+    double per = ms / (double)removed;
+    per = per < 0.0 ? 0.0 : per > 2.0 ? 2.0 : per;
+    g_streamCost.ownMs += (per - g_streamCost.ownMs) * 0.25;
+    g_streamPace.ownSum += per; g_streamPace.ownSamples++;
+}
+
+/* A chosen removal frame's room under the target: the learned step cost and kStreamRemoveGather removals' own time. */
+static double WorldStreamRemoveRoom(void) { return g_streamCost.removeMs + kStreamRemoveGather * g_streamCost.ownMs; }
+
+/* A forced removal frame's most: kStreamRemoveForcedOwnMs of learned own time, in [kStreamRemoveGather,
+ * kStreamRemoveForcedMost]; 24 at run 2c's 0.31 ms. Such a frame costs the frame before, the learned step cost and at
+ * most max(kStreamRemoveForcedOwnMs, kStreamRemoveGather own times): about 10.4 ms over the frame before in run 2c. */
+static uint32_t WorldStreamForcedMost(void)
+{
+    const double n = g_streamCost.ownMs > 0.0 ? kStreamRemoveForcedOwnMs / g_streamCost.ownMs : (double)kStreamRemoveForcedMost;
+    return n < (double)kStreamRemoveGather ? kStreamRemoveGather : n > (double)kStreamRemoveForcedMost ? kStreamRemoveForcedMost : (uint32_t)n;
+}
+
+/* The removals due: those queued, or the live stamps past their removal radius when more (they wait for queue room). */
+static uint32_t WorldStreamBacklog(void) { return g_streamDropCount > g_stream.expired ? g_streamDropCount : g_stream.expired; }
+
+/* A forced removal frame's minimum: the backlog within [kStreamRemoveGather, WorldStreamForcedMost]. The exits' pace
+ * comes in through the queue (each scan queues its new exits) and through the forced frames' wait. */
 static uint32_t WorldStreamDrainLeast(void)
 {
-    const uint32_t frames = g_stream.exitsChanges > 0 ? g_stream.exitsChanges : 1u;
-    const uint32_t over = g_stream.expired > kStreamChangeDrops ? g_stream.expired - kStreamChangeDrops : 0u;
-    const uint64_t n = ((uint64_t)g_stream.exitsNew * 8u + over + 8u * frames - 1u) / (8u * (uint64_t)frames);
-    return n < kStreamRemoveGather ? kStreamRemoveGather : n > kStreamRemoveForcedMost ? kStreamRemoveForcedMost : (uint32_t)n;
+    const uint32_t most = WorldStreamForcedMost(), n = WorldStreamBacklog();
+    return n < kStreamRemoveGather ? kStreamRemoveGather : n > most ? most : n;
+}
+
+/* The oldest removal's wait that forces a removal frame: kStreamRemoveWaitBusyMs while the backlog is past one forced
+ * frame's most or the exits' pace past one such frame each kStreamRemoveWaitMs, else kStreamRemoveWaitMs. Forced frames
+ * alone then keep up with WorldStreamForcedMost a kStreamRemoveWaitBusyMs (240 a second at fps 40 and up: a removal
+ * frame takes 4 frames with the spawns' turn), so neither the queue nor the live stamps past their radius grow below
+ * that pace. */
+static ULONGLONG WorldStreamRemoveWait(void)
+{
+    const uint32_t most = WorldStreamForcedMost();
+    const int busy = WorldStreamBacklog() > most || g_streamPace.exitRate * (double)kStreamRemoveWaitMs / 1000.0 > (double)most;
+    return busy ? (ULONGLONG)kStreamRemoveWaitBusyMs : (ULONGLONG)kStreamRemoveWaitMs;
 }
 
 /* A due stamp not yet spawned within the squared reach (0: any) from the cursor: the order is nearest first. */
@@ -1789,18 +1874,19 @@ static int WorldStreamFloorStuck(double quietHi, uint32_t leaves, double moveMs)
     return quietHi > 0.0 && CO_FC_TARGET_MS - quietHi - moveMs - kStreamSpawnMsStart >= 1.5;
 }
 
-/* Whether this change try is a removal frame: 0 no, 1 chosen (the frame before had kStreamRemoveRoomMs under the
- * target, and kStreamRemoveGather are queued or the oldest waited kStreamRemoveGatherMs; after a removal frame a spawn
- * frame's turn when spawns wait), 2 forced (the oldest waited kStreamRemoveWaitMs, whatever the frames). `lastWhole` 0:
- * not measured yet. */
+/* Whether this change try is a removal frame: 0 no, 1 chosen (the frame before left WorldStreamRemoveRoom under the
+ * target, and kStreamRemoveGather are queued or the oldest waited kStreamRemoveGatherMs), 2 forced (the oldest waited
+ * WorldStreamRemoveWait, whatever the frames). After any removal frame, a stalled far-grass job's too, a spawn frame's
+ * turn when spawns wait: a forced pick ahead of it starved the spawns for a stalled job's 20 s. `lastWhole` 0: not
+ * measured yet. */
 static int WorldStreamRemovePick(ULONGLONG now, double lastWhole, int spawnsWait)
 {
     if (g_streamDropCount == 0) return 0;
-    const ULONGLONG waited = g_streamPace.removeWaitAt != 0 && now > g_streamPace.removeWaitAt ? now - g_streamPace.removeWaitAt : 0;
-    if (waited >= kStreamRemoveWaitMs) return 2;
-    if (lastWhole >= CO_FC_TARGET_MS - kStreamRemoveRoomMs) return 0; /* 0, not measured: room */
-    if (g_streamDropCount < kStreamRemoveGather && waited < kStreamRemoveGatherMs) return 0;
     if (spawnsWait && g_streamPace.lastKind == 1) return 0;
+    const ULONGLONG waited = g_streamPace.removeWaitAt != 0 && now > g_streamPace.removeWaitAt ? now - g_streamPace.removeWaitAt : 0;
+    if (waited >= WorldStreamRemoveWait()) return 2;
+    if (lastWhole >= CO_FC_TARGET_MS - WorldStreamRemoveRoom()) return 0; /* 0, not measured: room */
+    if (g_streamDropCount < kStreamRemoveGather && waited < kStreamRemoveGatherMs) return 0;
     return 1;
 }
 
@@ -1859,7 +1945,9 @@ static uint32_t WorldStreamChangeLocked(ULONGLONG now, int layerBusy)
         ms = ms < 0.0 ? 0.0 : ms > kStreamBudgetMost ? kStreamBudgetMost : ms;
         const uint32_t least = removal == 2 ? WorldStreamDrainLeast() : kStreamRemoveGather;
         g_stream.drainLeast = least;
+        const double d0 = HitchNow();
         changed = WorldStreamDrainLocked(backlog ? kStreamChangeDropsBusy : kStreamChangeDrops, ms, drain, least);
+        WorldStreamOwnLearn(HitchNow() - d0, changed);
     }
     else
     {
@@ -1893,8 +1981,10 @@ static uint32_t WorldStreamChangeLocked(ULONGLONG now, int layerBusy)
     else { g_hitchCost.spawn += (float)(t1 - t0); g_stream.spawnMs += t1 - t0; if (t1 - t0 > g_stream.spawnMost) g_stream.spawnMost = t1 - t0; }
     g_hitchCost.removed += (uint16_t)(g_stream.removed - removed);
     if (changed == 0) return 0;
-    /* spawns held by a layer fill come back soon too, so tile builds do not cost spawn frames */
-    const int soon = backlog || (layerBusy && pending > 0);
+    /* spawns held by a layer fill come back soon too, so tile builds do not cost spawn frames; so do queued removals
+     * under the busy wait, which a kStreamChangeGap between change frames would hold to 4 forced frames a second */
+    const int soon = backlog || (layerBusy && pending > 0) ||
+        (g_streamDropCount > 0 && WorldStreamRemoveWait() == (ULONGLONG)kStreamRemoveWaitBusyMs);
     g_stream.nextChange = soon ? now : now + kStreamChangeGap;
     g_stream.nextChangeTick = soon ? g_streamTicks + kStreamChangeTicksBusy : 0;
     g_streamRebuild.leaves = rebuilt;
@@ -1914,19 +2004,21 @@ static uint32_t WorldStreamChangeLocked(ULONGLONG now, int layerBusy)
     g_stream.changeRemoved += g_stream.removed - removed;
     if (g_stream.removed != removed) g_stream.layerDrains[drain >= 6 ? drain - 5 : 0]++;
     if (made) g_stream.layerSpawns[spawn >= 6 ? spawn - 5 : 0]++;
-    co_framecost_bodies(room ? CO_FC_BODIES_ROOM : CO_FC_BODIES_FLOOR);
+    co_framecost_bodies(room ? CO_FC_BODIES_ROOM : CO_FC_BODIES_FLOOR); /* a removal frame: room when chosen, the floor when forced */
     co_framecost_change(g_stream.removed != removed, made != 0);
+    g_slChangeTick = g_streamTicks;
     return changed;
 }
 
-/* Each tick in play: the frame just closed into the governor's second when it was a quiet frame (no change, no
- * far-grass job, not kept apart); each kGovWindowMs with kGovMinFrames such frames, its mean turns the governor on over
- * kGovOnMs and off under kGovOffMs, kGovHoldMs after its last turn at least. Its state stays between the two. */
+/* Each tick in play: the frame just closed into the governor's second when it was a quiet frame (no change, not right
+ * after one, no far-grass job, not kept apart); each kGovWindowMs with kGovMinFrames such frames, its mean turns the
+ * governor on over kGovOnMs and off under kGovOffMs, kGovHoldMs after its last turn at least. Its state stays between
+ * the two. It acts only when asked (WorldStreamGovernActs); else its turns are counted, the would-be ones. */
 static void WorldStreamGovernLocked(ULONGLONG now)
 {
     CoFcRecent fc;
     co_framecost_recent_all(&fc);
-    if (fc.lastWhole > 0.0 && fc.lastBodies == 0 && !fc.lastGrass && !fc.lastApart) { g_streamPace.govSum += fc.lastWorld; g_streamPace.govN++; }
+    if (fc.lastWhole > 0.0 && fc.lastBodies == 0 && !fc.lastAfter && !fc.lastGrass && !fc.lastApart) { g_streamPace.govSum += fc.lastWorld; g_streamPace.govN++; }
     if (g_streamPace.govAt == 0) { g_streamPace.govAt = now; return; }
     if (now - g_streamPace.govAt < kGovWindowMs) return;
     g_streamPace.govAt = now;
@@ -1942,17 +2034,16 @@ static void WorldStreamGovernLocked(ULONGLONG now)
     g_streamPace.govSum = 0.0; g_streamPace.govN = 0;
 }
 
+/* The governor on and asked to act (g_streamGovActs): the far ring held, its far respawns held, its farthest evicted. */
+static int WorldStreamGovernActs(void) { return g_streamPace.govOn && g_streamGovActs; }
+
 /* A far window slot the governor may take out: live with its own unit, not queued, not a mission's, and farther than
  * kStreamOutRadius from every player (the near stamps' own keep radius: those are never touched). */
 static int WorldStreamGovernMay(uint32_t s)
 {
     if (g_streamOut2[s] <= 0.0f || !g_streamLive[s] || !g_streamPoseGood[s] || g_streamNeedsUnit[s] || g_streamUnit[s] == 0 || g_streamDrop[s] || g_streamMission[s])
         return 0;
-    for (int p = 0; p < g_stream.playerCount; p++)
-    {
-        const float dx = g_streamAt[s][0] - g_streamPlayerAt[p][0], dy = g_streamAt[s][1] - g_streamPlayerAt[p][1];
-        if (dx * dx + dy * dy <= kStreamOutRadius * kStreamOutRadius) { g_streamPace.govNearKept++; return 0; }
-    }
+    if (WorldStreamWithinOut(s)) { g_streamPace.govNearKept++; return 0; }
     return 1;
 }
 
@@ -2037,8 +2128,10 @@ static void WorldStreamLayersInstall(void)
     if (layers != NULL)
     {
         Note("difficulty: extra large maps: streamed broad phase layers off: %s; every static body stays in layer 4", layers);
+#if defined(CO_RESEARCH) || defined(CO_TEST)
         const char* sampler = SlSamplerInstall(ApiModuleBase("helldivers2.exe", NULL));
         if (sampler != NULL) Note("difficulty: extra large maps: the bodies' makers are not sampled: %s", sampler);
+#endif
     }
     else Note("difficulty: extra large maps: streamed broad phase layers on: the main world's broad phase has %d layers, 6..9 as layer 4, and each change frame's stamp bodies go to one of them", SlMainLayers());
 }
@@ -2070,8 +2163,18 @@ static const char* InstallWorldStream(uintptr_t game)
     g_streamInstallState = 1;
     InstallDestroyQueue();
     WorldStreamLayersInstall();
+#if defined(CO_RESEARCH) || defined(CO_TEST)
     const char* timers = StInstall(ApiModuleBase("helldivers2.exe", NULL));
     Note("difficulty: extra large maps: step removal timers %s%s", timers ? "off: " : "on (removeBodies, broad phase remove, renumber; activations counted)", timers ? timers : "");
+#endif
+#ifdef CO_RESEARCH
+    {
+        char t[4] = "";
+        g_streamGovActs = GetEnvironmentVariableA("HELLFORGE_XL_GOVERNOR", t, sizeof t) > 0 && t[0] == '1';
+    }
+#endif
+    Note("difficulty: extra large maps: streaming governor %s", g_streamGovActs ? "acts (HELLFORGE_XL_GOVERNOR=1): it holds and evicts the far ring while on"
+        : "observes only: it counts the turns it would make (a research build with HELLFORGE_XL_GOVERNOR=1 makes it act)");
     Note("difficulty: extra large maps: content streams: %d locations at most, %d per call, kept within %.0f m of the start, streamed within %.0f m of a player, removed beyond %.0f m after %d s",
         (int)kStreamMaxLocations, (int)kStreamBatch, (double)kStreamStartRadius, (double)kStreamInRadius, (double)kStreamOutRadius,
         (int)(kStreamOutTimeout / 1000));

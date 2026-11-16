@@ -1846,6 +1846,7 @@ uint32_t CoXlTestWindowGovernEvictRange(uint32_t base, uint32_t high)
     return queued;
 }
 void CoXlTestWindowGovernEvict(void) { AcquireSRWLockExclusive(&g_streamLock); WindowGovernEvictLocked(); ReleaseSRWLockExclusive(&g_streamLock); }
+int CoXlTestWindowGovernHolds(void) { AcquireSRWLockExclusive(&g_streamLock); const int r = WindowGovernHoldsLocked(); ReleaseSRWLockExclusive(&g_streamLock); return r; }
 /* The step timers: a thunk's original set (slot 0..3), the frame's counts, a frame closed under `kind`. */
 void CoXlTestStOrig(int slot, void* fn) { if (slot == 0) g_stOrig0 = fn; else if (slot == 1) g_stOrig1 = fn; else if (slot == 2) g_stOrig2 = fn; else g_stOrig3 = fn; }
 void* CoXlTestStThunk(int slot) { return slot == 0 ? (void*)StThunkRemove : slot == 1 ? (void*)StThunkBpRemove : slot == 2 ? (void*)StThunkRenumber : (void*)StThunkActivate; }
@@ -1856,7 +1857,7 @@ void CoXlTestStNote(void) { StNote(); }
 uint64_t CoXlTestStKindCalls(int kind, int slot) { return g_st.calls[kind][slot]; }
 uint32_t CoXlTestStKindFrames(int kind) { return g_st.frames[kind]; }
 /* The bodies' makers sampler: one sample of the chain `frames` (n of them), the note's text. */
-void CoXlTestSlChain(const uintptr_t* frames, int n, int game, int frame) { SlChainAdd(frames, n, game, frame); }
+void CoXlTestSlChain(const uintptr_t* frames, int n, int game, int mark) { SlChainAdd(frames, n, game, mark); }
 void CoXlTestSlSampleText(char* out, size_t room) { SlSampleText(out, room); }
 void CoXlTestSlSampleCall(void) { SlSample(0); }
 /* Since the note: the change frames' budgets summed, those at the floor, and the frames a tile built in. */
@@ -1959,7 +1960,8 @@ int CoXlTestRenderApart(int stampLeave, int step, uint8_t op)
     return apart;
 }
 /* The floor's removal minimum from a scan's new exits over its change frames; floor frames: stuck, dry; rebuilt summed. */
-uint32_t CoXlTestStreamFloorLeast(uint32_t exits, uint32_t changes) { g_stream.exitsNew = exits; g_stream.exitsChanges = changes; return WorldStreamDrainLeast(); }
+/* A forced removal frame's minimum with `expired` live stamps past their radius and the own time `ownMs` (kept when 0). */
+uint32_t CoXlTestStreamFloorLeast(uint32_t expired, double ownMs) { g_stream.expired = expired; if (ownMs > 0) g_streamCost.ownMs = ownMs; return WorldStreamDrainLeast(); }
 void CoXlTestStreamFloorMore(uint32_t* stuck, uint32_t* dry, double* rebuiltSum, uint32_t* least, uint32_t* exits, uint32_t* exitChanges)
 {
     *stuck = g_stream.floorStuck; *dry = g_stream.floorDry; *rebuiltSum = g_stream.rebuiltSum; *least = g_stream.drainLeast;
@@ -1979,6 +1981,22 @@ void CoXlTestStreamDistance(uint32_t i, float distance2) { g_streamDistance[i] =
 /* The scan's count of those, set; a slot queued for removal as a scan queues one. */
 void CoXlTestStreamExpiredSet(uint32_t n) { g_stream.expired = n; }
 int CoXlTestStreamDropPush(uint32_t i) { return WorldStreamDropLocked(i, STREAM_DROP_OUT); }
+int CoXlTestStreamDropFarPush(uint32_t i) { return WorldStreamDropLocked(i, STREAM_DROP_FAR); }
+/* Far removals skipped at the drain since the note (a player within kStreamOutRadius). */
+uint32_t CoXlTestStreamFarNearSkipped(void) { return g_streamPace.farNearSkipped; }
+/* A removal's learned own time (set when > 0), a learn from a drain of `ms` for `removed`, the chosen frames' room, the
+ * forced frames' wait now, the exits' pace (set when >= 0). */
+double CoXlTestStreamOwn(double ownMs) { if (ownMs > 0) g_streamCost.ownMs = ownMs; return g_streamCost.ownMs; }
+void CoXlTestStreamOwnLearn(double ms, uint32_t removed) { WorldStreamOwnLearn(ms, removed); }
+double CoXlTestStreamRemoveRoom(void) { return WorldStreamRemoveRoom(); }
+unsigned long long CoXlTestStreamRemoveWaitNow(void) { return WorldStreamRemoveWait(); }
+double CoXlTestStreamExitRate(double rate) { if (rate >= 0) g_streamPace.exitRate = rate; return g_streamPace.exitRate; }
+/* The governor acting (research switch) or observing. */
+void CoXlTestStreamGovActs(int on) { g_streamGovActs = on; }
+/* The makers' sampler's mark now (1 a change frame's tick, 2 the next, 0 else) and the last change frame's tick. */
+int CoXlTestSlChangeMark(void) { return SlChangeMark(); }
+uint32_t CoXlTestStreamChangeTick(void) { return g_slChangeTick; }
+void CoXlTestSlChangeTickSet(uint32_t tick) { g_slChangeTick = tick; }
 /* Since the note: the floor frames that held spawns for removals, the quiet frames' longest summed, and the frames
  * layers 6..9 moved in (after one the streamer changed nothing in); the animation wait before the flushes, all and most. */
 void CoXlTestStreamFloorStats(uint32_t* held, double* quietHiSum, uint32_t* streamedMoved, uint32_t* streamedQuiet, double* waitMs, double* waitMost)

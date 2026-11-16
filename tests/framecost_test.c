@@ -399,14 +399,20 @@ static void TestBodies(void)
         /* 18 ms of its own; the longest whole is not the last, and one change frame is under 16.7 ms whole (10 ms own);
          * the longest's budget was at its floor (a later 1 in the frame does not undo it) */
         if (c > 0) { Cost(c == 10 ? 35.0 : c == 20 ? 15.0 : c == 39 ? 30.0 : 25.0, 2.0, 0, 0, c == 20 ? 12.0 : 20.0, 1); co_framecost_bodies(0); co_framecost_bodies(c == 10 ? 2 : 1); if (c == 10) co_framecost_bodies(1); }
+        Cost(9.0, 0, 0, 0, 7.0, 0);                          /* the frame right after a change frame: neither quiet nor a change frame */
         Cost(18.0, 0, 0, 0, 5.0, 0); co_framecost_bodies(0); /* a 0 flags nothing */
-        for (int k = 0; k < 23; k++) Cost(9.0, 0, 0, 0, 5.0, 0);
+        for (int k = 0; k < 22; k++) Cost(9.0, 0, 0, 0, 5.0, 0);
     }
     Cost(9.0, 0, 0, 0, 5.0, 0);
     CHECK(co_framecost_test_bodies(&changed, &cMean, &cMost, &quiet, &qMean, &qMost, &over) == 1);
-    CHECK(changed == 40 && cMean > 17.79 && cMean < 17.81 && cMost == 18.0 && quiet == 960 && qMean == 5.0 && qMost == 5.0 && over == 40);
+    CHECK(changed == 40 && cMean > 17.79 && cMean < 17.81 && cMost == 18.0 && quiet == 920 && qMean == 5.0 && qMost == 5.0 && over == 40);
+    {
+        uint32_t af[4], ao[4]; double aw[4], am[4];
+        co_framecost_test_after(af, aw, am, ao);
+        CHECK(af[0] == 40 && aw[0] == 7.0 && am[0] == 7.0 && ao[0] == 0 && af[1] == 0 && af[2] == 0 && af[3] == 0); /* no kind given */
+    }
     CHECK(fake_host_logged("frame times, world update's own time by the streamer's body changes: 40 frame(s) with a change, mean 17.8 ms, "
-        "the longest 18.0 ms; 960 without, mean 5.0 ms, the longest 5.0 ms; 40 of those over 16.7 ms in all; the change frames whole: mean 25.1 ms, "
+        "the longest 18.0 ms; 920 without, mean 5.0 ms, the longest 5.0 ms; 40 of those over 16.7 ms in all; the change frames whole: mean 25.1 ms, "
         "the longest 35.0 ms, 39 over 16.7 ms; 39 of them with room in their budget, 38 of those over"));
     double wMean = 0, wMost = 0; uint32_t wOver = 0;
     co_framecost_test_bodies_whole(&wMean, &wMost, &wOver);
@@ -490,13 +496,26 @@ static void TestKinds(void)
     Cost(9.0, 0, 0, 0, 5.0, 0);
     co_framecost_recent_all(&r);
     CHECK(r.lastWhole == 30.0 && r.lastBodies == 1 && r.lastKind == 1 && r.lastGrass && !r.lastApart && r.lastWorld == 12.0);
-    for (int i = 0; i < 2; i++) { Cost(18.0, 0, 0, 0, 6.0, 0); co_framecost_bodies(2); co_framecost_change(0, 1); }
+    /* the frame right after a change frame: its kind and the pair's world update; a far-grass job in the pair spoils it */
+    for (int i = 0; i < 2; i++)
+    {
+        Cost(18.0, 0, 0, 0, 6.0, 0);
+        co_framecost_recent_all(&r);
+        CHECK(i == 1 ? !r.lastAfter && r.lastBodies == 2 : r.lastAfter && r.lastAfterKind == 1 && !r.pairClean && r.pairWorld == 17.0 && r.lastBodies == 0);
+        co_framecost_bodies(2); co_framecost_change(0, 1);
+    }
     Cost(22.0, 0, 0, 0, 10.0, 0); co_framecost_bodies(1); co_framecost_change(1, 0); co_framecost_change(0, 1);
-    Cost(9.0, 0, 0, 0, 5.0, 0);
+    Cost(20.0, 0, 0, 0, 5.0, 0);                                     /* right after it: over the target, out of the quiet ring */
     co_framecost_recent_all(&r);
     CHECK(r.lastKind == 3 && r.lastBodies == 1 && !r.lastGrass);
     co_framecost_change(1, 1);                                       /* without co_framecost_bodies: no change frame */
-    for (int i = 0; i < 3; i++) { Cost(21.0, 0, 0, 0, 13.0, 0); co_framecost_grass(1); }
+    for (int i = 0; i < 3; i++)
+    {
+        Cost(21.0, 0, 0, 0, 13.0, 0);
+        co_framecost_recent_all(&r);
+        CHECK(i > 0 ? !r.lastAfter && !r.pairClean && r.pairWorld == 0 : r.lastAfter && r.lastAfterKind == 3 && r.pairClean && r.pairWorld == 15.0);
+        co_framecost_grass(1);
+    }
     Cost(13.0, 0, 0, 0, 9.0, 0); co_framecost_grass(1);
     Cost(9.0, 0, 0, 0, 5.0, 0);
     co_framecost_recent_all(&r);
@@ -512,6 +531,19 @@ static void TestKinds(void)
         "2 spawn only (world update mean 6.0 ms, the longest 6.0 ms; whole mean 18.0 ms), 1 both (world update mean 10.0 ms, the longest 10.0 ms; "
         "whole mean 22.0 ms); 1 of them with a far-grass job out; 4 frame(s) without a change with a far-grass job out (world update mean 12.0 ms, "
         "the longest 13.0 ms; whole mean 19.0 ms, 3 over 16.7 ms), kept out of the quiet frames and their longest of 32"));
+    {
+        uint32_t af[4], ao[4], kb[4][3], ko[4][3]; double aw[4], am[4];
+        co_framecost_test_after(af, aw, am, ao);
+        CHECK(af[0] == 0 && af[1] == 1 && af[2] == 0 && af[3] == 1 && aw[1] == 5.0 && aw[3] == 5.0 && am[3] == 5.0 && ao[1] == 0 && ao[3] == 1);
+        co_framecost_test_kind_over(kb, ko);
+        CHECK(kb[1][1] == 4 && ko[1][1] == 4 && kb[1][2] == 0 && kb[2][1] == 0 && kb[2][2] == 2 && ko[2][2] == 2 && kb[3][1] == 1 && ko[3][1] == 1);
+    }
+    CHECK(fake_host_logged("frame times, the frames right after a change frame (none of their own; kept out of the quiet frames, their longest of 32 and the "
+        "governor): 1 after removal only (world update mean 5.0 ms, the longest 5.0 ms; whole mean 9.0 ms, 0 over 16.7 ms), 0 after spawn only (world update "
+        "mean 0.0 ms, the longest 0.0 ms; whole mean 0.0 ms, 0 over 16.7 ms), 1 after both (world update mean 5.0 ms, the longest 5.0 ms; whole mean 20.0 ms, "
+        "1 over 16.7 ms)"));
+    CHECK(fake_host_logged("frame times, change frames over 16.7 ms by kind and budget: removal only chosen 4 of 4, forced 0 of 0; spawn only with room 0 "
+        "of 0, at the floor 2 of 2; both with room 1 of 1, at the floor 0 of 0"));
     for (int i = 0; i < 1200; i++) Cost(9.0, 0, 0, 0, 5.0, 0);
     co_framecost_test_kinds(frames, world, &grass, &grassWorld, &bodyGrass);
     CHECK(frames[1] == 0 && grass == 0 && bodyGrass == 0);           /* each window counts its own */

@@ -277,8 +277,8 @@ static void WindowLeaveLocked(uint32_t s)
 static int WindowRespawnRoomLocked(uint32_t i, int* gates)
 {
     if (g_win.on && g_win.level == g_stream.level && i >= g_win.base && i < DIF_LOCATIONS) return 1;
-    /* the governor on (WorldStreamGovernLocked): no new stamp past kStreamOutRadius, the near ones' keep radius */
-    if (g_streamPace.govOn && g_streamDistance[i] > kStreamOutRadius * kStreamOutRadius) { g_streamPace.govHeldRespawns++; return 0; }
+    /* the governor on and acting (WorldStreamGovernActs): no new stamp past kStreamOutRadius, the near ones' keep radius */
+    if (WorldStreamGovernActs() && g_streamDistance[i] > kStreamOutRadius * kStreamOutRadius) { g_streamPace.govHeldRespawns++; return 0; }
     const int away = g_streamDistance[i] > WINDOW_IN * WINDOW_IN;
     if (gates[away] < 0)
     {
@@ -328,7 +328,7 @@ static void WindowEvictFarLocked(void)
     if (n != 0) g_win.farHoldUntil = GetTickCount64() + 30000; /* no churn: the far ring waits 30 s after it gave way */
 }
 
-/* The governor on (WorldStreamGovernLocked): the far ring takes nothing, and its farthest live stamps go, WINDOW_FAR_EVICT
+/* The governor on and acting (WorldStreamGovernActs): the far ring takes nothing, and its farthest live stamps go, WINDOW_FAR_EVICT
  * a scan while the queue holds none of them, only those WorldStreamGovernMay allows (past kStreamOutRadius of every
  * player). No hold after it: the governor's own hysteresis keeps it from churning, and the ring enters again once off. */
 static void WindowGovernEvictLocked(void)
@@ -351,6 +351,16 @@ static void WindowGovernEvictLocked(void)
         if (best > far2[m]) { pick[m] = s; far2[m] = best; }
     }
     for (uint32_t k = 0; k < n; k++) g_streamPace.govDrained += WorldStreamDropLocked(pick[k], STREAM_DROP_FAR) != 0;
+}
+
+/* A window scan's far ring while the governor acts: held and its farthest evicted (1); else scanned (0). Observing only,
+ * the ring enters as without it. */
+static int WindowGovernHoldsLocked(void)
+{
+    if (!WorldStreamGovernActs()) return 0;
+    g_streamPace.govHeldScans++;
+    WindowGovernEvictLocked();
+    return 1;
 }
 
 /* The far ring: the planned stamps between WINDOW_IN and their own reach of a player, the ones visible past
@@ -441,7 +451,7 @@ static void WindowScanLocked(ULONGLONG now)
                     }
                 }
     }
-    if (g_streamPace.govOn) { g_streamPace.govHeldScans++; WindowGovernEvictLocked(); return; }
+    if (WindowGovernHoldsLocked()) return;
     WindowScanFarLocked(bodies, slots, WindowTreesOver(WINDOW_FAR_SHARE));
 }
 

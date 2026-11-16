@@ -19,10 +19,12 @@
 #define ST_BPREMOVE_RVA 0xD41AF0u
 #define ST_RENUMBER_RVA 0xD42550u
 #define ST_ACTIVATE_RVA 0xDE1690u
+#if defined(CO_RESEARCH) || defined(CO_TEST)
 static const char kStRemovePin[] = "48 8B C4 44 89 48 20 44 89 40 18 48 89 48 08 55 41 54 48 8D A8 08 F8 FF FF";
 static const char kStBpRemovePin[] = "48 89 54 24 10 53 56 57 41 54 41 55 41 56 41 57 48 83 EC 60 48 8B F1 49 63 D8";
 static const char kStRenumberPin[] = "48 89 5C 24 08 48 89 7C 24 10 48 8B 81 30 01 00 00 45 33 D2";
 static const char kStActivatePin[] = "48 83 EC 28 4C 8B 11 41 8B D0 81 E2 FF FF FF 00";
+#endif
 
 enum { ST_REMOVE, ST_BPREMOVE, ST_RENUMBER, ST_TIMED, ST_ACTIVATE = ST_TIMED, ST_SLOTS };
 enum { ST_KINDS = 3 }; /* the frame just closed: 0 no change, 1 a removal, 2 spawns only */
@@ -85,7 +87,9 @@ ST_THUNK(StThunkRenumber, 2, g_stOrig2);
 __asm__(".text\n.p2align 4\n.globl StThunkActivate\nStThunkActivate:\n"
         "  lock incq g_stActivations(%rip)\n  jmpq *g_stOrig3(%rip)\n");
 
-/* The four hooks, all or none counted on: a refused pin or hook leaves the ones in passing through (they only time). */
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+/* The four hooks, all or none counted on: a refused pin or hook leaves the ones in passing through (they only time).
+ * A research instrument: a package build has none of them (difficulty_stream.c InstallWorldStream). */
 static const char* StInstall(uintptr_t exe)
 {
     char t[4] = "";
@@ -105,6 +109,7 @@ static const char* StInstall(uintptr_t exe)
     g_st.on = 1;
     return NULL;
 }
+#endif
 
 /* Each streamer tick: the step since the last tick (the frame just closed's world update) under that frame's kind. */
 static void StFrame(int kind)

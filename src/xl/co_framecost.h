@@ -61,8 +61,9 @@ enum { CO_FC_CAUSE_JOIN = CO_FC_PARTS, CO_FC_CAUSE_WORLD, CO_FC_CAUSE_REST, CO_F
  * not hold the change frames' budget at its floor. */
 void co_framecost_grass(int out);
 /* The streamer added or removed stamp bodies in this frame (its change step, run before the world update). Each window
- * then splits the world update's own time between such frames and the others, once a mission had one, and a slow
- * frame's line says whether it was one: those hold a broad phase rebuild by design. */
+ * then splits the world update's own time between such frames and the quiet ones (the frame right after a change
+ * frame is neither: it is counted apart), once a mission had one, and a slow frame's line says whether it was one:
+ * those hold a broad phase rebuild by design. */
 void co_framecost_bodies(int changed);
 #define CO_FC_BODIES_ROOM 1              /* co_framecost_bodies: a change frame whose budget had room under the target */
 #define CO_FC_BODIES_FLOOR 2             /* ... one at its floor: the quiet frames and the rebuild left none */
@@ -82,8 +83,16 @@ void co_framecost_change(int removed, int spawned);
 /* All of the above at once: quietHi without the frames a far-grass bake job was out in (they are kept out of the quiet
  * frames, as co_framecost_apart's), quietHiGrass with them (the rule before), and the frame just closed: its whole
  * time (0 until one closed in this play), co_framecost_bodies value, change kind (1 removal, 2 spawn, 3 both), and
- * whether a far-grass job was out in it or it was kept apart. */
-typedef struct { double quietHi, quietHiGrass, quietWorld, lastWorld, lastWhole; int lastBodies, lastKind, lastGrass, lastApart; } CoFcRecent;
+ * whether a far-grass job was out in it or it was kept apart.
+ * A frame without a change right after a change frame is an after-change frame (lastAfter, with that frame's kind in
+ * lastAfterKind): its world update runs 2.5-4.8 ms over the change frame's (run 2c), so it is kept out of the quiet
+ * frames, their longest of 32 and their world update, as the change frames are, and counted apart by that kind.
+ * pairWorld is the two frames' world update together, pairClean that neither had a far-grass job or was kept apart. */
+typedef struct
+{
+    double quietHi, quietHiGrass, quietWorld, lastWorld, lastWhole, pairWorld;
+    int lastBodies, lastKind, lastGrass, lastApart, lastAfter, lastAfterKind, pairClean;
+} CoFcRecent;
 void co_framecost_recent_all(CoFcRecent* r);
 
 #ifdef CO_TEST
@@ -119,6 +128,11 @@ int co_framecost_test_detail_lines(void);
 /* The last closed window: change frames by kind (index 1 removal only, 2 spawn only, 3 both) and their world update
  * mean; frames without a change with a far-grass job out and their world update mean; change frames with one out. */
 void co_framecost_test_kinds(uint32_t frames[4], double world[4], uint32_t* grass, double* grassWorld, uint32_t* bodyGrass);
+/* The last closed window: after-change frames by the change frame's kind (index 0 a change frame of no kind), their
+ * world update mean and longest, and how many were over the target; the change frames by kind and budget (index 1
+ * with room or, a removal frame, chosen; 2 at the floor or forced) and how many of those were over the target. */
+void co_framecost_test_after(uint32_t frames[4], double world[4], double most[4], uint32_t over[4]);
+void co_framecost_test_kind_over(uint32_t frames[4][3], uint32_t over[4][3]);
 /* The last closed window: 1% and 0.1% lows (fps), frames over 25 ms, 33 ms and 1 s, the CPU verdict. */
 void co_framecost_test_last(double* low1, double* low01, uint32_t* over25, uint32_t* over33, uint32_t* over1s, int* starved);
 #endif

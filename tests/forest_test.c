@@ -300,8 +300,9 @@ int main(void)
         CoXlTestStreamChangeAt(0);
         CHECK(CoXlTestStreamChange(2400, 0, &next) == 1 && g_calls == 2);
         CoXlTestStreamSpawned(2, &spawned, &due); CHECK(spawned);
-        /* room (the change frames are no quiet frames: 33 push the last 16.5 out): the far one goes too */
-        for (int k = 0; k < 33; k++) { co_framecost_test_begin(t, 1, 1); t += 10000; }
+        /* room (the change frame and the one right after it are no quiet frames: 34 push the last 16.5 out): the far one
+         * goes too */
+        for (int k = 0; k < 34; k++) { co_framecost_test_begin(t, 1, 1); t += 10000; }
         Level(5);
         CoXlTestStreamDue(0, unit); CoXlTestStreamDue(1, unit); CoXlTestStreamDue(2, unit);
         CoXlTestStreamDistance(2, 600.0f * 600.0f);
