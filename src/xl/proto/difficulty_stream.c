@@ -1407,6 +1407,7 @@ static const char* InstallWorldStream(uintptr_t game)
     g_stream.game = game;
     g_streamInstallState = 1;
     InstallDestroyQueue();
+    MatResInstall();
     Note("difficulty: extra large maps: content streams: %d locations at most, %d per call, kept within %.0f m of the start, streamed within %.0f m of a player, removed beyond %.0f m after %d s",
         (int)kStreamMaxLocations, (int)kStreamBatch, (double)kStreamStartRadius, (double)kStreamInRadius, (double)kStreamOutRadius,
         (int)(kStreamOutTimeout / 1000));

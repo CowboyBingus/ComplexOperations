@@ -225,6 +225,7 @@ static void CoXlTick(HfMod* mod, float dt, void* user)
 {
     (void)mod; (void)user;
     MoveFrameTick(0);
+    MatResTick(); /* op 0x41's unit resources a later frame's fence covers (proto/xl_free.c) */
     HitchTick();
     co_framecost_context(CoXlFrameContext);
     co_framecost_begin(CoXlInPlay(), (long)g_world.levels);
@@ -1417,7 +1418,38 @@ LONG CoXlTestMoveStallSamples(LONG set) { if (set >= 0) InterlockedExchange(&g_m
 int CoXlTestSplit63WallKind(int sp0, int sp1) { return Split63WallKind(sp0, sp1); }
 void CoXlTestSplit63WallAdd(double ms, int sp0, int sp1) { Split63WallAdd(ms, sp0, sp1); }
 void CoXlTestSplit63WallNote(void) { Split63WallNote(); }
-void CoXlTestNearBgQueue(int on, uint32_t* queue, uint32_t* priority) { g_nearBgQueue = on; NearJobQueue(queue, priority); }
+void CoXlTestNearBgQueue(int on, uint32_t* queue, uint32_t* priority) { g_nearBgQueue = on; g_nearAuto.latched = 0; NearJobQueue(queue, priority); }
+/* A job's end as the two jobs count it; the stall watch's build gate; "auto": a build that took its queue, ran a shape
+ * job or not, ended before a frame saw it or not, with `samples` stall samples; the queue number it took. */
+void CoXlTestMoveJobEnd(int shape, int tile) { if (shape) InterlockedIncrement(&g_shapeEnds); if (tile) InterlockedIncrement(&g_nearJobEnds); }
+int CoXlTestMoveFrameInBuild(int set) { if (set >= 0) g_moveFrame.inBuild = set; return g_moveFrame.inBuild; }
+void CoXlTestNearAutoReset(void) { memset(&g_nearAuto, 0, sizeof g_nearAuto); g_nearBgQueue = NEAR_BG_AUTO; }
+uint32_t CoXlTestNearAutoBuild(int shaped, int zero, long samples)
+{
+    uint32_t q = 0, p = 0;
+    NearJobQueue(&q, &p);
+    const uint32_t n = NearJobQueueNumber();
+    NearJobQueue(&q, &p); /* the build's second job keeps the first's queue */
+    if (NearJobQueueNumber() != n) return 0;
+    g_nearAuto.shaped = shaped; g_nearAuto.shapeZero = zero;
+    NearAutoBuildEnd(samples);
+    return n;
+}
+const char* CoXlTestMoveStallWait(uintptr_t a, uintptr_t exe, size_t exeSize, uintptr_t game, size_t gameSize)
+{ static char text[64]; const char* w = MoveStallWait(a, exe, exeSize, game, gameSize, text, sizeof text); return w != NULL ? w : ""; }
+/* Op 0x41's unit resources (proto/xl_free.c) with stand-ins for the exe's functions (MatResFns' order) and no app check. */
+void CoXlTestMatRes(const void* fns, int ready, void* teardown)
+{
+    memcpy(&g_matRes.fn, fns, sizeof g_matRes.fn);
+    g_matRes.ready = ready; g_matRes.teardown = (MatResTeardownFn)teardown; g_matRes.app = 0; g_matRes.n = 0;
+    g_matRes.deferred = g_matRes.freed = g_matRes.max = g_matRes.fallback = g_matRes.drains = g_matRes.leaked = 0;
+}
+void CoXlTestMatUnitDestroy(uint64_t destroy, uint64_t world, uint64_t unit) { MatUnitDestroy(destroy, world, unit); }
+void CoXlTestMatResTick(void) { MatResTick(); }
+void CoXlTestMatResTeardown(uint64_t world) { MatResTeardown(world); }
+void CoXlTestMatResNote(void) { MatResNote(); }
+uint32_t CoXlTestMatResPending(void) { return g_matRes.n; }
+void CoXlTestSetLevels(LONG levels) { InterlockedExchange(&g_world.levels, levels); }
 void CoXlTestMoveLevelUpdate(uint64_t level, uintptr_t moving, void (*update)(uint64_t))
 { g_move.levelPtr = moving; g_moveUpdate = (MoveUpdateFn)update; MoveLevelUpdate(level); g_moveUpdate = NULL; }
 DWORD CoXlTestNearJobTls(DWORD k) { DWORD old = g_tileRunnerTls; g_tileRunnerTls = k; return old; }

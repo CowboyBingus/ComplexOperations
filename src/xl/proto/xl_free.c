@@ -224,6 +224,229 @@ static int MoveReleaseTick(ULONGLONG now)
     return 1;
 }
 
+/* ---- Op 0x41's unit resources, freed after a later frame's fence ----------------------------------------------------
+ * Each unit op 0x41's setup spawns owns a mesh resource (exe 0x1A8B80 sets its record's +0xC). Its destroy (0x337420 ->
+ * 0x1A8E40) releases it in 0x1A8CE0: the handles' values into a release batch (0x4EB380), messages 0xC and 0xD carrying
+ * only the batch (0x74B80, 0x10BDA0), then a flagged fence and a blocking wait (0x105E40, 0x106030) before the batch's
+ * owner `res` and its two CPU arrays are freed: the render thread's whole last frame, 15-23 ms (A10.md). Here the record's
+ * byte is cleared so the game's destroy skips 0x1A8CE0, the same release is pushed, and `res` waits in a list instead:
+ * the render thread runs its queue in order on one thread and a fence the frame loop makes after the push is waited
+ * before the third frame kick from it ([r+0x1A50], only 0x10A81C, from 0x8A73F; 0x8A7C4 waits, 0x8AAF2 posts after it). */
+#define MAT_RES_PENDING 64
+#define MAT_RES_KICKS 3u
+typedef uint64_t (*MatResRecFn)(uint64_t map, const void* key);   /* 0x1B83E0 / 0x1B8240: the value, found or made */
+typedef uint64_t (*MatResCtxFn)(uint64_t dev);                    /* the device's slot +0xF8 (0x525F40): a release batch */
+typedef void (*MatResPairFn)(uint64_t a, uint64_t b);            /* 0x4EB380 (res, batch), 0x74B80 / 0x10BDA0 (r, batch) */
+typedef uint32_t (*MatResFenceFn)(uint64_t r, uint8_t flag);      /* 0x105E40 */
+typedef uint8_t (*MatResWaitFn)(uint64_t r, uint32_t id);         /* 0x106030 */
+typedef void (*MatResEraseFn)(uint64_t map, const uint32_t* id);  /* 0x1BCB30 */
+typedef void (*MatResReleaseFn)(uint64_t world, uint32_t id, uint8_t erase); /* 0x1A8CE0 itself */
+typedef void (*MatResFreeFn)(uint64_t alloc, uint64_t p, uint64_t zero); /* an allocator's slot +0x40 */
+typedef void (*MatResTeardownFn)(uint64_t world);                 /* 0x1A6E00 */
+typedef struct
+{
+    MatResRecFn unitRec, resRec;
+    MatResCtxFn ctxSlot;
+    MatResPairFn release, pushC, pushD;
+    MatResFenceFn fence;
+    MatResWaitFn wait;
+    MatResEraseFn erase;
+    MatResReleaseFn original;
+    uint64_t destroySlot; /* what [[api+8]+0x158] must hold: 0x337420 */
+} MatResFns;
+typedef struct { uint64_t world, r, res; uint32_t kick; LONG levels; } MatResEntry;
+static struct
+{
+    int ready;                 /* 1 the reviewed code and the teardown hook, -1 not (why in `off`) */
+    const char* off;
+    MatResFns fn;
+    MatResTeardownFn teardown; /* the hook's original */
+    uint64_t app;              /* exe+0x1A10208: [[app]+0x338] is the frame loop's renderer; 0 in a test */
+    SRWLOCK lock;              /* the list: the game thread's tick and a teardown on any thread */
+    MatResEntry e[MAT_RES_PENDING];
+    uint32_t n, deferred, freed, max, fallback, drains, leaked;
+} g_matRes = {.lock = SRWLOCK_INIT};
+
+static uint64_t MatResU64(uint64_t at) { uint64_t v = 0; return SafeRead((uintptr_t)at, &v, 8) ? 0 : v; }
+
+/* The renderer of `world` ([[world+0x2301F8]]) when it is the frame loop's and threaded, its kick count in *kick. */
+static uint64_t MatResRenderer(uint64_t world, uint32_t* kick)
+{
+    const uint64_t r = MatResU64(MatResU64(world + 0x2301F8u));
+    uint8_t threaded = 0;
+    if (r == 0 || (g_matRes.app != 0 && MatResU64(MatResU64(g_matRes.app) + 0x338) != r) || SafeRead((uintptr_t)r + 0x1480, &threaded, 1) || !threaded ||
+        SafeRead((uintptr_t)r + 0x1A50, kick, 4))
+        return 0;
+    return r;
+}
+
+/* 0x1A8D75..0x1A8E0B on `res`: the index and vertex arrays through their own allocators, then res through the world's. */
+static void MatResFree(uint64_t world, uint64_t res)
+{
+    uint8_t* b = (uint8_t*)(uintptr_t)res;
+    static const uint32_t arrays[2][4] = {{0x1C4u, 0x1C0u, 0x1D0u, 0x1C8u}, {0x1ACu, 0x1A8u, 0x1B8u, 0x1B0u}}; /* capacity, count, allocator, data */
+    for (int k = 0; k < 2; k++)
+    {
+        if (*(uint32_t*)(b + arrays[k][0]) == 0) continue;
+        *(uint32_t*)(b + arrays[k][1]) = 0;
+        const uint64_t alloc = *(uint64_t*)(b + arrays[k][2]);
+        ((MatResFreeFn)(uintptr_t)*(uint64_t*)(uintptr_t)(*(uint64_t*)(uintptr_t)alloc + 0x40))(alloc, *(uint64_t*)(b + arrays[k][3]), 0);
+        *(uint64_t*)(b + arrays[k][3]) = 0;
+        *(uint32_t*)(b + arrays[k][0]) = 0;
+    }
+    const uint64_t alloc = world + 0x230058u;
+    ((MatResFreeFn)(uintptr_t)*(uint64_t*)(uintptr_t)(*(uint64_t*)(uintptr_t)alloc + 0x40))(alloc, res, 0);
+}
+
+/* The copy of 0x1A8CE0(world, id, 1) up to its wait; 0 when the list is full or the renderer does not read (the caller
+ * then runs 0x1A8CE0 itself). */
+static int MatResDefer(uint64_t world, uint32_t id)
+{
+    uint32_t kick = 0;
+    const uint64_t r = MatResRenderer(world, &kick);
+    const uint64_t dev = r != 0 ? (MatResU64(r + 0x1168) != 0 ? MatResU64(r + 0x1168) : MatResU64(r + 0x1138)) : 0;
+    if (dev == 0 || MatResU64(MatResU64(dev) + 0xF8) != (uint64_t)(uintptr_t)g_matRes.fn.ctxSlot || g_matRes.n >= MAT_RES_PENDING) return 0;
+    const uint64_t rec = g_matRes.fn.resRec(world + 0x2304D0u, &id);
+    const uint64_t res = *(const uint64_t*)(uintptr_t)rec;
+    const uint64_t batch = g_matRes.fn.ctxSlot(dev);
+    g_matRes.fn.release(res, batch);
+    g_matRes.fn.pushC(r, batch);
+    g_matRes.fn.pushD(r, batch);
+    uint32_t after = kick;
+    SafeRead((uintptr_t)r + 0x1A50, &after, 4); /* the kick the push went in with: this thread alone kicks */
+    AcquireSRWLockExclusive(&g_matRes.lock);
+    if (res != 0) g_matRes.e[g_matRes.n++] = (MatResEntry){world, r, res, after, g_world.levels};
+    if (g_matRes.n > g_matRes.max) g_matRes.max = g_matRes.n;
+    g_matRes.deferred++;
+    ReleaseSRWLockExclusive(&g_matRes.lock);
+    g_matRes.fn.erase(world + 0x2304D0u, &id);
+    return 1;
+}
+
+/* Op 0x41's destroy of one unit through the game's slot `destroy`: an owned resource is released here and freed later. */
+static void MatUnitDestroy(uint64_t destroy, uint64_t world, uint64_t unit)
+{
+    typedef void (*DestroyFn)(uint64_t world, uint64_t unit);
+    if (g_matRes.ready <= 0 || destroy != g_matRes.fn.destroySlot) { ((DestroyFn)(uintptr_t)destroy)(world, unit); return; }
+    uint8_t* rec = (uint8_t*)(uintptr_t)g_matRes.fn.unitRec(world + 0x2304F8u, &unit);
+    const uint32_t id = *(const uint32_t*)(rec + 8);
+    if (rec[0xC] == 0) { ((DestroyFn)(uintptr_t)destroy)(world, unit); return; }
+    rec[0xC] = 0; /* 0x1A8EAB: the game's destroy leaves the resource to us */
+    ((DestroyFn)(uintptr_t)destroy)(world, unit);
+    if (!MatResDefer(world, id)) { g_matRes.fallback++; g_matRes.fn.original(world, id, 1); }
+}
+
+/* Game thread, every frame: what a fence after its push has covered goes back; another level's is left (T2). */
+static void MatResTick(void)
+{
+    if (g_matRes.n == 0) return;
+    AcquireSRWLockExclusive(&g_matRes.lock);
+    uint32_t keep = 0;
+    for (uint32_t i = 0; i < g_matRes.n; i++)
+    {
+        MatResEntry* x = &g_matRes.e[i];
+        uint32_t kick = 0;
+        if (x->levels != g_world.levels) { g_matRes.leaked++; continue; }
+        if (SafeRead((uintptr_t)x->r + 0x1A50, &kick, 4) || kick - x->kick < MAT_RES_KICKS) { g_matRes.e[keep++] = *x; continue; }
+        MatResFree(x->world, x->res);
+        g_matRes.freed++;
+    }
+    g_matRes.n = keep;
+    ReleaseSRWLockExclusive(&g_matRes.lock);
+}
+
+/* T1: before the world's render teardown (0x1A6E00) frees its allocator, its waiting resources go after one flagged
+ * fence, as 0x1A8CE0 would have waited for each. */
+static void MatResDrain(uint64_t world)
+{
+    AcquireSRWLockExclusive(&g_matRes.lock);
+    uint64_t r = 0;
+    for (uint32_t i = 0; i < g_matRes.n && r == 0; i++) if (g_matRes.e[i].world == world) r = g_matRes.e[i].r;
+    if (r != 0)
+    {
+        g_matRes.fn.wait(r, g_matRes.fn.fence(r, 1));
+        uint32_t keep = 0;
+        for (uint32_t i = 0; i < g_matRes.n; i++)
+            if (g_matRes.e[i].world == world) { MatResFree(world, g_matRes.e[i].res); g_matRes.freed++; }
+            else g_matRes.e[keep++] = g_matRes.e[i];
+        g_matRes.n = keep;
+        g_matRes.drains++;
+    }
+    ReleaseSRWLockExclusive(&g_matRes.lock);
+}
+
+static void MatResTeardown(uint64_t world)
+{
+    MatResDrain(world);
+    g_matRes.teardown(world);
+}
+
+/* The exe's bytes the copy relies on, beyond the fence's (kDrainPins from 1) and the frame kicks' (NearRenderFrame). */
+static const struct { uint32_t at; const char* bytes; } kMatResPins[] = {
+    {0x337420u, "41 B0 01 E9 18 1A E7 FF"}, /* the destroy slot: 0x1A8E40 with r8b = 1 */
+    {0x1A8E5Bu, "48 8B F2 48 8B F9 48 8D 54 24 58 48 81 C1 F8 04 23 00 45 0F B6 E0 E8 6A F5 00 00 48 8B 8F F8 01 23 00 48 8B D6 4C 8B F8 E8 F8 14 03 00 "
+                "49 8D 57 08 48 8D 8F D0 04 23 00 E8 A8 F3 00 00 49 8D 57 08 48 8D 8F D0 04 23 00 E8 98 F3 00 00 FF 48 3C 41 80 7F 0C 00 74 0F 41 8B 57 08 "
+                "41 B0 01 48 8B CF E8 1F FE FF FF"}, /* its record, +0xC deciding 0x1A8CE0 */
+    {0x1A8CE0u, "48 89 5C 24 08 48 89 6C 24 18 48 89 74 24 20 89 54 24 10 57 41 56 41 57 48 83 EC 20 48 8B F1 48 8D 54 24 48 48 81 C1 D0 04 23 00 45 0F B6 F0 "
+                "E8 2C F5 00 00 48 8B 96 F8 01 23 00 4C 8B F8 48 8B 3A 48 8B 8F 68 11 00 00 48 85 C9 75 07 48 8B 8F 38 11 00 00 48 8B 01 FF 90 F8 00 00 00 "
+                "49 8B 0F 48 8B D0 48 8B D8 E8 35 26 34 00 48 8B D3 48 8B CF E8 2A BE EC FF 48 8B D3 48 8B CF E8 3F 30 F6 FF B2 01 48 8B CF E8 D5 D0 F5 FF "
+                "8B D0 48 8B CF E8 BB D2 F5 FF 49 8B 1F 48 85 DB 0F 84 8D 00 00 00 33 FF 39 BB C4 01 00 00 74 32 39 BB C0 01 00 00 76 06 89 BB C0 01 00 00 "
+                "48 8B 8B D0 01 00 00 45 33 C0 48 8B 93 C8 01 00 00 48 8B 01 FF 50 40 48 89 BB C8 01 00 00 89 BB C4 01 00 00 39 BB AC 01 00 00 74 32 39 BB "
+                "A8 01 00 00 76 06 89 BB A8 01 00 00 48 8B 8B B8 01 00 00 45 33 C0 48 8B 93 B0 01 00 00 48 8B 01 FF 50 40 48 89 BB B0 01 00 00 89 BB AC 01 "
+                "00 00 48 8B 86 58 00 23 00 48 8D 8E 58 00 23 00 45 33 C0 48 8B D3 FF 50 40 45 84 F6 74 11 48 8D 54 24 48 48 8D 8E D0 04 23 00 E8 0C 3D 01 "
+                "00"}, /* the release this copies, whole */
+    {0x1B83E0u, "48 89 5C 24 10 57 48 83 EC 20 83 79 20 00 48 8B FA 48 8B D9"},
+    {0x1B8240u, "48 89 5C 24 10 57 48 83 EC 20 83 79 20 00 48 8B FA 48 8B D9"},
+    {0x4EB380u, "48 85 D2 0F 84 30 01 00 00 48 89 6C 24 20 57 48 83 EC 20 48 8B FA"},
+    {0x74B80u, "48 8B C4 53 48 81 EC 80 00 00 00 80 B9 80 14 00 00 00 48 8B D9 0F 84 0E 01 00 00"},
+    {0x10BDA0u, "48 8B C4 48 89 58 10 57 48 81 EC 80 00 00 00 8B B9 98 13 00 00 0F 57 C0 0F 57 C9"},
+    {0x525F40u, "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 30 48 8D 99 18 03 00 00 48 8B F1 48 8B 03"}, /* a batch from dev+0x318 */
+    {0x1BCB30u, "40 55 48 8B EC 48 83 EC 50 4C 8B D1 8B 49 1C 85"},
+    {0x105E40u, "40 53 57 48 83 EC 38 80 B9 80 14 00 00 00 0F B6 FA 48 8B D9"},
+    {0x106030u, "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20"},
+    {0x1A6E00u, "48 89 5C 24 20 55 56 57 41 56 41 57 48 83 EC 20 48 8B 51 20 48 8B F9"}, /* the teardown, rdi = world to its end */
+    {0x1A73E0u, "4C 8D BF F8 04 23 00 41 8B DD 41 8B 17 85 D2 74"}, /* it walks the unit map ... */
+    {0x1A7488u, "41 3B 1E 73 4D 8B C3 45 33 C0 48 8D 0C 80 49 8B 46 08 48 03 C9 8B 14 C8 48 8B CF E8 38 18 00 00"}, /* ... and releases what the resource map holds */
+    {0x10A81Cu, "41 89 BF 50 1A 00 00"}, {0x8A73Fu, "E8 7C FE 07 00"}, /* the one kick, from the frame loop */
+};
+
+/* Once, at install: the copy is on only with every pin read and the teardown hooked. */
+static void MatResInstall(void)
+{
+    if (g_matRes.ready != 0) return;
+    const uintptr_t exe = ApiModuleBase("helldivers2.exe", NULL);
+    uint32_t frame = 0;
+    g_matRes.ready = -1;
+    g_matRes.off = "no exe";
+    if (exe == 0) return;
+    for (size_t i = 0; i < sizeof kMatResPins / sizeof kMatResPins[0]; i++)
+        if (ApiCodeMatches(exe + kMatResPins[i].at, kMatResPins[i].bytes) != 1) { g_matRes.off = "an exe pin"; Note("difficulty: moving tiles: op 0x41's resources keep the game's wait (exe+0x%X is not the reviewed code)", kMatResPins[i].at); return; }
+    for (size_t i = 1; i < sizeof kDrainPins / sizeof kDrainPins[0]; i++)
+        if (ApiCodeMatches(exe + kDrainPins[i].at, kDrainPins[i].bytes) != 1) { g_matRes.off = "a fence pin"; Note("difficulty: moving tiles: op 0x41's resources keep the game's wait (exe+0x%X is not the reviewed code)", kDrainPins[i].at); return; }
+    (void)NearRenderFrame(&frame);
+    if (!g_renderFramePinned) { g_matRes.off = "a kick pin"; Note("difficulty: moving tiles: op 0x41's resources keep the game's wait (the frame kicks are not the reviewed code)"); return; }
+    g_matRes.fn = (MatResFns){(MatResRecFn)(exe + 0x1B83E0u), (MatResRecFn)(exe + 0x1B8240u), (MatResCtxFn)(exe + 0x525F40u), (MatResPairFn)(exe + 0x4EB380u),
+        (MatResPairFn)(exe + 0x74B80u), (MatResPairFn)(exe + 0x10BDA0u), (MatResFenceFn)(exe + 0x105E40u), (MatResWaitFn)(exe + 0x106030u),
+        (MatResEraseFn)(exe + 0x1BCB30u), (MatResReleaseFn)(exe + 0x1A8CE0u), exe + 0x337420u};
+    g_matRes.app = exe + 0x1A10208u;
+    if (LoaderHook("op 0x41's resources: the world's render teardown", exe + 0x1A6E00u, (void*)MatResTeardown, (void**)&g_matRes.teardown) || g_matRes.teardown == NULL)
+    { g_matRes.teardown = NULL; g_matRes.off = "no teardown hook"; Note("difficulty: moving tiles: op 0x41's resources keep the game's wait (the render teardown could not be hooked)"); return; }
+    g_matRes.ready = 1;
+    g_matRes.off = NULL;
+    Note("difficulty: moving tiles: op 0x41's unit resources are freed %u frame kicks after their release instead of behind a fence wait (exe 0x1A8CE0)", MAT_RES_KICKS);
+}
+
+/* The build's line (MoveCostNote), then the counts start again. */
+static void MatResNote(void)
+{
+    if (g_matRes.deferred == 0 && g_matRes.fallback == 0 && g_matRes.drains == 0 && g_matRes.leaked == 0 && g_matRes.freed == 0) return;
+    Note("difficulty: moving tiles: op 0x41's unit resources this build: %u released without the wait, %u freed after %u frame kicks or a teardown, "
+        "pending max %u (now %u), %u by the game's wait (list full or no renderer), %u teardown drains, %u left to a gone level",
+        g_matRes.deferred, g_matRes.freed, MAT_RES_KICKS, g_matRes.max, g_matRes.n, g_matRes.fallback, g_matRes.drains, g_matRes.leaked);
+    g_matRes.deferred = g_matRes.freed = g_matRes.fallback = g_matRes.drains = g_matRes.leaked = 0;
+    g_matRes.max = g_matRes.n;
+}
+
 /* ---- rpmalloc's caches after tile events ---------------------------------------------------------------------------
  * The trim-all exe 0x3245F0 ([api+0x10]+0x520) releases this thread's cached spans and the global caches at once; each
  * pool worker trims after its job loop and the render thread on message 0x29. The frame update 0xAB5000 calls it every

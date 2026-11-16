@@ -213,6 +213,7 @@ static void MoveRestoreDrop(void)
 /* A new level starts (TerrainNearReplay's first call): the last level's tile terrains went at its end (NearTilesDestroy),
  * so their maps go now; one still in the world keeps them (NearTilesLeft). A build that end cut short was ended there
  * too (MoveBuildLeft); what is reset here is the mod's own state. */
+static void MoveFrameLeft(void);
 static void MoveLevelGone(void)
 {
     NearLayerSettle();
@@ -235,6 +236,8 @@ static void MoveLevelGone(void)
     SplitClear();
     InterlockedExchange(&g_moveBuilding, 0);
     MoveHold(0);
+    MoveFrameLeft();
+    NearAutoForget();
 }
 
 static int MoveOn(void)
@@ -2107,17 +2110,19 @@ static struct { LARGE_INTEGER last; int mv, ns, op, conf, sp0, sp1; } g_moveWall
  * job consumer's last return and on to the next tick; a wall frame alone cannot say which of them held it. */
 #define MOVE_FRAME_SLOW_MS 40.0
 #define MOVE_FRAME_LINES 8 /* a build */
-enum { MF_TICK, MF_LEVEL, MF_T0, MF_T1, MF_MARKS };
+enum { MF_TICK, MF_LEVEL, MF_T0, MF_T1, MF_TICK_END, MF_MARKS }; /* MF_TICK_END: CoXlTick's own end */
 typedef struct
 {
     int64_t at[MF_MARKS], consumer, consumerOut; /* QPC ticks; the consumer's after MoveTick only */
     int have, mv, ns, op, shape, tile, building;
+    LONG shapeEnds, tileEnds; /* the job ends counted at the tick: one that ends inside the frame was out in it */
 } MoveFrameMarks;
 static struct { MoveFrameMarks f; uint32_t lines; int inBuild; DWORD thread; uintptr_t teb; } g_moveFrame;
 
-/* frame, early update, level update, mover, after the mover, consumer, to the next tick (ms); 0 without every mark. The
- * part after the mover ends at the consumer's last return, so the five parts add up to the frame. */
-static int MoveFrameParts(const MoveFrameMarks* f, int64_t next, double hz, double part[7])
+/* frame, early update, level update, mover, after the mover, consumer, to the next tick, CoXlTick (ms); 0 without the
+ * four marks. The part after the mover ends at the consumer's last return, so the five parts add up to the frame;
+ * CoXlTick is the early update's own first part (0 without its end mark). */
+static int MoveFrameParts(const MoveFrameMarks* f, int64_t next, double hz, double part[8])
 {
     if ((f->have & 15) != 15 || !(hz > 0)) return 0;
     const int64_t* a = f->at;
@@ -2126,21 +2131,23 @@ static int MoveFrameParts(const MoveFrameMarks* f, int64_t next, double hz, doub
     part[0] = (double)(next - a[MF_TICK]) * k; part[1] = (double)(a[MF_LEVEL] - a[MF_TICK]) * k;
     part[2] = (double)(a[MF_T0] - a[MF_LEVEL]) * k; part[3] = (double)(a[MF_T1] - a[MF_T0]) * k;
     part[4] = (double)(x - a[MF_T1]) * k; part[5] = (double)f->consumer * k; part[6] = (double)(next - x) * k;
+    part[7] = (f->have & (1 << MF_TICK_END)) && a[MF_TICK_END] >= a[MF_TICK] && a[MF_TICK_END] <= a[MF_LEVEL] ? (double)(a[MF_TICK_END] - a[MF_TICK]) * k : 0.0;
     return 1;
 }
 
 static void MoveFrameClose(int64_t next, double hz)
 {
     const MoveFrameMarks* f = &g_moveFrame.f;
-    double p[7];
+    double p[8];
     if (!f->building || g_moveFrame.lines >= MOVE_FRAME_LINES || !MoveFrameParts(f, next, hz, p) || !(p[0] > MOVE_FRAME_SLOW_MS)) return;
     g_moveFrame.lines++;
-    Note("difficulty: moving tiles: slow frame %.1f ms (%s/near %d/op 0x%02X): early update %.1f ms, level update %.1f, mover %.1f, after the mover %.1f "
-        "(consumer %.1f), to the next tick %.1f; jobs out: shape %d, tile %d", p[0], MoveStateName(f->mv), f->ns, (unsigned)f->op & 0xFFu, p[1], p[2],
-        p[3], p[4], p[5], p[6], f->shape, f->tile);
+    const int shape = f->shape || g_shapeEnds != f->shapeEnds, tile = f->tile || g_nearJobEnds != f->tileEnds;
+    Note("difficulty: moving tiles: slow frame %.1f ms (%s/near %d/op 0x%02X): early update %.1f ms (CoXlTick %.1f), level update %.1f, mover %.1f, "
+        "after the mover %.1f (consumer %.1f), to the next tick %.1f; jobs out: shape %d, tile %d", p[0], MoveStateName(f->mv), f->ns, (unsigned)f->op & 0xFFu,
+        p[1], p[7], p[2], p[3], p[4], p[5], p[6], shape, tile);
 }
 
-/* A mark on the game thread at `now`; a tick closes the frame before it. */
+/* A mark on the game thread at `now`; a tick closes the frame before it and takes the job end counts the new one starts with. */
 static void MoveFrameMark(int mark, int64_t now, double hz)
 {
     if (mark == MF_TICK)
@@ -2148,10 +2155,14 @@ static void MoveFrameMark(int mark, int64_t now, double hz)
         MoveFrameClose(now, hz);
         memset(&g_moveFrame.f, 0, sizeof g_moveFrame.f);
         g_moveFrame.thread = GetCurrentThreadId();
+        g_moveFrame.f.shapeEnds = g_shapeEnds; g_moveFrame.f.tileEnds = g_nearJobEnds; /* running then: it ends in the frame or t0 sees it */
     }
     g_moveFrame.f.at[mark] = now;
     g_moveFrame.f.have |= 1 << mark;
 }
+
+/* The level's end: no build runs any more (the stall watch's gate, move.c's teardown). */
+static void MoveFrameLeft(void) { g_moveFrame.inBuild = 0; g_moveFrame.f.building = 0; }
 
 /* The job consumer (NearConsume), on whichever thread runs it: only the game thread's calls after MoveTick count. */
 static void MoveFrameConsumer(int64_t in, int64_t out)
@@ -2293,9 +2304,13 @@ static void MoveCostNote(void)
     }
     memset(&g_moveCost, 0, sizeof g_moveCost);
     Split63WallNote(); /* a build that ended inside the step */
+    MatResNote();
     g_moveFrame.lines = 0;
 #if defined(CO_RESEARCH) || defined(CO_TEST)
+    NearAutoBuildEnd(g_moveStall.samples);
     InterlockedExchange(&g_moveStall.samples, 0);
+#else
+    NearAutoBuildEnd(0);
 #endif
 }
 
@@ -2344,6 +2359,37 @@ static void MoveStallWhere(uintptr_t a, uintptr_t exe, size_t exeSize, uintptr_t
     snprintf(out, size, "0"); *offset = a;
 }
 
+/* The function an exe address lies in: its pdata entry, walked back over chained parts to the primary start; 0 none. */
+static uintptr_t MoveStallFunction(uintptr_t a)
+{
+    DWORD64 base = 0;
+    PRUNTIME_FUNCTION f = RtlLookupFunctionEntry((DWORD64)a, &base, NULL);
+    for (int hops = 0; f != NULL && hops < 8; hops++)
+    {
+        const uint8_t* ui = (const uint8_t*)(uintptr_t)(base + f->UnwindData);
+        if (!((ui[0] >> 3) & UNW_FLAG_CHAININFO)) return (uintptr_t)(base + f->BeginAddress);
+        f = (PRUNTIME_FUNCTION)(ui + 4 + 2 * (((size_t)ui[2] + 1) & ~(size_t)1)); /* the chained entry after the codes */
+    }
+    return 0;
+}
+
+/* The wait an address names (RIP, or a return address on the stack): the job system's waits and helps (0x626900,
+ * 0x624D00, 0x627160, 0x6273E0, 0xB3D90), the frame loop's fence (the call at 0x8A7C4), a resource fence (0x1A8D70 the
+ * release, 0x1A8449 the create), the game's wait on its queue-14 generator job (game 0xF6E6E6); NULL none. */
+static const char* MoveStallWait(uintptr_t a, uintptr_t exe, size_t exeSize, uintptr_t game, size_t gameSize, char* out, size_t size)
+{
+    static const uint32_t kWaits[] = {0x626900u, 0x624D00u, 0x627160u, 0x6273E0u, 0xB3D90u};
+    if (a >= game && a < game + gameSize) return a - game == 0xF6E6E6u ? "the game's wait on its queue-14 generator job (game 0xF6E6E6)" : NULL;
+    if (!(a >= exe && a < exe + exeSize)) return NULL;
+    if (a - exe == 0x8A7C9u) return "the frame loop's fence (exe 0x8A7C4)";
+    if (a - exe == 0x1A8D75u) return "a resource release's fence (exe 0x1A8D70)";
+    if (a - exe == 0x1A844Eu) return "a resource create's fence (exe 0x1A8449)";
+    const uintptr_t f = MoveStallFunction(a);
+    for (size_t k = 0; k < sizeof kWaits / sizeof kWaits[0]; k++)
+        if (f == exe + kWaits[k]) { snprintf(out, size, "the job system's wait or help (exe 0x%X)", kWaits[k]); return out; }
+    return NULL;
+}
+
 static size_t MoveStallImage(uintptr_t base)
 {
     IMAGE_DOS_HEADER dos; uint32_t size = 0;
@@ -2354,6 +2400,8 @@ static size_t MoveStallImage(uintptr_t base)
 
 #ifdef CO_RESEARCH
 #define MOVE_STALL_STACK 0x4000
+#define MOVE_STALL_FRAMES 32
+#define MOVE_STALL_QUEUES 21 /* 0x624D00's queues: 7 categories of 3 */
 /* The watcher. Between SuspendThread and ResumeThread it only reads the context and copies the stack, which take no
  * lock the game thread may hold (no allocation, log, module or unwind lookup); everything else runs after the resume. */
 static DWORD WINAPI MoveStallWatch(void* unused)
@@ -2390,21 +2438,33 @@ static DWORD WINAPI MoveStallWatch(void* unused)
         ResumeThread(thread);
         if (len == 0) continue;
         InterlockedIncrement(&g_moveStall.samples);
-        char where[64], trail[640]; uint64_t off = 0; size_t n = 0; int frames = 0;
+        char where[64], trail[1600], queues[256], waitText[64]; uint64_t off = 0; size_t n = 0; int frames = 0, capped = 0;
+        const char* wait = MoveStallWait((uintptr_t)c.Rip, exe, exeSize, game, gameSize, waitText, sizeof waitText);
         MoveStallWhere((uintptr_t)c.Rip, exe, exeSize, game, gameSize, where, sizeof where, &off);
         trail[0] = 0;
-        for (size_t i = 0; i + 8 <= len && frames < 16 && n + 32 < sizeof trail; i += 8)
+        /* MOVE_STALL_FRAMES candidates; past them only the game's frame update [0xAB4520, 0xAB5200), which the reading needs */
+        for (size_t i = 0; i + 8 <= len && n + 40 < sizeof trail; i += 8)
         {
             uint64_t v; memcpy(&v, copy + i, 8);
-            if (!((v >= exe && v < exe + exeSize) || (v >= game && v < game + gameSize)) || !MoveStallCallBefore((uintptr_t)v)) continue;
-            n += (size_t)snprintf(trail + n, sizeof trail - n, "%s%s+0x%llX", frames ? ", " : "", v >= game && v < game + gameSize ? "game" : "exe",
-                (unsigned long long)(v - (v >= game && v < game + gameSize ? game : exe)));
+            const int inGame = v >= game && v < game + gameSize;
+            if (!((v >= exe && v < exe + exeSize) || inGame) || !MoveStallCallBefore((uintptr_t)v)) continue;
+            if (frames >= MOVE_STALL_FRAMES && !(inGame && v - game >= 0xAB4520u && v - game < 0xAB5200u)) { capped = 1; continue; }
+            if (wait == NULL) wait = MoveStallWait((uintptr_t)v, exe, exeSize, game, gameSize, waitText, sizeof waitText);
+            n += (size_t)snprintf(trail + n, sizeof trail - n, "%s%s+0x%llX", frames ? ", " : "", inGame ? "game" : "exe", (unsigned long long)(v - (inGame ? game : exe)));
             frames++;
         }
-        Note("difficulty: moving tiles: stall sample: the game thread %.0f ms into the %s at %s+0x%llX; stack: %s; queues pending 9 %u, 10 %u, 11 %u, 14 %u; "
+        /* every engine queue with jobs on it, q:n; "unread" when the scheduler does not read */
+        size_t qn = 0; queues[0] = 0;
+        for (int q = 0; q < MOVE_STALL_QUEUES; q++)
+        {
+            const uint32_t count = MoveStallQueued(exe, q);
+            if (count == 0xFFFFFFFFu) { snprintf(queues, sizeof queues, "unread"); qn = 1; break; }
+            if (count != 0) qn += (size_t)snprintf(queues + qn, sizeof queues - qn, "%s%d:%u", qn ? " " : "", q, count);
+        }
+        Note("difficulty: moving tiles: stall sample: the game thread %.0f ms into the %s at %s+0x%llX; wait: %s; stack%s: %s; queues pending: %s; "
             "jobs out: shape %d, tile %d", (double)(at.QuadPart - since) * 1000.0 / (double)hz.QuadPart, phase == MS_EARLY ? "early update" : "frame after the mover",
-            where, (unsigned long long)off, frames ? trail : "none found", MoveStallQueued(exe, 9), MoveStallQueued(exe, 10), MoveStallQueued(exe, 11),
-            MoveStallQueued(exe, 14), (int)g_shape.running, g_nearJob.inflight > 0);
+            where, (unsigned long long)off, wait != NULL ? wait : "none named", capped ? " (capped)" : "", frames ? trail : "none found", qn ? queues : "none",
+            (int)g_shape.running, g_nearJob.inflight > 0);
     }
 }
 
@@ -2427,7 +2487,7 @@ static void MoveStallStart(void)
 static void MoveFrameTick(int end)
 {
     LARGE_INTEGER now, hz; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&hz);
-    if (end) { MoveStallPhase(MS_EARLY, now.QuadPart); return; }
+    if (end) { MoveFrameMark(MF_TICK_END, now.QuadPart, (double)hz.QuadPart); MoveStallPhase(MS_EARLY, now.QuadPart); return; }
     MoveFrameMark(MF_TICK, now.QuadPart, (double)hz.QuadPart);
     MoveStallPhase(MS_NONE, now.QuadPart);
 #ifdef CO_RESEARCH
@@ -2456,7 +2516,7 @@ static void MoveLevelUpdate(uint64_t level)
     QueryPerformanceCounter(&t0);
     MoveFrameMark(MF_T0, t0.QuadPart, (double)hz.QuadPart);
     g_moveFrame.f.mv = mv; g_moveFrame.f.ns = ns; g_moveFrame.f.op = op;
-    g_moveFrame.f.shape = g_shape.running != 0; g_moveFrame.f.tile = g_nearJob.inflight > 0;
+    g_moveFrame.f.shape |= g_shape.running != 0; g_moveFrame.f.tile |= g_nearJob.inflight > 0;
     if (g_moveWall.last.QuadPart != 0 && (g_moveWall.mv != MV_IDLE || g_moveCost.pending))
     {
         const double wall = (double)(t0.QuadPart - g_moveWall.last.QuadPart) * 1000.0 / (double)hz.QuadPart;

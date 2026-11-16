@@ -25,12 +25,16 @@ int CoXlTestSplit63WallKind(int sp0, int sp1);
 void CoXlTestSplit63WallAdd(double ms, int sp0, int sp1);
 void CoXlTestSplit63WallNote(void);
 void CoXlTestNearBgQueue(int on, uint32_t* queue, uint32_t* priority);
+void CoXlTestMoveJobEnd(int shape, int tile);
+void CoXlTestNearAutoReset(void);
+uint32_t CoXlTestNearAutoBuild(int shaped, int zero, long samples);
+const char* CoXlTestMoveStallWait(uintptr_t a, uintptr_t exe, size_t exeSize, uintptr_t game, size_t gameSize);
 
 static int g_failed;
 static const char* g_case;
 #define CHECK(what) do { if (!(what)) { printf("FAILED %s: %s\n", g_case, #what); g_failed++; } } while (0)
 
-enum { MF_TICK, MF_LEVEL, MF_T0, MF_T1 };
+enum { MF_TICK, MF_LEVEL, MF_T0, MF_T1, MF_TICK_END };
 enum { MS_NONE, MS_EARLY, MS_LATE };
 enum { SP_NONE, SP_WHOLE, SP_HIDING, SP_READY, SP_QUEUED, SP_RANGES, SP_SHOWING, SP_DONE, SP_RESTORE };
 enum { S63W_BEFORE, S63W_OP, S63W_RANGES, S63W_SHOWING, S63W_LAST, S63W_OTHER };
@@ -53,7 +57,7 @@ int main(void)
     g_coApi = fake_host_reset(CO_GAME_BUILD);
     g_coMod = (HfMod*)&g_fake;
     CoXlTestGame((uintptr_t)g_fake.image);
-    double p[7];
+    double p[8];
 
     g_case = "the parts add up to the frame; after the mover ends at the consumer's last return";
     Frame(1000.0, 130.0, 131.0, 139.0);
@@ -62,6 +66,16 @@ int main(void)
     CHECK(CoXlTestMoveFrameParts(1000.0 + 165.5, p));
     CHECK(Near(p[0], 165.5) && Near(p[1], 130.0) && Near(p[2], 1.0) && Near(p[3], 8.0) && Near(p[4], 12.0) && Near(p[5], 2.5) && Near(p[6], 14.5));
     CHECK(Near(p[1] + p[2] + p[3] + p[4] + p[6], p[0]));
+    CHECK(Near(p[7], 0.0)); /* no CoXlTick end mark */
+
+    g_case = "CoXlTick's own time: from the tick to its end mark, inside the early update";
+    CoXlTestMoveFrameMark(MF_TICK, 1500.0);
+    CoXlTestMoveFrameMark(MF_TICK_END, 1500.0 + 3.5);
+    CoXlTestMoveFrameMark(MF_LEVEL, 1500.0 + 20.0);
+    CoXlTestMoveFrameMark(MF_T0, 1500.0 + 21.0);
+    CoXlTestMoveFrameMark(MF_T1, 1500.0 + 22.0);
+    CHECK(CoXlTestMoveFrameParts(1500.0 + 50.0, p));
+    CHECK(Near(p[7], 3.5) && Near(p[1], 20.0));
 
     g_case = "a consumer call before MoveTick's end is not after the mover; no consumer: the rest is to the next tick";
     Frame(2000.0, 2.0, 3.0, 9.0);
@@ -73,16 +87,35 @@ int main(void)
     CoXlTestMoveFrameMark(MF_TICK, 3000.0);
     CHECK(!CoXlTestMoveFrameParts(3020.0, p));
 
-    g_case = "a build frame over 40 ms is noted with its state, op and jobs at the next tick";
+    g_case = "a build frame over 40 ms is noted with its state, op and jobs at the next tick; a shape job that ended between the tick and t0 was out";
     g_fake.log[0] = 0;
     CoXlTestMoveFrameLines(1);
-    Frame(4000.0, 130.0, 131.0, 139.0);
-    CoXlTestMoveFrameState(1, MV_READY, 6, 0x64, 1, 0);
+    CoXlTestMoveFrameMark(MF_TICK, 4000.0);
+    CoXlTestMoveFrameMark(MF_TICK_END, 4000.0 + 2.0);
+    CoXlTestMoveJobEnd(1, 0); /* the job's end before the level update: nothing in the frame sees it running */
+    CoXlTestMoveFrameMark(MF_LEVEL, 4000.0 + 130.0);
+    CoXlTestMoveFrameMark(MF_T0, 4000.0 + 131.0);
+    CoXlTestMoveFrameMark(MF_T1, 4000.0 + 139.0);
+    CoXlTestMoveFrameState(1, MV_READY, 6, 0x64, 0, 0);
     CoXlTestMoveFrameConsumer(4000.0 + 140.0, 4000.0 + 141.5);
     CoXlTestMoveFrameMark(MF_TICK, 4000.0 + 165.5);
-    CHECK(fake_host_logged("difficulty: moving tiles: slow frame 165.5 ms (ready/near 6/op 0x64): early update 130.0 ms, level update 1.0, mover 8.0, "
+    CHECK(fake_host_logged("difficulty: moving tiles: slow frame 165.5 ms (ready/near 6/op 0x64): early update 130.0 ms (CoXlTick 2.0), level update 1.0, mover 8.0, "
         "after the mover 2.5 (consumer 1.5), to the next tick 24.0; jobs out: shape 1, tile 0"));
     CHECK(CoXlTestMoveFrameLines(0) == 1);
+
+    g_case = "a tile job that ends inside the frame was out; one that ended in the frame before was not";
+    g_fake.log[0] = 0;
+    CoXlTestMoveJobEnd(0, 1); /* the last frame's */
+    Frame(4200.0, 50.0, 51.0, 52.0);
+    CoXlTestMoveFrameState(1, MV_REPLAY, 2, 0x3C, 0, 0);
+    CoXlTestMoveFrameMark(MF_TICK, 4200.0 + 60.0);
+    CHECK(fake_host_logged("jobs out: shape 0, tile 0"));
+    g_fake.log[0] = 0;
+    Frame(4300.0, 50.0, 51.0, 52.0);
+    CoXlTestMoveFrameState(1, MV_REPLAY, 2, 0x3C, 0, 0);
+    CoXlTestMoveJobEnd(0, 1); /* after MoveTick, before the next tick */
+    CoXlTestMoveFrameMark(MF_TICK, 4300.0 + 60.0);
+    CHECK(fake_host_logged("jobs out: shape 0, tile 1"));
 
     g_case = "40 ms or less, or no build: no line";
     g_fake.log[0] = 0;
@@ -91,7 +124,7 @@ int main(void)
     Frame(5039.0, 10.0, 11.0, 12.0); /* closes a 39 ms frame */
     CoXlTestMoveFrameState(0, 0, 7, -1, 0, 0);
     CoXlTestMoveFrameMark(MF_TICK, 5140.0); /* a 100 ms frame outside a build */
-    CHECK(strstr(g_fake.log, "slow frame") == NULL && CoXlTestMoveFrameLines(0) == 1);
+    CHECK(strstr(g_fake.log, "slow frame") == NULL && CoXlTestMoveFrameLines(0) == 3); /* the three above */
 
     g_case = "at most 8 a build; the build's end lets the next build note again";
     g_fake.log[0] = 0;
@@ -158,6 +191,41 @@ int main(void)
         g_fake.log[0] = 0;
         CoXlTestNearBgQueue(-1, &q, &pr); /* read again: a test build reads no switch */
         CHECK(q == 1 && pr == 3 && strstr(g_fake.log, "queue 14") == NULL);
+    }
+
+    g_case = "auto: queue 10 until two builds stalled (0 frames) with samples, then 14 for good; a build keeps its queue";
+    CoXlTestNearAutoReset();
+    g_fake.log[0] = 0;
+    CHECK(CoXlTestNearAutoBuild(1, 1, 0) == 10);  /* stalled, no sample */
+    CHECK(CoXlTestNearAutoBuild(0, 0, 3) == 10);  /* no shape job: not counted */
+    CHECK(CoXlTestNearAutoBuild(1, 1, 2) == 10);  /* 1 */
+    CHECK(CoXlTestNearAutoBuild(1, 0, 1) == 10);  /* samples, no stall */
+    CHECK(strstr(g_fake.log, "go to queue 14") == NULL);
+    CHECK(CoXlTestNearAutoBuild(1, 1, 1) == 10);  /* 2: switches after this build */
+    CHECK(fake_host_logged("the tile jobs go to queue 14 from the next build on: 4 builds on queue 10, 2 stalled"));
+    CHECK(CoXlTestNearAutoBuild(1, 0, 0) == 14 && CoXlTestNearAutoBuild(1, 1, 4) == 14);
+
+    g_case = "auto: four builds with a shape job and no stall with samples: 14 from the fifth; one such stall keeps 10";
+    CoXlTestNearAutoReset();
+    for (int k = 0; k < 4; k++) CHECK(CoXlTestNearAutoBuild(1, 0, k) == 10);
+    CHECK(CoXlTestNearAutoBuild(1, 0, 0) == 14);
+    CoXlTestNearAutoReset();
+    CHECK(CoXlTestNearAutoBuild(1, 1, 1) == 10);
+    for (int k = 0; k < 4; k++) CHECK(CoXlTestNearAutoBuild(1, 0, 0) == 10);
+    {
+        uint32_t q = 0, pr = 0;
+        CoXlTestNearBgQueue(0, &q, &pr); /* back to off for the cases after */
+    }
+
+    g_case = "the stall sample's wait: the frame loop's fence, a resource fence, the game's generator job; other places none";
+    {
+        static uint8_t exe[0x200000], game[0x1000000];
+        const uintptr_t e = (uintptr_t)exe, g = (uintptr_t)game;
+        CHECK(strstr(CoXlTestMoveStallWait(e + 0x8A7C9u, e, sizeof exe, g, sizeof game), "frame loop's fence (exe 0x8A7C4)") != NULL);
+        CHECK(strstr(CoXlTestMoveStallWait(e + 0x1A8D75u, e, sizeof exe, g, sizeof game), "release's fence") != NULL);
+        CHECK(strstr(CoXlTestMoveStallWait(e + 0x1A844Eu, e, sizeof exe, g, sizeof game), "create's fence") != NULL);
+        CHECK(strstr(CoXlTestMoveStallWait(g + 0xF6E6E6u, e, sizeof exe, g, sizeof game), "generator job (game 0xF6E6E6)") != NULL);
+        CHECK(CoXlTestMoveStallWait(g + 0xF6E6E0u, e, sizeof exe, g, sizeof game)[0] == 0 && CoXlTestMoveStallWait(e + 0x8A7C4u, e, sizeof exe, g, sizeof game)[0] == 0);
     }
 
     if (g_failed) { printf("slowframe: %d check(s) failed\n", g_failed); return 1; }

@@ -17,6 +17,10 @@ static int NearTilesDestroy(int ship);
 static void MoveBuildLeft(int ship);
 static uint64_t NearMainWorld(void);
 static int NearTilesLeft(void);
+static void MatUnitDestroy(uint64_t destroy, uint64_t world, uint64_t unit);
+static void MatResInstall(void);
+static void MatResTick(void);
+static void MatResNote(void);
 
 /* The research log of the terrains' materials (xl_terrain_research.c); a release has none of it. */
 #ifdef CO_RESEARCH

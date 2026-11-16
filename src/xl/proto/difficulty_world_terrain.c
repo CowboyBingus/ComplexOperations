@@ -2377,7 +2377,25 @@ static struct
     uint8_t ctx[0xE8], buildS[0x120];
     int built, failed, waits; long jobs; double longest; uint64_t arenaPeak;
     LONG refused;
+    uint32_t queue, stackMax; int32_t roles[4]; int nroles; /* the run's queue (q + 3 x priority); its jobs' roles and deepest stack */
 } g_nearJob = {.refused = -1};
+static volatile LONG g_nearJobEnds, g_shapeEnds; /* jobs that ended: the slow-frame line's "jobs out" over its whole frame */
+
+/* The engine role of the thread running a job ([[gs:0x58]][0]+0x1D8, as 0x626900 reads it; -1 a thread the pool did
+ * not make, -2 unread) and how deep in its stack the job starts: a worker helping inside a wait runs it nested. */
+static int32_t NearJobRole(void)
+{
+    uint64_t tls = __readgsqword(0x58), block = 0;
+    int32_t role = -2;
+    if (tls == 0 || SafeRead((uintptr_t)tls, &block, 8) || block == 0 || SafeRead((uintptr_t)block + 0x1D8, &role, 4)) return -2;
+    return role;
+}
+static uint32_t NearJobStack(void)
+{
+    volatile uint8_t here = 0;
+    const NT_TIB* tib = (const NT_TIB*)NtCurrentTeb();
+    return (uint32_t)((uintptr_t)tib->StackBase - (uintptr_t)&here);
+}
 static NearJobBuildFn g_nearJobBuild;   /* a test's build in place of NearJobBuildTile */
 static NearJobSubmitFn g_nearJobSubmit; /* a test's submit in place of the engine's */
 
@@ -2433,6 +2451,14 @@ static uint64_t NearJobRun(uint64_t a, uint64_t b, uint64_t c, uint64_t element)
     NearJobSlot* p = (NearJobSlot*)(uintptr_t)element;
     TileRunner* r = g_nearJob.r;
     if (GetCurrentThreadId() == g_nearJob.gameThread) InterlockedIncrement(&g_nearJob.onGame);
+    {
+        const int32_t role = NearJobRole(); /* one job at a time: these fields are this job's alone */
+        const uint32_t depth = NearJobStack();
+        int seen = 0;
+        for (int k = 0; k < g_nearJob.nroles; k++) seen |= g_nearJob.roles[k] == role;
+        if (!seen && g_nearJob.nroles < 4) g_nearJob.roles[g_nearJob.nroles++] = role;
+        if (depth > g_nearJob.stackMax) g_nearJob.stackMax = depth;
+    }
     p->ok = 0; p->phase = 0; p->notesLen = 0; p->notesLost = 0; p->notes[0] = 0;
     TlsSetValue(g_tileRunnerTls, r);
     AcquireSRWLockShared(&g_sectionLock);
@@ -2458,23 +2484,58 @@ static uint64_t NearJobRun(uint64_t a, uint64_t b, uint64_t c, uint64_t element)
     MemoryBarrier();
     InterlockedExchange(&p->state, NEAR_JOB_BUILT);
     InterlockedDecrement(&g_nearJob.inflight);
+    InterlockedIncrement(&g_nearJobEnds);
     return 0;
 }
 
 /* The two long tile jobs' queue, r9d + 3 x arg5 (exe 0x6261C9): 10 holds a regular worker the game thread may wait on;
  * 14 (research, HELLFORGE_XL_NEAR_BGQUEUE=1) is popped only by the two LP workers, woken through [pool+0xE0] (exe
- * 0x625446), which run the same worker entry (0x625190) and never serve the game thread's queues. */
+ * 0x625446), which run the same worker entry (0x625190) and never serve the game thread's queues. "auto" (research):
+ * queue 10 until two builds whose shape job ended before a frame saw it ("0 frames") also have stall samples, or four
+ * builds with a shape job have none, then 14 for the rest of the process; a build keeps the queue its first job took. */
+enum { NEAR_BG_OFF, NEAR_BG_ON, NEAR_BG_AUTO };
+#define NEAR_BG_STALLS 2
+#define NEAR_BG_CLEAN 4
 static int g_nearBgQueue = -1; /* -1: not read yet */
+static struct { int on, latched, latch, builds, stalls, shapeZero, shaped; } g_nearAuto;
 static void NearJobQueue(uint32_t* queue, uint32_t* priority)
 {
     if (g_nearBgQueue < 0)
     {
-        char v[4] = "";
-        g_nearBgQueue = GetEnvironmentVariableA("HELLFORGE_XL_NEAR_BGQUEUE", v, sizeof v) > 0 && v[0] == '1';
-        if (g_nearBgQueue) Note("difficulty: moving tiles: the composite tile and collision shape jobs go to queue 14, the LP workers' (HELLFORGE_XL_NEAR_BGQUEUE=1, research)");
+        char v[8] = "";
+        const DWORD n = GetEnvironmentVariableA("HELLFORGE_XL_NEAR_BGQUEUE", v, sizeof v);
+        g_nearBgQueue = n > 0 && v[0] == '1' ? NEAR_BG_ON : n > 0 && strcmp(v, "auto") == 0 ? NEAR_BG_AUTO : NEAR_BG_OFF;
+        if (g_nearBgQueue == NEAR_BG_ON) Note("difficulty: moving tiles: the composite tile and collision shape jobs go to queue 14, the LP workers' (HELLFORGE_XL_NEAR_BGQUEUE=1, research)");
+        if (g_nearBgQueue == NEAR_BG_AUTO)
+            Note("difficulty: moving tiles: the tile jobs start on queue 10 and go to 14 after %d builds stalled with samples or %d builds with none (HELLFORGE_XL_NEAR_BGQUEUE=auto, research)",
+                NEAR_BG_STALLS, NEAR_BG_CLEAN);
     }
-    *queue = g_nearBgQueue ? 2 : 1;
-    *priority = g_nearBgQueue ? 4 : 3;
+    if (!g_nearAuto.latched) { g_nearAuto.latch = g_nearBgQueue == NEAR_BG_ON || (g_nearBgQueue == NEAR_BG_AUTO && g_nearAuto.on); g_nearAuto.latched = 1; }
+    *queue = g_nearAuto.latch ? 2 : 1;
+    *priority = g_nearAuto.latch ? 4 : 3;
+}
+
+/* The level's end: the build it cut short neither counts nor keeps its queue. */
+static void NearAutoForget(void) { g_nearAuto.latched = g_nearAuto.shapeZero = g_nearAuto.shaped = 0; }
+
+/* The queue number the build's jobs go to (0 before its first). */
+static uint32_t NearJobQueueNumber(void) { return !g_nearAuto.latched ? 0u : g_nearAuto.latch ? 14u : 10u; }
+
+/* A build's end (MoveCostNote, the level's end): "auto" counts it once it ran a shape job; the next build takes its queue anew. */
+static void NearAutoBuildEnd(long samples)
+{
+    if (g_nearBgQueue == NEAR_BG_AUTO && !g_nearAuto.on && g_nearAuto.shaped)
+    {
+        g_nearAuto.builds++;
+        if (g_nearAuto.shapeZero && samples > 0) g_nearAuto.stalls++;
+        if (g_nearAuto.stalls >= NEAR_BG_STALLS || (g_nearAuto.builds >= NEAR_BG_CLEAN && g_nearAuto.stalls == 0))
+        {
+            g_nearAuto.on = 1;
+            Note("difficulty: moving tiles: the tile jobs go to queue 14 from the next build on: %d builds on queue 10, %d stalled (\"0 frames\") with stall samples (HELLFORGE_XL_NEAR_BGQUEUE=auto)",
+                g_nearAuto.builds, g_nearAuto.stalls);
+        }
+    }
+    g_nearAuto.latched = g_nearAuto.shapeZero = g_nearAuto.shaped = 0;
 }
 
 /* Game thread: the next step's job once its slot is free and no job is in flight. One at a time: a tile job holds a
@@ -2493,6 +2554,7 @@ static void NearJobFeed(void)
     NearJobSubmitFn submit = g_nearJobSubmit != NULL ? g_nearJobSubmit : (NearJobSubmitFn)(uintptr_t)g_nearJob.submit;
     uint32_t queue, priority;
     NearJobQueue(&queue, &priority);
+    g_nearJob.queue = queue + 3 * priority;
     submit((void*)NearJobRun, &g_nearJob.element[i], name, queue, priority, 1, 0);
 }
 
@@ -2506,6 +2568,15 @@ static uint8_t* NearJobStuckBlock(void)
     if (in != NULL) return in->T;
     for (int i = 0; i < NEAR_JOB_SLOTS; i++) if (g_nearJob.slot[i].state == NEAR_JOB_BUILDING) return g_nearJob.slot[i].T;
     return NULL;
+}
+
+static const char* NearJobRolesText(void)
+{
+    static char text[48];
+    int at = 0;
+    text[0] = 0;
+    for (int k = 0; k < g_nearJob.nroles && at < (int)sizeof text - 12; k++) at += snprintf(text + at, sizeof text - (size_t)at, "%s%d", k ? "/" : "", (int)g_nearJob.roles[k]);
+    return g_nearJob.nroles ? text : "none";
 }
 
 /* Game thread: the run's job joined (`wait` ms at most, then no tile jobs for the session, as CoarseEnd), the marker and
@@ -2531,8 +2602,8 @@ static void NearJobStopIn(const char* why, int restore, ULONGLONG wait)
     g_tileSectionHeld = 0;
     g_nearJob.on = 0;
     Note("difficulty: moving tiles: composite tiles on a worker: %d built, %d failed, longest %.0f ms, arena peak %.1f MiB, jobs seen on the game thread %ld; "
-        "%ld jobs, the steps waited %d frames for their tiles (%s)", g_nearJob.built, g_nearJob.failed, g_nearJob.longest,
-        (double)g_nearJob.arenaPeak / (1024.0 * 1024.0), (long)g_nearJob.onGame, g_nearJob.jobs, g_nearJob.waits, why);
+        "%ld jobs, the steps waited %d frames for their tiles (%s); queue %u, job roles %s, deepest job stack %u KiB", g_nearJob.built, g_nearJob.failed, g_nearJob.longest,
+        (double)g_nearJob.arenaPeak / (1024.0 * 1024.0), (long)g_nearJob.onGame, g_nearJob.jobs, g_nearJob.waits, why, g_nearJob.queue, NearJobRolesText(), g_nearJob.stackMax / 1024u);
 }
 static void NearJobStop(const char* why, int restore) { NearJobStopIn(why, restore, NEAR_JOB_WAIT_MS); }
 
@@ -2649,6 +2720,7 @@ static int NearJobStart(int s, uint64_t records, uint32_t end, uint64_t context,
     g_nearJob.first = s; g_nearJob.last = last; g_nearJob.next = s; g_nearJob.take = s;
     g_nearJob.level = g_worldLevelLive; g_nearJob.levels = g_world.levels; g_nearJob.inits = g_levelInits; g_nearJob.gameThread = GetCurrentThreadId();
     g_nearJob.built = g_nearJob.failed = g_nearJob.waits = 0; g_nearJob.jobs = 0; g_nearJob.longest = 0; g_nearJob.arenaPeak = 0; g_nearJob.onGame = 0;
+    g_nearJob.queue = 0; g_nearJob.stackMax = 0; g_nearJob.nroles = 0;
     for (int i = 0; i < NEAR_JOB_SLOTS; i++)
     {
         NearJobSlot* q = &g_nearJob.slot[i];
@@ -2825,7 +2897,6 @@ static int NearSeedPatch(int on)
 static void NearMatUnitsSlice(uint64_t pass, uint64_t record, uint64_t context)
 {
     (void)record;
-    typedef void (*DestroyFn)(uint64_t world, uint64_t unit);
     const uint64_t lg = *(const uint64_t*)(uintptr_t)pass;
     const uint32_t t = *(const uint32_t*)(uintptr_t)(lg + 0x124), counter = *(const uint32_t*)(uintptr_t)(pass + 0x13C);
     g_matUnits.left = 0;
@@ -2833,7 +2904,7 @@ static void NearMatUnitsSlice(uint64_t pass, uint64_t record, uint64_t context)
     const uint64_t list = *(const uint64_t*)(uintptr_t)(pass + 0x140);
     volatile uint32_t* count = (volatile uint32_t*)(uintptr_t)(list + 0x2000);
     const uint64_t api = *(volatile uint64_t*)(uintptr_t)(g_world.game + 0x3326308u);
-    const DestroyFn destroy = (DestroyFn)*(const uint64_t*)(uintptr_t)(*(const uint64_t*)(uintptr_t)(api + 8) + 0x158);
+    const uint64_t destroy = *(const uint64_t*)(uintptr_t)(*(const uint64_t*)(uintptr_t)(api + 8) + 0x158);
     const uint64_t world = *(const uint64_t*)(uintptr_t)(context + 0x40);
     LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
     uint32_t i = g_matUnits.at;
@@ -2844,7 +2915,7 @@ static void NearMatUnitsSlice(uint64_t pass, uint64_t record, uint64_t context)
             QueryPerformanceCounter(&t1);
             if ((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart >= NEAR_MAT_UNITS_MS) break;
         }
-        destroy(world, *(const uint64_t*)(uintptr_t)(list + (uint64_t)i * 8));
+        MatUnitDestroy(destroy, world, *(const uint64_t*)(uintptr_t)(list + (uint64_t)i * 8)); /* its resource freed later (xl_free.c) */
     }
     QueryPerformanceCounter(&t1);
     g_matUnits.ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
@@ -8741,7 +8812,7 @@ static const struct { uint32_t at; const char* bytes; } kNearShapeWork[] = {
  * stuck: a job inside the steps that never came back (nothing waits for it again, its terrain is left alone). */
 static struct { volatile LONG on, gate; int inList, stuck; volatile LONG running; uint64_t world, handle, obj, shape, element, done; double jobMs, quadMs;
     uint32_t frames, onGame, nodes, cols, rows; float rootMin, rootMax, z[2]; uint16_t low, high; int scanned; DWORD game; ULONGLONG since;
-    uint64_t tree, xy0, xy1; uint32_t first, csr; int64_t depth; volatile LONG quadDone; } g_shape;
+    uint64_t tree, xy0, xy1; uint32_t first, csr; int64_t depth; volatile LONG quadDone; uint32_t queue, stackUsed; int32_t role; } g_shape;
 #define NEAR_SHAPE_WAIT_MS 30000u
 static uintptr_t g_shapeExe; /* a test's image; 0: the game's */
 static uintptr_t NearShapeExe(void) { return g_shapeExe != 0 ? g_shapeExe : (uintptr_t)GetModuleHandleW(NULL); }
@@ -8850,8 +8921,9 @@ static uint64_t NearShapeJob(uint64_t a, uint64_t b, uint64_t c, uint64_t data)
 {
     (void)a; (void)b; (void)c; (void)data;
     typedef uint64_t (*ShapeFn)(uint64_t world, uint64_t obj);
-    if (InterlockedCompareExchange(&g_shape.gate, 1, 0) != 0) { InterlockedExchange(&g_shape.running, 0); return 0; } /* shut out */
+    if (InterlockedCompareExchange(&g_shape.gate, 1, 0) != 0) { InterlockedExchange(&g_shape.running, 0); InterlockedIncrement(&g_shapeEnds); return 0; } /* shut out */
     if (GetCurrentThreadId() == g_shape.game) g_shape.onGame++;
+    g_shape.role = NearJobRole(); g_shape.stackUsed = NearJobStack();
     LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
     g_shape.shape = ((ShapeFn)(NearShapeExe() + 0x786130u))(g_shape.world, g_shape.obj);
     uint64_t heights = 0; /* what NearGroundOf copies to the slot later (obj+0x40), craters held meanwhile */
@@ -8871,6 +8943,7 @@ static uint64_t NearShapeJob(uint64_t a, uint64_t b, uint64_t c, uint64_t data)
     g_shape.jobMs = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
     MemoryBarrier();
     InterlockedExchange(&g_shape.running, 0);
+    InterlockedIncrement(&g_shapeEnds);
     return 0;
 }
 
@@ -8921,6 +8994,7 @@ static int NearShapeBegin(uint64_t world, uint64_t handle)
     g_shape.cols = cols; g_shape.rows = rows; g_shape.scanned = 0;
     g_shape.tree = tree; g_shape.xy0 = xy0; g_shape.xy1 = xy1; g_shape.first = first; g_shape.quadDone = 0; g_shape.csr = _mm_getcsr();
     g_shape.depth = tree != 0 ? NearQuadDepth(exe, cols, rows, two) : 0;
+    g_shape.queue = 0; g_shape.role = -2; g_shape.stackUsed = 0;
     InterlockedExchange(&g_shape.gate, 0);
     InterlockedExchange(&g_shape.on, 1);
     if (!g_shape.inList) return 1; /* no shape (0x1AC2FF): the quadtree alone, next */
@@ -8928,6 +9002,7 @@ static int NearShapeBegin(uint64_t world, uint64_t handle)
     InterlockedExchange(&g_shape.running, 1);
     uint32_t queue, priority;
     NearJobQueue(&queue, &priority);
+    g_shape.queue = queue + 3 * priority;
     ((SubmitFn)(uintptr_t)submit)((void*)NearShapeJob, &g_shape.element, name, queue, priority, 1, 0);
     return 1;
 }
@@ -8964,8 +9039,10 @@ static int NearShapeEnd(void)
     leave(world + NEAR_SHAPE_LOCK);
     if (g_shape.inList) MoveHold(0);
     g_shape.done = g_shape.handle;
-    Note("difficulty: near terrain: the tile's collision shape built on a worker: %.0f ms of work, %u frames, %.2f s; jobs on the game thread %u",
-        g_shape.jobMs, g_shape.frames, (double)(GetTickCount64() - g_shape.since) / 1000.0, g_shape.onGame);
+    Note("difficulty: near terrain: the tile's collision shape built on a worker: %.0f ms of work, %u frames, %.2f s; jobs on the game thread %u; queue %u, job role %d, job stack %u KiB",
+        g_shape.jobMs, g_shape.frames, (double)(GetTickCount64() - g_shape.since) / 1000.0, g_shape.onGame, g_shape.queue, (int)g_shape.role, g_shape.stackUsed / 1024u);
+    if (g_shape.inList) g_nearAuto.shaped = 1; /* a shape job's build counts for "auto" */
+    if (g_shape.inList && g_shape.frames == 0) g_nearAuto.shapeZero = 1;
     Note("difficulty: near terrain: the tile's render quadtree: %u nodes (21845 for 4096 x 4096 at depth 7), root %.2f..%.2f m, %.1f ms on %s",
         g_shape.nodes, (double)g_shape.rootMin, (double)g_shape.rootMax, g_shape.quadMs, g_shape.quadDone ? "the shape job" : "the game thread");
     if (g_shape.scanned) NearHeightNote("scanned on the job", g_shape.low, g_shape.high, g_shape.z);
