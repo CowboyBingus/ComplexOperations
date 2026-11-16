@@ -21,6 +21,11 @@ static void MatUnitDestroy(uint64_t destroy, uint64_t world, uint64_t unit);
 static void MatResInstall(void);
 static void MatResTick(void);
 static void MatResNote(void);
+static void MatWaitInstall(void);
+static void MatWaitSetup(int in);
+static void MatWaitTick(void);
+static void MatWaitDrain(void);
+static void MatWaitNote(void);
 
 /* The research log of the terrains' materials (xl_terrain_research.c); a release has none of it. */
 #ifdef CO_RESEARCH

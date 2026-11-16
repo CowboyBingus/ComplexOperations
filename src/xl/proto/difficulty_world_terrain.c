@@ -3085,7 +3085,9 @@ static int NearRunStepIn(uint64_t records, uint32_t end, uint64_t context, uint6
     const LONG64 seedTicks = seeds ? g_nearSeed.data[1] : 0, seedCalls = seeds ? g_nearSeed.data[2] : 0;
     LARGE_INTEGER c0, c1, chz; QueryPerformanceCounter(&c0);
     const uint64_t r0 = __builtin_ia32_rdtsc();
+    if (setup) MatWaitSetup(1); /* its create's fence wait is done later (xl_free.c) */
     fault = WorldTileGuarded(g_near.one, context, &index, &g_near.phase, g, h, 1, &calls);
+    if (setup) MatWaitSetup(0);
     const uint64_t r1 = __builtin_ia32_rdtsc();
     QueryPerformanceCounter(&c1); QueryPerformanceFrequency(&chz);
     if (seeds)

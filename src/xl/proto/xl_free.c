@@ -376,8 +376,10 @@ static void MatResDrain(uint64_t world)
     ReleaseSRWLockExclusive(&g_matRes.lock);
 }
 
+static void MatWaitDrain(void);
 static void MatResTeardown(uint64_t world)
 {
+    MatWaitDrain(); /* the renderer's fences before anything of the world goes */
     MatResDrain(world);
     g_matRes.teardown(world);
 }
@@ -446,6 +448,126 @@ static void MatResNote(void)
         g_matRes.deferred, g_matRes.freed, MAT_RES_KICKS, g_matRes.max, g_matRes.n, g_matRes.fallback, g_matRes.drains, g_matRes.leaked);
     g_matRes.deferred = g_matRes.freed = g_matRes.fallback = g_matRes.drains = g_matRes.leaked = 0;
     g_matRes.max = g_matRes.n;
+}
+
+/* ---- Op 0x41's setup create: its fence waited later -----------------------------------------------------------------
+ * The setup's unit resource (0x1A8290) pushes its batch (0xC, 0xD) and a flagged fence (0x105E40 dl=1), then blocks in
+ * 0x106030 until the render thread reaches that fence: a frame behind, so 10-20 ms (A10c.md). The pushes stay as they
+ * are, so the render thread still drains the device's jobs at the fence (0x1132E6) before any later message; only the
+ * game thread's wait moves to CoXlTick, once a later frame fence was waited (2 kicks). Until then the fence's slot in
+ * [r+0x14E0] stays taken (0x105E40 reuses only empty ones, 0x106030 empties it) and its object stays allocated. */
+#define MAT_WAIT_PENDING 8
+#define MAT_WAIT_KICKS 2u
+#define MAT_WAIT_RETURN 0x1A844Eu /* after 0x1A8449: call 0x106030, 0x1A8290's wait */
+typedef struct { uint64_t r; uint32_t id, kick; } MatWaitEntry;
+static struct
+{
+    int ready;             /* 1 hooked, -1 not */
+    uintptr_t exe;
+    MatResWaitFn orig;     /* the hook's original 0x106030 */
+    volatile LONG inSetup; /* the game thread is inside op 0x41's setup call (terrain.c) */
+    DWORD thread;
+    SRWLOCK lock;          /* the list: CoXlTick and the teardown hook */
+    MatWaitEntry e[MAT_WAIT_PENDING];
+    uint32_t n, deferred, completed, max, fallback;
+} g_matWait = {.lock = SRWLOCK_INIT};
+
+/* What 0x106030 returns at 0x1A844E is not read (the next instruction loads [r14+0x150]), so 0 stands for the wait. */
+static uint8_t MatWaitFrom(uint64_t r, uint32_t id, uintptr_t from)
+{
+    if (g_matWait.inSetup && from == g_matWait.exe + MAT_WAIT_RETURN && GetCurrentThreadId() == g_matWait.thread)
+    {
+        uint8_t threaded = 0; uint32_t kick = 0; uint64_t dev = 0, table = 0;
+        if (!SafeRead((uintptr_t)r + 0x1480, &threaded, 1) && threaded && !SafeRead((uintptr_t)r + 0x1A50, &kick, 4) &&
+            (dev = MatResU64(r + 0x1168)) == 0) dev = MatResU64(r + 0x1138);
+        if (dev != 0) table = MatResU64(dev);
+        /* d3d12's device table only: d3d11's create path (+0xE8 0x706EE0) was not reviewed */
+        AcquireSRWLockExclusive(&g_matWait.lock);
+        const int room = table == g_matWait.exe + 0x16955D8u && g_matWait.n < MAT_WAIT_PENDING; /* 0 without a render thread */
+        if (room)
+        {
+            g_matWait.e[g_matWait.n++] = (MatWaitEntry){r, id, kick};
+            if (g_matWait.n > g_matWait.max) g_matWait.max = g_matWait.n;
+            g_matWait.deferred++;
+        }
+        else g_matWait.fallback++;
+        ReleaseSRWLockExclusive(&g_matWait.lock);
+        if (room) return 0;
+    }
+    return g_matWait.orig(r, id);
+}
+static uint8_t MatWaitDetour(uint64_t r, uint32_t id) { return MatWaitFrom(r, id, (uintptr_t)__builtin_return_address(0)); }
+
+/* Game thread: around the mod's call into op 0x41's setup. */
+static void MatWaitSetup(int in)
+{
+    if (g_matWait.ready <= 0) return;
+    g_matWait.thread = GetCurrentThreadId();
+    InterlockedExchange(&g_matWait.inSetup, in);
+}
+
+/* Game thread, every frame (CoXlTick): a wait whose fence a later frame fence covers goes back to the game's own
+ * 0x106030, which then finds the event set and frees the fence; `all` waits the rest too (a teardown, the level's end). */
+static void MatWaitComplete(int all)
+{
+    MatWaitEntry due[MAT_WAIT_PENDING];
+    uint32_t keep = 0, n = 0;
+    AcquireSRWLockExclusive(&g_matWait.lock);
+    for (uint32_t i = 0; i < g_matWait.n; i++)
+    {
+        MatWaitEntry x = g_matWait.e[i];
+        uint32_t kick = 0;
+        if (!all && (SafeRead((uintptr_t)x.r + 0x1A50, &kick, 4) || kick - x.kick < MAT_WAIT_KICKS)) g_matWait.e[keep++] = x;
+        else due[n++] = x;
+    }
+    g_matWait.n = keep;
+    g_matWait.completed += n;
+    ReleaseSRWLockExclusive(&g_matWait.lock);
+    for (uint32_t i = 0; i < n; i++) g_matWait.orig(due[i].r, due[i].id); /* outside the lock: it can still block */
+}
+static void MatWaitTick(void) { if (g_matWait.n != 0) MatWaitComplete(0); }
+static void MatWaitDrain(void) { if (g_matWait.n != 0) MatWaitComplete(1); }
+
+/* The bytes the deferral relies on: the call site, the slot scan and reuse (0x105E40), the wait's prologue and its
+ * emptying of the slot (0x106030); the render side's flagged drain is kDrainPins' 0x1132E6. */
+static const struct { uint32_t at; const char* bytes; } kMatWaitPins[] = {
+    {0x1A843Au, "B2 01 48 8B CF E8 FC D9 F5 FF 8B D0 48 8B CF E8 E2 DB F5 FF 49 8B 86 50 01 00 00"}, /* fence(r, 1), wait, then [r14+0x150] */
+    {0x105EEBu, "8B 16 85 D2 74 20 48 8B 8B E0 14 00 00 0F 1F 84 00 00 00 00 00 48 83 3C F9 00 0F 84 0E 01 00 00 FF C7 3B FA 75 EF"}, /* an empty slot only */
+    {0x106019u, "3B FA 0F 84 F0 FE FF FF 4C 89 34 F9"},
+    {0x105FDFu, "8B C7"}, /* the id is the slot */
+    {0x105EB4u, "45 33 C9 49 89 76 40 45 33 C0 33 D2 33 C9 FF 15 F0 09 2F 01 49 89 06"}, /* its event: (0, 0, 0, 0), auto-reset */
+    {0x106098u, "83 BF B0 13 00 00 00 74 49 BA 01 00 00 00 FF 15 4C 06 2F 01 85 C0 74 5A"}, /* a set event: no wait */
+    {0x1060EAu, "33 D2 FF 15 06 06 2F 01 85 C0 40 0F 95 C5 85 C0 74 0E 49 8B 0E BA FF FF FF FF FF 15 EE 05 2F 01"},
+    {0x629A6Du, "48 83 C1 10 FF 15 41 CC DC 00 48 8B 0B FF 15 88 CC DC 00"}, /* the render thread sets it */
+    {0x106030u, "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20 80 B9 80 14 00 00 00 48 8B F9 8B F2 0F 84 04 01 00 00 48 81 C1 F0 14 00 00 FF 15 54 06 2F 01 "
+                "48 8B 87 E0 14 00 00 48 8D 8F F0 14 00 00 4C 8B 34 F0 48 C7 04 F0 00 00 00 00"}, /* the slot emptied under the lock */
+};
+
+/* Once, after MatResInstall: only with its teardown hook (T1 drains these first). */
+static void MatWaitInstall(void)
+{
+    if (g_matWait.ready != 0) return;
+    g_matWait.ready = -1;
+    const uintptr_t exe = ApiModuleBase("helldivers2.exe", NULL);
+    if (exe == 0 || g_matRes.ready != 1) return;
+    for (size_t i = 0; i < sizeof kMatWaitPins / sizeof kMatWaitPins[0]; i++)
+        if (ApiCodeMatches(exe + kMatWaitPins[i].at, kMatWaitPins[i].bytes) != 1)
+        { Note("difficulty: moving tiles: op 0x41's setup keeps the game's fence wait (exe+0x%X is not the reviewed code)", kMatWaitPins[i].at); return; }
+    g_matWait.exe = exe;
+    if (LoaderHook("op 0x41's setup: its fence wait", exe + 0x106030u, (void*)MatWaitDetour, (void**)&g_matWait.orig) || g_matWait.orig == NULL)
+    { g_matWait.orig = NULL; Note("difficulty: moving tiles: op 0x41's setup keeps the game's fence wait (0x106030 could not be hooked)"); return; }
+    g_matWait.ready = 1;
+    Note("difficulty: moving tiles: op 0x41's setup no longer waits for its resource's fence; the wait is done %u frame kicks later (exe 0x1A8449)", MAT_WAIT_KICKS);
+}
+
+/* The build's line (MoveCostNote). */
+static void MatWaitNote(void)
+{
+    if (g_matWait.deferred == 0 && g_matWait.completed == 0 && g_matWait.fallback == 0) return;
+    Note("difficulty: moving tiles: op 0x41's setup create waits this build: %u deferred, %u completed later, pending max %u (now %u), %u waited inline (list full, "
+        "no render thread or not d3d12)", g_matWait.deferred, g_matWait.completed, g_matWait.max, g_matWait.n, g_matWait.fallback);
+    g_matWait.deferred = g_matWait.completed = g_matWait.fallback = 0;
+    g_matWait.max = g_matWait.n;
 }
 
 /* ---- rpmalloc's caches after tile events ---------------------------------------------------------------------------

@@ -2305,6 +2305,7 @@ static void MoveCostNote(void)
     memset(&g_moveCost, 0, sizeof g_moveCost);
     Split63WallNote(); /* a build that ended inside the step */
     MatResNote();
+    MatWaitNote();
     g_moveFrame.lines = 0;
 #if defined(CO_RESEARCH) || defined(CO_TEST)
     NearAutoBuildEnd(g_moveStall.samples);
@@ -2580,6 +2581,7 @@ static void NearLevelLeft(int ship)
     NearLayerSettle();
     MoveBuildLeft(ship); /* the merge cameras go before the terrains they draw */
     NearAutoForget(); /* after the leave's shape join: its MoveCostNote comes later, at the ship */
+    MatWaitDrain(); /* op 0x41's setup fence waits: none outlives its level */
     /* A release still owed is never sent outside play. A level init has asked for the package before this hook
      * (0xF712FF, a no-op while it is listed, exe 0x603746..0x603828), and its 0x43 asks again only when has() is 0
      * (0xF61E8B..0xF61EA9), which stays 1 until the queued unload is reached (exe 0x603290): a release here would

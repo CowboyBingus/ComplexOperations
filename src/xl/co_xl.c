@@ -226,6 +226,7 @@ static void CoXlTick(HfMod* mod, float dt, void* user)
     (void)mod; (void)user;
     MoveFrameTick(0);
     MatResTick(); /* op 0x41's unit resources a later frame's fence covers (proto/xl_free.c) */
+    MatWaitTick(); /* and its setup's fence waits */
     HitchTick();
     co_framecost_context(CoXlFrameContext);
     co_framecost_begin(CoXlInPlay(), (long)g_world.levels);
@@ -1449,6 +1450,19 @@ void CoXlTestMatRes(const void* fns, int ready, void* teardown)
 }
 void CoXlTestMatUnitDestroy(uint64_t destroy, uint64_t world, uint64_t unit) { MatUnitDestroy(destroy, world, unit); }
 void CoXlTestMatResTick(void) { MatResTick(); }
+/* Op 0x41's setup fence waits (proto/xl_free.c): a stand-in exe base and 0x106030; a wait from `from` with the setup
+ * flag `in`; the per-frame completion, the drain, the line and the pending count. */
+void CoXlTestMatWait(uintptr_t exe, void* orig)
+{
+    memset(g_matWait.e, 0, sizeof g_matWait.e);
+    g_matWait.exe = exe; g_matWait.orig = (MatResWaitFn)orig; g_matWait.ready = 1; g_matWait.n = 0; g_matWait.inSetup = 0;
+    g_matWait.deferred = g_matWait.completed = g_matWait.max = g_matWait.fallback = 0;
+}
+uint8_t CoXlTestMatWaitFrom(int in, uint64_t r, uint32_t id, uintptr_t from) { MatWaitSetup(in); const uint8_t v = MatWaitFrom(r, id, from); MatWaitSetup(0); return v; }
+void CoXlTestMatWaitTick(void) { MatWaitTick(); }
+void CoXlTestMatWaitDrain(void) { MatWaitDrain(); }
+void CoXlTestMatWaitNote(void) { MatWaitNote(); }
+uint32_t CoXlTestMatWaitPending(void) { return g_matWait.n; }
 void CoXlTestMatResTeardown(uint64_t world) { MatResTeardown(world); }
 void CoXlTestMatResNote(void) { MatResNote(); }
 uint32_t CoXlTestMatResPending(void) { return g_matRes.n; }
