@@ -251,6 +251,29 @@ static void CoXlTick(HfMod* mod, float dt, void* user)
     co_framecost_mark(CO_FC_DENSITY);
 }
 
+static int RenderWorldMade(uintptr_t game);
+/* The streamed layers' count before the main world is made. Its physics create (0xAB1B2C) follows the store of
+ * [engine+0x10E8] (0xAB18B7) on every path of 0xAB0EE0: with that still 0 once the hooks are in, its broad phase is
+ * made with them. NULL when in time. */
+static const char* LayersEarly(uintptr_t game, uintptr_t exe)
+{
+    if (RenderWorldMade(game)) return "the main world was made before the layer count could be hooked";
+    const char* why = SlEarly(exe);
+    if (why != NULL) return why;
+    if (RenderWorldMade(game)) return "the main world was made while the layer count was hooked (the 10 s note shows its layers)";
+    return NULL;
+}
+static const char* LayersEarlyNoted(uintptr_t game, uintptr_t exe)
+{
+    const char* layers = LayersEarly(game, exe);
+    if (layers == NULL) Note("difficulty: extra large maps: streamed broad phase layers: the layer count is hooked before the game's set-up makes the main world");
+    else if (g_sl.layers) Note("difficulty: extra large maps: streamed broad phase layers: %s", layers);
+    else Note("difficulty: extra large maps: streamed broad phase layers: %s; every static body stays in layer 4", layers);
+    return layers;
+}
+/* Called by co_capacity_early as soon as its checks pass, before the engine's room is written: the window in which the
+ * set-up can get ahead of the hooks is then as short as it can be. */
+void CoXlLayersEarly(uintptr_t game, uintptr_t exe) { (void)LayersEarlyNoted(game, exe); }
 /* As game.dll is loaded: the records' move must be hooked before the game builds its entity state, and a process moves
  * them once, so it goes in with the engine's room (co_early.c), not with the level's installs. */
 void CoXlEarly(uintptr_t game)
@@ -1743,7 +1766,7 @@ void CoXlTestStreamNote(void)
 void CoXlTestSlReset(void) { memset(&g_sl, 0, sizeof g_sl); }
 void CoXlTestSlSet(int on, uintptr_t exe, void* count, void* info, void* rule, void* create)
 {
-    g_sl.on = on; g_sl.exe = exe;
+    g_sl.on = on; g_sl.layers = on; g_sl.exe = exe;
     if (count) g_sl.countOrig = count;
     if (info) g_sl.infoOrig = info;
     if (rule) g_sl.ruleOrig = rule;
@@ -1751,6 +1774,11 @@ void CoXlTestSlSet(int on, uintptr_t exe, void* count, void* info, void* rule, v
 }
 int CoXlTestSlOn(void) { return g_sl.on; }
 const char* CoXlTestSlInstall(uintptr_t exe) { return SlInstall(exe); }
+const char* CoXlTestSlEarly(uintptr_t exe) { return SlEarly(exe); }
+const char* CoXlTestLayersEarly(uintptr_t game, uintptr_t exe) { return LayersEarlyNoted(game, exe); }
+int CoXlTestSlLayers(void) { return g_sl.layers; }
+void CoXlTestStreamSlNote(void) { SlNote(); }
+void CoXlTestStreamLayersInstall(void) { WorldStreamLayersInstall(); }
 int CoXlTestSlCount(void) { return SlCountFrom(NULL, g_sl.exe + SL_COUNT_BACK); }
 void CoXlTestSlInfo(uint8_t layer, uint8_t* out) { SlInfo(NULL, layer, out); }
 void CoXlTestSlRule(const uint32_t* ids, int n, const uint8_t* bodies, uint8_t* out) { SlRule(NULL, ids, n, bodies, out); }

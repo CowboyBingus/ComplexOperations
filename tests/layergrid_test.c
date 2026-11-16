@@ -88,6 +88,11 @@ void CoXlTestSlReset(void);
 void CoXlTestSlSet(int on, uintptr_t exe, void* count, void* info, void* rule, void* create);
 int CoXlTestSlOn(void);
 const char* CoXlTestSlInstall(uintptr_t exe);
+const char* CoXlTestSlEarly(uintptr_t exe);
+const char* CoXlTestLayersEarly(uintptr_t game, uintptr_t exe);
+int CoXlTestSlLayers(void);
+void CoXlTestStreamSlNote(void);
+void CoXlTestStreamLayersInstall(void);
 int CoXlTestSlCount(void);
 void CoXlTestSlInfo(uint8_t layer, uint8_t* out);
 void CoXlTestSlRule(const uint32_t* ids, int n, const uint8_t* bodies, uint8_t* out);
@@ -408,6 +413,9 @@ static void BroadPhase(int32_t count, const uint32_t leaves[10])
     uint8_t* exe = g_fake.exe;
     const uint64_t w = (uint64_t)(uintptr_t)g_slWorld, bp = (uint64_t)(uintptr_t)g_slBp, vt = (uint64_t)(uintptr_t)g_slVt,
         layers = (uint64_t)(uintptr_t)g_slLayers, bodies = (uint64_t)(uintptr_t)g_slBodies, update = (uint64_t)(uintptr_t)exe + 0xD40550u;
+    const uint64_t engine = (uint64_t)(uintptr_t)(g_fake.image + 0x3700000u); /* the set-up's engine, inside the fake game */
+    const uint32_t id = 2;                                          /* the main world's physics id: slot 2 */
+    memcpy(g_fake.image + 0x3326340u, &engine, 8); memcpy(g_fake.image + 0x3700000u + 0x10F0u, &id, 4);
     memcpy(exe + 0x27BA9F0u, &w, 8);
     memcpy(g_slWorld + 0x4C0, &bp, 8); memcpy(g_slWorld + 0x38, &bodies, 8);
     memcpy(g_slBp, &vt, 8); memcpy(g_slVt + 0x38, &update, 8);
@@ -428,6 +436,14 @@ static uint32_t g_nextId;
 static int OrigCount6(void* cfg) { return 6; }
 static int OrigCount7(void* cfg) { return 7; }
 static void OrigInfo(void* cfg, uint8_t layer, uint8_t* out) { g_infoCalls++; out[0] = 0xEE; }
+/* The game's set-up making the main world on its thread while the count goes in: [engine+0x10E8] stored. */
+static uint8_t* g_layerWorldEngine;
+static void MakeWorldMeanwhile(uintptr_t target)
+{
+    const uint64_t world = 0x5000;
+    (void)target;
+    memcpy(g_layerWorldEngine + 0x10E8, &world, 8);
+}
 static void OrigRule(void* cfg, const uint32_t* ids, int n, const uint8_t* bodies, uint8_t* out)
 { for (int i = 0; i < n; i++) out[i] = (int)(ids[i] & 0xFFFFFFu) == g_ruleOther ? 3 : 4; }
 static void* OrigCreate(void* writer, uint32_t* id, void* cinfo, void* r9) { *id = g_nextId; return writer; }
@@ -1593,28 +1609,154 @@ int main(void)
         CHECK(!CoXlTestSlFlushDue(world));                           /* the ring does not read: left to the world's flush */
     }
 
-    Start("the streamed layers go in all four or not at all, and only over the reviewed code");
+    /* The count and info go in before the game's set-up (SlEarly), the rule and body maker with the streamer (SlInstall),
+     * each pair both or none and only over the reviewed code; the second pair never without the first. */
+    Start("the streamed layers' count and info go in first, the rule and body maker after them, only over the reviewed code");
     {
         uint8_t* exe = fake_host_exe();
         const uintptr_t image = (uintptr_t)g_fake.image;
         CoXlTestSlReset();
-        g_fake.noMatchExe[0] = 0xD09080u;
-        CHECK(CoXlTestSlInstall((uintptr_t)exe) != NULL && !CoXlTestSlOn() && g_fake.hookCount == 0);
-        g_fake.noMatchExe[0] = 0x12D600u;
-        CHECK(CoXlTestSlInstall((uintptr_t)exe) != NULL && !CoXlTestSlOn() && g_fake.hookCount == 0);
+        g_fake.hookCount = 0;
+        const char* first = CoXlTestSlInstall((uintptr_t)exe);       /* the count not in first */
+        CHECK(first != NULL && strcmp(first, "the layer count was not hooked before the game's set-up made the main world (its broad phase keeps 6 layers)") == 0);
+        CHECK(!CoXlTestSlOn() && g_fake.hookCount == 0);
+        g_fake.noMatchExe[0] = 0xDB9EE0u;
+        CHECK(CoXlTestSlEarly((uintptr_t)exe) != NULL && !CoXlTestSlLayers() && g_fake.hookCount == 0);
+        g_fake.noMatchExe[0] = 0xDB9DB0u;
+        CHECK(CoXlTestSlEarly((uintptr_t)exe) != NULL && !CoXlTestSlLayers() && g_fake.hookCount == 0);
         g_fake.noMatchExe[0] = 0xD3C66Cu;                             /* the count's call site in the constructor */
-        CHECK(CoXlTestSlInstall((uintptr_t)exe) != NULL && !CoXlTestSlOn() && g_fake.hookCount == 0);
+        CHECK(CoXlTestSlEarly((uintptr_t)exe) != NULL && !CoXlTestSlLayers() && g_fake.hookCount == 0);
         g_fake.noMatchExe[0] = 0;
-        g_fake.noHook = (uintptr_t)exe + 0xDB9EE0u - image;          /* the count refused: the other three pass through */
-        CHECK(CoXlTestSlInstall((uintptr_t)exe) != NULL && !CoXlTestSlOn() && g_fake.hookCount == 3);
+        g_fake.noHook = (uintptr_t)exe + 0xDB9EE0u - image;          /* the count refused: the info passes through */
+        CHECK(CoXlTestSlEarly((uintptr_t)exe) != NULL && !CoXlTestSlLayers() && g_fake.hookCount == 1 &&
+            fake_host_detour((uintptr_t)exe + 0xDB9DB0u - image) != NULL);
         CoXlTestSlReset();
         g_fake.noHook = 0; g_fake.hookCount = 0;
-        CHECK(CoXlTestSlInstall(0) != NULL && !CoXlTestSlOn());
-        CHECK(CoXlTestSlInstall((uintptr_t)exe) == NULL && CoXlTestSlOn() && g_fake.hookCount == 4);
-        CHECK(fake_host_detour((uintptr_t)exe + 0xDB9EE0u - image) != NULL && fake_host_detour((uintptr_t)exe + 0xDB9DB0u - image) != NULL &&
-            fake_host_detour((uintptr_t)exe + 0xDB9E60u - image) != NULL && fake_host_detour((uintptr_t)exe + 0xD09080u - image) != NULL);
+        CHECK(CoXlTestSlEarly(0) != NULL && !CoXlTestSlLayers());
+        CHECK(CoXlTestSlEarly((uintptr_t)exe) == NULL && CoXlTestSlLayers() && !CoXlTestSlOn() && g_fake.hookCount == 2);
+        CHECK(fake_host_detour((uintptr_t)exe + 0xDB9EE0u - image) != NULL && fake_host_detour((uintptr_t)exe + 0xDB9DB0u - image) != NULL);
+        CHECK(g_fake.hooks[0].target == (uintptr_t)exe + 0xDB9DB0u - image); /* the info first: no 10 layers without it */
+        CHECK(CoXlTestSlEarly((uintptr_t)exe) == NULL && g_fake.hookCount == 2); /* once */
+        /* the main world made with 10 layers, so each refusal below is the pin's or the exe's, not the count's */
+        const uint32_t leaves[10] = {0, 0, 0, 0, 1000, 0, 10, 20, 30, 40};
+        static const char kNotReviewed[] = "the broad phase's layer rule, the body maker or the spawn flush is not the reviewed code";
+        BroadPhase(10, leaves);
+        const uint32_t pins[3] = {0xD09080u, 0x12D600u, 0xDB9E60u};
+        for (int k = 0; k < 3; k++)
+        {
+            g_fake.noMatchExe[0] = pins[k];
+            const char* pin = CoXlTestSlInstall((uintptr_t)exe);
+            CHECK(pin != NULL && strcmp(pin, kNotReviewed) == 0 && !CoXlTestSlOn() && g_fake.hookCount == 2);
+        }
+        g_fake.noMatchExe[0] = 0;
+        const char* other = CoXlTestSlInstall((uintptr_t)exe + 0x1000u); /* another exe than the count's */
+        CHECK(other != NULL && strcmp(other, "the exe is not the one the layer count was hooked in") == 0 && !CoXlTestSlOn() && g_fake.hookCount == 2);
+        /* the main world made with the game's 6 (the count in, but after it): said, and the rule and body maker stay out */
+        BroadPhase(6, leaves);
+        const char* six = CoXlTestSlInstall((uintptr_t)exe);
+        CHECK(six != NULL && strcmp(six, "the main world's broad phase has 6 layers (made before the layer count was hooked)") == 0);
+        CHECK(!CoXlTestSlOn() && g_fake.hookCount == 2);
+        CoXlTestStreamLayersInstall();
+        CHECK(fake_host_logged("streamed broad phase layers off: the main world's broad phase has 6 layers (made before the layer count was hooked); every static body"));
+        CHECK(!CoXlTestSlOn() && g_fake.hookCount == 2);
+        memset(exe + 0x27BA9F0u, 0, 8);                              /* no main world to read: -1, not on */
+        CHECK(CoXlTestSlInstall((uintptr_t)exe) != NULL && !CoXlTestSlOn() && g_fake.hookCount == 2);
+        BroadPhase(10, leaves);
+        CoXlTestStreamLayersInstall();
+        CHECK(CoXlTestSlOn() && CoXlTestSlLayers() && g_fake.hookCount == 4);
+        CHECK(fake_host_logged("streamed broad phase layers on: the main world's broad phase has 10 layers, 6..9 as layer 4"));
+        CHECK(fake_host_detour((uintptr_t)exe + 0xDB9E60u - image) != NULL && fake_host_detour((uintptr_t)exe + 0xD09080u - image) != NULL);
         CHECK(CoXlTestSlInstall((uintptr_t)exe) == NULL && g_fake.hookCount == 4); /* once */
         CoXlTestSlReset();
+    }
+
+    /* The main world is made once, in the game's set-up, and its broad phase reads the layer count then: the count must
+     * be hooked before that (the game-loaded event), or the world keeps 6 layers for the process (the combined run). */
+    Start("the layer count against the main world's making: in time it has 10 layers, too late it keeps 6 and says so");
+    {
+        uint8_t* exe = fake_host_exe();
+        const uintptr_t image = (uintptr_t)g_fake.image, game = image;
+        const uint32_t leaves[10] = {0, 0, 0, 0, 1000, 0, 10, 20, 30, 40};
+        uint32_t read[5] = {0};
+        uint64_t engineWas = 0;
+        const uint64_t none = 0, world = 0x5000, engineAt = (uint64_t)(uintptr_t)(g_fake.image + 0x3700000u);
+        uint8_t* engine = g_fake.image + 0x3700000u;                  /* an engine object inside the fake game */
+        memcpy(&engineWas, g_fake.image + 0x3326340u, 8);
+        memcpy(g_fake.image + 0x3326340u, &engineAt, 8);
+        memcpy(engine + 0x10E8, &none, 8);                           /* the set-up has not made the main world */
+        g_fake.originals[0].target = (uintptr_t)exe + 0xDB9EE0u; g_fake.originals[0].original = (void*)OrigCount6;
+        g_fake.originals[1].target = (uintptr_t)exe + 0xDB9DB0u; g_fake.originals[1].original = (void*)OrigInfo;
+        /* in time: hooked at the game-loaded event, then the set-up makes the world, then the streamer goes in */
+        CoXlTestSlReset(); g_fake.hookCount = 0;
+        CHECK(CoXlTestLayersEarly(game, (uintptr_t)exe) == NULL && CoXlTestSlLayers());
+        CHECK(fake_host_logged("streamed broad phase layers: the layer count is hooked before the game's set-up makes the main world"));
+        const int made = CoXlTestSlCountFrom((uintptr_t)exe + 0xD3C675u); /* the constructor's read, during the set-up */
+        CHECK(made == 10);
+        {
+            uint8_t info[12] = {0}; uint32_t mask = 0;
+            CoXlTestSlInfo(6, info);                                  /* the constructor's info, before the rule goes in */
+            memcpy(&mask, info + 4, 4);
+            CHECK(!CoXlTestSlOn() && info[0] == 1 && mask == 1);
+        }
+        BroadPhase(made, leaves);
+        memcpy(engine + 0x10E8, &world, 8);
+        CHECK(CoXlTestSlInstall((uintptr_t)exe) == NULL && CoXlTestSlOn());
+        CHECK(CoXlTestSlLeaves(read) && read[0] == 1000 && read[1] == 10 && read[4] == 40);
+        /* too late, as in the run: the world was made before the count was hooked */
+        CoXlTestSlReset(); g_fake.hookCount = 0;
+        BroadPhase(6, leaves);
+        CHECK(CoXlTestLayersEarly(game, (uintptr_t)exe) != NULL && !CoXlTestSlLayers() && g_fake.hookCount == 0);
+        CHECK(fake_host_logged("streamed broad phase layers: the main world was made before the layer count could be hooked; every static body stays in layer 4"));
+        CHECK(CoXlTestSlInstall((uintptr_t)exe) != NULL && !CoXlTestSlOn() && g_fake.hookCount == 0);
+        CHECK(!CoXlTestSlLeaves(read));
+        CoXlTestStreamSlNote();
+        CHECK(fake_host_logged("(not read: the main world's broad phase has 6 layers, made before the layer count was hooked); in 10 s"));
+        BroadPhase(33, leaves);                                      /* 10 or more, but not a count it reads */
+        CoXlTestStreamSlNote();
+        CHECK(fake_host_logged("(not read: the main world's broad phase has 33 layers, but they do not read)"));
+        BroadPhase(10, leaves);                                      /* exactly 10, but the split is off: not "made before" */
+        CoXlTestStreamSlNote();
+        CHECK(fake_host_logged("(not read: the main world's broad phase has 10 layers, but they do not read)"));
+        BroadPhase(6, leaves);
+        /* made while the count was hooked: said, the hooks stay in, the 10 s note tells which */
+        memcpy(engine + 0x10E8, &none, 8);
+        CoXlTestSlReset(); g_fake.hookCount = 0;
+        g_layerWorldEngine = engine;
+        g_fake.onHook = MakeWorldMeanwhile;
+        CHECK(CoXlTestLayersEarly(game, (uintptr_t)exe) != NULL && CoXlTestSlLayers());
+        g_fake.onHook = NULL;
+        CHECK(fake_host_logged("streamed broad phase layers: the main world was made while the layer count was hooked (the 10 s note shows its layers)"));
+        CHECK(!fake_host_logged("hooked (the 10 s note shows its layers); every static body"));
+        /* the main world in another slot: its id's record, not slot 2's */
+        {
+            const uint32_t one = 1, four = 4;
+            uint64_t w2 = 0;
+            CoXlTestSlSet(1, (uintptr_t)exe, (void*)OrigCount6, (void*)OrigInfo, NULL, NULL);
+            BroadPhase(10, leaves);
+            memcpy(&w2, exe + 0x27BA9F0u, 8);
+            memcpy(g_fake.image + 0x3700000u + 0x10F0u, &one, 4);
+            CHECK(!CoXlTestSlLeaves(read));                          /* slot 1 empty */
+            memcpy(exe + 0x27BA870u + 0xB0u + 0x20u, &w2, 8);
+            CHECK(CoXlTestSlLeaves(read) && read[4] == 40);
+            memcpy(exe + 0x27BA870u + 0xB0u + 0x20u, &none, 8);
+            memcpy(g_fake.image + 0x3700000u + 0x10F0u, &four, 4);   /* not a slot */
+            memcpy(exe + 0x27BA870u + 4u * 0xB0u + 0x20u, &w2, 8);
+            CHECK(!CoXlTestSlLeaves(read));
+            memcpy(exe + 0x27BA870u + 4u * 0xB0u + 0x20u, &none, 8);
+            memcpy(g_fake.image + 0x3326340u, &none, 8);             /* no engine yet */
+            CHECK(!CoXlTestSlLeaves(read));
+            BroadPhase(10, leaves);
+            CHECK(CoXlTestSlLeaves(read));
+        }
+        /* no main world to read */
+        CoXlTestSlReset();
+        memcpy(exe + 0x27BA9F0u, &none, 8);
+        CoXlTestStreamSlNote();
+        CHECK(fake_host_logged("(not read: no main world)"));
+        memset(g_fake.originals, 0, sizeof g_fake.originals);
+        memcpy(engine + 0x10E8, &none, 8);
+        memcpy(g_fake.image + 0x3326340u, &engineWas, 8);
+        CoXlTestSlReset(); g_fake.hookCount = 0;
     }
 
     /* Any static add or remove makes the next step rebuild the whole static layer (exe 0xD3DAA9): leaf moves after a
@@ -1623,6 +1765,11 @@ int main(void)
     StreamGame();
     Stream(1);
     Budgets(1000, 10);
+    /* the main world is the record of the engine's physics id (0xAB1B31): 2, the slot Budgets fills */
+    uint64_t sEngineWas = 0;
+    const uint64_t sEngine = (uint64_t)(uintptr_t)(g_fake.image + 0x3700000u); const uint32_t sId = 2;
+    memcpy(&sEngineWas, g_fake.image + 0x3326340u, 8);
+    memcpy(g_fake.image + 0x3326340u, &sEngine, 8); memcpy(g_fake.image + 0x3700000u + 0x10F0u, &sId, 4);
     uint32_t sFrames = 0, sMoved = 0, sQuiet = 0, sLeaves = 0;
     StaticLayer(1000, 0xC0001000u, 6, 0xD40550u); /* the capacity's top bits are flags */
     CoXlTestStreamStatic(0, 0, &sFrames, &sMoved, &sQuiet, &sLeaves);
@@ -1671,6 +1818,7 @@ int main(void)
         CoXlTestStreamLayersPick(0, &d, &sp, &rb);
         CHECK(d == -1 && sp == 0 && rb == 0xC00u);                   /* split off: the step rebuilds layer 4, its last read */
     }
+    memcpy(g_fake.image + 0x3326340u, &sEngineWas, 8);
 
     Start("far stamps evicted over the budget: no more while the last eviction still drains");
     StreamGame();

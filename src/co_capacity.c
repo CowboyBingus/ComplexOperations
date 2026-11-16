@@ -124,6 +124,7 @@ void co_capacity_early(void)
     if ((g_capacity.early = OwnSites(game)) != NULL || (g_capacity.early = co_stamps_room_check(game)) != NULL) return;
     const uintptr_t exe = g_coApi->module_base("helldivers2.exe", NULL);
     if ((g_capacity.early = co_early_check(game, exe)) != NULL || (g_capacity.early = CoXlRenderCheck(game, exe)) != NULL) return;
+    CoXlLayersEarly(game, exe); /* first after the checks: the set-up reads the layer count once, as it makes the main world */
     if ((g_capacity.early = co_early_install(game, exe)) != NULL) return;
     n->render = (g_capacity.render = CoXlRenderWrite(game)) == NULL;
     CoXlEarly(game);

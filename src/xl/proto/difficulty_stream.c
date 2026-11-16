@@ -419,6 +419,7 @@ static void SlFrameBegin(uint32_t layer);
 static void SlFrameEnd(uint64_t world);
 static void SlNote(void);
 static const char* SlInstall(uintptr_t exe);
+static int SlMainLayers(void);
 static int SlWorld(uintptr_t exe, uintptr_t* w, uintptr_t* bp);
 static int MoveStepRecent(void); /* difficulty_world_move.c */
 static int MoveBuildRecent(void);
@@ -1874,6 +1875,14 @@ static void WorldStreamTick(float dt)
      * generator call is inside; only a location this streamer queued is removed. */
 }
 
+/* The rule and body hooks with the streamer, and the line that says whether the main world has the layers. */
+static void WorldStreamLayersInstall(void)
+{
+    const char* layers = SlInstall(ApiModuleBase("helldivers2.exe", NULL));
+    if (layers != NULL) Note("difficulty: extra large maps: streamed broad phase layers off: %s; every static body stays in layer 4, so a change frame rebuilds all of it", layers);
+    else Note("difficulty: extra large maps: streamed broad phase layers on: the main world's broad phase has %d layers, 6..9 as layer 4, and each change frame's stamp bodies go to one of them", SlMainLayers());
+}
+
 /* NULL when the hook is in (or the level is not extra large, so there is nothing to stream), else why it is not. */
 static const char* InstallWorldStream(uintptr_t game)
 {
@@ -1900,9 +1909,7 @@ static const char* InstallWorldStream(uintptr_t game)
     g_stream.game = game;
     g_streamInstallState = 1;
     InstallDestroyQueue();
-    const char* layers = SlInstall(ApiModuleBase("helldivers2.exe", NULL));
-    if (layers != NULL) Note("difficulty: extra large maps: streamed broad phase layers off: %s; every static body stays in layer 4, so a change frame rebuilds all of it", layers);
-    else Note("difficulty: extra large maps: streamed broad phase layers on: new broad phases get layers 6..9 as layer 4, and each change frame's stamp bodies go to one of them");
+    WorldStreamLayersInstall();
     Note("difficulty: extra large maps: content streams: %d locations at most, %d per call, kept within %.0f m of the start, streamed within %.0f m of a player, removed beyond %.0f m after %d s",
         (int)kStreamMaxLocations, (int)kStreamBatch, (double)kStreamStartRadius, (double)kStreamInRadius, (double)kStreamOutRadius,
         (int)(kStreamOutTimeout / 1000));

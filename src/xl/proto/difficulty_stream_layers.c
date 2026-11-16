@@ -25,6 +25,9 @@
 #define SL_FLUSH_RVA 0x12D600u
 #define SL_COUNT_SITE 0xD3C66Cu     /* the broad phase constructor 0xD3C450's call of the count; it returns to +9 */
 #define SL_COUNT_BACK 0xD3C675u
+#define SL_ENGINE 0x3326340u        /* game.dll: the set-up's engine object */
+#define SL_ENGINE_ID 0x10F0u        /* its main world's physics id (stored at 0xAB1B31) */
+#define SL_RECORDS 0x27BA870u       /* exe: the 4 physics worlds' records of 0xB0 (0x78D3A8), the hknp world at +0x20 (0x78D8D4) */
 static const char kSlCountPin[] = "B8 06 00 00 00 C3";
 static const char kSlInfoPin[] = "0F B6 C2 83 F8 05 0F 87 8A 00 00 00 48 8D 15";
 static const char kSlRulePin[] = "4D 63 D8 4C 8B D2 45 85 C0 7E 6E 48 8B 44 24 28 45 33 C0 41 8B 0A 81 E1";
@@ -42,8 +45,11 @@ typedef void (*SlFlushFn)(uint64_t world);
 
 static struct
 {
-    int on;                     /* all four hooks are in: new broad phases have layers 6..9 */
-    uintptr_t exe;
+    int layers;                 /* the count and info hooks are in: broad phases made since have layers 6..9 */
+    int on;                     /* the rule and body hooks too: bodies go to 6..9 */
+    uintptr_t exe, game;        /* game.dll, read once: SlWorld runs for every body made */
+    int count;                  /* the main world's broad phase's layers, read as the rule and body hooks went in */
+    char why[96];               /* SlInstall's refusal with that count */
     void *countOrig, *infoOrig, *ruleOrig, *createOrig;
     volatile LONG thread;       /* the change frame's thread while it spawns and flushes (0: none) */
     volatile LONG current;      /* that frame's layer */
@@ -53,15 +59,24 @@ static struct
     uint8_t layerOf[SL_BODIES]; /* a body index's streamed layer, 0: none */
 } g_sl;
 
-/* The mission world (W = [exe+0x27BA9F0]) and its broad phase ([W+0x4C0], stored by the world's constructor at
- * 0xD062BB; vtable +0x38 the update 0xD40550). 0 when either does not read. */
+/* The main world W (made once, in the game's set-up) and its broad phase ([W+0x4C0], stored by the world's
+ * constructor at 0xD062BB; vtable +0x38 the update 0xD40550). W is the record of the main world's physics id: the
+ * slot the ring gave it (2 in the runs, [exe+0x27BA9F0]), read rather than assumed. 0 when any does not read. Id 0 is
+ * a slot too, so an id not yet stored (0 from the engine's publish, 0x4EE564, to 0xAB1B31) would read as slot 0: every
+ * caller runs after the set-up (the hooks are gated on `on`, the rest run from the streamer). */
 static int SlWorld(uintptr_t exe, uintptr_t* w, uintptr_t* bp)
 {
-    uintptr_t vt = 0, fn = 0;
+    uintptr_t vt = 0, fn = 0, engine = 0;
+    uint32_t id = 0;
     *w = *bp = 0;
-    return exe != 0 && !SafeRead(exe + 0x27BA9F0u, w, 8) && *w != 0 && !SafeRead(*w + 0x4C0, bp, 8) && *bp != 0 && !SafeRead(*bp, &vt, 8) &&
-        !SafeRead(vt + 0x38, &fn, 8) && fn == exe + 0xD40550u;
+    if (g_sl.game == 0) g_sl.game = ApiModuleBase("game.dll", NULL);
+    return exe != 0 && g_sl.game != 0 && !SafeRead(g_sl.game + SL_ENGINE, &engine, 8) && !SafeRead(engine + SL_ENGINE_ID, &id, 4) &&
+        id < 4 && !SafeRead(exe + SL_RECORDS + id * 0xB0u + 0x20u, w, 8) && *w != 0 && !SafeRead(*w + 0x4C0, bp, 8) && *bp != 0 &&
+        !SafeRead(*bp, &vt, 8) && !SafeRead(vt + 0x38, &fn, 8) && fn == exe + 0xD40550u;
 }
+
+static int SlLayerCount(void);
+static int SlMainLayers(void) { return g_sl.count; } /* as SlInstall read it */
 
 /* The broad phase holds layers 6..9 with layer 4's type and pair mask: only then may the rule send a body there (a
  * broad phase made before the hooks has 6 layers, and an unset layer's type 0 would hide its bodies from every query). */
@@ -86,13 +101,13 @@ static int SlBroadPhaseReady(uintptr_t bp)
 static int SlCountFrom(void* cfg, uintptr_t back)
 {
     const int n = ((SlCountFn)g_sl.countOrig)(cfg);
-    return g_sl.on && n == 6 && back == g_sl.exe + SL_COUNT_BACK ? (int)(SL_FIRST + SL_COUNT) : n;
+    return g_sl.layers && n == 6 && back == g_sl.exe + SL_COUNT_BACK ? (int)(SL_FIRST + SL_COUNT) : n;
 }
 static int SlCount(void* cfg) { return SlCountFrom(cfg, (uintptr_t)__builtin_return_address(0)); }
 
 static void SlInfo(void* cfg, uint8_t layer, uint8_t* out)
 {
-    if (g_sl.on && layer >= SL_FIRST && layer < SL_FIRST + SL_COUNT)
+    if (g_sl.layers && layer >= SL_FIRST && layer < SL_FIRST + SL_COUNT)
     {
         const uint32_t mask = 1; const uint16_t flags = 0;
         out[0] = 1; memcpy(out + 4, &mask, 4); memcpy(out + 8, &flags, 2); /* layer 4's, 0xDB9E1F */
@@ -187,23 +202,43 @@ static void SlPick(const uint32_t leaves[SL_LAYERS], const uint32_t queued[SL_LA
     *spawn = spawns ? SL_FIRST + to - 1 : 0;
 }
 
-/* The four hooks, all or none; 0 when on. The count is hooked last, so no broad phase gets layers 6..9 without their
- * info. Hooks the loader took stay in and pass through while off. */
-static const char* SlInstall(uintptr_t exe)
+/* The layer count and info, before the game's set-up: the main world is made once there (0x4EE160 -> 0xAB0EE0 ->
+ * 0x78D330 -> 0xD05870) and its broad phase reads the count once, so hooks put in later never reach it. The info is
+ * hooked first, so no broad phase gets layers 6..9 without it. NULL when in; a refused count leaves the info passing
+ * through. */
+static const char* SlEarly(uintptr_t exe)
 {
     char t[4] = "";
-    if (g_sl.on) return NULL;
+    if (g_sl.layers) return NULL;
     if (exe == 0) return "the exe is not loaded";
     if (GetEnvironmentVariableA("HELLFORGE_LW_BP", t, sizeof t) > 0 && t[0] == '1') return "the living world's layer research (HELLFORGE_LW_BP) hooks the same layer rule";
-    if (!ApiCodeMatches(exe + SL_COUNT_RVA, kSlCountPin) || !ApiCodeMatches(exe + SL_INFO_RVA, kSlInfoPin) || !ApiCodeMatches(exe + SL_RULE_RVA, kSlRulePin) ||
-        !ApiCodeMatches(exe + SL_CREATE_RVA, kSlCreatePin) || !ApiCodeMatches(exe + SL_FLUSH_RVA, kSlFlushPin) ||
-        !ApiCodeMatches(exe + SL_COUNT_SITE, kSlCountSitePin))
-        return "the broad phase's layer config, the body maker or the spawn flush is not the reviewed code";
+    if (!ApiCodeMatches(exe + SL_COUNT_RVA, kSlCountPin) || !ApiCodeMatches(exe + SL_INFO_RVA, kSlInfoPin) || !ApiCodeMatches(exe + SL_COUNT_SITE, kSlCountSitePin))
+        return "the broad phase's layer config is not the reviewed code";
     g_sl.exe = exe;
     if (LoaderHook("extra large maps: streamed layers' info", exe + SL_INFO_RVA, (void*)SlInfo, &g_sl.infoOrig) || g_sl.infoOrig == NULL ||
-        LoaderHook("extra large maps: streamed layers' rule", exe + SL_RULE_RVA, (void*)SlRule, &g_sl.ruleOrig) || g_sl.ruleOrig == NULL ||
-        LoaderHook("extra large maps: streamed layers' bodies", exe + SL_CREATE_RVA, (void*)SlCreate, &g_sl.createOrig) || g_sl.createOrig == NULL ||
         LoaderHook("extra large maps: streamed layers' count", exe + SL_COUNT_RVA, (void*)SlCount, &g_sl.countOrig) || g_sl.countOrig == NULL)
+        return "a layer config hook was refused";
+    g_sl.layers = 1;
+    return NULL;
+}
+
+/* The rule and body hooks, both or none, once the streamer goes in; 0 when on. Only after SlEarly: without its layers
+ * the main world's broad phase has none to send bodies to. Hooks the loader took stay in and pass through while off. */
+static const char* SlInstall(uintptr_t exe)
+{
+    if (g_sl.on) return NULL;
+    if (!g_sl.layers) return "the layer count was not hooked before the game's set-up made the main world (its broad phase keeps 6 layers)";
+    if (exe == 0 || exe != g_sl.exe) return "the exe is not the one the layer count was hooked in";
+    /* the main world exists by now (the streamer goes in from a game update): its own count says whether it was in time */
+    if ((g_sl.count = SlLayerCount()) < (int)(SL_FIRST + SL_COUNT))
+    {
+        snprintf(g_sl.why, sizeof g_sl.why, "the main world's broad phase has %d layers (made before the layer count was hooked)", g_sl.count);
+        return g_sl.why;
+    }
+    if (!ApiCodeMatches(exe + SL_RULE_RVA, kSlRulePin) || !ApiCodeMatches(exe + SL_CREATE_RVA, kSlCreatePin) || !ApiCodeMatches(exe + SL_FLUSH_RVA, kSlFlushPin))
+        return "the broad phase's layer rule, the body maker or the spawn flush is not the reviewed code";
+    if (LoaderHook("extra large maps: streamed layers' rule", exe + SL_RULE_RVA, (void*)SlRule, &g_sl.ruleOrig) || g_sl.ruleOrig == NULL ||
+        LoaderHook("extra large maps: streamed layers' bodies", exe + SL_CREATE_RVA, (void*)SlCreate, &g_sl.createOrig) || g_sl.createOrig == NULL)
         return "a hook was refused";
     g_sl.on = 1;
     return NULL;
@@ -225,11 +260,23 @@ static int SlLeaves(uint32_t leaves[SL_LAYERS])
     return 1;
 }
 
+/* The main world's broad phase's layer count; -1 when there is none to read. */
+static int SlLayerCount(void)
+{
+    uintptr_t w = 0, bp = 0;
+    int32_t count = 0;
+    return SlWorld(ApiModuleBase("helldivers2.exe", NULL), &w, &bp) && !SafeRead(bp + 0x18, &count, 4) ? (int)count : -1;
+}
+
 static void SlNote(void)
 {
     uint32_t leaves[SL_LAYERS] = {0};
-    const int read = SlLeaves(leaves);
+    char why[160] = "";
+    const int read = SlLeaves(leaves), count = read ? (int)(SL_FIRST + SL_COUNT) : SlLayerCount();
+    if (!read && count < 0) snprintf(why, sizeof why, " (not read: no main world)");
+    else if (!read && count < (int)(SL_FIRST + SL_COUNT)) snprintf(why, sizeof why, " (not read: the main world's broad phase has %d layers, made before the layer count was hooked)", count);
+    else if (!read) snprintf(why, sizeof why, " (not read: the main world's broad phase has %d layers, but they do not read)", count);
     Note("difficulty: extra large maps: streamed layers %s: static leaves layer 4 %u, layers 6..9 %u %u %u %u%s; in 10 s %ld bodies made, %ld of them in a change frame, %ld sent to 6..9 by the rule",
-        g_sl.on ? "on" : "off", leaves[0], leaves[1], leaves[2], leaves[3], leaves[4], read ? "" : " (not read: a broad phase made before the hooks, or none)",
+        g_sl.on ? "on" : "off", leaves[0], leaves[1], leaves[2], leaves[3], leaves[4], why,
         (long)InterlockedExchange(&g_sl.created, 0), (long)InterlockedExchange(&g_sl.marked, 0), (long)InterlockedExchange(&g_sl.routed, 0));
 }
