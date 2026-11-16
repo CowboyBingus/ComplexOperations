@@ -21,6 +21,9 @@ static int LwRhRole(void)
 static uint8_t LwRhNext(uintptr_t dev, uintptr_t sched)
 {
     uint8_t out = ((LwRhNextFn)g_lwRh.orig)(dev, sched);
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+    if (g_xrfOn) XrfRound((uintptr_t)__builtin_return_address(0)); /* message 8's spin rounds (xl_render_frame.c) */
+#endif
     if (!g_lwAff.renderTid && LwRhRole() == 1) g_lwAff.renderTid = GetCurrentThreadId(); /* for the affinity test */
     if (!g_lwRh.on || !sched) return out;
     uintptr_t ret = (uintptr_t)__builtin_return_address(0) - g_lwRh.exe;

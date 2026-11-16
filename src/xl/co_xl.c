@@ -69,6 +69,7 @@ static double HitchNow(void)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-function"
 #include "proto/xl_free.h"
+#include "proto/xl_render_frame.h"
 #include "proto/entity_records.c"
 #include "proto/difficulty_world_profile.c"
 #include "proto/difficulty_world.c"
@@ -109,6 +110,7 @@ static double HitchNow(void)
 #include "proto/difficulty_world_memprobe.c"
 #include "proto/xl_span_rescue.c"
 #include "proto/xl_sun_slice.c"
+#include "proto/xl_render_frame.c"
 #pragma clang diagnostic pop
 
 /* The index query (0xC05360: rcx index, edx key, r8d, r9 buffer, [rsp+0x28] its places) writes at most its places and
@@ -253,6 +255,7 @@ static void CoXlTick(HfMod* mod, float dt, void* user)
     co_density_tick(dt);
     co_framecost_mark(CO_FC_DENSITY);
     MoveFrameTick(1);
+    RenderFrameTick(); /* research: the render frame's parts (proto/xl_render_frame.c); nothing in a package */
 }
 
 /* As game.dll is loaded: the records' move must be hooked before the game builds its entity state, and a process moves
@@ -384,6 +387,7 @@ const char* CoXlInstall(uintptr_t game)
     /* refused, the game's rule stays: every step on the map holds every main objective */
     if ((why = co_unlock_install(game, g_importantList)) != NULL) Note("complex operations: mission unlock: %s; every step holds every main", why);
     if (g_streamInstallState == 1) SpanRescueInstall(); /* its passes follow the streamer's removals */
+    RenderFrameInstall(); /* after the stranded spans: it times render messages through their dispatcher hook */
     if (LoaderHook("the stamp index query's count (at most its places on a complex level)", game + CO_STAMP_QUERY, (void*)CoIndexQueryThunk, (void**)&g_indexQuery))
         return "the stamp index's query could not be hooked";
     co_nav_ship(WorldShip); /* the ship's navigation step is where play's world goes back to the game's */

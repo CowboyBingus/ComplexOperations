@@ -497,7 +497,13 @@ static uint8_t MatWaitFrom(uint64_t r, uint32_t id, uintptr_t from)
         LARGE_INTEGER a, b; QueryPerformanceCounter(&a);
         const uint8_t v = g_matWait.orig(r, id);
         QueryPerformanceCounter(&b);
-        if (from == g_matWait.frameAt) MoveFrameFence(a.QuadPart, b.QuadPart);
+        if (from == g_matWait.frameAt)
+        {
+            MoveFrameFence(a.QuadPart, b.QuadPart);
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+            XrfFence(a.QuadPart, b.QuadPart); /* every frame's, for the render frame instrument's window */
+#endif
+        }
         else InterlockedExchangeAdd64(&g_moveRelease.fence, b.QuadPart - a.QuadPart);
         return v;
     }

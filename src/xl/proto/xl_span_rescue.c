@@ -295,6 +295,9 @@ static uint64_t SrTrimmed(uint64_t global)
 static uint64_t SrRendered(uint64_t renderer, uint64_t message, uint64_t payload)
 {
     SrRescueHere(SR_VIA_RENDER);
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+    if (g_xrfViaSr) return XrfMessage(renderer, message, payload, g_sr.render); /* the render frame instrument's timing */
+#endif
     return g_sr.render(renderer, message, payload);
 }
 static uint64_t SrTasked(uint64_t router)
