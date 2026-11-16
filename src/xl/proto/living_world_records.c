@@ -11,6 +11,7 @@
 #define LW_REC_ROOM 0x7000u      /* the counter's records are 0x10000-0x16FFF; a ring (0x13E0760) has 0x17000 on */
 #define LW_REC_SCATTER 0x9E3779B1u
 #define LW_REC_GAME 1u           /* the constructor's multiplier (0x13DF88C), the map's only writer of it */
+#define LW_REC_GAME_SITE 0x13DF892u /* that store's imm32: HellForge 0.5's record-hash rewrites it to LW_REC_SCATTER */
 
 typedef uintptr_t (*LwRecInsertFn)(uintptr_t a, uintptr_t entries, uint32_t count, uintptr_t d);
 typedef void (*LwRecResetFn)(uintptr_t world);
@@ -18,8 +19,11 @@ static struct { void *insertOrig, *resetOrig, *builtOrig; volatile LONG dropped,
 static void LwRecScatter(uintptr_t world, const char* when);
 static void LwTreeLevel(void); /* living_world_trees.c */
 
-/* The multiplier a level of the mission in play hashes with: the scatter on a complex one, the game's on any other. */
-static uint32_t LwRecWanted(void) { return LwLive() ? LW_REC_SCATTER : LW_REC_GAME; }
+/* The constructor's multiplier as it stands: the game's 1, or HellForge's record-hash scatter (written before the
+ * constructor runs, never after), so a normal level keeps whatever HellForge set up. */
+static uint32_t LwRecGame(void) { return EvpU32(g_lw.game + LW_REC_GAME_SITE, LW_REC_GAME) == LW_REC_SCATTER ? LW_REC_SCATTER : LW_REC_GAME; }
+/* The multiplier a level of the mission in play hashes with: the scatter on a complex one, the constructor's on any other. */
+static uint32_t LwRecWanted(void) { return LwLive() ? LW_REC_SCATTER : LwRecGame(); }
 /* The map's slots as its setup gave them (the game's 0x8000, HellForge's 0x10000): every probe masks with count - 1. */
 static int LwRecSlots(const volatile uint32_t* map) { uint32_t n = map[2]; return n != 0 && (n & (n - 1)) == 0; }
 
@@ -91,7 +95,8 @@ static void LwRecReset(uintptr_t world)
 }
 
 /* The pins hold the facts the fix rests on: the record numbering (0x13E02C7), the insert's probe reading capacity and
- * multiplier (0x13E030B), the other writers' bases (0x13E078E, 0x13E0B77) and the constructor's multiplier (0x13DF88C).
+ * multiplier (0x13E030B), the other writers' bases (0x13E078E, 0x13E0B77) and the constructor's multiplier (0x13DF88C:
+ * the game's 1, or the 0x9E3779B1 HellForge's record-hash writes there; code_matches reads that rewrite as it is).
  * The capacity is read from the map: HellForge's larger maps set it up with 0x10000 slots through 0x13DF870. */
 static void LwInstallRecords(void)
 {
@@ -107,7 +112,8 @@ static void LwInstallRecords(void)
         !ApiCodeMatches(g + 0x13E030Bu, "45 8B 8E 50 5F 0C 00 45 8B 96 58 5F 0C 00 44 0F AF D3") ||
         !ApiCodeMatches(g + 0x13E0B77u, "41 81 C0 00 74 01 00") ||
         !ApiCodeMatches(g + 0x13E078Eu, "8D 82 00 70 01 00") ||
-        !ApiCodeMatches(g + 0x13DF88Cu, "C7 83 58 5F 0C 00 01 00 00 00") ||
+        (!ApiCodeMatches(g + 0x13DF88Cu, "C7 83 58 5F 0C 00 01 00 00 00") && /* HellForge 0.5's record-hash: */
+         !ApiCodeMatches(g + 0x13DF88Cu, "C7 83 58 5F 0C 00 B1 79 37 9E")) ||  /* the same store, imm LW_REC_SCATTER */
         !ApiCodeMatches(g + LW_REC_RESET, "48 89 5C 24 08 57 48 83 EC 20 33 FF 48 8B D9 48 89 B9 78 AF 1E 00"))
     { Note("living world: the destruction records are not the reviewed code; not changed"); return; }
     if (LoaderHook("living world: destruction record room", g + LW_REC_INSERT, (void*)LwRecInsert, &g_lwRec.insertOrig) ||
@@ -119,5 +125,5 @@ static void LwInstallRecords(void)
         LoaderHook("living world: destruction record multiplier", g + LW_REC_RESET, (void*)LwRecReset, &g_lwRec.resetOrig) ||
         g_lwRec.resetOrig == NULL)
     { Note("living world: the destruction records' constructor or reset could not be hooked; room only"); return; }
-    Note("living world: on complex levels the destruction records are capped at %u, map multiplier 0x%X", g_lwRec.room, LW_REC_SCATTER);
+    Note("living world: on complex levels the destruction records are capped at %u, map multiplier 0x%X (other levels 0x%X)", g_lwRec.room, LW_REC_SCATTER, LwRecGame());
 }

@@ -1,4 +1,5 @@
 #include "co_aibudget.h"
+#include <math.h>
 
 float co_aibudget_stock(CoAiBudget* b, uintptr_t world, float cur)
 {
@@ -8,6 +9,16 @@ float co_aibudget_stock(CoAiBudget* b, uintptr_t world, float cur)
     if (cur >= CO_AIB_STOCK_LEAST && cur <= CO_AIB_STOCK_MOST && (!(b->stock > 0) || !(b->wrote > 0) || cur != b->wrote)) b->stock = cur;
     return b->stock;
 }
+
+float co_aibudget_stock_game(CoAiBudget* b, uintptr_t world, float game)
+{
+    if (!(game >= CO_AIB_STOCK_LEAST && game <= CO_AIB_STOCK_MOST)) return 0.0f;
+    if (world != b->world) { b->world = world; b->raised = b->draining = 0; }
+    b->stock = game;
+    return b->stock;
+}
+
+float co_aibudget_put(const CoAiBudget* b, float want) { return b->stock > 0 && want == b->stock ? nextafterf(want, 1.0f) : want; }
 
 float co_aibudget_want(CoAiBudget* b, float waitS, int lowUs, int raiseMs)
 {

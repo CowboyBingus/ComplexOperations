@@ -7,6 +7,7 @@
  * and then swaps with no drain; a world's later completions wait until that swap is applied and committed (the queue's
  * buffer changed and no step in flight); after 100 ms a built cell goes with other changes queued; a level's end
  * keeps the game's order and the drain; a world's records that wait 2000 ms get its step finished once, noted. */
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -1704,6 +1705,8 @@ static void TestHoldRaise(void)
     Push(0, IDX, 3, 0);
     CHECK(Tick(0, 1000) == 0);
     CHECK(Aib(1, 1099) == 0.002f);  /* held: the game's own, not the low one */
+    float raw; memcpy(&raw, g_aiw + 0x47C, 4);
+    CHECK(raw == nextafterf(0.002f, 1.0f)); /* written a float step above: HellForge's ai-path-budget leaves it */
     CHECK(Aib(1, 1100) == 0.004f && Aib(1, 1499) == 0.004f);
     CHECK(Aib(1, 1500) == 0.004f && Aib(1, 600000) == 0.004f); /* never more */
     HoldCounts(v);

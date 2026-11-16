@@ -2,7 +2,7 @@
   "format": 1,
   "id": "cowboybingus.complex-operations",
   "name": "Complex Operations",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Eight hellpods on the ship bridge and sessions of up to eight players. Every planet with level-11 operations has at least one complex operation, and each other level-11 operation is one in four: a 16 km map with three missions. Every player in the session needs it. Tested with two players so far.",
   "gameplay": true,
   "code": {
