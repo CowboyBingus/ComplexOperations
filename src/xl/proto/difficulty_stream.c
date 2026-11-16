@@ -257,7 +257,13 @@ static struct { double ns; uint32_t leaves; } g_streamRebuild = {0.0, 0}; /* the
 /* A change frame's world update and its after-change frame's over two quiet frames' by kind, learned from each pair
  * (ms; kept over levels: the machine's), a removal's own drain time, and the kind of the last change frame not yet
  * learned from (1 removal, 2 spawn; 0 none). */
-static struct { double removeMs, spawnMs, ownMs; int kind; } g_streamCost = {kStreamRemoveMsStart, kStreamSpawnMsStart, kStreamRemoveOwnMsStart, 0};
+#define SL_LAYERS 5u /* the static layers: layer 4, then the streamed 6..9 (difficulty_stream_layers.c) */
+/* Each 10 s by kind (removal, spawn) and the layer the change marked (4, then 6..9): the clean pairs' cost (a change
+ * frame's and its after-change frame's world update over two quiet frames') and the leaves its step rebuilt, so a run
+ * shows that a change pays for its own layer's leaves alone. */
+typedef struct { uint32_t n; double ms, most, leaves; } LayerCostSum;
+static LayerCostSum g_streamLayerCost[2][SL_LAYERS];
+static struct { double removeMs, spawnMs, ownMs; int kind; uint32_t layer, leaves; } g_streamCost = {kStreamRemoveMsStart, kStreamSpawnMsStart, kStreamRemoveOwnMsStart, 0, 0, 0};
 /* Removal frames, far-grass holds and the governor: their state for the level, and the counts since the note. */
 static struct
 {
@@ -385,7 +391,7 @@ static void WorldStreamClearLocked(void)
     g_stream.floorDue = g_stream.floorSpawned = 0;
     g_streamFlush.waitMs = g_streamFlush.waitMost = 0.0;
     g_streamFlush.frames = 0; g_streamFlush.ms = g_streamFlush.most = 0.0;
-    g_streamRebuild.leaves = 0; g_streamCost.kind = 0;
+    g_streamRebuild.leaves = 0; g_streamCost.kind = 0; memset(g_streamLayerCost, 0, sizeof g_streamLayerCost);
     memset(&g_streamPace, 0, sizeof g_streamPace);
     memset(g_streamUnit, 0, sizeof g_streamUnit);         /* a unit's address means nothing once its level is not this one */
     memset(g_streamResource, 0, sizeof g_streamResource);
@@ -464,7 +470,6 @@ static void DestroyTick(void);                /* difficulty_world_destroy.c */
 static void DestroyNote(void);
 static const char* InstallDestroyQueue(void);
 /* The streamed broad phase layers (difficulty_stream_layers.c). */
-#define SL_LAYERS 5u /* layer 4, then 6..9 */
 static int SlLeaves(uint32_t leaves[SL_LAYERS]);
 static void SlPick(const uint32_t leaves[SL_LAYERS], const uint32_t queued[SL_LAYERS], int due, int* turn, int* drain, uint32_t* spawn);
 static void SlFrameBegin(uint32_t layer);
@@ -1529,6 +1534,31 @@ static void WorldStreamObjectivesNote(void)
 static double WorldStreamRemoveRoom(void);
 static uint32_t WorldStreamForcedMost(void);
 static ULONGLONG WorldStreamRemoveWait(void);
+/* The change cost by layer since the last note (g_streamLayerCost), then cleared: per kind each layer that had a clean
+ * pair, its count, mean and most ms and its leaves' mean, and the kind's ns a leaf over all its pairs. */
+static void WorldStreamLayerCostNote(void)
+{
+    static const char* const kKind[2] = {"removal", "spawn"};
+    char text[900];
+    size_t o = 0;
+    for (int k = 0; k < 2 && o < sizeof text; k++)
+    {
+        uint32_t n = 0; double ms = 0.0, leaves = 0.0;
+        o += (size_t)snprintf(text + o, sizeof text - o, "%s%s frames:", k ? "; " : "", kKind[k]);
+        for (uint32_t l = 0; l < SL_LAYERS && o < sizeof text; l++)
+        {
+            const LayerCostSum* c = &g_streamLayerCost[k][l];
+            if (c->n == 0) continue;
+            n += c->n; ms += c->ms; leaves += c->leaves;
+            o += (size_t)snprintf(text + o, sizeof text - o, " layer %u %u at %.2f ms (the most %.2f) over %.0f leaves,", l == 0 ? 4u : 5u + l, c->n, c->ms / c->n,
+                c->most, c->leaves / c->n);
+        }
+        if (o < sizeof text && n == 0) o += (size_t)snprintf(text + o, sizeof text - o, " none");
+        else if (o < sizeof text) o += (size_t)snprintf(text + o, sizeof text - o, " %.1f ns a leaf over %u", leaves > 0.0 ? ms * 1e6 / leaves : 0.0, n);
+    }
+    memset(g_streamLayerCost, 0, sizeof g_streamLayerCost);
+    Note("difficulty: extra large maps: streaming change cost by the layer it rebuilt in 10 s (a change frame's and its after-change frame's world update over two quiet frames'): %s", text);
+}
 /* Every 10 s while streaming: what is spawned now, what is due, removals and respawns so far, the players and time,
  * and the frame rate over those 10 s (mean and the slowest frame). */
 static void WorldStreamNoteLocked(ULONGLONG now)
@@ -1603,6 +1633,7 @@ static void WorldStreamNoteLocked(ULONGLONG now)
         g_stream.orderCount > g_stream.orderCursor ? g_stream.orderCount - g_stream.orderCursor : 0u,
         g_stream.layerDrains[0], g_stream.layerDrains[1], g_stream.layerDrains[2], g_stream.layerDrains[3], g_stream.layerDrains[4],
         g_stream.layerSpawns[0], g_stream.layerSpawns[1], g_stream.layerSpawns[2], g_stream.layerSpawns[3], g_stream.layerSpawns[4]);
+    WorldStreamLayerCostNote();
     SlNote();
     StNote();
     g_stream.changes = g_stream.expiredMost = g_stream.staticFrames = g_stream.staticMoved = g_stream.staticQuiet = g_stream.staticTile = 0;
@@ -1755,7 +1786,13 @@ static void WorldStreamCostLearn(void)
     double most = *est * 4.0;
     most = most < 1.0 ? 1.0 : most > 12.0 ? 12.0 : most;
     double ms = r.pairWorld - 2.0 * r.quietWorld;
-    ms = ms < 0.0 ? 0.0 : ms > most ? most : ms;
+    ms = ms < 0.0 ? 0.0 : ms;
+    if (g_streamCost.layer < SL_LAYERS)
+    {
+        LayerCostSum* c = &g_streamLayerCost[kind == 1 ? 0 : 1][g_streamCost.layer];
+        c->n++; c->ms += ms; c->leaves += g_streamCost.leaves; if (ms > c->most) c->most = ms;
+    }
+    ms = ms > most ? most : ms;
     *est = *est * 0.75 + ms * 0.25;
     if (kind == 1) { g_streamPace.removeSum += ms; g_streamPace.removeSamples++; }
     else { g_streamPace.spawnSum += ms; g_streamPace.spawnSamples++; }
@@ -1998,6 +2035,8 @@ static uint32_t WorldStreamChangeLocked(ULONGLONG now, int layerBusy)
     g_stream.nextChangeTick = soon ? g_streamTicks + kStreamChangeTicksBusy : 0;
     g_streamRebuild.leaves = rebuilt;
     g_streamCost.kind = removal ? 1 : 2;
+    g_streamCost.layer = removal ? (drain >= 6 ? (uint32_t)drain - 5u : 0u) : (spawn >= 6 ? spawn - 5u : 0u);
+    g_streamCost.leaves = rebuilt;
     g_streamPace.lastKind = removal ? 1 : 2;
     if (removal) { g_streamPace.removeFrames++; g_streamPace.removeForced += removal == 2; g_streamPace.removeWaitAt = g_streamDropCount ? now : 0; g_stream.changesSinceScan++; }
     else g_streamPace.spawnFrames++;

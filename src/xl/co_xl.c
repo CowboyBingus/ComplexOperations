@@ -1766,6 +1766,7 @@ void CoXlTestStreamNote(void)
  * the given originals (NULL keeps the one there). */
 void CoXlTestSlReset(void) { memset(&g_sl, 0, sizeof g_sl); }
 void CoXlTestSlAsk(int on) { g_slAskTest = on ? 1 : -1; }
+void CoXlTestSlAskDefault(void) { g_slAskTest = 0; } /* as a package: the switch not read */
 void CoXlTestSlSet(int on, uintptr_t exe, void* count, void* info, void* rule, void* create)
 {
     g_sl.on = on; g_sl.layers = on; g_sl.exe = exe;
@@ -1791,6 +1792,12 @@ int CoXlTestSlFlushDue(uint64_t world) { return SlFlushDue(world); }
 int CoXlTestSlLeaves(uint32_t leaves[5]) { return SlLeaves(leaves); }
 void CoXlTestSlPick(const uint32_t leaves[5], const uint32_t queued[5], int due, int* turn, int* drain, uint32_t* spawn) { SlPick(leaves, queued, due, turn, drain, spawn); }
 void CoXlTestSlCounts(long* created, long* marked, long* routed) { *created = g_sl.created; *marked = g_sl.marked; *routed = g_sl.routed; }
+/* The spawn windows' counts: bodies marked off the game thread, flushes that left the ring holding units. */
+void CoXlTestSlWindowCounts(long* off, long* ringLeft) { *off = g_sl.markedOff; *ringLeft = g_sl.ringLeft; }
+/* The streamer's game thread set (the one before returned); the spawn flush SlFrameEnd calls (NULL: the game's); the window's end. */
+DWORD CoXlTestSlGameThread(DWORD id) { const DWORD was = g_layerGameThread; g_layerGameThread = id; return was; }
+void CoXlTestSlFlushWith(void (*flush)(uint64_t world)) { g_slFlushTest = flush; }
+void CoXlTestSlFrameEnd(uint64_t world) { SlFrameEnd(world); }
 /* The change step's layer as it would pick it now with spawns due or not: the drained layer (-1: any), the spawns'
  * (0: none of its own), and the leaves its step rebuilds. */
 void CoXlTestStreamLayersPick(int due, int* drain, uint32_t* spawn, uint32_t* rebuilt) { WorldStreamLayersLocked(due, drain, spawn, rebuilt); }
@@ -1803,6 +1810,11 @@ void CoXlTestStreamCost(double removeMs, double spawnMs, double* removeNow, doub
     *removeNow = g_streamCost.removeMs; *spawnNow = g_streamCost.spawnMs; *kind = g_streamCost.kind;
 }
 void CoXlTestStreamCostKind(int kind) { g_streamCost.kind = kind; }
+/* The layer (0 layer 4, 1..4 layers 6..9) and leaves the last change frame left to learn with; set with a kind; the
+ * by-layer cost note now. */
+void CoXlTestStreamCostLayer(uint32_t* layer, uint32_t* leaves) { *layer = g_streamCost.layer; *leaves = g_streamCost.leaves; }
+void CoXlTestStreamCostLayerSet(int kind, uint32_t layer, uint32_t leaves) { g_streamCost.kind = kind; g_streamCost.layer = layer; g_streamCost.leaves = leaves; }
+void CoXlTestStreamLayerCostNote(void) { WorldStreamLayerCostNote(); }
 void CoXlTestStreamCostLearn(void) { WorldStreamCostLearn(); }
 uint32_t CoXlTestStreamLeaves(void) { return g_streamRebuild.leaves; }
 /* A far-grass bake job out or not, as FarGrassBusy reads it. */
@@ -1857,9 +1869,9 @@ void CoXlTestStNote(void) { StNote(); }
 uint64_t CoXlTestStKindCalls(int kind, int slot) { return g_st.calls[kind][slot]; }
 uint32_t CoXlTestStKindFrames(int kind) { return g_st.frames[kind]; }
 /* The bodies' makers sampler: one sample of the chain `frames` (n of them), the note's text. */
-void CoXlTestSlChain(const uintptr_t* frames, int n, int game, int mark) { SlChainAdd(frames, n, game, mark); }
+void CoXlTestSlChain(const uintptr_t* frames, int n, int game, int mark, int window) { SlChainAdd(frames, n, game, mark, window); }
 void CoXlTestSlSampleText(char* out, size_t room) { SlSampleText(out, room); }
-void CoXlTestSlSampleCall(void) { SlSample(0); }
+void CoXlTestSlSampleCall(void) { SlSample(0, 0); }
 /* Since the note: the change frames' budgets summed, those at the floor, and the frames a tile built in. */
 void CoXlTestStreamBudgetStats(double* sum, uint32_t* floors, uint32_t* builds) { *sum = g_stream.budgetSum; *floors = g_stream.budgetFloors; *builds = g_stream.buildFrames; }
 uint32_t CoXlTestStreamNextTick(void) { return g_stream.nextChangeTick; }

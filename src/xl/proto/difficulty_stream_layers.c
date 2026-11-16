@@ -12,8 +12,14 @@
  * - A body's layer is the low 5 bits of body +0x74 (0xD3D17C, 0xD41B84); no exe code outside the broad phase reads them.
  * - The layer rule 0xDB9E60(cfg, ids, n, bodies, out) runs in the add and in the body update (0xD40674). Every unit's
  *   body is made by the world writer's +0x50, 0xD09080(W+0x18, u32* id, cinfo), and added later (command 02 in the
- *   step). So bodies made on the game thread while a change frame spawns and flushes the spawn ring (0x12D600, as
- *   DestroyUnit does at 0x3389A8) are remembered by index, and the rule's layer 4 for them becomes the frame's layer. */
+ *   step). So bodies made while a change frame spawns and flushes the spawn ring (0x12D600, as DestroyUnit does at
+ *   0x3389A8) are remembered by index, and the rule's layer 4 for them becomes the frame's layer. On any thread: the
+ *   ring's units-spawned broadcast makes their actors in a parallel-for (0x788E90 -> jobs 0x788E00 -> 0x7880C0 ->
+ *   0x7858A0 -> 0x7848B0, create at 0x784E2E) and waits for it at 0x7896C2, so about half are made on workers (run 2d's
+ *   makers: 461 of 1082 samples on the game thread) and all before the flush returns.
+ * - Every static add or remove marks its layer whole (0xD3D1DA; rebuilt by 0xD3D780's tasks, renumbered by 0xD42550),
+ *   about 21 ns a leaf (run 2d: a removal frame, and the frame after a spawn frame, +6-8 ms at 290-395k leaves of
+ *   layer 4). A stamp body left in layer 4 makes its change frame pay for all of layer 4. */
 
 #define SL_FIRST 6u                 /* the first streamed layer */
 #define SL_COUNT 4u                 /* streamed layers: a change frame rebuilds about a quarter of the streamed leaves */
@@ -50,12 +56,13 @@ static struct
     uintptr_t exe, game;        /* game.dll, read once: SlWorld runs for every body made */
     int count;                  /* the main world's broad phase's layers, read as the rule and body hooks went in */
     char why[96];               /* SlInstall's refusal with that count */
-    int asked;                  /* HELLFORGE_XL_STREAM_LAYERS=1 was set at SlEarly: the layers are off without it */
+    int asked;                  /* SlEarly found the layers wanted (not HELLFORGE_XL_STREAM_LAYERS=0): off without it */
     void *countOrig, *infoOrig, *ruleOrig, *createOrig;
-    volatile LONG thread;       /* the change frame's thread while it spawns and flushes (0: none) */
-    volatile LONG current;      /* that frame's layer */
+    volatile LONG window;       /* the change frame's layer while it spawns and flushes its ring (0: no window) */
     uintptr_t okBp;             /* the mission world's broad phase, checked to hold layers 6..9 as layer 4 */
     volatile LONG marked, routed, created; /* since the note: bodies remembered, sent to 6..9 by the rule, made in all */
+    volatile LONG markedOff;    /* ... of the remembered, made off the game thread (the broadcast's workers) */
+    volatile LONG ringLeft;     /* ... a window's flush left units on the ring (512 a call, 0x12D889): made later, in layer 4 */
     volatile LONG any;          /* a body was ever made in a change frame: until then the rule has nothing to send */
     uint8_t layerOf[SL_BODIES]; /* a body index's streamed layer, 0: none */
 } g_sl;
@@ -147,7 +154,7 @@ static void SlRule(void* cfg, const uint32_t* ids, int n, const uint8_t* bodies,
 #define SL_SAMPLE_DEPTH 4
 #define SL_SAMPLE_KEEP 48
 #define SL_SAMPLE_NAMED 4
-typedef struct { uint32_t rva[SL_SAMPLE_DEPTH]; char mod[SL_SAMPLE_DEPTH]; uint32_t count, game, change, after; } SlChain;
+typedef struct { uint32_t rva[SL_SAMPLE_DEPTH]; char mod[SL_SAMPLE_DEPTH]; uint32_t count, game, change, after, window; } SlChain;
 static struct
 {
     volatile LONG calls;        /* the mission world's bodies made since the note */
@@ -168,7 +175,7 @@ static char SlWhere(uintptr_t a, uint32_t* rva)
 }
 
 /* A chain into the table: counted on the one it matches, else a new entry while there is room. */
-static void SlChainAdd(const uintptr_t* frames, int n, int game, int mark)
+static void SlChainAdd(const uintptr_t* frames, int n, int game, int mark, int window)
 {
     SlChain c;
     memset(&c, 0, sizeof c);
@@ -178,7 +185,7 @@ static void SlChainAdd(const uintptr_t* frames, int n, int game, int mark)
     uint32_t k = 0;
     while (k < g_slSample.used && (memcmp(g_slSample.e[k].rva, c.rva, sizeof c.rva) != 0 || memcmp(g_slSample.e[k].mod, c.mod, sizeof c.mod) != 0)) k++;
     if (k == g_slSample.used && k < SL_SAMPLE_KEEP) g_slSample.e[g_slSample.used++] = c;
-    if (k < g_slSample.used) { g_slSample.e[k].count++; g_slSample.e[k].game += game != 0; g_slSample.e[k].change += mark == 1; g_slSample.e[k].after += mark == 2; }
+    if (k < g_slSample.used) { g_slSample.e[k].count++; g_slSample.e[k].game += game != 0; g_slSample.e[k].change += mark == 1; g_slSample.e[k].after += mark == 2; g_slSample.e[k].window += window != 0; }
     else g_slSample.missed++;
     ReleaseSRWLockExclusive(&g_slSample.lock);
 }
@@ -191,7 +198,7 @@ static int SlChangeMark(void)
     return c == 0 ? 0 : t == c ? 1 : t == c + 1u ? 2 : 0;
 }
 
-static void SlSample(int mark)
+static void SlSample(int mark, int window)
 {
     InterlockedIncrement(&g_slSample.made[mark >= 0 && mark < 3 ? mark : 0]);
     if ((uint32_t)InterlockedIncrement(&g_slSample.calls) % SL_SAMPLE_EVERY != 0) return;
@@ -216,7 +223,7 @@ static void SlSample(int mark)
         if (a >= g_slSample.selfLo && a < g_slSample.selfHi) continue;
         keep[n++] = a;
     }
-    SlChainAdd(keep, n, g_layerGameThread != 0 && (DWORD)g_layerGameThread == GetCurrentThreadId(), mark);
+    SlChainAdd(keep, n, g_layerGameThread != 0 && (DWORD)g_layerGameThread == GetCurrentThreadId(), mark, window);
 }
 
 /* The note's part: the bodies made, the samples, and the SL_SAMPLE_NAMED most frequent chains; the table starts again. */
@@ -237,21 +244,21 @@ static void SlSampleText(char* out, size_t room)
         const SlChain* c = &g_slSample.e[best];
         o += (size_t)snprintf(out + o, room - o, "; %u from", c->count);
         for (int d = 0; d < SL_SAMPLE_DEPTH && o < room && c->mod[d]; d++) o += (size_t)snprintf(out + o, room - o, "%s%c+0x%X", d ? " < " : " ", c->mod[d], c->rva[d]);
-        if (o < room) o += (size_t)snprintf(out + o, room - o, " (%u on the game thread, %u in a change frame, %u in the frame after)", c->game, c->change, c->after);
+        if (o < room) o += (size_t)snprintf(out + o, room - o, " (%u on the game thread, %u in a change frame, %u in the frame after, %u in a spawn window)", c->game, c->change, c->after, c->window);
     }
     memset(g_slSample.e, 0, sizeof g_slSample.e); g_slSample.used = g_slSample.missed = g_slSample.sampled = 0;
     ReleaseSRWLockExclusive(&g_slSample.lock);
 }
 
-/* A body of the mission world takes the change frame's layer when made inside it on its thread, else none: an index
- * used again by another body forgets the stamp's. */
-static void SlMade(uint32_t id, uint32_t inFrame)
+/* A body of the mission world takes the change frame's layer when made inside its window, else none: an index used
+ * again by another body forgets the stamp's. */
+static void SlMade(uint32_t id, uint32_t inFrame, int gameThread)
 {
     const uint32_t index = id & 0xFFFFFFu;
     if (index >= SL_BODIES) return;
     g_sl.layerOf[index] = (uint8_t)inFrame;
     InterlockedIncrement(&g_sl.created);
-    if (inFrame) { InterlockedIncrement(&g_sl.marked); g_sl.any = 1; }
+    if (inFrame) { InterlockedIncrement(&g_sl.marked); g_sl.any = 1; if (!gameThread) InterlockedIncrement(&g_sl.markedOff); }
 }
 
 static void* SlCreate(void* writer, uint32_t* id, void* cinfo, void* r9)
@@ -259,19 +266,19 @@ static void* SlCreate(void* writer, uint32_t* id, void* cinfo, void* r9)
     void* r = ((SlCreateFn)g_sl.createOrig)(writer, id, cinfo, r9);
     uintptr_t w = 0, bp = 0;
     if (id == NULL || g_sl.exe == 0 || !SlWorld(g_sl.exe, &w, &bp) || (uintptr_t)writer != w + 0x18) return r;
-    const int frame = g_sl.thread != 0 && g_sl.thread == (LONG)GetCurrentThreadId();
-    if (g_sl.on) SlMade(*id, frame ? (uint32_t)g_sl.current : 0);
+    /* any thread: the broadcast's workers make about half of a flush's bodies while the game thread waits in it */
+    const LONG window = g_sl.window;
+    if (g_sl.on) SlMade(*id, (uint32_t)window, g_layerGameThread != 0 && (DWORD)g_layerGameThread == GetCurrentThreadId());
     else InterlockedIncrement(&g_sl.created);
-    SlSample(SlChangeMark());
+    SlSample(SlChangeMark(), window != 0);
     return r;
 }
 
-/* The change frame's spawns into `layer` (6..9): bodies made on this thread from here to SlFrameEnd take it. */
+/* The change frame's spawns into `layer` (6..9): bodies made on any thread from here to SlFrameEnd take it. */
 static void SlFrameBegin(uint32_t layer)
 {
     if (!g_sl.on) return;
-    InterlockedExchange(&g_sl.current, (LONG)layer);
-    InterlockedExchange(&g_sl.thread, (LONG)GetCurrentThreadId());
+    InterlockedExchange(&g_sl.window, (LONG)layer);
 }
 
 /* The spawns queued their units on the async spawn ring: they are made inside the frame, as DestroyUnit makes them
@@ -284,13 +291,25 @@ static int SlFlushDue(uint64_t world)
     return ring == 0 || (ring == 1 && ((!SafeRead(world + 0x170038, &a, 4) && a != 0) || (!SafeRead(world + 0x10030, &b, 4) && b != 0)));
 }
 
+#ifdef CO_TEST
+static SlFlushFn g_slFlushTest; /* a test's spawn flush in place of the game's */
+#endif
 /* The frame's end: its units made (the caller waited for the animation jobs, as before a destroy), then bodies made
- * on this thread take no streamed layer. `world` 0: nothing to make. */
+ * take no streamed layer. `world` 0: nothing to make. A ring the flush left units on makes them in the world's own
+ * flush, outside the window: counted, as their bodies stay in layer 4. */
 static void SlFrameEnd(uint64_t world)
 {
     if (!g_sl.on) return;
-    if (SlFlushDue(world)) ((SlFlushFn)(g_sl.exe + SL_FLUSH_RVA))(world);
-    InterlockedExchange(&g_sl.thread, 0);
+    if (SlFlushDue(world))
+    {
+        SlFlushFn flush = (SlFlushFn)(g_sl.exe + SL_FLUSH_RVA);
+#ifdef CO_TEST
+        if (g_slFlushTest != NULL) flush = g_slFlushTest;
+#endif
+        flush(world);
+        if (MoveSpawnRingEmpty(world) == 0) InterlockedIncrement(&g_sl.ringLeft);
+    }
+    InterlockedExchange(&g_sl.window, 0);
 }
 
 /* The change frame's one layer (leaves and queued removals of layer 4, then 6..9), so its step rebuilds one: the one
@@ -314,25 +333,26 @@ static void SlPick(const uint32_t leaves[SL_LAYERS], const uint32_t queued[SL_LA
  * 0x78D330 -> 0xD05870) and its broad phase reads the count once, so hooks put in later never reach it. The info is
  * hooked first, so no broad phase gets layers 6..9 without it. NULL when in; a refused count leaves the info passing
  * through. */
-#define SL_OFF_DEFAULT "off by default (HELLFORGE_XL_STREAM_LAYERS=1 turns them on): a rebuild of 100-230k leaves costs nothing measurable (run 1 against run 2a)"
+#define SL_OFF_ASKED "off as asked (HELLFORGE_XL_STREAM_LAYERS=0)"
 #ifdef CO_TEST
-static int g_slAskTest; /* a test's switch: 1 on, else off (a test build reads no environment switch, co_shim.h) */
+static int g_slAskTest; /* a test's switch: 1 on, -1 off, 0 the environment's (none in a test build, co_shim.h) */
 #endif
-/* A research switch: a package build reads none (co_shim.h), so there the layers are always off. */
+/* On unless a research build sets HELLFORGE_XL_STREAM_LAYERS=0: a package reads no switch (co_shim.h), so there they are
+ * on. Run 2d: with every stamp body in layer 4 a change costs about 7 ms of world update at 310-450k bodies. */
 static int SlAsked(void)
 {
     char t[4] = "";
 #ifdef CO_TEST
     if (g_slAskTest) return g_slAskTest > 0;
 #endif
-    return GetEnvironmentVariableA("HELLFORGE_XL_STREAM_LAYERS", t, sizeof t) > 0 && t[0] == '1';
+    return !(GetEnvironmentVariableA("HELLFORGE_XL_STREAM_LAYERS", t, sizeof t) > 0 && t[0] == '0');
 }
 static const char* SlEarly(uintptr_t exe)
 {
     char t[4] = "";
     if (g_sl.layers) return NULL;
-    /* off unless asked: no hook goes in before the set-up, so the race with it (adv REPORT-r9 §2) is not run */
-    if (!(g_sl.asked = SlAsked())) return SL_OFF_DEFAULT;
+    /* asked off: no hook goes in before the set-up, so the race with it (adv REPORT-r9 §2) is not run */
+    if (!(g_sl.asked = SlAsked())) return SL_OFF_ASKED;
     if (exe == 0) return "the exe is not loaded";
     if (GetEnvironmentVariableA("HELLFORGE_LW_BP", t, sizeof t) > 0 && t[0] == '1') return "the living world's layer research (HELLFORGE_LW_BP) hooks the same layer rule";
     if (!ApiCodeMatches(exe + SL_COUNT_RVA, kSlCountPin) || !ApiCodeMatches(exe + SL_INFO_RVA, kSlInfoPin) || !ApiCodeMatches(exe + SL_COUNT_SITE, kSlCountSitePin))
@@ -356,7 +376,7 @@ static const char* SlEarly(uintptr_t exe)
 static const char* SlInstall(uintptr_t exe)
 {
     if (g_sl.on) return NULL;
-    if (!g_sl.asked && !SlAsked()) return SL_OFF_DEFAULT;
+    if (!g_sl.asked && !SlAsked()) return SL_OFF_ASKED;
     if (!g_sl.layers) return "the layer count was not hooked before the game's set-up made the main world (its broad phase keeps 6 layers)";
     if (exe == 0 || exe != g_sl.exe) return "the exe is not the one the layer count was hooked in";
     /* the main world exists by now (the streamer goes in from a game update): its own count says whether it was in time */
@@ -424,9 +444,11 @@ static void SlNote(void)
     if (!read && count < 0) snprintf(why, sizeof why, " (not read: no main world)");
     else if (!read && count < (int)(SL_FIRST + SL_COUNT)) snprintf(why, sizeof why, " (not read: the main world's broad phase has %d layers, made before the layer count was hooked)", count);
     else if (!read) snprintf(why, sizeof why, " (not read: the main world's broad phase has %d layers, but they do not read)", count);
-    Note("difficulty: extra large maps: streamed layers %s: static leaves layer 4 %u, layers 6..9 %u %u %u %u%s; in 10 s %ld bodies made, %ld of them in a change frame, %ld sent to 6..9 by the rule",
+    Note("difficulty: extra large maps: streamed layers %s: static leaves layer 4 %u, layers 6..9 %u %u %u %u%s; in 10 s %ld bodies made, %ld of them in a change frame's spawn window "
+        "(%ld of those off the game thread), %ld sent to 6..9 by the rule; %ld window flushes left units on the spawn ring",
         g_sl.on ? "on" : "off", leaves[0], leaves[1], leaves[2], leaves[3], leaves[4], why,
-        (long)InterlockedExchange(&g_sl.created, 0), (long)InterlockedExchange(&g_sl.marked, 0), (long)InterlockedExchange(&g_sl.routed, 0));
+        (long)InterlockedExchange(&g_sl.created, 0), (long)InterlockedExchange(&g_sl.marked, 0), (long)InterlockedExchange(&g_sl.markedOff, 0),
+        (long)InterlockedExchange(&g_sl.routed, 0), (long)InterlockedExchange(&g_sl.ringLeft, 0));
     if (g_sl.createOrig == NULL) return;
     SlSampleText(made, sizeof made);
     Note("difficulty: extra large maps: the mission world's bodies' makers in 10 s: %s", made);
