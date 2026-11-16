@@ -322,7 +322,7 @@ static void WindowEvictFarLocked(void)
         for (uint32_t k = 1; k < n; k++) if (far2[k] < far2[m]) m = k;
         if (best > far2[m]) { pick[m] = s; far2[m] = best; }
     }
-    for (uint32_t k = 0; k < n; k++) WorldStreamDropLocked(pick[k], STREAM_DROP_FAR); /* a few a frame (WorldStreamDrainLocked) */
+    for (uint32_t k = 0; k < n; k++) WorldStreamDropLocked(pick[k], STREAM_DROP_FAR); /* in the next change frames (WorldStreamChangeLocked) */
     if (n != 0) g_win.farHoldUntil = GetTickCount64() + 30000; /* no churn: the far ring waits 30 s after it gave way */
 }
 
