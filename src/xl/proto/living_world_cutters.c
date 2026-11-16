@@ -1,7 +1,8 @@
-/* The trees' navmesh cutters near players and squads (../co_cutset.h): research switch
- * HELLFORGE_LW_CUTTERS=MODE[,CAP[,ADDS[,REMOVES]]], off by default. 1 records only: the game adds every cutter and the
- * set counts what the mod would do, to compare with the "navmesh cutters:" line. 2 holds the makes back and adds the
- * cutters in reach (no removes, no cap). 3 also removes and caps. A client follows HELLFORGE_LW_CUTTERS_CLIENT. */
+/* The trees' navmesh cutters only near players, units, squads and garrisons (../co_cutset.h). Every streamed tree's
+ * cutter added and removed again kept the AI step's drain on through a whole flight (issue C): mode 3 is the default
+ * on a complex level, every build. HELLFORGE_LW_CUTTERS=0 is the game's way; =MODE[,CAP[,ADDS[,REMOVES]]] for research:
+ * 1 records only (the game adds every cutter, the set counts what the mod would do), 2 holds the makes back and adds
+ * the cutters in reach (no removes, no cap), 3 also removes and caps. A client follows HELLFORGE_LW_CUTTERS_CLIENT. */
 #define LW_CUT_NOTE_MS 30000
 /* A squad's request point is within 2 m of its place, its members' slots 5 m around the point and each up to 2.52 m
  * wide (LwPlace, LwMemberSlot): a tree whose hole could reach one of them is well inside this. */
@@ -14,6 +15,7 @@ static struct
     int on, mode, client, body; uint32_t removes; ULONGLONG tickAt, notedAt;
     double holdSum, holdWorst;
     uint32_t ticks, adds, removed, shed, capped, waiting, over, players, last, squads, beside, left; double usSum, usWorst;
+    uint32_t ahead, garrisons, units, unitsHeld, allowLeast, allowMost, addedMost, queueHeld; int queuedMost; float fastest;
     CoCutHeld held[EVT_MAX_PLAYERS];
     uint32_t gate[4], gateLongest; /* requests by LW_CUT_ verdict since the start; the longest wait in ms */
 } g_lwCut;
@@ -52,29 +54,37 @@ static int LwCutReady(const LwSquad* q)
     return verdict != LW_CUT_WAITS;
 }
 
-/* The switch's text into v = {mode, cap, adds, removes}: 1 on, 0 off (empty or a leading 0), -1 not valid. */
+/* The switch's text into v = {mode, cap, adds, removes a tick at most}: 1 on, 0 off (a leading 0), -1 not valid. No
+ * text (the switch not set) is mode 3 with the set's own limits. */
 static int LwCutParse(const char* t, unsigned* v)
 {
-    v[0] = 0; v[1] = CO_CUTSET_CAP; v[2] = CO_CUTSET_ADDS; v[3] = CO_CUTSET_REMOVES;
-    if (t[0] == 0 || t[0] == '0') return 0;
+    v[0] = 3; v[1] = CO_CUTSET_CAP; v[2] = CO_CUTSET_ADDS; v[3] = CO_CUTSET_REMOVES_MOST;
+    if (t[0] == 0) return 1;
+    if (t[0] == '0') { v[0] = 0; return 0; }
+    v[0] = 0;
     sscanf(t, "%u%*[ ,]%u%*[ ,]%u%*[ ,]%u", &v[0], &v[1], &v[2], &v[3]);
-    if (v[0] < 1 || v[0] > 3 || v[1] > CO_CUTSET_SLOTS || v[2] > CO_CUTSET_ADDS || v[3] > CO_CUTSET_BATCH) return -1;
+    if (v[0] < 1 || v[0] > 3 || v[1] > CO_CUTSET_SLOTS || v[2] > CO_CUTSET_ADDS || v[3] > CO_CUTSET_REMOVES_MOST) return -1;
     if (v[0] == 2) { v[1] = CO_CUTSET_SLOTS; v[3] = 0; } /* adds only: a cutter left on is what the game does */
     return 1;
 }
-/* A client's part from HELLFORGE_LW_CUTTERS_CLIENT: 0 left to the game, 1 adds around its players, 2 adds none. */
-static int LwCutClient(const char* t) { return t[0] >= '0' && t[0] <= '2' ? t[0] - '0' : 1; }
+/* A client's part from HELLFORGE_LW_CUTTERS_CLIENT: 0 left to the game (the default: whether a client's navmesh
+ * steers anything it shows is not known without a client's dump, and the game's way is safe), 1 adds around its
+ * players and the units it knows, 2 adds none. */
+static int LwCutClient(const char* t) { return t[0] >= '0' && t[0] <= '2' ? t[0] - '0' : 0; }
 
-/* The tick's centres into `c` (room for CO_CUTSET_CENTRES); returns how many, the first out[0] of them players.
- * `peer` and `place` are the streamer's list. out = {players, at the last place, squads, beside a player, left out}.
- * The squads are the host's (LwCutSquad). */
-static uint32_t LwCutCentres(const EvpPlayer* list, int count, const uint64_t* peer, float (*place)[2], int streamed, int host, int none, ULONGLONG now, CoCutCentre* c, uint32_t* out)
+/* The tick's centres into `c` (room for CO_CUTSET_CENTRES); returns how many, the first out[0] of them players and
+ * the places ahead of the moving ones. `peer` and `place` are the streamer's list; `units` the navigators' units,
+ * `garrisons` {x, y, reach of its guard points}. out = {players and leads, at the last place, squads, inside another
+ * centre's reach, left out, leads, garrisons, units}. Squads and garrisons are the host's (LwCutSquad). */
+#define LW_CUT_OUTS 8
+static uint32_t LwCutCentres(const EvpPlayer* list, int count, const uint64_t* peer, float (*place)[2], int streamed, int host, int none, ULONGLONG now,
+    float (*units)[2], uint32_t unitCount, float (*garrisons)[3], uint32_t garrisonCount, CoCutCentre* c, uint32_t* out)
 {
     uint32_t n = 0;
-    out[1] = out[2] = out[3] = out[4] = 0;
+    memset(out, 0, LW_CUT_OUTS * sizeof out[0]);
     for (int i = 0; i < count && i < EVT_MAX_PLAYERS && !none; i++)
     {
-        float at[2] = {0, 0}, use[2];
+        float at[2] = {0, 0}, use[2], ahead[2][2];
         int reads = 0;
         for (int p = 0; p < streamed && !reads; p++)
             if (peer[p] == list[i].peer) { at[0] = place[p][0]; at[1] = place[p][1]; reads = 1; }
@@ -82,14 +92,39 @@ static uint32_t LwCutCentres(const EvpPlayer* list, int count, const uint64_t* p
         if (kind == 0) continue;
         c[n++] = (CoCutCentre){use[0], use[1], CO_CUTSET_PLAYER_IN, CO_CUTSET_PLAYER_OUT};
         out[1] += (uint32_t)(kind == 2);
+        const int leads = kind == 1 ? co_cutset_lead(g_lwCut.held, EVT_MAX_PLAYERS, list[i].peer, ahead) : 0;
+        for (int k = 0; k < leads; k++) { c[n++] = (CoCutCentre){ahead[k][0], ahead[k][1], CO_CUTSET_PLAYER_IN, CO_CUTSET_PLAYER_OUT}; out[5]++; }
     }
     out[0] = n;
     for (int i = 0; host && i < g_lwWorld.count; i++)
     {
         if (!LwCutSquad(i, now)) continue;
         const CoCutCentre q = {g_lwSquads[i].pos[0], g_lwSquads[i].pos[1], CO_CUTSET_SQUAD_IN, CO_CUTSET_SQUAD_OUT};
-        if (co_cutset_covered(c, out[0], &q)) out[3]++;
+        if (co_cutset_covered(c, n, &q)) out[3]++;
         else if (n < CO_CUTSET_CENTRES) { c[n++] = q; out[2]++; }
+        else out[4]++;
+    }
+    for (uint32_t i = 0; host && i < garrisonCount; i++)
+    {
+        float in = garrisons[i][2] + 16.0f;
+        in = in < CO_CUTSET_GARRISON_LEAST ? CO_CUTSET_GARRISON_LEAST : in > CO_CUTSET_GARRISON_MOST ? CO_CUTSET_GARRISON_MOST : in;
+        const CoCutCentre g = {garrisons[i][0], garrisons[i][1], in, in + 32.0f};
+        int nears = 0;
+        for (uint32_t k = 0; k < out[0] && !nears; k++)
+        {
+            const float dx = c[k].x - g.x, dy = c[k].y - g.y, r = CO_CUTSET_GARRISON_NEAR + garrisons[i][2];
+            nears = dx * dx + dy * dy <= r * r;
+        }
+        if (!nears) continue;
+        if (co_cutset_covered(c, n, &g)) out[3]++;
+        else if (n < CO_CUTSET_CENTRES) { c[n++] = g; out[6]++; }
+        else out[4]++;
+    }
+    for (uint32_t i = 0; i < unitCount && !none; i++)
+    {
+        if (!isfinite(units[i][0]) || !isfinite(units[i][1])) continue;
+        if (co_cutset_holds(c, n, units[i][0], units[i][1], CO_CUTSET_UNIT_NEED)) out[3]++;
+        else if (n < CO_CUTSET_CENTRES) { c[n++] = (CoCutCentre){units[i][0], units[i][1], CO_CUTSET_UNIT_IN, CO_CUTSET_UNIT_OUT}; out[7]++; }
         else out[4]++;
     }
     return n;
@@ -98,11 +133,11 @@ static uint32_t LwCutCentres(const EvpPlayer* list, int count, const uint64_t* p
 static void LwCutInit(void)
 {
     char t[64] = "", cl[8] = ""; unsigned v[4];
-    if (!GetEnvironmentVariableA("HELLFORGE_LW_CUTTERS", t, sizeof t)) return;
+    GetEnvironmentVariableA("HELLFORGE_LW_CUTTERS", t, sizeof t); /* not set: mode 3 */
     const int valid = LwCutParse(t, v);
-    if (valid == 0) return;
+    if (valid == 0) { Note("living world: tree cutters: HELLFORGE_LW_CUTTERS=0: the game adds every tree's cutter as before"); return; }
     if (valid < 0)
-    { Note("living world: tree cutters: HELLFORGE_LW_CUTTERS=MODE[,CAP[,ADDS[,REMOVES]]]: mode 1 to 3, cap up to %u, adds up to %u, removes up to %u a tick; not recorded", CO_CUTSET_SLOTS, CO_CUTSET_ADDS, CO_CUTSET_BATCH); return; }
+    { Note("living world: tree cutters: HELLFORGE_LW_CUTTERS=MODE[,CAP[,ADDS[,REMOVES]]]: mode 1 to 3, cap up to %u, adds up to %u, removes up to %u a tick; not recorded", CO_CUTSET_SLOTS, CO_CUTSET_ADDS, CO_CUTSET_REMOVES_MOST); return; }
     const unsigned mode = v[0], cap = v[1], adds = v[2], removes = v[3];
     GetEnvironmentVariableA("HELLFORGE_LW_CUTTERS_CLIENT", cl, sizeof cl);
     g_lwCut.client = LwCutClient(cl);
@@ -114,8 +149,9 @@ static void LwCutInit(void)
     g_lwCut.on = 1; g_lwCut.mode = (int)mode; g_lwCut.removes = removes; g_lwCut.notedAt = GetTickCount64();
     co_cutters_switch(mode >= 2);
     if (mode == 1) Note("living world: tree cutters: record only on complex levels (the game adds every cutter as before): cap %u on, %u adds and %u removes a tick at most", cap, adds, removes);
-    else Note("living world: tree cutters: switching on complex levels (mode %u): the game makes each tree's cutter and the mod adds those in reach: cap %u on, %u adds and %u removes a tick at most; a client %s",
-        mode, cap, adds, removes, g_lwCut.client == 0 ? "is left to the game" : g_lwCut.client == 1 ? "adds around its players" : "adds none");
+    else Note("living world: tree cutters: switching on complex levels (mode %u%s): the game makes each tree's cutter and the mod adds those within %.0f m of a player (to %.0f m ahead of one at 45 m/s), %.0f m of a unit or a squad and around a garrison a player nears: cap %u on, %u adds and %u removes a tick at most (removes held to %u entries scanned, none with %d changes queued); a client %s",
+        mode, t[0] ? ", HELLFORGE_LW_CUTTERS" : ", the default", (double)CO_CUTSET_PLAYER_IN, (double)CO_CUTSET_LEAD_MS / 1000.0 * 45.0 + CO_CUTSET_PLAYER_IN, (double)CO_CUTSET_UNIT_IN,
+        cap, adds, mode == 2 ? 0u : removes, CO_CUTSET_SCANS, CO_CUTSET_QUEUE_SHORT, g_lwCut.client == 0 ? "is left to the game" : g_lwCut.client == 1 ? "adds around its players and units" : "adds none");
 }
 
 /* Launch measurements, HELLFORGE_LW_CUTTERS_BODY=0 turns them off: what a squad member placed beside a tree does
@@ -127,7 +163,7 @@ static void LwCutInit(void)
 #define LW_CUT_BODY_LEVEL 96      /* members watched a level: 20 lines each */
 #define LW_CUT_BODY_STUCK 5       /* seconds with a goal and no way made */
 #define LW_CUT_NAVS 1024
-typedef struct LwCutBody { uint32_t unit; int squad; ULONGLONG at; float spot[2]; uint8_t used, samples, still, busy, stuck; } LwCutBody;
+typedef struct LwCutBody { uint32_t unit; int squad; ULONGLONG at; float spot[2]; uint8_t used, samples, still, busy, stuck, told; } LwCutBody;
 static struct
 {
     LwCutBody unit[LW_CUT_BODY_MAX]; uint32_t squadOf[LW_SQUADS_MAX]; ULONGLONG until[LW_SQUADS_MAX];
@@ -228,7 +264,13 @@ static void LwCutBodySample(uintptr_t exe, LwCutBody* b, ULONGLONG now)
     const int stuck = b->samples != 0 && nav && rec && LwCutBodyStep(b, p, goals, state);
     if (stuck && !b->stuck) { b->stuck = 1; g_lwCutBody.stuck++; }
     LwGround(p[0], p[1], &ray);
-    Note("living world: tree cutters: body: unit %08X of squad %d, %u s: at (%.1f, %.1f, %.2f), %.2f over the ground ray, %.2f over the drawn ground; nearest tree %.1f m (cutter %s); %.2f m from its last spot; navigation state %u, stale %u, goals %u, repaths %u; motion status %u%s%s",
+    /* a player's build writes a member's first and last second and the second it is found stuck: 3 lines at most */
+    int write = 1;
+#ifndef CO_RESEARCH
+    write = b->samples == 0 || b->samples == LW_CUT_BODY_S || (stuck && b->stuck == 1 && !b->told);
+    if (stuck) b->told = 1;
+#endif
+    if (write) Note("living world: tree cutters: body: unit %08X of squad %d, %u s: at (%.1f, %.1f, %.2f), %.2f over the ground ray, %.2f over the drawn ground; nearest tree %.1f m (cutter %s); %.2f m from its last spot; navigation state %u, stale %u, goals %u, repaths %u; motion status %u%s%s",
         b->unit, b->squad, (unsigned)b->samples, (double)p[0], (double)p[1], (double)p[2], (double)(p[2] - ray), (double)(p[2] - drawn), (double)tree, on ? "on" : "off",
         (double)from, state, (unsigned)stale, goals, repaths, LwCutMotion(b->unit), rec && nav ? "" : "; its navigation record or navigator did not read",
         stuck ? "; STUCK: a goal, and 5 s within 0.5 m of one spot or with a state other than 0" : "");
@@ -279,24 +321,68 @@ static void LwCutLines(ULONGLONG now, const CoCuttersTick* t)
         Note("living world: tree cutters (switching): since the start: %llu makes held back, %llu added by the game with no tick in the last second, %llu added at once (not recorded), %llu not added (the AI world or the pool had gone); %llu switched on, %llu switched off; %llu ticks skipped with the AI step in flight; the set's lock held mean %.0f us, worst %.0f us a tick; %u navmesh runs began with changes; squads' requests: %u placed with their trees cut in (longest wait %u ms), %u where the cutters are the game's, %u let through uncut after %u ms, %u asks made to wait",
             (unsigned long long)t->held, (unsigned long long)t->stock, (unsigned long long)t->atOnce, (unsigned long long)t->noWorld, (unsigned long long)t->sentOn, (unsigned long long)t->sentOff, (unsigned long long)t->skips, g_lwCut.holdSum / g_lwCut.ticks, g_lwCut.holdWorst,
             t->took, g_lwCut.gate[LW_CUT_IS_CUT], g_lwCut.gateLongest, g_lwCut.gate[LW_CUT_GAMES], g_lwCut.gate[LW_CUT_LATE], LW_CUT_WAIT_MS, g_lwCut.gate[LW_CUT_WAITS]);
+    Note("living world: tree cutters (%s): centres at the last tick: %u players and %u places ahead of moving ones (the fastest %.0f m/s in 30 s), %u squads, %u garrisons a player nears, %u units (%u more inside another centre's reach, %u left out past %u); removes allowed a tick %u to %u; the AI world's added cutters at most %u, changes queued at most %d, %u ticks with the removes held by a queue of %u or more",
+        mode, g_lwCut.players - g_lwCut.ahead, g_lwCut.ahead, (double)g_lwCut.fastest, g_lwCut.squads, g_lwCut.garrisons, g_lwCut.units, g_lwCut.beside, g_lwCut.left, CO_CUTSET_CENTRES,
+        g_lwCut.allowLeast, g_lwCut.allowMost, g_lwCut.addedMost, g_lwCut.queuedMost, g_lwCut.queueHeld, CO_CUTSET_QUEUE_SHORT);
     if (g_lwCut.body)
         Note("living world: tree cutters: bodies: %u squad members watched beside a tree since the level's start (%u gone while watched, %u STUCK); navigators' repaths: %u in %u ticks within a second after a navmesh run that began with changes, %u in %u other ticks; %u navigators read at the last tick, %u not",
             g_lwCutBody.watched, g_lwCutBody.gone, g_lwCutBody.stuck, g_lwCutBody.after, g_lwCutBody.afterTicks, g_lwCutBody.other, g_lwCutBody.otherTicks, g_lwCutBody.navs, g_lwCutBody.unread);
     g_lwCutBody.after = g_lwCutBody.afterTicks = g_lwCutBody.other = g_lwCutBody.otherTicks = 0;
     g_lwCut.ticks = g_lwCut.adds = g_lwCut.removed = g_lwCut.shed = g_lwCut.capped = g_lwCut.waiting = g_lwCut.over = 0;
     g_lwCut.usSum = g_lwCut.usWorst = g_lwCut.holdSum = g_lwCut.holdWorst = 0; g_lwCut.notedAt = now;
+    g_lwCut.allowLeast = g_lwCut.allowMost = g_lwCut.addedMost = g_lwCut.queueHeld = 0; g_lwCut.queuedMost = -1; g_lwCut.fastest = 0;
+}
+
+/* Every navigator's unit place (navigator +0x30, the raw position the game hands it each frame: exe 0xBE0C10,
+ * 0xBE0C90), through the navigation records ([game+0x3326418]: count +0x18, records +0x50 of 0xA8, the navigator handle
+ * at +8). Returns how many, at most `room`. A unit stands where the game put it, so its trees must be cut there. */
+static uint32_t LwCutUnits(uintptr_t exe, float (*at)[2], uint32_t room)
+{
+    uintptr_t mgr = 0, recs = 0; uint32_t n = 0, got = 0;
+    if (!EvpPtr(g_lw.game + 0x3326418u, &mgr) || SafeRead(mgr + 0x18, &n, 4) || !EvpPtr(mgr + 0x50, &recs)) return 0;
+    if (n > LW_CUT_NAVS) n = LW_CUT_NAVS;
+    for (uint32_t i = 0; i < n && got < room; i++)
+    {
+        uint32_t handle = 0xFFFFFFFFu; uintptr_t nav; float p[2];
+        if (SafeRead(recs + 0xA8ull * i + 8, &handle, 4) || handle == 0xFFFFFFFFu || !(nav = LwCutNavigator(exe, handle)) || SafeRead(nav + 0x30, p, 8)) continue;
+        at[got][0] = p[0]; at[got][1] = p[1]; got++;
+    }
+    return got;
+}
+/* A garrison's guard points' farthest from its centre (GuardForce lists [[game+0x33265C0]+0x48] + 0x2B8 x index:
+ * count +0x1A8, point indices +0x28; points [game+0x346D5C0] of 0x58, x, y at +0x10, as LwRetakeGarrison reads them).
+ * Kept per garrison until its point count changes; one that does not read is given the most. */
+static struct { uint32_t entity, points; float reach; } g_lwCutReach[LW_GARRISONS_MAX];
+static float LwCutGarrisonReach(int i)
+{
+    const LwGarrison* g = &g_lwGarrisons[i];
+    if (g_lwCutReach[i].entity == g->entity && g_lwCutReach[i].points == g->points && g->points) return g_lwCutReach[i].reach;
+    uintptr_t gf = 0, lists = 0, points = 0; float reach = 0.0f;
+    const uintptr_t l = EvpPtr(g_lw.game + 0x33265C0u, &gf) && EvpPtr(gf + 0x48, &lists) && EvpPtr(g_lw.game + 0x346D5C0u, &points) ? lists + 0x2B8ull * g->index : 0;
+    const uint32_t n = l ? EvpU32(l + 0x1A8, 0xFFFFFFFFu) : 0xFFFFFFFFu;
+    for (uint32_t p = 0; n <= 96 && p < n; p++)
+    {
+        uint32_t gi = EvpU32(l + 0x28 + 4u * p, 0xFFFFFFFFu); float xy[2];
+        if (gi >= 0x100000 || SafeRead(points + 0x58ull * gi + 0x10, xy, 8) || !isfinite(xy[0]) || !isfinite(xy[1])) { reach = CO_CUTSET_GARRISON_MOST; break; }
+        const float d = sqrtf((xy[0] - g->center[0]) * (xy[0] - g->center[0]) + (xy[1] - g->center[1]) * (xy[1] - g->center[1]));
+        if (d > reach) reach = d;
+    }
+    if (n > 96) reach = CO_CUTSET_GARRISON_MOST;
+    g_lwCutReach[i].entity = g->entity; g_lwCutReach[i].points = g->points; g_lwCutReach[i].reach = reach;
+    return reach;
 }
 
 /* Game thread, every peer, 4 Hz: a client has the AI world and the forest's cutters too (the make has no host
  * test). Centres: every player's Helldiver, or for 30 s the last place it read at (a dead player's surroundings
- * keep their cutters), and on the host the squads (LwCutSquad) that a player's reach does not already hold. */
+ * keep their cutters), and two places ahead of a moving one; every navigator's unit no centre already holds; and on
+ * the host the squads (LwCutSquad) and the garrisons a player nears. */
 static void LwCutFrame(int mission, int host)
 {
     if (!g_lwCut.on || !mission) return;
     if (!host && g_lwCut.mode >= 2 && g_lwCut.client == 0) return; /* no tick: this client's makes are the game's */
     ULONGLONG now = GetTickCount64();
     if (now - g_lwCut.tickAt < CO_CUTSET_TICK_MS) return;
-    CoCutCentre c[CO_CUTSET_CENTRES]; uint32_t counts[5];
+    CoCutCentre c[CO_CUTSET_CENTRES]; uint32_t counts[LW_CUT_OUTS];
     EvpPlayer list[EVT_MAX_PLAYERS];
     int count = EvpPlayers(g_lw.game, list);
     /* The places the streamer streams trees around (a hellpod's flight held still, co_settle.h), so a tree streamed
@@ -312,9 +398,28 @@ static void LwCutFrame(int mission, int host)
     ReleaseSRWLockShared(&g_streamLock);
     g_lwCut.tickAt = now;
     const int none = !host && g_lwCut.mode >= 2 && g_lwCut.client == 2; /* a client that adds none: no centre */
-    const uint32_t n = LwCutCentres(list, count, peer, place, streamed, host, none, now, c, counts);
+    static float units[LW_CUT_NAVS][2], garrisons[LW_GARRISONS_MAX][3];
+    const uintptr_t exe = ApiModuleBase("helldivers2.exe", NULL);
+    const uint32_t unitCount = none ? 0 : LwCutUnits(exe, units, LW_CUT_NAVS);
+    uint32_t garrisonCount = 0;
+    for (int i = 0; host && i < g_lwGarrisonCount; i++)
+        if (g_lwGarrisons[i].haveCenter && g_lwGarrisons[i].entity)
+        { garrisons[garrisonCount][0] = g_lwGarrisons[i].center[0]; garrisons[garrisonCount][1] = g_lwGarrisons[i].center[1]; garrisons[garrisonCount++][2] = LwCutGarrisonReach(i); }
+    const uint32_t n = LwCutCentres(list, count, peer, place, streamed, host, none, now, units, unitCount, garrisons, garrisonCount, c, counts);
     CoCuttersTick t;
     if (!co_cutters_tick(c, n, (uint32_t)now, g_lwCut.removes, &t)) return;
+    for (int i = 0; i < EVT_MAX_PLAYERS; i++)
+        if (g_lwCut.held[i].used && (uint32_t)now - g_lwCut.held[i].at < 1000u)
+        { const float v = sqrtf(g_lwCut.held[i].vx * g_lwCut.held[i].vx + g_lwCut.held[i].vy * g_lwCut.held[i].vy); if (v > g_lwCut.fastest) g_lwCut.fastest = v; }
+    g_lwCut.ahead = counts[5]; g_lwCut.garrisons = counts[6]; g_lwCut.units = counts[7];
+    if (!t.skipped && t.bound)
+    {
+        if (g_lwCut.ticks == 0 || t.allowed < g_lwCut.allowLeast) g_lwCut.allowLeast = t.allowed;
+        if (t.allowed > g_lwCut.allowMost) g_lwCut.allowMost = t.allowed;
+        if (t.added > g_lwCut.addedMost) g_lwCut.addedMost = t.added;
+        if (t.queued > g_lwCut.queuedMost) g_lwCut.queuedMost = t.queued;
+        g_lwCut.queueHeld += (uint32_t)(g_lwCut.mode == 3 && t.queued >= CO_CUTSET_QUEUE_SHORT);
+    }
     g_lwCut.ticks++; g_lwCut.adds += t.adds; g_lwCut.removed += t.removes; g_lwCut.shed += t.shed; g_lwCut.capped += (uint32_t)(t.capped != 0);
     if (t.waiting > g_lwCut.waiting) g_lwCut.waiting = t.waiting;
     if (t.over > g_lwCut.over) g_lwCut.over = t.over;
@@ -323,7 +428,6 @@ static void LwCutFrame(int mission, int host)
     g_lwCut.holdSum += t.holdUs; if (t.holdUs > g_lwCut.holdWorst) g_lwCut.holdWorst = t.holdUs;
     if (g_lwCut.body)
     {
-        const uintptr_t exe = ApiModuleBase("helldivers2.exe", NULL);
         LwCutRepaths(exe, t.took);
         if (host) LwCutBodies(exe, now);
     }
@@ -338,5 +442,6 @@ static void LwCutLive(int complex)
     memset(g_lwCut.held, 0, sizeof g_lwCut.held); /* a last place is of its own level */
     memset(g_lwCutAsk, 0, sizeof g_lwCutAsk);
     memset(&g_lwCutBody, 0, sizeof g_lwCutBody);
+    memset(g_lwCutReach, 0, sizeof g_lwCutReach); /* entity numbers are used again in the next level */
     if (g_lwCut.on && !complex && dropped) Note("living world: tree cutters: %u records dropped at the level's end", dropped);
 }

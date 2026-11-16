@@ -426,10 +426,10 @@ static void Leaving(void)
 
     Fresh("removes: capped a tick, the longest out first");
     CoCutCentre two[2] = {Player(100.0f, 0.0f), Player(-1000.0f, 0.0f)};
-    for (uint32_t i = 0; i < 100; i++) co_cutset_made(&g_set, H(100 + i), 100.0f + 0.2f * (float)i, 5.0f, 1);   /* one cell */
-    for (uint32_t i = 0; i < 3; i++) co_cutset_made(&g_set, H(300 + i), -1000.0f + (float)i, 5.0f, 1);
+    for (uint32_t i = 0; i < 300; i++) co_cutset_made(&g_set, H(100 + i), 100.0f + 0.05f * (float)i, 5.0f, 1);   /* one cell */
+    for (uint32_t i = 0; i < 3; i++) co_cutset_made(&g_set, H(500 + i), -1000.0f + (float)i, 5.0f, 1);
     Tick(two, 2, 1000, 16);
-    CHECK(g_out.adds == 103 && g_set.on == 103);
+    CHECK(g_out.adds == 303 && g_set.on == 303);
     two[0] = Player(5000.0f, 5000.0f);  /* the first group is out from 1250 on, the second from 2250 on */
     Tick(two, 2, 1250, 16);
     Tick(two, 2, 2000, 16);
@@ -438,22 +438,22 @@ static void Leaving(void)
     Tick(two, 2, 5999, 64);
     CHECK(g_out.removes == 0);
     Tick(two, 2, 6000, 0); /* no removes asked for (the engine's queue is long) */
-    CHECK(g_out.removes == 0 && g_set.on == 103);
+    CHECK(g_out.removes == 0 && g_set.on == 303);
     Tick(two, 2, 6000, 16);
-    CHECK(g_out.removes == 16 && g_set.on == 87);
+    CHECK(g_out.removes == 16 && g_set.on == 287);
     int first = 1;
-    for (uint32_t i = 0; i < g_out.removes; i++) first &= g_out.remove[i] >= H(100) && g_out.remove[i] < H(200);
+    for (uint32_t i = 0; i < g_out.removes; i++) first &= g_out.remove[i] >= H(100) && g_out.remove[i] < H(400);
     CHECK(first);
-    Tick(two, 2, 7500, 1000); /* never more than one batch; both groups are due, the first is the longer out */
-    CHECK(g_out.removes == CO_CUTSET_BATCH && g_set.on == 23);
+    Tick(two, 2, 7500, 1000); /* never more than the most a tick; both groups are due, the first is the longer out */
+    CHECK(g_out.removes == CO_CUTSET_REMOVES_MOST && g_set.on == 31);
     first = 1;
-    for (uint32_t i = 0; i < g_out.removes; i++) first &= g_out.remove[i] >= H(100) && g_out.remove[i] < H(200);
+    for (uint32_t i = 0; i < g_out.removes; i++) first &= g_out.remove[i] >= H(100) && g_out.remove[i] < H(400);
     CHECK(first);
     Sound();
-    Tick(two, 2, 7750, 22);
-    CHECK(g_out.removes == 22 && g_set.on == 1 && Removes(H(300)) + Removes(H(301)) + Removes(H(302)) == 2);
+    Tick(two, 2, 7750, 30);
+    CHECK(g_out.removes == 30 && g_set.on == 1 && Removes(H(500)) + Removes(H(501)) + Removes(H(502)) == 2);
     Tick(two, 2, 8000, 22);
-    CHECK(g_out.removes == 1 && g_set.on == 0 && g_set.removed == 103);
+    CHECK(g_out.removes == 1 && g_set.on == 0 && g_set.removed == 303);
     Tick(two, 2, 8250, 22);
     CHECK(g_out.removes == 0);
     Sound();
@@ -887,10 +887,65 @@ static void CutIn(void)
     Sound();
 }
 
+static void Spread(void)
+{
+    g_case = "removes a tick: the scans they cost, the queue, the least and the most";
+    CHECK(co_cutset_removes(150000, 0, 256) == CO_CUTSET_REMOVES);           /* 10 by the scans: the least */
+    CHECK(co_cutset_removes(30000, 0, 256) == CO_CUTSET_SCANS / 30000u);     /* 50 */
+    CHECK(co_cutset_removes(5000, 0, 256) == 256 && co_cutset_removes(0, 0, 256) == 256);
+    CHECK(co_cutset_removes(5000, 0, 1000) == CO_CUTSET_REMOVES_MOST);
+    CHECK(co_cutset_removes(5000, 0, 40) == 40 && co_cutset_removes(5000, 0, 4) == 4 && co_cutset_removes(5000, 0, 0) == 0);
+    CHECK(co_cutset_removes(5000, CO_CUTSET_QUEUE_SHORT - 1, 256) == 256 && co_cutset_removes(5000, CO_CUTSET_QUEUE_SHORT, 256) == 0);
+    CHECK(co_cutset_removes(5000, -1, 256) == CO_CUTSET_REMOVES && co_cutset_removes(5000, -1, 4) == 4);
+    CHECK(co_cutset_removes(CO_CUTSET_SCANS / 20u, 0, 256) == 20 && co_cutset_removes(CO_CUTSET_SCANS / 20u + 1u, 0, 256) == 19);
+
+    g_case = "a unit held by another centre's reach";
+    const CoCutCentre p[2] = {Player(1000.0f, 0.0f), {0.0f, 0.0f, CO_CUTSET_UNIT_IN, CO_CUTSET_UNIT_OUT}};
+    CHECK(co_cutset_holds(p, 2, 16.0f, 0.0f, CO_CUTSET_UNIT_NEED) == 1);   /* 16 + 48 = 64: at the edge */
+    CHECK(co_cutset_holds(p, 2, 16.5f, 0.0f, CO_CUTSET_UNIT_NEED) == 0);
+    CHECK(co_cutset_holds(p, 1, 0.0f, 0.0f, CO_CUTSET_UNIT_NEED) == 0);
+    CHECK(co_cutset_holds(p, 2, 1100.0f, 0.0f, CO_CUTSET_UNIT_NEED) == 1 && co_cutset_holds(p, 2, 1113.0f, 0.0f, CO_CUTSET_UNIT_NEED) == 0);
+    CHECK(co_cutset_holds(p, 0, 0.0f, 0.0f, 1.0f) == 0);
+    const CoCutCentre bad[1] = {{0.0f, 0.0f, nanf(""), 96.0f}};
+    CHECK(co_cutset_holds(bad, 1, 0.0f, 0.0f, 1.0f) == 0);
+    const CoCutCentre unused[2] = {{0.0f, 0.0f, INFINITY, INFINITY}, {0.0f, 0.0f, 0.0f, 0.0f}}; /* centres the tick does not use */
+    CHECK(co_cutset_holds(unused, 1, 0.0f, 0.0f, 1.0f) == 0 && co_cutset_holds(unused + 1, 1, 0.0f, 0.0f, 0.0f) == 0);
+
+    g_case = "a player's speed and the places ahead of it";
+    CoCutHeld held[3]; float at[2], ahead[2][2] = {{-1, -1}, {-1, -1}};
+    memset(held, 0, sizeof held);
+    CHECK(co_cutset_player(held, 3, 7, 1, 0.0f, 0.0f, 1000, at) == 1 && co_cutset_lead(held, 3, 7, ahead) == 0);
+    CHECK(co_cutset_player(held, 3, 7, 1, 10.0f, 0.0f, 1500, at) == 1 && held[0].vx == 10.0f && held[0].vy == 0.0f); /* 20 m/s, half */
+    CHECK(co_cutset_lead(held, 3, 7, ahead) == 2 && ahead[0][0] == 30.0f && ahead[1][0] == 50.0f && ahead[0][1] == 0.0f && ahead[1][1] == 0.0f);
+    CHECK(co_cutset_lead(held, 3, 8, ahead) == 0); /* another peer, not held */
+    CHECK(co_cutset_player(held, 3, 7, 1, 10.0f, 20.0f, 2500, at) == 1 && held[0].vx == 5.0f && held[0].vy == 10.0f);
+    CHECK(co_cutset_player(held, 3, 7, 1, 10.0f, 20.0f, 2500, at) == 1 && held[0].vx == 5.0f); /* the same moment twice: no speed from it */
+    CHECK(co_cutset_player(held, 3, 7, 0, 0.0f, 0.0f, 2600, at) == 2 && held[0].vx == 5.0f && co_cutset_lead(held, 3, 7, ahead) == 2);
+    CHECK(co_cutset_player(held, 3, 7, 1, 10.0f + 120.0f * 2.1f, 20.0f, 4600, at) == 1 && held[0].vx == 0.0f && held[0].vy == 0.0f); /* 2.1 s: no speed */
+    CHECK(co_cutset_player(held, 3, 7, 1, 262.0f + 61.0f, 20.0f, 5100, at) == 1 && held[0].vx == 0.0f); /* 122 m/s: a teleport */
+    CHECK(co_cutset_player(held, 3, 7, 1, 323.0f + 59.0f, 20.0f, 5600, at) == 1 && held[0].vx == 59.0f); /* 118 m/s */
+    CHECK(co_cutset_player(held, 3, 7, 1, 382.0f, 20.0f, 6100, at) == 1 && held[0].vx == 29.5f);
+    CHECK(co_cutset_player(held, 3, 7, 1, 382.0f, 20.0f, 6600, at) == 1 && held[0].vx == 14.75f);
+    g_case = "a player's speed at the edges: 2 s apart is still a speed, 120 m/s is still one";
+    memset(held, 0, sizeof held);
+    co_cutset_player(held, 3, 9, 1, 0.0f, 0.0f, 1000, at);
+    CHECK(co_cutset_player(held, 3, 9, 1, 40.0f, 0.0f, 3000, at) == 1 && held[0].vx == 10.0f); /* 20 m/s over exactly 2 s */
+    CHECK(co_cutset_player(held, 3, 9, 1, 100.0f, 0.0f, 3500, at) == 1 && held[0].vx == 65.0f); /* 120 m/s */
+    CHECK(co_cutset_player(held, 3, 9, 1, 121.0f, 0.0f, 5600, at) == 1 && held[0].vx == 0.0f);  /* 2.1 s: too old for a speed */
+    held[2].peer = 11; held[2].used = 0; held[2].vx = 50.0f; held[2].x = 0.0f;
+    CHECK(co_cutset_lead(held, 3, 11, ahead) == 0); /* a free slot's old speed is no one's */
+    memset(held, 0, sizeof held);
+    co_cutset_player(held, 3, 7, 1, 382.0f, 20.0f, 6600, at);
+    held[0].vx = 1.99f; held[0].vy = 0.0f;
+    CHECK(co_cutset_lead(held, 3, 7, ahead) == 0);
+    held[0].vx = 0.0f; held[0].vy = -2.0f;
+    CHECK(co_cutset_lead(held, 3, 7, ahead) == 2 && ahead[0][1] == 20.0f - 4.0f && ahead[1][1] == 20.0f - 8.0f);
+}
+
 int main(void)
 {
     /* unbuffered, and no group after a failed one: a set gone wrong can loop, and its failed checks must show */
-    void (*const groups[])(void) = {Binding, Records, AddsInReach, Leaving, Cap, Clock, Centres, CutIn, Tree, Forest};
+    void (*const groups[])(void) = {Binding, Records, AddsInReach, Leaving, Cap, Clock, Centres, Spread, CutIn, Tree, Forest};
     setvbuf(stdout, NULL, _IONBF, 0);
     for (size_t i = 0; i < sizeof groups / sizeof groups[0] && g_failed == 0; i++) groups[i]();
     free(g_memory);

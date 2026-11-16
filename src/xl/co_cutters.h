@@ -50,6 +50,7 @@ void co_cutters_seen(CoCuttersSeen* out);
 #define CO_CUTTERS_ALIVE_MS 1000u     /* with no tick this long the game adds a new cutter itself, as it always did */
 #define CO_CUTTERS_QUEUE 0x4A0u       /* AI world: its queued changes; a navmesh run takes them all as it begins (0xBB1430) */
 #define CO_CUTTERS_RUN 0x4B0u         /* AI world: the navmesh run in flight, 0 from its commit to the next start (0xBD1190) */
+#define CO_CUTTERS_ADDED 0x230u       /* AI world: its added cutters, dword; each remove scans them (0xBE8D32) */
 
 /* Arms the record with `cap` cutters on and `adds` a tick at most. NULL, or why not: the engine's code at the
  * sites above and at the switch 0x812AE0 is not the code this was made for, or no memory. */
@@ -83,10 +84,14 @@ typedef struct CoCuttersTick
     int skipped;
     uint64_t held, stock, atOnce, noWorld, sentOn, sentOff, skips;
     uint32_t took; /* navmesh runs that began with changes of the mission's world */
+    /* the AI world's added cutters and queued changes as the tick read them (0 / -1 when not read), and the removes
+     * the tick was allowed (co_cutset_removes) */
+    uint32_t added, allowed; int queued;
 } CoCuttersTick;
 /* One tick of the set over these centres, game thread: what it would add and remove, counted as done. Record only:
  * nothing is sent to the engine. Switching: sent to CO_CUTTERS_SWITCH in batches, unless the AI step is in flight
- * (then nothing is chosen). 0 when not armed or no complex level is live. */
+ * (then nothing is chosen). `removes` is the most a tick; co_cutset_removes lowers it by the AI world's added cutters
+ * and its queue. 0 when not armed or no complex level is live. */
 int co_cutters_tick(const CoCutCentre* centres, uint32_t count, uint32_t nowMs, uint32_t removes, CoCuttersTick* out);
 
 #ifdef CO_TEST
