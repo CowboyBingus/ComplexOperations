@@ -386,3 +386,25 @@ uint32_t co_cutset_removes(uint32_t added, int queued, uint32_t most)
     if (n < CO_CUTSET_REMOVES) n = CO_CUTSET_REMOVES;
     return n < most ? n : most;
 }
+
+uint32_t co_cutset_adds(int queued, uint32_t most)
+{
+    if (queued < 0) return most;
+    const uint32_t least = most < CO_CUTSET_ADDS_LEAST ? most : CO_CUTSET_ADDS_LEAST;
+    const uint32_t room = queued >= CO_CUTSET_QUEUE_ROOM ? 0u : (uint32_t)(CO_CUTSET_QUEUE_ROOM - queued);
+    return room < least ? least : room < most ? room : most;
+}
+
+uint32_t co_cutset_flush(CoCutSet* s, uint32_t* cursor, uint32_t* out, uint32_t room)
+{
+    uint32_t n = 0;
+    while (*cursor < CELLS && n < room)
+    {
+        const CoCutCell* c = &s->cell[*cursor];
+        uint32_t r = c->pending != 0 ? c->head : 0;
+        for (; r != 0 && n < room; r = s->rec[r - 1].next)
+            if ((s->flag[r - 1] & (F_WANTED | F_ON)) == F_WANTED) { Lit(s, r - 1); s->added++; out[n++] = s->rec[r - 1].handle; }
+        if (r == 0 || c->pending == 0) (*cursor)++; /* a cell left with some waits for the next call */
+    }
+    return n;
+}

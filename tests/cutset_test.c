@@ -942,10 +942,54 @@ static void Spread(void)
     CHECK(co_cutset_lead(held, 3, 7, ahead) == 2 && ahead[0][1] == 20.0f - 4.0f && ahead[1][1] == 20.0f - 8.0f);
 }
 
+static void Load(void)
+{
+    g_case = "adds a tick: the room under the queue's bound, the least, the most";
+    CHECK(co_cutset_adds(-1, 512) == 512 && co_cutset_adds(-1, 7) == 7);
+    CHECK(co_cutset_adds(0, 512) == 512 && co_cutset_adds(256, 512) == 512 && co_cutset_adds(257, 512) == 511);
+    CHECK(co_cutset_adds(700, 512) == 68 && co_cutset_adds(704, 512) == CO_CUTSET_ADDS_LEAST && co_cutset_adds(705, 512) == CO_CUTSET_ADDS_LEAST);
+    CHECK(co_cutset_adds(CO_CUTSET_QUEUE_ROOM, 512) == CO_CUTSET_ADDS_LEAST && co_cutset_adds(5000, 512) == CO_CUTSET_ADDS_LEAST);
+    CHECK(co_cutset_adds(5000, 2) == 2 && co_cutset_adds(700, 30) == 30 && co_cutset_adds(767, 512) == CO_CUTSET_ADDS_LEAST);
+
+    Fresh("flush: every wanted cutter not on goes on, cell by cell, a batch at a time");
+    co_cutset_made(&g_set, H(1), 0.0f, 0.0f, 1);
+    co_cutset_made(&g_set, H(2), 0.5f, 0.0f, 1);
+    co_cutset_made(&g_set, H(7), 1.0f, 0.0f, 1);
+    co_cutset_made(&g_set, H(3), 0.0f, 1.0f, 0);     /* the game's "never added": stays out */
+    co_cutset_made(&g_set, H(4), 100.0f, 0.0f, 1);
+    co_cutset_made(&g_set, H(6), 100.5f, 0.0f, 1);
+    co_cutset_made(&g_set, H(5), -3000.0f, 40.0f, 1);
+    CHECK(co_cutset_on(&g_set, H(4)) == 1);          /* the game added it */
+    const uint64_t added = g_set.added;
+    uint32_t cursor = 0, out[8], n, seen[16] = {0}, total = 0;
+    n = co_cutset_flush(&g_set, &cursor, out, 2);    /* the first cell's three: two now, the cursor stays on it */
+    CHECK(n == 2 && cursor == 256u * CO_CUTSET_GRID + 256u && g_set.on == 3);
+    for (uint32_t i = 0; i < n; i++) seen[out[i] & 15]++;
+    total += n;
+    n = co_cutset_flush(&g_set, &cursor, out, 2);    /* its last one, then the next cell's waiting one */
+    CHECK(n == 2 && cursor == 256u * CO_CUTSET_GRID + 260u);
+    for (uint32_t i = 0; i < n; i++) seen[out[i] & 15]++;
+    total += n;
+    n = co_cutset_flush(&g_set, &cursor, out, 8);
+    CHECK(n == 1 && out[0] == H(5) && cursor == CO_CUTSET_GRID * CO_CUTSET_GRID);
+    seen[out[0] & 15]++; total += n;
+    CHECK(co_cutset_flush(&g_set, &cursor, out, 8) == 0);
+    CHECK(total == 5 && seen[1] == 1 && seen[2] == 1 && seen[7] == 1 && seen[6] == 1 && seen[5] == 1 && seen[3] == 0 && seen[4] == 0);
+    CHECK(g_set.on == 6 && g_set.added == added + 5 && g_set.wanted == 6);
+    cursor = 0;
+    CHECK(co_cutset_flush(&g_set, &cursor, out, 8) == 0); /* none left to go on */
+    Sound();
+    Fresh("flush: a binding that went took its records along");
+    co_cutset_made(&g_set, H(1), 0.0f, 0.0f, 1);
+    co_cutset_bind(&g_set, 0, 0, 0);
+    cursor = 0;
+    CHECK(co_cutset_flush(&g_set, &cursor, out, 8) == 0 && cursor == CO_CUTSET_GRID * CO_CUTSET_GRID);
+}
+
 int main(void)
 {
     /* unbuffered, and no group after a failed one: a set gone wrong can loop, and its failed checks must show */
-    void (*const groups[])(void) = {Binding, Records, AddsInReach, Leaving, Cap, Clock, Centres, Spread, CutIn, Tree, Forest};
+    void (*const groups[])(void) = {Binding, Records, AddsInReach, Leaving, Cap, Clock, Centres, Spread, Load, CutIn, Tree, Forest};
     setvbuf(stdout, NULL, _IONBF, 0);
     for (size_t i = 0; i < sizeof groups / sizeof groups[0] && g_failed == 0; i++) groups[i]();
     free(g_memory);

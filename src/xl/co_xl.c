@@ -615,6 +615,7 @@ float CoXlTestLwRequestZ(float top, float face) { return LwRequestZ(top, face); 
  * squad's ask to come online and what it gets (0 waits, 1 cut in, 2 the game's cutters, 3 let through late). */
 int CoXlTestLwCutParse(const char* text, unsigned* v) { return LwCutParse(text, v); }
 int CoXlTestLwCutClient(const char* text) { return LwCutClient(text); }
+int CoXlTestLwCutLoadHolds(int on, int mode, int client, int host) { return LwCutLoadHolds(on, mode, client, host); }
 void CoXlTestLwCutSquad(int i, int state, int every, float x, float y)
 {
     if (i < 0) { g_lwWorld.count = 0; memset(g_lwCut.held, 0, sizeof g_lwCut.held); memset(g_lwCutAsk, 0, sizeof g_lwCutAsk); return; }

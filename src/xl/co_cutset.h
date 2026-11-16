@@ -21,6 +21,10 @@
  * entry (75 us a remove at 150 000). With the AI world's queue this long the removes wait for the run to catch up. */
 #define CO_CUTSET_SCANS 1500000u
 #define CO_CUTSET_QUEUE_SHORT 256
+/* A tick's adds keep the AI world's queue under the drain's start (CO_AIB_DRAIN_QUEUE 1024): a landing's 3 000 trees
+ * go over seconds at the runs' pace instead of 8 ms drain frames. The least still goes, so units' discs move on. */
+#define CO_CUTSET_QUEUE_ROOM 768
+#define CO_CUTSET_ADDS_LEAST 64
 #define CO_CUTSET_CAP 48000         /* most cutters switched on: 8 player discs hold about 19 000 */
 #define CO_CUTSET_LEAVE_MS 5000     /* a cell out of every centre's reach this long before its cutters go */
 #define CO_CUTSET_TICK_MS 250
@@ -123,5 +127,12 @@ int co_cutset_holds(const CoCutCentre* centres, uint32_t count, float x, float y
 /* A tick's removes at most `most`: CO_CUTSET_SCANS over the AI world's added cutters, at least CO_CUTSET_REMOVES; none
  * while `queued` changes wait (CO_CUTSET_QUEUE_SHORT or more), and the least when the queue does not read (under 0). */
 uint32_t co_cutset_removes(uint32_t added, int queued, uint32_t most);
+/* A tick's adds at most `most`: the room left under CO_CUTSET_QUEUE_ROOM queued changes, at least CO_CUTSET_ADDS_LEAST
+ * (never more than `most`); `most` when the queue does not read (under 0). */
+uint32_t co_cutset_adds(int queued, uint32_t most);
+/* Marks on up to `room` wanted records that are not on, cell by cell from `*cursor`, with their handles in `out`; the
+ * cursor moves past the cells done. Returns how many, 0 once every cell is done. Past the cap: this is the
+ * game's own "add every cutter", for a level whose tick never came. */
+uint32_t co_cutset_flush(CoCutSet* s, uint32_t* cursor, uint32_t* out, uint32_t room);
 
 #endif

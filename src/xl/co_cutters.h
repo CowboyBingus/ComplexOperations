@@ -57,6 +57,19 @@ void co_cutters_seen(CoCuttersSeen* out);
 const char* co_cutters_record_arm(uintptr_t exe, uint32_t cap, uint32_t adds);
 /* A complex level is live, or no longer: leaving drops every record. Returns the records dropped. */
 uint32_t co_cutters_live(int complex);
+/* After co_cutters_live(1), at the level's init: `on` holds the forest's makes back from then on, before any tick
+ * (a level's first trees were added by the game during its load and later removed at the game's cost). Only while
+ * switching. The first tick that switches ends it; co_cutters_load_watch flushes if none comes. */
+#define CO_CUTTERS_LOAD_MS 180000u         /* no tick this long after the level's init: the held ones go on */
+#define CO_CUTTERS_LOAD_MISSION_MS 10000u  /* nor this long after its play began */
+void co_cutters_load_hold(int on, uint32_t nowMs);
+/* Game thread, every frame of a live level: with the load's hold still on and no tick past the bounds above, every
+ * held cutter is switched on (the game's way) and the hold ends. Not while the AI step is in flight. Returns the
+ * cutters switched on by this call. */
+uint32_t co_cutters_load_watch(int inMission, uint32_t nowMs);
+/* This level's load hold: on now, and how it ended; makes held back before the first tick; cutters the watch switched on. */
+typedef struct CoCuttersLoad { int holding, ended; uint32_t at; uint64_t held, flushed; } CoCuttersLoad; /* ended: 1 by a tick, 2 by the watch */
+void co_cutters_load_seen(CoCuttersLoad* out);
 /* 1: makes are held back and the tick switches cutters on (and off, when it is given removes). 0: record only. */
 void co_cutters_switch(int on);
 /* For the hook on the engine's swap of an AI world's queued changes (0xBB1430), before the original, any thread:
@@ -87,6 +100,7 @@ typedef struct CoCuttersTick
     /* the AI world's added cutters and queued changes as the tick read them (0 / -1 when not read), and the removes
      * the tick was allowed (co_cutset_removes) */
     uint32_t added, allowed; int queued;
+    uint32_t addsAllowed; /* co_cutset_adds: the adds the queue left room for */
 } CoCuttersTick;
 /* One tick of the set over these centres, game thread: what it would add and remove, counted as done. Record only:
  * nothing is sent to the engine. Switching: sent to CO_CUTTERS_SWITCH in batches, unless the AI step is in flight

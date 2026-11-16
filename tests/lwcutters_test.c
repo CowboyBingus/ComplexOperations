@@ -15,6 +15,7 @@ static const char* g_case;
 #define CHECK(what) do { if (!(what)) { printf("FAILED %s: %s\n", g_case, #what); g_failed++; } } while (0)
 
 int CoXlTestLwCutParse(const char* text, unsigned* v);
+int CoXlTestLwCutLoadHolds(int on, int mode, int client, int host);
 int CoXlTestLwCutClient(const char* text);
 void CoXlTestLwCutSquad(int i, int state, int every, float x, float y);
 uint32_t CoXlTestLwCutCentres(const uint64_t* players, int count, const uint64_t* peer, float (*place)[2], int streamed, int host, int none, uint64_t now,
@@ -203,6 +204,10 @@ int main(void)
     CHECK(CoXlTestLwCutParse("3,1048576,512,256", v) == 1 && v[1] == CO_CUTSET_SLOTS && v[2] == CO_CUTSET_ADDS && v[3] == CO_CUTSET_REMOVES_MOST);
     CHECK(CoXlTestLwCutParse("4", v) == -1 && CoXlTestLwCutParse("x", v) == -1);
     CHECK(CoXlTestLwCutParse("3,1048577", v) == -1 && CoXlTestLwCutParse("3,10,513", v) == -1 && CoXlTestLwCutParse("3,10,10,257", v) == -1);
+    g_case = "the load's hold: where a tick will come";
+    CHECK(CoXlTestLwCutLoadHolds(1, 3, 0, 1) == 1 && CoXlTestLwCutLoadHolds(1, 2, 0, 1) == 1 && CoXlTestLwCutLoadHolds(1, 3, 1, 0) == 1);
+    CHECK(CoXlTestLwCutLoadHolds(1, 3, 0, 0) == 0 && CoXlTestLwCutLoadHolds(1, 3, 2, 0) == 0 && CoXlTestLwCutLoadHolds(1, 1, 0, 1) == 0);
+    CHECK(CoXlTestLwCutLoadHolds(0, 3, 1, 1) == 0);
     g_case = "a client's part";
     /* not set, or not valid: left to the game */
     CHECK(CoXlTestLwCutClient("") == 0 && CoXlTestLwCutClient("0") == 0 && CoXlTestLwCutClient("1") == 1 && CoXlTestLwCutClient("2") == 2);

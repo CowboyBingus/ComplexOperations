@@ -16,6 +16,7 @@ static struct
     double holdSum, holdWorst;
     uint32_t ticks, adds, removed, shed, capped, waiting, over, players, last, squads, beside, left; double usSum, usWorst;
     uint32_t ahead, garrisons, units, unitsHeld, allowLeast, allowMost, addedMost, queueHeld; int queuedMost; float fastest;
+    uint32_t addsLeast, addsMost; int loadArmed, loadNoted; /* adds the queue left room for; this level's load hold */
     CoCutHeld held[EVT_MAX_PLAYERS];
     uint32_t gate[4], gateLongest; /* requests by LW_CUT_ verdict since the start; the longest wait in ms */
 } g_lwCut;
@@ -321,16 +322,16 @@ static void LwCutLines(ULONGLONG now, const CoCuttersTick* t)
         Note("living world: tree cutters (switching): since the start: %llu makes held back, %llu added by the game with no tick in the last second, %llu added at once (not recorded), %llu not added (the AI world or the pool had gone); %llu switched on, %llu switched off; %llu ticks skipped with the AI step in flight; the set's lock held mean %.0f us, worst %.0f us a tick; %u navmesh runs began with changes; squads' requests: %u placed with their trees cut in (longest wait %u ms), %u where the cutters are the game's, %u let through uncut after %u ms, %u asks made to wait",
             (unsigned long long)t->held, (unsigned long long)t->stock, (unsigned long long)t->atOnce, (unsigned long long)t->noWorld, (unsigned long long)t->sentOn, (unsigned long long)t->sentOff, (unsigned long long)t->skips, g_lwCut.holdSum / g_lwCut.ticks, g_lwCut.holdWorst,
             t->took, g_lwCut.gate[LW_CUT_IS_CUT], g_lwCut.gateLongest, g_lwCut.gate[LW_CUT_GAMES], g_lwCut.gate[LW_CUT_LATE], LW_CUT_WAIT_MS, g_lwCut.gate[LW_CUT_WAITS]);
-    Note("living world: tree cutters (%s): centres at the last tick: %u players and %u places ahead of moving ones (the fastest %.0f m/s in 30 s), %u squads, %u garrisons a player nears, %u units (%u more inside another centre's reach, %u left out past %u); removes allowed a tick %u to %u; the AI world's added cutters at most %u, changes queued at most %d, %u ticks with the removes held by a queue of %u or more",
+    Note("living world: tree cutters (%s): centres at the last tick: %u players and %u places ahead of moving ones (the fastest %.0f m/s in 30 s), %u squads, %u garrisons a player nears, %u units (%u more inside another centre's reach, %u left out past %u); removes allowed a tick %u to %u, adds %u to %u; the AI world's added cutters at most %u, changes queued at most %d, %u ticks with the removes held by a queue of %u or more",
         mode, g_lwCut.players - g_lwCut.ahead, g_lwCut.ahead, (double)g_lwCut.fastest, g_lwCut.squads, g_lwCut.garrisons, g_lwCut.units, g_lwCut.beside, g_lwCut.left, CO_CUTSET_CENTRES,
-        g_lwCut.allowLeast, g_lwCut.allowMost, g_lwCut.addedMost, g_lwCut.queuedMost, g_lwCut.queueHeld, CO_CUTSET_QUEUE_SHORT);
+        g_lwCut.allowLeast, g_lwCut.allowMost, g_lwCut.addsLeast, g_lwCut.addsMost, g_lwCut.addedMost, g_lwCut.queuedMost, g_lwCut.queueHeld, CO_CUTSET_QUEUE_SHORT);
     if (g_lwCut.body)
         Note("living world: tree cutters: bodies: %u squad members watched beside a tree since the level's start (%u gone while watched, %u STUCK); navigators' repaths: %u in %u ticks within a second after a navmesh run that began with changes, %u in %u other ticks; %u navigators read at the last tick, %u not",
             g_lwCutBody.watched, g_lwCutBody.gone, g_lwCutBody.stuck, g_lwCutBody.after, g_lwCutBody.afterTicks, g_lwCutBody.other, g_lwCutBody.otherTicks, g_lwCutBody.navs, g_lwCutBody.unread);
     g_lwCutBody.after = g_lwCutBody.afterTicks = g_lwCutBody.other = g_lwCutBody.otherTicks = 0;
     g_lwCut.ticks = g_lwCut.adds = g_lwCut.removed = g_lwCut.shed = g_lwCut.capped = g_lwCut.waiting = g_lwCut.over = 0;
     g_lwCut.usSum = g_lwCut.usWorst = g_lwCut.holdSum = g_lwCut.holdWorst = 0; g_lwCut.notedAt = now;
-    g_lwCut.allowLeast = g_lwCut.allowMost = g_lwCut.addedMost = g_lwCut.queueHeld = 0; g_lwCut.queuedMost = -1; g_lwCut.fastest = 0;
+    g_lwCut.allowLeast = g_lwCut.allowMost = g_lwCut.addsLeast = g_lwCut.addsMost = g_lwCut.addedMost = g_lwCut.queueHeld = 0; g_lwCut.queuedMost = -1; g_lwCut.fastest = 0;
 }
 
 /* Every navigator's unit place (navigator +0x30, the raw position the game hands it each frame: exe 0xBE0C10,
@@ -372,13 +373,39 @@ static float LwCutGarrisonReach(int i)
     return reach;
 }
 
+/* The level's load hold (co_cutters_load_hold): set at its init where a tick will come, the host's or a client's that
+ * adds (LwCutClient 1). A client left to the game holds nothing: no tick of its own would ever add what it held. */
+static int LwCutLoadHolds(int on, int mode, int client, int host) { return on && mode >= 2 && (host || client == 1); }
+/* One line a level once the hold is over: ended by the first tick, or by the watch with no tick (the game's way). */
+static void LwCutLoadNote(uint32_t now)
+{
+    CoCuttersLoad l;
+    if (!g_lwCut.loadArmed || g_lwCut.loadNoted) return;
+    co_cutters_load_seen(&l);
+    if (l.holding) return;
+    g_lwCut.loadNoted = 1;
+    if (l.ended == 2)
+        Note("living world: tree cutters: the level's load: no tick came, %llu held-back cutters switched on as the game would (%llu makes held, %.1f s after the level's init)",
+            (unsigned long long)l.flushed, (unsigned long long)l.held, (double)(now - l.at) / 1000.0);
+    else if (l.ended == 1) /* 0: the hold never took (not switching, no level live) */
+        Note("living world: tree cutters: the level's load: %llu makes held back until the first tick, %.1f s after the level's init", (unsigned long long)l.held, (double)(now - l.at) / 1000.0);
+}
+/* Every frame of a live level, before the mission test: the load's hold ends at the first tick or the watch's bound. */
+static void LwCutLoadWatch(int mission, uint32_t now)
+{
+    co_cutters_load_watch(mission, now);
+    LwCutLoadNote(now);
+}
+
 /* Game thread, every peer, 4 Hz: a client has the AI world and the forest's cutters too (the make has no host
  * test). Centres: every player's Helldiver, or for 30 s the last place it read at (a dead player's surroundings
  * keep their cutters), and two places ahead of a moving one; every navigator's unit no centre already holds; and on
  * the host the squads (LwCutSquad) and the garrisons a player nears. */
 static void LwCutFrame(int mission, int host)
 {
-    if (!g_lwCut.on || !mission) return;
+    if (!g_lwCut.on) return;
+    LwCutLoadWatch(mission, (uint32_t)GetTickCount64());
+    if (!mission) return;
     if (!host && g_lwCut.mode >= 2 && g_lwCut.client == 0) return; /* no tick: this client's makes are the game's */
     ULONGLONG now = GetTickCount64();
     if (now - g_lwCut.tickAt < CO_CUTSET_TICK_MS) return;
@@ -416,6 +443,8 @@ static void LwCutFrame(int mission, int host)
     {
         if (g_lwCut.ticks == 0 || t.allowed < g_lwCut.allowLeast) g_lwCut.allowLeast = t.allowed;
         if (t.allowed > g_lwCut.allowMost) g_lwCut.allowMost = t.allowed;
+        if (g_lwCut.ticks == 0 || t.addsAllowed < g_lwCut.addsLeast) g_lwCut.addsLeast = t.addsAllowed;
+        if (t.addsAllowed > g_lwCut.addsMost) g_lwCut.addsMost = t.addsAllowed;
         if (t.added > g_lwCut.addedMost) g_lwCut.addedMost = t.added;
         if (t.queued > g_lwCut.queuedMost) g_lwCut.queuedMost = t.queued;
         g_lwCut.queueHeld += (uint32_t)(g_lwCut.mode == 3 && t.queued >= CO_CUTSET_QUEUE_SHORT);
@@ -439,6 +468,10 @@ static void LwCutFrame(int mission, int host)
 static void LwCutLive(int complex)
 {
     uint32_t dropped = co_cutters_live(complex);
+    /* the level's first trees too: the forest makes them during the load, before any tick (at its init: live first) */
+    g_lwCut.loadArmed = complex && LwCutLoadHolds(g_lwCut.on, g_lwCut.mode, g_lwCut.client, co_peers_is_host());
+    g_lwCut.loadNoted = 0;
+    if (g_lwCut.loadArmed) co_cutters_load_hold(1, (uint32_t)GetTickCount64());
     memset(g_lwCut.held, 0, sizeof g_lwCut.held); /* a last place is of its own level */
     memset(g_lwCutAsk, 0, sizeof g_lwCutAsk);
     memset(&g_lwCutBody, 0, sizeof g_lwCutBody);
