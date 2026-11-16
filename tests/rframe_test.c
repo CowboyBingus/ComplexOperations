@@ -23,6 +23,14 @@ void CoXlTestXrfWalk(uint64_t stream);
 void CoXlTestXrfApplied(uintptr_t ret, int64_t t1);
 void CoXlTestXrfRoundAt(uintptr_t ret, int64_t now);
 void CoXlTestXrfSpinClose(void);
+void CoXlTestXrfRoundPending(uintptr_t ret);
+void CoXlTestXrfRound(uintptr_t ret, uintptr_t dev);
+void CoXlTestXrfBake(int updates, uint64_t cells, uint64_t instances, int64_t ticks);
+LONG CoXlTestXrfInPart(void);
+uint32_t CoXlTestXrfReads(void);
+void CoXlTestXrfSetOrig(int hook, void* fn);
+uint64_t CoXlTestXrfDispatchAt(uintptr_t ret, uint64_t records);
+void CoXlTestGame(uintptr_t game);
 void CoXlTestXrfRecords(uint32_t n);
 void CoXlTestXrfDrained(int64_t t1);
 void CoXlTestXrfAfterAt(uintptr_t ret, int64_t now);
@@ -193,7 +201,7 @@ static void TestPartFor(void)
         {XH_LODWAIT, 0x1EC4AFu, -1}, {XH_TREES, 0x1E3E32u, CO_RF_TREES}, {XH_TREES, 0x3658CCu, -1}, {XH_JOIN, 0x1EDA86u, CO_RF_JOIN},
         {XH_DISPA, 0x6CED4Cu, CO_RF_DISPATCH}, {XH_DISPA, 0x6CED5Du, -1}, {XH_DISPB, 0x6CED5Du, CO_RF_DISPATCH}, {XH_APPLY, 0x1E9940u, CO_RF_APPLY},
         {XH_CHAIN, 0x10A97Cu, CO_RF_CHAIN}, {XH_GPUWAIT, 0x6C5F43u, CO_RF_GPUWAIT}, {XH_GPUWAIT, 0x6C5F44u, -1}, {XH_DRAIN, 0x6C601Du, CO_RF_DRAIN},
-        {XH_DRAIN, 0x6C05BBu, -1}};
+        {XH_DRAIN, 0x6C05BBu, -1}, {XH_LODWAIT, 0x211411u, CO_RF_SCATWAIT}, {XH_JOBWAIT, 0x211411u, -1}};
     for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) CHECK(CoXlTestXrfPartFor(k[i].hook, g_exe + k[i].ret) == k[i].part);
     CHECK(CoXlTestXrfPartFor(XH_JOBWAIT, 0x140000000ull) == -2 && CoXlTestXrfPartFor(XH_JOBWAIT, g_exe + 0x2800000u) == -2);
     CHECK(CoXlTestXrfPartFor(XH_APPLY, 0x140000000ull) == CO_RF_APPLY); /* the apply and the chain spin are timed from any caller */
@@ -451,6 +459,93 @@ static void TestInstall(void)
     g_fake.noMatchExe[0] = 0;
 }
 
+/* Message 8's spin with the device's chain count: rounds counted without the clock, the clock read after the last. */
+static LONG g_seenInPart = -1;
+static uint64_t OrigSeesPart(uint64_t a, uint64_t b, uint64_t c, uint64_t d) { (void)a; (void)b; (void)c; (void)d; g_seenInPart = CoXlTestXrfInPart(); return 7; }
+static void TestSpinRounds(void)
+{
+    Reset("message 8's spin rounds: the return address first, no clock until the round after which the chain count is 0");
+    static uint8_t dev[0x400];
+    uint32_t pending = 3, none = 0;
+    memcpy(dev + 0x3D8, &pending, 4);
+    const CoRfFrame* f = CoXlTestXrfCurrent();
+    CoXlTestXrfApplied(g_exe + 0x1E95A0u, 100);
+    Clock(200);
+    const uint32_t reads = CoXlTestXrfReads();
+    CoXlTestXrfRound(g_exe + 0x10BB9Au, (uintptr_t)dev);  /* another caller of 0x528210: nothing */
+    CoXlTestXrfRound(g_exe + 0x1E95F8u, (uintptr_t)dev);  /* the chain still has work: counted, no clock */
+    CHECK(f->rounds8 == 1 && f->clocks == 0 && CoXlTestXrfReads() == reads);
+    Clock(300);
+    memcpy(dev + 0x3D8, &none, 4);
+    CoXlTestXrfRound(g_exe + 0x1E95F8u, (uintptr_t)dev);  /* the last: the clock at its end */
+    CHECK(CoXlTestXrfReads() == reads + 1);
+    Clock(5000);
+    CoXlTestXrfMessageDone(0x08, 0, g_now);
+    CHECK(f->rounds8 == 2 && f->t[CO_RF_SPIN8] == g_now - 5000 - 100 && f->spinEndsAtClose == 0 && f->clocks == 2);
+    /* a last round not seen as the last (the count changed after the read): the spin closes at the next event */
+    CoXlTestXrfApplied(g_exe + 0x1E95A0u, g_now);
+    CoXlTestXrfRoundPending(g_exe + 0x1E95F8u);
+    Clock(700);
+    CoXlTestXrfMessageDone(0x08, 0, g_now);
+    CHECK(f->rounds8 == 3 && f->spinEndsAtClose == 1 && f->t[CO_RF_SPIN8] == 1400 + 700); /* 100 to the last round at 1500, then 700 */
+
+    Reset("a timed call: the stall watcher sees the render thread inside a part while it runs, outside after");
+    CoXlTestXrfSetOrig(XH_DISPA, (void*)OrigSeesPart);
+    g_seenInPart = -1;
+    CHECK(CoXlTestXrfDispatchAt(g_exe + 0x6CED4Cu, 5) == 7 && g_seenInPart == 1 && CoXlTestXrfInPart() == 0);
+    g_seenInPart = -1;
+    CHECK(CoXlTestXrfDispatchAt(g_exe + 0x6CED5Du, 5) == 7 && g_seenInPart == 0); /* not its call site: not timed */
+}
+
+/* Render frames with and without a far-grass bake view: what one adds, and its work, in the window's lines. */
+static void TestBake(void)
+{
+    Reset("bake views: their frames against the others, the added ms, frames over 25 ms, cells, instances, wrapper time");
+    FrameEnd(0);
+    for (int i = 0; i < 200; i++)
+    {
+        const int bake = i % 10 == 0;           /* 20 frames with a bake view, 2 of them 30 ms */
+        if (bake) { CoXlTestXrfBake(20, 1200, 30000, 400); CoXlTestXrfAdd(CO_RF_SCATWAIT, 0, 2000); }
+        Msg(0x07, bake ? (i % 100 == 0 ? 29000 : 11000) : 9000);
+        Clock(1000);
+        FrameEnd(0);
+    }
+    Clock(10 * US);
+    CoXlTestXrfTick();
+    uint32_t frames = 0, over = 0; double added = 0;
+    co_rframe_test_bake(&frames, &over, &added);
+    /* with: 18 x 12 + 2 x 30 = 276 over 20; without: 10 */
+    CHECK(frames == 20 && over == 2 && CLOSE(added, 276.0 / 20 - 10.0));
+    CHECK(fake_host_logged("render frame bake views: 20 of 200 frames ran a far-grass bake view; period ms mean/p99/worst with one 13.80/30.00/30.00, without 10.00/10.00/10.00; "
+        "a bake view adds 3.80 ms (OVER the goal of 3.0 ms); frames over 25 ms: 2 with a bake view, 0 without; a bake view: cells 1200 (most 1200), instances 30000 "
+        "(most 30000), the mod's wrappers 400 us (most 400) over its threads, scatter graph wait (0x21140C) 2.00 ms (most 2.00)"));
+    CHECK(fake_host_logged(", bake 1.00, bakeCells 1200.00, bakeInst 30000.00, bakeCoUs 400.00"));
+    CHECK(LinesShort());
+    /* a window without bake views has no such line */
+    g_fake.log[0] = 0;
+    for (int i = 0; i < 10; i++) { Msg(0x07, 9000); Clock(1000); FrameEnd(0); }
+    Clock(10 * US);
+    CoXlTestXrfTick();
+    co_rframe_test_bake(&frames, &over, &added);
+    CHECK(frames == 0 && !fake_host_logged("render frame bake views"));
+    CHECK(co_rframe_wait_name(0x211411u) != NULL && strstr(co_rframe_wait_name(0x211411u), "0x21140C") != NULL);
+}
+
+/* The stall sample's trail keeps game.dll's return addresses with the exe's. */
+static void TestStallGame(void)
+{
+    Reset("a stall sample's stack: game.dll's frames in the trail beside the exe's");
+    uint8_t* x = (uint8_t*)g_exe;
+    const uintptr_t game = (uintptr_t)g_fake.image;
+    CoXlTestGame(game);
+    x[0x1EC4AAu] = 0xE8; ((uint8_t*)game)[0x1000] = 0xE8;
+    uint64_t stack[3] = {g_exe + 0x1EC4AFu, game + 0x1005u, 0x42};
+    CoXlTestXrfStall(0, g_exe + 0x627200u, 30.0, 100.0, stack, sizeof stack);
+    CoXlTestXrfTick();
+    CHECK(fake_host_logged("stack (24 bytes): exe+0x1EC4AF, game+0x1005"));
+    CoXlTestGame(0);
+}
+
 int main(void)
 {
     TestSelect();
@@ -465,6 +560,9 @@ int main(void)
     TestPools();
     TestStamps();
     TestStall();
+    TestSpinRounds();
+    TestBake();
+    TestStallGame();
     TestInstall();
     if (g_failed) { printf("rframe: %d check(s) failed\n", g_failed); return 1; }
     printf("rframe: all checks passed\n");

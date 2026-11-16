@@ -7360,6 +7360,8 @@ typedef struct { int live; LONG level; float centre[2]; uint64_t handle; NearGro
 static uint16_t* g_groundBuf[NEAR_TILES_MAX + 1]; /* NearGroundOf's copies: a tile slot each, the coarse terrain last */
 static NearTile g_tiles[NEAR_TILES_MAX];
 static volatile LONG g_tilesGen;
+/* The coarse ground is new or gone: the scatter's cached ranges start over (a range over the old ground is wrong). */
+static void NearCoarseChanged(void) { InterlockedIncrement(&g_tilesGen); }
 
 /* Research: the last level's tile terrains as the next level finds them, before their textures are freed. A first
  * qword still inside the game's executable is a live object's vtable: the terrain outlived its level. */
@@ -7783,13 +7785,17 @@ static void InstallBeaconDepth(uintptr_t game)
 }
 
 /* The live tile nearest to (x, y) whose terrain span reaches within `reach` of it; -1 when none. */
+static int NearTileNearIn(float x, float y, float reach) /* g_tilesLock held (shared) */
+{
+    for (int k = 0; k < NEAR_TILES_MAX; k++)
+        if (g_tiles[k].live && g_tiles[k].level == g_world.levels && fabsf(x - g_tiles[k].centre[0]) <= reach + NEAR_SPAN / 2 &&
+            fabsf(y - g_tiles[k].centre[1]) <= reach + NEAR_SPAN / 2) return k;
+    return -1;
+}
 static int NearTileNear(float x, float y, float reach)
 {
-    int at = -1;
     AcquireSRWLockShared(&g_tilesLock);
-    for (int k = 0; k < NEAR_TILES_MAX && at < 0; k++)
-        if (g_tiles[k].live && g_tiles[k].level == g_world.levels && fabsf(x - g_tiles[k].centre[0]) <= reach + NEAR_SPAN / 2 &&
-            fabsf(y - g_tiles[k].centre[1]) <= reach + NEAR_SPAN / 2) at = k;
+    const int at = NearTileNearIn(x, y, reach);
     ReleaseSRWLockShared(&g_tilesLock);
     return at;
 }
@@ -9209,6 +9215,7 @@ static int TerrainNearStep(uint64_t records, uint32_t end, uint32_t at, uint32_t
             uintptr_t gen = 0, h = 0;
             if (!SafeRead(g_worldLevel + 0x2C8, &gen, 8) && gen != 0 && !SafeRead(gen + 0x8758A0u, &h, 8))
                 NearGroundOf(world, h, 16384.0f - 0.5f, 0.0f, 0.0f, &g_nearCoarseGround, &g_groundBuf[NEAR_TILES_MAX]);
+            NearCoarseChanged();
             NearGroundOf(world, g_near.handle, NEAR_SPAN, g_near.centre[0], g_near.centre[1], &g_nearTileGround, &g_groundBuf[0]);
             if (g_nearTileGround.v != NULL && NearTileAdd(0, g_near.centre[0], g_near.centre[1], g_near.handle, &g_nearTileGround) == 0)
             {
@@ -9252,27 +9259,65 @@ static volatile LONG64 g_nearScatterMoved, g_nearScatterSeen, g_nearScatterCalls
 static volatile LONG64 g_nearScatterNoted;
 static volatile LONG g_nearScatterNotes;
 static volatile LONG g_nearScatterLevel = -1;
-static float NearScatterImage(uintptr_t image, float x, float y)
+/* The coarse image's header, read once a call: its size and its u16 data (0 when it does not read). */
+typedef struct { uint32_t w, h; uint64_t data; } NearScatImg;
+static int NearScatterImageOpen(uintptr_t image, NearScatImg* img)
 {
     uint32_t dims[2] = {0}; uint64_t data = 0;
-    if (SafeRead(image, dims, 8) || SafeRead(image + 0x10, &data, 8) || data == 0 || dims[0] < 2 || dims[1] < 2 || dims[0] > 16384 || dims[1] > 16384) return -9999.0f;
+    img->data = 0;
+    if (SafeRead(image, dims, 8) || SafeRead(image + 0x10, &data, 8) || data == 0 || dims[0] < 2 || dims[1] < 2 || dims[0] > 16384 || dims[1] > 16384) return 0;
+    img->w = dims[0]; img->h = dims[1]; img->data = data;
+    return 1;
+}
+static float NearScatterImageAt(const NearScatImg* img, float x, float y)
+{
+    if (img->data == 0) return -9999.0f;
     float world = 2048.0f * g_world.current, u = x / world + 0.5f, v = y / world + 0.5f;
     if (!(u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f)) return -9999.0f;
-    uint32_t w = dims[0], h = dims[1];
+    uint32_t w = img->w, h = img->h;
     float fx = (float)(w - 1) * u, fy = (float)(h - 1) * v;
     uint32_t c0 = (uint32_t)fx, r0 = (uint32_t)fy, c1 = c0 + 1 < w - 1 ? c0 + 1 : w - 1, r1 = r0 + 1 < h - 1 ? r0 + 1 : h - 1;
     float ax = fx - (float)c0, ay = fy - (float)r0;
     uint64_t rowA = (uint64_t)(h - r0 - 1) * w, rowB = (uint64_t)(h - r1 - 1) * w;
     uint16_t a = 0, b = 0, c = 0, d = 0;
+    const uint64_t data = img->data;
     if (SafeRead(data + (rowA + c0) * 2, &a, 2) || SafeRead(data + (rowA + c1) * 2, &b, 2) || SafeRead(data + (rowB + c0) * 2, &c, 2) || SafeRead(data + (rowB + c1) * 2, &d, 2))
         return -9999.0f;
     float top = ((float)a / 65535.0f) * (1.0f - ax) + ((float)b / 65535.0f) * ax, bottom = ((float)c / 65535.0f) * (1.0f - ax) + ((float)d / 65535.0f) * ax;
     return (top * (1.0f - ay) + bottom * ay) * 1000.0f - 500.0f;
 }
 
+/* Instances moved by NearScatterCellIn: the call's counts, added to the globals once (the render thread and every job
+ * worker run the callback at once, so a shared counter per instance was a contended cache line per instance). */
+typedef struct { LONG64 seen, moved, noTile, noImage; float tile, coarse, x, y; } NearScatCounts;
+
+/* The tile's ground for one cell's instances, g_tilesLock held shared for the whole call: the tiles' slots and ground
+ * copies change only under it exclusively (NearTileAdd/Remove/Clear; a slot's copy is refilled while it is not live),
+ * so every instance of the cell reads one snapshot, and the game thread's writer waits for one cell at most. */
+static void NearScatterCellIn(uint8_t* inst, uint32_t n, const NearScatImg* img, NearScatCounts* k)
+{
+    for (uint32_t i = 0; i < n; i++, inst += 0x30)
+    {
+        float p[3];
+        memcpy(p, inst, 12);
+        float tile = NearVisibleIn(p[0], p[1]);
+        if (tile < -9000.0f) { k->noTile++; continue; }
+        float coarse = NearScatterImageAt(img, p[0], p[1]);
+        if (coarse < -9000.0f) { k->noImage++; continue; }
+        p[2] += tile - coarse;
+        memcpy(inst + 8, &p[2], 4);
+        k->seen++;
+        if (fabsf(tile - coarse) > 0.05f) k->moved++;
+        k->tile = tile; k->coarse = coarse; k->x = p[0]; k->y = p[1];
+    }
+}
+
 static uint32_t NearScatterCell(int32_t x, int32_t y, int32_t size, void* unused, void* out, uint32_t max, uint8_t* brush)
 {
     uint32_t made = g_nearScatter(x, y, size, unused, out, max, brush);
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+    const int64_t t0 = t_tdScatBake ? XrfClock() : 0;
+#endif
     if (g_nearScatterLevel != g_world.levels)
     {
         g_nearScatterLevel = g_world.levels;
@@ -9290,29 +9335,39 @@ static uint32_t NearScatterCell(int32_t x, int32_t y, int32_t size, void* unused
                 (long long)g_nearScatterNoTile, (long long)g_nearScatterNoImage);
         }
     }
-    if (made == 0 || out == NULL || NearTilesLive() == 0) return made;
-    float cx = (float)x * (float)size, cy = (float)y * (float)size;
-    if (NearTileNear(cx, cy, (float)size) < 0) return made;
-    InterlockedIncrement64(&g_nearScatterNear);
-    uintptr_t globals = 0, image = 0;
-    if (SafeRead((uintptr_t)brush + 0x2858, &globals, 8) || globals == 0 || SafeRead(globals + 0x10, &image, 8) || image == 0) { InterlockedIncrement64(&g_nearScatterNoImage); return made; }
-    uint8_t* inst = (uint8_t*)out;
-    for (uint32_t i = 0; i < made && i < max; i++, inst += 0x30)
+    NearScatCounts k = {0};
+    if (made != 0 && out != NULL && NearTilesLive() != 0)
     {
-        float p[3];
-        memcpy(p, inst, 12);
-        float tile = NearVisibleAt(p[0], p[1]);
-        if (tile < -9000.0f) { InterlockedIncrement64(&g_nearScatterNoTile); continue; }
-        float coarse = NearScatterImage(image, p[0], p[1]);
-        if (coarse < -9000.0f) { InterlockedIncrement64(&g_nearScatterNoImage); continue; }
-        p[2] += tile - coarse;
-        memcpy(inst + 8, &p[2], 4);
-        LONG64 n = InterlockedIncrement64(&g_nearScatterSeen);
-        if (fabsf(tile - coarse) > 0.05f) InterlockedIncrement64(&g_nearScatterMoved);
-        if (n == 1 || n == 100000 || n == 1000000)
-            Note("difficulty: near terrain: scatter on the tile: %lld instances so far, %lld moved (this one %.2f m: tile %.2f, coarse %.2f at %.1f, %.1f)",
-                (long long)n, (long long)g_nearScatterMoved, (double)(tile - coarse), (double)tile, (double)coarse, (double)p[0], (double)p[1]);
+        const float cx = (float)x * (float)size, cy = (float)y * (float)size;
+        uintptr_t globals = 0, image = 0;
+        NearScatImg img = {0};
+        const int have = !SafeRead((uintptr_t)brush + 0x2858, &globals, 8) && globals != 0 && !SafeRead(globals + 0x10, &image, 8) && image != 0;
+        if (have) NearScatterImageOpen(image, &img);
+        AcquireSRWLockShared(&g_tilesLock);
+        const int onTile = NearTileNearIn(cx, cy, (float)size) >= 0;
+        if (onTile && have) NearScatterCellIn((uint8_t*)out, made < max ? made : max, &img, &k);
+        ReleaseSRWLockShared(&g_tilesLock);
+        if (onTile)
+        {
+            InterlockedIncrement64(&g_nearScatterNear);
+            if (!have) k.noImage++;
+        }
     }
+    if (k.noTile) InterlockedAdd64(&g_nearScatterNoTile, k.noTile);
+    if (k.noImage) InterlockedAdd64(&g_nearScatterNoImage, k.noImage);
+    if (k.moved) InterlockedAdd64(&g_nearScatterMoved, k.moved);
+    if (k.seen)
+    {
+        const LONG64 n = InterlockedAdd64(&g_nearScatterSeen, k.seen), before = n - k.seen;
+        static const LONG64 marks[3] = {1, 100000, 1000000};
+        for (int m = 0; m < 3; m++)
+            if (before < marks[m] && n >= marks[m])
+                Note("difficulty: near terrain: scatter on the tile: %lld instances so far, %lld moved (the cell's last %.2f m: tile %.2f, coarse %.2f at %.1f, %.1f)",
+                    (long long)n, (long long)g_nearScatterMoved, (double)(k.tile - k.coarse), (double)k.tile, (double)k.coarse, (double)k.x, (double)k.y);
+    }
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+    if (t_tdScatBake) XrfBakeAdd(0, made, XrfClock() - t0);
+#endif
     return made;
 }
 
@@ -9328,19 +9383,20 @@ static uint32_t NearScatterCell(int32_t x, int32_t y, int32_t size, void* unused
  * over the cell (and its pad), which is where the instances stand (NearScatterCell: the tile over its span, the
  * level's heights elsewhere), 1 m under and 3 m over. The call goes through a stub that keeps rsi (the layer) in a TLS
  * slot. Ranges are cached per cell (by size, half width and index) for the level and the tile's state; only views of at most 1024
- * nodes with the tile in, and 256 new cells a call. */
+ * nodes with the tile in, and 256 new cells a call. The render thread and the job workers update views at once, so the
+ * cache takes no lock: each entry is a seqlock tagged with the generation it was taken in. */
 #define NEAR_SCAT_CACHE (1u << 16)
 typedef uint64_t (*NearViewFn)(uintptr_t tree, void* frustum, uint32_t stamp, float pad);
 static struct
 {
     DWORD tls; uint8_t* stub; int on;
-    SRWLOCK lock; LONG gen;
     volatile LONG64 nodes, missed, calls; ULONGLONG noted; LONG notes, level;
-} g_scatView = {.lock = SRWLOCK_INIT, .level = -1};
+} g_scatView = {.level = -1};
 static volatile LONG g_scatBakeOver; /* bake views' layers over NearScatLimits' nodes: far grass stops for the level */
 /* A cell's range, keyed by the exact bits of its layer's cell size and half width and its index: layers differ in
- * both, and a range is only right for the square it was taken over. Size 0 is a free slot (sizes are 1 m or more). */
-typedef struct { uint32_t size, half; int32_t ix, iy; float lo, hi; } NearScatEntry;
+ * both, and a range is only right for the square it was taken over. Size 0, or a generation not the reader's, is a
+ * free slot (sizes are 1 m or more), so a change of tiles needs no clearing. seq is odd while a writer fills it. */
+typedef struct { volatile LONG seq; LONG gen; uint32_t size, half; int32_t ix, iy; float lo, hi; } NearScatEntry;
 static NearScatEntry g_scatCache[NEAR_SCAT_CACHE]; /* zero-filled: not in the file */
 
 static uint32_t NearScatSlot(uint32_t size, uint32_t half, int32_t ix, int32_t iy)
@@ -9355,28 +9411,70 @@ static int NearScatSame(const NearScatEntry* e, uint32_t size, uint32_t half, in
     return e->size == size && e->half == half && e->ix == ix && e->iy == iy;
 }
 
-/* Up to 8 probes; the caller holds the lock. */
-static int NearScatFind(uint32_t size, uint32_t half, int32_t ix, int32_t iy, float* lo, float* hi)
+#ifdef CO_TEST
+static void (*g_scatTestHook)(NearScatEntry* e, int where); /* another thread's store at 0: inside a read, 1: before a store */
+#define NEAR_SCAT_TEST_HOOK(e, where) do { if (g_scatTestHook != NULL) g_scatTestHook((NearScatEntry*)(e), where); } while (0)
+#else
+#define NEAR_SCAT_TEST_HOOK(e, where) do { } while (0)
+#endif
+/* An entry's fields as one consistent copy: 0 while a writer has it (seq odd) or when it changed under the read. */
+static int NearScatRead(const NearScatEntry* e, NearScatEntry* copy)
+{
+    const LONG s0 = __atomic_load_n(&e->seq, __ATOMIC_ACQUIRE);
+    copy->seq = s0;
+    if (s0 & 1) return 0;
+    copy->gen = __atomic_load_n(&e->gen, __ATOMIC_RELAXED); copy->size = __atomic_load_n(&e->size, __ATOMIC_RELAXED);
+    copy->half = __atomic_load_n(&e->half, __ATOMIC_RELAXED); copy->ix = __atomic_load_n(&e->ix, __ATOMIC_RELAXED);
+    copy->iy = __atomic_load_n(&e->iy, __ATOMIC_RELAXED);
+    uint32_t lo = __atomic_load_n((const uint32_t*)&e->lo, __ATOMIC_RELAXED), hi = __atomic_load_n((const uint32_t*)&e->hi, __ATOMIC_RELAXED);
+    memcpy(&copy->lo, &lo, 4); memcpy(&copy->hi, &hi, 4);
+    NEAR_SCAT_TEST_HOOK(e, 0);
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    return __atomic_load_n(&e->seq, __ATOMIC_RELAXED) == s0;
+}
+
+static int NearScatFree(const NearScatEntry* e, LONG gen) { return e->size == 0 || e->gen != gen; }
+
+/* The readers' generation: the level and g_tilesGen, which also counts each change of the coarse ground, so no state
+ * comes back to an older generation. Unsigned: it wraps, it is never undefined. */
+static LONG NearScatGen(void) { return (LONG)(((uint32_t)g_world.levels << 24) + (uint32_t)g_tilesGen); }
+
+/* Up to 8 probes. A slot being written is passed over, as a miss would be: the range is taken again. */
+static int NearScatFind(LONG gen, uint32_t size, uint32_t half, int32_t ix, int32_t iy, float* lo, float* hi)
 {
     uint32_t slot = NearScatSlot(size, half, ix, iy);
     for (uint32_t k = 0; k < 8; k++)
     {
-        const NearScatEntry* e = &g_scatCache[(slot + k) & (NEAR_SCAT_CACHE - 1)];
-        if (NearScatSame(e, size, half, ix, iy)) { *lo = e->lo; *hi = e->hi; return 1; }
-        if (e->size == 0) return 0;
+        NearScatEntry e;
+        if (!NearScatRead(&g_scatCache[(slot + k) & (NEAR_SCAT_CACHE - 1)], &e)) continue;
+        if (e.gen == gen && NearScatSame(&e, size, half, ix, iy)) { *lo = e.lo; *hi = e.hi; return 1; }
+        if (NearScatFree(&e, gen)) return 0;
     }
     return 0;
 }
 
-/* The first free or same slot of the 8, else the last one's entry goes. The caller holds the lock exclusively. */
-static void NearScatStore(uint32_t size, uint32_t half, int32_t ix, int32_t iy, float lo, float hi)
+/* The first free or same slot of the 8, else the last one's entry goes. A slot another writer holds is left to it and
+ * the range is not kept (a later miss takes it again). */
+static void NearScatStore(LONG gen, uint32_t size, uint32_t half, int32_t ix, int32_t iy, float lo, float hi)
 {
     uint32_t slot = NearScatSlot(size, half, ix, iy);
     for (uint32_t k = 0; k < 8; k++)
     {
-        NearScatEntry* e = &g_scatCache[(slot + k) & (NEAR_SCAT_CACHE - 1)];
-        if (e->size == 0 || NearScatSame(e, size, half, ix, iy) || k == 7)
-        { e->size = size; e->half = half; e->ix = ix; e->iy = iy; e->lo = lo; e->hi = hi; return; }
+        NearScatEntry* at = &g_scatCache[(slot + k) & (NEAR_SCAT_CACHE - 1)];
+        NearScatEntry e;
+        if (!NearScatRead(at, &e)) { if (k == 7) return; continue; }
+        if (!(NearScatFree(&e, gen) || (e.gen == gen && NearScatSame(&e, size, half, ix, iy)) || k == 7)) continue;
+        LONG s0 = e.seq; /* the slot as judged: one changed since is another writer's */
+        NEAR_SCAT_TEST_HOOK(at, 1);
+        if (!__atomic_compare_exchange_n(&at->seq, &s0, s0 + 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
+        __atomic_thread_fence(__ATOMIC_RELEASE); /* the odd seq before any field: a reader never takes new fields as the old seq's */
+        uint32_t l, h; memcpy(&l, &lo, 4); memcpy(&h, &hi, 4);
+        __atomic_store_n(&at->gen, gen, __ATOMIC_RELAXED); __atomic_store_n(&at->size, size, __ATOMIC_RELAXED);
+        __atomic_store_n(&at->half, half, __ATOMIC_RELAXED); __atomic_store_n(&at->ix, ix, __ATOMIC_RELAXED);
+        __atomic_store_n(&at->iy, iy, __ATOMIC_RELAXED);
+        __atomic_store_n((uint32_t*)&at->lo, l, __ATOMIC_RELAXED); __atomic_store_n((uint32_t*)&at->hi, h, __ATOMIC_RELAXED);
+        __atomic_store_n(&at->seq, s0 + 2, __ATOMIC_RELEASE);
+        return;
     }
 }
 
@@ -9389,12 +9487,9 @@ static float NearScatGround(float x, float y)
 /* The drawn ground's range over a cell (centre cx, cy; half width h); 0 when no ground is known there. */
 static int NearScatRange(float size, int32_t ix, int32_t iy, float h, float* lo, float* hi, int* budget)
 {
-    LONG gen = (g_world.levels * 4 + (g_nearCoarseGround.v != NULL ? 2 : 0)) ^ (g_tilesGen << 12);
+    const LONG gen = NearScatGen();
     uint32_t sbits, hbits; memcpy(&sbits, &size, 4); memcpy(&hbits, &h, 4);
-    AcquireSRWLockShared(&g_scatView.lock);
-    int found = g_scatView.gen == gen && NearScatFind(sbits, hbits, ix, iy, lo, hi);
-    ReleaseSRWLockShared(&g_scatView.lock);
-    if (found) return 1;
+    if (NearScatFind(gen, sbits, hbits, ix, iy, lo, hi)) return 1;
     if (g_nearCoarseGround.v == NULL || *budget <= 0) return 0;
     (*budget)--;
     float cx = ((float)ix + 0.5f) * size, cy = ((float)iy + 0.5f) * size, a = 1e9f, b = -1e9f;
@@ -9411,10 +9506,7 @@ static int NearScatRange(float size, int32_t ix, int32_t iy, float h, float* lo,
         }
     if (b < a) return 0;
     *lo = a; *hi = b;
-    AcquireSRWLockExclusive(&g_scatView.lock);
-    if (g_scatView.gen != gen) { memset(g_scatCache, 0, sizeof g_scatCache); g_scatView.gen = gen; }
-    NearScatStore(sbits, hbits, ix, iy, a, b);
-    ReleaseSRWLockExclusive(&g_scatView.lock);
+    NearScatStore(gen, sbits, hbits, ix, iy, a, b);
     return 1;
 }
 
@@ -9431,6 +9523,10 @@ static uint64_t NearScatterView(uintptr_t tree, void* frustum, uint32_t stamp, f
 {
     uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL);
     uint8_t* layer = (uint8_t*)TlsGetValue(g_scatView.tls);
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+    const int64_t t0 = t_tdScatBake ? XrfClock() : 0;
+    uint64_t bakeCells = 0;
+#endif
     if (layer != NULL && g_world.current > 1.0f && tree != 0 && *(uintptr_t*)(layer + 0x40) == tree)
     {
         float size = *(float*)(layer + 0x22C), grow = *(float*)(layer + 0x230);
@@ -9438,6 +9534,9 @@ static uint64_t NearScatterView(uintptr_t tree, void* frustum, uint32_t stamp, f
         uint8_t* nodes = *(uint8_t**)(tree + 0x88);
         int budget; uint64_t most;
         NearScatLimits(t_tdScatBake, &budget, &most);
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+        bakeCells = count;
+#endif
         /* The engine builds a node for every cell in the view (0x9548C0), so a bake view's count is set by its 256 m square
          * and the layer's cell size; over the limit its nodes would keep z-0 boxes, and the batch stops instead. */
         if (t_tdScatBake && count > most && InterlockedIncrement(&g_scatBakeOver) <= 4)
@@ -9471,6 +9570,9 @@ static uint64_t NearScatterView(uintptr_t tree, void* frustum, uint32_t stamp, f
             }
         }
     }
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+    if (t_tdScatBake) XrfBakeAdd(bakeCells, 0, XrfClock() - t0);
+#endif
     return ((NearViewFn)(exe + 0x9531E0u))(tree, frustum, stamp, pad);
 }
 

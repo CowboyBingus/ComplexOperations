@@ -1867,7 +1867,9 @@ int CoXlTestTileAddAt(float cx, float cy, const uint16_t* heights, uint32_t n, f
     return NearTileAdd(NearTileFree(), cx, cy, 0x1234, &ground);
 }
 void CoXlTestTileRemove(int slot) { NearTileRemove(slot); }
-void CoXlTestCoarse(const uint16_t* heights, uint32_t n, float size) { const NearGround g = {heights, n, size, 0.0f, 0.0f}; g_nearCoarseGround = g; }
+void CoXlTestCoarse(const uint16_t* heights, uint32_t n, float size) { const NearGround g = {heights, n, size, 0.0f, 0.0f}; g_nearCoarseGround = g; NearCoarseChanged(); }
+LONG CoXlTestScatGenNow(void) { return NearScatGen(); } /* the readers' generation */
+void CoXlTestTilesGen(LONG gen) { g_tilesGen = gen; }
 void CoXlTestNearBuilding(int building) { g_near.level = g_world.levels; g_near.state = building ? NEAR_START : NEAR_IN; }
 void CoXlTestLayerTile(int slot, int in, float cx, float cy) { NearLayerTileChange(slot, in, cx, cy); }
 void CoXlTestLayerTileLater(int slot, int in, float cx, float cy) { NearLayerTileChangeLater(slot, in, cx, cy); }
@@ -2764,24 +2766,54 @@ void CoXlTestFgFrames(const float* ms, int n, double* worst, double* mean)
     FgFramesStart();
     *worst = g_fgFrames.before[0]; *mean = g_fgFrames.before[1];
 }
+int CoXlTestScatBakeNow(void) { return t_tdScatBake; } /* the mark outside the engine's update: always 0 */
 int CoXlTestScatterBake(void) { return g_scatterTestBake; } /* the far-grass bake mark the engine's update ran under */
 void CoXlTestScatLimits(int bake, int* budget, uint64_t* most) { NearScatLimits(bake, budget, most); }
-void CoXlTestScatClear(void) { memset(g_scatCache, 0, sizeof g_scatCache); }
+/* The range cache under generation `gen` (1 unless set): cleared, a store, a find, a cell's first slot. */
+static LONG g_scatTestGen = 1;
+void CoXlTestScatGen(LONG gen) { g_scatTestGen = gen; }
+void CoXlTestScatClear(void) { memset(g_scatCache, 0, sizeof g_scatCache); g_scatTestGen = 1; }
 void CoXlTestScatStore(float size, float half, int32_t ix, int32_t iy, float lo, float hi)
 {
     uint32_t s, h; memcpy(&s, &size, 4); memcpy(&h, &half, 4);
-    NearScatStore(s, h, ix, iy, lo, hi);
+    NearScatStore(g_scatTestGen, s, h, ix, iy, lo, hi);
 }
 int CoXlTestScatFind(float size, float half, int32_t ix, int32_t iy, float* lo, float* hi)
 {
     uint32_t s, h; memcpy(&s, &size, 4); memcpy(&h, &half, 4);
-    return NearScatFind(s, h, ix, iy, lo, hi);
+    return NearScatFind(g_scatTestGen, s, h, ix, iy, lo, hi);
 }
 uint32_t CoXlTestScatSlot(float size, float half, int32_t ix, int32_t iy)
 {
     uint32_t s, h; memcpy(&s, &size, 4); memcpy(&h, &half, 4);
     return NearScatSlot(s, h, ix, iy);
 }
+/* A slot held by a writer (seq odd) or let go, as another thread's store would leave it mid-way. */
+/* The brushes' callback through NearScatterCell: `fn` as the game's, the update's bake mark as given; and the
+ * level's counts since (seen, moved, off the tiles, without the image, near a tile). */
+uint32_t CoXlTestScatterCell(void* fn, int32_t x, int32_t y, int32_t size, void* out, uint32_t max, uint8_t* brush, int bake)
+{
+    g_nearScatter = (NearScatterFn)fn; t_tdScatBake = bake;
+    const uint32_t made = NearScatterCell(x, y, size, NULL, out, max, brush);
+    t_tdScatBake = 0;
+    return made;
+}
+void CoXlTestScatterCellCounts(LONG64* c)
+{
+    c[0] = g_nearScatterSeen; c[1] = g_nearScatterMoved; c[2] = g_nearScatterNoTile; c[3] = g_nearScatterNoImage; c[4] = g_nearScatterNear;
+}
+/* Another thread's store, run inside the next read (where 0) or before the next store takes its slot (1), once. */
+static int g_scatTestWhere; static float g_scatTestLo;
+static void ScatTestStore(NearScatEntry* e, int where)
+{
+    if (where != g_scatTestWhere) return;
+    g_scatTestHook = NULL;
+    e->seq += where == 0 ? 2 : 1; /* a store done in the read, or one begun (held) before ours */
+    uint32_t l; memcpy(&l, &g_scatTestLo, 4); memcpy((void*)&e->lo, &l, 4);
+}
+uint32_t CoXlTestScatPeekSize(uint32_t slot) { return g_scatCache[slot & (NEAR_SCAT_CACHE - 1)].size; } /* a slot's raw size field */
+void CoXlTestScatRace(int where, float lo) { g_scatTestWhere = where; g_scatTestLo = lo; g_scatTestHook = ScatTestStore; }
+void CoXlTestScatHold(uint32_t slot, int hold) { g_scatCache[slot & (NEAR_SCAT_CACHE - 1)].seq += hold ? 1 : -1; }
 int CoXlTestScatterUpdate(LONG op, LONG record, uint8_t* view)
 {
     g_genOp = op; g_genRecord = record; g_tdScatCameraPinned = 1;
@@ -2890,6 +2922,17 @@ int CoXlTestTacWaypoint(uint32_t i, float* x, float* y)
 int CoXlTestFgBatch(const float (*players)[2], int count, float reach, uint16_t* list, int max) { return FgBatch(&g_fg.map, players, count, reach, list, max); }
 void CoXlTestFgMark(int i, int j) { FgMark(&g_fg.map, i, j); }
 void CoXlTestFgView(int i, int j, float* centre, float* rect) { FgCentre(i, j, centre); FgRect(i, j, rect); }
+/* Job q of view (i, j): its camera box (l, r, b, t from the view's centre) and its rectangle; the jobs a view and the
+ * cells a job's layer gathers. */
+void CoXlTestFgSub(int i, int j, int q, float* box, float* rect) { FgSubRect(i, j, q, box, rect); }
+int CoXlTestFgSubs(void) { return FG_SUBS; }
+void CoXlTestFgSplit(int sx, int sy) { g_fg.sx = sx; g_fg.sy = sy; } /* research's HELLFORGE_XL_FARGRASS_SPLIT */
+float CoXlTestFgNearest(float* windowMin) { *windowMin = g_fg.nearestMin; return g_fg.nearest; } /* the coverage line's */
+void CoXlTestFgCoverageAge(ULONGLONG ms) { g_fg.coverageSince -= ms; } /* the coverage window as if ms older */
+int CoXlTestMoverWants(void) { return g_moveWantsTile; }
+void CoXlTestMoverWantsSet(int on) { g_moveWantsTile = on; }
+uint64_t CoXlTestFgJobCells(float size, float grow) { return FgJobCells(size, grow); }
+uint32_t CoXlTestFgJobs(void) { return g_fg.jobs; }
 void CoXlTestFgInstall(void* aim, void* generate) { g_fg.installed = 1; g_fg.aim = (FgAimFn)aim; g_fg.generate = (FgGenerateFn)generate; }
 void CoXlTestFgKeep(uint64_t record, uint32_t op) { FarGrassKeep(record, op); }
 uint64_t CoXlTestFgTex(int k) { return g_fg.tex[k]; }

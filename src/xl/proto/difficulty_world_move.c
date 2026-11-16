@@ -112,6 +112,7 @@ static struct
 static struct { int on, slot, hasGone; NearTile gone; float cx, cy; const char* why; } g_moveReplace;
 
 static int FarGrassBusy(void); /* difficulty_world_fargrass.c */
+static int g_moveWantsTile; /* this update's idle mover had a cell to build and waited for far grass's job */
 static void FarGrassTick(uint64_t level);
 static void FarGrassLevelLeft(void);
 static void FarGrassInstall(uintptr_t game);
@@ -1866,6 +1867,7 @@ static int MoveReleaseTick(ULONGLONG now); /* xl_free.c: an expired tile's relea
 
 static void MoveTick(uint64_t level)
 {
+    g_moveWantsTile = 0;
     if (!g_moveInstalled || level == 0 || level != g_worldLevelLive || g_world.live != 8.0f || !TerrainOn() || !NearOn() || !MoveOn()) return;
     uint32_t state = 0;
     if (SafeRead(level + 0x1E4, &state, 4) || state != 3) return;
@@ -1921,8 +1923,7 @@ static void MoveTick(uint64_t level)
     if (MoveTrimTick()) return;
     if (g_move.state == MV_IDLE)
     {
-        if (g_move.players == 0 || FarGrassBusy()) return; /* a far-grass batch has the generator's queue and names */
-        if (NearTilesLive() >= MOVE_CAP) return;
+        if (g_move.players == 0 || NearTilesLive() >= MOVE_CAP) return;
         float best = 1e9f; int ba = 0, bb = 0, bp = -1;
         for (int p = 0; p < g_move.players; p++)
         {
@@ -1936,6 +1937,8 @@ static void MoveTick(uint64_t level)
                 }
         }
         if (bp < 0) return;
+        /* a far-grass job has the generator's queue and names: it lets the next gap go to this build */
+        if (FarGrassBusy()) { g_moveWantsTile = 1; return; }
         g_move.slot = NearTileFree();
         if (g_move.slot < 0) return;
         g_move.cell[0] = ba; g_move.cell[1] = bb;
