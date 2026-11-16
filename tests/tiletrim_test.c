@@ -120,6 +120,9 @@ int main(void)
         CHECK(!CoXlTestMoverLive(1) && CoXlTestMoverLive(2)); /* one a frame */
         CHECK(fake_host_logged("difficulty: moving tiles: the tile of cell (0, -2) released"));
         CHECK(fake_host_logged("on the game thread, during the build of cell (2, 1) (mover replay, near state 2)"));
+        CHECK(fake_host_logged("difficulty: moving tiles: the release's parts (replay): the coarse raise ") && fake_host_logged("ms, the hide union ") &&
+            fake_host_logged(", the layer change and replacement queued ") && fake_host_logged(", the frees queued ") && fake_host_logged(", the ground check "));
+        CHECK(fake_host_logged("(its fence wait, exe 0x1ADFB3: untimed)")); /* no 0x106030 hook here */
         CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(2));
         CHECK(CoXlTestMoverRelease(now) == 0);
         CHECK(CoXlTestMoverLive(0)); /* the drop tile stays */

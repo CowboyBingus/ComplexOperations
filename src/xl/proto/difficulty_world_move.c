@@ -1387,17 +1387,30 @@ static void MoveRaiseCheck(float cx, float cy, int cellX, int cellY)
         cellX, cellY, hit, off, (double)worst, miss);
 }
 
+/* A release's parts on the game thread (QPC ticks): the raise, the hide union, the layer change and replacement queued,
+ * the destroy, its own fence wait inside it (0x1ADFB3, timed by xl_free.c's 0x106030 hook; -1 untimed), the frees
+ * queued, the ground check: which of them holds the 18-20 ms release frame. */
+enum { MR_RAISE, MR_UNION, MR_LATER, MR_DESTROY, MR_FREE, MR_CHECK, MR_PARTS };
+static struct { int64_t part[MR_PARTS]; volatile LONG64 fence; int fenceTimed; } g_moveRelease;
+
 static void MoveRelease(int slot)
 {
     NearTile t = g_tiles[slot];
     uint64_t world = MoveWorld();
+    LARGE_INTEGER at[MR_PARTS + 1];
+    memset(g_moveRelease.part, 0, sizeof g_moveRelease.part);
+    InterlockedExchange64(&g_moveRelease.fence, 0);
     NearTileRemove(slot);
     g_tiles[slot].tex[0] = g_tiles[slot].tex[1] = g_tiles[slot].band = 0; g_tiles[slot].bandPixels = NULL;
+    QueryPerformanceCounter(&at[0]);
     int raised = NearRaiseCoarse(world, &g_tileHidden[slot]);
     g_tileHidden[slot].lowered = 0;
+    QueryPerformanceCounter(&at[1]);
     NearHideUnion(world, "a tile released");
+    QueryPerformanceCounter(&at[2]);
     NearLayerTileChangeLater(slot, 0, t.centre[0], t.centre[1]);
     MoveReplaceLater(slot, &t, t.centre[0], t.centre[1], "a tile went");
+    QueryPerformanceCounter(&at[3]);
     typedef void (*DestroyFn)(uint64_t world, uint64_t handle);
     DestroyFn destroy = (DestroyFn)NearApi(0x08, 0x1E0);
     g_move.destroyTicks = -1;
@@ -1409,9 +1422,13 @@ static void MoveRelease(int slot)
         g_move.destroyTicks = d1.QuadPart - d0.QuadPart;
         g_tiles[slot].handle = 0; /* its object is freed: a later terrain may get the address */
     }
+    QueryPerformanceCounter(&at[4]);
     MoveFreeLater(t.tex[0], t.tex[1], t.band, t.bandPixels);
     g_move.released++;
+    QueryPerformanceCounter(&at[5]);
     if (raised) MoveRaiseCheck(t.centre[0], t.centre[1], t.cell[0], t.cell[1]);
+    QueryPerformanceCounter(&at[6]);
+    for (int k = 0; k < MR_PARTS; k++) g_moveRelease.part[k] = at[k + 1].QuadPart - at[k].QuadPart;
     Note("difficulty: moving tiles: the tile of cell (%d, %d) released (no player within %.0f m for %u s); the coarse collision %s; %d tiles live",
         t.cell[0], t.cell[1], (double)MOVE_KEEP, MOVE_KEEP_MS / 1000, raised ? "raised back" : "NOT raised back (the level's copy did not read)", NearTilesLive());
     if (g_allocOn > 0 || MemProbeOn()) WorldMemoryNote("a tile released", 0xFFFFFFFFu, 0, 1); /* research (HELLFORGE_XL_ALLOCS=1 or MEMPROBE=1): what a release gives back */
@@ -2100,7 +2117,8 @@ static void MoveTick(uint64_t level)
 typedef struct { int mv, ns, op, conf; uint32_t n; double max; } MoveSlowKey;
 typedef struct { MoveSlowKey key[MOVE_SLOW_KEYS]; uint32_t keys, over, other; } MoveSlow;
 static struct { double ms[6]; int mv[6], ns[6], step[6], conf[6], bld[6]; double sum; uint32_t frames; int pending;
-    double wall[3]; int wallMv[3]; uint32_t slow; MoveSlow tick, clock; } g_moveCost;
+    double wall[3]; int wallMv[3]; uint32_t slow; MoveSlow tick, clock;
+    uint32_t fenceFrames, fenceSlow; double fenceSum, fenceMax, fenceSlowWall, fenceSlowSum; int fenceMv, fenceOp; } g_moveCost;
 /* Wall-clock frames, level update to level update (once a frame on the game thread, 0xAB519E): the whole frame's time,
  * render and other threads' waits included, which the game-thread cost above leaves out. */
 static struct { LARGE_INTEGER last; int mv, ns, op, conf, sp0, sp1; } g_moveWall; /* sp0, sp1: the 0x63 split at t0, after MoveTick */
@@ -2114,15 +2132,16 @@ enum { MF_TICK, MF_LEVEL, MF_T0, MF_T1, MF_TICK_END, MF_MARKS }; /* MF_TICK_END:
 typedef struct
 {
     int64_t at[MF_MARKS], consumer, consumerOut; /* QPC ticks; the consumer's after MoveTick only */
+    int64_t fence; /* the frame loop's fence wait (exe 0x8A7C4) between the tick and the level update */
     int have, mv, ns, op, shape, tile, building;
     LONG shapeEnds, tileEnds; /* the job ends counted at the tick: one that ends inside the frame was out in it */
 } MoveFrameMarks;
-static struct { MoveFrameMarks f; uint32_t lines; int inBuild; DWORD thread; uintptr_t teb; } g_moveFrame;
+static struct { MoveFrameMarks f; uint32_t lines; int inBuild, fenceTimed; volatile LONG fenceIn, fenceOut; DWORD thread; uintptr_t teb; } g_moveFrame;
 
-/* frame, early update, level update, mover, after the mover, consumer, to the next tick, CoXlTick (ms); 0 without the
- * four marks. The part after the mover ends at the consumer's last return, so the five parts add up to the frame;
- * CoXlTick is the early update's own first part (0 without its end mark). */
-static int MoveFrameParts(const MoveFrameMarks* f, int64_t next, double hz, double part[8])
+/* frame, early update, level update, mover, after the mover, consumer, to the next tick, CoXlTick, frame fence (ms); 0
+ * without the four marks. The part after the mover ends at the consumer's last return, so the five parts add up to the
+ * frame; CoXlTick (0 without its end mark) and the frame fence are parts of the early update. */
+static int MoveFrameParts(const MoveFrameMarks* f, int64_t next, double hz, double part[9])
 {
     if ((f->have & 15) != 15 || !(hz > 0)) return 0;
     const int64_t* a = f->at;
@@ -2132,19 +2151,22 @@ static int MoveFrameParts(const MoveFrameMarks* f, int64_t next, double hz, doub
     part[2] = (double)(a[MF_T0] - a[MF_LEVEL]) * k; part[3] = (double)(a[MF_T1] - a[MF_T0]) * k;
     part[4] = (double)(x - a[MF_T1]) * k; part[5] = (double)f->consumer * k; part[6] = (double)(next - x) * k;
     part[7] = (f->have & (1 << MF_TICK_END)) && a[MF_TICK_END] >= a[MF_TICK] && a[MF_TICK_END] <= a[MF_LEVEL] ? (double)(a[MF_TICK_END] - a[MF_TICK]) * k : 0.0;
+    part[8] = (double)f->fence * k;
     return 1;
 }
 
 static void MoveFrameClose(int64_t next, double hz)
 {
     const MoveFrameMarks* f = &g_moveFrame.f;
-    double p[8];
+    double p[9];
     if (!f->building || g_moveFrame.lines >= MOVE_FRAME_LINES || !MoveFrameParts(f, next, hz, p) || !(p[0] > MOVE_FRAME_SLOW_MS)) return;
     g_moveFrame.lines++;
     const int shape = f->shape || g_shapeEnds != f->shapeEnds, tile = f->tile || g_nearJobEnds != f->tileEnds;
-    Note("difficulty: moving tiles: slow frame %.1f ms (%s/near %d/op 0x%02X): early update %.1f ms (CoXlTick %.1f), level update %.1f, mover %.1f, "
+    char fence[16] = "untimed";
+    if (g_moveFrame.fenceTimed) snprintf(fence, sizeof fence, "%.1f", p[8]);
+    Note("difficulty: moving tiles: slow frame %.1f ms (%s/near %d/op 0x%02X): early update %.1f ms (CoXlTick %.1f, frame fence %s), level update %.1f, mover %.1f, "
         "after the mover %.1f (consumer %.1f), to the next tick %.1f; jobs out: shape %d, tile %d", p[0], MoveStateName(f->mv), f->ns, (unsigned)f->op & 0xFFu,
-        p[1], p[7], p[2], p[3], p[4], p[5], p[6], shape, tile);
+        p[1], p[7], fence, p[2], p[3], p[4], p[5], p[6], shape, tile);
 }
 
 /* A mark on the game thread at `now`; a tick closes the frame before it and takes the job end counts the new one starts with. */
@@ -2163,6 +2185,19 @@ static void MoveFrameMark(int mark, int64_t now, double hz)
 
 /* The level's end: no build runs any more (the stall watch's gate, move.c's teardown). */
 static void MoveFrameLeft(void) { g_moveFrame.inBuild = 0; g_moveFrame.f.building = 0; }
+
+/* The frame loop's wait on the fence it posted a frame before (exe 0x8A7C4 waits [rsi+0x340], 0x8AAF2 posts it after
+ * the kick), timed by xl_free.c's 0x106030 hook: the game thread idle while the render thread ends the last frame. It
+ * runs after the world update and before the next level update, so only the game thread's waits in the early update count. */
+static void MoveFrameFence(int64_t in, int64_t out)
+{
+    MoveFrameMarks* f = &g_moveFrame.f;
+    if (GetCurrentThreadId() != g_moveFrame.thread || !(f->have & (1 << MF_TICK)) || (f->have & (1 << MF_LEVEL))) { InterlockedIncrement(&g_moveFrame.fenceOut); return; }
+    f->fence += out - in;
+    InterlockedIncrement(&g_moveFrame.fenceIn);
+}
+/* The fence in the wall frame ending at this level update (ms), -1 untimed. */
+static double MoveFrameFenceMs(double hz) { return g_moveFrame.fenceTimed && hz > 0 ? (double)g_moveFrame.f.fence * 1000.0 / hz : -1.0; }
 
 /* The job consumer (NearConsume), on whichever thread runs it: only the game thread's calls after MoveTick count. */
 static void MoveFrameConsumer(int64_t in, int64_t out)
@@ -2200,7 +2235,7 @@ static void MoveStallPhase(int phase, int64_t now) { (void)phase; (void)now; }
 /* The 0x63 step's wall frames by where its split was (state at the frame's t0 and after its MoveTick): before the op
  * (hides), the op's frame, the ranges, showing all, the last frame; its slowest frame is outside the split's own clock. */
 enum { S63W_BEFORE, S63W_OP, S63W_RANGES, S63W_SHOWING, S63W_LAST, S63W_OTHER, S63W_KINDS };
-static struct { uint32_t n[S63W_KINDS], over; double max[S63W_KINDS]; } g_split63Wall;
+static struct { uint32_t n[S63W_KINDS], over; double max[S63W_KINDS], fence[S63W_KINDS]; int timed; } g_split63Wall; /* fence: the longest frame's */
 static int Split63WallKind(int sp0, int sp1)
 {
     if (sp1 == SP_DONE) return S63W_LAST;
@@ -2210,12 +2245,14 @@ static int Split63WallKind(int sp0, int sp1)
     if (sp1 == SP_SHOWING) return S63W_SHOWING;
     return S63W_OTHER;
 }
-static void Split63WallAdd(double ms, int sp0, int sp1)
+/* fence: the frame fence's wait in the frame (ms), -1 untimed. */
+static void Split63WallAdd(double ms, double fence, int sp0, int sp1)
 {
     const int k = Split63WallKind(sp0, sp1);
     g_split63Wall.n[k]++;
-    if (ms > g_split63Wall.max[k]) g_split63Wall.max[k] = ms;
+    if (ms > g_split63Wall.max[k]) { g_split63Wall.max[k] = ms; g_split63Wall.fence[k] = fence; }
     if (ms > MOVE_SLOW_MS) g_split63Wall.over++;
+    if (fence >= 0) g_split63Wall.timed = 1;
 }
 static void Split63WallNote(void)
 {
@@ -2226,6 +2263,12 @@ static void Split63WallNote(void)
     Note("difficulty: moving tiles: 0x63 step's wall-clock frames: %u before the op (max %.1f ms), the op's %u (max %.1f), %u of the ranges (max %.1f), "
         "%u showing all (max %.1f), the last %u (max %.1f), %u other (max %.1f); %u over %.1f ms", n[S63W_BEFORE], m[S63W_BEFORE], n[S63W_OP], m[S63W_OP],
         n[S63W_RANGES], m[S63W_RANGES], n[S63W_SHOWING], m[S63W_SHOWING], n[S63W_LAST], m[S63W_LAST], n[S63W_OTHER], m[S63W_OTHER], g_split63Wall.over, MOVE_SLOW_MS);
+    /* how much of each kind's longest frame the game thread spent waiting for the render thread's last frame */
+    const double* f = g_split63Wall.fence;
+    if (g_split63Wall.timed)
+        Note("difficulty: moving tiles: 0x63 step's longest wall-clock frames' frame fence (exe 0x8A7C4): before the op %.1f of %.1f ms, the op's %.1f of %.1f, "
+            "the ranges' %.1f of %.1f, showing all %.1f of %.1f, the last %.1f of %.1f, other %.1f of %.1f", f[S63W_BEFORE], m[S63W_BEFORE], f[S63W_OP], m[S63W_OP],
+            f[S63W_RANGES], m[S63W_RANGES], f[S63W_SHOWING], m[S63W_SHOWING], f[S63W_LAST], m[S63W_LAST], f[S63W_OTHER], m[S63W_OTHER]);
     memset(&g_split63Wall, 0, sizeof g_split63Wall);
 }
 
@@ -2271,6 +2314,15 @@ static void MoveWallAdd(double ms, int mv)
     g_moveCost.wall[at] = ms; g_moveCost.wallMv[at] = mv;
 }
 
+/* A wall frame's fence wait (ms, -1 untimed) for the build's fence line, keyed by the state at the frame's start. */
+static void MoveFenceAdd(double wall, double fence, int mv, int op)
+{
+    if (fence < 0) return;
+    g_moveCost.fenceFrames++; g_moveCost.fenceSum += fence;
+    if (g_moveCost.fenceFrames == 1 || fence > g_moveCost.fenceMax) { g_moveCost.fenceMax = fence; g_moveCost.fenceMv = mv; g_moveCost.fenceOp = op; }
+    if (wall > MOVE_SLOW_MS) { g_moveCost.fenceSlow++; g_moveCost.fenceSlowWall += wall; g_moveCost.fenceSlowSum += fence; }
+}
+
 static void MoveCostAdd(double ms, int mv, int ns, int step, int conf, int bld)
 {
     g_moveCost.sum += ms; g_moveCost.frames++;
@@ -2301,6 +2353,15 @@ static void MoveCostNote(void)
         MoveSlowText(&g_moveCost.tick, tick, sizeof tick); MoveSlowText(&g_moveCost.clock, clock, sizeof clock);
         Note("difficulty: moving tiles: the build's frames over %.1f ms: the mover's own work %u:%s", MOVE_SLOW_MS, g_moveCost.tick.over, tick);
         Note("difficulty: moving tiles: the build's frames over %.1f ms: wall clock %u:%s", MOVE_SLOW_MS, g_moveCost.clock.over, clock);
+    }
+    if (g_moveCost.fenceFrames)
+    {
+        char op[8] = "-";
+        if (g_moveCost.fenceOp >= 0) snprintf(op, sizeof op, "0x%02X", g_moveCost.fenceOp);
+        Note("difficulty: moving tiles: the build's frame fence waits (exe 0x8A7C4): %u wall frames, %.0f ms in all, the longest %.1f ms (%s/op %s); "
+            "the %u wall frames over %.1f ms: %.0f of their %.0f ms in the fence; %ld waits in early updates, %ld elsewhere since the last such line", g_moveCost.fenceFrames, g_moveCost.fenceSum,
+            g_moveCost.fenceMax, MoveStateName(g_moveCost.fenceMv), op, g_moveCost.fenceSlow, MOVE_SLOW_MS, g_moveCost.fenceSlowSum, g_moveCost.fenceSlowWall,
+            (long)InterlockedExchange(&g_moveFrame.fenceIn, 0), (long)InterlockedExchange(&g_moveFrame.fenceOut, 0));
     }
     memset(&g_moveCost, 0, sizeof g_moveCost);
     Split63WallNote(); /* a build that ended inside the step */
@@ -2376,7 +2437,8 @@ static uintptr_t MoveStallFunction(uintptr_t a)
 
 /* The wait an address names (RIP, or a return address on the stack): the job system's waits and helps (0x626900,
  * 0x624D00, 0x627160, 0x6273E0, 0xB3D90), the frame loop's fence (the call at 0x8A7C4), a resource fence (0x1A8D70 the
- * release, 0x1A8449 the create), the game's wait on its queue-14 generator job (game 0xF6E6E6); NULL none. */
+ * release, 0x1A8449 the create), a terrain destroy's (0x1ADFB3), the game's wait on its queue-14 generator job (game
+ * 0xF6E6E6); NULL none. */
 static const char* MoveStallWait(uintptr_t a, uintptr_t exe, size_t exeSize, uintptr_t game, size_t gameSize, char* out, size_t size)
 {
     static const uint32_t kWaits[] = {0x626900u, 0x624D00u, 0x627160u, 0x6273E0u, 0xB3D90u};
@@ -2385,6 +2447,7 @@ static const char* MoveStallWait(uintptr_t a, uintptr_t exe, size_t exeSize, uin
     if (a - exe == 0x8A7C9u) return "the frame loop's fence (exe 0x8A7C4)";
     if (a - exe == 0x1A8D75u) return "a resource release's fence (exe 0x1A8D70)";
     if (a - exe == 0x1A844Eu) return "a resource create's fence (exe 0x1A8449)";
+    if (a - exe == 0x1ADFB8u) return "a terrain destroy's fence (exe 0x1ADFB3)";
     const uintptr_t f = MoveStallFunction(a);
     for (size_t k = 0; k < sizeof kWaits / sizeof kWaits[0]; k++)
         if (f == exe + kWaits[k]) { snprintf(out, size, "the job system's wait or help (exe 0x%X)", kWaits[k]); return out; }
@@ -2522,9 +2585,11 @@ static void MoveLevelUpdate(uint64_t level)
     if (g_moveWall.last.QuadPart != 0 && (g_moveWall.mv != MV_IDLE || g_moveCost.pending))
     {
         const double wall = (double)(t0.QuadPart - g_moveWall.last.QuadPart) * 1000.0 / (double)hz.QuadPart;
+        const double fence = MoveFrameFenceMs((double)hz.QuadPart); /* this frame's early update lies inside the wall frame */
         MoveWallAdd(wall, g_moveWall.mv);
         MoveSlowAdd(&g_moveCost.clock, wall, g_moveWall.mv, g_moveWall.ns, g_moveWall.op, g_moveWall.conf);
-        if (g_moveWall.op == 0x63) Split63WallAdd(wall, g_moveWall.sp0, g_moveWall.sp1);
+        MoveFenceAdd(wall, fence, g_moveWall.mv, g_moveWall.op);
+        if (g_moveWall.op == 0x63) Split63WallAdd(wall, fence, g_moveWall.sp0, g_moveWall.sp1);
     }
     if (g_moveWall.op == 0x63 && op != 0x63) Split63WallNote();
     g_moveWall.last = t0; g_moveWall.mv = mv; g_moveWall.ns = ns; g_moveWall.op = op; g_moveWall.conf = conf; g_moveWall.sp0 = g_split.state;

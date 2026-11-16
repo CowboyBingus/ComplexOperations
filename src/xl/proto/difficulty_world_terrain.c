@@ -2488,11 +2488,12 @@ static uint64_t NearJobRun(uint64_t a, uint64_t b, uint64_t c, uint64_t element)
     return 0;
 }
 
-/* The two long tile jobs' queue, r9d + 3 x arg5 (exe 0x6261C9): 10 holds a regular worker the game thread may wait on;
- * 14 (research, HELLFORGE_XL_NEAR_BGQUEUE=1) is popped only by the two LP workers, woken through [pool+0xE0] (exe
- * 0x625446), which run the same worker entry (0x625190) and never serve the game thread's queues. "auto" (research):
- * queue 10 until two builds whose shape job ended before a frame saw it ("0 frames") also have stall samples, or four
- * builds in a row with a shape job and no such stall, then 14 for the rest of the process; a build keeps its first job's queue. */
+/* The two long tile jobs' queue, r9d + 3 x arg5 (exe 0x6261C9): 14, popped only by the two LP workers (roles 16 and 17
+ * poll 12..14 alone, exe 0x626AE2 / 0x627372; no other role's list holds 12..14), woken through [pool+0xE0] (0x625446).
+ * On 10 a regular worker spinning in a mode-2 wait (0x627160 polls 9 0 3 6 10 1 4 7, each list LIFO) can take the job
+ * inside a render-side job (the channel 7 sync point 0x5799D0 waits at 0x579A2A), which then ends only with it.
+ * Research: HELLFORGE_XL_NEAR_BGQUEUE=0 keeps queue 10; "auto" starts on 10 and goes to 14 after two builds stalled
+ * ("0 frames" with stall samples) or four in a row without; a build keeps its first job's queue. */
 enum { NEAR_BG_OFF, NEAR_BG_ON, NEAR_BG_AUTO };
 #define NEAR_BG_STALLS 2
 #define NEAR_BG_CLEAN 4
@@ -2502,10 +2503,12 @@ static void NearJobQueue(uint32_t* queue, uint32_t* priority)
 {
     if (g_nearBgQueue < 0)
     {
-        char v[8] = "";
+        char v[8] = ""; /* a research switch: other builds read it as unset (co_shim.h) */
         const DWORD n = GetEnvironmentVariableA("HELLFORGE_XL_NEAR_BGQUEUE", v, sizeof v);
-        g_nearBgQueue = n > 0 && v[0] == '1' ? NEAR_BG_ON : n > 0 && strcmp(v, "auto") == 0 ? NEAR_BG_AUTO : NEAR_BG_OFF;
-        if (g_nearBgQueue == NEAR_BG_ON) Note("difficulty: moving tiles: the composite tile and collision shape jobs go to queue 14, the LP workers' (HELLFORGE_XL_NEAR_BGQUEUE=1, research)");
+        g_nearBgQueue = n > 0 && v[0] == '0' ? NEAR_BG_OFF : n > 0 && strcmp(v, "auto") == 0 ? NEAR_BG_AUTO : NEAR_BG_ON;
+        if (g_nearBgQueue == NEAR_BG_ON) Note("difficulty: moving tiles: the composite tile and collision shape jobs go to queue 14, the LP workers'");
+        if (g_nearBgQueue == NEAR_BG_OFF)
+            Note("difficulty: moving tiles: the composite tile and collision shape jobs go to queue 10, the regular workers' (HELLFORGE_XL_NEAR_BGQUEUE=0, research)");
         if (g_nearBgQueue == NEAR_BG_AUTO)
             Note("difficulty: moving tiles: the tile jobs start on queue 10 and go to 14 after %d builds stalled with samples or %d builds in a row without (HELLFORGE_XL_NEAR_BGQUEUE=auto, research)",
                 NEAR_BG_STALLS, NEAR_BG_CLEAN);
@@ -2542,9 +2545,9 @@ static void NearAutoBuildEnd(long samples)
     g_nearAuto.latched = g_nearAuto.shapeZero = g_nearAuto.shaped = 0;
 }
 
-/* Game thread: the next step's job once its slot is free and no job is in flight. One at a time: a tile job holds a
- * worker ~60 ms, and on queue 10 the frame's own job is popped only by the lower half of the regular workers
- * (StampRunnerCap). */
+/* Game thread: the next step's job once its slot is free and no job is in flight. One at a time: a tile job holds an
+ * LP worker ~60 ms and the game's own queue-14 jobs need the other; on queue 10 (research) the frame's own job is
+ * popped only by the lower half of the regular workers (StampRunnerCap). */
 static void NearJobFeed(void)
 {
     static const char name[] = "hellforge moving tile composite tile";
@@ -8785,8 +8788,8 @@ static void MoveHold(int on); /* difficulty_world_move.c */
  * the physics height field from every sample (0x786130 at 0x1AC4C9: two fresh arrays, a pass over the heights and
  * materials, a min/max tree) and then the render quadtree (0x2F2CB0 at 0x1AC58A). Vanilla runs it in the generator's
  * job (op 0x6A, record flags 0), and 0x786130 reads the object and writes only what it allocates. So the steps are the
- * function's own, in its order, with the shape build alone as an engine job on the regular workers (as the tile
- * runners, which the game thread's waits never run); craters are held meanwhile. Not the reviewed code: work() as before. */
+ * function's own, in its order, with the shape build alone as an engine job on the composite tiles' queue (NearJobQueue;
+ * those jobs are all joined before the spawn); craters are held meanwhile. Not the reviewed code: work() as before. */
 #define NEAR_SHAPE_LOCK 0x230520u
 #define NEAR_SHAPE_TABLE 0x230550u
 static const struct { uint32_t at; const char* bytes; } kNearShapeWork[] = {

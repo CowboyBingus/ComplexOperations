@@ -17,6 +17,10 @@ uint32_t CoXlTestMatWaitPending(void);
 void CoXlTestMatRes(const void* fns, int ready, void* teardown);
 void CoXlTestMatResTeardown(uint64_t world);
 void CoXlTestNearLevelLeft(int ship);
+void CoXlTestMatWaitTimed(uintptr_t frameAt, uintptr_t destroyAt);
+double CoXlTestMoveReleaseFenceMs(void);
+void CoXlTestMoveFrameMark(int mark, double ms);
+double CoXlTestMoveFrameFenceMs(void);
 
 static int g_failed;
 static const char* g_case;
@@ -27,6 +31,7 @@ static uint8_t g_r[0x1A60], g_r2[0x1A60];
 static uint64_t g_dev[2], g_dev11[2];
 static int g_waits; static uint64_t g_waitR[16]; static uint32_t g_waitId[16];
 
+static uint8_t SlowWait(uint64_t r, uint32_t id) { (void)r; (void)id; g_waits++; Sleep(20); return 1; }
 static uint8_t Wait(uint64_t r, uint32_t id) { if (g_waits < 16) { g_waitR[g_waits] = r; g_waitId[g_waits] = id; } g_waits++; return 1; }
 
 static void Renderer(uint8_t* r, int threaded, uint32_t kick, uint64_t* dev, int at1138)
@@ -127,6 +132,30 @@ int main(void)
     g_fake.log[0] = 0;
     CoXlTestMatWaitNote();
     CHECK(strstr(g_fake.log, "setup create waits") == NULL);
+
+    g_case = "the frame loop's fence (return 0x8A7C9) and a terrain destroy's (0x1ADFB8) wait as the game's, timed, inside the setup too";
+    {
+        enum { MF_TICK, MF_LEVEL };
+        CoXlTestMatWait(EXE, (void*)SlowWait);
+        CoXlTestMatWaitTimed(EXE + 0x8A7C9u, EXE + 0x1ADFB8u);
+        Renderer(g_r, 1, 90, g_dev, 0);
+        g_waits = 0;
+        CoXlTestMoveFrameMark(MF_TICK, 0.0); /* the early update: CoXlTick to the level update */
+        CHECK(CoXlTestMatWaitFrom(1, R(g_r), 4, EXE + 0x8A7C9u) == 1 && g_waits == 1 && CoXlTestMatWaitPending() == 0);
+        const double fence = CoXlTestMoveFrameFenceMs();
+        CHECK(fence >= 15.0 && fence < 1000.0);
+        CoXlTestMoveFrameMark(MF_LEVEL, 0.0);
+        CHECK(CoXlTestMatWaitFrom(0, R(g_r), 4, EXE + 0x8A7C9u) == 1 && g_waits == 2 && CoXlTestMoveFrameFenceMs() == fence); /* after the level update: not its part */
+        CHECK(CoXlTestMatWaitFrom(1, R(g_r), 5, EXE + 0x1ADFB8u) == 1 && g_waits == 3 && CoXlTestMatWaitPending() == 0);
+        CHECK(CoXlTestMoveReleaseFenceMs() >= 15.0 && CoXlTestMoveFrameFenceMs() == fence);
+        CHECK(CoXlTestMatWaitFrom(1, R(g_r), 6, EXE + 0x1A844Eu) == 0 && g_waits == 3 && CoXlTestMatWaitPending() == 1); /* the setup's still deferred */
+        CoXlTestMatWaitDrain();
+        CoXlTestMatWaitTimed(0, 0); /* their pins did not match: the game's wait, untimed */
+        CoXlTestMoveFrameMark(MF_TICK, 100.0);
+        g_waits = 0;
+        CHECK(CoXlTestMatWaitFrom(0, R(g_r), 4, EXE + 0x8A7C9u) == 1 && g_waits == 1 && CoXlTestMoveFrameFenceMs() == -1.0);
+        CHECK(CoXlTestMatWaitFrom(0, R(g_r), 5, EXE + 0x1ADFB8u) == 1 && g_waits == 2 && CoXlTestMoveReleaseFenceMs() == 0.0);
+    }
 
     if (g_failed) { printf("matwait: %d check(s) failed\n", g_failed); return 1; }
     printf("matwait: all checks passed\n");

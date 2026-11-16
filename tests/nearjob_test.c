@@ -57,7 +57,7 @@ static JobFn g_jobFn;
 static uint64_t* g_jobData;
 static volatile LONG g_pending;
 static int g_submits, g_twoAtOnce, g_badQueue;
-static uint32_t g_wantQueue = 1, g_wantPriority = 3; /* queue 10; 14 is (2, 4) */
+static uint32_t g_wantQueue = 2, g_wantPriority = 4; /* queue 14, the default; 10 is (1, 3) */
 static int g_auto; /* each job runs on a worker of its own 20 ms after its submit */
 static HANDLE g_autoThreads[64];
 static int g_autoCount;
@@ -214,15 +214,15 @@ int main(void)
     CHECK(fake_host_logged("(the run is drawn)"));
     CHECK(CoXlTestNearJobTake(7, Context()) == -1 && g_submits == 5); /* a record step after the run */
 
-    Begin("switched to queue 14 (HELLFORGE_XL_NEAR_BGQUEUE=1, research): the same run, each job submitted as (2, 4)", 9, 2, 4);
+    Begin("switched to queue 10 (HELLFORGE_XL_NEAR_BGQUEUE=0, research): the same run, each job submitted as (1, 3)", 9, 2, 4);
     {
         uint32_t q = 0, pr = 0;
-        CoXlTestNearBgQueue(1, &q, &pr);
-        g_wantQueue = 2; g_wantPriority = 4;
-        CHECK(Steps(2, 4, 1));
-        CHECK(g_builds == 3 && g_submits == 3 && g_badQueue == 0);
         CoXlTestNearBgQueue(0, &q, &pr);
         g_wantQueue = 1; g_wantPriority = 3;
+        CHECK(Steps(2, 4, 1));
+        CHECK(g_builds == 3 && g_submits == 3 && g_badQueue == 0);
+        CoXlTestNearBgQueue(1, &q, &pr);
+        g_wantQueue = 2; g_wantPriority = 4;
     }
 
     Begin("a failed build reaches its step as failed; the rest go on; jobs run on the game thread are counted", 9, 2, 5);
@@ -343,7 +343,7 @@ int main(void)
         CHECK(CoXlTestNearAutoEnd(3) == 0);
         CoXlTestNearAutoMark(1, 1);
         CHECK(CoXlTestNearAutoEnd(3) == 1);
-        CoXlTestNearBgQueue(0, &q, &pr);
+        CoXlTestNearBgQueue(1, &q, &pr); /* back to the default */
     }
 
     Begin("no TLS slot under 64: the game thread builds the tiles, nothing held", 9, 2, 6);

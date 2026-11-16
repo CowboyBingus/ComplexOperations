@@ -157,7 +157,7 @@ int main(void)
     g_heights = (uint64_t)(uintptr_t)g_hbuf;
     CoXlTestMoveHold(0);
     CoXlTestMoveBuilding(1); /* a tile builds in play */
-    g_case = "begin: under the lock the object filled from the entry as 0x1AC343..0x1AC4C1 does; the shape a job on channel 10";
+    g_case = "begin: under the lock the object filled from the entry as 0x1AC343..0x1AC4C1 does; the shape a job on channel 14";
     Entry(4096, 4096);
     { uint32_t had = 3; memcpy(g_treeHolder + 0x38, &had, 4); } /* nodes already in the list: the root goes in after them */
     const unsigned int csr0 = _mm_getcsr();
@@ -174,7 +174,7 @@ int main(void)
       memcpy(&v, g_obj + 0x58, 4); CHECK(v == (uint32_t)(Hash((uint64_t)(uintptr_t)"static", 6, 0) >> 32));
       memcpy(&v, g_obj + 0x5C, 4); CHECK(v == (uint32_t)(Hash((uint64_t)(uintptr_t)"terrain", 7, 0) >> 32)); }
     CHECK(memcmp(g_entry + 0x58, g_obj + 0x60, 0x108) == 0);
-    CHECK(g_submit.calls == 1 && g_submit.queue == 1 && g_submit.priority == 3 && g_submit.count == 1);
+    CHECK(g_submit.calls == 1 && g_submit.queue == 2 && g_submit.priority == 4 && g_submit.count == 1); /* queue 14, the default */
     CHECK(CoXlTestShapeState() == 3); /* on, running */
     CHECK(g_quad.calls == 0);
     CHECK(CoXlTestMoveHoldSince() != 0); /* craters held while the shape reads the heights */
@@ -230,17 +230,17 @@ int main(void)
         CHECK(Leaf(96) == 24 && Leaf(100) == 25 && Leaf(4000) == 125 && Leaf(33) == 33 && Leaf(20) == 20);
     }
 
-    g_case = "switched to queue 14 (HELLFORGE_XL_NEAR_BGQUEUE=1, research): the shape's job is submitted as (2, 4)";
+    g_case = "switched to queue 10 (HELLFORGE_XL_NEAR_BGQUEUE=0, research): the shape's job is submitted as (1, 3)";
     {
         uint32_t q = 0, pr = 0;
-        CoXlTestNearBgQueue(1, &q, &pr);
+        CoXlTestNearBgQueue(0, &q, &pr);
         Entry(4096, 4096);
         g_submit.calls = 0;
-        CHECK(CoXlTestShapeBegin(g_world, g_handle) == 1 && g_submit.calls == 1 && g_submit.queue == 2 && g_submit.priority == 4 && g_submit.count == 1);
+        CHECK(CoXlTestShapeBegin(g_world, g_handle) == 1 && g_submit.calls == 1 && g_submit.queue == 1 && g_submit.priority == 3 && g_submit.count == 1);
         RunJob();
         CoXlTestShapeEnd();
         CHECK(CoXlTestShapeState() == 0);
-        CoXlTestNearBgQueue(0, &q, &pr);
+        CoXlTestNearBgQueue(1, &q, &pr);
     }
 
     g_case = "a world not in the physics list: no shape, no job; the quadtree still built (0x1AC2FF)";

@@ -1417,9 +1417,17 @@ int CoXlTestMoveStallDue(int phase, double since, double now, LONG seq, LONG sam
 void CoXlTestMoveStallPhase(int phase, double ms, LONG* seq, int64_t* since) { MoveStallPhase(phase, CoXlTestTicks(ms)); *seq = g_moveStall.seq; *since = g_moveStall.since; }
 LONG CoXlTestMoveStallSamples(LONG set) { if (set >= 0) InterlockedExchange(&g_moveStall.samples, set); return g_moveStall.samples; }
 int CoXlTestSplit63WallKind(int sp0, int sp1) { return Split63WallKind(sp0, sp1); }
-void CoXlTestSplit63WallAdd(double ms, int sp0, int sp1) { Split63WallAdd(ms, sp0, sp1); }
+void CoXlTestSplit63WallAdd(double ms, int sp0, int sp1) { Split63WallAdd(ms, -1.0, sp0, sp1); }
+void CoXlTestSplit63WallAddFence(double ms, double fence, int sp0, int sp1) { Split63WallAdd(ms, fence, sp0, sp1); }
+/* The frame loop's fence wait (exe 0x8A7C4) from `in` to `out` ms on the QPC clock; timed or not; a wall frame's fence
+ * for the build's line; the fence part as the next level update reads it (-1 untimed). */
+void CoXlTestMoveFrameFence(double in, double out) { MoveFrameFence(CoXlTestTicks(in), CoXlTestTicks(out)); }
+void CoXlTestMoveFrameFenceTimed(int on) { g_moveFrame.fenceTimed = on; }
+void CoXlTestMoveFenceAdd(double wall, double fence, int mv, int op) { MoveFenceAdd(wall, fence, mv, op); }
+double CoXlTestMoveFrameFenceMs(void) { LARGE_INTEGER hz; QueryPerformanceFrequency(&hz); return MoveFrameFenceMs((double)hz.QuadPart); }
 void CoXlTestSplit63WallNote(void) { Split63WallNote(); }
 void CoXlTestNearBgQueue(int on, uint32_t* queue, uint32_t* priority) { g_nearBgQueue = on; g_nearAuto.latched = 0; NearJobQueue(queue, priority); }
+void CoXlTestNearJobQueue(uint32_t* queue, uint32_t* priority) { NearJobQueue(queue, priority); }
 /* A job's end as the two jobs count it; the stall watch's build gate; "auto": a build that took its queue, ran a shape
  * job or not, ended before a frame saw it or not, with `samples` stall samples; the queue number it took. */
 void CoXlTestMoveJobEnd(int shape, int tile) { if (shape) InterlockedIncrement(&g_shapeEnds); if (tile) InterlockedIncrement(&g_nearJobEnds); }
@@ -1458,6 +1466,13 @@ void CoXlTestMatWait(uintptr_t exe, void* orig)
     g_matWait.exe = exe; g_matWait.orig = (MatResWaitFn)orig; g_matWait.ready = 1; g_matWait.n = 0; g_matWait.inSetup = 0;
     g_matWait.deferred = g_matWait.completed = g_matWait.max = g_matWait.fallback = 0;
 }
+/* The two timed waits' return addresses (0: not timed) and the release's fence sum (ms) they feed. */
+void CoXlTestMatWaitTimed(uintptr_t frameAt, uintptr_t destroyAt)
+{
+    g_matWait.frameAt = frameAt; g_matWait.destroyAt = destroyAt; g_moveFrame.fenceTimed = frameAt != 0; g_moveRelease.fenceTimed = destroyAt != 0;
+    InterlockedExchange64(&g_moveRelease.fence, 0);
+}
+double CoXlTestMoveReleaseFenceMs(void) { return MoveTicksMs(g_moveRelease.fence); }
 uint8_t CoXlTestMatWaitFrom(int in, uint64_t r, uint32_t id, uintptr_t from) { MatWaitSetup(in); const uint8_t v = MatWaitFrom(r, id, from); MatWaitSetup(0); return v; }
 void CoXlTestMatWaitTick(void) { MatWaitTick(); }
 void CoXlTestMatWaitDrain(void) { MatWaitDrain(); }

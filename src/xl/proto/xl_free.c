@@ -183,6 +183,17 @@ static double MoveTicksMs(LONGLONG ticks)
     return (double)ticks * 1000.0 / (double)hz.QuadPart;
 }
 
+/* The release line's parts (MoveRelease's order): the destroy's fence wait apart from its frees and the rest. */
+static void MoveReleasePartsNote(int building)
+{
+    const int64_t* p = g_moveRelease.part;
+    char fence[16] = "untimed";
+    if (g_moveRelease.fenceTimed && g_move.destroyTicks >= 0) snprintf(fence, sizeof fence, "%.1f", MoveTicksMs(g_moveRelease.fence));
+    Note("difficulty: moving tiles: the release's parts (%s): the coarse raise %.1f ms, the hide union %.1f, the layer change and replacement queued %.1f, "
+        "the destroy %.1f (its fence wait, exe 0x1ADFB3: %s), the frees queued %.1f, the ground check %.1f", building ? MoveStateName(g_move.state) : "no build",
+        MoveTicksMs(p[MR_RAISE]), MoveTicksMs(p[MR_UNION]), MoveTicksMs(p[MR_LATER]), MoveTicksMs(p[MR_DESTROY]), fence, MoveTicksMs(p[MR_FREE]), MoveTicksMs(p[MR_CHECK]));
+}
+
 /* The mover's state in the line lets a run check that no release falls inside the merge's world-sized window; the
  * destroy alone and the render queue it found, that its fence waited for nothing. */
 static void MoveReleaseTimed(int k, int drained)
@@ -198,6 +209,7 @@ static void MoveReleaseTimed(int k, int drained)
         Note("difficulty: moving tiles: the release took %.1f ms on the game thread, during the build of cell (%d, %d) (mover %s, near state %d); %s, %s", MoveTicksMs(t1.QuadPart - t0.QuadPart),
             g_move.cell[0], g_move.cell[1], MoveStateName(g_move.state), g_near.state, destroyed, MoveDrainText(drained, g_move.drainWaits));
     else Note("difficulty: moving tiles: the release took %.1f ms on the game thread; %s, %s", MoveTicksMs(t1.QuadPart - t0.QuadPart), destroyed, MoveDrainText(drained, g_move.drainWaits));
+    MoveReleasePartsNote(building);
 }
 
 /* The first expired tile (not the drop tile) clear of the merge cameras, -1 none. */
@@ -459,6 +471,10 @@ static void MatResNote(void)
 #define MAT_WAIT_PENDING 8
 #define MAT_WAIT_KICKS 2u
 #define MAT_WAIT_RETURN 0x1A844Eu /* after 0x1A8449: call 0x106030, 0x1A8290's wait */
+/* Two waits only timed, each with its own pin: the frame loop's (0x8A7C4, its id the fence 0x8AAF2 posted a frame
+ * before) and a terrain destroy's flagged fence (0x1ADFB3 in 0x1ADEA0) */
+#define MAT_WAIT_FRAME_RETURN 0x8A7C9u
+#define MAT_WAIT_DESTROY_RETURN 0x1ADFB8u
 typedef struct { uint64_t r; uint32_t id, kick; } MatWaitEntry;
 static struct
 {
@@ -470,11 +486,21 @@ static struct
     SRWLOCK lock;          /* the list: CoXlTick and the teardown hook */
     MatWaitEntry e[MAT_WAIT_PENDING];
     uint32_t n, deferred, completed, max, fallback;
+    uintptr_t frameAt, destroyAt; /* the timed waits' return addresses, 0 when their pins did not match */
 } g_matWait = {.lock = SRWLOCK_INIT};
 
 /* What 0x106030 returns at 0x1A844E is not read (the next instruction loads [r14+0x150]), so 0 stands for the wait. */
 static uint8_t MatWaitFrom(uint64_t r, uint32_t id, uintptr_t from)
 {
+    if (from == g_matWait.frameAt || from == g_matWait.destroyAt) /* 0 untimed: never a return address */
+    {
+        LARGE_INTEGER a, b; QueryPerformanceCounter(&a);
+        const uint8_t v = g_matWait.orig(r, id);
+        QueryPerformanceCounter(&b);
+        if (from == g_matWait.frameAt) MoveFrameFence(a.QuadPart, b.QuadPart);
+        else InterlockedExchangeAdd64(&g_moveRelease.fence, b.QuadPart - a.QuadPart);
+        return v;
+    }
     if (g_matWait.inSetup && from == g_matWait.exe + MAT_WAIT_RETURN && GetCurrentThreadId() == g_matWait.thread)
     {
         uint8_t threaded = 0; uint32_t kick = 0; uint64_t dev = 0, table = 0;
@@ -543,6 +569,14 @@ static const struct { uint32_t at; const char* bytes; } kMatWaitPins[] = {
                 "48 8B 87 E0 14 00 00 48 8D 8F F0 14 00 00 4C 8B 34 F0 48 C7 04 F0 00 00 00 00"}, /* the slot emptied under the lock */
 };
 
+/* The timed waits' call sites: the fence id's load, the skip of an id -1, the call and its result's store; the destroy's
+ * flagged fence and its wait on it. */
+static const struct { uint32_t at; const char* bytes; } kMatWaitTimedPins[] = {
+    {0x8A7A3u, "8B 96 40 03 00 00"},
+    {0x8A7B8u, "83 FA FF 74 12 48 8B 8E 38 03 00 00 E8 67 B8 07 00 88 86 61 04 00 00"},
+    {0x1ADFA1u, "B2 01 48 8B 18 48 8B CB E8 92 7E F5 FF 8B D0 48 8B CB E8 78 80 F5 FF"},
+};
+
 /* Once, after MatResInstall: only with its teardown hook (T1 drains these first). */
 static void MatWaitInstall(void)
 {
@@ -558,6 +592,13 @@ static void MatWaitInstall(void)
     { g_matWait.orig = NULL; Note("difficulty: moving tiles: op 0x41's setup keeps the game's fence wait (0x106030 could not be hooked)"); return; }
     g_matWait.ready = 1;
     Note("difficulty: moving tiles: op 0x41's setup no longer waits for its resource's fence; the wait is done %u frame kicks later (exe 0x1A8449)", MAT_WAIT_KICKS);
+    const int frame = ApiCodeMatches(exe + kMatWaitTimedPins[0].at, kMatWaitTimedPins[0].bytes) == 1 && ApiCodeMatches(exe + kMatWaitTimedPins[1].at, kMatWaitTimedPins[1].bytes) == 1;
+    const int destroy = ApiCodeMatches(exe + kMatWaitTimedPins[2].at, kMatWaitTimedPins[2].bytes) == 1;
+    g_moveFrame.fenceTimed = frame; g_moveRelease.fenceTimed = destroy;
+    g_matWait.destroyAt = destroy ? exe + MAT_WAIT_DESTROY_RETURN : 0;
+    g_matWait.frameAt = frame ? exe + MAT_WAIT_FRAME_RETURN : 0;
+    Note("difficulty: moving tiles: the frame loop's fence wait (exe 0x8A7C4) %s; a terrain destroy's fence wait (exe 0x1ADFB3) %s", frame ? "timed" : "not timed (not the reviewed code)",
+        destroy ? "timed" : "not timed (not the reviewed code)");
 }
 
 /* The build's line (MoveCostNote). */
