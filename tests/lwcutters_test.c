@@ -334,6 +334,8 @@ int main(void)
         CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
         float ahead[1][3] = {{0.0f, 600.0f, 40.0f}}; /* over 440 m from the player standing; within it of its lead at speed */
         CHECK(CoXlTestLwCutCentres(one, 1, one, at, 1, 1, 0, 20000, NULL, 0, ahead, 1, c, out) == 1 && out[6] == 0);
+        float wide[1][3] = {{0.0f, 650.0f, 300.0f}}; /* over 400 m away, but its guard points reach within 400 m of the player */
+        CHECK(CoXlTestLwCutCentres(one, 1, one, at, 1, 1, 0, 20000, NULL, 0, wide, 1, c, out) == 2 && out[6] == 1);
         at[0][1] = 22.5f; CoXlTestLwCutCentres(one, 1, one, at, 1, 1, 0, 20250, NULL, 0, ahead, 1, c, out);
         at[0][1] = 45.0f; CoXlTestLwCutCentres(one, 1, one, at, 1, 1, 0, 20500, NULL, 0, ahead, 1, c, out);
         at[0][1] = 67.5f;
