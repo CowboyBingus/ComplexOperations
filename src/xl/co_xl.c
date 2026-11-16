@@ -1414,6 +1414,15 @@ uint8_t* CoXlTestNearMat41(int s, const uint8_t* record, uint8_t phase)
     return g_near.one;
 }
 void CoXlTestMatOff(void) { g_mat.on = 0; }
+/* The setup's seed lookups as its step timed them (proto/difficulty_world_terrain.c NearSeedPatch): the state (1 timed,
+ * < 0 why not); their calls and ms; the setup's ms; the stub's calls in all (-1: no stub). Then the step's notes. */
+int CoXlTestSeed(uint32_t* calls, double* lookups, double* setup, int64_t* total)
+{
+    *calls = g_matUnits.seedCalls; *setup = g_matUnits.call[0]; *lookups = NearSeedShare() * g_matUnits.call[0];
+    *total = g_nearSeed.data != NULL ? g_nearSeed.data[2] : -1;
+    return g_matUnits.seedState;
+}
+void CoXlTestMatUnitsNoteNow(void) { NearMatUnitsNote(); }
 /* A SafeRead that faults inside a guarded call (proto/difficulty_world.c WorldTileFault): its failure return, not the
  * call's fault; a plain read that faults there is still the call's. */
 static volatile int g_testGuardRead;

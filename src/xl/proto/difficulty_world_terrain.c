@@ -2696,7 +2696,92 @@ static int NearRunStepIn(uint64_t records, uint32_t end, uint64_t context, uint6
  * in the same order; the game's call then finds the list empty and only ends the op. Its two jobs are drained by then
  * (the consumer runs every frame), and nothing renders the merge world before the next step. */
 #define NEAR_MAT_UNITS_MS 3.0
-static struct { uint32_t at, left, units, slices, calls; double ms, call[3]; } g_matUnits;
+static struct { uint32_t at, left, units, slices, calls, seedCalls; double ms, call[3]; uint64_t seedTicks, setupTicks; int seedState; } g_matUnits;
+
+/* The setup's seed lookups, timed: whether they are most of the setup decides if computing them earlier on a worker
+ * would pay. 0xFC7900 (0xFC7900..0xFC7BD1) makes no calls, stores only to its own home area and never writes rcx, and
+ * the setup calls it directly only from these four sites, so for the setup's one call they point at a stub. */
+#define NEAR_SEED_LOOKUP 0xFC7900u
+static const uint32_t kNearSeedSites[4] = {0xF5036Du, 0xF503CAu, 0xF50552u, 0xF5059Eu};
+/* The lookup's ticks (rdtsc) and calls added up. It hands back every register as the lookup left it (rax and rdx kept
+ * across the count); only the flags differ, and each site's next flag use follows a cmp (0xF50372, 0xF503CF, 0xF5055A,
+ * 0xF505A6). The lookup's home area is the stub's: the setup never reads its calls' (no [rsp+0..0x1F], rbp = rsp+0x100). */
+static const uint8_t kNearSeedStub[89] = {
+    0x48, 0x83, 0xEC, 0x38,                         /*  0 sub rsp, 0x38 */
+    0x48, 0x89, 0x54, 0x24, 0x28,                   /*  4 mov [rsp+0x28], rdx */
+    0x0F, 0x31,                                     /*  9 rdtsc */
+    0x48, 0xC1, 0xE2, 0x20,                         /* 11 shl rdx, 32 */
+    0x48, 0x09, 0xD0,                               /* 15 or rax, rdx */
+    0x48, 0x89, 0x44, 0x24, 0x20,                   /* 18 mov [rsp+0x20], rax */
+    0x48, 0x8B, 0x54, 0x24, 0x28,                   /* 23 mov rdx, [rsp+0x28] */
+    0xFF, 0x15, 0, 0, 0, 0,                         /* 28 call [lookup] (rel32 at 30) */
+    0x48, 0x89, 0x44, 0x24, 0x28,                   /* 34 mov [rsp+0x28], rax */
+    0x48, 0x89, 0x54, 0x24, 0x30,                   /* 39 mov [rsp+0x30], rdx */
+    0x0F, 0x31,                                     /* 44 rdtsc */
+    0x48, 0xC1, 0xE2, 0x20,                         /* 46 shl rdx, 32 */
+    0x48, 0x09, 0xD0,                               /* 50 or rax, rdx */
+    0x48, 0x2B, 0x44, 0x24, 0x20,                   /* 53 sub rax, [rsp+0x20] */
+    0xF0, 0x48, 0x01, 0x05, 0, 0, 0, 0,             /* 58 lock add [ticks], rax (rel32 at 62) */
+    0xF0, 0x48, 0xFF, 0x05, 0, 0, 0, 0,             /* 66 lock inc qword [calls] (rel32 at 70) */
+    0x48, 0x8B, 0x44, 0x24, 0x28,                   /* 74 mov rax, [rsp+0x28] */
+    0x48, 0x8B, 0x54, 0x24, 0x30,                   /* 79 mov rdx, [rsp+0x30] */
+    0x48, 0x83, 0xC4, 0x38,                         /* 84 add rsp, 0x38 */
+    0xC3};                                          /* 88 ret */
+/* page: the stub (read and run only), its unwind data (a stack walk through it, e.g. a crash report's); data on the
+ * next page: [0] the lookup's address, [1] ticks, [2] calls. state: the last reason it was not timed (< 0). */
+static struct { uint8_t* page; volatile LONG64* data; int state; } g_nearSeed;
+enum { NEAR_SEED_NO_PAGE = -1, NEAR_SEED_NOT_REVIEWED = -2, NEAR_SEED_REACH = -3, NEAR_SEED_WRITE = -4 };
+
+static int NearSeedReady(void)
+{
+    if (g_nearSeed.page != NULL) return 1;
+    if (g_nearSeed.state == NEAR_SEED_NO_PAGE) return 0;
+    uint8_t* page = AllocateNearGame(g_world.game, 0x2000);
+    DWORD old = 0;
+    if (page == NULL) { g_nearSeed.state = NEAR_SEED_NO_PAGE; return 0; }
+    volatile LONG64* data = (volatile LONG64*)(page + 0x1000);
+    data[0] = (LONG64)(g_world.game + NEAR_SEED_LOOKUP);
+    memcpy(page, kNearSeedStub, sizeof kNearSeedStub);
+    const int32_t lookup = (int32_t)((intptr_t)&data[0] - (intptr_t)(page + 34)), ticks = (int32_t)((intptr_t)&data[1] - (intptr_t)(page + 66)),
+        calls = (int32_t)((intptr_t)&data[2] - (intptr_t)(page + 74));
+    memcpy(page + 30, &lookup, 4); memcpy(page + 62, &ticks, 4); memcpy(page + 70, &calls, 4);
+    /* version 1, a 4-byte prologue, one code: UWOP_ALLOC_SMALL of 0x38 ((6 + 1) x 8) at offset 4 */
+    static const uint8_t unwind[8] = {0x01, 0x04, 0x01, 0x00, 0x04, 0x62, 0x00, 0x00};
+    memcpy(page + 0x100, unwind, sizeof unwind);
+    RUNTIME_FUNCTION* fn = (RUNTIME_FUNCTION*)(page + 0x120);
+    fn->BeginAddress = 0; fn->EndAddress = sizeof kNearSeedStub; fn->UnwindData = 0x100;
+    if (!VirtualProtect(page, 0x1000, PAGE_EXECUTE_READ, &old) || !RtlAddFunctionTable(fn, 1, (DWORD64)(uintptr_t)page))
+    { VirtualFree(page, 0, MEM_RELEASE); g_nearSeed.state = NEAR_SEED_NO_PAGE; return 0; }
+    FlushInstructionCache(GetCurrentProcess(), page, 0x1000);
+    g_nearSeed.data = data;
+    g_nearSeed.page = page;
+    return 1;
+}
+
+/* The four sites' rel32 (+1) at the stub, or back at the lookup. On only when every site is the reviewed call (E8 to
+ * 0xFC7900) and the stub is in its reach. */
+static int NearSeedPatch(int on)
+{
+    const uintptr_t game = g_world.game, first = game + kNearSeedSites[0] + 1, last = game + kNearSeedSites[3] + 5;
+    const uintptr_t to = on ? (uintptr_t)g_nearSeed.page : game + NEAR_SEED_LOOKUP;
+    int32_t rel[4];
+    for (int k = 0; k < 4; k++)
+    {
+        const uintptr_t site = game + kNearSeedSites[k];
+        const int64_t d = (int64_t)to - (int64_t)(site + 5);
+        if (d != (int32_t)d) { g_nearSeed.state = NEAR_SEED_REACH; return 0; }
+        rel[k] = (int32_t)d;
+        uint8_t op = 0; int32_t had = 0;
+        if (on && (SafeRead(site, &op, 1) || SafeRead(site + 1, &had, 4) || op != 0xE8 || site + 5 + (intptr_t)had != game + NEAR_SEED_LOOKUP))
+        { g_nearSeed.state = NEAR_SEED_NOT_REVIEWED; return 0; }
+    }
+    DWORD old = 0;
+    if (!VirtualProtect((void*)first, last - first, PAGE_EXECUTE_READWRITE, &old)) { g_nearSeed.state = NEAR_SEED_WRITE; return 0; }
+    for (int k = 0; k < 4; k++) *(volatile int32_t*)(game + kNearSeedSites[k] + 1) = rel[k];
+    VirtualProtect((void*)first, last - first, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), (void*)first, last - first);
+    return 1;
+}
 static void NearMatUnitsSlice(uint64_t pass, uint64_t record, uint64_t context)
 {
     (void)record;
@@ -2729,6 +2814,9 @@ static void NearMatUnitsSlice(uint64_t pass, uint64_t record, uint64_t context)
     g_matUnits.left = *count;
 }
 
+/* The lookups' share of the setup: both in rdtsc ticks around the same call, so it applies to the setup's ms. */
+static double NearSeedShare(void) { return g_matUnits.setupTicks != 0 ? (double)g_matUnits.seedTicks / (double)g_matUnits.setupTicks : 0.0; }
+
 /* "op 0x41 on the game thread": the setup (0xF4F9E0, one call: what a later fix would slice), the jobs' calls, the
  * units' slices and the last call; once its cameras are back. */
 static void NearMatUnitsNote(void)
@@ -2736,6 +2824,17 @@ static void NearMatUnitsNote(void)
     if (g_matUnits.calls == 0) return;
     Note("difficulty: moving tiles: op 0x41 on the game thread: the setup %.1f ms, the jobs' calls %.1f ms, %u units destroyed in %u slices (%.1f ms), "
         "the last call %.1f ms", g_matUnits.call[0], g_matUnits.call[1], g_matUnits.units, g_matUnits.slices, g_matUnits.ms, g_matUnits.call[2]);
+    if (g_matUnits.seedState == 1 && g_matUnits.setupTicks != 0)
+    {
+        const double share = NearSeedShare();
+        Note("difficulty: moving tiles: op 0x41's setup: its seed lookups (game 0xFC7900) %u calls, %.1f ms of its %.1f ms (%.0f%%)",
+            g_matUnits.seedCalls, share * g_matUnits.call[0], g_matUnits.call[0], share * 100.0);
+    }
+    else if (g_matUnits.seedState < 0)
+        Note("difficulty: moving tiles: op 0x41's setup: its seed lookups not timed (%s)",
+            g_matUnits.seedState == NEAR_SEED_NO_PAGE ? "no stub page near the game" : g_matUnits.seedState == NEAR_SEED_NOT_REVIEWED ?
+            "its call sites are not the reviewed ones" : g_matUnits.seedState == NEAR_SEED_REACH ? "the stub is out of the call sites' reach" :
+            "the call sites could not be written");
     memset(&g_matUnits, 0, sizeof g_matUnits);
 }
 
@@ -2853,9 +2952,21 @@ static int NearRunStepIn(uint64_t records, uint32_t end, uint64_t context, uint6
     }
     int caps = NearStepPatch(g_near.stepOp[s], 1);
     if (mat) TerrainMatPatch(1);
+    /* the setup's call (phase 0) in play: its seed lookups timed */
+    const int setup = mat && g_moveBuilding && g_near.phase == 0, seeds = setup && NearSeedReady() && NearSeedPatch(1);
+    const LONG64 seedTicks = seeds ? g_nearSeed.data[1] : 0, seedCalls = seeds ? g_nearSeed.data[2] : 0;
     LARGE_INTEGER c0, c1, chz; QueryPerformanceCounter(&c0);
+    const uint64_t r0 = __builtin_ia32_rdtsc();
     fault = WorldTileGuarded(g_near.one, context, &index, &g_near.phase, g, h, 1, &calls);
+    const uint64_t r1 = __builtin_ia32_rdtsc();
     QueryPerformanceCounter(&c1); QueryPerformanceFrequency(&chz);
+    if (seeds)
+    {
+        NearSeedPatch(0);
+        g_matUnits.seedTicks = (uint64_t)(g_nearSeed.data[1] - seedTicks); g_matUnits.seedCalls = (uint32_t)(g_nearSeed.data[2] - seedCalls);
+        g_matUnits.setupTicks = r1 - r0;
+    }
+    if (setup) g_matUnits.seedState = seeds ? 1 : g_nearSeed.state;
     if (mat && g_moveBuilding)
     {
         const double ms = (double)(c1.QuadPart - c0.QuadPart) * 1000.0 / (double)chz.QuadPart;
