@@ -26,6 +26,16 @@ static void MatWaitSetup(int in);
 static void MatWaitTick(void);
 static void MatWaitDrain(void);
 static void MatWaitNote(void);
+static int NearGeneratorRuns(void);
+static int TerrainSplitOn(void);
+static int TerrainSplitLast(void);
+static const char* TerrainSplitWhy(void);
+static int TerrainTailsPending(void);
+static int TerrainDestroySplit(uint64_t world, uint64_t h, uint64_t destroy);
+static void TerrainTailCheck(uint64_t h, int raised, float cx, float cy, int cellX, int cellY);
+static void TerrainTailTick(void);
+static void TerrainTailDrain(uint64_t world, const char* why);
+static void TerrainSplitInstall(void);
 
 /* The research log of the terrains' materials (xl_terrain_research.c); a release has none of it. */
 #ifdef CO_RESEARCH

@@ -188,7 +188,7 @@ static void MoveFreeTick(int all)
     MovePackageTick(all);
     if (!all) MoveBandPixelsTick(); /* the live tiles' band pixels wait on render frames too */
     for (int k = 0; k < NEAR_TILES_MAX * 2; k++)
-        if (g_move.freeing[k].used && (all || ++g_move.freeing[k].frames >= 4))
+        if (g_move.freeing[k].used && (all || (!TerrainTailsPending() && ++g_move.freeing[k].frames >= 4))) /* after the terrain's rest */
         {
             MoveFreeNow(g_move.freeing[k].tex[0], g_move.freeing[k].tex[1], g_move.freeing[k].band, g_move.freeing[k].pixels);
             g_move.freeing[k].used = 0;
@@ -1414,19 +1414,21 @@ static void MoveRelease(int slot)
     typedef void (*DestroyFn)(uint64_t world, uint64_t handle);
     DestroyFn destroy = (DestroyFn)NearApi(0x08, 0x1E0);
     g_move.destroyTicks = -1;
+    int split = 0;
     if (destroy != NULL && t.handle != 0)
     {
         LARGE_INTEGER d0, d1; QueryPerformanceCounter(&d0);
-        destroy(world, t.handle);
+        split = TerrainDestroySplit(world, t.handle, (uint64_t)(uintptr_t)destroy); /* its rest 2 frame kicks later (xl_free.c) */
+        if (!split) destroy(world, t.handle);
         QueryPerformanceCounter(&d1);
         g_move.destroyTicks = d1.QuadPart - d0.QuadPart;
-        g_tiles[slot].handle = 0; /* its object is freed: a later terrain may get the address */
+        g_tiles[slot].handle = 0; /* its object is freed, now or by the rest: a later terrain may get the address */
     }
     QueryPerformanceCounter(&at[4]);
     MoveFreeLater(t.tex[0], t.tex[1], t.band, t.bandPixels);
     g_move.released++;
     QueryPerformanceCounter(&at[5]);
-    if (raised) MoveRaiseCheck(t.centre[0], t.centre[1], t.cell[0], t.cell[1]);
+    TerrainTailCheck(split ? t.handle : 0, raised, t.centre[0], t.centre[1], t.cell[0], t.cell[1]);
     QueryPerformanceCounter(&at[6]);
     for (int k = 0; k < MR_PARTS; k++) g_moveRelease.part[k] = at[k + 1].QuadPart - at[k].QuadPart;
     Note("difficulty: moving tiles: the tile of cell (%d, %d) released (no player within %.0f m for %u s); the coarse collision %s; %d tiles live",

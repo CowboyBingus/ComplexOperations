@@ -168,6 +168,7 @@ static int MoveRenderDrained(uint64_t world)
 static const char* MoveDrainText(int drained, uint32_t held)
 {
     static char text[192];
+    if (drained == -2) return "the render queue not held for (the destroy is split at its fence)";
     if (drained < 0) return "the render queue not read";
     if (!g_drain.threaded) return "no render thread";
     snprintf(text, sizeof text, "the render queue %s after %u held frame(s) (the render thread in buffer %u, the game's %u; %u message(s) queued, %u device job(s))",
@@ -188,7 +189,8 @@ static void MoveReleasePartsNote(int building)
 {
     const int64_t* p = g_moveRelease.part;
     char fence[16] = "untimed";
-    if (g_moveRelease.fenceTimed && g_move.destroyTicks >= 0) snprintf(fence, sizeof fence, "%.1f", MoveTicksMs(g_moveRelease.fence));
+    if (TerrainSplitLast()) snprintf(fence, sizeof fence, "none (split)");
+    else if (g_moveRelease.fenceTimed && g_move.destroyTicks >= 0) snprintf(fence, sizeof fence, "%.1f", MoveTicksMs(g_moveRelease.fence));
     Note("difficulty: moving tiles: the release's parts (%s): the coarse raise %.1f ms, the hide union %.1f, the layer change and replacement queued %.1f, "
         "the destroy %.1f (its fence wait, exe 0x1ADFB3: %s), the frees queued %.1f, the ground check %.1f", building ? MoveStateName(g_move.state) : "no build",
         MoveTicksMs(p[MR_RAISE]), MoveTicksMs(p[MR_UNION]), MoveTicksMs(p[MR_LATER]), MoveTicksMs(p[MR_DESTROY]), fence, MoveTicksMs(p[MR_FREE]), MoveTicksMs(p[MR_CHECK]));
@@ -202,8 +204,14 @@ static void MoveReleaseTimed(int k, int drained)
     LARGE_INTEGER t0, t1; QueryPerformanceCounter(&t0);
     MoveRelease(k);
     QueryPerformanceCounter(&t1);
-    char destroyed[48];
-    if (g_move.destroyTicks >= 0) snprintf(destroyed, sizeof destroyed, "the destroy alone %.1f ms", MoveTicksMs(g_move.destroyTicks));
+    char destroyed[128];
+    if (g_move.destroyTicks >= 0)
+    {
+        const char* why = TerrainSplitWhy();
+        snprintf(destroyed, sizeof destroyed, "the destroy alone %.1f ms%s%s%s", MoveTicksMs(g_move.destroyTicks), TerrainSplitLast() ? " (its head; the rest after its fence later)" : "",
+            why != NULL ? " (not split: " : "", why != NULL ? why : "");
+        if (why != NULL) strncat(destroyed, ")", sizeof destroyed - strlen(destroyed) - 1);
+    }
     else snprintf(destroyed, sizeof destroyed, "no destroy");
     if (building)
         Note("difficulty: moving tiles: the release took %.1f ms on the game thread, during the build of cell (%d, %d) (mover %s, near state %d); %s, %s", MoveTicksMs(t1.QuadPart - t0.QuadPart),
@@ -229,7 +237,7 @@ static int MoveReleaseTick(ULONGLONG now)
     MoveKeepSeen(now);
     int k = MoveReleaseDue(now);
     if (k < 0) { g_move.drainWaits = 0; return 0; }
-    int drained = MoveRenderDrained(MoveWorld());
+    int drained = TerrainSplitOn() ? -2 : MoveRenderDrained(MoveWorld()); /* split: no fence wait for a drained queue to shorten */
     if (drained == 0 && g_move.drainWaits < MOVE_DRAIN_FRAMES) { g_move.drainWaits++; return 1; }
     MoveReleaseTimed(k, drained);
     g_move.drainWaits = 0;
@@ -392,6 +400,7 @@ static void MatWaitDrain(void);
 static void MatResTeardown(uint64_t world)
 {
     MatWaitDrain(); /* the renderer's fences before anything of the world goes */
+    TerrainTailDrain(world, "the world's teardown"); /* its terrain map and lock go in the teardown (0x1A7B7A) */
     MatResDrain(world);
     g_matRes.teardown(world);
 }
@@ -617,6 +626,205 @@ static void MatWaitNote(void)
     g_matWait.max = g_matWait.n;
 }
 
+/* ---- A tile's terrain destroy, split at its fence -------------------------------------------------------------------
+ * 0x1ADEA0 frees the CPU copy (0x1ADC20), queues the render remove (0xC9480) and a flagged fence (0x105E40 at 0x1ADFA9),
+ * then blocks in 0x106030 until the render thread reaches it (10-30 ms, run 2e) before it frees the rest. The game
+ * offers no test of a fence without a wait (the event is auto-reset; nothing else marks it), so the head here runs up
+ * to the fence and the rest waits for 2 frame kicks: the frame loop has then waited its own fence (0x8A7C4) posted after
+ * this frame's whole buffer (0x8AAF2), the fence, the draw and the remove included. The game's 0x106030 then finds the
+ * event set, and the game's own destroy with [h+4] = 0xFFFFFF (0x1ADF89) skips the remove and fence and frees the rest. */
+#define TAIL_PENDING 8
+#define TAIL_KICKS 2u
+typedef void (*TailLockFn)(uint64_t cs);                  /* [exe+0x13F66B8] / [exe+0x13F66C0], 0x1ADEA0's own */
+typedef void (*TailPairFn)(uint64_t a, uint64_t b);       /* 0x1ADC20 (world, h), 0xC9480 (render world, h) */
+typedef void (*TailDestroyFn)(uint64_t world, uint64_t h); /* the game's slot [[api+8]+0x1E0] */
+typedef struct
+{
+    uint64_t world, h, r, destroy;
+    uint32_t id, kick, polls;
+    int64_t head;
+    int raised, cell[2];
+    float centre[2];
+} TerrainTail;
+static struct
+{
+    int ready; /* 1 the reviewed destroy, op 0x41's fence pins and teardown hook; -1 not */
+    struct { TailLockFn enter, leave; TailPairFn copyFree, remove; uint64_t slot[2]; } fn;
+    SRWLOCK lock; /* the list: the game thread and a teardown on any thread */
+    TerrainTail e[TAIL_PENDING];
+    uint32_t n, max, split, completed, drained, fallback;
+    int last;     /* the last release's destroy was split */
+    const char* fall;
+} g_tail = {.lock = SRWLOCK_INIT};
+
+static int TerrainSplitOn(void) { return g_tail.ready > 0; }
+static int TerrainSplitLast(void) { return g_tail.last && g_move.destroyTicks >= 0; } /* this release's destroy */
+static const char* TerrainSplitWhy(void) { return g_tail.ready > 0 && !g_tail.last && g_move.destroyTicks >= 0 ? (g_tail.fall != NULL ? g_tail.fall : "?") : NULL; }
+static int TerrainTailsPending(void) { return g_tail.n != 0; }
+
+/* The head of 0x1ADEA0(world, h) through the game's slot `destroy`: 1 when its rest waits in the list, 0 when the caller
+ * destroys as the game does (why in g_tail.fall). A bounds tree ([h+0x40], made by a height edit) is left to the game:
+ * 0x2F4D40 posts it with [h+4], which the rest here has cleared. */
+static int TerrainDestroySplit(uint64_t world, uint64_t h, uint64_t destroy)
+{
+    LARGE_INTEGER a, b; QueryPerformanceCounter(&a);
+    g_tail.last = 0;
+    if (g_tail.ready <= 0) return 0;
+    uint32_t kick = 0, rid = 0xFFFFFFu, id = 0;
+    uint64_t cow = 1;
+    const uint64_t r = MatResRenderer(world, &kick), rw = MatResU64(world + 0x2301F8u);
+    const char* fall = NULL;
+    if (destroy == 0 || (destroy != g_tail.fn.slot[0] && destroy != g_tail.fn.slot[1])) fall = "another destroy in the game's slot";
+    else if (r == 0) fall = "no threaded frame-loop renderer";
+    else if (SafeRead((uintptr_t)h + 0x40, &cow, 8) || cow != 0) fall = "its height bounds tree";
+    else if (g_tail.n >= TAIL_PENDING) fall = "the list full";
+    if (fall == NULL)
+    {
+        g_tail.fn.enter(world + 0x230520u);
+        if (SafeRead((uintptr_t)h + 4, &rid, 4) || rid == 0xFFFFFFu) fall = "no render id (no fence to wait)";
+        else
+        {
+            g_tail.fn.copyFree(world, h);
+            g_tail.fn.remove(rw, h);
+            id = g_matRes.fn.fence(r, 1);
+        }
+        g_tail.fn.leave(world + 0x230520u); /* before the list's lock: a teardown takes that one first */
+    }
+    if (fall != NULL) { g_tail.fallback++; g_tail.fall = fall; return 0; }
+    QueryPerformanceCounter(&b);
+    AcquireSRWLockExclusive(&g_tail.lock);
+    g_tail.e[g_tail.n++] = (TerrainTail){world, h, r, destroy, id, kick, 0, b.QuadPart - a.QuadPart, 0, {0, 0}, {0, 0}};
+    if (g_tail.n > g_tail.max) g_tail.max = g_tail.n;
+    g_tail.split++;
+    ReleaseSRWLockExclusive(&g_tail.lock);
+    g_tail.last = 1;
+    return 1;
+}
+
+/* The release's ground check waits for the rest: until then the tile's body still answers the ground query. */
+static void TerrainTailCheck(uint64_t h, int raised, float cx, float cy, int cellX, int cellY)
+{
+    int queued = 0;
+    AcquireSRWLockExclusive(&g_tail.lock);
+    for (uint32_t i = 0; h != 0 && i < g_tail.n && !queued; i++)
+        if (g_tail.e[i].h == h)
+        {
+            TerrainTail* x = &g_tail.e[i];
+            x->raised = raised; x->centre[0] = cx; x->centre[1] = cy; x->cell[0] = cellX; x->cell[1] = cellY;
+            queued = 1;
+        }
+    ReleaseSRWLockExclusive(&g_tail.lock);
+    if (!queued && raised) MoveRaiseCheck(cx, cy, cellX, cellY);
+}
+
+/* The rest of 0x1ADEA0 for one entry, in the list's lock: the game's own wait on the fence (set by now, or a drain's
+ * real wait, as the game's destroy would have waited), then the game's destroy past its fence. */
+static void TerrainTailRun(TerrainTail* x, const char* drain, uint32_t pending)
+{
+    LARGE_INTEGER a, b, c; QueryPerformanceCounter(&a);
+    uint32_t kick = x->kick;
+    SafeRead((uintptr_t)x->r + 0x1A50, &kick, 4);
+    g_matRes.fn.wait(x->r, x->id);
+    QueryPerformanceCounter(&b);
+    g_tail.fn.enter(x->world + 0x230520u);
+    *(volatile uint32_t*)(uintptr_t)(x->h + 4) = 0xFFFFFFu; /* removed and fenced above: 0x1ADF89 skips both */
+    ((TailDestroyFn)(uintptr_t)x->destroy)(x->world, x->h);
+    g_tail.fn.leave(x->world + 0x230520u);
+    QueryPerformanceCounter(&c);
+    if (drain != NULL) g_tail.drained++; else g_tail.completed++;
+    Note("difficulty: moving tiles: a released terrain's destroy split at its fence (exe 0x1ADFA9): the head %.1f ms in the release's frame, the rest %.1f ms "
+        "(its fence wait %.2f ms) %u frame kick(s) and %u poll(s) later%s%s; %u pending, %u split, %u completed, %u drained, %u by the game's wait (last: %s)",
+        MoveTicksMs(x->head), MoveTicksMs(c.QuadPart - a.QuadPart), MoveTicksMs(b.QuadPart - a.QuadPart), kick - x->kick, x->polls, drain != NULL ? ", drained at " : "",
+        drain != NULL ? drain : "", pending, g_tail.split, g_tail.completed, g_tail.drained, g_tail.fallback, g_tail.fall != NULL ? g_tail.fall : "none");
+}
+
+/* Game thread, every frame (CoXlTick, before the level update): the rests 2 frame kicks old. None while the level
+ * generator's job runs: it holds the terrain lock around its work (NearTilesDestroy's rule). */
+static void TerrainTailTick(void)
+{
+    if (g_tail.n == 0) return;
+    TerrainTail checks[TAIL_PENDING];
+    uint32_t keep = 0, nc = 0;
+    const int busy = NearGeneratorRuns();
+    AcquireSRWLockExclusive(&g_tail.lock);
+    const uint32_t n = g_tail.n;
+    for (uint32_t i = 0; i < n; i++)
+    {
+        TerrainTail x = g_tail.e[i];
+        uint32_t kick = 0;
+        x.polls++;
+        if (busy || SafeRead((uintptr_t)x.r + 0x1A50, &kick, 4) || kick - x.kick < TAIL_KICKS) { g_tail.e[keep++] = x; continue; }
+        TerrainTailRun(&x, NULL, n - (i - keep) - 1); /* those kept and those not yet looked at */
+        if (x.raised) checks[nc++] = x;
+    }
+    g_tail.n = keep;
+    ReleaseSRWLockExclusive(&g_tail.lock);
+    for (uint32_t i = 0; i < nc; i++) MoveRaiseCheck(checks[i].centre[0], checks[i].centre[1], checks[i].cell[0], checks[i].cell[1]);
+}
+
+/* Every rest of `world` (0: all) now, the fence waited as the game's destroy would: a level's end, the world's teardown. */
+static void TerrainTailDrain(uint64_t world, const char* why)
+{
+    if (g_tail.n == 0) return;
+    AcquireSRWLockExclusive(&g_tail.lock);
+    uint32_t keep = 0;
+    const uint32_t n = g_tail.n;
+    for (uint32_t i = 0; i < n; i++)
+    {
+        TerrainTail x = g_tail.e[i];
+        if (world != 0 && x.world != world) { g_tail.e[keep++] = x; continue; }
+        TerrainTailRun(&x, why, n - (i - keep) - 1);
+    }
+    g_tail.n = keep;
+    ReleaseSRWLockExclusive(&g_tail.lock);
+}
+
+/* The destroy as the split copies it, whole; its CPU copy free whole (a second call finds +0x10 empty); the remove
+ * whole; the bounds tree test; the slot's thunk. The fence, wait, kicks and render side are op 0x41's (MatResInstall). */
+static const struct { uint32_t at; const char* bytes; } kTailPins[] = {
+    {0x1ADEA0u, "48 8B C4 48 89 50 10 53 41 54 41 57 48 81 EC 90 01 00 00 48 89 68 18 4C 8D B9 20 05 23 00 48 89 78 E0 48 8B EA 4C 89 70 D8 4C 8B F1 49 8B CF FF 15 E3 87 24 01 48 8B D5 "
+                "49 8B CE E8 40 FD FF FF 4D 8D A6 50 05 23 00 49 8B CC 48 8D 94 24 B8 01 00 00 E8 C9 A7 00 00 48 8D 54 24 20 B9 02 00 00 00 48 8D 92 80 00 00 00 0F 10 00 0F 10 48 10 48 "
+                "8D 80 80 00 00 00 0F 11 42 80 0F 10 40 A0 0F 11 4A 90 0F 10 48 B0 0F 11 42 A0 0F 10 40 C0 0F 11 4A B0 0F 10 48 D0 0F 11 42 C0 0F 10 40 E0 0F 11 4A D0 0F 10 48 F0 0F 11 "
+                "42 E0 0F 11 4A F0 48 83 E9 01 75 AD 81 7D 04 FF FF FF 00 0F 10 00 0F 10 48 10 0F 11 02 0F 10 40 20 0F 11 4A 10 0F 10 48 30 0F 11 42 20 0F 10 40 40 0F 11 4A 30 0F 10 48 "
+                "50 0F 11 42 40 0F 11 4A 50 74 2D 49 8B 8E F8 01 23 00 48 8B D5 E8 E6 B4 F1 FF 49 8B 86 F8 01 23 00 B2 01 48 8B 18 48 8B CB E8 92 7E F5 FF 8B D0 48 8B CB E8 78 80 F5 FF "
+                "48 8B 7C 24 20 49 81 C6 58 00 23 00 33 DB 48 85 FF 0F 84 86 00 00 00 48 89 B4 24 C8 01 00 00 39 9F E4 1E 00 00 74 32 39 9F E0 1E 00 00 76 06 89 9F E0 1E 00 00 48 8B 8F "
+                "F0 1E 00 00 45 33 C0 48 8B 97 E8 1E 00 00 48 8B 01 FF 50 40 48 89 9F E8 1E 00 00 89 9F E4 1E 00 00 39 5F 3C 74 28 39 5F 38 76 0B 33 D2 48 8D 4F 38 E8 2A 09 01 00 48 8B "
+                "4F 48 45 33 C0 48 8B 57 40 48 8B 01 FF 50 40 48 89 5F 40 89 5F 3C 49 8B 06 45 33 C0 48 8B D7 49 8B CE FF 50 40 48 8B B4 24 C8 01 00 00 48 8B 7C 24 28 48 85 FF 74 31 33 "
+                "D2 48 8B CF E8 C7 A9 33 00 48 8B 4F 60 45 33 C0 48 8B 57 50 48 8B 01 FF 50 40 48 89 5F 50 45 33 C0 89 5F 58 48 8B D7 49 8B 06 49 8B CE FF 50 40 48 8B CD E8 A8 6C 14 00 "
+                "49 8B 06 45 33 C0 48 8B D5 49 8B CE FF 50 40 44 8B 5C 24 40 4C 8B B4 24 80 01 00 00 48 8B BC 24 88 01 00 00 48 8B AC 24 C0 01 00 00 41 8D 43 FF 44 89 9C 24 B0 01 00 00 "
+                "83 F8 FD 77 56 41 8B CB E8 D3 70 5E 00 48 85 C0 74 17 8B 50 14 81 FA FF FF FF 00 74 0C 41 C1 EB 1E 41 8B CB E8 C7 5C 62 00 48 8D 84 24 B0 01 00 00 8B 08 83 F9 FF 75 0D "
+                "FF C3 48 83 C0 04 83 FB 01 72 EE EB 16 C1 E9 1E 48 8D 94 24 B0 01 00 00 41 B8 01 00 00 00 E8 F5 88 5E 00 48 8D 94 24 B8 01 00 00 49 8B CC E8 45 F0 00 00 49 8B CF 48 81 "
+                "C4 90 01 00 00 41 5F 41 5C 5B 48 FF 25 6F 85 24 01"},
+    {0x1ADC20u, "48 89 5C 24 08 48 89 6C 24 18 48 89 74 24 20 48 89 54 24 10 57 48 83 EC 20 48 8D B9 20 05 23 00 48 8B D9 48 8B CF FF 15 6C 8A 24 01 48 8D 8B 50 05 23 00 48 8D 54 24 38 "
+                "E8 63 AA 00 00 48 8B F0 48 8B 68 10 48 85 ED 74 38 48 8B 55 40 48 81 C3 58 00 23 00 45 33 C0 48 8B CB 4C 8B 0B 41 FF 51 40 4C 8B 0B 45 33 C0 48 8B 55 48 48 8B CB 41 FF "
+                "51 40 48 8B 03 45 33 C0 48 8B D5 48 8B CB FF 50 40 48 8B CF 48 C7 46 10 00 00 00 00 48 8B 5C 24 30 48 8B 6C 24 40 48 8B 74 24 48 48 83 C4 20 5F 48 FF 25 F9 89 24 01"},
+    {0xC9480u, "40 53 48 83 EC 30 80 79 08 00 8B 5A 04 0F 84 86 00 00 00 48 89 7C 24 40 48 8B 79 10 48 85 FF 74 73 48 8B 8F E8 00 00 00 48 8D 54 24 20 41 B9 08 00 00 00 48 8B 01 "
+               "45 8D 41 20 FF 50 30 45 33 C0 41 B9 01 00 00 00 48 8B 10 C7 42 08 28 00 00 00 48 8D 4A 10 66 44 89 4A 0C 48 8D 41 07 48 C1 E8 03 4C 89 02 66 83 C0 02 66 C1 E0 03 66 2B "
+               "C1 0F B7 C8 48 8B C2 66 89 4A 0E 48 03 CA 48 87 87 F0 00 00 00 48 89 10 44 89 09 89 59 04 44 89 41 08 4C 89 41 10 48 8B 7C 24 40 48 83 C4 30 5B C3"},
+    {0x2F4D40u, "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 60 33 ED 48 8B D9 48 39 69 40 0F 84 44 01 00 00"},
+    {0x336AD0u, "E9 CB 73 E7 FF"},
+};
+
+/* Once, after MatResInstall: its fence and wait, kick pins, frame-loop renderer and teardown hook (which drains these). */
+static void TerrainSplitInstall(void)
+{
+    if (g_tail.ready != 0) return;
+    g_tail.ready = -1;
+    const uintptr_t exe = ApiModuleBase("helldivers2.exe", NULL);
+    if (exe == 0 || g_matRes.ready != 1) { Note("difficulty: moving tiles: a released terrain's destroy keeps its fence wait (op 0x41's fence copy is off)"); return; }
+    for (size_t i = 0; i < sizeof kTailPins / sizeof kTailPins[0]; i++)
+        if (ApiCodeMatches(exe + kTailPins[i].at, kTailPins[i].bytes) != 1)
+        { Note("difficulty: moving tiles: a released terrain's destroy keeps its fence wait (exe+0x%X is not the reviewed code)", kTailPins[i].at); return; }
+    uint64_t enter = 0, leave = 0;
+    if (SafeRead(exe + 0x13F66B8u, &enter, 8) || SafeRead(exe + 0x13F66C0u, &leave, 8) || enter == 0 || leave == 0)
+    { Note("difficulty: moving tiles: a released terrain's destroy keeps its fence wait (the terrain lock's calls do not read)"); return; }
+    g_tail.fn.enter = (TailLockFn)(uintptr_t)enter; g_tail.fn.leave = (TailLockFn)(uintptr_t)leave;
+    g_tail.fn.copyFree = (TailPairFn)(exe + 0x1ADC20u); g_tail.fn.remove = (TailPairFn)(exe + 0xC9480u);
+    g_tail.fn.slot[0] = exe + 0x1ADEA0u; g_tail.fn.slot[1] = exe + 0x336AD0u;
+    g_tail.ready = 1;
+    Note("difficulty: moving tiles: a released terrain's destroy is split at its fence (exe 0x1ADFA9): its rest runs %u frame kicks later, without the wait", TAIL_KICKS);
+}
+
 /* ---- rpmalloc's caches after tile events ---------------------------------------------------------------------------
  * The trim-all exe 0x3245F0 ([api+0x10]+0x520) releases this thread's cached spans and the global caches at once; each
  * pool worker trims after its job loop and the render thread on message 0x29. The frame update 0xAB5000 calls it every
@@ -809,6 +1017,7 @@ static int NearTilesDestroy(int ship)
     const int known = !busy && world != 0 && (g_near.world == 0 || g_near.world == world);
     LARGE_INTEGER t0, t1, hz;
     QueryPerformanceCounter(&t0);
+    if (!busy) TerrainTailDrain(0, why); /* the released tiles' rests: none outlives its level */
     for (int i = 0; i < n; i++)
     {
         const uint64_t h = *at[i];

@@ -229,6 +229,7 @@ static void CoXlTick(HfMod* mod, float dt, void* user)
     MoveFrameTick(0);
     MatResTick(); /* op 0x41's unit resources a later frame's fence covers (proto/xl_free.c) */
     MatWaitTick(); /* and its setup's fence waits */
+    TerrainTailTick(); /* a released terrain's destroy past its fence */
     HitchTick();
     co_framecost_context(CoXlFrameContext);
     co_framecost_begin(CoXlInPlay(), (long)g_world.levels);
@@ -1499,6 +1500,29 @@ uint32_t CoXlTestMatWaitPending(void) { return g_matWait.n; }
 void CoXlTestMatResTeardown(uint64_t world) { MatResTeardown(world); }
 void CoXlTestMatResNote(void) { MatResNote(); }
 uint32_t CoXlTestMatResPending(void) { return g_matRes.n; }
+/* A terrain destroy split at its fence (proto/xl_free.c): stand-ins for the terrain lock's calls, 0x1ADC20, 0xC9480
+ * and the game's slot; ready 0 off. The head as MoveRelease calls it, the per-frame rests, a drain, the pending count,
+ * the install on the fake exe (1 on), the level whose generator job the tick and NearTilesDestroy look at. */
+void CoXlTestTerrainSplit(void* enter, void* leave, void* copyFree, void* remove, uint64_t slot, int ready)
+{
+    memset(g_tail.e, 0, sizeof g_tail.e);
+    g_tail.n = g_tail.max = g_tail.split = g_tail.completed = g_tail.drained = g_tail.fallback = 0; g_tail.fall = NULL; g_tail.last = 0;
+    g_tail.fn.enter = (TailLockFn)enter; g_tail.fn.leave = (TailLockFn)leave; g_tail.fn.copyFree = (TailPairFn)copyFree; g_tail.fn.remove = (TailPairFn)remove;
+    g_tail.fn.slot[0] = slot; g_tail.fn.slot[1] = 0; g_tail.ready = ready;
+}
+int CoXlTestTerrainDestroySplit(uint64_t world, uint64_t h, uint64_t destroy) { g_move.destroyTicks = 0; return TerrainDestroySplit(world, h, destroy); }
+void CoXlTestTerrainTailTick(void) { TerrainTailTick(); }
+void CoXlTestTerrainTailDrain(uint64_t world) { TerrainTailDrain(world, "a test"); }
+uint32_t CoXlTestTerrainTailPending(void) { return g_tail.n; }
+int CoXlTestTerrainSplitInstall(void) { g_tail.ready = 0; TerrainSplitInstall(); return g_tail.ready; }
+void CoXlTestTerrainSplitLevel(uintptr_t level) { g_worldLevel = level; }
+/* One tile's textures queued for release (queue 1), then `ticks` frames of MoveFreeTick: 1 while still queued. */
+int CoXlTestMoveFreeQueued(int queue, int ticks)
+{
+    if (queue) { memset(g_move.freeing, 0, sizeof g_move.freeing); MoveFreeLater(0, 0, 0, NULL); }
+    for (int i = 0; i < ticks; i++) MoveFreeTick(0);
+    return g_move.freeing[0].used;
+}
 void CoXlTestSetLevels(LONG levels) { InterlockedExchange(&g_world.levels, levels); }
 void CoXlTestMoveLevelUpdate(uint64_t level, uintptr_t moving, void (*update)(uint64_t))
 { g_move.levelPtr = moving; g_moveUpdate = (MoveUpdateFn)update; MoveLevelUpdate(level); g_moveUpdate = NULL; }
