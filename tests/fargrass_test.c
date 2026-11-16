@@ -19,6 +19,11 @@ void CoXlTestFgMark(int i, int j);
 void CoXlTestFgView(int i, int j, float* centre, float* rect);
 void CoXlTestFgSub(int i, int j, int q, float* box, float* rect);
 int CoXlTestFgSubs(void);
+void CoXlTestFgSplit(int sx, int sy);
+float CoXlTestFgNearest(float* windowMin);
+int CoXlTestMoverWants(void);
+void CoXlTestFgCoverageAge(ULONGLONG ms);
+void CoXlTestMoverWantsSet(int on);
 uint64_t CoXlTestFgJobCells(float size, float grow);
 uint32_t CoXlTestFgJobs(void);
 void CoXlTestFgInstall(void* aim, void* generate);
@@ -109,10 +114,11 @@ static const uint32_t kTables[] = {0x08, 0x10, 0x18, 0x20, 0xE0};
 #define LOOKUP_TMP 0xD3000ull
 #define ZONES 0xD4000ull
 #define WORLD 0x3000ull
-#define VP 0x7100ull
-#define CAMERA 0x7200ull
+#define VP 0x7100ull     /* the batch's viewports VP, VP + 1, ... */
+#define CAMERA 0x7200ull /* the camera of unit UNIT + n is CAMERA + n */
 #define ENV 0x7300ull
 #define UNIT 0x77u
+#define PAIRS 2
 
 /* What the fake engine saw. */
 static struct
@@ -123,8 +129,8 @@ static struct
     uint64_t destroyedTex[8];
     float aimSize, aimK, farZ;
     uint64_t output[2];
-    float at[3]; uint32_t moveUnit;
-    float rect[4], box[4]; int boxes;
+    float at[3]; uint32_t moveUnit; int movePair;
+    float rect[4], box[4]; int boxes, rectPair, boxPair;
     uint32_t generateHash, generateBehind; uint64_t generateQueue, generateWorld;
     uint32_t vpName; uint64_t unitHash, envHash;
 } g_saw;
@@ -146,25 +152,37 @@ static void FakeSetting(const char* name, const char* value)
     if (strcmp(value, "true") == 0) g_saw.setTrue++;
     if (strcmp(value, "false") == 0) g_saw.setFalse++;
 }
-static uint64_t FakeVp(uint64_t world, uint32_t name) { (void)world; g_saw.vpName = name; g_saw.vps++; return VP; }
-static void FakeVpDestroy(uint64_t world, uint64_t vp) { if (world == WORLD && vp == VP) g_saw.vpDestroys++; }
-static uint32_t FakeSpawn(uint64_t world, uint64_t hash, const float* pose) { (void)world; (void)pose; g_saw.unitHash = hash; g_saw.units++; return UNIT; }
-static void FakeUnitDestroy(uint64_t world, uint32_t unit) { if (world == WORLD && unit == UNIT) g_saw.unitDestroys++; }
-static uint64_t FakeCamera(uint32_t unit, uint32_t index) { return unit == UNIT && index == 0 ? CAMERA : 0; }
+static int g_madeVps, g_madeUnits; /* this batch's */
+static uint64_t FakeVp(uint64_t world, uint32_t name) { (void)world; g_saw.vpName = name; g_saw.vps++; return VP + (uint64_t)(g_madeVps++ % PAIRS); }
+static void FakeVpDestroy(uint64_t world, uint64_t vp) { if (world == WORLD && vp >= VP && vp < VP + PAIRS) g_saw.vpDestroys++; }
+static uint32_t FakeSpawn(uint64_t world, uint64_t hash, const float* pose)
+{
+    (void)world; (void)pose; g_saw.unitHash = hash; g_saw.units++;
+    return UNIT + (uint32_t)(g_madeUnits++ % PAIRS);
+}
+static void FakeUnitDestroy(uint64_t world, uint32_t unit) { if (world == WORLD && unit >= UNIT && unit < UNIT + PAIRS) g_saw.unitDestroys++; }
+static uint64_t FakeCamera(uint32_t unit, uint32_t index) { return unit >= UNIT && unit < UNIT + PAIRS && index == 0 ? CAMERA + (unit - UNIT) : 0; }
 static uint64_t FakeEnv(uint64_t world, uint64_t hash) { (void)world; g_saw.envHash = hash; g_saw.envs++; return ENV; }
 static void FakeEnvDestroy(uint64_t world, uint64_t env) { if (world == WORLD && env == ENV) g_saw.envDestroys++; }
-static void FakeFar(uint64_t camera, float farZ) { if (camera == CAMERA) g_saw.farZ = farZ; }
+static int IsCamera(uint64_t c) { return c >= CAMERA && c < CAMERA + PAIRS; }
+static void FakeFar(uint64_t camera, float farZ) { if (IsCamera(camera)) g_saw.farZ = farZ; }
 static void FakeOutput(uint64_t vp, uint64_t tex) { g_saw.output[0] = vp; g_saw.output[1] = tex; }
-static void FakeMove(uint64_t camera, uint32_t unit, const float* xyz) { if (camera == CAMERA) { memcpy(g_saw.at, xyz, 12); g_saw.moveUnit = unit; } }
+static void FakeMove(uint64_t camera, uint32_t unit, const float* xyz)
+{
+    if (IsCamera(camera) && unit == UNIT + (camera - CAMERA)) { memcpy(g_saw.at, xyz, 12); g_saw.moveUnit = unit; g_saw.movePair = (int)(camera - CAMERA); }
+}
 static void FakeUnitUpdate(uint64_t world, uint32_t unit) { (void)world; (void)unit; }
 static void FakeBox(uint64_t camera, float l, float r, float b, float t)
 {
-    if (camera == CAMERA) { g_saw.box[0] = l; g_saw.box[1] = r; g_saw.box[2] = b; g_saw.box[3] = t; g_saw.boxes++; }
+    if (IsCamera(camera)) { g_saw.box[0] = l; g_saw.box[1] = r; g_saw.box[2] = b; g_saw.box[3] = t; g_saw.boxes++; g_saw.boxPair = (int)(camera - CAMERA); }
 }
-static void FakeRect(uint64_t vp, float x, float y, float w, float h) { if (vp == VP) { g_saw.rect[0] = x; g_saw.rect[1] = y; g_saw.rect[2] = w; g_saw.rect[3] = h; } }
+static void FakeRect(uint64_t vp, float x, float y, float w, float h)
+{
+    if (vp >= VP && vp < VP + PAIRS) { g_saw.rect[0] = x; g_saw.rect[1] = y; g_saw.rect[2] = w; g_saw.rect[3] = h; g_saw.rectPair = (int)(vp - VP); }
+}
 static void FakeAim(uint64_t world, uint32_t unit, uint64_t camera, float size, float k)
 {
-    if (world == WORLD && unit == UNIT && camera == CAMERA) { g_saw.aimSize = size; g_saw.aimK = k; g_saw.aims++; }
+    if (world == WORLD && unit >= UNIT && unit < UNIT + PAIRS && camera == CAMERA + (unit - UNIT)) { g_saw.aimSize = size; g_saw.aimK = k; g_saw.aims++; }
 }
 static void FakeGenerate(uint64_t queue, uint64_t world, uint32_t hash, uint64_t unused, uint32_t n1, const void* p1, uint32_t n2, const void* p2,
     const void* p3, uint32_t last)
@@ -242,6 +260,9 @@ static void Start(const char* name)
     CoXlTestFgInstall((void*)FakeAim, (void*)FakeGenerate);
     CoXlTestFgObserver(0, 0, 0);
     memset(&g_saw, 0, sizeof g_saw);
+    g_madeVps = g_madeUnits = 0;
+    CoXlTestFgSplit(4, 2);
+    CoXlTestMoverWantsSet(0);
     g_nextStandIn = 0x5100;
 }
 
@@ -320,49 +341,68 @@ int main(void)
         CHECK(wrong == 0);
     }
 
-    g_case = "a view's jobs: their rectangles tile the view's without overlap, each box's ground in its own rectangle";
+    g_case = "a view's jobs, every split: the engine's projection puts each job's own metres on its rectangle, which tile the view's";
     {
-        CHECK(CoXlTestFgSubs() == 8);
+        static const int splits[3][2] = {{1, 1}, {2, 2}, {4, 2}};
         int wrong = 0;
-        static const int views[4][2] = {{0, 0}, {63, 0}, {5, 60}, {31, 33}};
-        for (int v = 0; v < 4; v++)
+        for (int sp = 0; sp < 3; sp++)
         {
-            const int i = views[v][0], j = views[v][1];
-            float c[2], r[4];
-            CoXlTestFgView(i, j, c, r);
-            static uint8_t cover[64][64]; /* the view's 64 x 64 texels */
-            memset(cover, 0, sizeof cover);
-            for (int q = 0; q < 8; q++)
+            const int sx = splits[sp][0], sy = splits[sp][1], tw = 64 / sx, th = 64 / sy;
+            CoXlTestFgSplit(sx, sy);
+            CHECK(CoXlTestFgSubs() == sx * sy);
+            static const int views[4][2] = {{0, 0}, {63, 0}, {5, 60}, {31, 33}};
+            for (int v = 0; v < 4; v++)
             {
-                float b[4], s[4];
-                CoXlTestFgSub(i, j, q, b, s);
-                /* 64 x 128 m boxes inside the view's square, at whole texels of the 4096 target */
-                wrong += !(b[1] - b[0] == 64.0f && b[3] - b[2] == 128.0f && b[0] >= -128.0f && b[1] <= 128.0f && b[2] >= -128.0f && b[3] <= 128.0f);
-                wrong += !(s[2] * 4096.0f == 16.0f && s[3] * 4096.0f == 32.0f);
-                const float x0 = s[0] * 4096.0f - r[0] * 4096.0f, y0 = s[1] * 4096.0f - r[1] * 4096.0f;
-                wrong += x0 != floorf(x0) || y0 != floorf(y0);
-                for (int ty = 0; ty < 32; ty++)
-                    for (int tx = 0; tx < 16; tx++)
-                    {
-                        const int cx = (int)x0 + tx, cy = (int)y0 + ty;
-                        if (cx < 0 || cx >= 64 || cy < 0 || cy >= 64) { wrong++; continue; }
-                        cover[cy][cx]++;
-                    }
-                /* the ortho box maps x east, y north onto the rectangle with the top row north (clip +y up): a texel's
-                 * centre from the box must be the overlay's texel (u = x / 16384 + 0.5, v = 0.5 - y / 16384) */
-                for (int ty = 0; ty < 32; ty += 7)
-                    for (int tx = 0; tx < 16; tx += 5)
-                    {
-                        const float wx = c[0] + b[0] + (tx + 0.5f) * 4.0f, wy = c[1] + b[3] - (ty + 0.5f) * 4.0f;
-                        const float u = (wx / 16384.0f + 0.5f) * 4096.0f, vv = (0.5f - wy / 16384.0f) * 4096.0f;
-                        wrong += (int)floorf(u) != (int)(s[0] * 4096.0f) + tx || (int)floorf(vv) != (int)(s[1] * 4096.0f) + ty;
-                    }
+                const int i = views[v][0], j = views[v][1];
+                float c[2], r[4];
+                CoXlTestFgView(i, j, c, r);
+                static uint8_t cover[64][64]; /* the view's 64 x 64 texels */
+                memset(cover, 0, sizeof cover);
+                for (int q = 0; q < sx * sy; q++)
+                {
+                    float b[4], s[4];
+                    CoXlTestFgSub(i, j, q, b, s);
+                    /* the job's metres from the view's centre: column q % sx from the west, row q / sx from the south */
+                    const double w = 256.0 / sx, h = 256.0 / sy, x0m = -128.0 + (q % sx) * w, y0m = -128.0 + (q / sx) * h;
+                    /* the engine's ortho (0x4CE190) with m00 divided by the view's aspect (0x4CE9AE): the rectangle's
+                     * w / h times the square target's, at aspect_ratio -1 (0x1EAD05); m30 not divided */
+                    const double aspect = (double)s[2] / (double)s[3], l = b[0], rr = b[1], bb = b[2], t = b[3];
+                    const double kx = 2.0 / ((rr - l) * aspect), cx = -(l + rr) / (rr - l), ky = 2.0 / (t - bb), cy = -(t + bb) / (t - bb);
+                    wrong += fabs(x0m * kx + cx + 1.0) > 1e-5 || fabs((x0m + w) * kx + cx - 1.0) > 1e-5;
+                    wrong += fabs(y0m * ky + cy + 1.0) > 1e-5 || fabs((y0m + h) * ky + cy - 1.0) > 1e-5;
+                    wrong += !(s[2] * 4096.0f == (float)tw && s[3] * 4096.0f == (float)th);
+                    const float tx0 = s[0] * 4096.0f - r[0] * 4096.0f, ty0 = s[1] * 4096.0f - r[1] * 4096.0f;
+                    wrong += tx0 != floorf(tx0) || ty0 != floorf(ty0);
+                    for (int ty = 0; ty < th; ty++)
+                        for (int tx = 0; tx < tw; tx++)
+                        {
+                            const int gx = (int)tx0 + tx, gy = (int)ty0 + ty;
+                            if (gx < 0 || gx >= 64 || gy < 0 || gy >= 64) { wrong++; continue; }
+                            cover[gy][gx]++;
+                        }
+                    /* a texel's centre through the inverse of that projection (clip +y up, the top row north) must be
+                     * the overlay's texel (u = x / 16384 + 0.5, v = 0.5 - y / 16384) */
+                    for (int ty = 0; ty < th; ty += 3)
+                        for (int tx = 0; tx < tw; tx += 3)
+                        {
+                            const double clipX = -1.0 + (tx + 0.5) * 2.0 / tw, clipY = 1.0 - (ty + 0.5) * 2.0 / th;
+                            const double wx = c[0] + (clipX - cx) / kx, wy = c[1] + (clipY - cy) / ky;
+                            const double u = (wx / 16384.0 + 0.5) * 4096.0, vv = (0.5 - wy / 16384.0) * 4096.0;
+                            wrong += (int)floor(u) != (int)(s[0] * 4096.0f) + tx || (int)floor(vv) != (int)(s[1] * 4096.0f) + ty;
+                        }
+                }
+                for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++) wrong += cover[y][x] != 1;
             }
-            for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++) wrong += cover[y][x] != 1;
         }
         CHECK(wrong == 0);
-        /* a 16 m layer with an 8 m pad: 18 x 18 cells for the whole square, 6 x 10 for a job */
+        /* a 16 m layer with an 8 m pad: 18 x 18 cells for the whole square, 10 x 10 for a 2 x 2 job, 6 x 10 for 4 x 2 */
+        CoXlTestFgSplit(1, 1);
+        CHECK(CoXlTestFgJobCells(16.0f, 8.0f) == 18 * 18);
+        CoXlTestFgSplit(2, 2);
+        CHECK(CoXlTestFgJobCells(16.0f, 8.0f) == 100);
+        CoXlTestFgSplit(4, 2);
         CHECK(CoXlTestFgJobCells(16.0f, 8.0f) == 60 && CoXlTestFgJobCells(16.0f, 4.0f) == 60 && CoXlTestFgJobCells(4.0f, 2.0f) == 18 * 34);
+        CHECK(CoXlTestFgSubs() == 8); /* the default */
     }
 
     Start("the planner: unbaked views near a player, nearest first");
@@ -437,13 +477,15 @@ int main(void)
     CHECK(CoXlTestFgBusy());
     CHECK(g_saw.published == 4 && g_saw.publishName[0] == 0x3AEAC078u && g_saw.publishTex[0] == DENSITY && g_saw.publishName[3] == 0x2FFE957Du &&
         g_saw.publishTex[3] == ZONES);
-    CHECK(g_saw.vps == 1 && g_saw.vpName == 0x5A038527u && g_saw.units == 1 && g_saw.unitHash == 0x465F4895F3DC98D1ull && g_saw.envs == 1 &&
+    CHECK(g_saw.vps == PAIRS && g_saw.vpName == 0x5A038527u && g_saw.units == PAIRS && g_saw.unitHash == 0x465F4895F3DC98D1ull && g_saw.envs == 1 &&
         g_saw.envHash == 0x9F09B0185B47408Full);
-    CHECK(g_saw.aims == 1 && Near(g_saw.aimSize, 2048.0f) && Near(g_saw.aimK, 8.0f) && Near(g_saw.farZ, 1002.0f));
-    CHECK(g_saw.output[0] == VP && g_saw.output[1] == DENSITY);
-    int jobs = (int)CoXlTestFgJobs(), entriesOk = 1, rectsOk = 1, ticks = 0, busyWhileQueued = 1, freeBetween = 0; /* the first job is out */
-    CHECK(jobs == 1 && g_saw.boxes == 1);
-    /* the first job's own rectangle and box (checked in the loop for the rest) */
+    CHECK(g_saw.aims == PAIRS && Near(g_saw.aimSize, 2048.0f) && Near(g_saw.aimK, 8.0f) && Near(g_saw.farZ, 1002.0f));
+    CHECK(g_saw.output[0] == VP + PAIRS - 1 && g_saw.output[1] == DENSITY);
+    int jobs = (int)CoXlTestFgJobs(), entriesOk = 1, rectsOk = 1, ticks = 0, busyWhileQueued = 1, oneAFrame = 1, settled = 1, alternate = 1;
+    int posted[PAIRS], firstEmpty[PAIRS], lastPair = 0, builderAt = -1, unbuiltSeen = 1; /* per pair: its last job's tick, the first tick after it that read the queue empty */
+    for (int p = 0; p < PAIRS; p++) posted[p] = firstEmpty[p] = -1;
+    posted[0] = 0;
+    CHECK(jobs == 1 && g_saw.boxes == 1 && g_saw.boxPair == 0 && g_saw.rectPair == 0 && g_saw.movePair == 0);
     {
         int i = (int)floorf((g_saw.at[0] + 8192.0f) / 256.0f), j = (int)floorf((g_saw.at[1] + 8192.0f) / 256.0f);
         float b[4], r[4];
@@ -453,41 +495,58 @@ int main(void)
     while (!(g_saw.generates == 1 && !CoXlTestFgBusy()) && ticks < 4000)
     {
         uint32_t before = Queued();
-        CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
         ticks++;
+        for (int p = 0; p < PAIRS; p++) if (posted[p] >= 0 && firstEmpty[p] < 0 && before == 0) firstEmpty[p] = ticks;
+        CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
         if (Queued() > before && g_saw.generates == 0)
         {
             const uint8_t* e = g_queue + 0x18 + (size_t)before * 0x1D0;
+            const int p = g_saw.boxPair;
             uint32_t flags, id;
             memcpy(&flags, e + 0x20, 4); memcpy(&id, e + 0x68, 4);
-            entriesOk &= Queued() == 1 && At(e, 0) == WORLD && At(e, 8) == CAMERA && At(e, 0x10) == VP && At(e, 0x18) == ENV && flags == 0x10400u &&
-                id == 0xFFFFFFFFu && e[0x58] == 0xAB && e[0x67] == 0xAB;
+            entriesOk &= Queued() == 1 && At(e, 0) == WORLD && At(e, 8) == CAMERA + (uint64_t)p && At(e, 0x10) == VP + (uint64_t)p && At(e, 0x18) == ENV &&
+                flags == 0x10400u && id == 0xFFFFFFFFu && e[0x58] == 0xAB && e[0x67] == 0xAB;
+            oneAFrame &= before == 0;
+            alternate &= p == (lastPair + 1) % PAIRS && g_saw.rectPair == p && g_saw.movePair == p;
+            /* the pair's last job read off the queue, and its render run: that tick and two more */
+            settled &= posted[p] < 0 || (firstEmpty[p] > 0 && ticks - firstEmpty[p] + 1 >= 3);
+            posted[p] = ticks; firstEmpty[p] = -1; lastPair = p;
             int i = (int)floorf((g_saw.at[0] + 8192.0f) / 256.0f), j = (int)floorf((g_saw.at[1] + 8192.0f) / 256.0f);
             float b[4], r[4];
             CoXlTestFgSub(i, j, jobs % 8, b, r); /* a view's eight jobs in order, the camera over its centre */
             rectsOk &= Near(g_saw.rect[0], r[0]) && Near(g_saw.rect[1], r[1]) && Near(g_saw.rect[2], r[2]) && Near(g_saw.rect[3], r[3]) &&
                 g_saw.boxes == jobs + 1 && memcmp(g_saw.box, b, sizeof b) == 0 && Near(g_saw.at[0], -8192.0f + (i + 0.5f) * 256) &&
-                Near(g_saw.at[1], -8192.0f + (j + 0.5f) * 256) && Near(g_saw.at[2], 501.0f) && g_saw.moveUnit == UNIT;
+                Near(g_saw.at[1], -8192.0f + (j + 0.5f) * 256) && Near(g_saw.at[2], 501.0f) && g_saw.moveUnit == UNIT + (uint32_t)p;
             jobs++;
         }
+        if (g_saw.generates == 1 && builderAt < 0)
+        {
+            builderAt = ticks; /* every pair's last job had run */
+            for (int p = 0; p < PAIRS; p++) settled &= firstEmpty[p] > 0 && ticks - firstEmpty[p] + 1 >= 3;
+        }
+        float windowMin;
+        if (ticks > 1 && g_saw.generates == 0) unbuiltSeen &= CoXlTestFgNearest(&windowMin) == 0.0f; /* the eye's view is in the batch */
         if (Queued() != 0 && !CoXlTestFgBusy()) busyWhileQueued = 0;
-        if (Queued() == 0 && !CoXlTestFgBusy() && g_saw.generates == 0) freeBetween++; /* a moving tile may build between jobs */
         if (ticks % 3 == 0 && Queued() == before) Drain(); /* the render callback, not every frame, never with a job just queued */
     }
+    {
+        float windowMin;
+        CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+        CHECK(unbuiltSeen && CoXlTestFgNearest(&windowMin) > 0.0f && windowMin == 0.0f); /* built now; the window saw it unbuilt */
+    }
     const int views = jobs / 8;
-    CHECK(jobs % 8 == 0 && views == 8 && (uint32_t)views == CoXlTestFgBaked() && (uint32_t)jobs == CoXlTestFgJobs() && entriesOk && rectsOk && busyWhileQueued &&
-        freeBetween >= jobs - 1);
+    CHECK(jobs % 8 == 0 && views == 8 && (uint32_t)views == CoXlTestFgBaked() && (uint32_t)jobs == CoXlTestFgJobs() && entriesOk && rectsOk && busyWhileQueued);
+    CHECK(oneAFrame && alternate && settled);
     CHECK(g_saw.generates == 1 && g_saw.generateBehind == 0 && g_saw.generateHash == 0xC4933EE1u && g_saw.generateQueue == (uint64_t)(uintptr_t)g_queue &&
         g_saw.generateWorld == WORLD);
-    /* the names go out with each job and come back once it has run: jobs + the builder */
-    CHECK(!CoXlTestFgBusy() && g_saw.published == 4 * (jobs + 1) && g_saw.unpublished == 4 * (jobs + 1) && g_saw.vpDestroys == 1 &&
-        g_saw.unitDestroys == 1 && g_saw.envDestroys == 1);
+    /* the names went out with the jobs and are back; the objects are gone */
+    CHECK(!CoXlTestFgBusy() && g_saw.published >= 4 && g_saw.published % 4 == 0 && g_saw.unpublished == g_saw.published && g_saw.vpDestroys == PAIRS &&
+        g_saw.unitDestroys == PAIRS && g_saw.envDestroys == 1);
     CHECK(g_saw.setTrue >= 2); /* set again while the batch ran */
     /* a full batch: the next is picked at the next update, not 30 later */
-    CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
-    CHECK(g_saw.vps == 2);
-    /* batches go on until the ground within 768 m of the player is baked, then stop while the player stays */
-    for (int k = 0; k < 20000; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+    CHECK(g_saw.vps == 2 * PAIRS);
+    /* batches go on until the ground within 1280 m of the player is baked, then stop while the player stays */
+    for (int k = 0; k < 40000; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
     {
         int close = 0, closeBaked = 0;
         for (int j = 0; j < 64; j++)
@@ -495,20 +554,18 @@ int main(void)
             {
                 float cx = -8192.0f + (i + 0.5f) * 256, cy = -8192.0f + (j + 0.5f) * 256;
                 float dx = fmaxf(0, fabsf(100.0f - cx) - 128), dy = fmaxf(0, fabsf(-300.0f - cy) - 128);
-                if (sqrtf(dx * dx + dy * dy) <= 768.0f) { close++; closeBaked += CoXlTestFgViewBaked(i, j); }
+                if (sqrtf(dx * dx + dy * dy) <= 1280.0f) { close++; closeBaked += CoXlTestFgViewBaked(i, j); }
             }
         CHECK(close > 8 && closeBaked == close && !CoXlTestFgBusy() && CoXlTestFgJobs() == 8 * CoXlTestFgBaked());
     }
     const int vps = g_saw.vps, builds = g_saw.generates;
     for (int k = 0; k < 200; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
-    CHECK(g_saw.vps == vps && g_saw.generates == builds && vps >= 2);
+    CHECK(g_saw.vps == vps && g_saw.generates == builds && vps >= 2 * PAIRS);
     /* the builder's job still queued when the batch waits to end: the names stay */
-    CoXlTestFgObserver(1, 4000.0f, 4000.0f);
-    const uint32_t jobsBefore = CoXlTestFgJobs();
-    const int published = g_saw.unpublished;
-    for (int k = 0; k < 1000 && g_saw.generates < builds + 1; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
-    const int u = published + 4 * (int)(CoXlTestFgJobs() - jobsBefore);
-    CHECK(g_saw.generates == builds + 1 && CoXlTestFgBusy() && g_saw.unpublished == u);
+    CoXlTestFgObserver(1, 5000.0f, 5000.0f);
+    for (int k = 0; k < 2000 && g_saw.generates < builds + 1; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+    const int u = g_saw.unpublished;
+    CHECK(g_saw.generates == builds + 1 && CoXlTestFgBusy() && Queued() == 1);
     for (int k = 0; k < 10; k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
     CHECK(CoXlTestFgBusy() && g_saw.unpublished == u);
     Drain();
@@ -518,6 +575,90 @@ int main(void)
     CHECK(!CoXlTestFgBusy() && g_saw.unpublished == u + 4);
     CoXlTestWorldShip();
     CHECK(CoXlTestFgSetting() == 0 && g_saw.setFalse == 1);
+
+    Start("another producer's job on the queue after a pair's job was read off: the pair's count goes on");
+    {
+        Kept();
+        CoXlTestFgObserver(1, 100.0f, -300.0f);
+        for (int k = 0; k < 40 && !CoXlTestFgBusy(); k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+        CHECK(CoXlTestFgJobs() == 1);
+        Drain();
+        CoXlTestFgTick((uint64_t)(uintptr_t)g_level); /* job 1 read off: its first update; job 2 on the other pair */
+        CHECK(CoXlTestFgJobs() == 2 && Queued() == 1);
+        const uint32_t one = 1;
+        Drain(); memcpy(g_queue + 0x10, &one, 4); /* job 2 read off, another producer's job queued */
+        CoXlTestFgTick((uint64_t)(uintptr_t)g_level); /* job 1's second update */
+        Drain();
+        CoXlTestFgTick((uint64_t)(uintptr_t)g_level); /* its third: job 1 has run, its pair takes job 3 */
+        CHECK(CoXlTestFgJobs() == 3 && Queued() == 1);
+        CoXlTestWorldShip();
+    }
+
+    Start("a moving tile that wants to start: no job goes out, the names come back once the jobs out have run");
+    {
+        Kept();
+        CoXlTestFgObserver(1, 100.0f, -300.0f);
+        for (int k = 0; k < 40 && !CoXlTestFgBusy(); k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+        Drain();
+        CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+        CHECK(CoXlTestFgBusy() && CoXlTestFgJobs() == 2 && Queued() == 1); /* the second pair's job at the first empty read */
+        CoXlTestMoverWantsSet(1);
+        int left = 0;
+        for (int k = 0; k < 6; k++)
+        {
+            Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+            if (!CoXlTestFgBusy() && left == 0) left = k + 1;
+        }
+        CHECK(CoXlTestFgJobs() == 2 && !CoXlTestFgBusy() && left == 3); /* the second job read off at the first tick, run by the third */
+        CoXlTestMoverWantsSet(0);
+        CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+        CHECK(CoXlTestFgBusy() && CoXlTestFgJobs() == 3);
+        CoXlTestWorldShip();
+    }
+
+    static const struct { float fps, hold; } kFlights[4] = {{60.0f, 6.0f}, {45.0f, 6.0f}, {60.0f, 12.0f}, {45.0f, 12.0f}};
+    for (int fl = 0; fl < 4; fl++)
+    {
+        Start("flying at 45 m/s with a tile build's hold every 45 s: the ground 256 m around the eye stays baked");
+        Kept();
+        const float fps = kFlights[fl].fps, hold = kFlights[fl].hold;
+        float x = -6000.0f, y = -6000.0f, worst = 1e9f, windowMin = 0;
+        CoXlTestFgObserver(1, x, y);
+        for (int k = 0; k < 20000; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); } /* the drop: its ground baked */
+        const int frames = (int)(150.0f * fps);
+        for (int f = 0; f < frames; f++)
+        {
+            const float t = (float)f / fps;
+            x += 45.0f / fps;
+            CoXlTestFgObserver(1, x, y);
+            CoXlTestMover(0, 0, fmodf(t + 20.0f * (float)fl, 45.0f) < hold ? 1 : 0, 0, 0, 0); /* the merge window holds the jobs */
+            Drain(); /* the consumer, once a frame */
+            CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+            if (t > 30.0f) worst = fminf(worst, CoXlTestFgNearest(&windowMin));
+        }
+        CoXlTestMover(0, 0, 0, 0, 0, 0);
+        printf("fargrass: %.0f fps, %.0f s holds: the nearest unbaked view at least %.0f m from the eye\n", fps, hold, worst);
+        CHECK(worst >= 256.0f && worst <= 2048.0f);
+        /* the coverage line once the 10 s window is over, with the window's least */
+        {
+            char line[160];
+            CoXlTestFgCoverageAge(10000);
+            CoXlTestFgTick((uint64_t)(uintptr_t)g_level); /* a window ends: the next starts from here */
+            const float first = CoXlTestFgNearest(&windowMin);
+            CHECK(first >= 256.0f && windowMin == first);
+            CoXlTestFgObserver(1, x + 4096.0f, y + 4096.0f); /* a moment over unbaked ground */
+            CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+            const float away = CoXlTestFgNearest(&windowMin);
+            CoXlTestFgObserver(1, x - 256.0f, y); /* back over baked ground, not where the last line was */
+            CoXlTestFgCoverageAge(10000);
+            CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
+            const float at = CoXlTestFgNearest(&windowMin);
+            snprintf(line, sizeof line, "far grass: nearest unbaked view to the eye %.0f m (min over the window %.0f m)", at, away);
+            CHECK(away == 0.0f && at >= 256.0f && lroundf(at) != lroundf(first) && fake_host_logged(line) && windowMin == at);
+        }
+        CoXlTestWorldShip();
+        CoXlTestFgObserver(0, 0, 0);
+    }
 
     Start("crater cuts: each build keeps every view not baked since the last one, with the game's own slots");
     Kept();
@@ -588,7 +729,7 @@ int main(void)
     }
     CoXlTestFgObserver(1, 4000.0f, 4000.0f);
     for (int k = 0; k < 400; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
-    CHECK(g_saw.generates == 1 && g_saw.vps == 1);
+    CHECK(g_saw.generates == 1 && g_saw.vps == PAIRS);
     CoXlTestWorldShip();
     CoXlTestFgObserver(0, 0.0f, 0.0f);
 
@@ -604,22 +745,19 @@ int main(void)
     CoXlTestFgTick(0); /* another level's update: the overlay's variant is the game's there */
     CHECK(g_saw.setFalse == 1 && CoXlTestFgSetting() == 0);
 
-    Start("a batch's next view waits while a moving tile builds, and outside play");
+    Start("a batch's next job waits while a moving tile builds, and outside play");
     {
         Kept();
         CoXlTestFgObserver(1, 100.0f, -300.0f);
         for (int k = 0; k < 40 && !CoXlTestFgBusy(); k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
         CHECK(CoXlTestFgBusy() && Queued() == 1);
-        Drain();
-        for (int k = 0; k < 3; k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
-        CHECK(!CoXlTestFgBusy() && CoXlTestFgBaked() == 1); /* the first view ran; the names are back */
         CoXlTestMover(0, 0, 1, 0, 0, 0); /* a tile build starts */
-        for (int k = 0; k < 50; k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
-        CHECK(!CoXlTestFgBusy() && Queued() == 0 && CoXlTestFgBaked() == 1);
+        for (int k = 0; k < 50; k++) { Drain(); CoXlTestFgTick((uint64_t)(uintptr_t)g_level); }
+        CHECK(!CoXlTestFgBusy() && Queued() == 0 && CoXlTestFgBaked() == 1 && CoXlTestFgJobs() == 1); /* the job ran; the names are back */
         CoXlTestMover(0, 0, 0, 0, 0, 0);
         uint32_t three = 2; memcpy(g_level + 0x1E4, &three, 4); /* the level leaves play (state 2) */
         for (int k = 0; k < 50; k++) CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
-        CHECK(Queued() == 0 && CoXlTestFgBaked() == 1 && g_saw.setFalse >= 1 && CoXlTestFgSetting() == 0);
+        CHECK(Queued() == 0 && CoXlTestFgJobs() == 1 && g_saw.setFalse >= 1 && CoXlTestFgSetting() == 0);
         three = 3; memcpy(g_level + 0x1E4, &three, 4);
         CoXlTestFgTick((uint64_t)(uintptr_t)g_level);
         CHECK(CoXlTestFgBusy() && Queued() == 1 && CoXlTestFgBaked() == 1 && CoXlTestFgJobs() == 2 && CoXlTestFgSetting() == 1); /* the view's next job */
@@ -670,21 +808,20 @@ int main(void)
     CoXlTestWorldShip();
     CHECK(g_saw.setTrue == 1 && g_saw.setFalse == 2 && fake_host_logged("debug_deformation_prevention false (the level is left)"));
 
-    Start("a moving tile's build waits while a batch runs");
+    Start("a moving tile's build waits while a batch's job is out and asks for the next gap");
     {
         static const char kStart[] = "the level's context did not read; no tile"; /* how far a build start gets on the fake game */
         CoXlTestMission((uintptr_t)g_level, 1);
         Level();
         CoXlTestMover(0, 0, 0, 0, 0, 0);
         CoXlTestFgRing(-2, 2, -2, 2);
-        CoXlTestFgState(2); /* a view's job is out */
+        CoXlTestFgState(1); /* a batch's job is out */
         CoXlTestFgOut(1);
         CoXlTestMoverTick((uintptr_t)g_level, 2048.4f, 0.0f);
-        CHECK(!fake_host_logged(kStart));
-        CoXlTestFgState(1); /* between views: the tile builds */
-        CoXlTestFgOut(0);
+        CHECK(!fake_host_logged(kStart) && CoXlTestMoverWants() == 1); /* it asks for the next gap */
+        CoXlTestFgOut(0); /* nothing out: the tile builds */
         CoXlTestMoverTick((uintptr_t)g_level, 2048.4f, 0.0f);
-        CHECK(fake_host_logged(kStart));
+        CHECK(fake_host_logged(kStart) && CoXlTestMoverWants() == 0);
         CoXlTestFgState(0);
         CoXlTestFgRing(0, 0, 0, 0);
     }

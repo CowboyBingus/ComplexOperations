@@ -7360,6 +7360,8 @@ typedef struct { int live; LONG level; float centre[2]; uint64_t handle; NearGro
 static uint16_t* g_groundBuf[NEAR_TILES_MAX + 1]; /* NearGroundOf's copies: a tile slot each, the coarse terrain last */
 static NearTile g_tiles[NEAR_TILES_MAX];
 static volatile LONG g_tilesGen;
+/* The coarse ground is new or gone: the scatter's cached ranges start over (a range over the old ground is wrong). */
+static void NearCoarseChanged(void) { InterlockedIncrement(&g_tilesGen); }
 
 /* Research: the last level's tile terrains as the next level finds them, before their textures are freed. A first
  * qword still inside the game's executable is a live object's vtable: the terrain outlived its level. */
@@ -9213,6 +9215,7 @@ static int TerrainNearStep(uint64_t records, uint32_t end, uint32_t at, uint32_t
             uintptr_t gen = 0, h = 0;
             if (!SafeRead(g_worldLevel + 0x2C8, &gen, 8) && gen != 0 && !SafeRead(gen + 0x8758A0u, &h, 8))
                 NearGroundOf(world, h, 16384.0f - 0.5f, 0.0f, 0.0f, &g_nearCoarseGround, &g_groundBuf[NEAR_TILES_MAX]);
+            NearCoarseChanged();
             NearGroundOf(world, g_near.handle, NEAR_SPAN, g_near.centre[0], g_near.centre[1], &g_nearTileGround, &g_groundBuf[0]);
             if (g_nearTileGround.v != NULL && NearTileAdd(0, g_near.centre[0], g_near.centre[1], g_near.handle, &g_nearTileGround) == 0)
             {
@@ -9432,6 +9435,10 @@ static int NearScatRead(const NearScatEntry* e, NearScatEntry* copy)
 
 static int NearScatFree(const NearScatEntry* e, LONG gen) { return e->size == 0 || e->gen != gen; }
 
+/* The readers' generation: the level and g_tilesGen, which also counts each change of the coarse ground, so no state
+ * comes back to an older generation. Unsigned: it wraps, it is never undefined. */
+static LONG NearScatGen(void) { return (LONG)(((uint32_t)g_world.levels << 24) + (uint32_t)g_tilesGen); }
+
 /* Up to 8 probes. A slot being written is passed over, as a miss would be: the range is taken again. */
 static int NearScatFind(LONG gen, uint32_t size, uint32_t half, int32_t ix, int32_t iy, float* lo, float* hi)
 {
@@ -9460,6 +9467,7 @@ static void NearScatStore(LONG gen, uint32_t size, uint32_t half, int32_t ix, in
         LONG s0 = e.seq; /* the slot as judged: one changed since is another writer's */
         NEAR_SCAT_TEST_HOOK(at, 1);
         if (!__atomic_compare_exchange_n(&at->seq, &s0, s0 + 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
+        __atomic_thread_fence(__ATOMIC_RELEASE); /* the odd seq before any field: a reader never takes new fields as the old seq's */
         uint32_t l, h; memcpy(&l, &lo, 4); memcpy(&h, &hi, 4);
         __atomic_store_n(&at->gen, gen, __ATOMIC_RELAXED); __atomic_store_n(&at->size, size, __ATOMIC_RELAXED);
         __atomic_store_n(&at->half, half, __ATOMIC_RELAXED); __atomic_store_n(&at->ix, ix, __ATOMIC_RELAXED);
@@ -9479,7 +9487,7 @@ static float NearScatGround(float x, float y)
 /* The drawn ground's range over a cell (centre cx, cy; half width h); 0 when no ground is known there. */
 static int NearScatRange(float size, int32_t ix, int32_t iy, float h, float* lo, float* hi, int* budget)
 {
-    LONG gen = (g_world.levels * 4 + (g_nearCoarseGround.v != NULL ? 2 : 0)) ^ (g_tilesGen << 12);
+    const LONG gen = NearScatGen();
     uint32_t sbits, hbits; memcpy(&sbits, &size, 4); memcpy(&hbits, &h, 4);
     if (NearScatFind(gen, sbits, hbits, ix, iy, lo, hi)) return 1;
     if (g_nearCoarseGround.v == NULL || *budget <= 0) return 0;

@@ -1833,7 +1833,9 @@ int CoXlTestTileAddAt(float cx, float cy, const uint16_t* heights, uint32_t n, f
     return NearTileAdd(NearTileFree(), cx, cy, 0x1234, &ground);
 }
 void CoXlTestTileRemove(int slot) { NearTileRemove(slot); }
-void CoXlTestCoarse(const uint16_t* heights, uint32_t n, float size) { const NearGround g = {heights, n, size, 0.0f, 0.0f}; g_nearCoarseGround = g; }
+void CoXlTestCoarse(const uint16_t* heights, uint32_t n, float size) { const NearGround g = {heights, n, size, 0.0f, 0.0f}; g_nearCoarseGround = g; NearCoarseChanged(); }
+LONG CoXlTestScatGenNow(void) { return NearScatGen(); } /* the readers' generation */
+void CoXlTestTilesGen(LONG gen) { g_tilesGen = gen; }
 void CoXlTestNearBuilding(int building) { g_near.level = g_world.levels; g_near.state = building ? NEAR_START : NEAR_IN; }
 void CoXlTestLayerTile(int slot, int in, float cx, float cy) { NearLayerTileChange(slot, in, cx, cy); }
 void CoXlTestLayerTileLater(int slot, int in, float cx, float cy) { NearLayerTileChangeLater(slot, in, cx, cy); }
@@ -2890,6 +2892,11 @@ void CoXlTestFgView(int i, int j, float* centre, float* rect) { FgCentre(i, j, c
  * cells a job's layer gathers. */
 void CoXlTestFgSub(int i, int j, int q, float* box, float* rect) { FgSubRect(i, j, q, box, rect); }
 int CoXlTestFgSubs(void) { return FG_SUBS; }
+void CoXlTestFgSplit(int sx, int sy) { g_fg.sx = sx; g_fg.sy = sy; } /* research's HELLFORGE_XL_FARGRASS_SPLIT */
+float CoXlTestFgNearest(float* windowMin) { *windowMin = g_fg.nearestMin; return g_fg.nearest; } /* the coverage line's */
+void CoXlTestFgCoverageAge(ULONGLONG ms) { g_fg.coverageSince -= ms; } /* the coverage window as if ms older */
+int CoXlTestMoverWants(void) { return g_moveWantsTile; }
+void CoXlTestMoverWantsSet(int on) { g_moveWantsTile = on; }
 uint64_t CoXlTestFgJobCells(float size, float grow) { return FgJobCells(size, grow); }
 uint32_t CoXlTestFgJobs(void) { return g_fg.jobs; }
 void CoXlTestFgInstall(void* aim, void* generate) { g_fg.installed = 1; g_fg.aim = (FgAimFn)aim; g_fg.generate = (FgGenerateFn)generate; }

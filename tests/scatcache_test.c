@@ -15,6 +15,9 @@ void CoXlTestScatStore(float size, float half, int32_t ix, int32_t iy, float lo,
 int CoXlTestScatFind(float size, float half, int32_t ix, int32_t iy, float* lo, float* hi);
 uint32_t CoXlTestScatSlot(float size, float half, int32_t ix, int32_t iy);
 void CoXlTestScatGen(LONG gen);
+LONG CoXlTestScatGenNow(void);
+void CoXlTestTilesGen(LONG gen);
+void CoXlTestCoarse(const uint16_t* heights, uint32_t n, float size);
 void CoXlTestScatHold(uint32_t slot, int hold);
 void CoXlTestScatRace(int where, float lo);
 uint32_t CoXlTestScatPeekSize(uint32_t slot);
@@ -200,6 +203,36 @@ int main(void)
     CHECK(Has(16.0f, 8.0f, 4, 4, 3.0f, 4.0f));
     CoXlTestScatGen(5);
     CHECK(Misses(16.0f, 8.0f, 4, 4));
+
+    g_case = "the readers' generation never comes back: the coarse ground on, off and on again, a tile, and past 2^19 changes";
+    {
+        static uint16_t coarse[4] = {0, 0, 0, 0};
+        LONG seen[6];
+        CoXlTestTilesGen(5);
+        seen[0] = CoXlTestScatGenNow();
+        CoXlTestCoarse(coarse, 2, 16384.0f);
+        seen[1] = CoXlTestScatGenNow();
+        CoXlTestCoarse(NULL, 0, 0.0f);
+        seen[2] = CoXlTestScatGenNow();
+        CoXlTestCoarse(coarse, 2, 16384.0f);
+        seen[3] = CoXlTestScatGenNow();
+        CoXlTestTilesGen(0x7FFFFFFF); /* the shift that was undefined past 2^19 */
+        seen[4] = CoXlTestScatGenNow();
+        CoXlTestCoarse(coarse, 2, 16384.0f);
+        seen[5] = CoXlTestScatGenNow();
+        int distinct = 1;
+        for (int a = 0; a < 6; a++) for (int b = a + 1; b < 6; b++) distinct &= seen[a] != seen[b];
+        CHECK(distinct);
+        /* a range taken with the coarse ground on is not found after it went and came back */
+        CoXlTestScatClear();
+        CoXlTestScatGen(seen[1]);
+        CoXlTestScatStore(16.0f, 8.0f, 7, 7, 1.0f, 2.0f);
+        CoXlTestScatGen(seen[3]);
+        CHECK(Misses(16.0f, 8.0f, 7, 7));
+        CoXlTestCoarse(NULL, 0, 0.0f);
+        CoXlTestTilesGen(0);
+        CoXlTestScatClear();
+    }
 
     g_case = "a slot a writer holds: a find passes it by, a store leaves it to the writer";
     {
