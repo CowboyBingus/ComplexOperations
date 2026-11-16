@@ -62,8 +62,10 @@ static int LwCutReady(const LwSquad* q)
     if (!g_lwCut.on || g_lwCut.mode < 2) return 1;
     uint32_t waiting = 0;
     const int cut = co_cutters_cut(q->pos[0], q->pos[1], LW_CUT_PLACE_M, &waiting);
-    const uint32_t waited = LwCutWaited((int)(q - g_lwSquads), cut, GetTickCount64());
+    const int i = (int)(q - g_lwSquads);
+    const uint32_t waited = LwCutWaited(i, cut, GetTickCount64());
     const int verdict = LwCutVerdict(cut, waited);
+    if (verdict == LW_CUT_LATE) g_lwCutAsk[i].cut = 0; /* let through: a place it asks for next waits its own 5 s */
     g_lwCut.gate[verdict]++;
     if (verdict != LW_CUT_GAMES && verdict != LW_CUT_WAITS && waited > g_lwCut.gateLongest) g_lwCut.gateLongest = waited;
     return verdict != LW_CUT_WAITS;

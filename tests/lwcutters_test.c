@@ -184,11 +184,20 @@ static void Gate(void)
     CHECK(CoXlTestLwGates(0, 1, 1, &places, &rooms, &retry) == 1 && places == 1);
     CoXlTestLwCutGate(g);
     CHECK(g[WAITS] == 4 && g[IS_CUT] == 3 && g[LATE] == 1 && g[4] >= 5001 && g[4] < 6000);
+    /* let through ends the wait: the same place not cut in waits again */
+    CHECK(CoXlTestLwGates(1, 0, 1, &places, &rooms, &retry) == 0 && places == 0);
+    /* a held squad let through late at A whose point is refused, moved to B: B waits, it is not let through at once */
+    CoXlTestLwCutWaited(0, 5001);
+    CHECK(CoXlTestLwGates(1, 0, 1, &places, &rooms, &retry) == 0 && places == 1);
+    CoXlTestLwCutSquad(0, OFFLINE, 0, 45.0f, -60.0f);
+    CHECK(CoXlTestLwGates(1, 0, 1, &places, &rooms, &retry) == 0 && places == 0);
+    CoXlTestLwCutGate(g);
+    CHECK(g[WAITS] == 6 && g[IS_CUT] == 3 && g[LATE] == 2 && g[4] >= 5001 && g[4] < 6000);
     /* no tick for over a second: the cutters are the game's and nothing waits */
     CHECK(co_cutters_tick(c, 1, GetTickCount() - 1500u, 0, &t) == 1);
     CHECK(CoXlTestLwGates(0, 1, 1, &places, &rooms, &retry) == 1);
     CoXlTestLwCutGate(g);
-    CHECK(g[GAMES] == 1 && g[WAITS] == 4);
+    CHECK(g[GAMES] == 1 && g[WAITS] == 6);
     CoXlTestLwCutMode(0);
     co_cutters_test_reset();
 }
@@ -285,8 +294,8 @@ int main(void)
     CHECK(CoXlTestLwCutAsked(4, 50000) == 0 && CoXlTestLwCutAsked(4, 55000) == 5000 && CoXlTestLwCutAsked(3, 55000) == 0);
     g_case = "the cut gate's wait: only the asks it refused, from the first of them";
     CHECK(CoXlTestLwCutWait(5, 1, 1000) == 0 && CoXlTestLwCutWait(5, 1, 4000) == 0 && CoXlTestLwCutWait(5, 1, 8000) == 0);
-    CHECK(CoXlTestLwCutWait(5, 0, 9000) == 0 && CoXlTestLwCutWait(5, 0, 12000) == 3000 && CoXlTestLwCutWait(5, 0, 14100) == 5100);
-    CHECK(CoXlTestLwCutWait(5, 1, 15000) == 6000 && CoXlTestLwCutWait(5, 1, 16000) == 0 && CoXlTestLwCutWait(5, -1, 17000) == 0);
+    CHECK(CoXlTestLwCutWait(5, 0, 9000) == 0 && CoXlTestLwCutWait(5, 0, 12000) == 3000 && CoXlTestLwCutWait(5, 0, 13900) == 4900);
+    CHECK(CoXlTestLwCutWait(5, 1, 15000) == 6000 && CoXlTestLwCutWait(5, 1, 16000) == 0 /* cut in after asks that never went late (LwCutReady ends a wait at its LATE) */ && CoXlTestLwCutWait(5, -1, 17000) == 0);
     CHECK(CoXlTestLwCutWait(5, 0, 18000) == 0 && CoXlTestLwCutWait(5, -1, 19000) == 1000 && CoXlTestLwCutWait(5, 0, 20000) == 0);
     CHECK(CoXlTestLwCutWait(6, 0, 20000) == 0 && CoXlTestLwCutWait(6, 0, 24000) == 4000 && CoXlTestLwCutWait(6, 0, 29001) == 0); /* asks 5 s apart: a new wait */
     CHECK(CoXlTestLwCutWait(6, 0, 34001) == 5000);
