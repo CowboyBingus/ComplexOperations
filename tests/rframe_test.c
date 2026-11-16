@@ -35,7 +35,7 @@ void CoXlTestXrfTick(void);
 void CoXlTestXrfPoolsRw(uint64_t rw);
 uint32_t CoXlTestXrfTimed(void);
 int CoXlTestXrfStallDue(int64_t at, int64_t now, LONG seq);
-void CoXlTestXrfStall(int k, uint64_t rip, double ms, const void* stack, uint32_t len);
+void CoXlTestXrfStall(int k, uint64_t rip, double ms, double suspendedUs, const void* stack, uint32_t len);
 int CoXlTestXrfInstall(const char** in, const char** refused, const char** off);
 void* CoXlTestXrfOrig(int hook);
 void CoXlTestXrfStampsSet(int on, uint32_t base, uint32_t n, const float (*at)[2], const float* out2, const uint8_t* live, int players, const float (*playerAt)[2]);
@@ -397,18 +397,18 @@ static void TestStall(void)
     uint8_t* x = (uint8_t*)g_exe;
     x[0x1EC4AAu] = 0xE8; x[0x113EEEu] = 0xE8;             /* the calls before the return addresses */
     uint64_t stack[4] = {0x1234, g_exe + 0x1EC4AFu, g_exe + 0x500000u, g_exe + 0x113EF3u};
-    CoXlTestXrfStall(0, g_exe + 0x627200u, 31.04, stack, sizeof stack);
+    CoXlTestXrfStall(0, g_exe + 0x627200u, 31.04, 412.6, stack, sizeof stack);
     CoXlTestXrfTick();
-    CHECK(fake_host_logged("render stall sample: the render thread 31.0 ms into its frame at exe+0x627200 (function not found); wait: message 7's cull job wait (0x627160 from 0x1EC4AA); stack (32 bytes): exe+0x1EC4AF, exe+0x113EF3"));
+    CHECK(fake_host_logged("render stall sample: the render thread 31.0 ms into its frame at exe+0x627200 (function not found); suspended 413 us; wait: message 7's cull job wait (0x627160 from 0x1EC4AA); stack (32 bytes): exe+0x1EC4AF, exe+0x113EF3"));
     g_fake.log[0] = 0;
     CoXlTestXrfTick();
     CHECK(!fake_host_logged("render stall sample")); /* once */
     x[0x500000u] = 0xE8;                                   /* a call site no wait is known at, before the known one */
     uint64_t stack2[3] = {g_exe + 0x500005u, g_exe + 0x1E95A0u, g_exe + 0x113EF3u};
     x[0x1E959Bu] = 0xE8;
-    CoXlTestXrfStall(1, g_exe + 0x58E700u, 40.0, stack2, sizeof stack2);
+    CoXlTestXrfStall(1, g_exe + 0x58E700u, 40.0, 1800.0, stack2, sizeof stack2);
     CoXlTestXrfTick();
-    CHECK(fake_host_logged("wait: message 8's object messages (0x1E84A0 from 0x1E959B); stack (24 bytes): exe+0x500005, exe+0x1E95A0, exe+0x113EF3"));
+    CHECK(fake_host_logged("suspended 1800 us; wait: message 8's object messages (0x1E84A0 from 0x1E959B); stack (24 bytes): exe+0x500005, exe+0x1E95A0, exe+0x113EF3"));
     CHECK(co_rframe_wait_name(0x6C5F43u) != NULL && co_rframe_wait_name(0x113F22u) != NULL && co_rframe_wait_name(0x1EC4AAu) == NULL);
 }
 
@@ -418,26 +418,37 @@ static void TestInstall(void)
     const char *in, *refused, *off;
     g_coApi = fake_host_reset(CO_GAME_BUILD); g_coMod = (HfMod*)&g_fake; g_exe = (uintptr_t)fake_host_exe();
     CHECK(CoXlTestXrfInstall(&in, &refused, &off) == 1 && off == NULL);
-    CHECK(strcmp(refused, "") == 0 && strstr(in, "job wait 0x627160, LOD wait 0x6097A0") != NULL && strstr(in, "render messages 0x113010") != NULL);
+    CHECK(strcmp(refused, "") == 0 && strstr(in, "job wait 0x627160, LOD wait 0x6097A0 (+9), SpeedTree view wait 0x213540 (+9)") != NULL && strstr(in, "render messages 0x113010") != NULL);
     CHECK(g_fake.hookCount == XH_COUNT);
     for (int h = 0; h < XH_COUNT; h++) CHECK(CoXlTestXrfOrig(h) != NULL);
+    const uintptr_t image = (uintptr_t)g_fake.image; /* the fake records a hook's target from the image */
+    CHECK(g_fake.hooks[XH_LODWAIT].target + image - g_exe == 0x6097A9u && g_fake.hooks[XH_TREES].target + image - g_exe == 0x213549u);
+    CHECK(g_fake.hooks[XH_JOBWAIT].target + image - g_exe == 0x627160u && g_fake.hooks[XH_JOIN].target + image - g_exe == 0x252460u);
     CHECK(CoXlTestXrfTimed() == ((1u << CO_RF_TIMED) - 1u & ~(1u << CO_RF_SPIN8))); /* every part but the rounds' */
     g_coApi = fake_host_reset(CO_GAME_BUILD); g_coMod = (HfMod*)&g_fake; g_exe = (uintptr_t)fake_host_exe();
     g_fake.noMatchExe[0] = 0x1E3E64u;                 /* the LOD wait's call site */
     g_fake.noMatchExe[1] = 0x6C0590u;                 /* the GPU wait's prologue */
     CHECK(CoXlTestXrfInstall(&in, &refused, &off) == 1);
-    CHECK(strcmp(refused, "LOD wait 0x6097A0 (call site), GPU wait 0x6C0590 (prologue)") == 0 && strstr(in, "LOD wait") == NULL);
+    CHECK(strcmp(refused, "LOD wait 0x6097A0 (+9) (call site), GPU wait 0x6C0590 (prologue)") == 0 && strstr(in, "LOD wait") == NULL);
     CHECK(CoXlTestXrfOrig(XH_LODWAIT) == NULL && CoXlTestXrfOrig(XH_GPUWAIT) == NULL && CoXlTestXrfOrig(XH_JOBWAIT) != NULL);
     CHECK(g_fake.hookCount == XH_COUNT - 2);
     const uint32_t t = CoXlTestXrfTimed();
     CHECK(!(t >> CO_RF_LODB & 1) && !(t >> CO_RF_GPUWAIT & 1) && (t >> CO_RF_CULL & 1) && (t >> CO_RF_M07 & 1));
     CoXlTestXrfTick();
-    CHECK(fake_host_logged("render frame instrument (research): hooks in: job wait 0x627160, SpeedTree view wait 0x213540"));
-    CHECK(fake_host_logged("refused: LOD wait 0x6097A0 (call site), GPU wait 0x6C0590 (prologue); through other hooks: render messages yes (its own 0x113010 hook), the frame fence (0x8A7C4) not yet"));
+    CHECK(fake_host_logged("render frame instrument (research): hooks in: job wait 0x627160, SpeedTree view wait 0x213540 (+9), generator join"));
+    CHECK(fake_host_logged("refused: LOD wait 0x6097A0 (+9) (call site), GPU wait 0x6C0590 (prologue); through other hooks: render messages yes (its own 0x113010 hook), the frame fence (0x8A7C4) not yet"));
     g_fake.log[0] = 0;
     CoXlTestXrfTick();
     CHECK(!fake_host_logged("render frame instrument")); /* once, until what is timed changes */
     g_fake.noMatchExe[0] = g_fake.noMatchExe[1] = 0;
+    g_coApi = fake_host_reset(CO_GAME_BUILD); g_coMod = (HfMod*)&g_fake; g_exe = (uintptr_t)fake_host_exe();
+    g_fake.noMatchExe[0] = 0x2136AFu;                 /* the ret the SpeedTree view wait's skipped lead-in jumps to */
+    CHECK(CoXlTestXrfInstall(&in, &refused, &off) == 1);
+    CHECK(strcmp(refused, "SpeedTree view wait 0x213540 (+9) (prologue)") == 0 && CoXlTestXrfOrig(XH_TREES) == NULL && g_fake.hookCount == XH_COUNT - 1);
+    g_coApi = fake_host_reset(CO_GAME_BUILD); g_coMod = (HfMod*)&g_fake; g_exe = (uintptr_t)fake_host_exe();
+    g_fake.noMatchExe[0] = 0x6098FDu;                 /* the LOD wait's */
+    CHECK(CoXlTestXrfInstall(&in, &refused, &off) == 1 && strcmp(refused, "LOD wait 0x6097A0 (+9) (prologue)") == 0);
+    g_fake.noMatchExe[0] = 0;
 }
 
 int main(void)

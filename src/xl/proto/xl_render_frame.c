@@ -29,29 +29,31 @@
 
 enum { XH_JOBWAIT, XH_LODWAIT, XH_TREES, XH_JOIN, XH_DISPA, XH_DISPB, XH_APPLY, XH_CHAIN, XH_GPUWAIT, XH_DRAIN, XH_AFTER, XH_CELLS, XH_MESSAGE, XH_COUNT };
 
-/* Each hook's target and prologue, and the call sites (or code) its reading rests on. */
-static const struct { uint32_t rva; const char* name; const char* pin; uint32_t site; const char* sitePin; uint32_t site2; const char* site2Pin; } kXrfHooks[XH_COUNT] = {
-    {0x627160u, "job wait 0x627160", "48 89 5C 24 08 44 89 44 24 18 55 56 57 41 54 41 55 41 56 41 57 48 8B EC",
-     0x1EC4AAu, "E8 B1 AC 43 00 48 8D 5B 04 49 83 EF 01 75 D7", 0x1E2FA1u, "E8 BA 41 44 00"},
-    {0x6097A0u, "LOD wait 0x6097A0", "83 FA FF 0F 84 54 01 00 00 56 57 41 57 48 83 EC 20 48 89 5C 24 40 48 8B", 0x1E3E64u, "E8 37 59 42 00", 0, NULL},
-    {0x213540u, "SpeedTree view wait 0x213540", "83 FA FF 0F 84 66 01 00 00 48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 30",
-     0x1E3E21u, "44 89 7C 24 20 48 8B 89 B0 01 00 00 E8 0E F7 02 00", 0x213607u, "8B 7C 24 60"},
-    {0x252460u, "generator join 0x252460", "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57 48 83 EC 20", 0x1EDA81u, "E8 DA 49 06 00", 0, NULL},
-    {0x6CC130u, "dispatch 0x6CC130", "44 88 4C 24 20 44 89 44 24 18 89 54 24 10 48 89 4C 24 08 55 53 56 57 41",
-     0x6CED3Du, "44 0F B6 CB 41 8B D7 48 8B CF E8 E4 D3 FF FF", 0x6CECD5u, "44 8B BF C8 05 00 00"},
-    {0x6CA5F0u, "dispatch 0x6CA5F0", "44 89 44 24 18 89 54 24 10 48 89 4C 24 08 55 53 56 57 41 54 41 55 41 56",
-     0x6CED4Eu, "44 0F B6 CB 41 8B D7 48 8B CF E8 93 B8 FF FF", 0x6CECD5u, "44 8B BF C8 05 00 00"},
-    {0x1E84A0u, "message 8 apply 0x1E84A0", "48 8B C4 4C 89 40 18 48 89 50 10 55 53 56 57 41 54 41 55 41 56 41 57 48",
-     0x1E8510u, "48 8B 42 10 4C 8B 30 4D 85 F6 0F 84 3D 0F 00 00 4C 89 72 10 41 0F B7 7E 0E 49 03 FE 8B 07 FF C8", 0x1E959Bu, "E8 00 EF FF FF"},
-    {0x10BB30u, "device-chain spin 0x10BB30", "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B B9 68", 0x10BB95u, "E8 76 C6 41 00 84 C0", 0, NULL},
-    {0x6C0590u, "GPU wait 0x6C0590", "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 54 41 55 41 56 41 57", 0x6C5F3Eu, "E8 4D A6 FF FF", 0, NULL},
-    {0x6BEED0u, "submit drain 0x6BEED0", "40 53 48 83 EC 70 48 8B D9 33 D2 48 8B 49 28 FF 15 13 78 D3 00 33 C0 4C",
-     0x6C6018u, "E8 B3 8E FF FF", 0x6C60A5u, "FF 90 B0 00 00 00"},
-    {0x6F0360u, "after Present1 0x6F0360", "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83",
-     0x6C6178u, "E8 E3 A1 02 00", 0x6C60A5u, "FF 90 B0 00 00 00"},
-    {0x9548C0u, "SpeedTree cells 0x9548C0", "48 8B C4 55 53 57 48 8D 68 A1 48 81 EC D0 00 00 00", 0x212560u, "E8 5B 23 74 00",
-     0x954CF2u, "4C 89 B3 90 00 00 00"},
-    {0x113010u, "render messages 0x113010", "48 89 5C 24 08 55 56 57 41 56 41 57 48 8B EC 48 83 EC 60 0F B7 7A 0C 4D", 0x113EEEu, "E8 1D F1 FF FF", 0, NULL},
+/* Each hook's function and prologue (pinned at rva; hooked at rva + at), the call sites (or code) its reading rests on,
+ * and the bare ret a lead-in skipped by hooking at +9 jumps to. FarHook (no MinHook room near the exe) refuses the jcc in
+ * cmp edx,-1; je; at +9 rsp, the arguments and [rsp] are still the entry's, and the code there sets flags before reading. */
+static const struct { uint32_t rva; uint32_t at; const char* name; const char* pin; uint32_t site; const char* sitePin; uint32_t site2; const char* site2Pin; uint32_t ret; } kXrfHooks[XH_COUNT] = {
+    {0x627160u, 0, "job wait 0x627160", "48 89 5C 24 08 44 89 44 24 18 55 56 57 41 54 41 55 41 56 41 57 48 8B EC",
+     0x1EC4AAu, "E8 B1 AC 43 00 48 8D 5B 04 49 83 EF 01 75 D7", 0x1E2FA1u, "E8 BA 41 44 00", 0},
+    {0x6097A0u, 9, "LOD wait 0x6097A0 (+9)", "83 FA FF 0F 84 54 01 00 00 56 57 41 57 48 83 EC 20 48 89 5C 24 40 48 8B", 0x1E3E64u, "E8 37 59 42 00", 0, NULL, 0x6098FDu},
+    {0x213540u, 9, "SpeedTree view wait 0x213540 (+9)", "83 FA FF 0F 84 66 01 00 00 48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 30",
+     0x1E3E21u, "44 89 7C 24 20 48 8B 89 B0 01 00 00 E8 0E F7 02 00", 0x213607u, "8B 7C 24 60", 0x2136AFu},
+    {0x252460u, 0, "generator join 0x252460", "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57 48 83 EC 20", 0x1EDA81u, "E8 DA 49 06 00", 0, NULL, 0},
+    {0x6CC130u, 0, "dispatch 0x6CC130", "44 88 4C 24 20 44 89 44 24 18 89 54 24 10 48 89 4C 24 08 55 53 56 57 41",
+     0x6CED3Du, "44 0F B6 CB 41 8B D7 48 8B CF E8 E4 D3 FF FF", 0x6CECD5u, "44 8B BF C8 05 00 00", 0},
+    {0x6CA5F0u, 0, "dispatch 0x6CA5F0", "44 89 44 24 18 89 54 24 10 48 89 4C 24 08 55 53 56 57 41 54 41 55 41 56",
+     0x6CED4Eu, "44 0F B6 CB 41 8B D7 48 8B CF E8 93 B8 FF FF", 0x6CECD5u, "44 8B BF C8 05 00 00", 0},
+    {0x1E84A0u, 0, "message 8 apply 0x1E84A0", "48 8B C4 4C 89 40 18 48 89 50 10 55 53 56 57 41 54 41 55 41 56 41 57 48",
+     0x1E8510u, "48 8B 42 10 4C 8B 30 4D 85 F6 0F 84 3D 0F 00 00 4C 89 72 10 41 0F B7 7E 0E 49 03 FE 8B 07 FF C8", 0x1E959Bu, "E8 00 EF FF FF", 0},
+    {0x10BB30u, 0, "device-chain spin 0x10BB30", "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8B B9 68", 0x10BB95u, "E8 76 C6 41 00 84 C0", 0, NULL, 0},
+    {0x6C0590u, 0, "GPU wait 0x6C0590", "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 54 41 55 41 56 41 57", 0x6C5F3Eu, "E8 4D A6 FF FF", 0, NULL, 0},
+    {0x6BEED0u, 0, "submit drain 0x6BEED0", "40 53 48 83 EC 70 48 8B D9 33 D2 48 8B 49 28 FF 15 13 78 D3 00 33 C0 4C",
+     0x6C6018u, "E8 B3 8E FF FF", 0x6C60A5u, "FF 90 B0 00 00 00", 0},
+    {0x6F0360u, 0, "after Present1 0x6F0360", "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83",
+     0x6C6178u, "E8 E3 A1 02 00", 0x6C60A5u, "FF 90 B0 00 00 00", 0},
+    {0x9548C0u, 0, "SpeedTree cells 0x9548C0", "48 8B C4 55 53 57 48 8D 68 A1 48 81 EC D0 00 00 00", 0x212560u, "E8 5B 23 74 00",
+     0x954CF2u, "4C 89 B3 90 00 00 00", 0},
+    {0x113010u, 0, "render messages 0x113010", "48 89 5C 24 08 55 56 57 41 56 41 57 48 8B EC 48 83 EC 60 0F B7 7A 0C 4D", 0x113EEEu, "E8 1D F1 FF FF", 0, NULL, 0},
 };
 
 typedef uint64_t (*Xrf4Fn)(uint64_t, uint64_t, uint64_t, uint64_t);
@@ -76,7 +78,7 @@ static struct
     uint32_t lostR; ULONGLONG poolsAt; int pools; uint32_t shown[5], parked[5], shownMost[5], parkedMost[5];
     /* the stall watcher's samples, handed to the game thread */
     volatile LONG stallTaken, stallSeq; int stallOn; DWORD stallErr;
-    struct { volatile LONG ready; uint64_t rip; double ms; uint32_t len; uint8_t stack[XRF_STACK]; } stall[CO_RF_STALL_SAMPLES];
+    struct { volatile LONG ready; uint64_t rip; double ms, suspendedUs; uint32_t len; uint8_t stack[XRF_STACK]; } stall[CO_RF_STALL_SAMPLES];
     int asked;
 #ifdef CO_TEST
     uint64_t testRw;                 /* the main world's render world for the pools, instead of the capacity stub's */
@@ -372,10 +374,11 @@ static void RenderFrameInstall(void)
         if (h == XH_MESSAGE && g_xrfViaSr) continue; /* the stranded spans' hook calls in */
         const uintptr_t x = g_xrf.exe;
         const char* why = NULL;
-        if (ApiCodeMatches(x + kXrfHooks[h].rva, kXrfHooks[h].pin) != 1) why = "prologue";
+        if (ApiCodeMatches(x + kXrfHooks[h].rva, kXrfHooks[h].pin) != 1 ||
+            (kXrfHooks[h].ret != 0 && ApiCodeMatches(x + kXrfHooks[h].ret, "C3") != 1)) why = "prologue";
         else if (ApiCodeMatches(x + kXrfHooks[h].site, kXrfHooks[h].sitePin) != 1 ||
                  (kXrfHooks[h].site2Pin != NULL && ApiCodeMatches(x + kXrfHooks[h].site2, kXrfHooks[h].site2Pin) != 1)) why = "call site";
-        else if (LoaderHook(kXrfHooks[h].name, x + kXrfHooks[h].rva, kXrfDetours[h], &g_xrf.orig[h]) || g_xrf.orig[h] == NULL) why = "hook";
+        else if (LoaderHook(kXrfHooks[h].name, x + kXrfHooks[h].rva + kXrfHooks[h].at, kXrfDetours[h], &g_xrf.orig[h]) || g_xrf.orig[h] == NULL) why = "hook";
         if (why != NULL)
         {
             g_xrf.orig[h] = NULL;
@@ -542,8 +545,8 @@ static void XrfStallNote(int k)
     }
     char function[40] = "not found";
     if (fn != 0) snprintf(function, sizeof function, "exe+0x%llX", (unsigned long long)(fn - exe));
-    Note("render stall sample: the render thread %.1f ms into its frame at %s+0x%llX (function %s); wait: %s; stack (%u bytes): %s",
-        g_xrf.stall[k].ms, where, (unsigned long long)off, function, wait != NULL ? wait : "none named", g_xrf.stall[k].len, frames ? trail : "none found");
+    Note("render stall sample: the render thread %.1f ms into its frame at %s+0x%llX (function %s); suspended %.0f us; wait: %s; stack (%u bytes): %s",
+        g_xrf.stall[k].ms, where, (unsigned long long)off, function, g_xrf.stall[k].suspendedUs, wait != NULL ? wait : "none named", g_xrf.stall[k].len, frames ? trail : "none found");
 }
 static void XrfStallNotes(void)
 {
@@ -587,6 +590,7 @@ static DWORD WINAPI XrfStallWatch(void* unused)
         memset(&c, 0, sizeof c);
         c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
         size_t len = 0;
+        const int64_t before = XrfNow(); /* the render thread's own cost of a sample: suspended to resumed */
         if (SuspendThread(thread) == (DWORD)-1) continue;
         if (GetThreadContext(thread, &c) && g_xrf.frameSeq == seq)
         {
@@ -599,9 +603,11 @@ static DWORD WINAPI XrfStallWatch(void* unused)
         }
         const int64_t taken = XrfNow();
         ResumeThread(thread);
+        const int64_t after = XrfNow();
         if (len == 0) continue;
         g_xrf.stall[k].rip = c.Rip; g_xrf.stall[k].len = (uint32_t)len;
         g_xrf.stall[k].ms = (double)(taken - at) * 1000.0 / (double)g_xrf.freq;
+        g_xrf.stall[k].suspendedUs = (double)(after - before) * 1e6 / (double)g_xrf.freq;
         InterlockedIncrement(&g_xrf.stallTaken);
         __atomic_store_n(&g_xrf.stall[k].ready, 1, __ATOMIC_RELEASE);
     }
@@ -654,9 +660,9 @@ void CoXlTestXrfPoolsRw(uint64_t rw) { g_xrf.testRw = rw; g_xrf.poolsAt = 0; }
 uint32_t CoXlTestXrfTimed(void) { return XrfTimed(); }
 int CoXlTestXrfStallDue(int64_t at, int64_t now, LONG seq) { return XrfStallDue(at, now, seq); }
 /* A watcher's sample as it hands it over: noted at the next tick. */
-void CoXlTestXrfStall(int k, uint64_t rip, double ms, const void* stack, uint32_t len)
+void CoXlTestXrfStall(int k, uint64_t rip, double ms, double suspendedUs, const void* stack, uint32_t len)
 {
-    g_xrf.stall[k].rip = rip; g_xrf.stall[k].ms = ms; g_xrf.stall[k].len = len;
+    g_xrf.stall[k].rip = rip; g_xrf.stall[k].ms = ms; g_xrf.stall[k].suspendedUs = suspendedUs; g_xrf.stall[k].len = len;
     memcpy(g_xrf.stall[k].stack, stack, len);
     __atomic_store_n(&g_xrf.stall[k].ready, 1, __ATOMIC_RELEASE);
 }
