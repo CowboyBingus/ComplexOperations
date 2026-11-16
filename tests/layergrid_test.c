@@ -516,7 +516,7 @@ static void OrigRule(void* cfg, const uint32_t* ids, int n, const uint8_t* bodie
 static void* OrigCreate(void* writer, uint32_t* id, void* cinfo, void* r9) { *id = g_nextId; return writer; }
 static DWORD WINAPI CreateElsewhere(void* p) { uint32_t id = 0; CoXlTestSlCreate(WriterW(), &id); return 0; }
 /* The spawn flush as the game's (0x12D600): its broadcast makes one body on the caller's thread and one on a worker,
- * waiting for it (0x7896C2); it empties the ring unless it held more than one call makes. */
+ * waiting for it (0x7896C2); it takes 512 units of the ring at most (0x12D889), none while g_flushLeaves. */
 static uint64_t g_ringHead, g_ringTail;
 static int g_flushCalls, g_flushLeaves;
 static void FakeFlush(uint64_t world)
@@ -528,12 +528,12 @@ static void FakeFlush(uint64_t world)
     g_nextId = 12;
     HANDLE t = CreateThread(NULL, 0, CreateElsewhere, NULL, 0, NULL);
     WaitForSingleObject(t, INFINITE); CloseHandle(t);
-    if (!g_flushLeaves) g_ringHead = g_ringTail;
+    if (!g_flushLeaves) g_ringTail += g_ringHead - g_ringTail > 512 ? 512 : g_ringHead - g_ringTail;
 }
 /* SpawnLevelLayers for the change step: every record of the call done, one body made inside the call on this thread
  * (its forest's, 0x8152DF), and the call's units queued on the spawn ring. */
 static uint8_t g_spawnPass[0x100];
-static int g_spawnCalls;
+static int g_spawnCalls, g_spawnShort;
 static uint8_t SpawnBodies(uint8_t* pass, uint8_t* record, uint8_t* context)
 {
     uint64_t countAt = 0;
@@ -541,6 +541,7 @@ static uint8_t SpawnBodies(uint8_t* pass, uint8_t* record, uint8_t* context)
     (void)record; (void)context;
     memcpy(&countAt, pass + 0x48, 8);
     memcpy(&count, (void*)(uintptr_t)countAt, 4);
+    if (g_spawnShort && count > 0) count--;                         /* the ring full before the last record (0xF46A76) */
     memcpy(pass + 0xD8, &count, 4);
     g_spawnCalls++;
     g_nextId = 20; CoXlTestSlCreate(WriterW(), &id);
@@ -2016,21 +2017,45 @@ int main(void)
         CHECK(off == 2 && left == 0);
         g_nextId = 13; CoXlTestSlCreate(WriterW(), &id);             /* the window closed with the flush */
         CHECK(CoXlTestSlLayerOf(13) == 0);
-        g_ringHead = 0x110; g_flushLeaves = 1;                       /* more than one call makes: the rest later, counted */
+        /* a ring the flush makes nothing of: 4 more calls at most, then its 16 units counted as left */
+        g_ringHead = g_ringTail + 0x10; g_flushLeaves = 1;
         CoXlTestSlFrame(6);
         CoXlTestSlFrameEnd(wlv);
         CoXlTestSlWindowCounts(&off, &left);
-        CHECK(g_flushCalls == 2 && CoXlTestSlLayerOf(11) == 6 && left == 1);
+        CHECK(g_flushCalls == 6 && CoXlTestSlLayerOf(11) == 6 && left == 1);
+        /* 700 units: the first call makes 512, one more the other 188, all inside the window */
+        g_ringHead = g_ringTail + 700; g_flushLeaves = 0;
+        CoXlTestSlFrame(8);
+        CoXlTestSlFrameEnd(wlv);
+        CoXlTestSlWindowCounts(&off, &left);
+        CHECK(g_flushCalls == 8 && g_ringHead == g_ringTail && CoXlTestSlLayerOf(11) == 8 && CoXlTestSlLayerOf(12) == 8 && left == 1);
+        /* 1024 units: 512 left, as many as the world's own flush makes: made in the window too */
+        g_ringHead = g_ringTail + 1024;
+        CoXlTestSlFrame(9);
+        CoXlTestSlFrameEnd(wlv);
+        CoXlTestSlWindowCounts(&off, &left);
+        CHECK(g_flushCalls == 10 && g_ringHead == g_ringTail && CoXlTestSlLayerOf(11) == 9 && left == 1);
+        /* 1500 units: 988 left after the first call, more than the world's own flush makes this frame: held */
+        g_ringHead = g_ringTail + 1500;
+        CoXlTestSlFrame(7);
+        CoXlTestSlFrameEnd(wlv);
+        CoXlTestSlWindowCounts(&off, &left);
+        CHECK(g_flushCalls == 11 && g_ringHead - g_ringTail == 988 && left == 2);
         g_ringHead = g_ringTail;                                     /* an empty ring and destroy lists: no flush */
         CoXlTestSlFrame(7);
         CoXlTestSlFrameEnd(wlv);
         CoXlTestSlFrameEnd(0);
-        CHECK(g_flushCalls == 2);
+        CHECK(g_flushCalls == 11);
         CoXlTestSlFlushWith(NULL);
         CoXlTestSlGameThread(gameWas);
         CoXlTestStreamSlNote();
-        CHECK(fake_host_logged("in 10 s 14 bodies made, 9 of them in a change frame's spawn window (3 of those off the game thread), 4 sent to 6..9 by "
-                               "the rule; 1 window flushes left units on the spawn ring"));
+        CHECK(fake_host_logged("in 10 s 32 bodies made, 27 of them in a change frame's spawn window (12 of those off the game thread), 4 sent to 6..9 by "
+                               "the rule; 2 window flushes left units on the spawn ring (1004 units, 1 of those windows held with over 512 left), "
+                               "6 extra flush calls made 700 units;"));
+        g_fake.log[0] = 0;
+        CoXlTestStreamSlNote();                                       /* each note starts again */
+        CHECK(fake_host_logged("0 window flushes left units on the spawn ring (0 units, 0 of those windows held with over 512 left), "
+                               "0 extra flush calls made 0 units;"));
         CoXlTestSlWindowCounts(&off, &left);
         CHECK(off == 0 && left == 0);                                 /* each note starts again */
         VirtualFree(wl, 0, MEM_RELEASE);
@@ -2247,6 +2272,18 @@ int main(void)
         long off = 0, left = 0;
         CoXlTestSlWindowCounts(&off, &left);
         CHECK(off == 3 && left == 0);                                 /* the workers' bodies of the three flushes */
+        /* a SpawnLevelLayers call stopped by a full ring: its last record stays due, the stop counted for the note */
+        CoXlTestStreamSlNote();
+        CoXlTestStreamDue(6, U(0x700)); CoXlTestStreamDue(7, U(0x800));
+        g_spawnShort = 1;
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(10010, 0, &at) == 1 && CoXlTestStreamLayerOf(6) == 7 && CoXlTestStreamLayerOf(7) == 0);
+        g_spawnShort = 0;
+        g_fake.log[0] = 0;
+        CoXlTestStreamSlNote();
+        CHECK(fake_host_logged("0 extra flush calls made 0 units; 1 SpawnLevelLayers calls stopped by a full spawn ring"));
+        CoXlTestStreamSlNote();
+        CHECK(fake_host_logged("; 0 SpawnLevelLayers calls stopped by a full spawn ring"));
         CoXlTestSlFlushWith(NULL);
         CoXlTestSlGameThread(gameWas);
         CoXlTestStreamSpawnSetup(NULL, NULL);

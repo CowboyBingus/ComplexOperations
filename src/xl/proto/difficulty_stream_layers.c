@@ -62,7 +62,8 @@ static struct
     uintptr_t okBp;             /* the mission world's broad phase, checked to hold layers 6..9 as layer 4 */
     volatile LONG marked, routed, created; /* since the note: bodies remembered, sent to 6..9 by the rule, made in all */
     volatile LONG markedOff;    /* ... of the remembered, made off the game thread (the broadcast's workers) */
-    volatile LONG ringLeft;     /* ... a window's flush left units on the ring (512 a call, 0x12D889): made later, in layer 4 */
+    volatile LONG ringLeft;     /* ... a window's flushes left units on the ring: made later, in layer 4 */
+    LONG leftUnits, moreCalls, moreUnits, held; /* ... those units; the extra flush calls and the units they made; held over 512 */
     volatile LONG any;          /* a body was ever made in a change frame: until then the rule has nothing to send */
     uint8_t layerOf[SL_BODIES]; /* a body index's streamed layer, 0: none */
 } g_sl;
@@ -294,9 +295,24 @@ static int SlFlushDue(uint64_t world)
 #ifdef CO_TEST
 static SlFlushFn g_slFlushTest; /* a test's spawn flush in place of the game's */
 #endif
+#define SL_FLUSH_CAP 512            /* units one flush makes at most (0x12D889 `cmp esi,0x200`) */
+#define SL_FLUSH_MORE 4             /* extra flush calls a window makes at most */
+/* The units on the world's spawn ring as the flush counts them ([[ring+8]] - [[ring+0x10]], 0x12D6C6..0x12D6D8); -1
+ * when it does not read. */
+static int64_t SlRingCount(uint64_t world)
+{
+    uint64_t ring = 0, at8 = 0, at10 = 0, a = 0, b = 0;
+    if (world == 0 || SafeRead(world + 0x20, &ring, 8) || ring == 0 || SafeRead(ring + 8, &at8, 8) || SafeRead(ring + 0x10, &at10, 8) ||
+        at8 == 0 || at10 == 0 || SafeRead(at8, &a, 8) || SafeRead(at10, &b, 8)) return -1;
+    return (int64_t)(a - b);
+}
+
 /* The frame's end: its units made (the caller waited for the animation jobs, as before a destroy), then bodies made
- * take no streamed layer. `world` 0: nothing to make. A ring the flush left units on makes them in the world's own
- * flush, outside the window: counted, as their bodies stay in layer 4. */
+ * take no streamed layer. `world` 0: nothing to make. One flush makes 512 units at most and SpawnLevelLayers queues a
+ * location whole once under 512 (0xF46A60), so the ring can hold more: while it holds 512 or fewer the window flushes
+ * again, which makes exactly what the world's own flush (0x335330, later this frame) would make, into the frame's
+ * layer. More than 512 left (units queued ahead of the stamps') are not pulled forward: held and counted, as are
+ * units left after the window, made later in layer 4. */
 static void SlFrameEnd(uint64_t world)
 {
     if (!g_sl.on) return;
@@ -307,7 +323,17 @@ static void SlFrameEnd(uint64_t world)
         if (g_slFlushTest != NULL) flush = g_slFlushTest;
 #endif
         flush(world);
-        if (MoveSpawnRingEmpty(world) == 0) InterlockedIncrement(&g_sl.ringLeft);
+        int64_t left = SlRingCount(world);
+        for (int k = 0; k < SL_FLUSH_MORE && left > 0 && left <= SL_FLUSH_CAP; k++)
+        {
+            flush(world);
+            const int64_t now = SlRingCount(world);
+            g_sl.moreCalls++;
+            if (now >= 0 && now <= left) g_sl.moreUnits += (LONG)(left - now);
+            left = now;
+        }
+        if (left > SL_FLUSH_CAP) g_sl.held++;
+        if (left > 0) { InterlockedIncrement(&g_sl.ringLeft); g_sl.leftUnits += (LONG)left; }
     }
     InterlockedExchange(&g_sl.window, 0);
 }
@@ -445,10 +471,13 @@ static void SlNote(void)
     else if (!read && count < (int)(SL_FIRST + SL_COUNT)) snprintf(why, sizeof why, " (not read: the main world's broad phase has %d layers, made before the layer count was hooked)", count);
     else if (!read) snprintf(why, sizeof why, " (not read: the main world's broad phase has %d layers, but they do not read)", count);
     Note("difficulty: extra large maps: streamed layers %s: static leaves layer 4 %u, layers 6..9 %u %u %u %u%s; in 10 s %ld bodies made, %ld of them in a change frame's spawn window "
-        "(%ld of those off the game thread), %ld sent to 6..9 by the rule; %ld window flushes left units on the spawn ring",
+        "(%ld of those off the game thread), %ld sent to 6..9 by the rule; %ld window flushes left units on the spawn ring (%ld units, %ld of those windows "
+        "held with over 512 left), %ld extra flush calls made %ld units; %u SpawnLevelLayers calls stopped by a full spawn ring",
         g_sl.on ? "on" : "off", leaves[0], leaves[1], leaves[2], leaves[3], leaves[4], why,
         (long)InterlockedExchange(&g_sl.created, 0), (long)InterlockedExchange(&g_sl.marked, 0), (long)InterlockedExchange(&g_sl.markedOff, 0),
-        (long)InterlockedExchange(&g_sl.routed, 0), (long)InterlockedExchange(&g_sl.ringLeft, 0));
+        (long)InterlockedExchange(&g_sl.routed, 0), (long)InterlockedExchange(&g_sl.ringLeft, 0), (long)g_sl.leftUnits, (long)g_sl.held,
+        (long)g_sl.moreCalls, (long)g_sl.moreUnits, g_stream.ringFull);
+    g_sl.leftUnits = g_sl.held = g_sl.moreCalls = g_sl.moreUnits = 0; g_stream.ringFull = 0;
     if (g_sl.createOrig == NULL) return;
     SlSampleText(made, sizeof made);
     Note("difficulty: extra large maps: the mission world's bodies' makers in 10 s: %s", made);

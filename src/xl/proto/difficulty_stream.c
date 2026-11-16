@@ -240,6 +240,7 @@ typedef struct WorldStreamState
     uint32_t layerDrains[5], layerSpawns[5]; /* since the note: change frames that drained, spawned into layer 4, 6..9 */
     int spawnCapped;         /* the last spawn pass stopped at its location count with due ones left */
     uint32_t spawnCaps, tileDefers, spawnedIn; /* since the note: passes capped, frames deferred for a tile step, locations */
+    uint32_t ringFull;          /* since the layers' note: SpawnLevelLayers calls stopped by a full spawn ring (0xF46A76) */
 } WorldStreamState;
 /* The change frame's flush of the spawn ring, run after g_streamLock is released (WorldStreamChangeAfter), and its
  * cost. A flush also makes the game's own ring entries, which the world's flush (0x335330, game.dll 0xAB61C5) would
@@ -1480,6 +1481,7 @@ static uint32_t WorldStreamSpawnDueLocked(double ms, uint32_t most)
         }
         if (resume < count)
         {
+            g_stream.ringFull++;
             g_stream.orderCursor = pickedAt[resume]; /* the queue was full: the rest stay due */
             break;
         }
