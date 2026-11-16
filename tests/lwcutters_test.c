@@ -1,6 +1,7 @@
 /* The tree cutters' glue (src/xl/proto/living_world_cutters.c): the research switch's text, and the centres a tick is
  * given: every player at the streamer's place for it or, for 30 s, at the last one; on the host the online squads
  * that no player's reach holds, up to the set's limit. */
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -14,10 +15,13 @@ static const char* g_case;
 #define CHECK(what) do { if (!(what)) { printf("FAILED %s: %s\n", g_case, #what); g_failed++; } } while (0)
 
 int CoXlTestLwCutParse(const char* text, unsigned* v);
+int CoXlTestLwCutLoadHolds(int on, int mode, int client, int host);
 int CoXlTestLwCutClient(const char* text);
 void CoXlTestLwCutSquad(int i, int state, int every, float x, float y);
-uint32_t CoXlTestLwCutCentres(const uint64_t* players, int count, const uint64_t* peer, float (*place)[2], int streamed, int host, int none, uint64_t now, CoCutCentre* c, uint32_t* out);
+uint32_t CoXlTestLwCutCentres(const uint64_t* players, int count, const uint64_t* peer, float (*place)[2], int streamed, int host, int none, uint64_t now,
+    float (*units)[2], uint32_t unitCount, float (*garrisons)[3], uint32_t garrisonCount, CoCutCentre* c, uint32_t* out);
 uint32_t CoXlTestLwCutAsked(int i, uint64_t now);
+uint32_t CoXlTestLwCutWait(int i, int cut, uint64_t now);
 int CoXlTestLwCutVerdict(int cut, uint32_t waitedMs);
 enum { WAITS, IS_CUT, GAMES, LATE };
 enum { OFFLINE = 1, PENDING = 2, ONLINE = 3 };
@@ -151,7 +155,7 @@ static void Gate(void)
     CHECK(CoXlTestLwGates(0, 1, 1, &places, &rooms, &retry) == 1 && places == 1 && rooms == 1);
     CoXlTestLwCutGate(g);
     CHECK(g[WAITS] == 0 && g[IS_CUT] == 0 && g[GAMES] == 0 && g[LATE] == 0);
-    CHECK(CoXlTestLwCutCentres(NULL, 0, NULL, NULL, 0, 1, 0, GetTickCount64(), c, out) == 0);
+    CHECK(CoXlTestLwCutCentres(NULL, 0, NULL, NULL, 0, 1, 0, GetTickCount64(), NULL, 0, NULL, 0, c, out) == 0);
     /* switching: a tree 10 m from the squad waits for its cutter, so the request is refused before anything is placed */
     CoXlTestLwCutMode(2);
     CHECK(CoXlTestLwGates(0, 1, 1, &places, &rooms, &retry) == 0 && places == 0 && rooms == 0 && retry == 0);
@@ -159,7 +163,7 @@ static void Gate(void)
     CoXlTestLwCutGate(g);
     CHECK(g[WAITS] == 2 && g[IS_CUT] == 0 && g[GAMES] == 0 && g[LATE] == 0);
     /* the ask made the squad a centre: the next tick sends its tree's cutter */
-    CHECK(CoXlTestLwCutCentres(NULL, 0, NULL, NULL, 0, 1, 0, GetTickCount64(), c, out) == 1 && c[0].x == 40.0f && c[0].y == -60.0f);
+    CHECK(CoXlTestLwCutCentres(NULL, 0, NULL, NULL, 0, 1, 0, GetTickCount64(), NULL, 0, NULL, 0, c, out) == 1 && c[0].x == 40.0f && c[0].y == -60.0f);
     CHECK(co_cutters_tick(c, 1, GetTickCount(), 0, &t) == 1 && t.adds == 1);
     CHECK(CoXlTestLwGates(0, 1, 1, &places, &rooms, &retry) == 0 && places == 0); /* sent, not cut in yet */
     /* a navmesh run began with the add and is not in flight: placed */
@@ -167,18 +171,33 @@ static void Gate(void)
     CHECK(CoXlTestLwGates(0, 1, 1, &places, &rooms, &retry) == 1 && places == 1 && rooms == 1);
     CoXlTestLwCutGate(g);
     CHECK(g[WAITS] == 3 && g[IS_CUT] == 1 && g[LATE] == 0 && g[4] < 5000);
+    /* refused by the room for 6 s with its trees cut in: no wait of this gate, so the tree below waits its 5 s */
+    CHECK(CoXlTestLwGates(0, 1, 0, &places, &rooms, &retry) == 0 && rooms == 1);
+    CoXlTestLwCutWaited(0, 6000);
+    CHECK(CoXlTestLwGates(0, 1, 0, &places, &rooms, &retry) == 0 && rooms == 1);
+    CoXlTestLwCutGate(g);
+    CHECK(g[IS_CUT] == 3 && g[LATE] == 0 && g[4] < 5000);
     /* another tree, and the wait runs out: the request goes as it would have, counted */
     g_makeAnswer = 0x81010502u; co_cutters_test_make(&d, (uintptr_t)exe + CO_CUTTERS_FOREST_RETURN);
     CHECK(CoXlTestLwGates(0, 1, 1, &places, &rooms, &retry) == 0);
     CoXlTestLwCutWaited(0, 5001);
     CHECK(CoXlTestLwGates(0, 1, 1, &places, &rooms, &retry) == 1 && places == 1);
     CoXlTestLwCutGate(g);
-    CHECK(g[WAITS] == 4 && g[IS_CUT] == 1 && g[LATE] == 1 && g[4] >= 5001 && g[4] < 10000);
+    CHECK(g[WAITS] == 4 && g[IS_CUT] == 3 && g[LATE] == 1 && g[4] >= 5001 && g[4] < 6000);
+    /* let through ends the wait: the same place not cut in waits again */
+    CHECK(CoXlTestLwGates(1, 0, 1, &places, &rooms, &retry) == 0 && places == 0);
+    /* a held squad let through late at A whose point is refused, moved to B: B waits, it is not let through at once */
+    CoXlTestLwCutWaited(0, 5001);
+    CHECK(CoXlTestLwGates(1, 0, 1, &places, &rooms, &retry) == 0 && places == 1);
+    CoXlTestLwCutSquad(0, OFFLINE, 0, 45.0f, -60.0f);
+    CHECK(CoXlTestLwGates(1, 0, 1, &places, &rooms, &retry) == 0 && places == 0);
+    CoXlTestLwCutGate(g);
+    CHECK(g[WAITS] == 6 && g[IS_CUT] == 3 && g[LATE] == 2 && g[4] >= 5001 && g[4] < 6000);
     /* no tick for over a second: the cutters are the game's and nothing waits */
     CHECK(co_cutters_tick(c, 1, GetTickCount() - 1500u, 0, &t) == 1);
     CHECK(CoXlTestLwGates(0, 1, 1, &places, &rooms, &retry) == 1);
     CoXlTestLwCutGate(g);
-    CHECK(g[GAMES] == 1 && g[WAITS] == 4);
+    CHECK(g[GAMES] == 1 && g[WAITS] == 6);
     CoXlTestLwCutMode(0);
     co_cutters_test_reset();
 }
@@ -188,23 +207,30 @@ int main(void)
 {
     unsigned v[4];
     g_case = "the switch's text";
-    CHECK(CoXlTestLwCutParse("", v) == 0 && CoXlTestLwCutParse("0", v) == 0 && CoXlTestLwCutParse("0,5", v) == 0);
-    CHECK(CoXlTestLwCutParse("1", v) == 1 && v[0] == 1 && v[1] == CO_CUTSET_CAP && v[2] == CO_CUTSET_ADDS && v[3] == CO_CUTSET_REMOVES);
+    /* not set: mode 3 with the set's limits, in every build; a leading 0 is the game's way */
+    CHECK(CoXlTestLwCutParse("", v) == 1 && v[0] == 3 && v[1] == CO_CUTSET_CAP && v[2] == CO_CUTSET_ADDS && v[3] == CO_CUTSET_REMOVES_MOST);
+    CHECK(CoXlTestLwCutParse("0", v) == 0 && v[0] == 0 && CoXlTestLwCutParse("0,5", v) == 0);
+    CHECK(CoXlTestLwCutParse("1", v) == 1 && v[0] == 1 && v[1] == CO_CUTSET_CAP && v[2] == CO_CUTSET_ADDS && v[3] == CO_CUTSET_REMOVES_MOST);
     CHECK(CoXlTestLwCutParse("1,1000,64,8", v) == 1 && v[0] == 1 && v[1] == 1000 && v[2] == 64 && v[3] == 8);
     CHECK(CoXlTestLwCutParse("3 2000 32 4", v) == 1 && v[0] == 3 && v[1] == 2000 && v[2] == 32 && v[3] == 4);
     /* mode 2 adds only: no cap and no removes, whatever was asked */
     CHECK(CoXlTestLwCutParse("2,1000,64,8", v) == 1 && v[0] == 2 && v[1] == CO_CUTSET_SLOTS && v[2] == 64 && v[3] == 0);
     CHECK(CoXlTestLwCutParse("3,1000,64,8", v) == 1 && v[1] == 1000 && v[3] == 8);
     /* the limits themselves pass, one past each does not */
-    CHECK(CoXlTestLwCutParse("3,1048576,512,64", v) == 1 && v[1] == CO_CUTSET_SLOTS && v[2] == CO_CUTSET_ADDS && v[3] == CO_CUTSET_BATCH);
+    CHECK(CoXlTestLwCutParse("3,1048576,512,256", v) == 1 && v[1] == CO_CUTSET_SLOTS && v[2] == CO_CUTSET_ADDS && v[3] == CO_CUTSET_REMOVES_MOST);
     CHECK(CoXlTestLwCutParse("4", v) == -1 && CoXlTestLwCutParse("x", v) == -1);
-    CHECK(CoXlTestLwCutParse("3,1048577", v) == -1 && CoXlTestLwCutParse("3,10,513", v) == -1 && CoXlTestLwCutParse("3,10,10,65", v) == -1);
+    CHECK(CoXlTestLwCutParse("3,1048577", v) == -1 && CoXlTestLwCutParse("3,10,513", v) == -1 && CoXlTestLwCutParse("3,10,10,257", v) == -1);
+    g_case = "the load's hold: where a tick will come";
+    CHECK(CoXlTestLwCutLoadHolds(1, 3, 0, 1) == 1 && CoXlTestLwCutLoadHolds(1, 2, 0, 1) == 1 && CoXlTestLwCutLoadHolds(1, 3, 1, 0) == 1);
+    CHECK(CoXlTestLwCutLoadHolds(1, 3, 0, 0) == 0 && CoXlTestLwCutLoadHolds(1, 3, 2, 0) == 0 && CoXlTestLwCutLoadHolds(1, 1, 0, 1) == 0);
+    CHECK(CoXlTestLwCutLoadHolds(0, 3, 1, 1) == 0);
     g_case = "a client's part";
-    CHECK(CoXlTestLwCutClient("") == 1 && CoXlTestLwCutClient("0") == 0 && CoXlTestLwCutClient("1") == 1 && CoXlTestLwCutClient("2") == 2);
-    CHECK(CoXlTestLwCutClient("3") == 1 && CoXlTestLwCutClient("/") == 1 && CoXlTestLwCutClient("x") == 1);
+    /* not set, or not valid: left to the game */
+    CHECK(CoXlTestLwCutClient("") == 0 && CoXlTestLwCutClient("0") == 0 && CoXlTestLwCutClient("1") == 1 && CoXlTestLwCutClient("2") == 2);
+    CHECK(CoXlTestLwCutClient("3") == 0 && CoXlTestLwCutClient("/") == 0 && CoXlTestLwCutClient("x") == 0);
 
     CoCutCentre c[CO_CUTSET_CENTRES + 1];
-    uint32_t out[5];
+    uint32_t out[8];
     const uint64_t players[3] = {0xA1, 0xB2, 0xC3};
     /* the streamer's list in another order, without 0xC3 */
     uint64_t peer[2] = {0xB2, 0xA1};
@@ -213,20 +239,20 @@ int main(void)
     g_case = "players at the streamer's places, by peer";
     CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
     memset(c, 0, sizeof c);
-    CHECK(CoXlTestLwCutCentres(players, 3, peer, place, 2, 1, 0, 1000, c, out) == 2);
+    CHECK(CoXlTestLwCutCentres(players, 3, peer, place, 2, 1, 0, 1000, NULL, 0, NULL, 0, c, out) == 2);
     CHECK(out[0] == 2 && out[1] == 0 && out[2] == 0 && out[3] == 0 && out[4] == 0);
     CHECK(c[0].x == 100.0f && c[0].y == 50.0f && c[0].in == CO_CUTSET_PLAYER_IN && c[0].out == CO_CUTSET_PLAYER_OUT);
     CHECK(c[1].x == 2000.0f && c[1].y == -500.0f && c[1].in == CO_CUTSET_PLAYER_IN && c[1].out == CO_CUTSET_PLAYER_OUT);
     g_case = "a player the streamer no longer has keeps the last place for 30 s";
-    CHECK(CoXlTestLwCutCentres(players, 3, peer, place, 1, 1, 0, 2000, c, out) == 2 && out[0] == 2 && out[1] == 1);
+    CHECK(CoXlTestLwCutCentres(players, 3, peer, place, 1, 1, 0, 2000, NULL, 0, NULL, 0, c, out) == 2 && out[0] == 2 && out[1] == 1);
     CHECK(c[0].x == 100.0f && c[0].y == 50.0f && c[1].x == 2000.0f);
-    CHECK(CoXlTestLwCutCentres(players, 3, peer, place, 1, 1, 0, 1000 + CO_CUTSET_HOLD_MS + 1, c, out) == 1 && out[0] == 1 && out[1] == 0 && c[0].x == 2000.0f);
+    CHECK(CoXlTestLwCutCentres(players, 3, peer, place, 1, 1, 0, 1000 + CO_CUTSET_HOLD_MS + 1, NULL, 0, NULL, 0, c, out) == 1 && out[0] == 1 && out[1] == 0 && c[0].x == 2000.0f);
     g_case = "only the players the manager lists, and none past the limit";
-    CHECK(CoXlTestLwCutCentres(players, 1, peer, place, 2, 1, 0, 50000, c, out) == 1 && c[0].x == 100.0f);
+    CHECK(CoXlTestLwCutCentres(players, 1, peer, place, 2, 1, 0, 50000, NULL, 0, NULL, 0, c, out) == 1 && c[0].x == 100.0f);
     {
         uint64_t unnamed[2] = {0xA1, 0}; /* the streamer holds a place with no peer: no player past the list is it */
         CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
-        CHECK(CoXlTestLwCutCentres(players, 1, unnamed, place, 2, 1, 0, 1000, c, out) == 1 && out[0] == 1 && c[0].x == 2000.0f);
+        CHECK(CoXlTestLwCutCentres(players, 1, unnamed, place, 2, 1, 0, 1000, NULL, 0, NULL, 0, c, out) == 1 && out[0] == 1 && c[0].x == 2000.0f);
     }
     {
         uint64_t many[CO_SHIM_MAX_PLAYERS + 2], manyPeer[CO_SHIM_MAX_PLAYERS];
@@ -234,12 +260,12 @@ int main(void)
         for (int i = 0; i < CO_SHIM_MAX_PLAYERS + 2; i++) many[i] = 0x500u + (uint64_t)(i % CO_SHIM_MAX_PLAYERS); /* the two past the limit would read */
         for (int i = 0; i < CO_SHIM_MAX_PLAYERS; i++) { manyPeer[i] = 0x500u + (uint64_t)i; manyPlace[i][0] = 1000.0f * (float)i; manyPlace[i][1] = 0; }
         CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
-        CHECK(CoXlTestLwCutCentres(many, CO_SHIM_MAX_PLAYERS + 2, manyPeer, manyPlace, CO_SHIM_MAX_PLAYERS, 1, 0, 1000, c, out) == CO_SHIM_MAX_PLAYERS);
+        CHECK(CoXlTestLwCutCentres(many, CO_SHIM_MAX_PLAYERS + 2, manyPeer, manyPlace, CO_SHIM_MAX_PLAYERS, 1, 0, 1000, NULL, 0, NULL, 0, c, out) == CO_SHIM_MAX_PLAYERS);
         CHECK(out[0] == CO_SHIM_MAX_PLAYERS && c[CO_SHIM_MAX_PLAYERS - 1].x == 1000.0f * (float)(CO_SHIM_MAX_PLAYERS - 1));
     }
     g_case = "a client that adds none has no centre";
     CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
-    CHECK(CoXlTestLwCutCentres(players, 3, peer, place, 2, 0, 1, 1000, c, out) == 0 && out[0] == 0);
+    CHECK(CoXlTestLwCutCentres(players, 3, peer, place, 2, 0, 1, 1000, NULL, 0, NULL, 0, c, out) == 0 && out[0] == 0);
 
     g_case = "the host's squads: online, pending, or asking to come online; one a player's reach holds takes no centre";
     CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
@@ -250,22 +276,29 @@ int main(void)
     CoXlTestLwCutSquad(4, ONLINE, 0, -7000.0f, 0.0f);
     CoXlTestLwCutSquad(5, ONLINE, 1, 100.0f, 150.0f);    /* 100 m from the first player: its disc passes 160 m */
     CoXlTestLwCutSquad(6, 0, 1, -8000.0f, 0.0f);         /* a free slot */
-    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 100000, c, out) == 6);
+    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 100000, NULL, 0, NULL, 0, c, out) == 6);
     CHECK(out[0] == 2 && out[2] == 4 && out[3] == 1 && out[4] == 0);
-    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 3000, c, out) == 6); /* a squad that never asked, early in the clock */
+    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 3000, NULL, 0, NULL, 0, c, out) == 6); /* a squad that never asked, early in the clock */
     CHECK(c[2].x == 5000.0f && c[2].y == 5000.0f && c[2].in == CO_CUTSET_SQUAD_IN && c[2].out == CO_CUTSET_SQUAD_OUT);
     CHECK(c[3].x == -6000.0f && c[4].x == -7000.0f && c[5].x == 100.0f && c[5].y == 150.0f);
     g_case = "an offline squad is a centre from its ask to come online, for 5 s after its last";
     CHECK(CoXlTestLwCutAsked(2, 100000) == 0);
     CoXlTestLwCutAsked(6, 100000); /* a free slot that asked is none */
-    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 100000, c, out) == 7 && out[2] == 5 && c[3].x == -5000.0f);
-    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 105000, c, out) == 7);
-    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 105001, c, out) == 6 && c[4].x == -7000.0f);
+    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 100000, NULL, 0, NULL, 0, c, out) == 7 && out[2] == 5 && c[3].x == -5000.0f);
+    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 105000, NULL, 0, NULL, 0, c, out) == 7);
+    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 105001, NULL, 0, NULL, 0, c, out) == 6 && c[4].x == -7000.0f);
     g_case = "a squad's wait runs from its first ask; asks over 5 s apart are separate waits";
     CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
     CHECK(CoXlTestLwCutAsked(3, 1000) == 0 && CoXlTestLwCutAsked(3, 3000) == 2000 && CoXlTestLwCutAsked(3, 8000) == 7000);
     CHECK(CoXlTestLwCutAsked(3, 13001) == 0 && CoXlTestLwCutAsked(3, 13500) == 499);
     CHECK(CoXlTestLwCutAsked(4, 50000) == 0 && CoXlTestLwCutAsked(4, 55000) == 5000 && CoXlTestLwCutAsked(3, 55000) == 0);
+    g_case = "the cut gate's wait: only the asks it refused, from the first of them";
+    CHECK(CoXlTestLwCutWait(5, 1, 1000) == 0 && CoXlTestLwCutWait(5, 1, 4000) == 0 && CoXlTestLwCutWait(5, 1, 8000) == 0);
+    CHECK(CoXlTestLwCutWait(5, 0, 9000) == 0 && CoXlTestLwCutWait(5, 0, 12000) == 3000 && CoXlTestLwCutWait(5, 0, 13900) == 4900);
+    CHECK(CoXlTestLwCutWait(5, 1, 15000) == 6000 && CoXlTestLwCutWait(5, 1, 16000) == 0 /* cut in after asks that never went late (LwCutReady ends a wait at its LATE) */ && CoXlTestLwCutWait(5, -1, 17000) == 0);
+    CHECK(CoXlTestLwCutWait(5, 0, 18000) == 0 && CoXlTestLwCutWait(5, -1, 19000) == 1000 && CoXlTestLwCutWait(5, 0, 20000) == 0);
+    CHECK(CoXlTestLwCutWait(6, 0, 20000) == 0 && CoXlTestLwCutWait(6, 0, 24000) == 4000 && CoXlTestLwCutWait(6, 0, 29001) == 0); /* asks 5 s apart: a new wait */
+    CHECK(CoXlTestLwCutWait(6, 0, 34001) == 5000);
     g_case = "what an ask gets";
     CHECK(CoXlTestLwCutVerdict(1, 0) == IS_CUT && CoXlTestLwCutVerdict(1, 60000) == IS_CUT);
     CHECK(CoXlTestLwCutVerdict(-1, 0) == GAMES && CoXlTestLwCutVerdict(-1, 60000) == GAMES);
@@ -275,19 +308,88 @@ int main(void)
     CoXlTestLwCutSquad(1, ONLINE, 1, 130.0f, 50.0f);
     CoXlTestLwCutSquad(5, ONLINE, 1, 100.0f, 150.0f);
     g_case = "a client has no squads";
-    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 0, 0, 1000, c, out) == 2 && out[2] == 0 && out[3] == 0);
-    g_case = "a squad beside another squad still takes its centre: only players' reaches count";
+    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 0, 0, 1000, NULL, 0, NULL, 0, c, out) == 2 && out[2] == 0 && out[3] == 0);
+    g_case = "a squad another squad's reach holds takes no centre; one beside it does";
     CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
     CoXlTestLwCutSquad(0, ONLINE, 1, 5000.0f, 5000.0f);
     CoXlTestLwCutSquad(1, ONLINE, 1, 5000.0f, 5000.0f);
-    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 1000, c, out) == 4 && out[2] == 2 && out[3] == 0);
+    CoXlTestLwCutSquad(2, ONLINE, 1, 5001.0f, 5000.0f);
+    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 1000, NULL, 0, NULL, 0, c, out) == 4 && out[2] == 2 && out[3] == 1 && c[3].x == 5001.0f);
     g_case = "squads past the set's centres are left out and counted";
     CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
     for (int i = 0; i < CO_CUTSET_CENTRES; i++) CoXlTestLwCutSquad(i, ONLINE, 1, 3000.0f + 200.0f * (float)(i % 16), 3000.0f + 200.0f * (float)(i / 16));
     c[CO_CUTSET_CENTRES].x = -1.0f;
-    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 1000, c, out) == CO_CUTSET_CENTRES);
+    CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 1000, NULL, 0, NULL, 0, c, out) == CO_CUTSET_CENTRES);
     CHECK(out[0] == 2 && out[2] == CO_CUTSET_CENTRES - 2 && out[3] == 0 && out[4] == 2 && c[CO_CUTSET_CENTRES].x == -1.0f);
     CHECK(c[CO_CUTSET_CENTRES - 1].x == 3000.0f + 200.0f * (float)((CO_CUTSET_CENTRES - 3) % 16));
+
+    g_case = "a moving player's reach also lies ahead of it: two discs at half and all of 4 s at its speed";
+    {
+        uint64_t one[1] = {0xA1}; float at[1][2] = {{0.0f, 0.0f}};
+        CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
+        CHECK(CoXlTestLwCutCentres(one, 1, one, at, 1, 1, 0, 10000, NULL, 0, NULL, 0, c, out) == 1 && out[5] == 0);
+        at[0][1] = 11.25f; /* 45 m/s for a tick: half of it, as the speed before was none */
+        CHECK(CoXlTestLwCutCentres(one, 1, one, at, 1, 1, 0, 10250, NULL, 0, NULL, 0, c, out) == 3 && out[0] == 3 && out[5] == 2);
+        CHECK(c[0].y == 11.25f && c[1].x == 0.0f && c[1].y == 11.25f + 45.0f && c[2].y == 11.25f + 90.0f);
+        CHECK(c[1].in == CO_CUTSET_PLAYER_IN && c[1].out == CO_CUTSET_PLAYER_OUT && c[2].in == CO_CUTSET_PLAYER_IN);
+        at[0][1] = 22.5f;
+        CHECK(CoXlTestLwCutCentres(one, 1, one, at, 1, 1, 0, 10500, NULL, 0, NULL, 0, c, out) == 3 && c[1].y == 22.5f + 67.5f && c[2].y == 22.5f + 135.0f);
+        g_case = "a move faster than 120 m/s is a teleport, a walk needs no lead, a held place has none";
+        at[0][1] = 1000.0f;
+        CHECK(CoXlTestLwCutCentres(one, 1, one, at, 1, 1, 0, 10750, NULL, 0, NULL, 0, c, out) == 1 && out[5] == 0 && c[0].y == 1000.0f);
+        at[0][1] = 1000.25f; /* 1 m/s */
+        CHECK(CoXlTestLwCutCentres(one, 1, one, at, 1, 1, 0, 11000, NULL, 0, NULL, 0, c, out) == 1 && out[5] == 0);
+        at[0][1] = 1020.0f; /* 79 m/s, half of it: a lead */
+        CHECK(CoXlTestLwCutCentres(one, 1, one, at, 1, 1, 0, 11250, NULL, 0, NULL, 0, c, out) == 3);
+        CHECK(CoXlTestLwCutCentres(one, 1, one, at, 0, 1, 0, 11500, NULL, 0, NULL, 0, c, out) == 1 && out[1] == 1 && out[5] == 0);
+        at[0][1] = 1040.0f; /* two places 3 s apart give no speed */
+        CHECK(CoXlTestLwCutCentres(one, 1, one, at, 1, 1, 0, 14250, NULL, 0, NULL, 0, c, out) == 1);
+    }
+    g_case = "a garrison a player nears is a centre over its guard points; one held by a player's reach takes none";
+    {
+        float g[5][3] = {{600.0f, 50.0f, 40.0f}, {500.0f, 50.0f, 40.0f}, {150.0f, 50.0f, 20.0f}, {-200.0f, 50.0f, 300.0f}, {550.0f, 50.0f, 40.0f}};
+        CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
+        CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 1000, NULL, 0, g, 4, c, out) == 4);
+        CHECK(out[0] == 2 && out[6] == 2 && out[3] == 1 && out[4] == 0);
+        CHECK(c[2].x == 500.0f && c[2].in == 56.0f && c[2].out == 88.0f);
+        CHECK(c[3].x == -200.0f && c[3].in == CO_CUTSET_GARRISON_MOST && c[3].out == CO_CUTSET_GARRISON_MOST + 32.0f);
+        g_case = "a garrison's disc is never smaller than the least, and a client has none";
+        float small[1][3] = {{500.0f, 50.0f, 0.0f}};
+        CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 1000, NULL, 0, small, 1, c, out) == 3 && c[2].in == CO_CUTSET_GARRISON_LEAST);
+        CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 0, 0, 1000, NULL, 0, g, 4, c, out) == 2 && out[6] == 0);
+        g_case = "a garrison near only a moving player's lead is a centre";
+        uint64_t one[1] = {0xA1}; float at[1][2] = {{0.0f, 0.0f}};
+        CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
+        float ahead[1][3] = {{0.0f, 600.0f, 40.0f}}; /* over 440 m from the player standing; within it of its lead at speed */
+        CHECK(CoXlTestLwCutCentres(one, 1, one, at, 1, 1, 0, 20000, NULL, 0, ahead, 1, c, out) == 1 && out[6] == 0);
+        float wide[1][3] = {{0.0f, 650.0f, 300.0f}}; /* over 400 m away, but its guard points reach within 400 m of the player */
+        CHECK(CoXlTestLwCutCentres(one, 1, one, at, 1, 1, 0, 20000, NULL, 0, wide, 1, c, out) == 2 && out[6] == 1);
+        at[0][1] = 22.5f; CoXlTestLwCutCentres(one, 1, one, at, 1, 1, 0, 20250, NULL, 0, ahead, 1, c, out);
+        at[0][1] = 45.0f; CoXlTestLwCutCentres(one, 1, one, at, 1, 1, 0, 20500, NULL, 0, ahead, 1, c, out);
+        at[0][1] = 67.5f;
+        CHECK(CoXlTestLwCutCentres(one, 1, one, at, 1, 1, 0, 20750, NULL, 0, ahead, 1, c, out) == 4 && out[6] == 1 && c[3].y == 600.0f);
+    }
+    g_case = "every navigator's unit is a centre unless another centre's reach holds 48 m around it";
+    {
+        float u[6][2] = {{100.0f, 50.0f}, {5000.0f, 5000.0f}, {5010.0f, 5000.0f}, {5020.0f, 5000.0f}, {NAN, 0.0f}, {-3000.0f, 0.0f}};
+        CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
+        CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 1000, u, 6, NULL, 0, c, out) == 5);
+        CHECK(out[7] == 3 && out[3] == 2 && out[4] == 0);
+        CHECK(c[2].x == 5000.0f && c[2].in == CO_CUTSET_UNIT_IN && c[2].out == CO_CUTSET_UNIT_OUT && c[3].x == 5020.0f && c[4].x == -3000.0f);
+        g_case = "a client takes its units too; one that adds none takes none";
+        CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 0, 0, 1000, u, 6, NULL, 0, c, out) == 5 && out[7] == 3);
+        CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 0, 1, 1000, u, 6, NULL, 0, c, out) == 0);
+        g_case = "a squad's reach holds its members";
+        CoXlTestLwCutSquad(0, ONLINE, 1, 4995.0f, 5000.0f); /* holds the units 5 and 15 m off, not 25 */
+        CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 1000, u, 6, NULL, 0, c, out) == 5 && out[2] == 1 && out[7] == 2 && c[3].x == 5020.0f);
+        g_case = "units past the set's centres are left out and counted";
+        static float many[CO_CUTSET_CENTRES][2];
+        for (int i = 0; i < CO_CUTSET_CENTRES; i++) { many[i][0] = 3000.0f + 200.0f * (float)(i % 16); many[i][1] = -3000.0f - 200.0f * (float)(i / 16); }
+        CoXlTestLwCutSquad(-1, 0, 0, 0, 0);
+        c[CO_CUTSET_CENTRES].x = -1.0f;
+        CHECK(CoXlTestLwCutCentres(players, 2, peer, place, 2, 1, 0, 1000, many, CO_CUTSET_CENTRES, NULL, 0, c, out) == CO_CUTSET_CENTRES);
+        CHECK(out[7] == CO_CUTSET_CENTRES - 2 && out[4] == 2 && c[CO_CUTSET_CENTRES].x == -1.0f);
+    }
 
     Gate();
     Measures();

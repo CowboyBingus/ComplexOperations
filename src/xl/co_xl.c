@@ -43,6 +43,7 @@
 #include "co_switch.h"
 #include "co_steer.h"
 #include "co_aibudget.h"
+#include "co_joinstat.h"
 #include "co_cutters.h"
 #include "co_navcut.h"
 #include "co_forest.h"
@@ -648,6 +649,7 @@ float CoXlTestLwRequestZ(float top, float face) { return LwRequestZ(top, face); 
  * squad's ask to come online and what it gets (0 waits, 1 cut in, 2 the game's cutters, 3 let through late). */
 int CoXlTestLwCutParse(const char* text, unsigned* v) { return LwCutParse(text, v); }
 int CoXlTestLwCutClient(const char* text) { return LwCutClient(text); }
+int CoXlTestLwCutLoadHolds(int on, int mode, int client, int host) { return LwCutLoadHolds(on, mode, client, host); }
 void CoXlTestLwCutSquad(int i, int state, int every, float x, float y)
 {
     if (i < 0) { g_lwWorld.count = 0; memset(g_lwCut.held, 0, sizeof g_lwCut.held); memset(g_lwCutAsk, 0, sizeof g_lwCutAsk); return; }
@@ -657,7 +659,8 @@ void CoXlTestLwCutSquad(int i, int state, int every, float x, float y)
 }
 uint32_t CoXlTestLwCutAsked(int i, uint64_t now) { return LwCutAsked(i, now); }
 void CoXlTestLwCutMode(int mode) { g_lwCut.on = mode != 0; g_lwCut.mode = mode; memset(g_lwCut.gate, 0, sizeof g_lwCut.gate); g_lwCut.gateLongest = 0; }
-void CoXlTestLwCutWaited(int i, uint32_t ms) { g_lwCutAsk[i].first -= ms; }
+void CoXlTestLwCutWaited(int i, uint32_t ms) { g_lwCutAsk[i].first -= ms; if (g_lwCutAsk[i].cut != 0) g_lwCutAsk[i].cut -= ms; }
+uint32_t CoXlTestLwCutWait(int i, int cut, uint64_t now) { return LwCutWaited(i, cut, now); }
 void CoXlTestLwCutGate(uint32_t* five) { memcpy(five, g_lwCut.gate, sizeof g_lwCut.gate); five[4] = g_lwCut.gateLongest; }
 int CoXlTestLwCutVerdict(int cut, uint32_t waitedMs) { return LwCutVerdict(cut, waitedMs); }
 /* The launch measurements: a navigator handle's place in its pool, a watched member's samples a second apart (`reset`
@@ -670,12 +673,14 @@ int CoXlTestLwCutBodyStep(int reset, float x, float y, uint32_t goals, uint32_t 
     return LwCutBodyStep(&b, p, goals, state);
 }
 uint32_t CoXlTestLwCutRepathStep(uint32_t i, uint32_t handle, uint32_t count) { return LwCutRepathStep(i, handle, count); }
-uint32_t CoXlTestLwCutCentres(const uint64_t* players, int count, const uint64_t* peer, float (*place)[2], int streamed, int host, int none, uint64_t now, CoCutCentre* c, uint32_t* out)
+/* `units` the navigators' places, `garrisons` {x, y, reach}; out has LW_CUT_OUTS (8) entries. */
+uint32_t CoXlTestLwCutCentres(const uint64_t* players, int count, const uint64_t* peer, float (*place)[2], int streamed, int host, int none, uint64_t now,
+    float (*units)[2], uint32_t unitCount, float (*garrisons)[3], uint32_t garrisonCount, CoCutCentre* c, uint32_t* out)
 {
     EvpPlayer list[EVT_MAX_PLAYERS + 2];
     memset(list, 0, sizeof list);
     for (int i = 0; i < count && i < EVT_MAX_PLAYERS + 2; i++) list[i].peer = players[i];
-    return LwCutCentres(list, count, peer, place, streamed, host, none, now, c, out);
+    return LwCutCentres(list, count, peer, place, streamed, host, none, now, units, unitCount, garrisons, garrisonCount, c, out);
 }
 /* A square grid of route nodes `step` apart over a disc of `radius`, no home regions. */
 static void LwTestGrid(float radius, float step)
