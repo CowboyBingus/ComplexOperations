@@ -151,6 +151,31 @@ int main(void)
         reset((uintptr_t)g_world);
         CHECK(Multiplier() == 1);
     }
+    /* HellForge 0.5's record-hash rewrites the constructor's store (0x13DF88C) to the scatter before it runs: a normal
+     * level, a reset and the constructor keep that multiplier, and a complex level uses the same one. */
+    g_case = "HellForge's record-hash multiplier on normal levels";
+    {
+        const uint32_t scatter = SCATTER, one = 1;
+        memcpy(image + 0x13DF892u, &scatter, 4);
+        CoXlTestLive(0);
+        Map(0x8000u, SCATTER, 0);
+        Counter(0);
+        insert(0, 0, 3, 0);
+        CHECK(g_inserted == 3 && Multiplier() == SCATTER);
+        Map(0x8000u, SCATTER, 0);
+        reset((uintptr_t)g_world);
+        CHECK(Multiplier() == SCATTER);
+        built((uintptr_t)g_world);
+        CHECK(Multiplier() == SCATTER);
+        CoXlTestLive(1);
+        Map(0x8000u, SCATTER, 0);
+        insert(0, 0, 5, 0);
+        CHECK(g_inserted == 5 && Multiplier() == SCATTER);
+        memcpy(image + 0x13DF892u, &one, 4);
+        CoXlTestLive(0);
+        reset((uintptr_t)g_world);
+        CHECK(Multiplier() == 1); /* the game's own store again: the game's 1 */
+    }
     /* After a complex mission the map can keep its keys into a normal level: its multiplier stays, and every record
      * is found by the game's own probe, as under the game's multiplier (only the slots they sit in differ). */
     g_case = "a complex mission's records at a normal level's first batch";

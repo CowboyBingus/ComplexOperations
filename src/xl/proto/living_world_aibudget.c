@@ -31,6 +31,19 @@ static uintptr_t LwAibWorld(void)
     return SafeRead(exe + 0x190D4A0u + 2u * 0x80u, &h, 8) ? 0 : h;
 }
 
+/* The game's budget constant every AI world is made from (game.dll 0x23C65D8, loaded at 0xAB1AE6 into the settings'
+ * +0x4AC), 0 when the load is not the reviewed code. */
+static float LwAibGameStock(void)
+{
+    static float stock = -1.0f;
+    if (stock >= 0.0f) return stock;
+    stock = 0.0f;
+    uint32_t bits = 0;
+    if (g_lw.game && ApiCodeMatches(g_lw.game + 0xAB1AE6u, "F3 0F 10 05 EA 4A 91 01 F3 0F 11 85 AC 04 00 00") && !SafeRead(g_lw.game + 0x23C65D8u, &bits, 4))
+        memcpy(&stock, &bits, 4);
+    return stock;
+}
+
 /* Request latency as 0xC40060 reads it: the larger of the queued requests' wait (+0x480) and the age of the run in
  * flight (+0x484), both sums of the step's time in seconds (0xC40030; a run's start moves the wait to +0x484 at
  * 0xC400B0, its commit clears it at 0xC400A0). */
@@ -176,7 +189,8 @@ static void LwAibSteer(uintptr_t h, float cur, float lat, float runS, ULONGLONG 
     LwNavHoldRan(g_lwAib.b.ran == CO_AIB_RAN_MORE);
     g_lwAib.wasDraining = g_lwAib.b.draining && g_lwAib.b.ran == CO_AIB_RAN_DRAIN; /* the drain's value was the one written */
     g_lwAib.kind = !(want > 0) ? -1 : g_lwAib.b.ran == CO_AIB_RAN_DRAIN ? CO_JS_DRAIN : g_lwAib.b.ran == CO_AIB_RAN_MORE ? CO_JS_RAISE : want >= g_lwAib.b.stock ? CO_JS_STOCK : CO_JS_LOW;
-    if (want > 0 && cur != want) { *(volatile float*)(h + 0x47C) = want; co_aibudget_wrote(&g_lwAib.b, want); }
+    float put = co_aibudget_put(&g_lwAib.b, want);
+    if (want > 0 && cur != put) { *(volatile float*)(h + 0x47C) = put; co_aibudget_wrote(&g_lwAib.b, put); }
 }
 
 /* The joins since the last frame go to the statistic of the budget the step ran with: the hold's raise or the AI
@@ -205,7 +219,12 @@ static void LwAibFrame(void)
     uintptr_t h = LwAibWorld(); float cur = 0;
     double join = LwFpJoinTake();
     if (!h || SafeRead(h + 0x47C, &cur, 4) || !(cur > 0.00001f && cur < 0.1f)) { LwAibJoin(join, 0); return; }
-    if (!(co_aibudget_stock(&g_lwAib.b, h, cur) > 0))
+    if (!(co_aibudget_stock(&g_lwAib.b, h, cur) > 0) && co_aibudget_stock_game(&g_lwAib.b, h, LwAibGameStock()) > 0 && g_lwAib.unknown != h)
+    {
+        g_lwAib.unknown = h; /* HellForge 0.5's ai-path-budget, or another instance of the mod, lowered it */
+        Note("living world: AI path budget: AI world %p holds %.0f us; the game's %.0f us from its constant", (void*)h, (double)cur * 1e6, (double)g_lwAib.b.stock * 1e6);
+    }
+    if (!(g_lwAib.b.stock > 0) || g_lwAib.b.world != h)
     {
         LwAibJoin(join, 0);
         /* another instance of the mod lowered this world (a DLL swapped into a held session): no stock to return to */

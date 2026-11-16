@@ -583,7 +583,8 @@ float CoXlTestLwAibWorld(uintptr_t w, float stock, float lat, int on, ULONGLONG 
     g_lwAib.b.world = w; g_lwAib.b.stock = stock; g_lwAib.b.raised = 0; g_lwAib.on = on;
     LwAibJoin(LwFpJoinTake(), 1);
     LwAibSteer(w, cur, lat, *(float*)(w + 0x484), now);
-    return *(float*)(w + 0x47C);
+    float v = *(float*)(w + 0x47C);
+    return v == nextafterf(stock, 1.0f) ? stock : v; /* the stock one is written a float step above (co_aibudget_put) */
 }
 /* A frame whose AI world did not read, as LwAibFrame leaves it: the joins so far are taken and dropped. */
 void CoXlTestLwAibUnread(void) { LwAibJoin(LwFpJoinTake(), 0); }

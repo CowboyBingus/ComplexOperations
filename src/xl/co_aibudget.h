@@ -26,6 +26,14 @@ typedef struct CoAiDrain { int us, runMs, queue; } CoAiDrain;
 /* The game's budget for `world`, whose field reads `cur` now, 0 when it is not known: a value this mod wrote, or one
  * outside CO_AIB_STOCK_LEAST..CO_AIB_STOCK_MOST (another instance of the mod wrote it), is never taken as the game's. */
 float co_aibudget_stock(CoAiBudget* b, uintptr_t world, float cur);
+/* When the field does not hold a game value: `game`, the constant the game makes every world's budget from (game.dll
+ * 0x23C65D8, 0 when it did not read), is `world`'s stock when it is in CO_AIB_STOCK_LEAST..CO_AIB_STOCK_MOST. HellForge
+ * 0.5's ai-path-budget lowers every world to 500 us from the game's load on, so the field is rarely the game's then. */
+float co_aibudget_stock_game(CoAiBudget* b, uintptr_t world, float game);
+/* The value written for `want`: the stock one a float step above it, so HellForge 0.5's ai-path-budget, which steers a
+ * field that holds exactly 2 ms or its 500 us and leaves any other value alone, does not lower it again; any other
+ * value as it is (500 us is HellForge's own low, and it raises at the same wait this lever does). */
+float co_aibudget_put(const CoAiBudget* b, float want);
 /* The budget for this step: `lowUs`, or the stock one from a wait over `raiseMs` until it is under half of that.
  * The caller writes it and passes what it wrote to co_aibudget_wrote. */
 float co_aibudget_want(CoAiBudget* b, float waitS, int lowUs, int raiseMs);

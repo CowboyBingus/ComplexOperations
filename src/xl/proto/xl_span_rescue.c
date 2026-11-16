@@ -66,6 +66,7 @@ static SRWLOCK g_srLock = SRWLOCK_INIT; /* shared while span headers are read; e
 static struct
 {
     int on;                              /* 1 on, -1 refused */
+    int beside;                          /* the map and unmap wrapped are HellForge's span-rescue's, not rpmalloc's */
     uintptr_t exe;
     SrMapFn map; SrUnmapFn unmap; SrTrimFn trim; SrRenderFn render; SrTaskFn task;
     volatile uint64_t* volatile* top;
@@ -276,7 +277,9 @@ static uint64_t SrTrimmed(uint64_t global)
     uintptr_t from = (uintptr_t)__builtin_return_address(0);
     SrRescueHere(SR_VIA_TRIM);
     if ((uint8_t)global != 0) InterlockedIncrement(&g_sr.gameTrims);
-    if (g_sr.on != 1 || from != g_sr.exe + SR_WORKER_TRIMS) return g_sr.trim(global);
+    /* Beside HellForge's span-rescue a flag may be its pass's (its SrWakeWorkers): its trim hook, after this one in the
+     * chain, takes the worker's list only if the trim goes on. */
+    if (g_sr.on != 1 || g_sr.beside || from != g_sr.exe + SR_WORKER_TRIMS) return g_sr.trim(global);
     if (SrWorkerSkips()) { InterlockedIncrement(&g_sr.trimsSkipped); return 0; }
     LARGE_INTEGER a, b;
     QueryPerformanceCounter(&a);
@@ -513,6 +516,29 @@ static void SpanRescueTick(void)
 }
 
 /* ---- Install: once, with the streamer, before the ship's and the mission's spans are mapped ---------------------- */
+#ifdef CO_TEST
+static void* g_srTestHellForge[2]; /* the tests' stand-ins for HellForge's span map and unmap wrappers */
+#endif
+/* HellForge 0.5's span-rescue (perf_span_rescue.c, from the loader once the game has loaded) wraps these same two
+ * pointers the same way: its map registers a 64 KiB region after rpmalloc's map, its unmap clears the bit under its own
+ * lock before rpmalloc's unmap, and it rescues only when a load ends. The mod's wrappers then go around its, so both
+ * registries see every span; both rescues run on the heap's own thread, outside any allocator call, and each checks
+ * the span is still stranded under its deferred list's lock, so a span one of them moved is left alone by the other. */
+static int SrHellForges(void* fn)
+{
+#ifdef CO_TEST
+    if (fn != NULL && (fn == g_srTestHellForge[0] || fn == g_srTestHellForge[1])) return 1;
+#endif
+    HMODULE m = NULL;
+    wchar_t path[MAX_PATH];
+    if (fn == NULL || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)fn, &m))
+        return 0;
+    DWORD n = GetModuleFileNameW(m, path, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return 0;
+    const wchar_t* base = path;
+    for (const wchar_t* c = path; *c; c++) if (*c == L'\\' || *c == L'/') base = c + 1;
+    return _wcsicmp(base, L"hellforge_modloader.dll") == 0;
+}
 /* A refusal after the scan thread started: it ends at its next wake. */
 static void SrRefused(const char* why)
 {
@@ -543,8 +569,11 @@ static void SpanRescueInstall(void)
         { Note("difficulty: stranded spans: off: rpmalloc's code at 0x%X is not the reviewed one", kSrPins[i].rva); return; }
     void* volatile* mapAt = (void* volatile*)(exe + SR_MAP_AT);
     void* volatile* unmapAt = (void* volatile*)(exe + SR_UNMAP_AT);
-    if (*(volatile uint32_t*)(exe + SR_INITIALISED) != 1 || *mapAt != (void*)(exe + SR_MAP_DEFAULT) || *unmapAt != (void*)(exe + SR_UNMAP_DEFAULT))
-    { Note("difficulty: stranded spans: off: rpmalloc is not set up with its own span map and unmap"); return; }
+    void *map = *mapAt, *unmap = *unmapAt;
+    int own = map == (void*)(exe + SR_MAP_DEFAULT) && unmap == (void*)(exe + SR_UNMAP_DEFAULT);
+    if (*(volatile uint32_t*)(exe + SR_INITIALISED) != 1 || (!own && !(SrHellForges(map) && SrHellForges(unmap))))
+    { Note("difficulty: stranded spans: off: rpmalloc is not set up with its own span map and unmap, or HellForge's span-rescue's"); return; }
+    g_sr.beside = !own;
     /* no map-fail callback (0x6678C2 calls it from inside rpmalloc) and no other config: as init left them */
     if (*(volatile uint64_t*)(exe + SR_CONFIG_REST) != 0 || *(volatile uint64_t*)(exe + SR_CONFIG_REST + 8) != 0)
     { Note("difficulty: stranded spans: off: rpmalloc has a map-fail callback or another config set"); return; }
@@ -564,7 +593,7 @@ static void SpanRescueInstall(void)
     g_sr.exe = exe;
     /* The unmap first: no span is registered before every unmap clears its bit. A refused swap puts back what went in;
      * bits set meanwhile stay, read by nothing. The trim hook goes in last, so a refusal leaves no hook. */
-    g_sr.unmap = (SrUnmapFn)(exe + SR_UNMAP_DEFAULT); g_sr.map = (SrMapFn)(exe + SR_MAP_DEFAULT);
+    g_sr.unmap = (SrUnmapFn)unmap; g_sr.map = (SrMapFn)map;
     if (InterlockedCompareExchangePointer(unmapAt, (void*)SrUnmapped, (void*)g_sr.unmap) != (void*)g_sr.unmap)
     { SrRefused("rpmalloc's span unmap changed while it was wrapped"); return; }
     if (InterlockedCompareExchangePointer(mapAt, (void*)SrMapped, (void*)g_sr.map) != (void*)g_sr.map)
@@ -585,8 +614,11 @@ static void SpanRescueInstall(void)
     int task = SrReach("threads that run Havok tasks", kSrTaskPins, sizeof kSrTaskPins / sizeof kSrTaskPins[0], SR_TASK_STEP, (void*)SrTasked, (void**)&g_sr.task);
     g_sr.on = 1;
     Note("difficulty: stranded spans: on: rpmalloc's 64 KiB spans are registered from now; after %u stamps removed (at most once in %llu s) a full span "
-        "holding deferred blocks goes back to its heap's partial list on that heap's thread; a pool worker's trim only a pass asked for is skipped; "
-        "lists are taken at trims and the tick%s%s", SR_EVERY, SR_GAP_MS / 1000, render ? ", the renderer's messages" : "", task ? ", Havok's task steps" : "");
+        "holding deferred blocks goes back to its heap's partial list on that heap's thread; %s; "
+        "lists are taken at trims and the tick%s%s", SR_EVERY, SR_GAP_MS / 1000,
+        g_sr.beside ? "beside HellForge's span-rescue (its passes when a load ends, these in play), every pool worker's trim runs"
+                    : "a pool worker's trim only a pass asked for is skipped",
+        render ? ", the renderer's messages" : "", task ? ", Havok's task steps" : "");
 }
 
 #ifdef CO_TEST
@@ -595,10 +627,11 @@ void CoXlTestSrReset(int sync)
     if (g_sr.top != NULL) for (uint32_t t = 0; t < SR_TOP; t++) if (g_sr.top[t] != NULL) memset((void*)g_sr.top[t], 0, SR_LEAF_WORDS * 8);
     volatile uint64_t* volatile* top = g_sr.top; uint64_t* spans = g_sr.slot[0].spans;
     memset(&g_sr, 0, sizeof g_sr); /* an earlier scan thread keeps waiting on its own event */
-    g_sr.top = top; g_sr.sync = sync; g_srTestHeap = 0;
+    g_sr.top = top; g_sr.sync = sync; g_srTestHeap = 0; g_srTestHellForge[0] = g_srTestHellForge[1] = NULL;
     if (spans != NULL) for (int k = 0; k < SR_HEAPS; k++) g_sr.slot[k].spans = spans + (size_t)k * SR_PER_HEAP;
 }
 int CoXlTestSrInstall(void) { SpanRescueInstall(); return g_sr.on; }
+void CoXlTestSrHellForge(void* map, void* unmap) { g_srTestHellForge[0] = map; g_srTestHellForge[1] = unmap; }
 /* The scan thread ended (1), runs (0), none (-1). */
 int CoXlTestSrThreadEnded(unsigned ms) { return g_sr.thread == NULL ? -1 : WaitForSingleObject(g_sr.thread, ms) == WAIT_OBJECT_0; }
 /* The registry's lock, as a reader (1) or the unmap (2) holds it; 0 lets go of what `mode` took. */

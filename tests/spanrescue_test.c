@@ -11,6 +11,7 @@
 
 void CoXlTestSrReset(int sync);
 int CoXlTestSrInstall(void);
+void CoXlTestSrHellForge(void* map, void* unmap);
 void CoXlTestSrHeap(uintptr_t heap);
 int CoXlTestSrStep(uint32_t removed, uint32_t left, unsigned long long now, int inPlay);
 uint64_t CoXlTestSrTrim(uint64_t global);
@@ -787,6 +788,61 @@ static void Skip(void)
     CHECK(fake_host_logged("at the tick 0.000 ms (longest 0.000 ms), at render messages 0.000 ms (longest 0.000 ms), at Havok task steps 0.000 ms (longest 0.000 ms)"));
 }
 
+/* HellForge 0.5's span-rescue, as its loader leaves rpmalloc: its own map and unmap wrappers around the defaults. */
+static int g_hfMaps, g_hfUnmaps;
+static void* HfMap(size_t size, size_t* offset) { g_hfMaps++; return ((MapFn)(void*)(g_exe + MAP_DEFAULT))(size, offset); }
+static void HfUnmap(void* address, size_t size, size_t offset, size_t release)
+{
+    g_hfUnmaps++;
+    ((UnmapFn)(void*)(g_exe + UNMAP_DEFAULT))(address, size, offset, release);
+}
+static void Beside(void)
+{
+    g_case = "beside HellForge's span-rescue: its wrappers wrapped, every span registered by both";
+    Setup(1);
+    SetQ((uintptr_t)(g_exe + MAP_AT), (uint64_t)(uintptr_t)HfMap); SetQ((uintptr_t)(g_exe + UNMAP_AT), (uint64_t)(uintptr_t)HfUnmap);
+    CHECK(CoXlTestSrInstall() == -1); /* wrappers of another module: refused, as any other set-up */
+    CHECK(Q((uintptr_t)(g_exe + MAP_AT)) == (uint64_t)(uintptr_t)HfMap && Q((uintptr_t)(g_exe + UNMAP_AT)) == (uint64_t)(uintptr_t)HfUnmap);
+    Setup(1);
+    SetQ((uintptr_t)(g_exe + MAP_AT), (uint64_t)(uintptr_t)HfMap); SetQ((uintptr_t)(g_exe + UNMAP_AT), (uint64_t)(uintptr_t)HfUnmap);
+    CoXlTestSrHellForge((void*)HfMap, NULL);
+    CHECK(CoXlTestSrInstall() == -1); /* only the map HellForge's: refused */
+    Setup(1);
+    SetQ((uintptr_t)(g_exe + MAP_AT), (uint64_t)(uintptr_t)HfMap); SetQ((uintptr_t)(g_exe + UNMAP_AT), (uint64_t)(uintptr_t)HfUnmap);
+    CoXlTestSrHellForge((void*)HfMap, (void*)HfUnmap);
+    SetD((uintptr_t)(g_exe + REGIONS), 9);
+    g_hfMaps = g_hfUnmaps = 0;
+    CHECK(CoXlTestSrInstall() == 1);
+    CHECK(fake_host_logged("beside HellForge's span-rescue"));
+    CHECK(Q((uintptr_t)(g_exe + MAP_AT)) != (uint64_t)(uintptr_t)HfMap && Q((uintptr_t)(g_exe + UNMAP_AT)) != (uint64_t)(uintptr_t)HfUnmap);
+    FakeMapping();
+    uintptr_t heap = NewHeap();
+    CoXlTestSrHeap(heap);
+    void* b[COUNT];
+    uintptr_t span = Fill(heap, b);
+    CHECK(g_hfMaps == 1 && g_maps == 1 && CoXlTestSrMarked(span) && CoXlTestSrRegistered() == 1);
+
+    g_case = "beside HellForge's span-rescue: a pass in play rescues";
+    FreeElsewhere(b, 1, COUNT - 1);
+    Pass(256, 100000);
+    long long f[F_N]; CoXlTestSrLast(f);
+    CHECK(f[F_FOUND] == 1 && f[F_RESCUED] == 1 && f[F_CHANGED] == 0);
+    CHECK(Partial(heap) == span && Len(Q(span)) == COUNT - 1 && Q(heap + 0x718) == 0);
+    CHECK(CoXlTestSrRescue(heap, span) == 0); /* a second rescuer finds it no longer stranded */
+
+    g_case = "beside HellForge's span-rescue: the unmap clears the mod's bit, then HellForge's unmap runs";
+    ((UnmapFn) * (void**)(g_exe + UNMAP_AT))((void*)span, 0x10000, 0, 0x10000);
+    CHECK(g_hfUnmaps == 1 && g_unmaps == 1 && g_unmapSawBit == 0 && !CoXlTestSrMarked(span) && CoXlTestSrRegistered() == 0);
+
+    g_case = "beside HellForge's span-rescue: every pool worker's trim runs (a flag may be HellForge's pass's)";
+    WorkerSite();
+    WorkerFn worker = (WorkerFn)(void*)(g_exe + WORKER_TRIM);
+    CoXlTestSrHeap(NewHeap());
+    g_trims = 0;
+    worker(); worker(); worker();
+    CHECK(g_trims == 3);
+}
+
 static volatile LONG g_toggleStop;
 static DWORD WINAPI ToggleMap(void* unused)
 {
@@ -973,6 +1029,7 @@ int main(void)
     Churning();
     Neighbour();
     Skip();
+    Beside();
     Reach();
     Refusals();
     Install();

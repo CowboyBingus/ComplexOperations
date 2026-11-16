@@ -1,5 +1,6 @@
 /* The AI path budget's stock value and its raise: a world still holding the mod's lowered value after a level is not
  * read as the game's, also when the next world has the same address; the raise then gives the game's value back. */
+#include <math.h>
 #include <stdio.h>
 
 #include "xl/co_aibudget.h"
@@ -46,6 +47,56 @@ static void Unknown(void)
     CHECK(co_aibudget_stock(&g, 0x1000, 0.002f) == 0.002f);
     /* a known stock is kept over a later world's high read too */
     CHECK(co_aibudget_stock(&g, 0x2000, 0.008f) == 0.002f);
+}
+
+/* HellForge 0.5's ai-path-budget, as perf_ai_path_budget.c steers a field each frame: only a field holding exactly the
+ * game's 2 ms or its 500 us, to 500 us, or to 2 ms while the wait is over 0.5 s until it is under 0.25 s. */
+static int g_hfRaised;
+static float HellForgeSteer(float field, float waitS)
+{
+    if (field != 0.002f && field != 0.0005f) return field;
+    if (waitS > 0.5f) g_hfRaised = 1; else if (waitS < 0.25f) g_hfRaised = 0;
+    return g_hfRaised ? 0.002f : 0.0005f;
+}
+/* One frame of the mod's steer (LwAibSteer: the step's value, written as co_aibudget_put gives it) and HellForge's. */
+static float BothFrame(CoAiBudget* b, const CoAiDrain* d, float field, int leverOn, float waitS)
+{
+    float want = co_aibudget_step(b, d, leverOn, waitS, 500, 500, 0, 0.0f, 0, 0.0f), put = co_aibudget_put(b, want);
+    if (want > 0 && field != put) { field = put; co_aibudget_wrote(b, put); }
+    return HellForgeSteer(field, waitS);
+}
+static void Beside(void)
+{
+    const CoAiDrain off = {0, 3000, 1024};
+    const float up = nextafterf(0.002f, 1.0f);
+    CoAiBudget b = {0};
+    /* HellForge lowered the world before the mission: the stock from the game's constant, then kept for the world */
+    CHECK(co_aibudget_stock(&b, 0x1000, 0.0005f) == 0.0f);
+    CHECK(co_aibudget_stock_game(&b, 0x1000, 0.0f) == 0.0f && co_aibudget_stock_game(&b, 0x1000, 0.0005f) == 0.0f);
+    CHECK(co_aibudget_stock_game(&b, 0x1000, 0.002f) == 0.002f && b.world == 0x1000);
+    CHECK(co_aibudget_stock(&b, 0x1000, 0.0005f) == 0.002f);
+    /* the stock value is written a float step above; every other value as it is */
+    CHECK(co_aibudget_put(&b, 0.002f) == up && up > 0.002f && up < 0.0020001f);
+    CHECK(co_aibudget_put(&b, 0.0005f) == 0.0005f && co_aibudget_put(&b, 0.008f) == 0.008f && co_aibudget_put(&b, 0.004f) == 0.004f);
+    CoAiBudget none = {0};
+    CHECK(co_aibudget_put(&none, 0.002f) == 0.002f);
+    /* with both levers: the mod's stock (its lever off: a nav hold waits) stays through HellForge's frame */
+    g_hfRaised = 0;
+    float field = 0.0005f;
+    field = BothFrame(&b, &off, field, 0, 0.0f);
+    CHECK(field == up);
+    field = BothFrame(&b, &off, field, 0, 0.0f);
+    CHECK(field == up);
+    /* the lever back on with a short wait: both want 500 us */
+    field = BothFrame(&b, &off, field, 1, 0.0f);
+    CHECK(field == 0.0005f);
+    /* a long wait: both raise; the mod's raise stays while the wait is between the two bounds, then both drop */
+    field = BothFrame(&b, &off, field, 1, 0.6f);
+    CHECK(field == up);
+    field = BothFrame(&b, &off, field, 1, 0.3f);
+    CHECK(field == up);
+    field = BothFrame(&b, &off, field, 1, 0.1f);
+    CHECK(field == 0.0005f);
 }
 
 /* The lever, the drain and another part's raise (the nav hold's 4000 us) in one step: the largest, in every order. */
@@ -225,6 +276,7 @@ static void DrainMissions(void)
 
 int main(void)
 {
+    Beside();
     CoAiBudget b = {0};
     const float stock = 0.002f, low = 500.0f / 1000000.0f;
 
