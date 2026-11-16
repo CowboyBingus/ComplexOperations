@@ -215,10 +215,16 @@ static const char* SlEarly(uintptr_t exe)
     if (!ApiCodeMatches(exe + SL_COUNT_RVA, kSlCountPin) || !ApiCodeMatches(exe + SL_INFO_RVA, kSlInfoPin) || !ApiCodeMatches(exe + SL_COUNT_SITE, kSlCountSitePin))
         return "the broad phase's layer config is not the reviewed code";
     g_sl.exe = exe;
+    /* Set, fenced, before the count's hook is written: the set-up's thread can only reach SlCount after that write, so
+     * it reads 1. Set after it, the set-up's store at 0xAB18B7 and this one could each miss the other (a store-buffer
+     * litmus): LayersEarly would say "in time" for a world made with 6. */
+    InterlockedExchange((volatile LONG*)&g_sl.layers, 1);
     if (LoaderHook("extra large maps: streamed layers' info", exe + SL_INFO_RVA, (void*)SlInfo, &g_sl.infoOrig) || g_sl.infoOrig == NULL ||
         LoaderHook("extra large maps: streamed layers' count", exe + SL_COUNT_RVA, (void*)SlCount, &g_sl.countOrig) || g_sl.countOrig == NULL)
+    {
+        InterlockedExchange((volatile LONG*)&g_sl.layers, 0);
         return "a layer config hook was refused";
-    g_sl.layers = 1;
+    }
     return NULL;
 }
 
@@ -230,7 +236,8 @@ static const char* SlInstall(uintptr_t exe)
     if (!g_sl.layers) return "the layer count was not hooked before the game's set-up made the main world (its broad phase keeps 6 layers)";
     if (exe == 0 || exe != g_sl.exe) return "the exe is not the one the layer count was hooked in";
     /* the main world exists by now (the streamer goes in from a game update): its own count says whether it was in time */
-    if ((g_sl.count = SlLayerCount()) < (int)(SL_FIRST + SL_COUNT))
+    if ((g_sl.count = SlLayerCount()) < 0) return "no main world to read (its broad phase's layer count is unknown)"; /* not a lost race */
+    if (g_sl.count < (int)(SL_FIRST + SL_COUNT))
     {
         snprintf(g_sl.why, sizeof g_sl.why, "the main world's broad phase has %d layers (made before the layer count was hooked)", g_sl.count);
         return g_sl.why;

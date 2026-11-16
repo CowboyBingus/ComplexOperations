@@ -436,6 +436,9 @@ static uint32_t g_nextId;
 static int OrigCount6(void* cfg) { return 6; }
 static int OrigCount7(void* cfg) { return 7; }
 static void OrigInfo(void* cfg, uint8_t layer, uint8_t* out) { g_infoCalls++; out[0] = 0xEE; }
+/* The flag as each hook goes in, by target: the count's hook must find it set. */
+static uintptr_t g_flagTarget; static int g_flagAtHook = -1;
+static void FlagAtHook(uintptr_t target) { if (target == g_flagTarget) g_flagAtHook = CoXlTestSlLayers(); }
 /* The game's set-up making the main world on its thread while the count goes in: [engine+0x10E8] stored. */
 static uint8_t* g_layerWorldEngine;
 static void MakeWorldMeanwhile(uintptr_t target)
@@ -1633,7 +1636,10 @@ int main(void)
         CoXlTestSlReset();
         g_fake.noHook = 0; g_fake.hookCount = 0;
         CHECK(CoXlTestSlEarly(0) != NULL && !CoXlTestSlLayers());
+        g_flagTarget = (uintptr_t)exe + 0xDB9EE0u; g_flagAtHook = -1; g_fake.onHook = FlagAtHook;
         CHECK(CoXlTestSlEarly((uintptr_t)exe) == NULL && CoXlTestSlLayers() && !CoXlTestSlOn() && g_fake.hookCount == 2);
+        g_fake.onHook = NULL;
+        CHECK(g_flagAtHook == 1);                                    /* set before the count's hook is written */
         CHECK(fake_host_detour((uintptr_t)exe + 0xDB9EE0u - image) != NULL && fake_host_detour((uintptr_t)exe + 0xDB9DB0u - image) != NULL);
         CHECK(g_fake.hooks[0].target == (uintptr_t)exe + 0xDB9DB0u - image); /* the info first: no 10 layers without it */
         CHECK(CoXlTestSlEarly((uintptr_t)exe) == NULL && g_fake.hookCount == 2); /* once */
@@ -1659,8 +1665,13 @@ int main(void)
         CoXlTestStreamLayersInstall();
         CHECK(fake_host_logged("streamed broad phase layers off: the main world's broad phase has 6 layers (made before the layer count was hooked); every static body"));
         CHECK(!CoXlTestSlOn() && g_fake.hookCount == 2);
-        memset(exe + 0x27BA9F0u, 0, 8);                              /* no main world to read: -1, not on */
-        CHECK(CoXlTestSlInstall((uintptr_t)exe) != NULL && !CoXlTestSlOn() && g_fake.hookCount == 2);
+        memset(exe + 0x27BA9F0u, 0, 8);                              /* no main world to read: -1, not on, and not a lost race */
+        const char* none = CoXlTestSlInstall((uintptr_t)exe);
+        CHECK(none != NULL && strcmp(none, "no main world to read (its broad phase's layer count is unknown)") == 0);
+        CHECK(!CoXlTestSlOn() && g_fake.hookCount == 2);
+        CoXlTestStreamLayersInstall();
+        CHECK(fake_host_logged("streamed broad phase layers off: no main world to read (its broad phase's layer count is unknown); every static body"));
+        CHECK(!fake_host_logged("has -1 layers"));
         BroadPhase(10, leaves);
         CoXlTestStreamLayersInstall();
         CHECK(CoXlTestSlOn() && CoXlTestSlLayers() && g_fake.hookCount == 4);
