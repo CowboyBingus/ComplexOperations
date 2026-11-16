@@ -101,8 +101,11 @@ static int g_order[64], g_builds, g_failTile = -1, g_tookFailed = -1, g_badMarke
 static uint8_t* g_blocks[64];
 static HANDLE g_holdBuild; /* set: a build waits on it (a job stuck inside its build) */
 static volatile LONG g_inBuild;
+static DWORD g_tlsIndex = TLS_OUT_OF_INDEXES; /* the runner slot, read in the build when set */
+static void* g_tlsSeen;
 static int Build(int tile, uint64_t context, uint8_t* block, uint8_t* record)
 {
+    if (g_tlsIndex != TLS_OUT_OF_INDEXES) g_tlsSeen = TlsGetValue(g_tlsIndex);
     uint64_t queue = 1;
     memcpy(&queue, (const void*)(uintptr_t)(context + 0x50), 8);
     if (queue != 0) g_bad50++; /* the level's GPU job queue is not the runner's */
@@ -223,6 +226,20 @@ int main(void)
         CHECK(g_builds == 3 && g_submits == 3 && g_badQueue == 0);
         CoXlTestNearBgQueue(1, &q, &pr);
         g_wantQueue = 2; g_wantPriority = 4;
+    }
+
+    Begin("a job run where another job holds the runner slot (a wait's help on the same thread): its own runner while it builds, the other's after", 9, 2, 3);
+    {
+        void* const outer = (void*)(uintptr_t)0x5151;
+        const DWORD k = CoXlTestNearJobTls(0);
+        CoXlTestNearJobTls(k);
+        CHECK(k < 64);
+        g_tlsIndex = k; g_tlsSeen = NULL;
+        TlsSetValue(k, outer);
+        CHECK(Steps(2, 3, 0));
+        CHECK(g_builds == 2 && g_tlsSeen != NULL && g_tlsSeen != outer && TlsGetValue(k) == outer);
+        TlsSetValue(k, NULL);
+        g_tlsIndex = TLS_OUT_OF_INDEXES;
     }
 
     Begin("a failed build reaches its step as failed; the rest go on; jobs run on the game thread are counted", 9, 2, 5);

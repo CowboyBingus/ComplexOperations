@@ -306,6 +306,12 @@ int64_t co_framecost_add(int part, int64_t since) { return Add(part, since, co_f
 void co_framecost_nested(int inner, int outer, int64_t since) { Nested(inner, outer, since, co_framecost_now()); }
 void co_framecost_extra(int which, int64_t since) { Extra(which, since, co_framecost_now()); }
 void co_framecost_world(int enter) { World(enter, co_framecost_now()); }
+double co_framecost_world_ms(void)
+{
+    if (g_fc.at == 0 || GetCurrentThreadId() != g_fc.thread) return -1.0;
+    const int64_t now = co_framecost_now();
+    return Ms(g_fc.extra[CO_FX_WORLD] + (g_fc.worldAt ? now - g_fc.worldAt : 0));
+}
 void co_framecost_grass(int out) { if (out && GetCurrentThreadId() == g_fc.thread) g_fc.grass = 1; }
 
 #ifdef CO_TEST

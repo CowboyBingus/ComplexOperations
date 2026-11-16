@@ -1417,8 +1417,14 @@ int CoXlTestMoveStallDue(int phase, double since, double now, LONG seq, LONG sam
 void CoXlTestMoveStallPhase(int phase, double ms, LONG* seq, int64_t* since) { MoveStallPhase(phase, CoXlTestTicks(ms)); *seq = g_moveStall.seq; *since = g_moveStall.since; }
 LONG CoXlTestMoveStallSamples(LONG set) { if (set >= 0) InterlockedExchange(&g_moveStall.samples, set); return g_moveStall.samples; }
 int CoXlTestSplit63WallKind(int sp0, int sp1) { return Split63WallKind(sp0, sp1); }
-void CoXlTestSplit63WallAdd(double ms, int sp0, int sp1) { Split63WallAdd(ms, -1.0, sp0, sp1); }
-void CoXlTestSplit63WallAddFence(double ms, double fence, int sp0, int sp1) { Split63WallAdd(ms, fence, sp0, sp1); }
+void CoXlTestSplit63WallAdd(double ms, int sp0, int sp1) { Split63WallAdd(ms, -1.0, -1.0, 0.0, 0, sp0, sp1); }
+void CoXlTestSplit63WallAddParts(double ms, double fence, double world, double mover, uint32_t toggles, int sp0, int sp1)
+{ Split63WallAdd(ms, fence, world, mover, toggles, sp0, sp1); }
+/* The wall frame closed at a level update's t0 (ms on the QPC clock) with the world update's ms (-1 untimed); MoveTick's
+ * ms and its shows and hides after it. */
+void CoXlTestMoveWallClose(double t0, int mv, int ns, int op, int conf, double world)
+{ LARGE_INTEGER hz; QueryPerformanceFrequency(&hz); MoveWallClose(CoXlTestTicks(t0), (double)hz.QuadPart, mv, ns, op, conf, world); }
+void CoXlTestMoveWallTicked(double ms, uint32_t toggles) { LARGE_INTEGER hz; QueryPerformanceFrequency(&hz); MoveWallTicked(CoXlTestTicks(ms), (double)hz.QuadPart, toggles); }
 /* The frame loop's fence wait (exe 0x8A7C4) from `in` to `out` ms on the QPC clock; timed or not; a wall frame's fence
  * for the build's line; the fence part as the next level update reads it (-1 untimed). */
 void CoXlTestMoveFrameFence(double in, double out) { MoveFrameFence(CoXlTestTicks(in), CoXlTestTicks(out)); }
@@ -1473,6 +1479,14 @@ void CoXlTestMatWaitTimed(uintptr_t frameAt, uintptr_t destroyAt)
     InterlockedExchange64(&g_moveRelease.fence, 0);
 }
 double CoXlTestMoveReleaseFenceMs(void) { return MoveTicksMs(g_moveRelease.fence); }
+/* MatWaitInstall on the fake exe with op 0x41's free in: 1 hooked; the timed waits' return addresses it set (0 untimed). */
+int CoXlTestMatWaitInstall(uintptr_t* frameAt, uintptr_t* destroyAt)
+{
+    g_matWait.ready = 0; g_matWait.frameAt = g_matWait.destroyAt = 0; g_matRes.ready = 1;
+    MatWaitInstall();
+    *frameAt = g_matWait.frameAt; *destroyAt = g_matWait.destroyAt;
+    return g_matWait.ready;
+}
 uint8_t CoXlTestMatWaitFrom(int in, uint64_t r, uint32_t id, uintptr_t from) { MatWaitSetup(in); const uint8_t v = MatWaitFrom(r, id, from); MatWaitSetup(0); return v; }
 void CoXlTestMatWaitTick(void) { MatWaitTick(); }
 void CoXlTestMatWaitDrain(void) { MatWaitDrain(); }

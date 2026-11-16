@@ -24,7 +24,10 @@ LONG CoXlTestMoveStallSamples(LONG set);
 int CoXlTestSplit63WallKind(int sp0, int sp1);
 void CoXlTestSplit63WallAdd(double ms, int sp0, int sp1);
 void CoXlTestSplit63WallNote(void);
-void CoXlTestSplit63WallAddFence(double ms, double fence, int sp0, int sp1);
+void CoXlTestSplit63WallAddParts(double ms, double fence, double world, double mover, uint32_t toggles, int sp0, int sp1);
+void CoXlTestMoveWallClose(double t0, int mv, int ns, int op, int conf, double world);
+void CoXlTestMoveWallTicked(double ms, uint32_t toggles);
+int CoXlTestMoveFrameInBuild(int set);
 void CoXlTestMoveFrameFence(double in, double out);
 void CoXlTestMoveFrameFenceTimed(int on);
 void CoXlTestMoveFenceAdd(double wall, double fence, int mv, int op);
@@ -48,6 +51,7 @@ enum { S63W_BEFORE, S63W_OP, S63W_RANGES, S63W_SHOWING, S63W_LAST, S63W_OTHER };
 #define MV_READY 10
 
 static int Near(double a, double b) { return fabs(a - b) < 0.01; }
+static DWORD WINAPI OtherThreadFence(LPVOID unused) { (void)unused; CoXlTestMoveFrameFence(9000.0 + 11.0, 9000.0 + 31.0); return 0; }
 
 /* One frame from `t`: tick, level update entry, t0, MoveTick's end at the given offsets (ms). */
 static void Frame(double t, double level, double t0, double t1)
@@ -150,8 +154,13 @@ int main(void)
     CoXlTestMoveFrameMark(MF_TICK, 9000.0);
     CHECK(Near(CoXlTestMoveFrameFenceMs(), 0.0));
     CoXlTestMoveFrameMark(MF_TICK_END, 9000.0 + 1.0);
+    CoXlTestMoveFrameInBuild(1);
     CoXlTestMoveFrameFence(9000.0 + 10.0, 9000.0 + 40.0);
     CoXlTestMoveFrameFence(9000.0 + 41.0, 9000.0 + 43.5);
+    {
+        HANDLE t = CreateThread(NULL, 0, OtherThreadFence, NULL, 0, NULL); /* another thread's wait: not this frame's */
+        WaitForSingleObject(t, INFINITE); CloseHandle(t);
+    }
     CHECK(Near(CoXlTestMoveFrameFenceMs(), 32.5));
     CoXlTestMoveFrameMark(MF_LEVEL, 9000.0 + 45.0);
     CoXlTestMoveFrameFence(9000.0 + 46.0, 9000.0 + 49.0); /* after the level update: not counted */
@@ -162,6 +171,15 @@ int main(void)
     CoXlTestMoveFrameMark(MF_TICK, 9000.0 + 60.0);
     CHECK(fake_host_logged("difficulty: moving tiles: slow frame 60.0 ms (replay/near 2/op 0x63): early update 45.0 ms (CoXlTick 1.0, frame fence 32.5), level update 5.0"));
     CHECK(Near(CoXlTestMoveFrameFenceMs(), 0.0)); /* the tick starts the next frame's */
+    CoXlTestMoveFenceAdd(60.0, 32.5, MV_REPLAY, 0x63);
+    g_fake.log[0] = 0;
+    CoXlTestMoveCostNote();
+    CHECK(fake_host_logged("its waits in the build: 2 in early updates, 1 elsewhere on the game thread, 1 on other threads"));
+    CoXlTestMoveFenceAdd(20.0, 1.0, MV_REPLAY, 0x63);
+    g_fake.log[0] = 0;
+    CoXlTestMoveCostNote();
+    CHECK(fake_host_logged("its waits in the build: 0 in early updates, 0 elsewhere on the game thread, 0 on other threads")); /* each build's own */
+    CoXlTestMoveFrameInBuild(0);
     CoXlTestMoveFrameFenceTimed(0);
     CHECK(CoXlTestMoveFrameFenceMs() == -1.0);
 
@@ -180,6 +198,37 @@ int main(void)
     g_fake.log[0] = 0;
     CoXlTestMoveCostNote();
     CHECK(strstr(g_fake.log, "frame fence waits") == NULL); /* cleared */
+    CoXlTestMoveFenceAdd(20.0, 0.0, MV_READY, -1); /* one frame, no wait: still the longest */
+    g_fake.log[0] = 0;
+    CoXlTestMoveCostNote();
+    CHECK(fake_host_logged("1 wall frames, 0 ms in all, the longest 0.0 ms (ready/op -)"));
+
+    g_case = "a wall frame's fence and world update into the build's line and the 0x63 table, MoveTick's ms and toggles with it";
+    CoXlTestMoveFrameFenceTimed(1);
+    CoXlTestMoveFrameMark(MF_TICK, 10000.0);
+    CoXlTestMoveFrameFence(10001.0, 10011.0);
+    CoXlTestMoveFrameMark(MF_LEVEL, 10012.0);
+    CoXlTestMoveWallClose(10013.0, MV_REPLAY, 2, 0x63, 0, 4.0); /* the first: opens the step's first frame */
+    CoXlTestMoveWallTicked(1.0, 300);
+    CoXlTestMoveFrameMark(MF_TICK, 10020.0);
+    CoXlTestMoveFrameFence(10021.0, 10041.0);
+    CoXlTestMoveFrameMark(MF_LEVEL, 10042.0);
+    CoXlTestMoveWallClose(10043.0, MV_REPLAY, 2, 0x63, 0, 5.0); /* 30 ms: fence 20, world 5 */
+    CoXlTestMoveWallTicked(0.5, 0);
+    CoXlTestMoveFrameMark(MF_TICK, 10050.0);
+    CoXlTestMoveFrameFence(10051.0, 10054.0);
+    CoXlTestMoveFrameMark(MF_LEVEL, 10055.0);
+    g_fake.log[0] = 0;
+    CoXlTestMoveWallClose(10060.0, MV_REPLAY, 2, 0x3C, 0, 2.0); /* 17 ms, the step's last: the table noted */
+    CHECK(fake_host_logged("difficulty: moving tiles: 0x63 step's longest wall-clock frames' parts (ms, -1 untimed; the world update 0x1B0B10, the frame fence 0x8A7C4): "
+        "before the op 30.0 = mover 1.0 + world update 5.0 + frame fence 20.0 + the rest 4.0, 300 shows or hides posted, the next frame's fence 3.0"));
+    g_fake.log[0] = 0;
+    CoXlTestMoveCostNote();
+    CHECK(fake_host_logged("the build's frame fence waits (exe 0x8A7C4): 2 wall frames, 23 ms in all, the longest 20.0 ms (replay/op 0x63); "
+        "the 2 wall frames over 16.7 ms: 23 of their 47 ms in the fence; its waits in the build: 0 in early updates")); /* no build flag: not counted */
+    CoXlTestMoveWallClose(10070.0, 0, 7, -1, 0, -1.0); /* idle from here */
+    CoXlTestMoveCostNote();
+    CoXlTestMoveFrameFenceTimed(0);
 
     g_case = "the stall watch: only the two stretches, past 40 ms, once a stretch, 4 a build, while a build runs";
     CHECK(CoXlTestMoveStallDue(MS_EARLY, 100.0, 141.0, 5, 4, 0, 1));
@@ -221,20 +270,22 @@ int main(void)
     CoXlTestSplit63WallNote();
     CHECK(fake_host_logged("difficulty: moving tiles: 0x63 step's wall-clock frames: 2 before the op (max 35.0 ms), the op's 1 (max 20.0), 4 of the ranges "
         "(max 17.0), 1 showing all (max 16.0), the last 1 (max 28.0), 0 other (max 0.0); 5 over 16.7 ms"));
-    CHECK(strstr(g_fake.log, "frame fence") == NULL); /* none timed */
+    CHECK(fake_host_logged("0x63 step's longest wall-clock frames' parts (ms, -1 untimed; the world update 0x1B0B10, the frame fence 0x8A7C4): before the op 35.0 = "
+        "mover 0.0 + world update -1.0 + frame fence -1.0 + the rest 35.0, 0 shows or hides posted, the next frame's fence -1.0; the op's 20.0 ="));
     g_fake.log[0] = 0;
     CoXlTestSplit63WallNote();
     CHECK(strstr(g_fake.log, "0x63 step's") == NULL);
 
-    g_case = "the 0x63 step's fence line: each kind's longest frame with its own fence wait";
+    g_case = "the 0x63 step's parts line: each kind's longest frame with its own parts and the next frame's fence; kinds without frames left out";
     g_fake.log[0] = 0;
-    CoXlTestSplit63WallAddFence(28.0, 20.5, SP_NONE, SP_HIDING);
-    CoXlTestSplit63WallAddFence(15.0, 1.0, SP_HIDING, SP_HIDING); /* not the longest: its fence is not shown */
-    CoXlTestSplit63WallAddFence(17.0, 2.0, SP_HIDING, SP_QUEUED);
-    CoXlTestSplit63WallAddFence(27.0, 0.5, SP_RANGES, SP_RANGES);
+    CoXlTestSplit63WallAddParts(28.0, 20.5, 3.0, 0.9, 545, SP_NONE, SP_HIDING);
+    CoXlTestSplit63WallAddParts(15.0, 1.0, 2.0, 0.8, 10, SP_HIDING, SP_HIDING); /* not the longest: its parts are not shown */
+    CoXlTestSplit63WallAddParts(17.0, 2.0, -1.0, 0.2, 0, SP_HIDING, SP_QUEUED);
+    CoXlTestSplit63WallAddParts(27.0, 0.5, 4.0, 1.5, 120, SP_RANGES, SP_RANGES);
     CoXlTestSplit63WallNote();
-    CHECK(fake_host_logged("difficulty: moving tiles: 0x63 step's longest wall-clock frames' frame fence (exe 0x8A7C4): before the op 20.5 of 28.0 ms, the op's 2.0 of 17.0, "
-        "the ranges' 0.5 of 27.0, showing all 0.0 of 0.0, the last 0.0 of 0.0, other 0.0 of 0.0"));
+    CHECK(fake_host_logged("before the op 28.0 = mover 0.9 + world update 3.0 + frame fence 20.5 + the rest 3.6, 545 shows or hides posted, the next frame's fence 1.0; "
+        "the op's 17.0 = mover 0.2 + world update -1.0 + frame fence 2.0 + the rest 14.8, 0 shows or hides posted, the next frame's fence 0.5; "
+        "the ranges' 27.0 = mover 1.5 + world update 4.0 + frame fence 0.5 + the rest 21.0, 120 shows or hides posted, the next frame's fence -1.0\n"));
 
     g_case = "the tile jobs' queue: 14 (2, 4) by default, noted once; a build without CO_RESEARCH reads no switch; 10 (1, 3) off";
     {

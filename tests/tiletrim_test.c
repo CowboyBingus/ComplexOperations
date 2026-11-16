@@ -2,6 +2,7 @@
  * build only of a tile clear of every merge camera, the keep time refreshed while building, one release a frame; the
  * trim once a burst of events is 8 frames past, outside a build, only on the reviewed code. Run on the fake game and exe. */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <windows.h>
 
@@ -29,6 +30,9 @@ uint32_t CoXlTestMoverFrames(void);
 void CoXlTestMoverWorld(uint64_t world);
 void CoXlTestMoverTileHandle(int slot, uint64_t handle);
 int CoXlTestDrainPins(void);
+void CoXlTestMatWait(uintptr_t exe, void* orig);
+void CoXlTestMatWaitTimed(uintptr_t frameAt, uintptr_t destroyAt);
+uint8_t CoXlTestMatWaitFrom(int in, uint64_t r, uint32_t id, uintptr_t from);
 
 static int g_failed;
 static const char* g_case;
@@ -64,7 +68,20 @@ static const struct { uint32_t at; const char* bytes; } kDrain[] = {
 };
 static uint8_t g_world[0x230200], g_rw[0x10], g_renderer[0x1C00], g_device[0x400], g_api[0x20], g_table[0x200];
 static uint64_t g_destroyWorld, g_destroyHandle;
-static void TestDestroy(uint64_t world, uint64_t handle) { g_destroyWorld = world; g_destroyHandle = handle; }
+static uintptr_t g_destroyFence; /* set: the destroy waits there as 0x1ADEA0 does (0x1ADFB3), through the 0x106030 hook */
+static void TestDestroy(uint64_t world, uint64_t handle)
+{
+    g_destroyWorld = world; g_destroyHandle = handle;
+    if (g_destroyFence != 0) CoXlTestMatWaitFrom(0, 0, 1, g_destroyFence);
+}
+static uint8_t SlowWait(uint64_t r, uint32_t id) { (void)r; (void)id; Sleep(20); return 1; }
+/* The number after the last `key` in the log, -1 none. */
+static double LoggedMs(const char* key)
+{
+    const char* at = NULL;
+    for (const char* p = strstr(g_fake.log, key); p != NULL; p = strstr(p + 1, key)) at = p;
+    return at != NULL ? atof(at + strlen(key)) : -1.0;
+}
 
 static void Put32(uint8_t* at, uint32_t v) { memcpy(at, &v, 4); }
 /* The render thread in buffer `render`, the game's `game`, `queued` messages there, `jobs` device jobs. */
@@ -489,6 +506,31 @@ int main(void)
         CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(1)); /* busy, but not held */
         CHECK(g_destroyWorld == (uint64_t)(uintptr_t)g_world && g_destroyHandle == 0x1234);
         CHECK(fake_host_logged("ms on the game thread; the destroy alone ") && fake_host_logged(" ms, the render queue not read"));
+    }
+
+    g_case = "the release's parts: each its own, the destroy's fence wait inside the destroy, counted again each release";
+    {
+        DrainWorld((uint64_t)(uintptr_t)TestDestroy);
+        CoXlTestMatWait((uintptr_t)exe, (void*)SlowWait);
+        CoXlTestMatWaitTimed(0, (uintptr_t)exe + 0x1ADFB8u);
+        g_destroyFence = (uintptr_t)exe + 0x1ADFB8u;
+        CoXlTestMover(OX, OY, MV_IDLE, 0, 0, 0);
+        CoXlTestMoverTile(0, 0, 0, 0);
+        for (int k = 1; k < 8; k++) CoXlTestMoverTile(k, 9 + k, 9, now);
+        CoXlTestMoverTile(1, 0, -2, now - KEEP_MS - 1000);
+        CoXlTestMoverTile(2, 1, -2, now - KEEP_MS - 1000);
+        CoXlTestMoverTileHandle(1, 0x1234); CoXlTestMoverTileHandle(2, 0x1235);
+        CoXlTestMoverPlayer(px, py);
+        g_fake.log[0] = 0;
+        CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(1));
+        const double fence = LoggedMs("(its fence wait, exe 0x1ADFB3: "), destroy = LoggedMs(", the destroy ");
+        CHECK(fake_host_logged("the release's parts (no build): the coarse raise "));
+        CHECK(fence >= 15.0 && destroy >= fence && LoggedMs("the coarse raise ") < 5.0 && LoggedMs(", the frees queued ") < 5.0 && LoggedMs(", the ground check ") < 5.0);
+        g_destroyFence = 0;
+        g_fake.log[0] = 0;
+        CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(2));
+        CHECK(LoggedMs("(its fence wait, exe 0x1ADFB3: ") >= 0.0 && LoggedMs("(its fence wait, exe 0x1ADFB3: ") < 5.0 && LoggedMs(", the destroy ") < 5.0);
+        CoXlTestMatWaitTimed(0, 0);
     }
 
     g_case = "the fence's pins: each pinned byte and the destroy's slot";

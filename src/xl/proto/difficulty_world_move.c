@@ -2121,7 +2121,7 @@ static struct { double ms[6]; int mv[6], ns[6], step[6], conf[6], bld[6]; double
     uint32_t fenceFrames, fenceSlow; double fenceSum, fenceMax, fenceSlowWall, fenceSlowSum; int fenceMv, fenceOp; } g_moveCost;
 /* Wall-clock frames, level update to level update (once a frame on the game thread, 0xAB519E): the whole frame's time,
  * render and other threads' waits included, which the game-thread cost above leaves out. */
-static struct { LARGE_INTEGER last; int mv, ns, op, conf, sp0, sp1; } g_moveWall; /* sp0, sp1: the 0x63 split at t0, after MoveTick */
+static struct { LARGE_INTEGER last; int mv, ns, op, conf, sp0, sp1; double mover; uint32_t toggles; } g_moveWall; /* sp0, sp1: the 0x63 split at t0, after MoveTick; MoveTick's ms, its shows and hides */
 
 /* A build frame over MOVE_FRAME_SLOW_MS split where the mod runs on the game thread, CoXlTick to CoXlTick: the early
  * update (CoXlTick and the game's update up to the level update, 0xAB519E), the level update, MoveTick, then up to the
@@ -2136,7 +2136,7 @@ typedef struct
     int have, mv, ns, op, shape, tile, building;
     LONG shapeEnds, tileEnds; /* the job ends counted at the tick: one that ends inside the frame was out in it */
 } MoveFrameMarks;
-static struct { MoveFrameMarks f; uint32_t lines; int inBuild, fenceTimed; volatile LONG fenceIn, fenceOut; DWORD thread; uintptr_t teb; } g_moveFrame;
+static struct { MoveFrameMarks f; uint32_t lines; int inBuild, fenceTimed; volatile LONG fenceIn, fenceOut, fenceOther; DWORD thread; uintptr_t teb; } g_moveFrame;
 
 /* frame, early update, level update, mover, after the mover, consumer, to the next tick, CoXlTick, frame fence (ms); 0
  * without the four marks. The part after the mover ends at the consumer's last return, so the five parts add up to the
@@ -2188,13 +2188,19 @@ static void MoveFrameLeft(void) { g_moveFrame.inBuild = 0; g_moveFrame.f.buildin
 
 /* The frame loop's wait on the fence it posted a frame before (exe 0x8A7C4 waits [rsi+0x340], 0x8AAF2 posts it after
  * the kick), timed by xl_free.c's 0x106030 hook: the game thread idle while the render thread ends the last frame. It
- * runs after the world update and before the next level update, so only the game thread's waits in the early update count. */
+ * runs after the world update and before the next level update, so only the game thread's waits in the early update
+ * count; the build's line counts the waits a build sees: in early updates, elsewhere on the game thread, other threads. */
 static void MoveFrameFence(int64_t in, int64_t out)
 {
     MoveFrameMarks* f = &g_moveFrame.f;
-    if (GetCurrentThreadId() != g_moveFrame.thread || !(f->have & (1 << MF_TICK)) || (f->have & (1 << MF_LEVEL))) { InterlockedIncrement(&g_moveFrame.fenceOut); return; }
+    const int game = GetCurrentThreadId() == g_moveFrame.thread;
+    if (!game || !(f->have & (1 << MF_TICK)) || (f->have & (1 << MF_LEVEL)))
+    {
+        if (g_moveFrame.inBuild) InterlockedIncrement(game ? &g_moveFrame.fenceOut : &g_moveFrame.fenceOther);
+        return;
+    }
     f->fence += out - in;
-    InterlockedIncrement(&g_moveFrame.fenceIn);
+    if (g_moveFrame.inBuild) InterlockedIncrement(&g_moveFrame.fenceIn);
 }
 /* The fence in the wall frame ending at this level update (ms), -1 untimed. */
 static double MoveFrameFenceMs(double hz) { return g_moveFrame.fenceTimed && hz > 0 ? (double)g_moveFrame.f.fence * 1000.0 / hz : -1.0; }
@@ -2235,7 +2241,16 @@ static void MoveStallPhase(int phase, int64_t now) { (void)phase; (void)now; }
 /* The 0x63 step's wall frames by where its split was (state at the frame's t0 and after its MoveTick): before the op
  * (hides), the op's frame, the ranges, showing all, the last frame; its slowest frame is outside the split's own clock. */
 enum { S63W_BEFORE, S63W_OP, S63W_RANGES, S63W_SHOWING, S63W_LAST, S63W_OTHER, S63W_KINDS };
-static struct { uint32_t n[S63W_KINDS], over; double max[S63W_KINDS], fence[S63W_KINDS]; int timed; } g_split63Wall; /* fence: the longest frame's */
+/* Each kind's longest frame's parts (ms, -1 untimed): MoveTick, the engine's world update (0x1B0B10) and the frame fence
+ * inside it, the shows and hides it posted, and the next frame's fence: a toggle is a render message (0x2BD140) the
+ * render thread applies with the world's render (message 8, 0x108D40 -> 0x1E9540) after this frame's kick, so the game
+ * thread waits for it at the next frame's fence. */
+static struct
+{
+    uint32_t n[S63W_KINDS], over, toggles[S63W_KINDS];
+    double max[S63W_KINDS], fence[S63W_KINDS], world[S63W_KINDS], mover[S63W_KINDS], next[S63W_KINDS];
+    int after; /* the kind whose longest frame was the last one added, -1 none: the next frame's fence is its */
+} g_split63Wall = {.after = -1};
 static int Split63WallKind(int sp0, int sp1)
 {
     if (sp1 == SP_DONE) return S63W_LAST;
@@ -2245,14 +2260,19 @@ static int Split63WallKind(int sp0, int sp1)
     if (sp1 == SP_SHOWING) return S63W_SHOWING;
     return S63W_OTHER;
 }
-/* fence: the frame fence's wait in the frame (ms), -1 untimed. */
-static void Split63WallAdd(double ms, double fence, int sp0, int sp1)
+/* A wall frame of the step: its ms and parts (ms, -1 untimed), the shows and hides its MoveTick posted. */
+static void Split63WallAdd(double ms, double fence, double world, double mover, uint32_t toggles, int sp0, int sp1)
 {
     const int k = Split63WallKind(sp0, sp1);
+    if (g_split63Wall.after >= 0) g_split63Wall.next[g_split63Wall.after] = fence;
+    g_split63Wall.after = -1;
     g_split63Wall.n[k]++;
-    if (ms > g_split63Wall.max[k]) { g_split63Wall.max[k] = ms; g_split63Wall.fence[k] = fence; }
+    if (g_split63Wall.n[k] == 1 || ms > g_split63Wall.max[k])
+    {
+        g_split63Wall.max[k] = ms; g_split63Wall.fence[k] = fence; g_split63Wall.world[k] = world; g_split63Wall.mover[k] = mover;
+        g_split63Wall.toggles[k] = toggles; g_split63Wall.next[k] = -1.0; g_split63Wall.after = k;
+    }
     if (ms > MOVE_SLOW_MS) g_split63Wall.over++;
-    if (fence >= 0) g_split63Wall.timed = 1;
 }
 static void Split63WallNote(void)
 {
@@ -2263,13 +2283,25 @@ static void Split63WallNote(void)
     Note("difficulty: moving tiles: 0x63 step's wall-clock frames: %u before the op (max %.1f ms), the op's %u (max %.1f), %u of the ranges (max %.1f), "
         "%u showing all (max %.1f), the last %u (max %.1f), %u other (max %.1f); %u over %.1f ms", n[S63W_BEFORE], m[S63W_BEFORE], n[S63W_OP], m[S63W_OP],
         n[S63W_RANGES], m[S63W_RANGES], n[S63W_SHOWING], m[S63W_SHOWING], n[S63W_LAST], m[S63W_LAST], n[S63W_OTHER], m[S63W_OTHER], g_split63Wall.over, MOVE_SLOW_MS);
-    /* how much of each kind's longest frame the game thread spent waiting for the render thread's last frame */
-    const double* f = g_split63Wall.fence;
-    if (g_split63Wall.timed)
-        Note("difficulty: moving tiles: 0x63 step's longest wall-clock frames' frame fence (exe 0x8A7C4): before the op %.1f of %.1f ms, the op's %.1f of %.1f, "
-            "the ranges' %.1f of %.1f, showing all %.1f of %.1f, the last %.1f of %.1f, other %.1f of %.1f", f[S63W_BEFORE], m[S63W_BEFORE], f[S63W_OP], m[S63W_OP],
-            f[S63W_RANGES], m[S63W_RANGES], f[S63W_SHOWING], m[S63W_SHOWING], f[S63W_LAST], m[S63W_LAST], f[S63W_OTHER], m[S63W_OTHER]);
+    /* where each kind's longest frame went: the game thread's own parts, the render thread's last frame, the rest */
+    static const char* const kName[S63W_KINDS] = {"before the op", "the op's", "the ranges'", "showing all", "the last", "other"};
+    char parts[1400]; size_t at = 0; parts[0] = 0;
+    for (int k = 0; k < S63W_KINDS && at + 1 < sizeof parts; k++)
+    {
+        if (n[k] == 0) continue;
+        double rest = m[k];
+        if (g_split63Wall.mover[k] > 0) rest -= g_split63Wall.mover[k];
+        if (g_split63Wall.world[k] > 0) rest -= g_split63Wall.world[k];
+        if (g_split63Wall.fence[k] > 0) rest -= g_split63Wall.fence[k];
+        const int w = snprintf(parts + at, sizeof parts - at, "%s %s %.1f = mover %.1f + world update %.1f + frame fence %.1f + the rest %.1f, %u shows or hides posted, "
+            "the next frame's fence %.1f", at ? ";" : "", kName[k], m[k], g_split63Wall.mover[k], g_split63Wall.world[k], g_split63Wall.fence[k], rest,
+            g_split63Wall.toggles[k], g_split63Wall.next[k]);
+        if (w < 0) break;
+        at += (size_t)w < sizeof parts - at ? (size_t)w : sizeof parts - at - 1;
+    }
+    Note("difficulty: moving tiles: 0x63 step's longest wall-clock frames' parts (ms, -1 untimed; the world update 0x1B0B10, the frame fence 0x8A7C4):%s", parts);
     memset(&g_split63Wall, 0, sizeof g_split63Wall);
+    g_split63Wall.after = -1;
 }
 
 static void MoveSlowAdd(MoveSlow* t, double ms, int mv, int ns, int op, int conf)
@@ -2354,14 +2386,16 @@ static void MoveCostNote(void)
         Note("difficulty: moving tiles: the build's frames over %.1f ms: the mover's own work %u:%s", MOVE_SLOW_MS, g_moveCost.tick.over, tick);
         Note("difficulty: moving tiles: the build's frames over %.1f ms: wall clock %u:%s", MOVE_SLOW_MS, g_moveCost.clock.over, clock);
     }
+    const long fenceIn = InterlockedExchange(&g_moveFrame.fenceIn, 0), fenceOut = InterlockedExchange(&g_moveFrame.fenceOut, 0),
+        fenceOther = InterlockedExchange(&g_moveFrame.fenceOther, 0); /* this build's, printed or not */
     if (g_moveCost.fenceFrames)
     {
         char op[8] = "-";
         if (g_moveCost.fenceOp >= 0) snprintf(op, sizeof op, "0x%02X", g_moveCost.fenceOp);
         Note("difficulty: moving tiles: the build's frame fence waits (exe 0x8A7C4): %u wall frames, %.0f ms in all, the longest %.1f ms (%s/op %s); "
-            "the %u wall frames over %.1f ms: %.0f of their %.0f ms in the fence; %ld waits in early updates, %ld elsewhere since the last such line", g_moveCost.fenceFrames, g_moveCost.fenceSum,
-            g_moveCost.fenceMax, MoveStateName(g_moveCost.fenceMv), op, g_moveCost.fenceSlow, MOVE_SLOW_MS, g_moveCost.fenceSlowSum, g_moveCost.fenceSlowWall,
-            (long)InterlockedExchange(&g_moveFrame.fenceIn, 0), (long)InterlockedExchange(&g_moveFrame.fenceOut, 0));
+            "the %u wall frames over %.1f ms: %.0f of their %.0f ms in the fence; its waits in the build: %ld in early updates, %ld elsewhere on the game thread, "
+            "%ld on other threads", g_moveCost.fenceFrames, g_moveCost.fenceSum, g_moveCost.fenceMax, MoveStateName(g_moveCost.fenceMv), op, g_moveCost.fenceSlow,
+            MOVE_SLOW_MS, g_moveCost.fenceSlowSum, g_moveCost.fenceSlowWall, fenceIn, fenceOut, fenceOther);
     }
     memset(&g_moveCost, 0, sizeof g_moveCost);
     Split63WallNote(); /* a build that ended inside the step */
@@ -2563,6 +2597,30 @@ static void MoveFrameTick(int end)
 /* Before the level's own update: the scatter cut's close counts this update (difficulty_world_diag.c). */
 static void MoveScatterTick(void) { TdScatterMergeTick((uint64_t)(uintptr_t)g_move.ctx); }
 
+static int LwFpWorldOn(void); /* living_world_fparts.c */
+/* The wall frame that ends at this level update's t0 (the last t0 to this one) into the build's tables, with the frame
+ * fence and the world update (ms, -1 untimed) inside it; then the new frame's state at t0. */
+static void MoveWallClose(int64_t t0, double hz, int mv, int ns, int op, int conf, double world)
+{
+    if (g_moveWall.last.QuadPart != 0 && (g_moveWall.mv != MV_IDLE || g_moveCost.pending) && hz > 0)
+    {
+        const double wall = (double)(t0 - g_moveWall.last.QuadPart) * 1000.0 / hz;
+        const double fence = MoveFrameFenceMs(hz); /* this frame's early update lies inside the wall frame */
+        MoveWallAdd(wall, g_moveWall.mv);
+        MoveSlowAdd(&g_moveCost.clock, wall, g_moveWall.mv, g_moveWall.ns, g_moveWall.op, g_moveWall.conf);
+        MoveFenceAdd(wall, fence, g_moveWall.mv, g_moveWall.op);
+        if (g_moveWall.op == 0x63) Split63WallAdd(wall, fence, world, g_moveWall.mover, g_moveWall.toggles, g_moveWall.sp0, g_moveWall.sp1);
+    }
+    if (g_moveWall.op == 0x63 && op != 0x63) Split63WallNote();
+    g_moveWall.last.QuadPart = t0; g_moveWall.mv = mv; g_moveWall.ns = ns; g_moveWall.op = op; g_moveWall.conf = conf; g_moveWall.sp0 = g_split.state;
+    g_moveWall.mover = 0; g_moveWall.toggles = 0;
+}
+/* After MoveTick: its time and the shows and hides it posted, the split's state after it. */
+static void MoveWallTicked(int64_t ticks, double hz, uint32_t toggles)
+{
+    g_moveWall.sp1 = g_split.state; g_moveWall.mover = hz > 0 ? (double)ticks * 1000.0 / hz : 0; g_moveWall.toggles = toggles;
+}
+
 /* The mod's parts are timed for the frame-time lines (co_framecost.h); the game's own update between them is not. */
 static void MoveLevelUpdate(uint64_t level)
 {
@@ -2582,20 +2640,12 @@ static void MoveLevelUpdate(uint64_t level)
     MoveFrameMark(MF_T0, t0.QuadPart, (double)hz.QuadPart);
     g_moveFrame.f.mv = mv; g_moveFrame.f.ns = ns; g_moveFrame.f.op = op;
     g_moveFrame.f.shape |= g_shape.running != 0; g_moveFrame.f.tile |= g_nearJob.inflight > 0;
-    if (g_moveWall.last.QuadPart != 0 && (g_moveWall.mv != MV_IDLE || g_moveCost.pending))
-    {
-        const double wall = (double)(t0.QuadPart - g_moveWall.last.QuadPart) * 1000.0 / (double)hz.QuadPart;
-        const double fence = MoveFrameFenceMs((double)hz.QuadPart); /* this frame's early update lies inside the wall frame */
-        MoveWallAdd(wall, g_moveWall.mv);
-        MoveSlowAdd(&g_moveCost.clock, wall, g_moveWall.mv, g_moveWall.ns, g_moveWall.op, g_moveWall.conf);
-        MoveFenceAdd(wall, fence, g_moveWall.mv, g_moveWall.op);
-        if (g_moveWall.op == 0x63) Split63WallAdd(wall, fence, g_moveWall.sp0, g_moveWall.sp1);
-    }
-    if (g_moveWall.op == 0x63 && op != 0x63) Split63WallNote();
-    g_moveWall.last = t0; g_moveWall.mv = mv; g_moveWall.ns = ns; g_moveWall.op = op; g_moveWall.conf = conf; g_moveWall.sp0 = g_split.state;
+    MoveWallClose(t0.QuadPart, (double)hz.QuadPart, mv, ns, op, conf, LwFpWorldOn() ? co_framecost_world_ms() : -1.0);
+    const uint32_t toggles = g_split.hides + g_split.shows;
     MoveTick(level);
     QueryPerformanceCounter(&t1);
-    g_moveWall.sp1 = g_split.state;
+    const uint32_t posted = g_split.hides + g_split.shows; /* the split cleared in MoveTick: its counts start at 0 */
+    MoveWallTicked(t1.QuadPart - t0.QuadPart, (double)hz.QuadPart, posted >= toggles ? posted - toggles : posted);
     MoveFrameMark(MF_T1, t1.QuadPart, (double)hz.QuadPart);
     g_moveFrame.f.building = g_moveFrame.inBuild = mv != MV_IDLE || g_move.state != MV_IDLE;
     g_moveFrame.f.shape |= g_shape.running != 0; g_moveFrame.f.tile |= g_nearJob.inflight > 0;

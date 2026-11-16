@@ -23,6 +23,8 @@ static uintptr_t LwFpWorld(uintptr_t w, float a, float b)
     co_framecost_world(0);
     return out;
 }
+/* 1 when the world update's hook is in (its time in co_framecost_world_ms is the engine's, not 0 for want of it). */
+static int LwFpWorldOn(void) { return g_lwFp.world != NULL; }
 /* The joins' time on the calling thread since its last call, in ms: the budget lever asks once a frame. */
 static double LwFpJoinTake(void)
 {

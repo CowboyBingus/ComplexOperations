@@ -51,6 +51,8 @@ void co_framecost_extra(int which, int64_t since);
 /* Around the engine's world update, on the game thread: its time is CO_FX_WORLD's, and what is timed inside it (a
  * part, a join) comes off it for the causes below. A frame that starts inside it gets its share on each side. */
 void co_framecost_world(int enter);
+/* The world update's time so far in the frame since CoXlTick (ms), on its thread; -1 off it or before the first tick. */
+double co_framecost_world_ms(void);
 /* What a frame over CO_FC_TARGET_MS is counted under, a window: the timed parts, then the AI joins, the world update
  * less what was timed inside it, and the rest of the frame. Two slow-frame lines a window cannot show a cause that
  * costs the third slowest frame or one of 17 to 25 ms; these counters hold every such frame. */

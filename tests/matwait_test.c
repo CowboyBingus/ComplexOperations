@@ -21,6 +21,7 @@ void CoXlTestMatWaitTimed(uintptr_t frameAt, uintptr_t destroyAt);
 double CoXlTestMoveReleaseFenceMs(void);
 void CoXlTestMoveFrameMark(int mark, double ms);
 double CoXlTestMoveFrameFenceMs(void);
+int CoXlTestMatWaitInstall(uintptr_t* frameAt, uintptr_t* destroyAt);
 
 static int g_failed;
 static const char* g_case;
@@ -155,6 +156,29 @@ int main(void)
         g_waits = 0;
         CHECK(CoXlTestMatWaitFrom(0, R(g_r), 4, EXE + 0x8A7C9u) == 1 && g_waits == 1 && CoXlTestMoveFrameFenceMs() == -1.0);
         CHECK(CoXlTestMatWaitFrom(0, R(g_r), 5, EXE + 0x1ADFB8u) == 1 && g_waits == 2 && CoXlTestMoveReleaseFenceMs() == 0.0);
+    }
+
+    g_case = "the install: each timed wait on its own pins; one not the reviewed code leaves it untimed and the other and A10c as they are";
+    {
+        const uintptr_t x = (uintptr_t)fake_host_exe();
+        uintptr_t frame = 1, destroy = 1;
+        g_fake.log[0] = 0;
+        CHECK(CoXlTestMatWaitInstall(&frame, &destroy) == 1 && frame == x + 0x8A7C9u && destroy == x + 0x1ADFB8u);
+        CHECK(fake_host_logged("the frame loop's fence wait (exe 0x8A7C4) timed; a terrain destroy's fence wait (exe 0x1ADFB3) timed"));
+        const uint32_t pins[3] = {0x8A7A3u, 0x8A7B8u, 0x1ADFA1u};
+        for (int k = 0; k < 3; k++)
+        {
+            g_fake.noMatchExe[0] = pins[k];
+            g_fake.log[0] = 0;
+            CHECK(CoXlTestMatWaitInstall(&frame, &destroy) == 1);
+            CHECK(k < 2 ? frame == 0 && destroy == x + 0x1ADFB8u : frame == x + 0x8A7C9u && destroy == 0);
+            CHECK(fake_host_logged(k < 2 ? "the frame loop's fence wait (exe 0x8A7C4) not timed (not the reviewed code); a terrain destroy's fence wait (exe 0x1ADFB3) timed"
+                                         : "the frame loop's fence wait (exe 0x8A7C4) timed; a terrain destroy's fence wait (exe 0x1ADFB3) not timed (not the reviewed code)"));
+        }
+        g_fake.noMatchExe[0] = 0x1A843Au; /* A10c's own pin: no hook, nothing timed */
+        CHECK(CoXlTestMatWaitInstall(&frame, &destroy) == -1 && frame == 0 && destroy == 0);
+        g_fake.noMatchExe[0] = 0;
+        CoXlTestMatWaitTimed(0, 0);
     }
 
     if (g_failed) { printf("matwait: %d check(s) failed\n", g_failed); return 1; }

@@ -2460,6 +2460,9 @@ static uint64_t NearJobRun(uint64_t a, uint64_t b, uint64_t c, uint64_t element)
         if (depth > g_nearJob.stackMax) g_nearJob.stackMax = depth;
     }
     p->ok = 0; p->phase = 0; p->notesLen = 0; p->notesLost = 0; p->notes[0] = 0;
+    /* a thread that helps in a wait (an LP, IO or file thread's mode-2 help) can run this inside another job that set
+     * the slot: that job's runner comes back when this one is done */
+    void* const outer = TlsGetValue(g_tileRunnerTls);
     TlsSetValue(g_tileRunnerTls, r);
     AcquireSRWLockShared(&g_sectionLock);
     if (NearJobLive())
@@ -2480,7 +2483,7 @@ static uint64_t NearJobRun(uint64_t a, uint64_t b, uint64_t c, uint64_t element)
         if (p->ok) g_nearJob.built++; else g_nearJob.failed++;
     }
     ReleaseSRWLockShared(&g_sectionLock);
-    TlsSetValue(g_tileRunnerTls, NULL);
+    TlsSetValue(g_tileRunnerTls, outer);
     MemoryBarrier();
     InterlockedExchange(&p->state, NEAR_JOB_BUILT);
     InterlockedDecrement(&g_nearJob.inflight);
@@ -2488,10 +2491,11 @@ static uint64_t NearJobRun(uint64_t a, uint64_t b, uint64_t c, uint64_t element)
     return 0;
 }
 
-/* The two long tile jobs' queue, r9d + 3 x arg5 (exe 0x6261C9): 14, popped only by the two LP workers (roles 16 and 17
- * poll 12..14 alone, exe 0x626AE2 / 0x627372; no other role's list holds 12..14), woken through [pool+0xE0] (0x625446).
- * On 10 a regular worker spinning in a mode-2 wait (0x627160 polls 9 0 3 6 10 1 4 7, each list LIFO) can take the job
- * inside a render-side job (the channel 7 sync point 0x5799D0 waits at 0x579A2A), which then ends only with it.
+/* The two long tile jobs' queue, r9d + 3 x arg5 (exe 0x6261C9): 14, which the game thread (role 0), the render thread
+ * (1) and the regular workers (2..N+1) never poll: only roles from N+2 up do (unsigned, at 0x626A03 / 0x627282: the LP
+ * workers woken through [pool+0xE0] at 0x625446, IO and command threads, unregistered threads). On 10 a regular
+ * worker spinning in a mode-2 wait (0x627160 polls 9 0 3 6 10 1 4 7, each list LIFO) can take the job inside a
+ * render-side job (the channel 7 sync point 0x5799D0 waits at 0x579A2A), which then ends only with it.
  * Research: HELLFORGE_XL_NEAR_BGQUEUE=0 keeps queue 10; "auto" starts on 10 and goes to 14 after two builds stalled
  * ("0 frames" with stall samples) or four in a row without; a build keeps its first job's queue. */
 enum { NEAR_BG_OFF, NEAR_BG_ON, NEAR_BG_AUTO };
