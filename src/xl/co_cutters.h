@@ -50,12 +50,26 @@ void co_cutters_seen(CoCuttersSeen* out);
 #define CO_CUTTERS_ALIVE_MS 1000u     /* with no tick this long the game adds a new cutter itself, as it always did */
 #define CO_CUTTERS_QUEUE 0x4A0u       /* AI world: its queued changes; a navmesh run takes them all as it begins (0xBB1430) */
 #define CO_CUTTERS_RUN 0x4B0u         /* AI world: the navmesh run in flight, 0 from its commit to the next start (0xBD1190) */
+#define CO_CUTTERS_ADDED 0x230u       /* AI world: its added cutters, dword; each remove scans them (0xBE8D32) */
 
 /* Arms the record with `cap` cutters on and `adds` a tick at most. NULL, or why not: the engine's code at the
  * sites above and at the switch 0x812AE0 is not the code this was made for, or no memory. */
 const char* co_cutters_record_arm(uintptr_t exe, uint32_t cap, uint32_t adds);
 /* A complex level is live, or no longer: leaving drops every record. Returns the records dropped. */
 uint32_t co_cutters_live(int complex);
+/* After co_cutters_live(1), at the level's init: `on` holds the forest's makes back from then on, before any tick
+ * (a level's first trees were added by the game during its load and later removed at the game's cost). Only while
+ * switching. The first tick that switches ends it; co_cutters_load_watch flushes if none comes. */
+#define CO_CUTTERS_LOAD_MS 180000u         /* no tick this long after the level's init: the held ones go on */
+#define CO_CUTTERS_LOAD_MISSION_MS 10000u  /* nor this long after its play began */
+void co_cutters_load_hold(int on, uint32_t nowMs);
+/* Game thread, every frame of a live level: with the load's hold still on and no tick past the bounds above, every
+ * held cutter is switched on (the game's way) and the hold ends. Not while the AI step is in flight. Returns the
+ * cutters switched on by this call. */
+uint32_t co_cutters_load_watch(int inMission, uint32_t nowMs);
+/* This level's load hold: on now, and how it ended; makes held back before the first tick; cutters the watch switched on. */
+typedef struct CoCuttersLoad { int holding, ended; uint32_t at; uint64_t held, flushed; } CoCuttersLoad; /* ended: 1 by a tick, 2 by the watch */
+void co_cutters_load_seen(CoCuttersLoad* out);
 /* 1: makes are held back and the tick switches cutters on (and off, when it is given removes). 0: record only. */
 void co_cutters_switch(int on);
 /* For the hook on the engine's swap of an AI world's queued changes (0xBB1430), before the original, any thread:
@@ -83,10 +97,15 @@ typedef struct CoCuttersTick
     int skipped;
     uint64_t held, stock, atOnce, noWorld, sentOn, sentOff, skips;
     uint32_t took; /* navmesh runs that began with changes of the mission's world */
+    /* the AI world's added cutters and queued changes as the tick read them (0 / -1 when not read), and the removes
+     * the tick was allowed (co_cutset_removes) */
+    uint32_t added, allowed; int queued;
+    uint32_t addsAllowed; /* co_cutset_adds: the adds the queue left room for */
 } CoCuttersTick;
 /* One tick of the set over these centres, game thread: what it would add and remove, counted as done. Record only:
  * nothing is sent to the engine. Switching: sent to CO_CUTTERS_SWITCH in batches, unless the AI step is in flight
- * (then nothing is chosen). 0 when not armed or no complex level is live. */
+ * (then nothing is chosen). `removes` is the most a tick; co_cutset_removes lowers it by the AI world's added cutters
+ * and its queue. 0 when not armed or no complex level is live. */
 int co_cutters_tick(const CoCutCentre* centres, uint32_t count, uint32_t nowMs, uint32_t removes, CoCuttersTick* out);
 
 #ifdef CO_TEST

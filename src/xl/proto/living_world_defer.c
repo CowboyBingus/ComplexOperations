@@ -211,7 +211,8 @@ static void LwInstallRender(void); /* living_world_render.c */
 static void LwInstallAllocStats(void); /* living_world_allocstats.c */
 static void LwInstallSrwWake(void); /* living_world_srwwake.c */
 static void LwInstallRegistry(void); /* living_world_registry.c */
-static void LwCutInit(void); /* living_world_cutters.c, research only */
+static void LwCutInit(void); /* living_world_cutters.c */
+static void LwStepInit(void); /* living_world_step.c */
 static void LwInstallZeroBox(void); /* living_world_zerobox.c */
 static void LwInstallVbox(void); /* living_world_vbox.c */
 static void LwInstallTasks(void); /* living_world_tasks.c, test only */
@@ -225,8 +226,10 @@ static void LwInstallDefer(void)
     if (!LwEnabled() || g_lwDefer.installed) return;
     /* the frame-time levers a release ships, each acting on complex levels only (LwLiveSet) */
     LwInstallVbox(); LwCorpseInit(); LwAibInit();
+    LwCutInit(); /* the trees' navmesh cutters only near players, units, squads and garrisons */
+    LwStepInit(); /* the AI step's parts and the navmesh queue by kind, measured only */
 #ifdef CO_RESEARCH /* levers without a leave proof or a verdict, and the instruments: a release installs none of them */
-    LwInstallAllocStats(); LwInstallSrwWake(); LwInstallRegistry(); LwCutInit();
+    LwInstallAllocStats(); LwInstallSrwWake(); LwInstallRegistry();
     LwInstallTasks();
     LwInstallBp(); LwInstallPairs(); LwInstallBpBuild(); LwInstallSemCap(); LwInstallRenderHelp(); LwInstallFrec(); LwInstallAnimRate(); LwInstallFrameHeap();
     LwInstallAlloc();

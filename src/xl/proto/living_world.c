@@ -6290,7 +6290,9 @@ static void LwLiveSet(int complex)
 #include "living_world_pairs.c" /* after living_world_corpse.c: dead ragdoll bones keep only ground and trigger pairs */
 #include "living_world_aibudget.c" /* the AI path threads' time a step, raised while requests wait */
 #include "living_world_fparts.c" /* a slow frame's line: the AI joins and the engine's world update */
-#include "living_world_cutters.c" /* research: the trees' navmesh cutters near players and squads, record only */
+#include "living_world_joins.c" /* issue C's 10 s lines: the AI joins by the budget the step ran with, and the units */
+#include "living_world_cutters.c" /* the trees' navmesh cutters only near players, units, squads and garrisons */
+#include "living_world_step.c" /* issue C's 30 s lines: the AI step's parts, and the navmesh queue by kind */
 #include "living_world_semcap.c" /* test: the worker wake tokens capped at the worker count */
 #include "living_world_srwwake.c" /* Wine's shared SRW release without the needless wake (KB frame-cost-swarm-cap2) */
 #include "living_world_registry.c" /* the unit registry lookup without its lock; old arrays kept */
