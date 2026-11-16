@@ -2,6 +2,7 @@
  * build only of a tile clear of every merge camera, the keep time refreshed while building, one release a frame; the
  * trim once a burst of events is 8 frames past, outside a build, only on the reviewed code. Run on the fake game and exe. */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <windows.h>
 
@@ -29,6 +30,14 @@ uint32_t CoXlTestMoverFrames(void);
 void CoXlTestMoverWorld(uint64_t world);
 void CoXlTestMoverTileHandle(int slot, uint64_t handle);
 int CoXlTestDrainPins(void);
+void CoXlTestMatWait(uintptr_t exe, void* orig);
+void CoXlTestMatWaitTimed(uintptr_t frameAt, uintptr_t destroyAt);
+uint8_t CoXlTestMatWaitFrom(int in, uint64_t r, uint32_t id, uintptr_t from);
+void CoXlTestMatRes(const void* fns, int ready, void* teardown);
+void CoXlTestTerrainSplit(void* enter, void* leave, void* copyFree, void* remove, uint64_t slot, int ready);
+void CoXlTestTerrainTailTick(void);
+uint32_t CoXlTestTerrainTailPending(void);
+int CoXlTestMoveFreeTagged(uint64_t terrain);
 
 static int g_failed;
 static const char* g_case;
@@ -64,7 +73,28 @@ static const struct { uint32_t at; const char* bytes; } kDrain[] = {
 };
 static uint8_t g_world[0x230200], g_rw[0x10], g_renderer[0x1C00], g_device[0x400], g_api[0x20], g_table[0x200];
 static uint64_t g_destroyWorld, g_destroyHandle;
-static void TestDestroy(uint64_t world, uint64_t handle) { g_destroyWorld = world; g_destroyHandle = handle; }
+static uintptr_t g_destroyFence; /* set: the destroy waits there as 0x1ADEA0 does (0x1ADFB3), through the 0x106030 hook */
+static void TestDestroy(uint64_t world, uint64_t handle)
+{
+    g_destroyWorld = world; g_destroyHandle = handle;
+    if (g_destroyFence != 0) CoXlTestMatWaitFrom(0, 0, 1, g_destroyFence);
+}
+static uint8_t SlowWait(uint64_t r, uint32_t id) { (void)r; (void)id; Sleep(20); return 1; }
+/* The split's stand-ins (xl_free.c): the terrain lock, the CPU copy free, the remove, the fence and the game's wait. */
+static int g_splitCalls, g_splitWaits;
+static uint32_t g_destroyRid;
+static void SplitLock(uint64_t cs) { (void)cs; }
+static void SplitPair(uint64_t a, uint64_t b) { (void)a; (void)b; g_splitCalls++; }
+static uint32_t SplitFence(uint64_t r, uint8_t flag) { (void)r; (void)flag; g_splitCalls++; return 3; }
+static uint8_t SplitWait(uint64_t r, uint32_t id) { (void)r; (void)id; g_splitWaits++; return 1; }
+static void SplitDestroy(uint64_t world, uint64_t handle) { g_destroyWorld = world; g_destroyHandle = handle; memcpy(&g_destroyRid, (void*)(uintptr_t)(handle + 4), 4); }
+/* The number after the last `key` in the log, -1 none. */
+static double LoggedMs(const char* key)
+{
+    const char* at = NULL;
+    for (const char* p = strstr(g_fake.log, key); p != NULL; p = strstr(p + 1, key)) at = p;
+    return at != NULL ? atof(at + strlen(key)) : -1.0;
+}
 
 static void Put32(uint8_t* at, uint32_t v) { memcpy(at, &v, 4); }
 /* The render thread in buffer `render`, the game's `game`, `queued` messages there, `jobs` device jobs. */
@@ -120,6 +150,9 @@ int main(void)
         CHECK(!CoXlTestMoverLive(1) && CoXlTestMoverLive(2)); /* one a frame */
         CHECK(fake_host_logged("difficulty: moving tiles: the tile of cell (0, -2) released"));
         CHECK(fake_host_logged("on the game thread, during the build of cell (2, 1) (mover replay, near state 2)"));
+        CHECK(fake_host_logged("difficulty: moving tiles: the release's parts (replay): the coarse raise ") && fake_host_logged("ms, the hide union ") &&
+            fake_host_logged(", the layer change and replacement queued ") && fake_host_logged(", the frees queued ") && fake_host_logged(", the ground check "));
+        CHECK(fake_host_logged("(its fence wait, exe 0x1ADFB3: untimed)")); /* no 0x106030 hook here */
         CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(2));
         CHECK(CoXlTestMoverRelease(now) == 0);
         CHECK(CoXlTestMoverLive(0)); /* the drop tile stays */
@@ -486,6 +519,92 @@ int main(void)
         CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(1)); /* busy, but not held */
         CHECK(g_destroyWorld == (uint64_t)(uintptr_t)g_world && g_destroyHandle == 0x1234);
         CHECK(fake_host_logged("ms on the game thread; the destroy alone ") && fake_host_logged(" ms, the render queue not read"));
+    }
+
+    g_case = "the release's parts: each its own, the destroy's fence wait inside the destroy, counted again each release";
+    {
+        DrainWorld((uint64_t)(uintptr_t)TestDestroy);
+        CoXlTestMatWait((uintptr_t)exe, (void*)SlowWait);
+        CoXlTestMatWaitTimed(0, (uintptr_t)exe + 0x1ADFB8u);
+        g_destroyFence = (uintptr_t)exe + 0x1ADFB8u;
+        CoXlTestMover(OX, OY, MV_IDLE, 0, 0, 0);
+        CoXlTestMoverTile(0, 0, 0, 0);
+        for (int k = 1; k < 8; k++) CoXlTestMoverTile(k, 9 + k, 9, now);
+        CoXlTestMoverTile(1, 0, -2, now - KEEP_MS - 1000);
+        CoXlTestMoverTile(2, 1, -2, now - KEEP_MS - 1000);
+        CoXlTestMoverTileHandle(1, 0x1234); CoXlTestMoverTileHandle(2, 0x1235);
+        CoXlTestMoverPlayer(px, py);
+        g_fake.log[0] = 0;
+        CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(1));
+        const double fence = LoggedMs("(its fence wait, exe 0x1ADFB3: "), destroy = LoggedMs(", the destroy ");
+        CHECK(fake_host_logged("the release's parts (no build): the coarse raise "));
+        CHECK(fence >= 15.0 && destroy >= fence && LoggedMs("the coarse raise ") < 5.0 && LoggedMs(", the frees queued ") < 5.0 && LoggedMs(", the ground check ") < 5.0);
+        g_destroyFence = 0;
+        g_fake.log[0] = 0;
+        CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(2));
+        CHECK(LoggedMs("(its fence wait, exe 0x1ADFB3: ") >= 0.0 && LoggedMs("(its fence wait, exe 0x1ADFB3: ") < 5.0 && LoggedMs(", the destroy ") < 5.0);
+        CoXlTestMatWaitTimed(0, 0);
+    }
+
+    g_case = "a split destroy: no held frame for a busy render queue, the head now, the game's destroy two frame kicks later; a bounds tree's held and whole";
+    {
+        static uint8_t h1[0x100], h2[0x100];
+        uint64_t fns[11] = {0};
+        fns[6] = (uint64_t)(uintptr_t)SplitFence; fns[7] = (uint64_t)(uintptr_t)SplitWait;
+        DrainWorld((uint64_t)(uintptr_t)SplitDestroy); /* busy: the render thread a buffer behind, 3 messages queued */
+        CoXlTestMatRes(fns, 1, NULL);
+        CoXlTestTerrainSplit((void*)SplitLock, (void*)SplitLock, (void*)SplitPair, (void*)SplitPair, (uint64_t)(uintptr_t)SplitDestroy, 1);
+        Put32(g_renderer + 0x1A50, 500);
+        Put32(h1 + 4, 0x4321); Put32(h2 + 4, 0x4322);
+        const uint64_t cow = 0x5000;
+        memcpy(h2 + 0x40, &cow, 8);
+        CoXlTestMover(OX, OY, MV_IDLE, 0, 0, 0);
+        CoXlTestMoverTile(0, 0, 0, 0);
+        for (int k = 1; k < 8; k++) CoXlTestMoverTile(k, 9 + k, 9, now);
+        CoXlTestMoverTile(1, 0, -2, now - KEEP_MS - 1000);
+        CoXlTestMoverTile(2, 1, -2, now - KEEP_MS - 1000);
+        CoXlTestMoverTileHandle(1, (uint64_t)(uintptr_t)h1); CoXlTestMoverTileHandle(2, (uint64_t)(uintptr_t)h2);
+        CoXlTestMoverPlayer(px, py);
+        g_destroyHandle = 0; g_splitCalls = g_splitWaits = 0;
+        g_fake.log[0] = 0;
+        CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(1) && CoXlTestMoverLive(2));
+        CHECK(g_destroyHandle == 0 && g_splitCalls == 3 && g_splitWaits == 0 && CoXlTestTerrainTailPending() == 1);
+        CHECK(CoXlTestMoveFreeTagged((uint64_t)(uintptr_t)h1) == 1); /* its textures wait for this rest */
+        CHECK(fake_host_logged("ms (its head; the rest after its fence later), the render queue not held for (the destroy is split at its fence)"));
+        CHECK(fake_host_logged("(its fence wait, exe 0x1ADFB3: none (split))"));
+        Put32(g_renderer + 0x1A50, 501);
+        CoXlTestTerrainTailTick();
+        CHECK(g_destroyHandle == 0);
+        Put32(g_renderer + 0x1A50, 502);
+        CoXlTestTerrainTailTick();
+        CHECK(g_destroyHandle == (uint64_t)(uintptr_t)h1 && g_destroyWorld == (uint64_t)(uintptr_t)g_world && g_destroyRid == 0xFFFFFFu && g_splitWaits == 1);
+        CHECK(CoXlTestTerrainTailPending() == 0 && fake_host_logged("2 frame kick(s) and 2 poll(s) later; 0 pending, 1 split, 1 completed"));
+        g_destroyHandle = 0;
+        g_fake.log[0] = 0;
+        CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(2)); /* another slot than the reviewed: the queue is not read */
+        CHECK(g_destroyHandle == (uint64_t)(uintptr_t)h2 && g_destroyRid == 0x4322 && CoXlTestTerrainTailPending() == 0);
+        CHECK(fake_host_logged(" ms (not split: its height bounds tree), the render queue not read"));
+        /* The reviewed slot: a tile whose destroy keeps its fence wait keeps the drain hold; one that will be split does
+         * not. (Its rest would call the fake exe, so the list is cleared, not run.) */
+        DrainWorld(fence);
+        CHECK(CoXlTestDrainPins() == 1);
+        CoXlTestMatRes(fns, 1, NULL);
+        CoXlTestTerrainSplit((void*)SplitLock, (void*)SplitLock, (void*)SplitPair, (void*)SplitPair, fence, 1);
+        CoXlTestMover(OX, OY, MV_IDLE, 0, 0, 0);
+        CoXlTestMoverTile(0, 0, 0, 0);
+        for (int k = 1; k < 8; k++) CoXlTestMoverTile(k, 9 + k, 9, now);
+        CoXlTestMoverTile(1, 0, -2, now - KEEP_MS - 1000);
+        CoXlTestMoverTileHandle(1, (uint64_t)(uintptr_t)h2);
+        CoXlTestMoverPlayer(px, py);
+        for (int f = 0; f < 3; f++) CHECK(CoXlTestMoverRelease(now) == 1 && CoXlTestMoverLive(1));
+        memset(h2 + 0x40, 0, 8);
+        g_splitCalls = 0;
+        g_fake.log[0] = 0;
+        CHECK(CoXlTestMoverRelease(now) == 1 && !CoXlTestMoverLive(1) && g_splitCalls == 3 && CoXlTestTerrainTailPending() == 1);
+        CHECK(fake_host_logged("(its head; the rest after its fence later), the render queue not held for (the destroy is split at its fence)"));
+        CoXlTestTerrainSplit(NULL, NULL, NULL, NULL, 0, 0);
+        CoXlTestMatRes(fns, 0, NULL);
+        memset(g_fake.image + 0x3326308u, 0, 8);
     }
 
     g_case = "the fence's pins: each pinned byte and the destroy's slot";

@@ -48,7 +48,7 @@ static uint64_t WeldFinal(uint64_t ctx, uint64_t b, uint64_t edges, uint64_t nod
     TileGuard* guard = TileGuardSelf();
     int tile = guard->thread != 0 && guard->thread == GetCurrentThreadId();
     if (InterlockedIncrement(&g_weldNotes) <= 24)
-        Note("difficulty: weld research: FinalizeVoronoi's weld failed (%s, world %u m): edges %u (cap %u), nodes %u before (cap %u)",
+        TerrainBuildNote("difficulty: weld research: FinalizeVoronoi's weld failed (%s, world %u m): edges %u (cap %u), nodes %u before (cap %u)",
             tile ? "a terrain tile: abandoned, no level restart" : "the level", w, e[0], e[1], n[0], n[1]);
     /* a tile's failure: done for 0xF68114 (it writes the counts back into the tile's own copy of the block), the tile's
      * runner abandons the tile (its guard's weldFailed) */
@@ -61,7 +61,7 @@ static uint64_t WeldCells(uint64_t weld, uint64_t list, uint64_t count, uint64_t
     if ((uint8_t)r == 0 && InterlockedIncrement(&g_weldNotes) <= 24)
     {
         uint32_t used = 0; SafeRead(weld + DIF_WELD_COUNT, &used, 4);
-        Note("difficulty: weld research: the edges' vertices did not fit (0xFB9D90; side %.0f m, %u edges, %u of 576 bucket blocks)", (double)WeldSide(weld), (uint32_t)count, used);
+        TerrainBuildNote("difficulty: weld research: the edges' vertices did not fit (0xFB9D90; side %.0f m, %u edges, %u of 576 bucket blocks)", (double)WeldSide(weld), (uint32_t)count, used);
     }
     return r;
 }
@@ -74,7 +74,7 @@ static uint64_t WeldVertex(uint64_t weld, uint64_t vertex, uint64_t out, uint64_
         uint32_t bx = 0, by = 0, held = 0; uint64_t block = 0;
         if (w > 0.0f) { int64_t x = (int64_t)(p[0] / w * 23.0f), y = (int64_t)(p[1] / w * 23.0f); bx = (uint32_t)x > 23u ? 23u : (uint32_t)x; by = (uint32_t)y > 23u ? 23u : (uint32_t)y; }
         if (!SafeRead(weld + 8ull * (by * 24u + bx), &block, 8) && block != 0) SafeRead(block, &held, 4);
-        Note("difficulty: weld research: a vertex did not fit (0xFB9B10; side %.0f m, at %.1f, %.1f: bucket %u, %u holds %u)", (double)w, (double)p[0], (double)p[1], bx, by, held);
+        TerrainBuildNote("difficulty: weld research: a vertex did not fit (0xFB9B10; side %.0f m, at %.1f, %.1f: bucket %u, %u holds %u)", (double)w, (double)p[0], (double)p[1], bx, by, held);
     }
     return r;
 }
@@ -85,7 +85,7 @@ static uint64_t WeldEdges(uint64_t weld, uint64_t b, uint64_t edges, uint64_t no
     {
         uint32_t e[2] = {0, 0}, n[2] = {0, 0}, used = 0;
         SafeRead(edges, e, 8); SafeRead(nodes, n, 8); SafeRead(weld + DIF_WELD_COUNT, &used, 4);
-        Note("difficulty: weld research: the edges' endpoints failed (0xFBB180; side %.0f m): edges %u, nodes %u (cap %u), %u of 576 bucket blocks", (double)WeldSide(weld), e[0], n[0], n[1], used);
+        TerrainBuildNote("difficulty: weld research: the edges' endpoints failed (0xFBB180; side %.0f m): edges %u, nodes %u (cap %u), %u of 576 bucket blocks", (double)WeldSide(weld), e[0], n[0], n[1], used);
     }
     return r;
 }

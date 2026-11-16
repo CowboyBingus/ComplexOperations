@@ -15,6 +15,7 @@
 void co_shim_install(void) { InstallSafeRead(); }
 int co_safe_read(uintptr_t address, void* buffer, size_t size) { return SafeRead(address, buffer, size); }
 int co_safe_find(uintptr_t list, size_t count, uint64_t value) { return SafeFind(list, count, value); }
+int co_safe_owns(const EXCEPTION_POINTERS* info) { return SafeReadOwns(info) != NULL; }
 
 /* ---- logs ---------------------------------------------------------------------------------------------------------- */
 

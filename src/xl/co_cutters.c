@@ -53,6 +53,7 @@ static const Pin kRecordPins[] = {
     {0xBB1430u, "40 53 48 83 EC 20 48 8B D9 48 8B 89 A0 04 00 00"},
     {0xAD4740u, "48 8B 01 8B 40 08 03 41 1C C3"},
     {0xBD1190u, "48 83 B9 B0 04 00 00 00 0F 95 C0 C3"},
+    {0xBE8D32u, "48 63 86 30 02 00 00 33 FF 85 C0 7E 24 48 8B D0 8B CF 48 8B 86 28 02 00 00"},
 };
 
 /* The make can run on a thread other than the game's (the forest's spawn has several callers), so the set has its
@@ -72,6 +73,7 @@ static struct
     void* memory;
     CoCutTick tick;
     uint64_t trees, others, unbound, destroyed;
+    volatile LONG loadHold; int loadEnd; uint32_t loadAt, missionAt, flushCursor; uint64_t loadHeld, flushed; /* this level's load */
 } g_rec;
 
 /* The mission world's AI world and pool as they read now; 1 when there are both. The engine's switch reads the
@@ -123,7 +125,12 @@ static void Recorded(uint32_t handle, int tree, float x, float y, int wanted, in
         g_rec.trees++;
         if (lit) { g_rec.set.epoch = (uint32_t)g_rec.took; co_cutset_on(&g_rec.set, handle); g_rec.stock++; }
     }
-    if (held && made) g_rec.held++;
+    if (held && made && !g_rec.alive && g_rec.loadEnd == 2)
+    { /* held as the load's, but the watch's flush ran during this make: no tick is there to add it */
+        g_rec.set.epoch = (uint32_t)g_rec.took; co_cutset_on(&g_rec.set, handle); g_rec.sw(&handle, 1, 1);
+        g_rec.held++; g_rec.loadHeld++; g_rec.flushed++; g_rec.sentOn++;
+    }
+    else if (held && made) { g_rec.held++; if (g_rec.loadHold && !g_rec.alive) g_rec.loadHeld++; }
     else if (held && Worlds(&world, &pool)) { g_rec.sw(&handle, 1, 1); g_rec.atOnce++; }
     else if (held) g_rec.noWorld++;
     ReleaseSRWLockExclusive(&g_rec.lock);
@@ -131,9 +138,24 @@ static void Recorded(uint32_t handle, int tree, float x, float y, int wanted, in
 
 /* A make is held back only while a tick is due to add it: with the tick gone (a paused mission, a level still
  * loading) the game adds the cutter itself, so no tree is ever left without one for long. */
+/* The AI world's changes queued for its next run, as 0xAD4740 counts them, -1 when they do not read; and its added
+ * cutters, the length every remove scans ([H+0x230], 0xBE8D32), 0 when it does not read. */
+static int Queued(uintptr_t world)
+{
+    uintptr_t q = 0, a = 0; int32_t n = 0, m = 0;
+    if (co_safe_read(world + CO_CUTTERS_QUEUE, &q, 8) || q == 0 || co_safe_read(q, &a, 8) || a == 0 || co_safe_read(a + 8, &n, 4) || co_safe_read(q + 0x1C, &m, 4)) return -1;
+    return n + m;
+}
+static uint32_t Added(uintptr_t world)
+{
+    int32_t n = 0;
+    return co_safe_read(world + CO_CUTTERS_ADDED, &n, 4) || n < 0 ? 0u : (uint32_t)n;
+}
+
 static int Holds(float x, float y)
 {
-    if (!g_rec.switching || !g_rec.alive || (uint32_t)GetTickCount() - (uint32_t)g_rec.tickAt > CO_CUTTERS_ALIVE_MS) return 0;
+    const int ticking = g_rec.alive && (uint32_t)GetTickCount() - (uint32_t)g_rec.tickAt <= CO_CUTTERS_ALIVE_MS;
+    if (!g_rec.switching || !(ticking || (g_rec.loadHold && !g_rec.alive))) return 0;
     AcquireSRWLockExclusive(&g_rec.lock);
     const int holds = g_rec.live && Bound() && co_cutset_takes(&g_rec.set, x, y);
     ReleaseSRWLockExclusive(&g_rec.lock);
@@ -278,13 +300,47 @@ uint32_t co_cutters_live(int complex)
 {
     uint32_t dropped = 0;
     InterlockedExchange(&g_rec.live, complex != 0);
-    InterlockedExchange(&g_rec.alive, 0); /* a level's first trees are the game's until its first tick */
+    InterlockedExchange(&g_rec.alive, 0); /* a level's first trees are the game's until its first tick, */
+    InterlockedExchange(&g_rec.loadHold, 0); /* unless co_cutters_load_hold says otherwise */
     if (complex || !g_rec.armed) return 0;
     AcquireSRWLockExclusive(&g_rec.lock);
     dropped = g_rec.set.records;
     co_cutset_clear(&g_rec.set);
     ReleaseSRWLockExclusive(&g_rec.lock);
     return dropped;
+}
+
+void co_cutters_load_hold(int on, uint32_t nowMs)
+{
+    if (!g_rec.armed) return;
+    AcquireSRWLockExclusive(&g_rec.lock);
+    g_rec.loadAt = nowMs; g_rec.missionAt = 0; g_rec.flushCursor = 0; g_rec.loadHeld = g_rec.flushed = 0; g_rec.loadEnd = 0;
+    InterlockedExchange(&g_rec.loadHold, on && g_rec.live && g_rec.switching);
+    ReleaseSRWLockExclusive(&g_rec.lock);
+}
+
+uint32_t co_cutters_load_watch(int inMission, uint32_t nowMs)
+{
+    if (!g_rec.armed || g_cut.exe == 0 || !g_rec.loadHold || g_rec.alive) return 0;
+    if (inMission && g_rec.missionAt == 0) g_rec.missionAt = nowMs != 0 ? nowMs : 1;
+    if (!(g_rec.missionAt != 0 && nowMs - g_rec.missionAt > CO_CUTTERS_LOAD_MISSION_MS) && nowMs - g_rec.loadAt <= CO_CUTTERS_LOAD_MS) return 0;
+    /* the step's threads read the AI world's cutters without its lock (as in the tick) */
+    if (*(const uintptr_t*)(g_cut.exe + CO_CUTTERS_AI_WORLDS + 0x80u * CO_CUTTERS_WORLD + CO_CUTTERS_STEP_TASK) != 0) return 0;
+    uint32_t sent = 0, batch[CO_CUTSET_BATCH], n;
+    AcquireSRWLockExclusive(&g_rec.lock);
+    if (g_rec.live && Bound()) /* a world that went took its records along: nothing is held then */
+        while ((n = co_cutset_flush(&g_rec.set, &g_rec.flushCursor, batch, CO_CUTSET_BATCH)) != 0) { g_rec.sw(batch, n, 1); sent += n; }
+    g_rec.flushed += sent; g_rec.sentOn += sent; g_rec.loadEnd = 2;
+    InterlockedExchange(&g_rec.loadHold, 0);
+    ReleaseSRWLockExclusive(&g_rec.lock);
+    return sent;
+}
+
+void co_cutters_load_seen(CoCuttersLoad* out)
+{
+    AcquireSRWLockExclusive(&g_rec.lock);
+    out->holding = g_rec.loadHold != 0; out->ended = g_rec.loadEnd; out->at = g_rec.loadAt; out->held = g_rec.loadHeld; out->flushed = g_rec.flushed;
+    ReleaseSRWLockExclusive(&g_rec.lock);
 }
 
 int co_cutters_tick(const CoCutCentre* centres, uint32_t count, uint32_t nowMs, uint32_t removes, CoCuttersTick* out)
@@ -301,17 +357,28 @@ int co_cutters_tick(const CoCutCentre* centres, uint32_t count, uint32_t nowMs, 
     const CoCutSet* s = &g_rec.set;
     out->hooked = g_cut.make != NULL && g_cut.destroy != NULL;
     out->bound = g_cut.exe != 0 && Bound();
-    out->skipped = skipped;
+    out->skipped = skipped; out->added = out->allowed = out->addsAllowed = 0; out->queued = -1;
     if (skipped) { g_rec.skips++; g_rec.tick.adds = g_rec.tick.removes = g_rec.tick.shed = g_rec.tick.waiting = g_rec.tick.over = 0; g_rec.tick.capped = 0; }
-    else { g_rec.set.epoch = (uint32_t)g_rec.took; co_cutset_tick(&g_rec.set, centres, count, nowMs, removes, &g_rec.tick); }
+    else
+    {
+        /* the removes' share of the tick shrinks as the scans they cost grow, and waits while the queue is long */
+        out->added = out->bound ? Added(g_rec.set.world) : 0; out->queued = out->bound ? Queued(g_rec.set.world) : -1;
+        out->allowed = removes = out->bound ? co_cutset_removes(out->added, out->queued, removes) : 0;
+        /* and the adds keep the queue under the drain's start: a landing's disc goes over seconds */
+        const uint32_t adds = g_rec.set.adds;
+        g_rec.set.adds = out->addsAllowed = out->bound ? co_cutset_adds(out->queued, adds) : adds;
+        g_rec.set.epoch = (uint32_t)g_rec.took; co_cutset_tick(&g_rec.set, centres, count, nowMs, removes, &g_rec.tick);
+        g_rec.set.adds = adds;
+    }
     if (g_rec.switching && !skipped)
     {
         /* under the set's lock: a destroy on another thread waits in its hook, so no handle here is stale */
         for (uint32_t k = 0; k < g_rec.tick.adds; k += CO_CUTSET_BATCH)
             g_rec.sw(g_rec.tick.add + k, g_rec.tick.adds - k < CO_CUTSET_BATCH ? g_rec.tick.adds - k : CO_CUTSET_BATCH, 1);
-        if (g_rec.tick.removes != 0) g_rec.sw(g_rec.tick.remove, g_rec.tick.removes, 0);
+        for (uint32_t k = 0; k < g_rec.tick.removes; k += CO_CUTSET_BATCH)
+            g_rec.sw(g_rec.tick.remove + k, g_rec.tick.removes - k < CO_CUTSET_BATCH ? g_rec.tick.removes - k : CO_CUTSET_BATCH, 0);
         g_rec.sentOn += g_rec.tick.adds; g_rec.sentOff += g_rec.tick.removes;
-        if (out->bound && out->hooked) { InterlockedExchange(&g_rec.tickAt, (LONG)nowMs); InterlockedExchange(&g_rec.alive, 1); }
+        if (out->bound && out->hooked) { InterlockedExchange(&g_rec.tickAt, (LONG)nowMs); InterlockedExchange(&g_rec.alive, 1); if (InterlockedExchange(&g_rec.loadHold, 0)) g_rec.loadEnd = 1; }
     }
     out->held = g_rec.held; out->stock = g_rec.stock; out->atOnce = g_rec.atOnce; out->noWorld = g_rec.noWorld; out->took = (uint32_t)g_rec.took; out->stranded = s->stranded; out->sentOn = g_rec.sentOn; out->sentOff = g_rec.sentOff; out->skips = g_rec.skips;
     out->makesOff = g_rec.makesPast; out->destroysOff = g_rec.destroysPast; out->threadsOff = 0;

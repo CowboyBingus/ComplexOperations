@@ -8,15 +8,29 @@
 
 #include "harness/fake_host.h"
 #include "xl/co_forest.h"
+#include "xl/co_framecost.h"
 #include "xl/co_shim.h"
 
 void CoXlTestStreamSetup(uintptr_t game, uint8_t* context, uint8_t* array, uint32_t count);
 void CoXlTestStreamSpawnSetup(void* spawn, uint8_t* pass);
 void CoXlTestStreamDue(uint32_t i, uint64_t unit);
+void CoXlTestStreamFloorDue(uint32_t* due, uint32_t* spawned);
 void CoXlTestStreamSpawnDue(void);
+uint32_t CoXlTestStreamChange(unsigned long long now, int layerBusy, unsigned long long* next);
+void CoXlTestStreamChangeAt(unsigned long long next);
+void CoXlTestStreamRemoveWait(unsigned long long at, int lastKind);
+uint32_t CoXlTestStreamDrain(double ms, uint32_t* waiting);
 void CoXlTestStreamSpawned(uint32_t i, int* spawned, int* due);
 void CoXlTestStreamTrees(uint32_t* holds, uint32_t* most, uint32_t* cursor);
 int CoXlTestWindowTreesOver(float share);
+int CoXlTestStreamSpawnInto(uint32_t layer, double ms, uint32_t most);
+void CoXlTestStreamMakeEstimate(double perLocation);
+uint32_t CoXlTestStreamSpawnedIn(void);
+uint32_t CoXlTestStreamSpawnCaps(void);
+uint32_t CoXlTestStreamLayerOf(uint32_t i);
+void CoXlTestStreamExpiredSet(uint32_t n);
+int CoXlTestStreamDropPush(uint32_t i);
+void CoXlTestStreamDistance(uint32_t i, float distance2);
 
 static int g_failed;
 static const char* g_case;
@@ -76,7 +90,7 @@ static uint8_t Spawn(uint8_t* pass, uint8_t* record, uint8_t* context)
     return 1;
 }
 
-static uint8_t g_context[0x100], g_pass[0x100], g_array[8 * 0xE0];
+static uint8_t g_context[0x100], g_pass[0x100], g_array[24 * 0xE0];
 /* A captured level of `count` locations, each with a stamp unit in the world above; none due yet. */
 static void Level(uint32_t count)
 {
@@ -164,6 +178,147 @@ int main(void)
     CoXlTestStreamSpawned(1, &spawned, &due);
     CHECK(spawned);
     CHECK(!CoXlTestWindowTreesOver(0.80f));
+
+    Start("the spawns go in a change frame, none while a layer fill runs, and a frame that spawned nothing leaves the next free");
+    Level(2);
+    CoXlTestStreamDue(0, unit);
+    CoXlTestStreamDue(1, unit);
+    unsigned long long next = 7;
+    CoXlTestStreamChangeAt(0);
+    CHECK(CoXlTestStreamChange(1000, 1, &next) == 0 && g_calls == 0 && next == 0);
+    CHECK(CoXlTestStreamChange(1001, 0, &next) == 1 && g_calls == 1 && next == 1251);
+    CoXlTestStreamSpawned(1, &spawned, &due);
+    CHECK(spawned);
+
+    /* Removals and spawns never share a frame: a removal frame (here forced) spawns nothing, the next try spawns. */
+    Start("a removal frame spawns nothing; the spawns go in the next frame");
+    Level(6);
+    CoXlTestStreamDue(0, unit);
+    CoXlTestStreamDue(1, unit);
+    CHECK(CoXlTestStreamDropPush(5));
+    CoXlTestStreamChangeAt(0);
+    CoXlTestStreamRemoveWait(1, 0);                /* the removal waited since the start of the clock: forced */
+    CHECK(CoXlTestStreamChange(3000, 0, &next) == 0 && g_calls == 0); /* slot 5 holds no unit: nothing removed, none spawned */
+    CoXlTestStreamSpawned(0, &spawned, &due);
+    CHECK(!spawned && due);
+    CHECK(CoXlTestStreamChange(3001, 0, &next) == 1 && g_calls == 1); /* the queue is empty now: a spawn frame */
+
+    /* A change frame's stamps are rebuilt in one broad phase layer: each slot keeps the layer it went to, for its removal. */
+    Start("spawns into a broad phase layer tag their slots; a held call tags none; a pass cut by its time says so");
+    Level(3);
+    CoXlTestStreamDue(0, unit);
+    CoXlTestStreamDue(1, unit);
+    CHECK(CoXlTestStreamSpawnInto(7, 1.0e9, 24) == 0 && g_calls == 1);
+    CHECK(CoXlTestStreamLayerOf(0) == 7 && CoXlTestStreamLayerOf(1) == 7 && CoXlTestStreamLayerOf(2) == 0);
+    CoXlTestStreamDue(2, unit);
+    CoXlTestStreamSpawnDue();                      /* no layer of its own: layer 4 */
+    CHECK(g_calls == 2 && CoXlTestStreamLayerOf(2) == 0 && CoXlTestStreamLayerOf(0) == 7);
+    Forest(ROOM, 0, ROOM);                         /* the forest full: the call waits */
+    Level(1);
+    CoXlTestStreamDue(0, unit);
+    CHECK(CoXlTestStreamSpawnInto(8, 1.0e9, 24) == 0 && g_calls == 0 && CoXlTestStreamLayerOf(0) == 0);
+    Forest(1000, 0, ROOM);
+    Level(20);
+    for (uint32_t k = 0; k < 20; k++) CoXlTestStreamDue(k, unit);
+    CHECK(CoXlTestStreamSpawnInto(9, 0.0, 24) == 1 && g_calls == 1);   /* one call of 16, then the time is used */
+    CHECK(CoXlTestStreamLayerOf(15) == 9 && CoXlTestStreamLayerOf(16) == 0);
+    CHECK(CoXlTestStreamSpawnInto(9, 0.0, 24) == 0 && g_calls == 2);   /* the last 4: nothing left when it stops */
+    CHECK(CoXlTestStreamLayerOf(19) == 9);
+
+    /* The units of a change frame's spawns are made in that frame (the ring's flush), about 30 bodies a location, which
+     * the spawn calls' own time does not see: a count caps the locations, and the last flush's time each the rest. */
+    Start("a change frame's spawns: at most its location count, and its time takes the units' making in");
+    Level(20);
+    for (uint32_t k = 0; k < 20; k++) CoXlTestStreamDue(k, unit);
+    CHECK(CoXlTestStreamSpawnInto(7, 1.0e9, 10) == 2 && g_calls == 1 && CoXlTestStreamSpawnedIn() == 10); /* one call of 10 */
+    CHECK(CoXlTestStreamLayerOf(9) == 7 && CoXlTestStreamLayerOf(10) == 0);
+    CHECK(CoXlTestStreamSpawnInto(7, 1.0e9, 10) == 0 && g_calls == 2 && CoXlTestStreamSpawnedIn() == 20); /* the last 10 */
+    CHECK(CoXlTestStreamSpawnCaps() == 1);
+    Level(24);
+    for (uint32_t k = 0; k < 24; k++) CoXlTestStreamDue(k, unit);
+    CHECK(CoXlTestStreamSpawnInto(7, 1.0e9, 20) == 2 && g_calls == 2 && CoXlTestStreamSpawnedIn() == 20); /* 16, then the 4 left */
+    CHECK(CoXlTestStreamLayerOf(19) == 7 && CoXlTestStreamLayerOf(20) == 0);
+    Level(20);
+    for (uint32_t k = 0; k < 20; k++) CoXlTestStreamDue(k, unit);
+    CoXlTestStreamMakeEstimate(1.0);                 /* 1 ms a location: 3 in a 3 ms frame */
+    CHECK(CoXlTestStreamSpawnInto(7, 3.0, 24) == 1 && g_calls == 1 && CoXlTestStreamSpawnedIn() == 3);
+    CHECK(CoXlTestStreamLayerOf(2) == 7 && CoXlTestStreamLayerOf(3) == 0);
+    CoXlTestStreamMakeEstimate(10.0);                /* more than the frame: the floor of 2, so a frame always moves on */
+    CHECK(CoXlTestStreamSpawnInto(7, 3.0, 24) == 1 && g_calls == 2 && CoXlTestStreamSpawnedIn() == 5);
+    CHECK(CoXlTestStreamLayerOf(4) == 7 && CoXlTestStreamLayerOf(5) == 0);
+    CoXlTestStreamMakeEstimate(0.1);                 /* 10 fit in 1 ms; 16 a call at most */
+    CHECK(CoXlTestStreamSpawnInto(7, 1.0, 24) == 1 && g_calls == 3 && CoXlTestStreamSpawnedIn() == 15);
+    Level(24);
+    for (uint32_t k = 0; k < 24; k++) CoXlTestStreamDue(k, unit);
+    CoXlTestStreamMakeEstimate(0.25);                /* a call of 16 (4 ms to make), then the 1.6 ms left make 6 */
+    CHECK(CoXlTestStreamSpawnInto(7, 5.6, 40) == 1 && g_calls == 2 && CoXlTestStreamSpawnedIn() == 22);
+    CHECK(CoXlTestStreamLayerOf(21) == 7 && CoXlTestStreamLayerOf(22) == 0);
+    CoXlTestStreamMakeEstimate(0.0);
+
+    /* At its budget's floor a change frame past the window's design (the live stamps past their removal radius more than
+     * a frame's removals, some queued) spawns only the nearest due inside kStreamInRadius, kStreamSpawnFloor of them:
+     * near content keeps coming while the removals catch up. */
+    Start("a change frame at its floor past the window's design: the nearest 2 inside 500 m, the rest wait");
+    {
+        int64_t t = 1000000;
+        co_framecost_test_reset(1000000);
+        for (int k = 0; k < 34; k++) { co_framecost_test_begin(t, 1, 1); t += 16500; } /* quiet frames of 16.5 ms: no room */
+        Level(5);
+        CoXlTestStreamDue(0, unit); CoXlTestStreamDue(1, unit); CoXlTestStreamDue(2, unit);
+        CoXlTestStreamDistance(0, 100.0f * 100.0f); CoXlTestStreamDistance(1, 400.0f * 400.0f); CoXlTestStreamDistance(2, 600.0f * 600.0f);
+        CoXlTestStreamExpiredSet(65);
+        CHECK(CoXlTestStreamDropPush(4));
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(2000, 0, &next) == 1 && g_calls == 1);       /* 0 and 1 in one call */
+        {
+            uint32_t floorDue = 9, floorSpawned = 9;
+            CoXlTestStreamFloorDue(&floorDue, &floorSpawned);
+            CHECK(floorDue == 1 && floorSpawned == 2);                   /* a judged floor frame, its 2 locations */
+        }
+        CoXlTestStreamSpawned(1, &spawned, &due); CHECK(spawned);
+        CoXlTestStreamSpawned(2, &spawned, &due); CHECK(!spawned && due);     /* 600 m: it waits */
+        CoXlTestStreamDropPush(4);                                 /* still queued: removals gather */
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(2001, 0, &next) == 0 && g_calls == 1);       /* only the far one left: nothing */
+        CoXlTestStreamSpawned(2, &spawned, &due); CHECK(!spawned && due);
+        CoXlTestStreamDropPush(4);                                 /* still queued: removals gather */
+        CoXlTestStreamExpiredSet(64);                                     /* a frame's removals: the window holds */
+        CHECK(CoXlTestStreamChange(2002, 0, &next) == 1 && g_calls == 2);
+        CoXlTestStreamSpawned(2, &spawned, &due); CHECK(spawned);
+        /* three near ones past the design: the floor's 2 */
+        Level(5);
+        CoXlTestStreamDue(0, unit); CoXlTestStreamDue(1, unit); CoXlTestStreamDue(2, unit);
+        for (uint32_t k = 0; k < 3; k++) CoXlTestStreamDistance(k, 10.0f);
+        CoXlTestStreamExpiredSet(65);
+        CHECK(CoXlTestStreamDropPush(4));
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(2300, 0, &next) == 1 && g_calls == 1);
+        CoXlTestStreamSpawned(1, &spawned, &due); CHECK(spawned);
+        CoXlTestStreamSpawned(2, &spawned, &due); CHECK(!spawned && due);
+        /* nothing queued: the window holds, all go */
+        { uint32_t left = 9; CoXlTestStreamDrain(1.0e9, &left); CHECK(left == 0); }
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(2400, 0, &next) == 1 && g_calls == 2);
+        CoXlTestStreamSpawned(2, &spawned, &due); CHECK(spawned);
+        /* room (the change frame and the one right after it are no quiet frames: 34 push the last 16.5 out): the far one
+         * goes too */
+        for (int k = 0; k < 34; k++) { co_framecost_test_begin(t, 1, 1); t += 10000; }
+        Level(5);
+        CoXlTestStreamDue(0, unit); CoXlTestStreamDue(1, unit); CoXlTestStreamDue(2, unit);
+        CoXlTestStreamDistance(2, 600.0f * 600.0f);
+        CHECK(CoXlTestStreamDropPush(4));
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(2600, 0, &next) == 1 && g_calls == 1);
+        CoXlTestStreamSpawned(2, &spawned, &due); CHECK(spawned);
+        {
+            uint32_t floorDue = 9, floorSpawned = 9;
+            CoXlTestStreamFloorDue(&floorDue, &floorSpawned);
+            CHECK(floorDue == 0 && floorSpawned == 0);                   /* a frame with room: not a floor frame's spawns */
+        }
+        for (uint32_t k = 0; k < 3; k++) CoXlTestStreamDistance(k, 0.0f);
+        CoXlTestStreamExpiredSet(0);
+        co_framecost_test_reset(0);
+    }
 
     Start("the forest near full: the call waits and its records stay due");
     Forest(ROOM - ROOM / 10u + 1u, 0, ROOM);

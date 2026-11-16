@@ -17,6 +17,25 @@ static int NearTilesDestroy(int ship);
 static void MoveBuildLeft(int ship);
 static uint64_t NearMainWorld(void);
 static int NearTilesLeft(void);
+static void MatUnitDestroy(uint64_t destroy, uint64_t world, uint64_t unit);
+static void MatResInstall(void);
+static void MatResTick(void);
+static void MatResNote(void);
+static void MatWaitInstall(void);
+static void MatWaitSetup(int in);
+static void MatWaitTick(void);
+static void MatWaitDrain(void);
+static void MatWaitNote(void);
+static int NearGeneratorRuns(void);
+static int TerrainSplitWould(uint64_t world, uint64_t h, uint64_t destroy);
+static int TerrainSplitLast(void);
+static const char* TerrainSplitWhy(void);
+static int TerrainTailPendingFor(uint64_t h);
+static int TerrainDestroySplit(uint64_t world, uint64_t h, uint64_t destroy);
+static void TerrainTailCheck(uint64_t h, int raised, float cx, float cy, int cellX, int cellY);
+static void TerrainTailTick(void);
+static void TerrainTailDrain(uint64_t world, const char* why);
+static void TerrainSplitInstall(void);
 
 /* The research log of the terrains' materials (xl_terrain_research.c); a release has none of it. */
 #ifdef CO_RESEARCH

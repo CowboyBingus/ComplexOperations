@@ -10,6 +10,7 @@
 void CoXlTestGame(uintptr_t game);
 void CoXlTestWorldLevel(uintptr_t level, uintptr_t preview);
 void CoXlTestWorldShip(void);
+int CoXlTestMoveFrameInBuild(int set);
 void CoXlTestTileReset(void);
 void CoXlTestTileTerrain(int k, uint64_t handle, uint64_t tex0, uint64_t tex1, uint64_t band);
 void CoXlTestTileBuild(int move, uint64_t dropHandle, uint64_t dropTex, int nearState);
@@ -181,7 +182,9 @@ int main(void)
     CHECK(g_destroys[0].world == (uint64_t)(uintptr_t)g_world && g_destroys[3].world == (uint64_t)(uintptr_t)g_world);
     CHECK(!MapHas(H0) && !MapHas(H3) && MapHas(HX) && Destroyed(HX) == 0); /* a terrain the mod does not hold stays */
     CHECK(g_freeCount == 0 && NoHandles());
+    CoXlTestMoveFrameInBuild(1); /* a build the level's end cuts short: the stall watch's gate closes with it */
     CoXlTestLevelGone();
+    CHECK(CoXlTestMoveFrameInBuild(-1) == 0);
     CHECK(Freed(0xB0) > DestroySeq(H1) && Freed(0xB1) > 0 && Freed(0xB2) > 0 && Freed(0xD2) > DestroySeq(H3) && Freed(0xC0) > 0);
     CHECK(CoXlTestTileTex(-1) == 0xA0); /* the drop tile's maps are not kept: the replay releases them */
 

@@ -278,7 +278,7 @@ static void ArcTable(const wchar_t* format, const ArcSet* s, const uint32_t* ind
 {
     wchar_t name[48];
     swprintf(name, 48, format, (long)g_world.levels);
-    HANDLE file = OpenLog(name);
+    HANDLE file = OpenResearchLog(name);
     if (file == INVALID_HANDLE_VALUE) return;
     char line[200]; DWORD wrote;
     int len = snprintf(line, sizeof line, "record\tid\tkind\tclass\tblock\tmission\tmain\tstays\tarc\tcluster_before\tcluster_after\tx_before\ty_before\tx_after\ty_after\tsite_class\n");

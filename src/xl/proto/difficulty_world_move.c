@@ -59,6 +59,9 @@ enum { MV_IDLE, MV_PACKAGE, MV_STAMPS, MV_KICK, MV_SETUP, MV_LOOKUP, MV_REPLAY, 
 #define MOVE_STAMP_MARGIN 512.0f /* locations this far past the tile's texels: a stamp's terrain reaches ~256 m from it */
 #define MOVE_STAMP_REACH 256.0f /* a stamp's terrain reaches about this far from it: these go in first */
 #define MOVE_UNSTAMP_MS 2.0 /* game-thread time a frame for the stamp units' destroys */
+#define MOVE_SELECT_MS 2.0  /* game-thread time a frame for the stamp units' spawns (MoveStampsSelect) */
+/* MoveStampsSelect's place between frames: the table index, then the plan's pass, bucket row/column and entry. */
+typedef struct { int on, plan; LONG level; uint32_t i; int pass, j, ii; uint32_t e, planned, past, pastInner, failed, frames; double ms, longest; } MoveSel;
 
 typedef void (*MoveUpdateFn)(uint64_t level);
 typedef void (*MoveCraterUpdateFn)(void* system, float dt, uint64_t r8, uint64_t r9);
@@ -75,10 +78,11 @@ static struct
     LONG level; int on, state, slot, cell[2], acquired, merge;
     uintptr_t levelPtr;
     float origin[2], centre[2];
-    uint32_t at2F, at37, at38, at4C, at66, frames, waits, calls;
+    uint32_t at2F, at37, at38, at4C, at66, frames, waits, calls, quiet;
     int pkgPending; uint32_t pkgFrames;
     uint32_t nodeOld; /* [R+0x18] when the merge began: a camera node destroyed before, never this build's */
     int cutNoted;     /* MoveBuildLeft has ended or noted this build */
+    ULONGLONG waitSince; /* MV_READY's current wait on another thread began (0: none): bounded from here */
     int shipSeen;     /* the ship was reached with this build left: its stamp units are never destroyed after that */
     int r108Out;      /* MoveTeardown's R+0x108: 0 none, 1 destroyed, 2 not in the world's list any more */
     uint32_t ringWaits; /* frames the stamp units' destroy waited for the async spawn ring */
@@ -87,6 +91,7 @@ static struct
      * copies of their records, the real indices, their units, the counts the two ops read through pointers */
     uint8_t* stLoc; uint32_t* stIndex; uint64_t* stUnit; uint32_t stCount, stUnits, stTemp; int stamped;
     uint32_t stGone, stFrames; double stMs, stLongest; /* the stamp units' destroys so far, spread over frames */
+    MoveSel sel; /* the spawns so far, spread over frames */
     ULONGLONG since, started;
     uint8_t ctx[0xE8];
     uint8_t settings[0xD0];
@@ -99,7 +104,7 @@ static struct
     uint32_t drainWaits; /* frames a due release has waited for the render queue to drain, the build's step with it */
     LONGLONG destroyTicks; /* the last release's destroy alone (QPC ticks), -1 none */
     struct { int a, b; ULONGLONG until; } skip[16];
-    struct { int used; uint64_t tex[2], band; uint32_t* pixels; uint32_t frames; } freeing[NEAR_TILES_MAX * 2];
+    struct { int used; uint64_t tex[2], band, terrain; uint32_t* pixels; uint32_t frames; } freeing[NEAR_TILES_MAX * 2]; /* terrain: its split destroy's h */
     float player[EVT_MAX_PLAYERS + 2][2];
     int players;
 } g_move = {.level = -1};
@@ -107,6 +112,7 @@ static struct
 static struct { int on, slot, hasGone; NearTile gone; float cx, cy; const char* why; } g_moveReplace;
 
 static int FarGrassBusy(void); /* difficulty_world_fargrass.c */
+static int g_moveWantsTile; /* this update's idle mover had a cell to build and waited for far grass's job */
 static void FarGrassTick(uint64_t level);
 static void FarGrassLevelLeft(void);
 static void FarGrassInstall(uintptr_t game);
@@ -132,14 +138,15 @@ static void MoveHold(int on)
     InterlockedExchange64(&g_moveHoldSince, on ? (LONG64)GetTickCount64() : 0);
 }
 
-/* The textures of a tile that went, released once the frames that may still draw it are past. */
-static void MoveFreeLater(uint64_t tex0, uint64_t tex1, uint64_t band, uint32_t* pixels)
+/* The textures of a tile that went, released once the frames that may still draw it are past and its terrain's split
+ * destroy (`terrain`, 0 none) has run its rest. */
+static void MoveFreeLater(uint64_t tex0, uint64_t tex1, uint64_t band, uint32_t* pixels, uint64_t terrain)
 {
     for (int k = 0; k < NEAR_TILES_MAX * 2; k++)
         if (!g_move.freeing[k].used)
         {
             g_move.freeing[k].used = 1; g_move.freeing[k].tex[0] = tex0; g_move.freeing[k].tex[1] = tex1; g_move.freeing[k].band = band;
-            g_move.freeing[k].pixels = pixels; g_move.freeing[k].frames = 0;
+            g_move.freeing[k].pixels = pixels; g_move.freeing[k].frames = 0; g_move.freeing[k].terrain = terrain;
             return;
         }
     Note("difficulty: moving tiles: no room to release a tile's textures; they stay allocated");
@@ -147,6 +154,7 @@ static void MoveFreeLater(uint64_t tex0, uint64_t tex1, uint64_t band, uint32_t*
 
 static void MoveFreeNow(uint64_t tex0, uint64_t tex1, uint64_t band, uint32_t* pixels)
 {
+    if (pixels != NULL && (const uint8_t*)pixels == g_matCopy.from) NearMatCopyFinish(); /* the spawn's readback reads them */
     NearReleaseFn release = (NearReleaseFn)NearApi(0x10, 0x198);
     typedef void (*DestroyFn)(uint64_t tex);
     DestroyFn destroy = (DestroyFn)NearApi(0x10, 0x6B0);
@@ -182,7 +190,7 @@ static void MoveFreeTick(int all)
     MovePackageTick(all);
     if (!all) MoveBandPixelsTick(); /* the live tiles' band pixels wait on render frames too */
     for (int k = 0; k < NEAR_TILES_MAX * 2; k++)
-        if (g_move.freeing[k].used && (all || ++g_move.freeing[k].frames >= 4))
+        if (g_move.freeing[k].used && (all || (!TerrainTailPendingFor(g_move.freeing[k].terrain) && ++g_move.freeing[k].frames >= 4))) /* after its terrain's rest */
         {
             MoveFreeNow(g_move.freeing[k].tex[0], g_move.freeing[k].tex[1], g_move.freeing[k].band, g_move.freeing[k].pixels);
             g_move.freeing[k].used = 0;
@@ -207,6 +215,7 @@ static void MoveRestoreDrop(void)
 /* A new level starts (TerrainNearReplay's first call): the last level's tile terrains went at its end (NearTilesDestroy),
  * so their maps go now; one still in the world keeps them (NearTilesLeft). A build that end cut short was ended there
  * too (MoveBuildLeft); what is reset here is the mod's own state. */
+static void MoveFrameLeft(void);
 static void MoveLevelGone(void)
 {
     NearLayerSettle();
@@ -215,6 +224,7 @@ static void MoveLevelGone(void)
         MoveFreeNow(g_move.dropTex[0] == g_near.tex[0] ? 0 : g_move.dropTex[0], g_move.dropTex[1] == g_near.tex[1] ? 0 : g_move.dropTex[1],
             g_move.dropBand == g_matband.tex ? 0 : g_move.dropBand, g_move.dropBand == g_matband.tex ? NULL : g_move.dropBandPixels);
     g_move.stashed = 0;
+    if (!NearGeneratorRuns()) TerrainTailDrain(0, "a level's start"); /* before their textures go (MoveFreeTick's own order) */
     MoveFreeTick(1);
     for (int k = 0; k < NEAR_TILES_MAX; k++)
         if (g_tiles[k].tex[0] != 0 || g_tiles[k].tex[1] != 0 || g_tiles[k].band != 0)
@@ -226,8 +236,11 @@ static void MoveLevelGone(void)
     g_move.stTemp = g_move.stGone = 0; g_move.stamped = 0;
     g_nearStampOffset[0] = g_nearStampOffset[1] = 0.0f; /* else this level's own 0x63 would look 20 km off */
     g_moveReplace.on = 0;
+    SplitClear();
     InterlockedExchange(&g_moveBuilding, 0);
     MoveHold(0);
+    MoveFrameLeft();
+    NearAutoForget();
 }
 
 static int MoveOn(void)
@@ -367,86 +380,129 @@ static int MoveStampUnitsDestroy(double budget)
 }
 
 /* The locations whose stamps reach the cell's tile (their record xy +0 in generator metres, world + half), each with a
- * stamp unit of its own at the offset, copied for 0x2F. */
-static uint32_t MoveStampsSelect(uint64_t locs, uint32_t count, float half)
+ * stamp unit of its own at the offset, copied for 0x2F. A tile's ~32768 spawns took 83-120 ms in one frame, so a frame
+ * makes them within `budget` ms (at least one) and the next goes on from the same place: the same units in the same
+ * order. 1 done (g_move.stCount final), 0 more next frame, -1 the level's stamp data went in between. */
+static int MoveStampsSelect(uint64_t locs, uint32_t count, float half, double budget)
 {
-    g_move.stCount = 0; g_move.stUnits = 0; g_move.stTemp = 0; g_move.stGone = 0;
-    if (g_move.stLoc == NULL)
+    MoveSel* s = &g_move.sel;
+    if (!s->on)
     {
-        g_move.stLoc = (uint8_t*)VirtualAlloc(NULL, (size_t)MOVE_STAMPS_MAX * 0xE0, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        g_move.stIndex = (uint32_t*)VirtualAlloc(NULL, (size_t)MOVE_STAMPS_MAX * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        g_move.stUnit = (uint64_t*)VirtualAlloc(NULL, (size_t)MOVE_STAMPS_MAX * 8, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        if (g_move.stLoc == NULL || g_move.stIndex == NULL || g_move.stUnit == NULL) return 0;
+        g_move.stCount = 0; g_move.stUnits = 0; g_move.stTemp = 0; g_move.stGone = 0;
+        if (g_move.stLoc == NULL)
+        {
+            g_move.stLoc = (uint8_t*)VirtualAlloc(NULL, (size_t)MOVE_STAMPS_MAX * 0xE0, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            g_move.stIndex = (uint32_t*)VirtualAlloc(NULL, (size_t)MOVE_STAMPS_MAX * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            g_move.stUnit = (uint64_t*)VirtualAlloc(NULL, (size_t)MOVE_STAMPS_MAX * 8, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            if (g_move.stLoc == NULL || g_move.stIndex == NULL || g_move.stUnit == NULL) return 1;
+        }
+        if (!g_stream.captured || g_stream.level != g_worldLevel || g_stream.levels != g_world.levels)
+        { Note("difficulty: moving tiles: the streamer has no stamp poses for this level; the tile gets no stamp terrains"); return 1; }
+        memset(s, 0, sizeof *s);
+        s->on = 1; s->level = g_world.levels; s->plan = g_plan.level == g_world.levels && g_plan.count != 0; s->j = -1;
     }
-    if (!g_stream.captured || g_stream.level != g_worldLevel || g_stream.levels != g_world.levels)
-    { Note("difficulty: moving tiles: the streamer has no stamp poses for this level; the tile gets no stamp terrains"); return 0; }
+    else if (g_world.levels != s->level || !g_stream.captured || g_stream.level != g_worldLevel || g_stream.levels != s->level ||
+        (s->plan && g_plan.level != s->level))
+    { s->on = 0; return -1; }
     uint64_t world = MoveWorld();
     uintptr_t wi = 0, table = 0, spawn = 0;
     if (world == 0 || SafeRead(g_world.game + DIF_STREAM_INTERFACE, &wi, 8) || wi == 0 || SafeRead(wi + DIF_STREAM_TABLE, &table, 8) || table == 0 ||
-        SafeRead(table + DIF_STREAM_SPAWN_ENTRY, &spawn, 8) || spawn == 0) return 0;
+        SafeRead(table + DIF_STREAM_SPAWN_ENTRY, &spawn, 8) || spawn == 0)
+    { const int some = g_move.stTemp != 0; s->on = 0; return some ? -1 : 1; }
+    LARGE_INTEGER hz, t0, t;
+    QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
+    const LONGLONG limit = budget >= 1e6 ? INT64_MAX : (LONGLONG)(budget * (double)hz.QuadPart / 1000.0);
+    uint32_t made = 0;
+#define MOVE_SEL_YIELD() do { if (made != 0) { QueryPerformanceCounter(&t); if (t.QuadPart - t0.QuadPart >= limit) goto frame; } } while (0)
     const float reach = NEAR_SIDE / 2 + MOVE_STAMP_MARGIN;
     uint8_t rec[0xE0];
-    uint32_t failed = 0;
     const uint32_t tableEnd = g_win.on && g_win.level == g_stream.level ? g_win.base : count; /* window slots come from the plan below */
-    for (uint32_t i = 0; i < count && i < tableEnd && i < kStreamMaxLocations && g_move.stCount < MOVE_STAMPS_MAX; i++)
+    for (; s->i < count && s->i < tableEnd && s->i < kStreamMaxLocations && g_move.stCount < MOVE_STAMPS_MAX; s->i++)
     {
+        const uint32_t i = s->i;
         if (!g_streamPoseGood[i] || g_streamResource[i] == 0 || SafeRead(locs + (uint64_t)i * 0xE0, rec, sizeof rec)) continue;
         float at[2];
         memcpy(at, rec, 8);
         if (!isfinite(at[0]) || !isfinite(at[1])) continue;
         if (fabsf(at[0] - half - g_move.centre[0]) > reach || fabsf(at[1] - half - g_move.centre[1]) > reach) continue;
+        MOVE_SEL_YIELD();
         float pose[16];
         memcpy(pose, g_streamPose[i], sizeof pose);
         pose[13] += MOVE_STAMP_OFFSET;
         uint64_t unit = ((WorldStreamSpawnUnitFn)spawn)(world, g_streamResource[i], pose, 0, 0);
-        if (unit == 0) { failed++; continue; }
+        made++;
+        if (unit == 0) { s->failed++; continue; }
         memcpy(rec + 0xA8, &unit, 8);
         memcpy(g_move.stLoc + (size_t)g_move.stCount * 0xE0, rec, sizeof rec);
         g_move.stIndex[g_move.stCount] = i; g_move.stUnit[g_move.stUnits++] = unit;
         g_move.stCount++; g_move.stTemp = g_move.stUnits;
     }
-    /* the plan's stamps in reach (g_plan: buckets of the map in generator metres), with op 0x31's pose (WindowPose) */
-    uint32_t planned = 0, past = 0, pastInner = 0;
-    if (g_plan.level == g_world.levels && g_plan.count != 0)
+    s->i = kStreamMaxLocations; /* the table is done (also when the room filled) */
+    /* the plan's stamps in reach (g_plan: buckets of the map in generator metres), with op 0x31's pose (WindowPose); the
+     * cursor (pass, j, ii, e) resumes the loops where the last frame stopped, -1 / UINT32_MAX = enter that loop afresh */
+    if (s->plan)
     {
         const float cell = g_plan.cell, gx = g_move.centre[0] + half, gy = g_move.centre[1] + half;
         int i0 = (int)floorf((gx - reach) / cell), i1 = (int)floorf((gx + reach) / cell), j0 = (int)floorf((gy - reach) / cell), j1 = (int)floorf((gy + reach) / cell);
         /* pass 0: the stamps whose terrain reaches the tile (MOVE_STAMP_REACH past its texels); pass 1: the rest of the
          * margin. A full room then leaves out only the outer margin, never a stamp that shapes the tile. */
         const float inner = NEAR_SIDE / 2 + MOVE_STAMP_REACH;
-        for (int pass = 0; pass < 2; pass++)
-        for (int j = j0 < 0 ? 0 : j0; j <= j1 && j < STAMP_PLAN_GRID; j++)
-            for (int i = i0 < 0 ? 0 : i0; i <= i1 && i < STAMP_PLAN_GRID; i++)
+        for (; s->pass < 2; s->pass++, s->j = -1)
+        {
+            if (s->j < 0) { s->j = j0 < 0 ? 0 : j0; s->ii = -1; }
+            for (; s->j <= j1 && s->j < STAMP_PLAN_GRID; s->j++, s->ii = -1)
             {
-                int b = j * STAMP_PLAN_GRID + i;
-                for (uint32_t e = g_plan.start[b]; e < g_plan.start[b + 1]; e++)
+                if (s->ii < 0) { s->ii = i0 < 0 ? 0 : i0; s->e = UINT32_MAX; }
+                for (; s->ii <= i1 && s->ii < STAMP_PLAN_GRID; s->ii++, s->e = UINT32_MAX)
                 {
-                    const uint8_t* loc = g_stamps.cand[e].loc;
-                    float at[2]; memcpy(at, loc, 8);
-                    const float dx = fabsf(at[0] - half - g_move.centre[0]), dy = fabsf(at[1] - half - g_move.centre[1]);
-                    if (dx > reach || dy > reach || (pass == 0) != (dx <= inner && dy <= inner)) continue;
-                    if (g_move.stCount >= MOVE_STAMPS_MAX) { past++; pastInner += pass == 0; continue; }
-                    uint64_t holder = 0, resource = 0;
-                    memcpy(&holder, loc + DIF_STREAM_LOC_RESOURCE, 8);
-                    if (holder == 0 || SafeRead((uintptr_t)holder + 8, &resource, 8) || resource == 0) continue;
-                    float pose[16];
-                    WindowPose(loc, 2.0f * half, pose);
-                    pose[13] += MOVE_STAMP_OFFSET;
-                    uint64_t unit = ((WorldStreamSpawnUnitFn)spawn)(world, resource, pose, 0, 0);
-                    if (unit == 0) { failed++; continue; }
-                    memcpy(rec, loc, sizeof rec);
-                    memcpy(rec + 0xA8, &unit, 8);
-                    memcpy(g_move.stLoc + (size_t)g_move.stCount * 0xE0, rec, sizeof rec);
-                    g_move.stIndex[g_move.stCount] = 0xFFFFFFFFu; g_move.stUnit[g_move.stUnits++] = unit;
-                    g_move.stCount++; g_move.stTemp = g_move.stUnits; planned++;
+                    const int b = s->j * STAMP_PLAN_GRID + s->ii;
+                    if (s->e == UINT32_MAX) s->e = g_plan.start[b];
+                    for (; s->e < g_plan.start[b + 1]; s->e++)
+                    {
+                        const uint8_t* loc = g_stamps.cand[s->e].loc;
+                        float at[2]; memcpy(at, loc, 8);
+                        const float dx = fabsf(at[0] - half - g_move.centre[0]), dy = fabsf(at[1] - half - g_move.centre[1]);
+                        if (dx > reach || dy > reach || (s->pass == 0) != (dx <= inner && dy <= inner)) continue;
+                        if (g_move.stCount >= MOVE_STAMPS_MAX) { s->past++; s->pastInner += s->pass == 0; continue; }
+                        uint64_t holder = 0, resource = 0;
+                        memcpy(&holder, loc + DIF_STREAM_LOC_RESOURCE, 8);
+                        if (holder == 0 || SafeRead((uintptr_t)holder + 8, &resource, 8) || resource == 0) continue;
+                        MOVE_SEL_YIELD();
+                        float pose[16];
+                        WindowPose(loc, 2.0f * half, pose);
+                        pose[13] += MOVE_STAMP_OFFSET;
+                        uint64_t unit = ((WorldStreamSpawnUnitFn)spawn)(world, resource, pose, 0, 0);
+                        made++;
+                        if (unit == 0) { s->failed++; continue; }
+                        memcpy(rec, loc, sizeof rec);
+                        memcpy(rec + 0xA8, &unit, 8);
+                        memcpy(g_move.stLoc + (size_t)g_move.stCount * 0xE0, rec, sizeof rec);
+                        g_move.stIndex[g_move.stCount] = 0xFFFFFFFFu; g_move.stUnit[g_move.stUnits++] = unit;
+                        g_move.stCount++; g_move.stTemp = g_move.stUnits; s->planned++;
+                    }
                 }
             }
+        }
     }
-    Note("difficulty: moving tiles: %u stamp terrains for the tile (%u of them the plan's%s)", g_move.stCount, planned, past ? "; more in reach than the tile's room" : "");
-    if (past) Note("difficulty: moving tiles: %u of the plan's stamps in reach left out (room %u), %u of them within %.0f m of the tile", past, MOVE_STAMPS_MAX, pastInner, MOVE_STAMP_REACH);
-    if (failed) Note("difficulty: moving tiles: %u stamp units could not be made at the offset", failed);
+#undef MOVE_SEL_YIELD
+    QueryPerformanceCounter(&t);
+    s->on = 0;
+    {
+        const double ms = (double)(t.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+        s->frames++; s->ms += ms; if (ms > s->longest) s->longest = ms;
+    }
+    Note("difficulty: moving tiles: %u stamp terrains for the tile (%u of them the plan's%s); their units made over %u frames (%.0f ms in all, the longest frame %.1f ms)",
+        g_move.stCount, s->planned, s->past ? "; more in reach than the tile's room" : "", s->frames, s->ms, s->longest);
+    if (s->past) Note("difficulty: moving tiles: %u of the plan's stamps in reach left out (room %u), %u of them within %.0f m of the tile", s->past, MOVE_STAMPS_MAX, s->pastInner, MOVE_STAMP_REACH);
+    if (s->failed) Note("difficulty: moving tiles: %u stamp units could not be made at the offset", s->failed);
     if (g_move.stCount) { g_nearStampOffset[0] = 0.0f; g_nearStampOffset[1] = MOVE_STAMP_OFFSET; }
-    return g_move.stCount;
+    return 1;
+frame:
+    {
+        const double ms = (double)(t.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+        s->frames++; s->ms += ms; if (ms > s->longest) s->longest = ms;
+    }
+    return 0;
 }
 
 /* The level's 0x2F (op = 0x2F) or 0x65 record on the staging lists: locations pass+8 / count [pass+0x28] for both, units
@@ -486,6 +542,539 @@ static int MoveRunRecord(void)
     typedef void (*ArenaFn)(uint64_t arena);
     if (arena != 0) ((ArenaFn)(g_world.game + 0x173BAB0u))(arena);
     return 1;
+}
+
+/* Op 0x2F (0xF44380) in budgeted slices. Phase A spawns the stamp terrain of up to 1023 locations a call (the bound
+ * 0x3FF at 0xF443FC), in location order, each its own table entry; once every location is done (0xF44709) phase B walks
+ * all of them in the same call: for 32768 locations 196608 engine calls and more on one frame. Here a call's batch is
+ * sized to MOVE_2F_MS, phase B is skipped by jumping to its "not done" exit (0xF4470C) and run below as it is in the
+ * code, a slice a frame; the batches change only where the calls split, not what is spawned or in which order. */
+#define MOVE_2F_MS 3.0
+static const struct { uint32_t at; const char* bytes; } kMove2FPins[] = {
+    {0xF443F9u, "41 8D 8B FF 03 00 00"},
+    {0xF44408u, "44 3B F1 4C 89 A4 24 98 00 00 00 41 0F 42 CE 4C 89 AC 24 90 00 00 00 4C 89 BC 24 88 00 00 00 89"},
+    {0xF44428u, "44 24 24 44 3B D9 0F 83 C9 02 00 00"}, /* the batch's clamp to the count and its loop test */
+    {0xF44705u, "44 89 58 48 45 3B DE 0F 85 3A 01 00 00 48 8B 05 EF 1B 3E 02 48 8B 48 08 48 8B 41 48 48 8B 4B 40"},
+    {0xF44725u, "FF D0 85 C0 0F 84 1D 01 00 00 45 33 ED 45 85 F6 0F 84 0D 01 00 00 8B 44 24 20 4C 8D 77 08 4C 8D"},
+    {0xF44745u, "A6 A8 00 00 00 66 0F 1F 44 00 00 41 83 7E F8 FF 0F 84 D6 00 00 00 41 8B 76 FC 33 FF 49 8B 2C 24"},
+    {0xF44765u, "45 8B 3E 85 F6 0F 84 C1 00 00 00 48 8B 05 91 1B 3E 02 42 8D 14 3F 48 8B 48 50 48 8B 41 30 48 8B"},
+    {0xF44785u, "CD FF D0 8B D8 85 C0 74 1A 48 8B 05 73 1B 3E 02 48 8B 48 18 48 8B 81 20 07 00 00 8B CB FF D0 84"},
+    {0xF447A5u, "C0 75 08 FF C7 3B FE 72 C2 EB 7D 48 8B 05 51 1B 3E 02 8B CB 48 8B 50 18 FF 92 50 04 00 00 48 8B"},
+    {0xF447C5u, "05 3E 1B 3E 02 33 D2 48 8B 48 18 48 8B 81 60 04 00 00 8B CB FF D0 48 8B 0D 26 1B 3E 02 41 8D 55"},
+    {0xF447E5u, "01 48 8B D8 4C 8B 81 10 01 00 00 48 8B C8 41 FF 50 18 48 8B 0D 0A 1B 3E 02 48 8B 91 10 01 00 00"},
+    {0xF44805u, "48 8B CB 4C 8B 42 10 BA 03 05 76 F2 41 FF D0 48 8B 0D ED 1A 3E 02 0F 57 D2 BA FA 94 D9 E0 4C 8B"},
+    {0xF44825u, "41 28 48 8B C8 41 FF 10 8B 44 24 20 41 FF C5 49 81 C4 E0 00 00 00 49 83 C6 0C 44 3B E8 0F 82 08"},
+    {0xF44845u, "FF FF FF 32 C0 EB 02 B0 01"},
+};
+static struct { int pinned, phaseB, done; uint32_t batch, at, calls, slices; double msA, msB; } g_move2F;
+/* Every stamp proxy phase B touches, for the render flags op 0x63's split would hide by (0x2BD140 reads them). They are
+ * read after the slice, outside the guard: a SafeRead fault inside it would be taken for phase B's own. */
+static uint64_t g_move2FObj[MOVE_STAMPS_MAX];
+static uint32_t g_move2FObjN;
+static struct { uint32_t n, noop, bit7, hideable, unread, values, other; uint32_t value[8], times[8]; } g_move2FFlags;
+
+/* ---- Op 0x63's stamp render in ranges ---------------------------------------------------------------------------------
+ * The render of a tile's ~29000 stamp terrains costs the render thread 147-180 ms, which the game thread waits for in
+ * the next frame. Its cull reads rw+0x268 only (0x1EA3E0; 0x107400 zeroes property 0x81C3BDDD), which a hide takes a
+ * terrain out of (0x3486C0 -> 0x2BD140, applied by the flush at 0x58E6A0), and its draws sort by depth i+1 of the
+ * location, highest first. So the stamps go in ranges from the highest location down, one a frame: the job's own render
+ * with range 0 shown, then its saved copy again per range; the same adds in the same order (scratch/u63g, u63h). */
+#define SPLIT_STAMP_US 5.5    /* render side a stamp: the whole render's 147-180 ms over its 28600-29277 stamps */
+#define SPLIT_RANGE_MS 3.0    /* render side a range */
+#define SPLIT_TOGGLE_MS 1.0   /* game-thread time a frame for the shows and hides */
+#define SPLIT_PER_MIN 64u
+#define SPLIT_RANGES_MAX 256u
+#define SPLIT_STALL 600       /* frames a range's render may wait for the job consumer */
+#define SPLIT_FRESH 0xFFFFFFFFu
+enum { SP_NONE, SP_WHOLE, SP_HIDING, SP_READY, SP_QUEUED, SP_RANGES, SP_SHOWING, SP_DONE, SP_RESTORE };
+static struct
+{
+    int state, over, idsOk, pending;
+    LONG level;
+    uint32_t m, per, K, k, cursor, hiddenN, stall, qBefore;
+    uint32_t l2Locs, l2Multi, l2Extra, l2Most;
+    uint32_t shows, hides, dead, frames;
+    double toggleMs, toggleMax, renderMs, renderMax, renderFirst, frameMs, frameMax, frameLeast;
+    LARGE_INTEGER frameAt;
+    __attribute__((aligned(16))) uint8_t job[0x1D0]; /* the 0x63 job as queued: the consumer's copy of it (0xAB0600) */
+} g_split;
+static uint32_t g_splitId[MOVE_STAMPS_MAX]; /* phase B's live terrain id of each drawn location, in location order */
+static uint8_t g_splitHidden[MOVE_STAMPS_MAX];
+
+static int Move2FPinned(void)
+{
+    if (g_move2F.pinned == 0)
+    {
+        g_move2F.pinned = 1;
+        for (size_t k = 0; k < sizeof kMove2FPins / sizeof kMove2FPins[0]; k++)
+            if (!ApiCodeMatches(g_world.game + kMove2FPins[k].at, kMove2FPins[k].bytes)) g_move2F.pinned = -1;
+        if (g_move2F.pinned < 0) Note("difficulty: moving tiles: op 0x2F is not the reviewed code; it runs whole, a call a frame");
+    }
+    return g_move2F.pinned > 0;
+}
+
+/* The batch bound and phase B's gate: `batch` locations a call and the gate a jump to the exit, or the game's bytes. */
+static void Move2FPatch(uint32_t batch)
+{
+    uint8_t* at = (uint8_t*)(uintptr_t)(g_world.game + 0xF443F9u);
+    DWORD old = 0;
+    if (!VirtualProtect(at, 0x320, PAGE_EXECUTE_READWRITE, &old)) return;
+    const uint32_t bound = batch != 0 ? batch : 0x3FFu;
+    memcpy(at + 3, &bound, 4);
+    static const uint8_t jump[6] = {0xE9, 0x3B, 0x01, 0x00, 0x00, 0x90}, gate[6] = {0x0F, 0x85, 0x3A, 0x01, 0x00, 0x00};
+    memcpy((uint8_t*)(uintptr_t)(g_world.game + 0xF4470Cu), batch != 0 ? jump : gate, 6);
+    VirtualProtect(at, 0x320, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), at, 0x320);
+}
+
+/* Phase B as 0xF44712..0xF4484A has it, from location g_move2F.at until MOVE_2F_MS are spent (checked each 16). */
+static void Move2FPhaseB(uint64_t pass, uint64_t record, uint64_t context)
+{
+    (void)record;
+    typedef uint64_t (*WorldFn)(uint64_t world);
+    typedef uint32_t (*IdFn)(uint64_t unit, uint32_t index);
+    typedef char (*LiveFn)(uint32_t id);
+    typedef void (*IdOnlyFn)(uint32_t id);
+    typedef uint64_t (*ObjFn)(uint32_t id, uint32_t zero);
+    typedef void (*IndexFn)(uint64_t obj, uint32_t index);
+    typedef uint64_t (*MatFn)(uint64_t obj, uint32_t hash);
+    typedef void (*ScalarFn)(uint64_t mat, uint32_t hash, float value);
+    const uint64_t api = *(volatile uint64_t*)(uintptr_t)(g_world.game + 0x3326308u);
+    const uint64_t a8 = *(uint64_t*)(uintptr_t)(api + 0x08), a18 = *(uint64_t*)(uintptr_t)(api + 0x18), a28 = *(uint64_t*)(uintptr_t)(api + 0x28);
+    const uint64_t a50 = *(uint64_t*)(uintptr_t)(api + 0x50), a110 = *(uint64_t*)(uintptr_t)(api + 0x110);
+    const uint32_t count = **(uint32_t**)(uintptr_t)(pass + 0x28);
+    const uint8_t* locs = *(const uint8_t**)(uintptr_t)(pass + 0x08);
+    const uint32_t* table = *(const uint32_t**)(uintptr_t)(pass + 0x50);
+    if (g_move2F.at == 0 && ((WorldFn)*(uint64_t*)(uintptr_t)(a8 + 0x48))(*(uint64_t*)(uintptr_t)(context + 0x40)) == 0) return; /* again next call */
+    LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
+    uint32_t i = g_move2F.at;
+    for (; i < count; i++)
+    {
+        if (i != g_move2F.at && (i & 15) == 0)
+        {
+            QueryPerformanceCounter(&t1);
+            if ((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart >= MOVE_2F_MS) break;
+        }
+        const uint32_t* e = table + (size_t)i * 3;
+        if (e[0] == 0xFFFFFFFFu || e[1] == 0) continue;
+        const uint64_t unit = *(const uint64_t*)(locs + (size_t)i * 0xE0 + 0xA8);
+        uint32_t id = 0, j = 0;
+        for (; j < e[1]; j++)
+        {
+            id = ((IdFn)*(uint64_t*)(uintptr_t)(a50 + 0x30))(unit, j + e[2]);
+            if (id != 0 && ((LiveFn)*(uint64_t*)(uintptr_t)(a18 + 0x720))(id)) break;
+            id = 0;
+        }
+        /* the later live ids keep the default depth and would draw in every range of 0x63's split: counted (reads only,
+         * 0x32B8E0 and 0x9D8C0), and any one turns the split off */
+        g_split.l2Locs++;
+        if (e[1] > 1) g_split.l2Multi++;
+        if (id != 0 && e[1] > 1)
+        {
+            uint32_t extra = 0;
+            for (uint32_t k = j + 1; k < e[1]; k++)
+            {
+                const uint32_t other = ((IdFn)*(uint64_t*)(uintptr_t)(a50 + 0x30))(unit, k + e[2]);
+                if (other != 0 && ((LiveFn)*(uint64_t*)(uintptr_t)(a18 + 0x720))(other)) extra++;
+            }
+            g_split.l2Extra += extra;
+            if (extra > g_split.l2Most) g_split.l2Most = extra;
+        }
+        if (id == 0) continue;
+        if (g_split.m < MOVE_STAMPS_MAX) g_splitId[g_split.m++] = id; else g_split.over = 1;
+        ((IdOnlyFn)*(uint64_t*)(uintptr_t)(a18 + 0x450))(id);
+        const uint64_t obj = ((ObjFn)*(uint64_t*)(uintptr_t)(a18 + 0x460))(id, 0);
+        if (g_move2FObjN < MOVE_STAMPS_MAX) g_move2FObj[g_move2FObjN++] = obj;
+        ((IndexFn)*(uint64_t*)(uintptr_t)(a110 + 0x18))(obj, i + 1);
+        const uint64_t mat = ((MatFn)*(uint64_t*)(uintptr_t)(a110 + 0x10))(obj, 0xF2760503u);
+        ((ScalarFn)*(uint64_t*)(uintptr_t)a28)(mat, 0xE0D994FAu, 0.0f);
+    }
+    QueryPerformanceCounter(&t1);
+    g_move2F.msB += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+    g_move2F.slices++;
+    g_move2F.at = i;
+    g_move2F.done = i >= count;
+    if (g_move2F.done) g_split.idsOk = 1;
+}
+
+/* The slice's proxies' flags as 0x2BD140 reads them: [[obj+0x30]+0x2C], else [[obj+0x38]+0x20]. Its hide does nothing
+ * without a bit of 0x83; bits 0 and 1 name the culling sets it moves, bit 7 one it leaves. */
+static void Move2FFlagsTally(void)
+{
+    for (uint32_t k = 0; k < g_move2FObjN; k++)
+    {
+        uint64_t r30 = 0, r38 = 0; uint32_t f = 0;
+        g_move2FFlags.n++;
+        const int read = !SafeRead(g_move2FObj[k] + 0x30, &r30, 8) && (r30 != 0 ? !SafeRead(r30 + 0x2C, &f, 4) :
+            !SafeRead(g_move2FObj[k] + 0x38, &r38, 8) && r38 != 0 && !SafeRead(r38 + 0x20, &f, 4));
+        if (!read) { g_move2FFlags.unread++; continue; }
+        if ((f & 0x83) == 0) g_move2FFlags.noop++;
+        else if (f & 0x80) g_move2FFlags.bit7++;
+        else g_move2FFlags.hideable++;
+        uint32_t v = 0;
+        while (v < g_move2FFlags.values && g_move2FFlags.value[v] != f) v++;
+        if (v == g_move2FFlags.values && v < 8) { g_move2FFlags.value[v] = f; g_move2FFlags.values++; }
+        if (v < g_move2FFlags.values) g_move2FFlags.times[v]++; else g_move2FFlags.other++;
+    }
+    g_move2FObjN = 0;
+}
+
+static int MoveRun2FDone(uint32_t count)
+{
+    Note("difficulty: moving tiles: op 0x2F in %u calls (%.1f ms) and %u slices of its last part (%.1f ms) for %u locations", g_move2F.calls, g_move2F.msA,
+        g_move2F.slices, g_move2F.msB, count);
+    if (g_move2FFlags.n != 0)
+    {
+        char values[256]; size_t n = 0; values[0] = 0;
+        for (uint32_t v = 0; v < g_move2FFlags.values && n + 1 < sizeof values; v++)
+        {
+            int w = snprintf(values + n, sizeof values - n, " 0x%X x%u;", g_move2FFlags.value[v], g_move2FFlags.times[v]);
+            if (w < 0) break;
+            n += (size_t)w;
+        }
+        Note("difficulty: moving tiles: the stamp terrains' render flags over %u: hide a no-op (no bit of 0x83) %u, bit 7 %u, hideable (bit 0 or 1, no bit 7) %u, "
+            "unread %u; values:%s %u of others", g_move2FFlags.n, g_move2FFlags.noop, g_move2FFlags.bit7, g_move2FFlags.hideable, g_move2FFlags.unread, values,
+            g_move2FFlags.other);
+    }
+    else Note("difficulty: moving tiles: the stamp terrains' render flags were not tallied (no stamp in the mod's last part)");
+    if (g_split.idsOk)
+        Note("difficulty: moving tiles: 0x63 terrains: %u locations, %u with e[1] > 1, %u extra live ids (most at one location %u)", g_split.l2Locs,
+            g_split.l2Multi, g_split.l2Extra, g_split.l2Most);
+    else Note("difficulty: moving tiles: 0x63 terrains: not counted (op 0x2F's last part ran in the game's call)");
+    uint64_t arena = 0;
+    memcpy(&arena, g_move.ctx, 8);
+    typedef void (*ArenaFn)(uint64_t arena);
+    if (arena != 0) ((ArenaFn)(g_world.game + 0x173BAB0u))(arena);
+    return 1;
+}
+
+/* MV_STAMPS' call: 1 done (the arena reset as MoveRunRecord does), 0 more next frame, -1 a fault. */
+static int MoveRun2F(void)
+{
+    if (!Move2FPinned()) return MoveRunRecord();
+    uint64_t pass = (uint64_t)(uintptr_t)g_move.one + 8, countAt = 0;
+    uint32_t count = 0, before = 0, after = 0;
+    if (SafeRead(pass + 0x28, &countAt, 8) || countAt == 0 || SafeRead(countAt, &count, 4)) return MoveRunRecord();
+    LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz);
+    if (!g_move2F.phaseB)
+    {
+        if (g_move2F.batch == 0) g_move2F.batch = 16; /* the first build's guess; later builds start at the last one's */
+        SafeRead(pass + 0x48, &before, 4);
+        volatile uint32_t index = 0;
+        volatile int calls = 0;
+        Move2FPatch(g_move2F.batch);
+        QueryPerformanceCounter(&t0);
+        LONG fault = WorldTileGuarded(g_move.one, (uint64_t)(uintptr_t)g_move.ctx, &index, &g_move.phase, 0, 0, 1, &calls);
+        QueryPerformanceCounter(&t1);
+        Move2FPatch(0);
+        if (fault) { Note("difficulty: moving tiles: op 0x2F faulted (%08lX at game.dll+0x%llX)", (unsigned long)fault, (unsigned long long)(TileGuardSelf()->at - g_world.game)); return -1; }
+        SafeRead(pass + 0x48, &after, 4);
+        const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+        g_move2F.msA += ms; g_move2F.calls++;
+        if (index != 0) return MoveRun2FDone(count); /* the game's call finished it whole */
+        if (after > before) g_move.waits = 0; /* moving on */
+        /* the next batch from this one's time a location, within 1..1023 */
+        const double per = after > before ? ms / (double)(after - before) : 0;
+        double next = per > 0 ? MOVE_2F_MS / per : (double)g_move2F.batch * 2;
+        if (next > (double)g_move2F.batch * 2) next = (double)g_move2F.batch * 2;
+        g_move2F.batch = next < 1 ? 1u : next > 1023 ? 1023u : (uint32_t)next;
+        if (after < count) return 0;
+        g_move2F.phaseB = 1; g_move2F.at = 0;
+        return 0;
+    }
+    const uint32_t at = g_move2F.at;
+    LONG fault = WorldTileGuardedCall((uintptr_t)Move2FPhaseB, g_move.one, (uint64_t)(uintptr_t)g_move.ctx);
+    if (fault)
+    {
+        const uintptr_t where = TileGuardSelf()->at, exe = (uintptr_t)GetModuleHandleW(NULL);
+        Note("difficulty: moving tiles: op 0x2F's last part faulted (%08lX at %p: game.dll+0x%llX, exe+0x%llX)", (unsigned long)fault, (void*)where,
+            (unsigned long long)(where - g_world.game), (unsigned long long)(where - exe));
+        return -1;
+    }
+    Move2FFlagsTally();
+    if (g_move2F.at > at) g_move.waits = 0;
+    if (!g_move2F.done) return 0;
+    return MoveRun2FDone(count);
+}
+static void SplitClear(void)
+{
+    memset(&g_split, 0, sizeof g_split);
+    g_split.level = g_world.levels; g_split.cursor = SPLIT_FRESH;
+}
+static void Move2FReset(void)
+{
+    const int pinned = g_move2F.pinned; const uint32_t batch = g_move2F.batch;
+    memset(&g_move2F, 0, sizeof g_move2F); memset(&g_move2FFlags, 0, sizeof g_move2FFlags);
+    g_move2F.pinned = pinned; g_move2F.batch = batch; g_move2FObjN = 0;
+    SplitClear();
+}
+
+/* ---- The split's steps (game thread) ---- */
+typedef char (*SplitLiveFn)(uint32_t id);
+typedef uint64_t (*SplitObjFn)(uint32_t id, uint32_t zero);
+typedef void (*SplitShowFn)(uint64_t obj, uint32_t show);
+static struct { uint32_t from, to, showBelow; double budget; int done; SplitLiveFn live; SplitObjFn obj; SplitShowFn show; } g_splitWalk;
+
+/* Range k: stamps [lo, hi) of g_splitId, from the top down; the last one reaches 0. */
+static uint32_t SplitHi(uint32_t k) { return g_split.m - k * g_split.per; }
+static uint32_t SplitLo(uint32_t k)
+{
+    const uint32_t top = (k + 1) * g_split.per;
+    return k + 1 >= g_split.K || top >= g_split.m ? 0 : g_split.m - top;
+}
+
+/* Under the tile guard: stamps [cursor, to) shown below showBelow, hidden from it, each looked up by its id first (a
+ * stamp can be gone; its object is never kept, 0x203E20 has no null test). Only a change is posted. */
+static void SplitWalkIn(uint64_t unused0, uint64_t unused1, uint64_t unused2)
+{
+    (void)unused0; (void)unused1; (void)unused2;
+    LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
+    uint32_t x = g_split.cursor;
+    for (uint32_t n = 0; x < g_splitWalk.to; x++, n++)
+    {
+        if (n != 0 && (n & 15) == 0)
+        {
+            QueryPerformanceCounter(&t1);
+            if ((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart >= g_splitWalk.budget) break;
+        }
+        const uint8_t want = x < g_splitWalk.showBelow ? 0 : 1; /* 1: hidden */
+        if (g_splitHidden[x] == want) continue;
+        const uint32_t id = g_splitId[x];
+        if (id == 0 || !g_splitWalk.live(id))
+        {
+            if (id != 0) { g_split.dead++; g_splitId[x] = 0; } /* never looked up again */
+            if (g_splitHidden[x]) { g_splitHidden[x] = 0; g_split.hiddenN--; } /* nothing left to show */
+            continue;
+        }
+        g_splitWalk.show(g_splitWalk.obj(id, 0), want ? 0u : 1u);
+        g_splitHidden[x] = want;
+        if (want) { g_split.hides++; g_split.hiddenN++; } else { g_split.shows++; g_split.hiddenN--; }
+    }
+    g_split.cursor = x;
+    g_splitWalk.done = x >= g_splitWalk.to;
+}
+
+/* One walk's slice within `budget` ms: 1 done, 0 more next frame, -1 a fault (the walk's state stays as far as it got). */
+static int SplitWalk(uint32_t from, uint32_t to, uint32_t showBelow, double budget)
+{
+    g_splitWalk.live = (SplitLiveFn)NearApi(0x18, 0x720); g_splitWalk.obj = (SplitObjFn)NearApi(0x18, 0x460);
+    g_splitWalk.show = (SplitShowFn)NearApi(0x110, 0x20);
+    if (g_splitWalk.live == NULL || g_splitWalk.obj == NULL || g_splitWalk.show == NULL) return -1;
+    if (g_split.cursor == SPLIT_FRESH || g_split.cursor < from) g_split.cursor = from;
+    g_splitWalk.from = from; g_splitWalk.to = to; g_splitWalk.showBelow = showBelow; g_splitWalk.budget = budget; g_splitWalk.done = 0;
+    LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
+    const LONG fault = WorldTileGuardedCall((uintptr_t)SplitWalkIn, NULL, 0);
+    QueryPerformanceCounter(&t1);
+    const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+    g_split.toggleMs += ms; if (ms > g_split.toggleMax) g_split.toggleMax = ms;
+    if (fault)
+    {
+        const uintptr_t where = TileGuardSelf()->at, exe = (uintptr_t)GetModuleHandleW(NULL);
+        Note("difficulty: moving tiles: 0x63 split: a show or hide faulted (%08lX at exe+0x%llX)", (unsigned long)fault, (unsigned long long)(where - exe));
+        return -1;
+    }
+    if (!g_splitWalk.done) return 0;
+    g_split.cursor = SPLIT_FRESH;
+    return 1;
+}
+
+static void SplitFrame(void)
+{
+    LARGE_INTEGER now; QueryPerformanceCounter(&now);
+    if (g_split.frameAt.QuadPart != 0)
+    {
+        LARGE_INTEGER hz; QueryPerformanceFrequency(&hz);
+        const double ms = (double)(now.QuadPart - g_split.frameAt.QuadPart) * 1000.0 / (double)hz.QuadPart;
+        g_split.frameMs += ms; g_split.frames++;
+        if (ms > g_split.frameMax) g_split.frameMax = ms;
+        if (g_split.frameLeast == 0 || ms < g_split.frameLeast) g_split.frameLeast = ms;
+    }
+    g_split.frameAt = now;
+}
+
+/* Whole or in ranges, decided once a build before any hide: the ids are phase B's, none extra, the calls there. */
+static void SplitDecide(void)
+{
+    char why[160] = "";
+#ifdef CO_RESEARCH
+    { char t[4] = ""; if (GetEnvironmentVariableA("HELLFORGE_XL_MOVE_SPLIT63", t, sizeof t) > 0 && t[0] == '0') snprintf(why, sizeof why, "turned off (HELLFORGE_XL_MOVE_SPLIT63=0, research)"); }
+#endif
+    if (why[0] != 0) {}
+    else if (!g_split.idsOk || g_split.level != g_world.levels) snprintf(why, sizeof why, "op 0x2F's last part did not run in the mod, so its terrain ids were not kept");
+    else if (g_split.over) snprintf(why, sizeof why, "more than %u stamp terrains", MOVE_STAMPS_MAX);
+    else if (g_split.l2Extra != 0) snprintf(why, sizeof why, "%u extra live terrain ids at its locations would draw in every range", g_split.l2Extra);
+    else if (NearApi(0x18, 0x720) == 0 || NearApi(0x18, 0x460) == 0 || NearApi(0x110, 0x20) == 0 || NearApi(0x10, 0x30) == 0)
+        snprintf(why, sizeof why, "the live, object, show or flush call did not resolve");
+    else if (g_nearRunOriginal == NULL || g_nearConsume == NULL) snprintf(why, sizeof why, "the render wrapper or the job consumer's hook is not in");
+    else
+    {
+        uint32_t per = (uint32_t)(SPLIT_RANGE_MS * 1000.0 / SPLIT_STAMP_US);
+        if (per < SPLIT_PER_MIN) per = SPLIT_PER_MIN;
+        uint32_t K = (g_split.m + per - 1) / per;
+        if (K > SPLIT_RANGES_MAX) { K = SPLIT_RANGES_MAX; per = (g_split.m + K - 1) / K; }
+        g_split.per = per; g_split.K = K;
+        if (K < 2) snprintf(why, sizeof why, "its %u stamps fit one range", g_split.m);
+    }
+    if (why[0] != 0)
+    {
+        g_split.state = SP_WHOLE;
+        Note("difficulty: moving tiles: 0x63 split: off: %s; the stamps render whole in one frame", why);
+        return;
+    }
+    g_split.state = SP_HIDING; g_split.cursor = SPLIT_FRESH;
+    Note("difficulty: moving tiles: 0x63 split: on: %u stamps in %u ranges of %u (%.1f us a stamp, %.1f ms a range)", g_split.m, g_split.K, g_split.per,
+        SPLIT_STAMP_US, SPLIT_RANGE_MS);
+}
+
+/* Before 0x63's op (its first call): every stamp below range 0 hidden, a slice a frame. 1 the op may run, 0 more next
+ * frame, -1 a fault. `queued`: the job queue's count now, against which the op's one job is found. */
+static int Split63Prepare(uint32_t queued)
+{
+    if (g_split.state == SP_NONE) SplitDecide();
+    if (g_split.state == SP_HIDING)
+    {
+        const int r = SplitWalk(0, SplitLo(0), 0, SPLIT_TOGGLE_MS);
+        if (r <= 0) return r;
+        g_split.state = SP_READY;
+    }
+    g_split.qBefore = queued;
+    return 1;
+}
+
+/* After 0x63's op: its one job is the one the split renders again, checked as the producer writes it (0xC178B1,
+ * 0xC14DCE) and copied. Any mismatch shows every stamp again in this frame, before the consumer renders the job (same
+ * thread, later in the frame), so it renders whole. -1: the shows faulted and the build must fail. */
+static int Split63Queued(uint64_t context)
+{
+    if (g_split.state != SP_READY) return 0;
+    char why[160] = "";
+    uint64_t queue = 0, world = 0, w0 = 0, cam = 0;
+    uint32_t q = 0, kind = 0;
+    if (SafeRead(context + 0x50, &queue, 8) || queue == 0 || SafeRead(queue + 0x10, &q, 4) || SafeRead(context + 0x40, &world, 8))
+        snprintf(why, sizeof why, "the job queue did not read");
+    else if (q != g_split.qBefore + 1) snprintf(why, sizeof why, "the op queued %d jobs, not one", (int)(q - g_split.qBefore));
+    else if (SafeRead(queue + 0x18 + (uint64_t)(q - 1) * 0x1D0, g_split.job, sizeof g_split.job)) snprintf(why, sizeof why, "its job did not read");
+    else
+    {
+        memcpy(&w0, g_split.job, 8); memcpy(&cam, g_split.job + 8, 8); memcpy(&kind, g_split.job + 0x68, 4);
+        if (kind != 0xFFFFFFFFu || g_split.job[0x24] != 0 || g_split.job[0x38] != 0 || g_split.job[0x39] != 0)
+            snprintf(why, sizeof why, "its job is not a plain render (+0x68 %08X, +0x24 %u, +0x38 %u, +0x39 %u)", kind, g_split.job[0x24], g_split.job[0x38], g_split.job[0x39]);
+        else if (w0 == 0 || w0 != world) snprintf(why, sizeof why, "its job's world is not the build's");
+        else if (cam == 0 || cam != g_near.cam[0]) snprintf(why, sizeof why, "its job's camera is not the merge camera");
+    }
+    if (why[0] == 0)
+    {
+        g_split.state = SP_QUEUED; g_split.frameAt.QuadPart = 0;
+        SplitFrame();
+        return 0;
+    }
+    const uint32_t hidden = g_split.hiddenN;
+    const double before = g_split.toggleMs;
+    const int r = SplitWalk(0, g_split.m, g_split.m, 1e30);
+    g_split.state = SP_WHOLE;
+    Note("difficulty: moving tiles: 0x63 split: off after the hides: %s; %u stamps shown again in this frame (%.1f ms%s), the stamps render whole in one frame",
+        why, hidden, g_split.toggleMs - before, r < 0 ? ", the shows FAULTED: the build fails" : "");
+    return r < 0 ? -1 : 0;
+}
+
+/* The job's copy again for the range whose shows and hides are posted, from the job consumer's hook after the game's
+ * consumer (0xAB07A0 / 0xAB07E1 as it calls them for this job, through the wrapper so the gui's offset and scale
+ * apply), under the tile's names. Only while this build's replay waits in 0x63. */
+static void Split63Replay(void)
+{
+    if (!g_split.pending || g_split.state != SP_RANGES || !g_nearActive || !g_moveBuilding || !g_near.stampLeave || g_split.level != g_world.levels) return;
+    typedef void (*FlushFn)(uint64_t world);
+    FlushFn flush = (FlushFn)NearApi(0x10, 0x30);
+    if (flush == NULL) return; /* the range stalls and the build fails */
+    uint64_t a = 0, camera = 0, c = 0, e = 0; uint32_t flags = 0;
+    memcpy(&a, g_split.job, 8); memcpy(&camera, g_split.job + 8, 8); memcpy(&c, g_split.job + 0x10, 8); memcpy(&e, g_split.job + 0x18, 8);
+    memcpy(&flags, g_split.job + 0x20, 4);
+    const int opened = NearNamesOpen();
+    LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
+    flush(a);
+    NearRunAt(1, a, camera, c, (uint64_t)(uintptr_t)(g_split.job + 0x58), e, 0, (uint64_t)(flags | 0x10000u), 0);
+    QueryPerformanceCounter(&t1);
+    NearNamesClose(opened);
+    const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+    g_split.renderMs += ms; if (ms > g_split.renderMax) g_split.renderMax = ms;
+    g_split.pending = 0;
+}
+
+/* The game's consumer rendering the queued job (range 0): its time. `job` is the consumer's copy. */
+static void Split63Seen(const uint8_t* job, double ms)
+{
+    if (g_split.state != SP_QUEUED || job == NULL || memcmp(job, g_split.job, 0x70) != 0) return;
+    g_split.renderFirst = ms; g_split.renderMs += ms; if (ms > g_split.renderMax) g_split.renderMax = ms;
+}
+
+/* 0x63's leave, once its job has drained (the consumer rendered it with range 0 shown: every queued render-path job is
+ * rendered, 0xAB07E1): per frame, range k hidden and range k+1 shown, then its render in the consumer; after the last
+ * range every stamp shown again. 1 done (or whole), 0 more next frame, -1 the build fails. */
+static int Split63Leave(void)
+{
+    if (g_split.state == SP_NONE || g_split.state == SP_WHOLE || g_split.state == SP_DONE) return 1;
+    if (g_split.state != SP_QUEUED && g_split.state != SP_RANGES && g_split.state != SP_SHOWING) return -1;
+    SplitFrame();
+    if (g_split.state == SP_QUEUED) { g_split.state = SP_RANGES; g_split.k = 0; g_split.pending = 0; g_split.cursor = SPLIT_FRESH; }
+    if (g_split.state == SP_RANGES)
+    {
+        if (g_split.pending)
+        {
+            if (++g_split.stall < SPLIT_STALL) return 0;
+            Note("difficulty: moving tiles: 0x63 split: range %u of %u was not rendered in %u frames; the build fails", g_split.k + 1, g_split.K, SPLIT_STALL);
+            return -1;
+        }
+        if (g_split.k + 1 < g_split.K)
+        {
+            /* ranges k+1 and k are one span: shown below range k's start, hidden from it */
+            const int r = SplitWalk(SplitLo(g_split.k + 1), SplitHi(g_split.k), SplitLo(g_split.k), SPLIT_TOGGLE_MS);
+            if (r <= 0) return r;
+            g_split.k++; g_split.pending = 1; g_split.stall = 0;
+            return 0;
+        }
+        g_split.state = SP_SHOWING; g_split.cursor = SPLIT_FRESH;
+    }
+    const int r = SplitWalk(0, g_split.m, g_split.m, SPLIT_TOGGLE_MS);
+    if (r <= 0) return r;
+    g_split.state = SP_DONE;
+    Note("difficulty: moving tiles: 0x63 split: %u ranges of %u stamps, toggles %.1f ms (frame max %.2f ms, %u shows, %u hides, %u skipped dead), "
+        "renders %.1f ms (range max %.2f ms, first %.2f ms), frames %.1f ms over %u (max %.2f ms, least %.2f ms)", g_split.K, g_split.per, g_split.toggleMs,
+        g_split.toggleMax, g_split.shows, g_split.hides, g_split.dead, g_split.renderMs, g_split.renderMax, g_split.renderFirst, g_split.frameMs, g_split.frames,
+        g_split.frameMax, g_split.frameLeast);
+    return 1;
+}
+
+/* A build that fails while stamps are hidden: no range renders again, and MV_FAILING shows them before 0x65. */
+static void Split63Fail(const char* why)
+{
+    if (g_split.state == SP_NONE || g_split.state == SP_WHOLE || g_split.state == SP_DONE || g_split.state == SP_RESTORE) return;
+    g_split.pending = 0;
+    Note("difficulty: moving tiles: 0x63 split: cut short in range %u of %u (%s): %u stamps hidden, shown again before 0x65", g_split.k + 1, g_split.K, why,
+        g_split.hiddenN);
+    g_split.state = g_split.hiddenN != 0 ? SP_RESTORE : SP_DONE; g_split.cursor = SPLIT_FRESH;
+}
+
+/* MV_FAILING's first work: 1 once nothing is hidden. Shows that fault leave the rest hidden for the destroy, which
+ * takes a hidden terrain from the set's parked list as well (0x58E240, 0x58E2BF). */
+static int Split63Restore(void)
+{
+    if (g_split.state != SP_RESTORE) return 1;
+    const int r = SplitWalk(0, g_split.m, g_split.m, SPLIT_TOGGLE_MS);
+    if (r == 0) return 0;
+    if (r < 0) Note("difficulty: moving tiles: 0x63 split: %u stamps stay hidden for their destroy", g_split.hiddenN);
+    g_split.state = SP_DONE;
+    return 1;
+}
+
+/* The ship or a level init with a build under way: no frame of it follows, so nothing is shown. Hidden stamps go with
+ * the build's units through the teardown: a hidden terrain's destroy (0x1E81B4) takes it from the parked list
+ * (0x58E240), the inverse of the hide's own bookkeeping (0x58E6A0). */
+static void Split63Left(const char* why)
+{
+    if (g_split.hiddenN != 0 && g_split.state != SP_NONE && g_split.state != SP_WHOLE)
+        Note("difficulty: moving tiles: 0x63 split: %s in range %u of %u: %u stamps stay hidden; they go with the build's units", why, g_split.k + 1, g_split.K,
+            g_split.hiddenN);
+    SplitClear();
 }
 
 static uint64_t MoveWorld(void)
@@ -611,18 +1200,22 @@ static int MoveTeardown(int left)
 /* The rest of a failed build, once its stamp terrains are away. */
 static void MoveFailRest(void)
 {
+    NearShapeJoin("a failed build"); /* the terrain below may be destroyed: its shape job first */
+    NearMatCopyFinish(); /* and its readback's rest, into the terrain's memory */
     MoveStampUnitsDestroy(1e30);
     MoveTeardown(0);
     if (g_move.failState >= MV_SPAWN && g_near.handle != 0 && g_near.handle != g_move.dropHandle)
     {
         typedef void (*DestroyFn)(uint64_t world, uint64_t handle);
         DestroyFn destroy = (DestroyFn)NearApi(0x08, 0x1E0);
-        if (destroy != NULL) { destroy(MoveWorld(), g_near.handle); g_near.handle = 0; }
+        /* a shape job stuck in this terrain's steps still writes its object: the terrain is left, not freed under it */
+        if (g_shape.stuck && g_shape.handle == g_near.handle) Note("difficulty: moving tiles: the failed tile's terrain is left in the world: its shape job is stuck in it");
+        else if (destroy != NULL) { destroy(MoveWorld(), g_near.handle); g_near.handle = 0; }
     }
     if (g_move.stashed)
     {
         MoveFreeLater(g_near.tex[0] != g_move.dropTex[0] ? g_near.tex[0] : 0, g_near.tex[1] != g_move.dropTex[1] ? g_near.tex[1] : 0,
-            g_matband.tex != g_move.dropBand ? g_matband.tex : 0, g_matband.pixels != g_move.dropBandPixels ? g_matband.pixels : NULL);
+            g_matband.tex != g_move.dropBand ? g_matband.tex : 0, g_matband.pixels != g_move.dropBandPixels ? g_matband.pixels : NULL, 0);
     }
     MovePackageLater();
     MoveCellSkip(g_move.cell[0], g_move.cell[1], GetTickCount64());
@@ -636,6 +1229,7 @@ static void MoveFailRest(void)
 static void MoveFail(const char* why)
 {
     Note("difficulty: moving tiles: the tile of cell (%d, %d) is not built: %s", g_move.cell[0], g_move.cell[1], why);
+    Split63Fail(why);
     if (g_nearActive) NearReplayEnd(0);
     if (g_move.state != MV_FAILING) g_move.failState = g_move.state;
     if (g_move.stamped && g_move.state != MV_FAILING && MoveStampsRecord(g_near.at65, 0x65))
@@ -796,31 +1390,50 @@ static void MoveRaiseCheck(float cx, float cy, int cellX, int cellY)
         cellX, cellY, hit, off, (double)worst, miss);
 }
 
+/* A release's parts on the game thread (QPC ticks): the raise, the hide union, the layer change and replacement queued,
+ * the destroy, its own fence wait inside it (0x1ADFB3, timed by xl_free.c's 0x106030 hook; -1 untimed), the frees
+ * queued, the ground check: which of them holds the 18-20 ms release frame. */
+enum { MR_RAISE, MR_UNION, MR_LATER, MR_DESTROY, MR_FREE, MR_CHECK, MR_PARTS };
+static struct { int64_t part[MR_PARTS]; volatile LONG64 fence; int fenceTimed; } g_moveRelease;
+
 static void MoveRelease(int slot)
 {
     NearTile t = g_tiles[slot];
     uint64_t world = MoveWorld();
+    LARGE_INTEGER at[MR_PARTS + 1];
+    memset(g_moveRelease.part, 0, sizeof g_moveRelease.part);
+    InterlockedExchange64(&g_moveRelease.fence, 0);
     NearTileRemove(slot);
     g_tiles[slot].tex[0] = g_tiles[slot].tex[1] = g_tiles[slot].band = 0; g_tiles[slot].bandPixels = NULL;
+    QueryPerformanceCounter(&at[0]);
     int raised = NearRaiseCoarse(world, &g_tileHidden[slot]);
     g_tileHidden[slot].lowered = 0;
+    QueryPerformanceCounter(&at[1]);
     NearHideUnion(world, "a tile released");
+    QueryPerformanceCounter(&at[2]);
     NearLayerTileChangeLater(slot, 0, t.centre[0], t.centre[1]);
     MoveReplaceLater(slot, &t, t.centre[0], t.centre[1], "a tile went");
+    QueryPerformanceCounter(&at[3]);
     typedef void (*DestroyFn)(uint64_t world, uint64_t handle);
     DestroyFn destroy = (DestroyFn)NearApi(0x08, 0x1E0);
     g_move.destroyTicks = -1;
+    int split = 0;
     if (destroy != NULL && t.handle != 0)
     {
         LARGE_INTEGER d0, d1; QueryPerformanceCounter(&d0);
-        destroy(world, t.handle);
+        split = TerrainDestroySplit(world, t.handle, (uint64_t)(uintptr_t)destroy); /* its rest 2 frame kicks later (xl_free.c) */
+        if (!split) destroy(world, t.handle);
         QueryPerformanceCounter(&d1);
         g_move.destroyTicks = d1.QuadPart - d0.QuadPart;
-        g_tiles[slot].handle = 0; /* its object is freed: a later terrain may get the address */
+        g_tiles[slot].handle = 0; /* its object is freed, now or by the rest: a later terrain may get the address */
     }
-    MoveFreeLater(t.tex[0], t.tex[1], t.band, t.bandPixels);
+    QueryPerformanceCounter(&at[4]);
+    MoveFreeLater(t.tex[0], t.tex[1], t.band, t.bandPixels, split ? t.handle : 0);
     g_move.released++;
-    if (raised) MoveRaiseCheck(t.centre[0], t.centre[1], t.cell[0], t.cell[1]);
+    QueryPerformanceCounter(&at[5]);
+    TerrainTailCheck(split ? t.handle : 0, raised, t.centre[0], t.centre[1], t.cell[0], t.cell[1]);
+    QueryPerformanceCounter(&at[6]);
+    for (int k = 0; k < MR_PARTS; k++) g_moveRelease.part[k] = at[k + 1].QuadPart - at[k].QuadPart;
     Note("difficulty: moving tiles: the tile of cell (%d, %d) released (no player within %.0f m for %u s); the coarse collision %s; %d tiles live",
         t.cell[0], t.cell[1], (double)MOVE_KEEP, MOVE_KEEP_MS / 1000, raised ? "raised back" : "NOT raised back (the level's copy did not read)", NearTilesLive());
     if (g_allocOn > 0 || MemProbeOn()) WorldMemoryNote("a tile released", 0xFFFFFFFFu, 0, 1); /* research (HELLFORGE_XL_ALLOCS=1 or MEMPROBE=1): what a release gives back */
@@ -850,6 +1463,7 @@ static int MoveArena(void)
     return 1;
 }
 
+static void MoveGroundStart(int slot);
 static int MoveStart(void)
 {
     uint64_t block = 0;
@@ -870,6 +1484,8 @@ static int MoveStart(void)
     g_move.stashed = 1;
     g_near.tex[0] = g_near.tex[1] = 0; g_matband.tex = 0; g_matband.pixels = NULL;
     InterlockedExchange(&g_moveBuilding, 1);
+    MoveGroundStart(g_move.slot);
+    g_move.sel.on = 0;
     g_move.acquired = 0; g_move.merge = 0; g_move.cutNoted = 0; g_move.shipSeen = 0; g_move.waits = 0; g_move.frames = 0; g_move.started = GetTickCount64();
     g_move.state = MV_PACKAGE;
     Note("difficulty: moving tiles: building cell (%d, %d) at (%.0f, %.0f) for a player %.0f m from it; %d tiles live", g_move.cell[0], g_move.cell[1],
@@ -920,6 +1536,56 @@ static double MoveMsSince(LARGE_INTEGER* t)
     double ms = (double)(now.QuadPart - t->QuadPart) * 1000.0 / (double)hz.QuadPart;
     *t = now;
     return ms;
+}
+
+/* A slot's first heights copy (NearGroundOf) went into a fresh 32 MiB buffer, every page faulted in on the ready frame
+ * (14.8 ms in game against 1.2 ms into touched memory). The buffer is made and touched on a thread of its own while
+ * the tile builds; the ready state waits for it and the first slot without a buffer takes it. */
+static struct { HANDLE thread; volatile LONG done; uint16_t* buf; } g_groundPre;
+static DWORD WINAPI MoveGroundFault(LPVOID unused)
+{
+    (void)unused;
+    const size_t bytes = (size_t)4096 * 4096 * 2;
+    volatile uint8_t* b = (volatile uint8_t*)VirtualAlloc(NULL, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    for (size_t i = 0; b != NULL && i < bytes; i += 4096) b[i] = 0;
+    g_groundPre.buf = (uint16_t*)b;
+    MemoryBarrier();
+    InterlockedExchange(&g_groundPre.done, 1);
+    return 0;
+}
+static void MoveGroundStart(int slot)
+{
+    if (slot < 0 || slot >= NEAR_TILES_MAX || g_groundBuf[slot] != NULL || g_groundPre.thread != NULL || g_groundPre.buf != NULL) return;
+    InterlockedExchange(&g_groundPre.done, 0);
+    g_groundPre.thread = CreateThread(NULL, 0, MoveGroundFault, NULL, 0, NULL); /* none: NearGroundOf makes its own */
+}
+/* 1 while the buffer is being touched (a frame at a time); then `slot` gets it if it has none. */
+static int MoveGroundWait(int slot);
+/* MV_READY waits for the last layer change's fill (a thread, about 1.3 s of work on 4 threads below normal priority,
+ * plus at most 8 x 200 ms for spawns reading its grids) and the ground prefault (8192 page touches, ~14 ms). 60 s is
+ * many times both: past it the thread is hung, and the build fails rather than wait for the level's end. Counted from
+ * when the current wait began: a release in the state may start a healthy change late. */
+#define MOVE_READY_WAIT_MS 60000u
+/* MV_READY's waits: NULL when both are done, "" to wait a frame more, else why the build fails. */
+static const char* MoveReadyWait(ULONGLONG now)
+{
+    const int layer = MoveLayerWait();
+    if (!layer && !MoveGroundWait(g_move.slot)) { g_move.waitSince = 0; return NULL; }
+    if (g_move.waitSince == 0) g_move.waitSince = now;
+    if (now - g_move.waitSince <= MOVE_READY_WAIT_MS) return "";
+    return layer ? "the layer change did not finish" : "the ground buffer did not finish";
+}
+
+static int MoveGroundWait(int slot)
+{
+    if (g_groundPre.thread != NULL)
+    {
+        if (!g_groundPre.done) return 1;
+        WaitForSingleObject(g_groundPre.thread, INFINITE); /* past its last store */
+        CloseHandle(g_groundPre.thread); g_groundPre.thread = NULL;
+    }
+    if (slot >= 0 && slot < NEAR_TILES_MAX && g_groundBuf[slot] == NULL && g_groundPre.buf != NULL) { g_groundBuf[slot] = g_groundPre.buf; g_groundPre.buf = NULL; }
+    return 0;
 }
 
 static void MoveTileIn(uint64_t world)
@@ -1201,6 +1867,7 @@ static int MoveReleaseTick(ULONGLONG now); /* xl_free.c: an expired tile's relea
 
 static void MoveTick(uint64_t level)
 {
+    g_moveWantsTile = 0;
     if (!g_moveInstalled || level == 0 || level != g_worldLevelLive || g_world.live != 8.0f || !TerrainOn() || !NearOn() || !MoveOn()) return;
     uint32_t state = 0;
     if (SafeRead(level + 0x1E4, &state, 4) || state != 3) return;
@@ -1249,14 +1916,14 @@ static void MoveTick(uint64_t level)
     MoveGroundKeep(); /* before the frame's ground rays are cast */
     co_framecost_nested(CO_FC_GROUNDKEEP, CO_FC_MOVE, fc);
     MoveFreeTick(0);
+    NearBandTick();
     MovePlayers();
     MoveLayerWait();
     if (MoveReleaseTick(now)) return; /* a release, or a frame held for one: a build's step waits for the next */
     if (MoveTrimTick()) return;
     if (g_move.state == MV_IDLE)
     {
-        if (g_move.players == 0 || FarGrassBusy()) return; /* a far-grass batch has the generator's queue and names */
-        if (NearTilesLive() >= MOVE_CAP) return;
+        if (g_move.players == 0 || NearTilesLive() >= MOVE_CAP) return;
         float best = 1e9f; int ba = 0, bb = 0, bp = -1;
         for (int p = 0; p < g_move.players; p++)
         {
@@ -1270,6 +1937,8 @@ static void MoveTick(uint64_t level)
                 }
         }
         if (bp < 0) return;
+        /* a far-grass job has the generator's queue and names: it lets the next gap go to this build */
+        if (FarGrassBusy()) { g_moveWantsTile = 1; return; }
         g_move.slot = NearTileFree();
         if (g_move.slot < 0) return;
         g_move.cell[0] = ba; g_move.cell[1] = bb;
@@ -1298,15 +1967,21 @@ static void MoveTick(uint64_t level)
             if (++g_move.waits > 3600) MoveFail("the merge package did not load");
             return;
         }
-        g_move.waits = 0; g_move.stamped = 0; g_move.stCount = g_move.stUnits = 0;
+        if (!g_move.sel.on) { g_move.waits = 0; g_move.stamped = 0; g_move.stCount = g_move.stUnits = 0; }
         uint64_t locs = 0, countAt = 0; uint32_t count = 0;
         uint64_t rec = g_near.records + (uint64_t)g_move.at2F * 0x19B0u;
         if (SafeRead(rec + 8 + 8, &locs, 8) || SafeRead(rec + 8 + 0x28, &countAt, 8) || locs == 0 || countAt == 0 || SafeRead(countAt, &count, 4))
         { MoveFail("the 0x2F record's locations did not read"); return; }
         static int stamps = -1; /* HELLFORGE_XL_MOVE_STAMPS=0: no stamp terrains for the tile (0x63 draws none) */
         if (stamps < 0) { char t[4] = ""; stamps = !(GetEnvironmentVariableA("HELLFORGE_XL_MOVE_STAMPS", t, sizeof t) > 0 && t[0] == '0'); }
-        if (stamps) MoveStampsSelect(locs, count, g_near.world_size > 0 ? g_near.world_size / 2 : 8192.0f);
+        if (stamps)
+        {
+            const int r = MoveStampsSelect(locs, count, g_near.world_size > 0 ? g_near.world_size / 2 : 8192.0f, MOVE_SELECT_MS);
+            if (r < 0) { MoveFail("the level's stamp data went while the stamp units were made"); return; }
+            if (r == 0) return; /* the rest of the spawns next frame */
+        }
         if (g_move.stCount != 0 && !MoveStampsRecord(g_move.at2F, 0x2F)) { MoveFail("record 0x2F did not read"); return; }
+        Move2FReset();
         g_move.state = g_move.stCount != 0 ? MV_STAMPS : MV_KICK;
         if (g_move.state == MV_KICK && SafeRead(g_near.records + (uint64_t)g_move.at37 * 0x19B0u, g_move.one, sizeof g_move.one)) { MoveFail("record 0x37 did not read"); return; }
         g_move.phase = g_move.state == MV_KICK ? 0 : g_move.phase;
@@ -1315,7 +1990,7 @@ static void MoveTick(uint64_t level)
     if (g_move.state == MV_STAMPS)
     {
         g_move.stamped = 1; /* from the first call some of the terrains may be spawned */
-        int r = MoveRunRecord();
+        int r = MoveRun2F();
         if (r < 0) { MoveFail("0x2F faulted"); return; }
         if (r == 0) { if (++g_move.waits > 1200) MoveFail("0x2F did not finish (the spawns did not come)"); return; }
         Note("difficulty: moving tiles: the stamp terrains of %u locations spawned for the tile (%.1f s)", g_move.stCount, (double)(GetTickCount64() - g_move.started) / 1000.0);
@@ -1365,12 +2040,14 @@ static void MoveTick(uint64_t level)
         if (g_near.state == NEAR_FAILED) { MoveFail("the replay failed"); return; }
         if (g_near.state != NEAR_SPAWN) return;
         MoveHold(0); /* NearReplayEnd unpublished the tile's textures */
-        g_move.waits = 0; g_move.state = MV_TEARDOWN;
+        g_move.waits = g_move.quiet = 0; g_move.state = MV_TEARDOWN;
         return;
     }
     if (g_move.state == MV_TEARDOWN)
     {
-        if (NearQueued((uint64_t)(uintptr_t)g_move.ctx) != 0 || ++g_move.waits < 3) { if (g_move.waits > 600) MoveFail("the job queue did not empty"); return; }
+        const int q = NearQueueWait((uint64_t)(uintptr_t)g_move.ctx, &g_move.waits, &g_move.quiet, 600, 3, "a build's teardown");
+        if (q < 0) MoveFail("the job queue did not empty");
+        if (q != 0) return;
         if (g_move.stamped)
         {
             if (!MoveStampsRecord(g_near.at65, 0x65)) { MoveFail("record 0x65 did not read"); return; }
@@ -1384,6 +2061,7 @@ static void MoveTick(uint64_t level)
     }
     if (g_move.state == MV_FAILING)
     {
+        if (!Split63Restore()) return; /* hidden stamps shown before 0x65 takes them */
         if (g_move.stamped && DestroyListCount(MoveWorld()) >= MOVE_DESTROY_ROOM) { if (++g_move.waits > 600) { g_move.stamped = 0; g_move.ringWaits = 0; Note("difficulty: moving tiles: the destroy list did not empty; the stamp terrains were not all taken away"); } return; }
         if (g_move.stamped)
         {
@@ -1418,12 +2096,14 @@ static void MoveTick(uint64_t level)
     {
         if (g_matband.tex != 0 && (g_matband.holds < NEAR_MAT_HOLD || GetTickCount64() - g_matband.made < 100)) { g_matband.holds++; return; }
         if (!NearSpawnTile((uint64_t)(uintptr_t)g_move.ctx)) { MoveFail("the spawn failed"); return; }
-        g_move.state = MV_READY;
+        g_move.state = MV_READY; g_move.waitSince = 0;
         return;
     }
     if (g_move.state == MV_READY)
     {
-        if (MoveLayerWait()) return; /* the last change's grids first: the tile's slot buffers and grids are its */
+        /* the last change's grids first: the tile's slot buffers and grids are its */
+        const char* wait = MoveReadyWait(GetTickCount64());
+        if (wait != NULL) { if (wait[0] != 0) MoveFail(wait); return; }
         uint64_t world = 0;
         LARGE_INTEGER t; QueryPerformanceCounter(&t);
         if (NearReadyTile((uint64_t)(uintptr_t)g_move.ctx, &world)) return;
@@ -1437,11 +2117,232 @@ static void MoveTick(uint64_t level)
 /* What a build costs the game thread: MoveTick's time in each frame of a build, the six longest with the build's state,
  * the replay's step and the conform's phase at the frame's start; noted once the build is over (the frame after the tile
  * is in, or after a failure). */
+/* Every frame of a build over MOVE_SLOW_MS, the mover's own work and the wall clock apart, counted by the state at the
+ * frame's start (the step's op too): the build's slow frames all named, not only its longest. */
+#define MOVE_SLOW_MS 16.7
+#define MOVE_SLOW_KEYS 12
+typedef struct { int mv, ns, op, conf; uint32_t n; double max; } MoveSlowKey;
+typedef struct { MoveSlowKey key[MOVE_SLOW_KEYS]; uint32_t keys, over, other; } MoveSlow;
 static struct { double ms[6]; int mv[6], ns[6], step[6], conf[6], bld[6]; double sum; uint32_t frames; int pending;
-    double wall[3]; int wallMv[3]; uint32_t slow; } g_moveCost;
+    double wall[3]; int wallMv[3]; uint32_t slow; MoveSlow tick, clock;
+    uint32_t fenceFrames, fenceSlow; double fenceSum, fenceMax, fenceSlowWall, fenceSlowSum; int fenceMv, fenceOp; } g_moveCost;
 /* Wall-clock frames, level update to level update (once a frame on the game thread, 0xAB519E): the whole frame's time,
  * render and other threads' waits included, which the game-thread cost above leaves out. */
-static struct { LARGE_INTEGER last; int mv; } g_moveWall;
+static struct { LARGE_INTEGER last; int mv, ns, op, conf, sp0, sp1; double mover; uint32_t toggles; } g_moveWall; /* sp0, sp1: the 0x63 split at t0, after MoveTick; MoveTick's ms, its shows and hides */
+
+/* A build frame over MOVE_FRAME_SLOW_MS split where the mod runs on the game thread, CoXlTick to CoXlTick: the early
+ * update (CoXlTick and the game's update up to the level update, 0xAB519E), the level update, MoveTick, then up to the
+ * job consumer's last return and on to the next tick; a wall frame alone cannot say which of them held it. */
+#define MOVE_FRAME_SLOW_MS 40.0
+#define MOVE_FRAME_LINES 8 /* a build */
+enum { MF_TICK, MF_LEVEL, MF_T0, MF_T1, MF_TICK_END, MF_MARKS }; /* MF_TICK_END: CoXlTick's own end */
+typedef struct
+{
+    int64_t at[MF_MARKS], consumer, consumerOut; /* QPC ticks; the consumer's after MoveTick only */
+    int64_t fence; /* the frame loop's fence wait (exe 0x8A7C4) between the tick and the level update */
+    int have, mv, ns, op, shape, tile, building;
+    LONG shapeEnds, tileEnds; /* the job ends counted at the tick: one that ends inside the frame was out in it */
+} MoveFrameMarks;
+static struct { MoveFrameMarks f; uint32_t lines; int inBuild, fenceTimed; volatile LONG fenceIn, fenceOut, fenceOther; DWORD thread; uintptr_t teb; } g_moveFrame;
+
+/* frame, early update, level update, mover, after the mover, consumer, to the next tick, CoXlTick, frame fence (ms); 0
+ * without the four marks. The part after the mover ends at the consumer's last return, so the five parts add up to the
+ * frame; CoXlTick (0 without its end mark) and the frame fence are parts of the early update. */
+static int MoveFrameParts(const MoveFrameMarks* f, int64_t next, double hz, double part[9])
+{
+    if ((f->have & 15) != 15 || !(hz > 0)) return 0;
+    const int64_t* a = f->at;
+    const int64_t x = f->consumerOut > a[MF_T1] && f->consumerOut <= next ? f->consumerOut : a[MF_T1];
+    const double k = 1000.0 / hz;
+    part[0] = (double)(next - a[MF_TICK]) * k; part[1] = (double)(a[MF_LEVEL] - a[MF_TICK]) * k;
+    part[2] = (double)(a[MF_T0] - a[MF_LEVEL]) * k; part[3] = (double)(a[MF_T1] - a[MF_T0]) * k;
+    part[4] = (double)(x - a[MF_T1]) * k; part[5] = (double)f->consumer * k; part[6] = (double)(next - x) * k;
+    part[7] = (f->have & (1 << MF_TICK_END)) && a[MF_TICK_END] >= a[MF_TICK] && a[MF_TICK_END] <= a[MF_LEVEL] ? (double)(a[MF_TICK_END] - a[MF_TICK]) * k : 0.0;
+    part[8] = (double)f->fence * k;
+    return 1;
+}
+
+static void MoveFrameClose(int64_t next, double hz)
+{
+    const MoveFrameMarks* f = &g_moveFrame.f;
+    double p[9];
+    if (!f->building || g_moveFrame.lines >= MOVE_FRAME_LINES || !MoveFrameParts(f, next, hz, p) || !(p[0] > MOVE_FRAME_SLOW_MS)) return;
+    g_moveFrame.lines++;
+    const int shape = f->shape || g_shapeEnds != f->shapeEnds, tile = f->tile || g_nearJobEnds != f->tileEnds;
+    char fence[16] = "untimed";
+    if (g_moveFrame.fenceTimed) snprintf(fence, sizeof fence, "%.1f", p[8]);
+    Note("difficulty: moving tiles: slow frame %.1f ms (%s/near %d/op 0x%02X): early update %.1f ms (CoXlTick %.1f, frame fence %s), level update %.1f, mover %.1f, "
+        "after the mover %.1f (consumer %.1f), to the next tick %.1f; jobs out: shape %d, tile %d", p[0], MoveStateName(f->mv), f->ns, (unsigned)f->op & 0xFFu,
+        p[1], p[7], fence, p[2], p[3], p[4], p[5], p[6], shape, tile);
+}
+
+/* A mark on the game thread at `now`; a tick closes the frame before it and takes the job end counts the new one starts with. */
+static void MoveFrameMark(int mark, int64_t now, double hz)
+{
+    if (mark == MF_TICK)
+    {
+        MoveFrameClose(now, hz);
+        memset(&g_moveFrame.f, 0, sizeof g_moveFrame.f);
+        g_moveFrame.thread = GetCurrentThreadId();
+        g_moveFrame.f.shapeEnds = g_shapeEnds; g_moveFrame.f.tileEnds = g_nearJobEnds; /* running then: it ends in the frame or t0 sees it */
+    }
+    g_moveFrame.f.at[mark] = now;
+    g_moveFrame.f.have |= 1 << mark;
+}
+
+/* The level's end: no build runs any more (the stall watch's gate, move.c's teardown). */
+static void MoveFrameLeft(void) { g_moveFrame.inBuild = 0; g_moveFrame.f.building = 0; }
+
+/* The frame loop's wait on the fence it posted a frame before (exe 0x8A7C4 waits [rsi+0x340], 0x8AAF2 posts it after
+ * the kick), timed by xl_free.c's 0x106030 hook: the game thread idle while the render thread ends the last frame. It
+ * runs after the world update and before the next level update, so only the game thread's waits in the early update
+ * count; the build's line counts the waits a build sees: in early updates, elsewhere on the game thread, other threads. */
+static void MoveFrameFence(int64_t in, int64_t out)
+{
+    MoveFrameMarks* f = &g_moveFrame.f;
+    const int game = GetCurrentThreadId() == g_moveFrame.thread;
+    if (!game || !(f->have & (1 << MF_TICK)) || (f->have & (1 << MF_LEVEL)))
+    {
+        if (g_moveFrame.inBuild) InterlockedIncrement(game ? &g_moveFrame.fenceOut : &g_moveFrame.fenceOther);
+        return;
+    }
+    f->fence += out - in;
+    if (g_moveFrame.inBuild) InterlockedIncrement(&g_moveFrame.fenceIn);
+}
+/* The fence in the wall frame ending at this level update (ms), -1 untimed. */
+static double MoveFrameFenceMs(double hz) { return g_moveFrame.fenceTimed && hz > 0 ? (double)g_moveFrame.f.fence * 1000.0 / hz : -1.0; }
+
+/* The job consumer (NearConsume), on whichever thread runs it: only the game thread's calls after MoveTick count. */
+static void MoveFrameConsumer(int64_t in, int64_t out)
+{
+    MoveFrameMarks* f = &g_moveFrame.f;
+    if (GetCurrentThreadId() != g_moveFrame.thread || !(f->have & (1 << MF_T1)) || in < f->at[MF_T1]) return;
+    f->consumer += out - in;
+    f->consumerOut = out;
+}
+
+/* Where the game thread is for the stall watch (S2): the two stretches of a frame the mod's marks do not explain. */
+enum { MS_NONE, MS_EARLY, MS_LATE };
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+/* A watcher samples the game thread once in such a stretch past MOVE_STALL_MS: its RIP, the call sites on its stack and
+ * the engine queues' lengths name the wait the frame parts only bound. Research builds only: it suspends the thread. */
+#define MOVE_STALL_MS 40.0
+#define MOVE_STALL_SAMPLES 4 /* a build */
+static struct { volatile LONG phase, seq, samples, sampled; volatile LONG64 since; } g_moveStall;
+static void MoveStallPhase(int phase, int64_t now)
+{
+    InterlockedExchange64(&g_moveStall.since, now); /* before the phase: a new phase is never read with an old start */
+    InterlockedExchange(&g_moveStall.phase, phase);
+    InterlockedIncrement(&g_moveStall.seq);
+}
+/* 1: sample this stretch now (one sample a stretch, MOVE_STALL_SAMPLES a build, only while a build runs). */
+static int MoveStallDue(int phase, int64_t since, int64_t now, double hz, LONG seq, LONG sampled, LONG samples, int building)
+{
+    return building && (phase == MS_EARLY || phase == MS_LATE) && seq != sampled && samples < MOVE_STALL_SAMPLES && hz > 0 &&
+        (double)(now - since) * 1000.0 / hz > MOVE_STALL_MS;
+}
+#else
+static void MoveStallPhase(int phase, int64_t now) { (void)phase; (void)now; }
+#endif
+
+/* The 0x63 step's wall frames by where its split was (state at the frame's t0 and after its MoveTick): before the op
+ * (hides), the op's frame, the ranges, showing all, the last frame; its slowest frame is outside the split's own clock. */
+enum { S63W_BEFORE, S63W_OP, S63W_RANGES, S63W_SHOWING, S63W_LAST, S63W_OTHER, S63W_KINDS };
+/* Each kind's longest frame's parts (ms, -1 untimed): MoveTick, the engine's world update (0x1B0B10) and the frame fence
+ * inside it, the shows and hides it posted, and the next frame's fence: a toggle is a render message (0x2BD140) the
+ * render thread applies with the world's render (message 8, 0x108D40 -> 0x1E9540) after this frame's kick, so the game
+ * thread waits for it at the next frame's fence. */
+static struct
+{
+    uint32_t n[S63W_KINDS], over, toggles[S63W_KINDS];
+    double max[S63W_KINDS], fence[S63W_KINDS], world[S63W_KINDS], mover[S63W_KINDS], next[S63W_KINDS];
+    int after; /* the kind whose longest frame was the last one added, -1 none: the next frame's fence is its */
+} g_split63Wall = {.after = -1};
+static int Split63WallKind(int sp0, int sp1)
+{
+    if (sp1 == SP_DONE) return S63W_LAST;
+    if ((sp1 == SP_QUEUED || sp1 == SP_WHOLE) && (sp0 == SP_NONE || sp0 == SP_HIDING || sp0 == SP_READY)) return S63W_OP;
+    if (sp1 == SP_NONE || sp1 == SP_HIDING || sp1 == SP_READY) return S63W_BEFORE;
+    if (sp1 == SP_QUEUED || sp1 == SP_RANGES) return S63W_RANGES;
+    if (sp1 == SP_SHOWING) return S63W_SHOWING;
+    return S63W_OTHER;
+}
+/* A wall frame of the step: its ms and parts (ms, -1 untimed), the shows and hides its MoveTick posted. */
+static void Split63WallAdd(double ms, double fence, double world, double mover, uint32_t toggles, int sp0, int sp1)
+{
+    const int k = Split63WallKind(sp0, sp1);
+    if (g_split63Wall.after >= 0) g_split63Wall.next[g_split63Wall.after] = fence;
+    g_split63Wall.after = -1;
+    g_split63Wall.n[k]++;
+    if (g_split63Wall.n[k] == 1 || ms > g_split63Wall.max[k])
+    {
+        g_split63Wall.max[k] = ms; g_split63Wall.fence[k] = fence; g_split63Wall.world[k] = world; g_split63Wall.mover[k] = mover;
+        g_split63Wall.toggles[k] = toggles; g_split63Wall.next[k] = -1.0; g_split63Wall.after = k;
+    }
+    if (ms > MOVE_SLOW_MS) g_split63Wall.over++;
+}
+static void Split63WallNote(void)
+{
+    uint32_t frames = 0;
+    for (int k = 0; k < S63W_KINDS; k++) frames += g_split63Wall.n[k];
+    if (frames == 0) return;
+    const uint32_t* n = g_split63Wall.n; const double* m = g_split63Wall.max;
+    Note("difficulty: moving tiles: 0x63 step's wall-clock frames: %u before the op (max %.1f ms), the op's %u (max %.1f), %u of the ranges (max %.1f), "
+        "%u showing all (max %.1f), the last %u (max %.1f), %u other (max %.1f); %u over %.1f ms", n[S63W_BEFORE], m[S63W_BEFORE], n[S63W_OP], m[S63W_OP],
+        n[S63W_RANGES], m[S63W_RANGES], n[S63W_SHOWING], m[S63W_SHOWING], n[S63W_LAST], m[S63W_LAST], n[S63W_OTHER], m[S63W_OTHER], g_split63Wall.over, MOVE_SLOW_MS);
+    /* where each kind's longest frame went: the game thread's own parts, the render thread's last frame, the rest */
+    static const char* const kName[S63W_KINDS] = {"before the op", "the op's", "the ranges'", "showing all", "the last", "other"};
+    char parts[1400]; size_t at = 0; parts[0] = 0;
+    for (int k = 0; k < S63W_KINDS && at + 1 < sizeof parts; k++)
+    {
+        if (n[k] == 0) continue;
+        double rest = m[k];
+        if (g_split63Wall.mover[k] > 0) rest -= g_split63Wall.mover[k];
+        if (g_split63Wall.world[k] > 0) rest -= g_split63Wall.world[k];
+        if (g_split63Wall.fence[k] > 0) rest -= g_split63Wall.fence[k];
+        const int w = snprintf(parts + at, sizeof parts - at, "%s %s %.1f = mover %.1f + world update %.1f + frame fence %.1f + the rest %.1f, %u shows or hides posted, "
+            "the next frame's fence %.1f", at ? ";" : "", kName[k], m[k], g_split63Wall.mover[k], g_split63Wall.world[k], g_split63Wall.fence[k], rest,
+            g_split63Wall.toggles[k], g_split63Wall.next[k]);
+        if (w < 0) break;
+        at += (size_t)w < sizeof parts - at ? (size_t)w : sizeof parts - at - 1;
+    }
+    Note("difficulty: moving tiles: 0x63 step's longest wall-clock frames' parts (ms, -1 untimed; the world update 0x1B0B10, the frame fence 0x8A7C4):%s", parts);
+    memset(&g_split63Wall, 0, sizeof g_split63Wall);
+    g_split63Wall.after = -1;
+}
+
+static void MoveSlowAdd(MoveSlow* t, double ms, int mv, int ns, int op, int conf)
+{
+    if (!(ms > MOVE_SLOW_MS)) return;
+    t->over++;
+    uint32_t k = 0;
+    while (k < t->keys && !(t->key[k].mv == mv && t->key[k].ns == ns && t->key[k].op == op && t->key[k].conf == conf)) k++;
+    if (k == t->keys)
+    {
+        if (t->keys >= MOVE_SLOW_KEYS) { t->other++; return; }
+        t->key[k] = (MoveSlowKey){mv, ns, op, conf, 0, 0.0};
+        t->keys++;
+    }
+    t->key[k].n++;
+    if (ms > t->key[k].max) t->key[k].max = ms;
+}
+
+/* "<mover state>/near <state>/op 0xNN/conform <phase>: <frames>, longest <ms>" for each key, in first-seen order. */
+static void MoveSlowText(const MoveSlow* t, char* out, size_t size)
+{
+    size_t n = 0;
+    out[0] = 0;
+    for (uint32_t k = 0; k < t->keys && n + 1 < size; k++)
+    {
+        const MoveSlowKey* e = &t->key[k];
+        char op[8] = "-";
+        if (e->op >= 0) snprintf(op, sizeof op, "0x%02X", e->op);
+        int w = snprintf(out + n, size - n, " %s/near %d/op %s/conform %d: %u, longest %.0f ms;", MoveStateName(e->mv), e->ns, op, e->conf, e->n, e->max);
+        if (w < 0) break;
+        n += (size_t)w;
+    }
+    if (t->other && n + 1 < size) snprintf(out + n, size - n, " %u more of other states;", t->other);
+}
 static void MoveWallAdd(double ms, int mv)
 {
     if (ms > 50.0) g_moveCost.slow++;
@@ -1450,6 +2351,15 @@ static void MoveWallAdd(double ms, int mv)
     if (at >= 3) return;
     for (int k = 2; k > at; k--) { g_moveCost.wall[k] = g_moveCost.wall[k - 1]; g_moveCost.wallMv[k] = g_moveCost.wallMv[k - 1]; }
     g_moveCost.wall[at] = ms; g_moveCost.wallMv[at] = mv;
+}
+
+/* A wall frame's fence wait (ms, -1 untimed) for the build's fence line, keyed by the state at the frame's start. */
+static void MoveFenceAdd(double wall, double fence, int mv, int op)
+{
+    if (fence < 0) return;
+    g_moveCost.fenceFrames++; g_moveCost.fenceSum += fence;
+    if (g_moveCost.fenceFrames == 1 || fence > g_moveCost.fenceMax) { g_moveCost.fenceMax = fence; g_moveCost.fenceMv = mv; g_moveCost.fenceOp = op; }
+    if (wall > MOVE_SLOW_MS) { g_moveCost.fenceSlow++; g_moveCost.fenceSlowWall += wall; g_moveCost.fenceSlowSum += fence; }
 }
 
 static void MoveCostAdd(double ms, int mv, int ns, int step, int conf, int bld)
@@ -1470,38 +2380,316 @@ static void MoveCostNote(void)
         n += snprintf(line + n, sizeof line - n, " %.0f ms (%s, near state %d, step %d, building %d, conform phase %d);", g_moveCost.ms[k],
             MoveStateName(g_moveCost.mv[k]), g_moveCost.ns[k], g_moveCost.step[k], g_moveCost.bld[k], g_moveCost.conf[k]);
     Note("difficulty: moving tiles: the build's cost on the game thread: %.0f ms over %u frames; the longest:%s", g_moveCost.sum, g_moveCost.frames, line);
-    Note("difficulty: moving tiles: the ready frame: ready and finalize %.1f ms, coarse hidden %.1f, heights copied %.1f, band %.1f, hide union %.1f, "
-        "layer change started %.1f, stamps flagged %.1f", g_moveReadyMs[0], g_moveReadyMs[1], g_moveReadyMs[2], g_moveReadyMs[3], g_moveReadyMs[4],
-        g_moveReadyMs[5], g_moveReadyMs[6]);
+    Note("difficulty: moving tiles: the ready frame: ready and finalize %.1f ms (the quadtree %.1f, the finalize %.1f), coarse hidden %.1f, heights copied %.1f, "
+        "band %.1f, hide union %.1f, layer change started %.1f, stamps flagged %.1f", g_moveReadyMs[0], g_shape.quadMs, g_nearFinalMs, g_moveReadyMs[1],
+        g_moveReadyMs[2], g_moveReadyMs[3], g_moveReadyMs[4], g_moveReadyMs[5], g_moveReadyMs[6]);
     memset(g_moveReadyMs, 0, sizeof g_moveReadyMs);
     Note("difficulty: moving tiles: the build's wall-clock frames: the longest %.0f ms (%s), %.0f ms (%s), %.0f ms (%s); %u over 50 ms",
         g_moveCost.wall[0], MoveStateName(g_moveCost.wallMv[0]), g_moveCost.wall[1], MoveStateName(g_moveCost.wallMv[1]), g_moveCost.wall[2],
         MoveStateName(g_moveCost.wallMv[2]), g_moveCost.slow);
+    {
+        char tick[1200], clock[1200];
+        MoveSlowText(&g_moveCost.tick, tick, sizeof tick); MoveSlowText(&g_moveCost.clock, clock, sizeof clock);
+        Note("difficulty: moving tiles: the build's frames over %.1f ms: the mover's own work %u:%s", MOVE_SLOW_MS, g_moveCost.tick.over, tick);
+        Note("difficulty: moving tiles: the build's frames over %.1f ms: wall clock %u:%s", MOVE_SLOW_MS, g_moveCost.clock.over, clock);
+    }
+    const long fenceIn = InterlockedExchange(&g_moveFrame.fenceIn, 0), fenceOut = InterlockedExchange(&g_moveFrame.fenceOut, 0),
+        fenceOther = InterlockedExchange(&g_moveFrame.fenceOther, 0); /* this build's, printed or not */
+    if (g_moveCost.fenceFrames)
+    {
+        char op[8] = "-";
+        if (g_moveCost.fenceOp >= 0) snprintf(op, sizeof op, "0x%02X", g_moveCost.fenceOp);
+        Note("difficulty: moving tiles: the build's frame fence waits (exe 0x8A7C4): %u wall frames, %.0f ms in all, the longest %.1f ms (%s/op %s); "
+            "the %u wall frames over %.1f ms: %.0f of their %.0f ms in the fence; its waits in the build: %ld in early updates, %ld elsewhere on the game thread, "
+            "%ld on other threads", g_moveCost.fenceFrames, g_moveCost.fenceSum, g_moveCost.fenceMax, MoveStateName(g_moveCost.fenceMv), op, g_moveCost.fenceSlow,
+            MOVE_SLOW_MS, g_moveCost.fenceSlowSum, g_moveCost.fenceSlowWall, fenceIn, fenceOut, fenceOther);
+    }
     memset(&g_moveCost, 0, sizeof g_moveCost);
+    Split63WallNote(); /* a build that ended inside the step */
+    MatResNote();
+    MatWaitNote();
+    g_moveFrame.lines = 0;
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+    NearAutoBuildEnd(g_moveStall.samples);
+    InterlockedExchange(&g_moveStall.samples, 0);
+#else
+    NearAutoBuildEnd(0);
+#endif
+}
+
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+/* The jobs on engine queue q (exe 0x624D00's list): the head's low 23 bits are an index + 1 into the links at
+ * [sched+0x148], each holding the next head; sched = [[[exe+0x1A0F8B8]+0x318]+0xF8] (exe 0xA4A40, 0x626973). */
+static uint32_t MoveStallQueued(uintptr_t exe, int q)
+{
+    uint64_t p = 0, s = 0, sched = 0, base = 0, links = 0;
+    uint32_t head = 0, n = 0;
+    if (SafeRead(exe + 0x1A0F8B8u, &p, 8) || p == 0 || SafeRead(p + 0x318, &s, 8) || s == 0 || SafeRead(s + 0xF8, &sched, 8) || sched == 0 ||
+        SafeRead(sched + 0x140, &base, 8) || SafeRead(sched + 0x148, &links, 8) || base == 0 || base + (uint64_t)q * 0x40 >= links ||
+        SafeRead(base + (uint64_t)q * 0x40, &head, 4)) return 0xFFFFFFFFu;
+    for (uint32_t h = head & 0x7FFFFFu; h != 0 && n < 1024; n++)
+    {
+        uint32_t next = 0;
+        if (SafeRead(links + (uint64_t)(h - 1) * 4, &next, 4)) break;
+        h = next & 0x7FFFFFu;
+    }
+    return n;
+}
+
+/* A qword on the stack copy that may be a return address: inside a module and right after a call (E8 rel32, FF /2). */
+static int MoveStallCallBefore(uintptr_t a)
+{
+    uint8_t b[8];
+    if (SafeRead(a - 8, b, 8)) return 0;
+    const uint8_t* e = b + 8; /* e[-k]: k bytes before the address */
+    return e[-5] == 0xE8 || (e[-2] == 0xFF && (e[-1] & 0xF8) == 0xD0) || (e[-6] == 0xFF && (e[-5] == 0x15 || ((e[-5] & 0xF8) == 0x90 && e[-5] != 0x94))) ||
+        (e[-3] == 0xFF && (e[-2] & 0xF8) == 0x50 && e[-2] != 0x54) || (e[-4] == 0xFF && e[-3] == 0x54) || (e[-7] == 0xFF && e[-6] == 0x94) ||
+        (e[-3] == 0x41 && e[-2] == 0xFF && (e[-1] & 0xF8) == 0xD0) || (e[-4] == 0x41 && e[-3] == 0xFF && (e[-2] & 0xF8) == 0x50);
+}
+
+static void MoveStallWhere(uintptr_t a, uintptr_t exe, size_t exeSize, uintptr_t game, size_t gameSize, char* out, size_t size, uint64_t* offset)
+{
+    HMODULE m = NULL; char path[MAX_PATH] = "";
+    if (a >= exe && a < exe + exeSize) { snprintf(out, size, "exe"); *offset = a - exe; return; }
+    if (a >= game && a < game + gameSize) { snprintf(out, size, "game"); *offset = a - game; return; }
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)a, &m) && GetModuleFileNameA(m, path, sizeof path) > 0)
+    {
+        const char* name = strrchr(path, '\\');
+        snprintf(out, size, "%s", name != NULL ? name + 1 : path);
+        *offset = a - (uintptr_t)m;
+        return;
+    }
+    snprintf(out, size, "0"); *offset = a;
+}
+
+/* The function an exe address lies in: its pdata entry, walked back over chained parts to the primary start; 0 none. */
+static uintptr_t MoveStallFunction(uintptr_t a)
+{
+    DWORD64 base = 0;
+    PRUNTIME_FUNCTION f = RtlLookupFunctionEntry((DWORD64)a, &base, NULL);
+    for (int hops = 0; f != NULL && hops < 8; hops++)
+    {
+        const uint8_t* ui = (const uint8_t*)(uintptr_t)(base + f->UnwindData);
+        if (!((ui[0] >> 3) & UNW_FLAG_CHAININFO)) return (uintptr_t)(base + f->BeginAddress);
+        f = (PRUNTIME_FUNCTION)(ui + 4 + 2 * (((size_t)ui[2] + 1) & ~(size_t)1)); /* the chained entry after the codes */
+    }
+    return 0;
+}
+
+/* The wait an address names (RIP, or a return address on the stack): the job system's waits and helps (0x626900,
+ * 0x624D00, 0x627160, 0x6273E0, 0xB3D90), the frame loop's fence (the call at 0x8A7C4), a resource fence (0x1A8D70 the
+ * release, 0x1A8449 the create), a terrain destroy's (0x1ADFB3), the game's wait on its queue-14 generator job (game
+ * 0xF6E6E6); NULL none. */
+static const char* MoveStallWait(uintptr_t a, uintptr_t exe, size_t exeSize, uintptr_t game, size_t gameSize, char* out, size_t size)
+{
+    static const uint32_t kWaits[] = {0x626900u, 0x624D00u, 0x627160u, 0x6273E0u, 0xB3D90u};
+    if (a >= game && a < game + gameSize) return a - game == 0xF6E6E6u ? "the game's wait on its queue-14 generator job (game 0xF6E6E6)" : NULL;
+    if (!(a >= exe && a < exe + exeSize)) return NULL;
+    if (a - exe == 0x8A7C9u) return "the frame loop's fence (exe 0x8A7C4)";
+    if (a - exe == 0x1A8D75u) return "a resource release's fence (exe 0x1A8D70)";
+    if (a - exe == 0x1A844Eu) return "a resource create's fence (exe 0x1A8449)";
+    if (a - exe == 0x1ADFB8u) return "a terrain destroy's fence (exe 0x1ADFB3)";
+    const uintptr_t f = MoveStallFunction(a);
+    for (size_t k = 0; k < sizeof kWaits / sizeof kWaits[0]; k++)
+        if (f == exe + kWaits[k]) { snprintf(out, size, "the job system's wait or help (exe 0x%X)", kWaits[k]); return out; }
+    return NULL;
+}
+
+static size_t MoveStallImage(uintptr_t base)
+{
+    IMAGE_DOS_HEADER dos; uint32_t size = 0;
+    if (base == 0 || SafeRead(base, &dos, sizeof dos) || SafeRead(base + (uintptr_t)dos.e_lfanew + 0x50, &size, 4)) return 0; /* OptionalHeader.SizeOfImage */
+    return size;
+}
+#endif
+
+#ifdef CO_RESEARCH
+#define MOVE_STALL_STACK 0x4000
+#define MOVE_STALL_FRAMES 32
+#define MOVE_STALL_QUEUES 21 /* 0x624D00's queues: 7 categories of 3 */
+/* The watcher. Between SuspendThread and ResumeThread it only reads the context and copies the stack, which take no
+ * lock the game thread may hold (no allocation, log, module or unwind lookup); everything else runs after the resume. */
+static DWORD WINAPI MoveStallWatch(void* unused)
+{
+    (void)unused;
+    static uint8_t copy[MOVE_STALL_STACK];
+    const uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL), game = g_world.game;
+    const size_t exeSize = MoveStallImage(exe), gameSize = MoveStallImage(game);
+    HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, g_moveFrame.thread);
+    if (thread == NULL) { Note("difficulty: moving tiles: stall samples off: the game thread could not be opened (%lu)", GetLastError()); return 0; }
+    LARGE_INTEGER hz; QueryPerformanceFrequency(&hz);
+    for (;;)
+    {
+        Sleep(10);
+        const LONG seq = g_moveStall.seq;
+        MemoryBarrier();
+        const int phase = (int)g_moveStall.phase;
+        const int64_t since = g_moveStall.since;
+        LARGE_INTEGER now; QueryPerformanceCounter(&now);
+        if (!MoveStallDue(phase, since, now.QuadPart, (double)hz.QuadPart, seq, g_moveStall.sampled, g_moveStall.samples, g_moveFrame.inBuild)) continue;
+        g_moveStall.sampled = seq;
+        CONTEXT c; memset(&c, 0, sizeof c);
+        c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        size_t len = 0;
+        if (SuspendThread(thread) == (DWORD)-1) continue;
+        const NT_TIB* tib = (const NT_TIB*)g_moveFrame.teb;
+        if (GetThreadContext(thread, &c) && g_moveStall.seq == seq && tib != NULL)
+        {
+            /* the stopped thread's own limits: [rsp, StackBase) is committed when rsp lies at or above StackLimit */
+            const uintptr_t lo = (uintptr_t)tib->StackLimit, hi = (uintptr_t)tib->StackBase;
+            if (c.Rsp >= lo && c.Rsp < hi) { len = hi - c.Rsp < sizeof copy ? (size_t)(hi - c.Rsp) : sizeof copy; memcpy(copy, (const void*)(uintptr_t)c.Rsp, len); }
+        }
+        LARGE_INTEGER at; QueryPerformanceCounter(&at);
+        ResumeThread(thread);
+        if (len == 0) continue;
+        InterlockedIncrement(&g_moveStall.samples);
+        char where[64], trail[1600], queues[256], waitText[64]; uint64_t off = 0; size_t n = 0; int frames = 0, capped = 0;
+        const char* wait = MoveStallWait((uintptr_t)c.Rip, exe, exeSize, game, gameSize, waitText, sizeof waitText);
+        MoveStallWhere((uintptr_t)c.Rip, exe, exeSize, game, gameSize, where, sizeof where, &off);
+        trail[0] = 0;
+        /* MOVE_STALL_FRAMES candidates; past them only the game's frame update [0xAB4520, 0xAB5200), which the reading needs */
+        for (size_t i = 0; i + 8 <= len && n + 40 < sizeof trail; i += 8)
+        {
+            uint64_t v; memcpy(&v, copy + i, 8);
+            const int inGame = v >= game && v < game + gameSize;
+            if (!((v >= exe && v < exe + exeSize) || inGame) || !MoveStallCallBefore((uintptr_t)v)) continue;
+            if (frames >= MOVE_STALL_FRAMES && !(inGame && v - game >= 0xAB4520u && v - game < 0xAB5200u)) { capped = 1; continue; }
+            if (wait == NULL) wait = MoveStallWait((uintptr_t)v, exe, exeSize, game, gameSize, waitText, sizeof waitText);
+            n += (size_t)snprintf(trail + n, sizeof trail - n, "%s%s+0x%llX", frames ? ", " : "", inGame ? "game" : "exe", (unsigned long long)(v - (inGame ? game : exe)));
+            frames++;
+        }
+        /* every engine queue with jobs on it, q:n; "unread" when the scheduler does not read */
+        size_t qn = 0; queues[0] = 0;
+        for (int q = 0; q < MOVE_STALL_QUEUES; q++)
+        {
+            const uint32_t count = MoveStallQueued(exe, q);
+            if (count == 0xFFFFFFFFu) { snprintf(queues, sizeof queues, "unread"); qn = 1; break; }
+            if (count != 0) qn += (size_t)snprintf(queues + qn, sizeof queues - qn, "%s%d:%u", qn ? " " : "", q, count);
+        }
+        /* the copy's length: a full one (MOVE_STALL_STACK) can have cut the trail before the game's frame update */
+        Note("difficulty: moving tiles: stall sample: the game thread %.0f ms into the %s at %s+0x%llX; wait: %s; stack (%u bytes%s): %s; queues pending: %s; "
+            "jobs out: shape %d, tile %d", (double)(at.QuadPart - since) * 1000.0 / (double)hz.QuadPart, phase == MS_EARLY ? "early update" : "frame after the mover",
+            where, (unsigned long long)off, wait != NULL ? wait : "none named", (unsigned)len, capped ? ", capped" : "", frames ? trail : "none found", qn ? queues : "none",
+            (int)g_shape.running, g_nearJob.inflight > 0);
+    }
+}
+
+/* Once a session, at the first build frame: on unless HELLFORGE_XL_STALL_SAMPLE=0. */
+static void MoveStallStart(void)
+{
+    static int started;
+    if (started || !g_moveFrame.inBuild) return;
+    started = 1;
+    char v[4] = "";
+    if (GetEnvironmentVariableA("HELLFORGE_XL_STALL_SAMPLE", v, sizeof v) > 0 && v[0] == '0') { Note("difficulty: moving tiles: stall samples off (HELLFORGE_XL_STALL_SAMPLE=0)"); return; }
+    HANDLE t = CreateThread(NULL, 0, MoveStallWatch, NULL, 0, NULL);
+    if (t != NULL) CloseHandle(t);
+    Note("difficulty: moving tiles: stall samples %s (a game-thread stretch over %.0f ms outside the mod's marks, %d a build; research)", t != NULL ? "on" : "off: no thread",
+        MOVE_STALL_MS, MOVE_STALL_SAMPLES);
+}
+#endif
+
+/* CoXlTick's start (end 0) and end (co_xl.c). */
+static void MoveFrameTick(int end)
+{
+    LARGE_INTEGER now, hz; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&hz);
+    if (end) { MoveFrameMark(MF_TICK_END, now.QuadPart, (double)hz.QuadPart); MoveStallPhase(MS_EARLY, now.QuadPart); return; }
+    MoveFrameMark(MF_TICK, now.QuadPart, (double)hz.QuadPart);
+    MoveStallPhase(MS_NONE, now.QuadPart);
+#ifdef CO_RESEARCH
+    g_moveFrame.teb = (uintptr_t)NtCurrentTeb();
+#endif
 }
 
 /* Before the level's own update: the scatter cut's close counts this update (difficulty_world_diag.c). */
 static void MoveScatterTick(void) { TdScatterMergeTick((uint64_t)(uintptr_t)g_move.ctx); }
 
+static int LwFpWorldOn(void); /* living_world_fparts.c */
+/* The wall frame that ends at this level update's t0 (the last t0 to this one) into the build's tables, with the frame
+ * fence and the world update (ms, -1 untimed) inside it; then the new frame's state at t0. */
+static void MoveWallClose(int64_t t0, double hz, int mv, int ns, int op, int conf, double world)
+{
+    if (g_moveWall.last.QuadPart != 0 && (g_moveWall.mv != MV_IDLE || g_moveCost.pending) && hz > 0)
+    {
+        const double wall = (double)(t0 - g_moveWall.last.QuadPart) * 1000.0 / hz;
+        const double fence = MoveFrameFenceMs(hz); /* this frame's early update lies inside the wall frame */
+        MoveWallAdd(wall, g_moveWall.mv);
+        MoveSlowAdd(&g_moveCost.clock, wall, g_moveWall.mv, g_moveWall.ns, g_moveWall.op, g_moveWall.conf);
+        MoveFenceAdd(wall, fence, g_moveWall.mv, g_moveWall.op);
+        if (g_moveWall.op == 0x63) Split63WallAdd(wall, fence, world, g_moveWall.mover, g_moveWall.toggles, g_moveWall.sp0, g_moveWall.sp1);
+    }
+    if (g_moveWall.op == 0x63 && op != 0x63) Split63WallNote();
+    g_moveWall.last.QuadPart = t0; g_moveWall.mv = mv; g_moveWall.ns = ns; g_moveWall.op = op; g_moveWall.conf = conf; g_moveWall.sp0 = g_split.state;
+    g_moveWall.mover = 0; g_moveWall.toggles = 0;
+}
+/* After MoveTick: its time and the shows and hides it posted, the split's state after it. */
+static void MoveWallTicked(int64_t ticks, double hz, uint32_t toggles)
+{
+    g_moveWall.sp1 = g_split.state; g_moveWall.mover = hz > 0 ? (double)ticks * 1000.0 / hz : 0; g_moveWall.toggles = toggles;
+}
+/* A build frame whose MoveTick took more than this holds a step of game-thread work: the stamp slices run to
+ * MOVE_UNSTAMP_MS / MOVE_SELECT_MS. The other frames poll jobs: 2209 ms over 980 frames with 22 over 50 ms leaves
+ * the rest about 1.1 ms or less each (session f8a9e7ce, a tile's build). */
+#define MOVE_STEP_MS 1.5
+/* The streamer's tick (g_streamTicks) of the last build frame and of the last heavy step, and that frame's MoveTick
+ * time. The level update (0xAB519E) runs before the late update with the streamer's tick (0xAB612D) in the frame
+ * function 0xAB5000, so this frame's are known when the streamer asks. */
+static uint32_t g_moveBuildAt, g_moveStepAt;
+static double g_moveStepMs;
+static void MoveStepMark(double ms)
+{
+    g_moveBuildAt = g_streamTicks + 1; g_moveStepMs = ms; /* the streamer's tick of this frame */
+    if (ms > MOVE_STEP_MS) g_moveStepAt = g_moveBuildAt;
+}
+/* A heavy build step ran in this frame or the last: the streamer's change frame waits (it never adds to a slice). */
+static int MoveStepRecent(void) { return g_moveStepAt != 0 && g_streamTicks - g_moveStepAt <= 1u; }
+/* A tile was building in this frame or the last: its bodies change layer 4 then. */
+static int MoveBuildRecent(void) { return g_moveBuildAt != 0 && g_streamTicks - g_moveBuildAt <= 1u; }
+/* This frame's MoveTick time while a tile builds, else 0: the streamer's change frame leaves it room. */
+static double MoveStepMsNow(void) { return g_moveBuildAt != 0 && g_moveBuildAt == g_streamTicks ? g_moveStepMs : 0.0; }
+
 /* The mod's parts are timed for the frame-time lines (co_framecost.h); the game's own update between them is not. */
 static void MoveLevelUpdate(uint64_t level)
 {
+    LARGE_INTEGER entry, hz; QueryPerformanceCounter(&entry); QueryPerformanceFrequency(&hz);
+    MoveStallPhase(MS_NONE, entry.QuadPart);
+    MoveFrameMark(MF_LEVEL, entry.QuadPart, (double)hz.QuadPart);
     int64_t fc = co_framecost_now();
     MoveScatterTick();
     co_framecost_add(CO_FC_SCATTER, fc);
     NearResetTick();
+    NearJobLevelUpdate((uintptr_t)level, g_move.levelPtr); /* a level leaving play: its tile job joined before the game's update */
     g_moveUpdate(level);
     int mv = g_move.state, ns = g_near.state, step = g_near.step, conf = g_conform.phase, bld = g_near.building;
-    LARGE_INTEGER t0, t1, hz;
-    QueryPerformanceCounter(&t0); QueryPerformanceFrequency(&hz);
-    if (g_moveWall.last.QuadPart != 0 && (g_moveWall.mv != MV_IDLE || g_moveCost.pending))
-        MoveWallAdd((double)(t0.QuadPart - g_moveWall.last.QuadPart) * 1000.0 / (double)hz.QuadPart, g_moveWall.mv);
-    g_moveWall.last = t0; g_moveWall.mv = mv;
+    const int op = step >= 0 && step < g_near.steps && step < NEAR_STEPS ? g_near.stepOp[step] : -1;
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
+    MoveFrameMark(MF_T0, t0.QuadPart, (double)hz.QuadPart);
+    g_moveFrame.f.mv = mv; g_moveFrame.f.ns = ns; g_moveFrame.f.op = op;
+    g_moveFrame.f.shape |= g_shape.running != 0; g_moveFrame.f.tile |= g_nearJob.inflight > 0;
+    MoveWallClose(t0.QuadPart, (double)hz.QuadPart, mv, ns, op, conf, LwFpWorldOn() ? co_framecost_world_ms() : -1.0);
+    const uint32_t toggles = g_split.hides + g_split.shows;
     MoveTick(level);
-    QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
+    QueryPerformanceCounter(&t1);
+    const uint32_t posted = g_split.hides + g_split.shows; /* the split cleared in MoveTick: its counts start at 0 */
+    MoveWallTicked(t1.QuadPart - t0.QuadPart, (double)hz.QuadPart, posted >= toggles ? posted - toggles : posted);
+    MoveFrameMark(MF_T1, t1.QuadPart, (double)hz.QuadPart);
+    g_moveFrame.f.building = g_moveFrame.inBuild = mv != MV_IDLE || g_move.state != MV_IDLE;
+    g_moveFrame.f.shape |= g_shape.running != 0; g_moveFrame.f.tile |= g_nearJob.inflight > 0;
+    MoveStallPhase(MS_LATE, t1.QuadPart);
+#ifdef CO_RESEARCH
+    MoveStallStart();
+#endif
     g_hitchCost.tiles += (float)((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart);
     co_framecost_add(CO_FC_MOVE, t0.QuadPart);
-    if (mv != MV_IDLE || g_move.state != MV_IDLE) { MoveCostAdd((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart, mv, ns, step, conf, bld); g_moveCost.pending = 1; }
+    if (mv != MV_IDLE || g_move.state != MV_IDLE)
+    {
+        const double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+        MoveStepMark(ms);
+        MoveCostAdd(ms, mv, ns, step, conf, bld);
+        MoveSlowAdd(&g_moveCost.tick, ms, mv, ns, op, conf);
+        g_moveCost.pending = 1;
+    }
     else if (g_moveCost.pending) MoveCostNote();
     const double grass = HitchNow();
     fc = co_framecost_now();
@@ -1531,8 +2719,12 @@ static void MoveInstall(uintptr_t game)
  * all of them up after its own level init (0x69, the replay, a build in play), so this clears only an older level's. */
 static void NearLevelLeft(int ship)
 {
+    NearBandJoin(); /* first: the pass reads the level's maps */
+    NearJobLevelLeft(); /* and a composite tile job reads its records */
     NearLayerSettle();
     MoveBuildLeft(ship); /* the merge cameras go before the terrains they draw */
+    NearAutoForget(); /* after the leave's shape join: its MoveCostNote comes later, at the ship */
+    MatWaitDrain(); /* op 0x41's setup fence waits: none outlives its level */
     /* A release still owed is never sent outside play. A level init has asked for the package before this hook
      * (0xF712FF, a no-op while it is listed, exe 0x603746..0x603828), and its 0x43 asks again only when has() is 0
      * (0xF61E8B..0xF61EA9), which stays 1 until the queued unload is reached (exe 0x603290): a release here would

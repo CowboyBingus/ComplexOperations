@@ -824,7 +824,7 @@ static void RoadsLinesFile(uintptr_t block)
     float* pts = RoadsReadPoints(block, &L, &points);
     wchar_t name[48];
     swprintf(name, 48, L"roadlines-%ld.tsv", (long)g_world.levels);
-    HANDLE file = pts != NULL ? OpenLog(name) : INVALID_HANDLE_VALUE;
+    HANDLE file = pts != NULL ? OpenResearchLog(name) : INVALID_HANDLE_VALUE;
     const float half = 1024.0f * g_world.current;
     char line[96]; DWORD wrote;
     for (uint32_t i = 0; file != INVALID_HANDLE_VALUE && i < n; i++)
@@ -869,7 +869,7 @@ static void RoadsSpursBuild(uintptr_t block, uint64_t context)
     uint32_t onRoad = 0, tooFar = 0, noRoom = 0, noIndex = 0, at = points, edged = 0, round = 0, narrow = 0, through = 0, onPad = 0, bare = 0, rim = 0; double km = 0; float longest = 0;
     wchar_t endsName[48];
     swprintf(endsName, 48, L"spurends-%ld.tsv", (long)g_world.levels);
-    HANDLE endsFile = OpenLog(endsName);
+    HANDLE endsFile = OpenResearchLog(endsName);
     const float half = 1024.0f * g_world.current;
     static float line[2 * ROADS_SPUR_POINTS];
     for (uint32_t t = 0; t < g_spurs.terms; t++)
@@ -1135,7 +1135,7 @@ static void RoadsCorridorNote(uintptr_t block, const uint8_t* ops, uint32_t befo
         ApiCodeMatches(g_world.game + 0xFCC180u, "48 8B C4 55 53 56 57 41 54 41 55 41 56 41 57 48 8D A8 18 FF FF FF") ? (RoadShapeFn)(g_world.game + 0xFCC180u) : NULL;
     wchar_t name[48];
     swprintf(name, 48, L"corridor-%ld.tsv", (long)g_world.levels);
-    c.file = OpenLog(name);
+    c.file = OpenResearchLog(name);
     const uint32_t added = g_stamps.ringLevel == g_world.levels ? g_stamps.first : 0xFFFFFFFFu;
     for (uint32_t i = 0; i < total; i++)
     {
@@ -1248,7 +1248,7 @@ static void RoadsSlopeNote(uintptr_t block)
     const uint32_t spurs = g_spurs.level == g_world.levels ? g_spurs.count : 0;
     wchar_t name[48];
     swprintf(name, 48, L"slopes-%ld.tsv", (long)g_world.levels);
-    HANDLE file = pts != NULL ? OpenLog(name) : INVALID_HANDLE_VALUE;
+    HANDLE file = pts != NULL ? OpenResearchLog(name) : INVALID_HANDLE_VALUE;
     RoadsSlope sum[2]; uint32_t parts[2] = {0, 0}, steep[2] = {0, 0}, worst[2] = {0, 0};
     memset(sum, 0, sizeof sum);
     for (uint32_t k = 0; pts != NULL && k < n + spurs; k++)
