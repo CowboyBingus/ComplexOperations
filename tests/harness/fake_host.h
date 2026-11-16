@@ -37,6 +37,7 @@ typedef struct FakeHost
     uintptr_t noHook;         /* hook fails for this address */
     struct { uintptr_t target; void* detour; } hooks[FAKE_HOOKS];
     int hookCount;
+    void (*onHook)(uintptr_t target); /* called after each hook goes in: what another thread does meanwhile */
     struct { uintptr_t target; void* original; } originals[4]; /* what a hook of this target calls as the original */
     struct { uintptr_t rva; uint8_t bytes[16]; } underHook[2]; /* another's hook here: read_code gives these, read the jump */
     HfEventCallback loaded;

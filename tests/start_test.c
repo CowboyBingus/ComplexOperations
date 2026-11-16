@@ -117,6 +117,9 @@ int main(void)
      * game.dll) and before the setup */
     CHECK(co_capacity_needs()->early && co_capacity_needs()->render && strstr(g_loadLog, "render capacity: the main world (capacity 0x200000) is made at 2x") != NULL);
     CHECK(strstr(g_loadLog, "is made at 2x") < strstr(g_loadLog, "the engine has room for a world"));
+    /* the streamed layers are off by default: said where their count would go in (before the engine's room), no hook */
+    CHECK(strstr(g_loadLog, "streamed broad phase layers: off by default (HELLFORGE_XL_STREAM_LAYERS=1 turns them on)") != NULL);
+    CHECK(strstr(g_loadLog, "streamed broad phase layers: off by default") < strstr(g_loadLog, "is made at 2x"));
     CHECK(g_fake.exe[FAKE_RENDER_CAP] == 0xE9 && g_fake.exe[FAKE_RENDER_POOL0] == 0xE9 && g_fake.exe[FAKE_RENDER_SCENE] == 0xE9);
     CHECK(g_loadWroteCount >= 21 && g_loadWrote[18] == (uintptr_t)g_fake.exe + FAKE_RENDER_SCENE &&
         g_loadWrote[19] == (uintptr_t)g_fake.exe + FAKE_RENDER_POOL0 && g_loadWrote[20] == (uintptr_t)g_fake.exe + FAKE_RENDER_CAP);
