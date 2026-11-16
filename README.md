@@ -291,8 +291,10 @@ one in four. HellForge owns difficulty 11; the mod only adds to it.
   level-11 operation complex, `0` only each planet's guaranteed one.
 - Every player needs the mod. The host launches a complex mission only when every player's PC can make one;
   otherwise that mission is a normal level-11 mission.
-- A PC that cannot make one plays normal missions. An example is a PC with less than 28 GB of memory free to commit
-  when the game starts. Such a player is denied only when hot-joining a running complex mission.
+- A PC that cannot make one plays normal missions. An example is a PC with less than 16 GB of RAM (the part asks for
+  15360 MB, since the firmware, an integrated GPU or the kernel keep some back). Such a player is denied only when
+  hot-joining a running complex mission. The game peaked at 16.6 GB working set on a complex city map.
+- As the game starts, the log gives the PC's RAM and the commit within reach: `complex operations: <n> MB of RAM`.
 - The mod's log says why the part is off: a line that starts with `complex operations are off:`.
 - A normal level-11 mission with the mod loaded is the mission it is without the mod at the same generation seed.
   The mod clears the lowest bit of every normal level-11 mission's seed, so an odd seed generates as the even one
@@ -360,7 +362,7 @@ In every build, with the part on or off:
 - Every level-11 war-table entry's seed has bit 0 cleared for a normal operation and set for a complex one.
 - Address space: 1 MB near the exe and pages near both modules.
 
-On a PC that passes the early check (the room below, at least 28 GB of memory free to commit at the start):
+On a PC that passes the early check (the room below, at least 16 GB of RAM):
 
 - The engine room in the table above, and the 32 x 32 navigation grid with the trim's 0x4000-byte block near the exe.
 - Entity records have 16384 slots.

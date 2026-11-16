@@ -13,7 +13,7 @@
 #include "xl/co_nav_sites.h"
 #include "xl/co_forest.h"
 
-void co_capacity_test_commit(uint32_t mb);
+void co_capacity_test_ram(uint32_t mb);
 void co_early_test_reset(void);
 const float* co_early_test_cell(void);
 void CoXlTestRecords(int state);
@@ -126,7 +126,7 @@ static void Machine(void)
     c->locations = 65024u; c->minimap_proxies = 32768u; c->important_locations = 1024u; c->linked_locations = 1024u;
     c->route_nodes = 2304u; c->route_edges = 3456u; c->route_points = 65520u; c->block_bytes = 0x2A00000u;
     for (uint32_t i = 0; i <= HF_GEN_ROUTE_POINTS; i++) { c->regions[i].at = 0x1200000u + 0x10010u * i; c->regions[i].places = 100u; }
-    co_capacity_test_commit(CO_COMPLEX_COMMIT_MB);
+    co_capacity_test_ram(CO_COMPLEX_RAM_MB);
 }
 
 int main(void)
@@ -250,12 +250,12 @@ int main(void)
     CHECK(!co_capacity_needs()->early && !co_early_in() && Unchanged() && g_fake.hookCount == 0);
 
     image = Reset("too little memory as the game loads");
-    Machine(); co_capacity_test_commit(CO_COMPLEX_COMMIT_MB - 1u);
+    Machine(); co_capacity_test_ram(CO_COMPLEX_RAM_MB - 1u);
     co_capacity_init(); co_capacity_game((uintptr_t)image);
     co_capacity_early();
     CHECK(!co_capacity_needs()->early && Unchanged() && g_fake.hookCount == 0);
     g_fake.levelRow = 0x1000; g_fake.capacity.moved = 1;
-    CHECK(co_capacity_poll(1) == 1 && !co_complex_on() && fake_host_logged("were not enlarged as the game started (not enough memory free"));
+    CHECK(co_capacity_poll(1) == 1 && !co_complex_on() && fake_host_logged("were not enlarged as the game started (this PC has less than 16 GB of RAM"));
     CHECK(co_capacity_normal() == 1 && Unchanged()); /* no room was made: the grid is HellForge's */
 
     image = Reset("HellForge refused the capacity");
