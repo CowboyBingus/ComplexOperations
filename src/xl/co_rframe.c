@@ -8,13 +8,14 @@
 
 static const char* const kCol[CO_RF_COLS] = {
     "msg07", "msg08", "msg09", "msg0A", "msg0B", "msg0E", "msg10", "other",
-    "cull(0x1EC4AF)", "lod(0x1E2FA6)", "lod(0x1E3E69)", "trees(0x1E3E32)", "join(0x1EDA86)", "dispatch(0x6CC130|0x6CA5F0)",
+    "cull(0x1EC4AF)", "lod(0x1E2FA6)", "lod(0x1E3E69)", "trees(0x1E3E32)", "join(0x1EDA86)", "scatter graph wait (0x21140C)", "dispatch(0x6CC130|0x6CA5F0)",
     "apply8(0x1E84A0)", "spin8(0x1E95B6)", "chain(0x10BB30)", "gpuwait(0x6C5F43)", "drain(0x6C601D)", "present1(0x6C601D-0x6C6178)",
-    "period", "outside(idle 0x113F1D, block switch 0x113F4A, loop)", "gpu"};
+    "period", "outside(idle 0x113F1D, block switch 0x113F4A, loop)", "gpu",
+    "bake view", "bake cells", "bake instances", "bake wrappers us"};
 /* The slowest 1% line's short names, in column order. */
 static const char* const kShort[CO_RF_COLS] = {
-    "07", "08", "09", "0A", "0B", "0E", "10", "other", "cull", "lodA", "lodB", "trees", "join", "dispatch", "apply8", "spin8",
-    "chain", "gpuwait", "drain", "present1", "period", "outside", "gpu"};
+    "07", "08", "09", "0A", "0B", "0E", "10", "other", "cull", "lodA", "lodB", "trees", "join", "scatwait", "dispatch", "apply8", "spin8",
+    "chain", "gpuwait", "drain", "present1", "period", "outside", "gpu", "bake", "bakeCells", "bakeInst", "bakeCoUs"};
 
 static struct
 {
@@ -24,7 +25,7 @@ static struct
     float col[CO_RF_FRAMES][CO_RF_COLS];
     uint32_t frames, kept, gpuFrames;
     double sum[CO_RF_COLS], worst[CO_RF_COLS];
-    uint64_t types[CO_RF_TYPES], applies, applyCut, dispatches, records, clocks, walked, rounds8, foreign;
+    uint64_t types[CO_RF_TYPES], applies, applyCut, dispatches, records, clocks, walked, rounds8, foreign, spinEndsAtClose;
     uint32_t recordsMost, clocksMost, walkedMost;
     float fence[CO_RF_FRAMES];
     uint32_t fences, fenceKept;
@@ -35,6 +36,7 @@ static struct
     uint32_t lastSlowN, lastFences;
     float lastEdge;
     double lastFence[3];
+    uint32_t lastBakeFrames, lastBakeOver; double lastBakeAdded;
 } g_rf;
 
 static double Ms(double ticks) { return g_rf.freq > 0 ? ticks * 1000.0 / (double)g_rf.freq : 0.0; }
@@ -66,7 +68,7 @@ static void WindowStart(int64_t now)
     g_rf.windowAt = now;
     g_rf.frames = g_rf.kept = g_rf.gpuFrames = g_rf.fences = g_rf.fenceKept = 0;
     memset(g_rf.sum, 0, sizeof g_rf.sum); memset(g_rf.worst, 0, sizeof g_rf.worst); memset(g_rf.types, 0, sizeof g_rf.types);
-    g_rf.applies = g_rf.applyCut = g_rf.dispatches = g_rf.records = g_rf.clocks = g_rf.walked = g_rf.rounds8 = g_rf.foreign = 0;
+    g_rf.applies = g_rf.applyCut = g_rf.dispatches = g_rf.records = g_rf.clocks = g_rf.walked = g_rf.rounds8 = g_rf.foreign = g_rf.spinEndsAtClose = 0;
     g_rf.recordsMost = g_rf.clocksMost = g_rf.walkedMost = 0;
     g_rf.fenceSum = g_rf.fenceWorst = 0;
 }
@@ -92,6 +94,9 @@ void co_rframe_frame(const CoRfFrame* f)
     const double outside = (double)f->period - messages; /* nested messages are timed once, by the outer one */
     row[CO_RF_OUTSIDE] = outside > 0 ? (float)Ms(outside) : 0.0f;
     row[CO_RF_GPU] = f->gpuMs;
+    row[CO_RF_BAKE] = f->bakeUpdates > 0 ? 1.0f : 0.0f;
+    row[CO_RF_BAKECELLS] = (float)f->bakeCells; row[CO_RF_BAKEINST] = (float)f->bakeInst;
+    row[CO_RF_BAKECO] = (float)(Ms((double)f->bakeTicks) * 1000.0);
     for (int p = 0; p < CO_RF_COLS; p++)
     {
         if (p == CO_RF_GPU && row[p] < 0) continue;
@@ -103,7 +108,7 @@ void co_rframe_frame(const CoRfFrame* f)
     g_rf.frames++;
     for (int t = 0; t < CO_RF_TYPES; t++) g_rf.types[t] += f->types[t];
     g_rf.applies += f->applies; g_rf.applyCut += f->applyCut; g_rf.dispatches += f->dispatches; g_rf.records += f->records;
-    g_rf.clocks += f->clocks; g_rf.walked += f->walked; g_rf.rounds8 += f->rounds8; g_rf.foreign += f->foreign;
+    g_rf.clocks += f->clocks; g_rf.walked += f->walked; g_rf.rounds8 += f->rounds8; g_rf.foreign += f->foreign; g_rf.spinEndsAtClose += f->spinEndsAtClose;
     if (f->recordsMost > g_rf.recordsMost) g_rf.recordsMost = f->recordsMost;
     if (f->clocks > g_rf.clocksMost) g_rf.clocksMost = f->clocks;
     if (f->walked > g_rf.walkedMost) g_rf.walkedMost = f->walked;
@@ -176,11 +181,49 @@ static size_t Columns(char* out, size_t room, int from, int to)
     return o;
 }
 
+/* The kept frames with a far-grass bake view against those without: what a bake view adds to its render frame. */
+static void BakeLine(void)
+{
+    uint32_t with = 0, without = 0, overWith = 0, overWithout = 0;
+    double sum[2] = {0, 0}, worst[2] = {0, 0}, cells = 0, inst = 0, co = 0, wait = 0, cellsMost = 0, instMost = 0, coMost = 0, waitMost = 0, p99[2] = {0, 0};
+    for (int pass = 0; pass < 2; pass++)
+    {
+        uint32_t n = 0;
+        for (uint32_t i = 0; i < g_rf.kept; i++)
+        {
+            const float* r = g_rf.col[i];
+            if ((r[CO_RF_BAKE] > 0) != (pass == 0)) continue;
+            g_rf.scratch[n++] = r[CO_RF_PERIOD];
+            sum[pass] += r[CO_RF_PERIOD];
+            if (r[CO_RF_PERIOD] > worst[pass]) worst[pass] = r[CO_RF_PERIOD];
+            if (r[CO_RF_PERIOD] > CO_RF_STALL_MS) { if (pass == 0) overWith++; else overWithout++; }
+            if (pass != 0) continue;
+            cells += r[CO_RF_BAKECELLS]; inst += r[CO_RF_BAKEINST]; co += r[CO_RF_BAKECO]; wait += r[CO_RF_SCATWAIT];
+            if (r[CO_RF_BAKECELLS] > cellsMost) cellsMost = r[CO_RF_BAKECELLS];
+            if (r[CO_RF_BAKEINST] > instMost) instMost = r[CO_RF_BAKEINST];
+            if (r[CO_RF_BAKECO] > coMost) coMost = r[CO_RF_BAKECO];
+            if (r[CO_RF_SCATWAIT] > waitMost) waitMost = r[CO_RF_SCATWAIT];
+        }
+        if (pass == 0) with = n; else without = n;
+        p99[pass] = n ? co_rframe_select(g_rf.scratch, n, (uint32_t)((99ull * n + 99) / 100) - 1) : 0;
+    }
+    const double meanWith = with ? sum[0] / with : 0, meanWithout = without ? sum[1] / without : 0, added = with && without ? meanWith - meanWithout : 0;
+    g_rf.lastBakeFrames = with; g_rf.lastBakeOver = overWith; g_rf.lastBakeAdded = added;
+    if (with == 0) return;
+    co_log("render frame bake views: %u of %u frames ran a far-grass bake view; period ms mean/p99/worst with one %.2f/%.2f/%.2f, without %.2f/%.2f/%.2f; "
+        "a bake view adds %.2f ms (%s %.1f ms); frames over %.0f ms: %u with a bake view, %u without; a bake view: cells %.0f (most %.0f), instances %.0f "
+        "(most %.0f), the mod's wrappers %.0f us (most %.0f) over its threads, scatter graph wait (0x21140C) %.2f ms (most %.2f)",
+        with, g_rf.kept, meanWith, p99[0], worst[0], meanWithout, p99[1], worst[1], added, without == 0 ? "no frame without one to compare; goal" :
+        added < CO_RF_BAKE_ADDED_MS ? "within the goal of" : "OVER the goal of", CO_RF_BAKE_ADDED_MS, CO_RF_STALL_MS, overWith, overWithout, cells / with, cellsMost,
+        inst / with, instMost, co / with, coMost, wait / with, waitMost);
+}
+
 int co_rframe_close(int64_t now, const CoRfCounts* c)
 {
     const double seconds = g_rf.freq > 0 ? (double)(now - g_rf.windowAt) / (double)g_rf.freq : 0;
     int lines = 0;
-    char a[400], b[400];
+    char a[700], b[700];
+    g_rf.lastBakeFrames = g_rf.lastBakeOver = 0; g_rf.lastBakeAdded = 0;
     if (g_rf.frames > 0)
     {
         Stats();
@@ -214,11 +257,13 @@ int co_rframe_close(int64_t now, const CoRfCounts* c)
         for (int t = 0; t < CO_RF_TYPES && o + 2 < sizeof a; t++)
             if (g_rf.types[t]) o += (size_t)snprintf(a + o, sizeof a - o, " %02X:%llu", t, (unsigned long long)g_rf.types[t]);
         co_log("render frame counts: message 8 applies %llu (%llu walked only to their first %d items), items by type:%s; dispatches %.2f a frame, "
-            "draw records a dispatch %.0f (most %u); spin8 rounds %llu; calls through another mod's hook, not counted: %llu",
+            "draw records a dispatch %.0f (most %u); spin8 rounds %llu (spins closed at the next event, their last round not seen: %llu); calls through another mod's hook, not counted: %llu",
             (unsigned long long)g_rf.applies, (unsigned long long)g_rf.applyCut, CO_RF_WALK, o ? a : " none", (double)g_rf.dispatches / g_rf.frames,
             g_rf.dispatches ? (double)g_rf.records / (double)g_rf.dispatches : 0.0, g_rf.recordsMost, (unsigned long long)g_rf.rounds8,
-            (unsigned long long)g_rf.foreign);
+            (unsigned long long)g_rf.spinEndsAtClose, (unsigned long long)g_rf.foreign);
         lines += 6;
+        BakeLine();
+        if (g_rf.lastBakeFrames) lines++;
     }
     if (c != NULL && (g_rf.frames > 0 || c->views > 0))
     {
@@ -257,6 +302,7 @@ const char* co_rframe_wait_name(uint32_t rva)
         {0x1E3E69u, "message 7's LOD wait (0x6097A0 from 0x1E3E64)"},
         {0x1E3E32u, "message 7's SpeedTree view task spin (0x213540 from 0x1E3E2D)"},
         {0x1EDA86u, "message 7's generator join (0x252460 from 0x1EDA81)"},
+        {0x211411u, "the scatter graph wait (0x6097A0 from 0x21140C)"},
         {0x6CED4Cu, "the draw dispatch 0x6CC130"},
         {0x6CED5Du, "the draw dispatch 0x6CA5F0"},
         {0x1E95A0u, "message 8's object messages (0x1E84A0 from 0x1E959B)"},
@@ -283,6 +329,7 @@ void co_rframe_test_fence(uint32_t* waits, double* mean, double* p99, double* wo
     *waits = g_rf.lastFences; *mean = g_rf.lastFence[0]; *p99 = g_rf.lastFence[1]; *worst = g_rf.lastFence[2];
 }
 uint32_t co_rframe_test_slow(void) { return g_rf.lastSlowN; }
+void co_rframe_test_bake(uint32_t* frames, uint32_t* over, double* added) { *frames = g_rf.lastBakeFrames; *over = g_rf.lastBakeOver; *added = g_rf.lastBakeAdded; }
 #endif
 #else
 typedef int co_rframe_none; /* a package build: no instrument */

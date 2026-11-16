@@ -17,6 +17,8 @@ enum
     CO_RF_LODB,     /* 0x6097A0 from 0x1E3E64 (ret 0x1E3E69) */
     CO_RF_TREES,    /* 0x213540 from 0x1E3E2D (ret 0x1E3E32): the SpeedTree view task's spin 0x2135E0 */
     CO_RF_JOIN,     /* 0x252460 from 0x1EDA81 (ret 0x1EDA86): the generator join */
+    CO_RF_SCATWAIT, /* 0x6097A0 from 0x21140C (ret 0x211411): the scatter graph wait of 0x2113C0 (message 7 calls it at
+                       0x1ED7B2) for a view without flag bit 0, a far-grass bake view among them */
     CO_RF_DISPATCH, /* 0x6CC130 and 0x6CA5F0 (one caller each, 0x6CED47 and 0x6CED58) */
     CO_RF_APPLY,    /* 0x1E84A0 on the render thread: message 8's object messages */
     CO_RF_SPIN8,    /* 0x1E95A0 .. the last 0x528210 round at 0x1E95F8: message 8's inline device-chain spin (0x1E95B6) */
@@ -29,6 +31,10 @@ enum
     CO_RF_PERIOD = CO_RF_TIMED, /* message 0x0B's entry to the next */
     CO_RF_OUTSIDE,              /* period less every message: the loop's idle poll (0x626900 at 0x113F1D) and the loop */
     CO_RF_GPU,                  /* [[r+0x1168]+0x1480] at the frame's end, ms */
+    CO_RF_BAKE,                 /* 1: a far-grass bake view's scatter update ran in the frame */
+    CO_RF_BAKECELLS,            /* its layers' cells (nodes the view test got, all layers) */
+    CO_RF_BAKEINST,             /* its instances (the brushes' callback's, all layers) */
+    CO_RF_BAKECO,               /* the mod's own wrappers' time in it, us summed over the threads */
     CO_RF_COLS
 };
 
@@ -38,6 +44,7 @@ enum
 #define CO_RF_WINDOW_S 10.0
 #define CO_RF_STALL_MS 25.0     /* a render frame this long is sampled (once a frame, CO_RF_STALL_SAMPLES a window) */
 #define CO_RF_STALL_SAMPLES 3
+#define CO_RF_BAKE_ADDED_MS 3.0 /* a bake view may add this much to its render frame's mean (the far-grass goal) */
 #define CO_RF_ITEM_NS 100.0     /* a walked item's cost bound: two cache misses the game's own walk then does not take */
 
 typedef struct
@@ -48,6 +55,8 @@ typedef struct
     uint32_t records, recordsMost;
     uint16_t types[CO_RF_TYPES];
     uint16_t clocks, walked, messages, dispatches, applies, applyCut, rounds8, foreign;
+    uint32_t bakeUpdates, bakeCells, bakeInst; int64_t bakeTicks; /* far-grass bake views (CO_RF_BAKE..) */
+    uint16_t spinEndsAtClose;   /* message 8 spins whose last round was not seen as the last: closed at the next event */
 } CoRfFrame;
 
 /* What the game thread reads at a window's close, beside the frames. */
@@ -83,6 +92,8 @@ float co_rframe_select(float* v, uint32_t n, uint32_t k);
 void co_rframe_test_col(int col, double* mean, double* p99, double* worst, double* slowMean);
 void co_rframe_test_fence(uint32_t* waits, double* mean, double* p99, double* worst);
 uint32_t co_rframe_test_slow(void);
+/* The last window's frames with a bake view, those of them over CO_RF_STALL_MS, and the ms a bake view added. */
+void co_rframe_test_bake(uint32_t* frames, uint32_t* over, double* added);
 #endif
 
 #endif

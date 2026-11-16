@@ -33,6 +33,7 @@ int CoXlTestFgBakeView(const uint8_t* view);
 void CoXlTestFgWorld(float live);
 int CoXlTestScatterUpdate(LONG op, LONG record, uint8_t* view);
 int CoXlTestScatterBake(void);
+int CoXlTestScatBakeNow(void);
 int CoXlTestScatterLayer(uint8_t* view, uint8_t* layer, int* locked);
 void CoXlTestScatterHold(uint8_t* layer, int hold);
 void CoXlTestScatterCounts(LONG64* bake, LONG64* overlap);
@@ -714,6 +715,7 @@ int main(void)
         CoXlTestMission(0, 1);
         CoXlTestFgWorld(8.0f);
         CHECK(CoXlTestScatterUpdate(0x22, 500, view) == 1 && CoXlTestScatterBake() == 1); /* not cut: run with the mark */
+        CHECK(CoXlTestScatBakeNow() == 0); /* the brushes' callback called from elsewhere is not a bake's */
         f = 400.0f; memcpy(view + 0x24, &f, 4);
         CHECK(CoXlTestScatterUpdate(0x22, 500, view) == 1 && CoXlTestScatterBake() == 0);
         int budget = 0; uint64_t most = 0;

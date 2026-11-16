@@ -1413,8 +1413,9 @@ static void TdScatterMergeTick(uint64_t context)
 /* Extra large maps' far-grass bake in play (difficulty_world_fargrass.c): its orthographic view has near 1 and far
  * 1002. While the engine updates the scatter for it, the scatter boxes (NearScatterView) give every node its ground. */
 #define TD_SCAT_BAKE_FAR 1002.0f
-/* Written at every entry of the update (exe 0x212F10, called only from 0x210DE5) and read only inside it (0x213226,
- * before its first ret at 0x213533), so a stale value is never read. */
+/* Set around the engine's update (exe 0x212F10, called only from 0x210DE5) and 0 outside it, so the view test's
+ * wrapper (0x213226) and the brushes' callback (0x213479) inside it read their own view's mark, and the callback called
+ * from anywhere else reads 0. */
 static _Thread_local int t_tdScatBake;
 /* A layer's update holds its lock on an extra large level in play. A render request kicks its scatter job without a
  * wait (exe 0x1EC7B2), and the player's view (flags 1) never waits for one (0x2113F9), so a far-grass bake view's job
@@ -1650,8 +1651,8 @@ static void TdScatterResearchDone(void)
 static void TdScatterUpdate(void* a, uint8_t* view, uint32_t c, uint8_t* layer, void* e, void* f, void* g, void* h)
 {
     const LONG skipOp = TdScatterSkipOp(view);
-    t_tdScatBake = TdScatterBakeView(view);
-    if (t_tdScatBake)
+    const int bake = TdScatterBakeView(view);
+    if (bake)
     {
         uintptr_t sys = 0;
         InterlockedIncrement64(&g_tdScatBakeUpdates);
@@ -1709,19 +1710,24 @@ static void TdScatterUpdate(void* a, uint8_t* view, uint32_t c, uint8_t* layer, 
         const LONG64 n = InterlockedIncrement64(&g_tdScatOverlap);
         if (n <= 4 || n == 100 || n == 10000)
             Note("difficulty: extra large maps: a scatter update waited for another view's update of its layer (%lld so far; this one %s)", (long long)n,
-                t_tdScatBake ? "a far-grass bake view" : "another view");
+                bake ? "a far-grass bake view" : "another view");
         LARGE_INTEGER t0, t1, hz;
         QueryPerformanceCounter(&t0);
         AcquireSRWLockExclusive(lock);
         QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&hz);
-        if (!t_tdScatBake)
+        if (!bake)
         {
             const LONG64 us = (t1.QuadPart - t0.QuadPart) * 1000000 / hz.QuadPart;
             InterlockedAdd64(&g_tdScatWaitUs, us);
             for (LONG64 m = g_tdScatWaitMaxUs; us > m && InterlockedCompareExchange64(&g_tdScatWaitMaxUs, us, m) != m; m = g_tdScatWaitMaxUs) {}
         }
     }
+#if defined(CO_RESEARCH) || defined(CO_TEST)
+    if (bake) XrfBakeUpdate(); /* the render frame has a bake view's update (xl_render_frame.c) */
+#endif
+    t_tdScatBake = bake;
     g_tdScatterUpdate(a, view, c, layer, e, f, g, h);
+    t_tdScatBake = 0;
     if (lock != NULL) ReleaseSRWLockExclusive(lock);
     TdScatterResearchDone();
     if (!TerrainDiagOn()) return;

@@ -23,8 +23,8 @@
 #include "../co_rframe.h"
 
 #define XRF_RING 1024u
-#define XRF_STACK 0x2000
-#define XRF_STACK_FRAMES 16
+#define XRF_STACK 0x8000 /* 32 KiB: the render thread's frames down to game.dll's callers of a wait */
+#define XRF_STACK_FRAMES 24
 #define XRF_STALL_POLL_MS 5
 
 enum { XH_JOBWAIT, XH_LODWAIT, XH_TREES, XH_JOIN, XH_DISPA, XH_DISPB, XH_APPLY, XH_CHAIN, XH_GPUWAIT, XH_DRAIN, XH_AFTER, XH_CELLS, XH_MESSAGE, XH_COUNT };
@@ -35,7 +35,8 @@ enum { XH_JOBWAIT, XH_LODWAIT, XH_TREES, XH_JOIN, XH_DISPA, XH_DISPB, XH_APPLY, 
 static const struct { uint32_t rva; uint32_t at; const char* name; const char* pin; uint32_t site; const char* sitePin; uint32_t site2; const char* site2Pin; uint32_t ret; } kXrfHooks[XH_COUNT] = {
     {0x627160u, 0, "job wait 0x627160", "48 89 5C 24 08 44 89 44 24 18 55 56 57 41 54 41 55 41 56 41 57 48 8B EC",
      0x1EC4AAu, "E8 B1 AC 43 00 48 8D 5B 04 49 83 EF 01 75 D7", 0x1E2FA1u, "E8 BA 41 44 00", 0},
-    {0x6097A0u, 9, "LOD wait 0x6097A0 (+9)", "83 FA FF 0F 84 54 01 00 00 56 57 41 57 48 83 EC 20 48 89 5C 24 40 48 8B", 0x1E3E64u, "E8 37 59 42 00", 0, NULL, 0x6098FDu},
+    {0x6097A0u, 9, "LOD wait 0x6097A0 (+9)", "83 FA FF 0F 84 54 01 00 00 56 57 41 57 48 83 EC 20 48 89 5C 24 40 48 8B", 0x1E3E64u, "E8 37 59 42 00",
+     0x211406u, "41 B8 02 00 00 00 E8 8F 83 3F 00", 0x6098FDu},
     {0x213540u, 9, "SpeedTree view wait 0x213540 (+9)", "83 FA FF 0F 84 66 01 00 00 48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 30",
      0x1E3E21u, "44 89 7C 24 20 48 8B 89 B0 01 00 00 E8 0E F7 02 00", 0x213607u, "8B 7C 24 60", 0x2136AFu},
     {0x252460u, 0, "generator join 0x252460", "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57 48 83 EC 20", 0x1EDA81u, "E8 DA 49 06 00", 0, NULL, 0},
@@ -69,11 +70,13 @@ static struct
     volatile DWORD renderTid; const NT_TIB* renderTib;
     DWORD gameTid; int started; uint32_t timed, noted;
     /* the render thread's own */
-    int depth; CoRfFrame f; int64_t applyEnd, spinLast, drainEnd; int spinOpen; uint32_t lostW;
+    int depth; CoRfFrame f; int64_t applyEnd, spinLast, drainEnd; int spinOpen, spinPending; uint32_t lostW;
+    volatile LONG inPart;            /* inside a timed call: the stall watcher leaves such a moment to the part's own time */
     volatile LONG64 frameAt; volatile LONG frameSeq;
     CoRfFrame ring[XRF_RING]; volatile uint32_t ringW, ringR;
     /* any thread */
     volatile LONG64 views, cells; volatile LONG cellsMost;
+    volatile LONG64 bakeUpdates, bakeCells, bakeInst, bakeTicks; /* far-grass bake views' scatter work since the frame began */
     /* the game thread's */
     uint32_t lostR; ULONGLONG poolsAt; int pools; uint32_t shown[5], parked[5], shownMost[5], parkedMost[5];
     /* the stall watcher's samples, handed to the game thread */
@@ -83,12 +86,14 @@ static struct
 #ifdef CO_TEST
     uint64_t testRw;                 /* the main world's render world for the pools, instead of the capacity stub's */
     int64_t testNow;                 /* the clock, when set */
+    uint32_t testReads;              /* the clock's reads */
 #endif
 } g_xrf;
 
 static int64_t XrfNow(void)
 {
 #ifdef CO_TEST
+    g_xrf.testReads++;
     if (g_xrf.testNow != 0) return g_xrf.testNow;
 #endif
     LARGE_INTEGER n; QueryPerformanceCounter(&n); return n.QuadPart;
@@ -106,7 +111,7 @@ static int XrfPartFor(int hook, uintptr_t ret)
     switch (hook)
     {
     case XH_JOBWAIT: return rva == 0x1EC4AFu ? CO_RF_CULL : rva == 0x1E2FA6u ? CO_RF_LODA : -1;
-    case XH_LODWAIT: return rva == 0x1E3E69u ? CO_RF_LODB : -1;
+    case XH_LODWAIT: return rva == 0x1E3E69u ? CO_RF_LODB : rva == 0x211411u ? CO_RF_SCATWAIT : -1;
     case XH_TREES: return rva == 0x1E3E32u ? CO_RF_TREES : -1;
     case XH_JOIN: return rva == 0x1EDA86u ? CO_RF_JOIN : -1;
     case XH_DISPA: return rva == 0x6CED4Cu ? CO_RF_DISPATCH : -1;
@@ -119,28 +124,50 @@ static int XrfPartFor(int hook, uintptr_t ret)
 static void XrfAdd(int part, int64_t t0, int64_t t1) { g_xrf.f.t[part] += t1 - t0; g_xrf.f.clocks += 2; }
 
 /* Message 8's inline spin: from 0x1E84A0's return at 0x1E95A0 to the end of its last round, closed before the next
- * apply, at each message's end and at the frame's end. */
-static void XrfSpinClose(void)
+ * apply, at each message's end and at the frame's end. A round is the last when the device's chain count [dev+0x3D8]
+ * reads 0 after it (the loop's own test, 0x1E9605..0x1E961A); one whose end was not seen so closes at `now` (0: read). */
+static void XrfSpinClose(int64_t now)
 {
     if (!g_xrf.spinOpen) return;
     g_xrf.spinOpen = 0;
+    if (g_xrf.spinPending) { g_xrf.spinLast = now != 0 ? now : XrfNow(); g_xrf.spinPending = 0; g_xrf.f.spinEndsAtClose++; g_xrf.f.clocks += now == 0; }
     if (g_xrf.spinLast > g_xrf.applyEnd) g_xrf.f.t[CO_RF_SPIN8] += g_xrf.spinLast - g_xrf.applyEnd;
 }
 static void XrfApplied(uintptr_t ret, int64_t t1)
 {
     if (ret - g_xrf.exe != 0x1E95A0u) return;
-    g_xrf.applyEnd = t1; g_xrf.spinLast = 0; g_xrf.spinOpen = 1;
+    g_xrf.applyEnd = t1; g_xrf.spinLast = 0; g_xrf.spinOpen = 1; g_xrf.spinPending = 0;
 }
-static void XrfRoundAt(uintptr_t ret, int64_t now)
+/* A round of message 8's spin: counted without the clock; the clock is read once, after the round that ends it. The
+ * thread is spinning there, so the read is not counted as the instrument's cost. */
+static void XrfRoundAt(uintptr_t ret, int last, int64_t now)
 {
     if (ret - g_xrf.exe != 0x1E95F8u || !g_xrf.spinOpen) return;
-    g_xrf.spinLast = now; g_xrf.f.rounds8++; g_xrf.f.clocks++;
+    g_xrf.f.rounds8++;
+    if (last) { g_xrf.spinLast = now; g_xrf.spinPending = 0; }
+    else g_xrf.spinPending = 1;
 }
-/* From LwRhNext, after 0x528210 returns: a round of message 8's spin ends now. */
-static void XrfRound(uintptr_t ret)
+/* From LwRhNext, after 0x528210(dev, sched) returns on any thread: the return address first, which is all most callers
+ * pay. */
+static void XrfRound(uintptr_t ret, uintptr_t dev)
 {
-    if (XrfMine() && g_xrf.spinOpen) XrfRoundAt(ret, XrfNow());
+    if (ret - g_xrf.exe != 0x1E95F8u || !g_xrf.spinOpen || !XrfMine()) return;
+    const int last = dev == 0 || *(volatile uint32_t*)(dev + 0x3D8) == 0;
+    XrfRoundAt(ret, last, last ? XrfNow() : 0);
 }
+
+/* Far-grass bake views' work (any thread): swapped into the render frame's record at its end. A bake view's scatter
+ * jobs are waited for inside its frame (0x2113F9: a view without flag bit 0 waits at 0x21140C), so they land in it. */
+static int64_t XrfClock(void) { return XrfNow(); }
+static void XrfBakeUpdate(void) { if (g_xrfOn) InterlockedIncrement64(&g_xrf.bakeUpdates); }
+static void XrfBakeAdd(uint64_t cells, uint64_t instances, int64_t ticks)
+{
+    if (!g_xrfOn) return;
+    if (cells) InterlockedAdd64(&g_xrf.bakeCells, (LONG64)cells);
+    if (instances) InterlockedAdd64(&g_xrf.bakeInst, (LONG64)instances);
+    if (ticks > 0) InterlockedAdd64(&g_xrf.bakeTicks, ticks);
+}
+static uint32_t XrfU32(LONG64 v) { return v < 0 ? 0 : v > 0xFFFFFFFFll ? 0xFFFFFFFFu : (uint32_t)v; }
 
 /* The object messages 0x1E84A0 is about to apply, by type: the first CO_RF_WALK of them. */
 static void XrfWalk(uint64_t stream)
@@ -172,7 +199,9 @@ static void XrfPush(const CoRfFrame* f)
  * in seconds (0x6C5940's timer pair; which frame it belongs to is inferred, not proven). */
 static void XrfFrameEnd(uint64_t r, int64_t now)
 {
-    XrfSpinClose();
+    XrfSpinClose(now);
+    g_xrf.f.bakeUpdates = XrfU32(InterlockedExchange64(&g_xrf.bakeUpdates, 0)); g_xrf.f.bakeCells = XrfU32(InterlockedExchange64(&g_xrf.bakeCells, 0));
+    g_xrf.f.bakeInst = XrfU32(InterlockedExchange64(&g_xrf.bakeInst, 0)); g_xrf.f.bakeTicks = InterlockedExchange64(&g_xrf.bakeTicks, 0);
     if (g_xrf.frameAt != 0)
     {
         uint64_t dev = 0; float gpu = -1.0f;
@@ -195,7 +224,7 @@ static int XrfSlot(uint16_t type)
 }
 static void XrfMessageDone(uint16_t type, int64_t a, int64_t b)
 {
-    XrfSpinClose();
+    XrfSpinClose(b);
     g_xrf.f.t[XrfSlot(type)] += b - a;
     g_xrf.f.messages++; g_xrf.f.clocks += 2;
 }
@@ -226,8 +255,9 @@ static uint64_t XrfOwnMessage(uint64_t r, uint64_t message, uint64_t payload) { 
         if (!XrfMine()) return call;                                         \
         const int part = XrfPartFor(hook, XRF_RET());                        \
         if (part < 0) { if (part == -2) g_xrf.f.foreign++; return call; }    \
+        g_xrf.inPart++;                                                      \
         const int64_t t0 = XrfNow(); const uint64_t out = call;              \
-        XrfAdd(part, t0, XrfNow()); return out;                              \
+        XrfAdd(part, t0, XrfNow()); g_xrf.inPart--; return out;              \
     } while (0)
 
 static uint64_t XrfJobWait(uint64_t a, uint64_t b, uint64_t c, uint64_t d) { XRF_TIMED(XH_JOBWAIT, ((Xrf4Fn)g_xrf.orig[XH_JOBWAIT])(a, b, c, d)); }
@@ -250,8 +280,10 @@ static uint64_t XrfDispatch(int hook, uintptr_t ret, uint64_t a, uint64_t b, uin
     const int part = XrfPartFor(hook, ret);
     if (part < 0) { if (part == -2) g_xrf.f.foreign++; return orig(a, b, c, d); }
     XrfRecords((uint32_t)b);
+    g_xrf.inPart++;
     const int64_t t0 = XrfNow(); const uint64_t out = orig(a, b, c, d);
     XrfAdd(part, t0, XrfNow());
+    g_xrf.inPart--;
     return out;
 }
 static uint64_t XrfDispatchA(uint64_t a, uint64_t b, uint64_t c, uint64_t d) { return XrfDispatch(XH_DISPA, XRF_RET(), a, b, c, d); }
@@ -262,10 +294,12 @@ static uint64_t XrfApply(uint64_t rw, uint64_t stream, uint64_t c, uint64_t d, u
     const Xrf5Fn orig = (Xrf5Fn)g_xrf.orig[XH_APPLY];
     if (!XrfMine()) return orig(rw, stream, c, d, e);
     const uintptr_t ret = XRF_RET();
-    XrfSpinClose();
+    XrfSpinClose(0);
     XrfWalk(stream);
+    g_xrf.inPart++;
     const int64_t t0 = XrfNow(); const uint64_t out = orig(rw, stream, c, d, e); const int64_t t1 = XrfNow();
     XrfAdd(CO_RF_APPLY, t0, t1);
+    g_xrf.inPart--;
     XrfApplied(ret, t1);
     return out;
 }
@@ -284,8 +318,10 @@ static uint64_t XrfDrain(uint64_t a, uint64_t b, uint64_t c, uint64_t d)
     if (!XrfMine()) return orig(a, b, c, d);
     const int part = XrfPartFor(XH_DRAIN, XRF_RET());
     if (part < 0) { if (part == -2) g_xrf.f.foreign++; return orig(a, b, c, d); }
+    g_xrf.inPart++;
     const int64_t t0 = XrfNow(); const uint64_t out = orig(a, b, c, d); const int64_t t1 = XrfNow();
     XrfAdd(part, t0, t1);
+    g_xrf.inPart--;
     XrfDrained(t1);
     return out;
 }
@@ -327,7 +363,7 @@ static uint32_t XrfPartsOf(int hook)
     switch (hook)
     {
     case XH_JOBWAIT: return 1u << CO_RF_CULL | 1u << CO_RF_LODA;
-    case XH_LODWAIT: return 1u << CO_RF_LODB;
+    case XH_LODWAIT: return 1u << CO_RF_LODB | 1u << CO_RF_SCATWAIT;
     case XH_TREES: return 1u << CO_RF_TREES;
     case XH_JOIN: return 1u << CO_RF_JOIN;
     case XH_DISPA: case XH_DISPB: return 1u << CO_RF_DISPATCH;
@@ -470,7 +506,7 @@ static void XrfInstallLine(void)
         g_xrf.in[0] ? g_xrf.in : "none", g_xrf.refused[0] ? g_xrf.refused : "none",
         g_xrfViaSr ? "yes (the stranded spans' 0x113010 hook)" : g_xrf.orig[XH_MESSAGE] != NULL ? "yes (its own 0x113010 hook)" : "NO",
         g_matWait.frameAt != 0 ? "yes (op 0x41's 0x106030 hook)" : "not yet", g_lwRh.orig != NULL ? "yes (the render help hook)" : "NO",
-        g_xrf.clockNs, g_xrf.stallOn ? "on (a render frame over 25 ms, once a frame, 3 a window)" : "off");
+        g_xrf.clockNs, g_xrf.stallOn ? "on (a render frame over 25 ms outside the timed parts, once a frame, 3 a window; time-critical watcher, 32 KiB stack copy)" : "off");
 }
 
 static void XrfStallNotes(void);
@@ -521,9 +557,13 @@ static void RenderFrameTick(void)
 static void XrfStallNote(int k)
 {
     const uintptr_t exe = g_xrf.exe, game = g_world.game;
-    const size_t exeSize = g_xrf.exeSize, gameSize = MoveStallImage(game);
+    const size_t exeSize = g_xrf.exeSize;
+    size_t gameSize = MoveStallImage(game);
+#ifdef CO_TEST
+    if (gameSize == 0 && game != 0) gameSize = 0x4000000u; /* the fake host's image has no headers */
+#endif
     const uint64_t rip = g_xrf.stall[k].rip;
-    char where[64], trail[400], waitText[64];
+    char where[64], trail[640], waitText[64];
     uint64_t off = 0;
     size_t n = 0;
     int frames = 0;
@@ -536,10 +576,11 @@ static void XrfStallNote(int k)
     {
         uint64_t v;
         memcpy(&v, g_xrf.stall[k].stack + i, 8);
-        if (!(v >= exe && v - exe < exeSize) || !MoveStallCallBefore((uintptr_t)v)) continue;
-        const char* name = co_rframe_wait_name((uint32_t)(v - exe));
+        const int inExe = v >= exe && v - exe < exeSize, inGame = game != 0 && v >= game && v - game < gameSize;
+        if (!(inExe || inGame) || !MoveStallCallBefore((uintptr_t)v)) continue;
+        const char* name = inExe ? co_rframe_wait_name((uint32_t)(v - exe)) : NULL;
         if (wait == NULL) wait = name != NULL ? name : MoveStallWait((uintptr_t)v, exe, exeSize, game, gameSize, waitText, sizeof waitText);
-        n += (size_t)snprintf(trail + n, sizeof trail - n, "%sexe+0x%llX", frames ? ", " : "", (unsigned long long)(v - exe));
+        n += (size_t)snprintf(trail + n, sizeof trail - n, "%s%s+0x%llX", frames ? ", " : "", inExe ? "exe" : "game", (unsigned long long)(v - (inExe ? exe : game)));
         if (n >= sizeof trail) n = sizeof trail - 1;
         frames++;
     }
@@ -584,15 +625,15 @@ static DWORD WINAPI XrfStallWatch(void* unused)
         if (!XrfStallDue(at, now, seq)) continue;
         int k = 0;
         while (k < CO_RF_STALL_SAMPLES && g_xrf.stall[k].ready) k++;
-        if (k == CO_RF_STALL_SAMPLES) continue;
-        g_xrf.stallSeq = seq;
+        if (k == CO_RF_STALL_SAMPLES || g_xrf.inPart != 0) continue;
         CONTEXT c;
         memset(&c, 0, sizeof c);
         c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
         size_t len = 0;
         const int64_t before = XrfNow(); /* the render thread's own cost of a sample: suspended to resumed */
         if (SuspendThread(thread) == (DWORD)-1) continue;
-        if (GetThreadContext(thread, &c) && g_xrf.frameSeq == seq)
+        /* suspended, the render thread's part is settled: a moment inside a timed call is left to the part's time */
+        if (g_xrf.inPart == 0 && GetThreadContext(thread, &c) && g_xrf.frameSeq == seq)
         {
             const uintptr_t lo = (uintptr_t)g_xrf.renderTib->StackLimit, hi = (uintptr_t)g_xrf.renderTib->StackBase;
             if (c.Rsp >= lo && c.Rsp < hi)
@@ -605,6 +646,7 @@ static DWORD WINAPI XrfStallWatch(void* unused)
         ResumeThread(thread);
         const int64_t after = XrfNow();
         if (len == 0) continue;
+        g_xrf.stallSeq = seq;
         g_xrf.stall[k].rip = c.Rip; g_xrf.stall[k].len = (uint32_t)len;
         g_xrf.stall[k].ms = (double)(taken - at) * 1000.0 / (double)g_xrf.freq;
         g_xrf.stall[k].suspendedUs = (double)(after - before) * 1e6 / (double)g_xrf.freq;
@@ -618,7 +660,8 @@ static void XrfStallStart(void)
     if (GetEnvironmentVariableA("HELLFORGE_XL_RFRAME_STALL", v, sizeof v) > 0 && v[0] == '0') return;
     HANDLE t = CreateThread(NULL, 0, XrfStallWatch, NULL, 0, NULL);
     g_xrf.stallOn = t != NULL;
-    if (t != NULL) CloseHandle(t);
+    /* above the render thread's priority: a busy machine otherwise delays the poll past the stall it should sample */
+    if (t != NULL) { SetThreadPriority(t, THREAD_PRIORITY_TIME_CRITICAL); CloseHandle(t); }
 }
 #else
 static void XrfStallStart(void) {}
@@ -645,8 +688,19 @@ uint64_t CoXlTestXrfMessage(uint64_t r, uint64_t message, uint64_t payload, uint
 { return XrfMessage(r, message, payload, (XrfMessageFn)orig); }
 void CoXlTestXrfWalk(uint64_t stream) { XrfWalk(stream); }
 void CoXlTestXrfApplied(uintptr_t ret, int64_t t1) { XrfApplied(ret, t1); }
-void CoXlTestXrfRoundAt(uintptr_t ret, int64_t now) { XrfRoundAt(ret, now); }
-void CoXlTestXrfSpinClose(void) { XrfSpinClose(); }
+void CoXlTestXrfRoundAt(uintptr_t ret, int64_t now) { XrfRoundAt(ret, 1, now); }
+void CoXlTestXrfRoundPending(uintptr_t ret) { XrfRoundAt(ret, 0, 0); } /* a round that is not the spin's last */
+void CoXlTestXrfRound(uintptr_t ret, uintptr_t dev) { XrfRound(ret, dev); }
+void CoXlTestXrfSpinClose(void) { XrfSpinClose(0); }
+void CoXlTestXrfBake(int updates, uint64_t cells, uint64_t instances, int64_t ticks)
+{
+    for (int k = 0; k < updates; k++) XrfBakeUpdate();
+    XrfBakeAdd(cells, instances, ticks);
+}
+LONG CoXlTestXrfInPart(void) { return g_xrf.inPart; }
+uint32_t CoXlTestXrfReads(void) { return g_xrf.testReads; }
+void CoXlTestXrfSetOrig(int hook, void* fn) { g_xrf.orig[hook] = fn; }
+uint64_t CoXlTestXrfDispatchAt(uintptr_t ret, uint64_t records) { return XrfDispatch(XH_DISPA, ret, 0, records, 0, 0); }
 void CoXlTestXrfRecords(uint32_t n) { XrfRecords(n); }
 void CoXlTestXrfDrained(int64_t t1) { XrfDrained(t1); }
 void CoXlTestXrfAfterAt(uintptr_t ret, int64_t now) { XrfAfterAt(ret, now); }
