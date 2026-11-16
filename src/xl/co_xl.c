@@ -1385,6 +1385,34 @@ int CoXlTestMove2FRun(void) { return MoveRun2F(); }
 uint32_t CoXlTestMove2FBatch(void) { return g_move2F.batch; }
 const uint8_t* CoXlTestMove2FRecord(void) { return g_move.one; }
 void CoXlTestMove2FPins(void) { g_move2F.pinned = 0; }
+/* Op 0x41's units destroyed a slice at a time (proto/difficulty_world_terrain.c NearMatUnitsSlice): one slice under the
+ * guard; the units still listed after it; the slices' totals; the step's note. */
+uint32_t CoXlTestMatUnits(uint8_t* record, uint64_t context, uint32_t* units, uint32_t* slices)
+{
+    const LONG fault = WorldTileGuardedCall((uintptr_t)NearMatUnitsSlice, record, context);
+    *units = g_matUnits.units; *slices = g_matUnits.slices;
+    return fault ? 0xFFFFFFFFu : g_matUnits.left;
+}
+void CoXlTestMatUnitsReset(void) { memset(&g_matUnits, 0, sizeof g_matUnits); }
+/* The near step's material leave with 0x41's arena still due (g_near.matArena): the step's result. */
+int CoXlTestNearMatLeave(int s, uint64_t context, int arenaDue)
+{
+    g_near.step = s; g_near.stepKind[s] = NEAR_RECORD; g_near.matLeave = 1; g_near.matArena = arenaDue;
+    return NearRunStepIn(0, 0, context, 0, 0);
+}
+void CoXlTestMatUnitsNote(double setup) { g_matUnits.calls = 1; g_matUnits.call[0] = setup; NearMatUnitsNote(); }
+/* A tile's 0x41 step past its record load (g_near.calls 1) with the material pass on for the tile: the record in
+ * g_near.one, its phase; g_near.one for the fake dispatcher; the material pass off (MatLeave then returns at once). */
+uint8_t* CoXlTestNearMat41(int s, const uint8_t* record, uint8_t phase)
+{
+    g_near.step = s; g_near.stepKind[s] = NEAR_RECORD; g_near.stepOp[s] = 0x41; g_near.calls = 1; g_near.phase = phase;
+    g_near.matLeave = 0; g_near.matArena = 0; g_near.building = 0; g_near.stampLeave = 0;
+    memcpy(g_near.one, record, sizeof g_near.one);
+    memset(&g_matUnits, 0, sizeof g_matUnits);
+    g_mat.on = 1; g_mat.owner = MAT_TILE;
+    return g_near.one;
+}
+void CoXlTestMatOff(void) { g_mat.on = 0; }
 /* A SafeRead that faults inside a guarded call (proto/difficulty_world.c WorldTileFault): its failure return, not the
  * call's fault; a plain read that faults there is still the call's. */
 static volatile int g_testGuardRead;

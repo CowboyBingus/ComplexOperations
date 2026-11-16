@@ -1365,6 +1365,7 @@ static struct {
     uint8_t one[0x19B0]; uint8_t phase; int calls; uint32_t frames, waits, quiet;
     int loggedStep; /* a mid-mission build: the last step whose start was noted, + 1 */
     int stampLeave; /* the replayed 0x63 drew at the stamp offset: the cameras go back once its job is drained */
+    int matArena; /* 0x41 ended in mission: its arena is emptied on the next frame, not on top of its last call */
     uint32_t stampWaits;
     int matLeave; /* the replayed 0x41 finished: its cameras go back once its jobs are drained */
     uint32_t readId; float* heights; uint32_t hw, hh;
@@ -2091,7 +2092,7 @@ static void NearReplayEnd(int ok)
         (unsigned long)g_nearNames.consumerThread, (long)g_nearNames.steps, (unsigned long)g_nearNames.stepThread, g_probeRun.outside, (long)g_nearNames.sky);
     g_probeRun.outside = 0;
     if (g_mat.on && g_mat.owner == MAT_TILE) InterlockedExchange(&g_mat.on, 0); /* the cameras go back below */
-    g_near.matLeave = 0;
+    g_near.matLeave = 0; g_near.matArena = 0; /* the next op's reset empties it */
     if (g_near.R != 0)
     {
         NearCameras(g_near.world_size / 2, g_near.world_size / 2, 0.0f, 0.0f);
@@ -2690,6 +2691,54 @@ static int NearBaseStep(uint64_t context);
 
 static int NearRunStepIn(uint64_t records, uint32_t end, uint64_t context, uint64_t g, uint64_t h);
 
+/* 0x41's last call (0xF52F7A..0xF52FCC) destroys every unit its setup spawned ([pass+0x140], count +0x2000, through
+ * [[api+8]+0x158] with the world [ctx+0x40]) in one frame. In play they go here first, a slice a frame, by the same call
+ * in the same order; the game's call then finds the list empty and only ends the op. Its two jobs are drained by then
+ * (the consumer runs every frame), and nothing renders the merge world before the next step. */
+#define NEAR_MAT_UNITS_MS 3.0
+static struct { uint32_t at, left, units, slices, calls; double ms, call[3]; } g_matUnits;
+static void NearMatUnitsSlice(uint64_t pass, uint64_t record, uint64_t context)
+{
+    (void)record;
+    typedef void (*DestroyFn)(uint64_t world, uint64_t unit);
+    const uint64_t lg = *(const uint64_t*)(uintptr_t)pass;
+    const uint32_t t = *(const uint32_t*)(uintptr_t)(lg + 0x124), counter = *(const uint32_t*)(uintptr_t)(pass + 0x13C);
+    g_matUnits.left = 0;
+    if (counter <= t * t) return; /* a job's call still to come (0xF52CED..0xF52D26, 0xF52E64) */
+    const uint64_t list = *(const uint64_t*)(uintptr_t)(pass + 0x140);
+    volatile uint32_t* count = (volatile uint32_t*)(uintptr_t)(list + 0x2000);
+    const uint64_t api = *(volatile uint64_t*)(uintptr_t)(g_world.game + 0x3326308u);
+    const DestroyFn destroy = (DestroyFn)*(const uint64_t*)(uintptr_t)(*(const uint64_t*)(uintptr_t)(api + 8) + 0x158);
+    const uint64_t world = *(const uint64_t*)(uintptr_t)(context + 0x40);
+    LARGE_INTEGER hz, t0, t1; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
+    uint32_t i = g_matUnits.at;
+    for (; i < *count; i++)
+    {
+        if (i != g_matUnits.at && (i & 7) == 0)
+        {
+            QueryPerformanceCounter(&t1);
+            if ((double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart >= NEAR_MAT_UNITS_MS) break;
+        }
+        destroy(world, *(const uint64_t*)(uintptr_t)(list + (uint64_t)i * 8));
+    }
+    QueryPerformanceCounter(&t1);
+    g_matUnits.ms += (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart;
+    g_matUnits.units += i - g_matUnits.at; g_matUnits.slices++;
+    g_matUnits.at = i;
+    if (i >= *count) { *count = 0; g_matUnits.at = 0; } /* as 0xF52FC2 leaves it */
+    g_matUnits.left = *count;
+}
+
+/* "op 0x41 on the game thread": the setup (0xF4F9E0, one call: what a later fix would slice), the jobs' calls, the
+ * units' slices and the last call; once its cameras are back. */
+static void NearMatUnitsNote(void)
+{
+    if (g_matUnits.calls == 0) return;
+    Note("difficulty: moving tiles: op 0x41 on the game thread: the setup %.1f ms, the jobs' calls %.1f ms, %u units destroyed in %u slices (%.1f ms), "
+        "the last call %.1f ms", g_matUnits.call[0], g_matUnits.call[1], g_matUnits.units, g_matUnits.slices, g_matUnits.ms, g_matUnits.call[2]);
+    memset(&g_matUnits, 0, sizeof g_matUnits);
+}
+
 /* A step with the tile's names published around it (its ops may look a name up as they queue their jobs). */
 static int NearRunStep(uint64_t records, uint32_t end, uint64_t context, uint64_t g, uint64_t h)
 {
@@ -2743,8 +2792,10 @@ static int NearRunStepIn(uint64_t records, uint32_t end, uint64_t context, uint6
     }
     if (g_near.matLeave)
     {
+        if (g_near.matArena) { g_near.matArena = 0; WorldArenaReset(context); }
         if (!MatLeave(context)) return 0;
         g_near.matLeave = 0;
+        NearMatUnitsNote();
         return 1;
     }
     if (g_near.stampLeave)
@@ -2774,6 +2825,7 @@ static int NearRunStepIn(uint64_t records, uint32_t end, uint64_t context, uint6
     {
         if (SafeRead(records + (uint64_t)g_near.stepRecord[s] * 0x19B0u, g_near.one, sizeof g_near.one)) return -1;
         NearRecordEdit(g_near.stepOp[s], g_near.one);
+        if (g_near.stepOp[s] == 0x41) memset(&g_matUnits, 0, sizeof g_matUnits);
         g_near.phase = 0;
         /* a tile built in mission: 0x63 renders the world through the merge camera, and mid-mission the world holds the
          * live terrains, which it draws as heights too (run s72k: the step's delta was the level's surface, corr 0.978);
@@ -2789,9 +2841,27 @@ static int NearRunStepIn(uint64_t records, uint32_t end, uint64_t context, uint6
      * the sampler's float load). */
     int swapCaps = g_near.stepOp[s] == 0x3E || g_near.stepOp[s] == 0x3F;
     if (swapCaps) { memcpy(live, (void*)(uintptr_t)g_near.lg, sizeof live); memcpy((void*)(uintptr_t)g_near.lg, g_near.caps, sizeof live); }
+    if (mat && g_moveBuilding && g_near.phase != 0)
+    {
+        fault = WorldTileGuardedCall((uintptr_t)NearMatUnitsSlice, g_near.one, context);
+        if (fault)
+        {
+            Note("difficulty: near terrain: op 0x41's units faulted (%08lX at game.dll+0x%llX)", (unsigned long)fault, (unsigned long long)(TileGuardSelf()->at - g_world.game));
+            return -1;
+        }
+        if (g_matUnits.left != 0) return 0; /* more next frame */
+    }
     int caps = NearStepPatch(g_near.stepOp[s], 1);
     if (mat) TerrainMatPatch(1);
+    LARGE_INTEGER c0, c1, chz; QueryPerformanceCounter(&c0);
     fault = WorldTileGuarded(g_near.one, context, &index, &g_near.phase, g, h, 1, &calls);
+    QueryPerformanceCounter(&c1); QueryPerformanceFrequency(&chz);
+    if (mat && g_moveBuilding)
+    {
+        const double ms = (double)(c1.QuadPart - c0.QuadPart) * 1000.0 / (double)chz.QuadPart;
+        g_matUnits.call[g_matUnits.calls == 0 ? 0 : index != 0 ? 2 : 1] += ms;
+        g_matUnits.calls++;
+    }
     if (mat) TerrainMatPatch(0);
     if (caps) NearStepPatch(g_near.stepOp[s], 0);
     if (swapCaps) memcpy((void*)(uintptr_t)g_near.lg, live, sizeof live);
@@ -2805,8 +2875,8 @@ static int NearRunStepIn(uint64_t records, uint32_t end, uint64_t context, uint6
     if (index != 0)
     {
         g_near.calls = 0;
+        if (mat) { g_near.matLeave = 1; g_near.matArena = 1; return 0; } /* nothing allocates from it before the next op */
         WorldArenaReset(context);
-        if (mat) { g_near.matLeave = 1; return 0; }
         if (g_near.stepOp[s] == 0x63 && (g_nearStampOffset[0] != 0 || g_nearStampOffset[1] != 0)) { g_near.stampLeave = 1; g_near.stampWaits = 0; return 0; }
         return 1;
     }
