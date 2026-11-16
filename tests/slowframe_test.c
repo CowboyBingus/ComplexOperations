@@ -202,16 +202,30 @@ int main(void)
     CHECK(CoXlTestNearAutoBuild(1, 0, 1) == 10);  /* samples, no stall */
     CHECK(strstr(g_fake.log, "go to queue 14") == NULL);
     CHECK(CoXlTestNearAutoBuild(1, 1, 1) == 10);  /* 2: switches after this build */
-    CHECK(fake_host_logged("the tile jobs go to queue 14 from the next build on: 4 builds on queue 10, 2 stalled"));
+    CHECK(fake_host_logged("the tile jobs go to queue 14 from the next build on (2 stalled): 4 builds on queue 10, 2 stalled (\"0 frames\") with stall samples, 0 counted since the last stall"));
     CHECK(CoXlTestNearAutoBuild(1, 0, 0) == 14 && CoXlTestNearAutoBuild(1, 1, 4) == 14);
 
-    g_case = "auto: four builds with a shape job and no stall with samples: 14 from the fifth; one such stall keeps 10";
+    g_case = "auto: four builds in a row with a shape job and no stall with samples: 14 from the fifth";
     CoXlTestNearAutoReset();
     for (int k = 0; k < 4; k++) CHECK(CoXlTestNearAutoBuild(1, 0, k) == 10);
     CHECK(CoXlTestNearAutoBuild(1, 0, 0) == 14);
+
+    g_case = "auto: the four count from the last stall: one stall, then four clean builds, switches; a stall restarts the count";
     CoXlTestNearAutoReset();
-    CHECK(CoXlTestNearAutoBuild(1, 1, 1) == 10);
+    CHECK(CoXlTestNearAutoBuild(1, 1, 1) == 10);                          /* stall 1 */
+    for (int k = 0; k < 3; k++) CHECK(CoXlTestNearAutoBuild(1, 0, 0) == 10);
+    CHECK(CoXlTestNearAutoBuild(0, 0, 0) == 10);                          /* no shape job: not counted */
+    CHECK(CoXlTestNearAutoBuild(1, 0, 0) == 10);                          /* the 4th clean one */
+    CHECK(CoXlTestNearAutoBuild(1, 0, 0) == 14);
+    CHECK(fake_host_logged("go to queue 14 from the next build on (4 clean since the last stall): 5 builds on queue 10, 1 stalled (\"0 frames\") with stall samples, 4 counted since the last stall"));
+    CoXlTestNearAutoReset();
+    for (int k = 0; k < 3; k++) CHECK(CoXlTestNearAutoBuild(1, 0, 0) == 10);
+    CHECK(CoXlTestNearAutoBuild(1, 1, 0) == 10);                          /* "0 frames" without samples: clean */
+    CoXlTestNearAutoReset();
+    for (int k = 0; k < 3; k++) CHECK(CoXlTestNearAutoBuild(1, 0, 0) == 10);
+    CHECK(CoXlTestNearAutoBuild(1, 1, 2) == 10);                          /* stall 1 restarts the count */
     for (int k = 0; k < 4; k++) CHECK(CoXlTestNearAutoBuild(1, 0, 0) == 10);
+    CHECK(CoXlTestNearAutoBuild(1, 0, 0) == 14);
     {
         uint32_t q = 0, pr = 0;
         CoXlTestNearBgQueue(0, &q, &pr); /* back to off for the cases after */

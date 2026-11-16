@@ -2461,9 +2461,10 @@ static DWORD WINAPI MoveStallWatch(void* unused)
             if (count == 0xFFFFFFFFu) { snprintf(queues, sizeof queues, "unread"); qn = 1; break; }
             if (count != 0) qn += (size_t)snprintf(queues + qn, sizeof queues - qn, "%s%d:%u", qn ? " " : "", q, count);
         }
-        Note("difficulty: moving tiles: stall sample: the game thread %.0f ms into the %s at %s+0x%llX; wait: %s; stack%s: %s; queues pending: %s; "
+        /* the copy's length: a full one (MOVE_STALL_STACK) can have cut the trail before the game's frame update */
+        Note("difficulty: moving tiles: stall sample: the game thread %.0f ms into the %s at %s+0x%llX; wait: %s; stack (%u bytes%s): %s; queues pending: %s; "
             "jobs out: shape %d, tile %d", (double)(at.QuadPart - since) * 1000.0 / (double)hz.QuadPart, phase == MS_EARLY ? "early update" : "frame after the mover",
-            where, (unsigned long long)off, wait != NULL ? wait : "none named", capped ? " (capped)" : "", frames ? trail : "none found", qn ? queues : "none",
+            where, (unsigned long long)off, wait != NULL ? wait : "none named", (unsigned)len, capped ? ", capped" : "", frames ? trail : "none found", qn ? queues : "none",
             (int)g_shape.running, g_nearJob.inflight > 0);
     }
 }
@@ -2578,6 +2579,7 @@ static void NearLevelLeft(int ship)
     NearJobLevelLeft(); /* and a composite tile job reads its records */
     NearLayerSettle();
     MoveBuildLeft(ship); /* the merge cameras go before the terrains they draw */
+    NearAutoForget(); /* after the leave's shape join: its MoveCostNote comes later, at the ship */
     /* A release still owed is never sent outside play. A level init has asked for the package before this hook
      * (0xF712FF, a no-op while it is listed, exe 0x603746..0x603828), and its 0x43 asks again only when has() is 0
      * (0xF61E8B..0xF61EA9), which stays 1 until the queued unload is reached (exe 0x603290): a release here would

@@ -158,7 +158,7 @@ int main(void)
     CoXlTestMatUnitDestroy((uint64_t)(uintptr_t)Teardown + 0, W(0), 0x5150u); /* another function in the slot */
     CHECK(strstr(g_calls, "unitRec") == NULL && strstr(g_calls, "release") == NULL);
 
-    g_case = "no render thread, or a device batch slot that is not the reviewed one: 0x1A8CE0 itself after the game's destroy";
+    g_case = "no render thread, or a device whose +0xF8 slot is not 0x525F40 (neither d3d table): 0x1A8CE0 itself after the game's destroy";
     CoXlTestMatRes(&g_fns, 1, (void*)Teardown);
     Res(0, 1); Unit(0, 1, 400);
     g_r[0x1480] = 0;

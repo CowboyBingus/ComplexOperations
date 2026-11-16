@@ -305,6 +305,7 @@ static int MatResDefer(uint64_t world, uint32_t id)
     uint32_t kick = 0;
     const uint64_t r = MatResRenderer(world, &kick);
     const uint64_t dev = r != 0 ? (MatResU64(r + 0x1168) != 0 ? MatResU64(r + 0x1168) : MatResU64(r + 0x1138)) : 0;
+    /* the batch maker 0x1A8CE0 calls through +0xF8: 0x525F40 in both the d3d12 (0x16955D8) and d3d11 (0x1696788) tables */
     if (dev == 0 || MatResU64(MatResU64(dev) + 0xF8) != (uint64_t)(uintptr_t)g_matRes.fn.ctxSlot || g_matRes.n >= MAT_RES_PENDING) return 0;
     const uint64_t rec = g_matRes.fn.resRec(world + 0x2304D0u, &id);
     const uint64_t res = *(const uint64_t*)(uintptr_t)rec;

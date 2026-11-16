@@ -1424,6 +1424,9 @@ void CoXlTestNearBgQueue(int on, uint32_t* queue, uint32_t* priority) { g_nearBg
 void CoXlTestMoveJobEnd(int shape, int tile) { if (shape) InterlockedIncrement(&g_shapeEnds); if (tile) InterlockedIncrement(&g_nearJobEnds); }
 int CoXlTestMoveFrameInBuild(int set) { if (set >= 0) g_moveFrame.inBuild = set; return g_moveFrame.inBuild; }
 void CoXlTestNearAutoReset(void) { memset(&g_nearAuto, 0, sizeof g_nearAuto); g_nearBgQueue = NEAR_BG_AUTO; }
+/* A build's shape line as NearShapeEnd marks it, and its end with `samples` stall samples: the builds "auto" counted. */
+void CoXlTestNearAutoMark(int shaped, int zero) { g_nearAuto.shaped = shaped; g_nearAuto.shapeZero = zero; }
+int CoXlTestNearAutoEnd(long samples) { NearAutoBuildEnd(samples); return g_nearAuto.builds; }
 uint32_t CoXlTestNearAutoBuild(int shaped, int zero, long samples)
 {
     uint32_t q = 0, p = 0;

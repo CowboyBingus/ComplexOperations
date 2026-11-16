@@ -32,6 +32,9 @@ void CoXlTestNearJobArena(uint64_t context);
 void CoXlTestNearReplayEnd(void);
 void CoXlTestNearLevelLeft(int ship);
 void CoXlTestNearBgQueue(int on, uint32_t* queue, uint32_t* priority);
+void CoXlTestNearAutoReset(void);
+void CoXlTestNearAutoMark(int shaped, int zero);
+int CoXlTestNearAutoEnd(long samples);
 
 static int g_failed;
 static const char* g_case;
@@ -330,6 +333,18 @@ int main(void)
     CHECK(Inflight() == 0);
     LateDone();
     CHECK(!On() && Inflight() == 0 && g_builds == 1 && fake_host_logged("(the level went)") && Marker() == (g_disk ^ 1u));
+
+    Begin("auto (research): a build the level's end cuts short is not counted at the ship's cost lines; one that ends is", 9, 2, 6);
+    {
+        uint32_t q = 0, pr = 0;
+        CoXlTestNearAutoReset();
+        CoXlTestNearAutoMark(1, 1); /* its shape line: "0 frames" */
+        CoXlTestNearLevelLeft(0);
+        CHECK(CoXlTestNearAutoEnd(3) == 0);
+        CoXlTestNearAutoMark(1, 1);
+        CHECK(CoXlTestNearAutoEnd(3) == 1);
+        CoXlTestNearBgQueue(0, &q, &pr);
+    }
 
     Begin("no TLS slot under 64: the game thread builds the tiles, nothing held", 9, 2, 6);
     {

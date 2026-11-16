@@ -2492,12 +2492,12 @@ static uint64_t NearJobRun(uint64_t a, uint64_t b, uint64_t c, uint64_t element)
  * 14 (research, HELLFORGE_XL_NEAR_BGQUEUE=1) is popped only by the two LP workers, woken through [pool+0xE0] (exe
  * 0x625446), which run the same worker entry (0x625190) and never serve the game thread's queues. "auto" (research):
  * queue 10 until two builds whose shape job ended before a frame saw it ("0 frames") also have stall samples, or four
- * builds with a shape job have none, then 14 for the rest of the process; a build keeps the queue its first job took. */
+ * builds in a row with a shape job and no such stall, then 14 for the rest of the process; a build keeps its first job's queue. */
 enum { NEAR_BG_OFF, NEAR_BG_ON, NEAR_BG_AUTO };
 #define NEAR_BG_STALLS 2
 #define NEAR_BG_CLEAN 4
 static int g_nearBgQueue = -1; /* -1: not read yet */
-static struct { int on, latched, latch, builds, stalls, shapeZero, shaped; } g_nearAuto;
+static struct { int on, latched, latch, builds, stalls, clean, shapeZero, shaped; } g_nearAuto; /* clean: counted builds since the last stall */
 static void NearJobQueue(uint32_t* queue, uint32_t* priority)
 {
     if (g_nearBgQueue < 0)
@@ -2507,7 +2507,7 @@ static void NearJobQueue(uint32_t* queue, uint32_t* priority)
         g_nearBgQueue = n > 0 && v[0] == '1' ? NEAR_BG_ON : n > 0 && strcmp(v, "auto") == 0 ? NEAR_BG_AUTO : NEAR_BG_OFF;
         if (g_nearBgQueue == NEAR_BG_ON) Note("difficulty: moving tiles: the composite tile and collision shape jobs go to queue 14, the LP workers' (HELLFORGE_XL_NEAR_BGQUEUE=1, research)");
         if (g_nearBgQueue == NEAR_BG_AUTO)
-            Note("difficulty: moving tiles: the tile jobs start on queue 10 and go to 14 after %d builds stalled with samples or %d builds with none (HELLFORGE_XL_NEAR_BGQUEUE=auto, research)",
+            Note("difficulty: moving tiles: the tile jobs start on queue 10 and go to 14 after %d builds stalled with samples or %d builds in a row without (HELLFORGE_XL_NEAR_BGQUEUE=auto, research)",
                 NEAR_BG_STALLS, NEAR_BG_CLEAN);
     }
     if (!g_nearAuto.latched) { g_nearAuto.latch = g_nearBgQueue == NEAR_BG_ON || (g_nearBgQueue == NEAR_BG_AUTO && g_nearAuto.on); g_nearAuto.latched = 1; }
@@ -2515,7 +2515,7 @@ static void NearJobQueue(uint32_t* queue, uint32_t* priority)
     *priority = g_nearAuto.latch ? 4 : 3;
 }
 
-/* The level's end: the build it cut short neither counts nor keeps its queue. */
+/* The level's end (NearLevelLeft, after the build's jobs are joined): the build it cut short neither counts nor keeps its queue. */
 static void NearAutoForget(void) { g_nearAuto.latched = g_nearAuto.shapeZero = g_nearAuto.shaped = 0; }
 
 /* The queue number the build's jobs go to (0 before its first). */
@@ -2527,12 +2527,16 @@ static void NearAutoBuildEnd(long samples)
     if (g_nearBgQueue == NEAR_BG_AUTO && !g_nearAuto.on && g_nearAuto.shaped)
     {
         g_nearAuto.builds++;
-        if (g_nearAuto.shapeZero && samples > 0) g_nearAuto.stalls++;
-        if (g_nearAuto.stalls >= NEAR_BG_STALLS || (g_nearAuto.builds >= NEAR_BG_CLEAN && g_nearAuto.stalls == 0))
+        if (g_nearAuto.shapeZero && samples > 0) { g_nearAuto.stalls++; g_nearAuto.clean = 0; }
+        else g_nearAuto.clean++;
+        if (g_nearAuto.stalls >= NEAR_BG_STALLS || g_nearAuto.clean >= NEAR_BG_CLEAN)
         {
             g_nearAuto.on = 1;
-            Note("difficulty: moving tiles: the tile jobs go to queue 14 from the next build on: %d builds on queue 10, %d stalled (\"0 frames\") with stall samples (HELLFORGE_XL_NEAR_BGQUEUE=auto)",
-                g_nearAuto.builds, g_nearAuto.stalls);
+            char rule[48];
+            if (g_nearAuto.stalls >= NEAR_BG_STALLS) snprintf(rule, sizeof rule, "%d stalled", NEAR_BG_STALLS);
+            else snprintf(rule, sizeof rule, "%d clean since the last stall", NEAR_BG_CLEAN);
+            Note("difficulty: moving tiles: the tile jobs go to queue 14 from the next build on (%s): %d builds on queue 10, %d stalled (\"0 frames\") with stall samples, "
+                "%d counted since the last stall (HELLFORGE_XL_NEAR_BGQUEUE=auto)", rule, g_nearAuto.builds, g_nearAuto.stalls, g_nearAuto.clean);
         }
     }
     g_nearAuto.latched = g_nearAuto.shapeZero = g_nearAuto.shaped = 0;
