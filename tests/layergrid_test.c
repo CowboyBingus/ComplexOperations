@@ -3,11 +3,13 @@
  * the ground under stamps that are already standing. Every grid holds the ground as drawn now, a stamp gets the grid of
  * the tile it stands by, the sampler answers while a tile builds, and the streamed stamps on a changed tile's ground go
  * out and come back. Run on the fake game. */
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
 
 #include "harness/fake_host.h"
+#include "xl/co_framecost.h"
 
 void CoXlTestGame(uintptr_t game);
 void CoXlTestWorldLevel(uintptr_t level, uintptr_t preview);
@@ -51,14 +53,150 @@ int CoXlTestStreamQueued(uint32_t i);
 void CoXlTestStreamScan(void);
 uint32_t CoXlTestStreamScanFrames(int frames);
 uint32_t CoXlTestStreamDrain(double ms, uint32_t* waiting);
+uint32_t CoXlTestStreamDrainMost(uint32_t most, double ms, uint32_t* waiting);
+uint32_t CoXlTestStreamChange(unsigned long long now, int layerBusy, unsigned long long* next);
+void CoXlTestStreamChangeAt(unsigned long long next);
+void CoXlTestStreamExpired(uint32_t* now, uint32_t* most);
+uint32_t CoXlTestStreamQueue(uint32_t* slots, uint32_t room);
+void CoXlTestStreamStatic(int skip, int changed, uint32_t* frames, uint32_t* moved, uint32_t* quiet, uint32_t* leaves);
 void CoXlTestStreamTick(void);
 void CoXlTestStreamBelt(uint32_t* gone, uint32_t* looks, long* destroys);
 void CoXlTestStreamLooks(uint32_t* bad, uint32_t* fails, int* off);
 uint32_t CoXlTestWindowEvictedFar(void);
+uint32_t CoXlTestStreamDrainLayer(uint32_t most, double ms, int layer, uint32_t* waiting, int* cut);
+uint32_t CoXlTestStreamDrainLeast(uint32_t most, double ms, int layer, uint32_t least, uint32_t* waiting, int* cut);
+uint32_t CoXlTestStreamFloorLeast(uint32_t expired, double ownMs);
+int CoXlTestStreamDropFarPush(uint32_t i);
+int CoXlTestStreamDropGovPush(uint32_t i);
+void CoXlTestStreamFarNearRemoved(uint32_t* window, uint32_t* governor);
+int CoXlTestStreamDropKind(uint32_t i);
+uint32_t CoXlTestStreamFarNearSkipped(void);
+double CoXlTestStreamOwn(double ownMs);
+void CoXlTestStreamOwnLearn(double ms, uint32_t removed);
+double CoXlTestStreamRemoveRoom(void);
+unsigned long long CoXlTestStreamRemoveWaitNow(void);
+double CoXlTestStreamExitRate(double rate);
+int CoXlTestWindowGovernHolds(void);
+void CoXlTestStreamGovActs(int on);
+int CoXlTestSlChangeMark(void);
+uint32_t CoXlTestStreamChangeTick(void);
+void CoXlTestSlChangeTickSet(uint32_t tick);
+uint32_t CoXlTestStreamSpawnTried(void);
+uint32_t CoXlTestStreamLeastNow(void);
+void CoXlTestStreamScanAt(unsigned long long at);
+void CoXlTestStreamSamples(double* sum, uint32_t* count);
+void CoXlTestStreamFloorDue(uint32_t* due, uint32_t* spawned);
+int CoXlTestStreamDueInReach(float reach2);
+void CoXlTestStreamSpawnedSet(uint32_t i, int spawned);
+void CoXlTestStreamDistance(uint32_t i, float distance2);
+void CoXlTestStreamFloorMore(uint32_t* stuck, uint32_t* dry, double* rebuiltSum, uint32_t* least, uint32_t* exits, uint32_t* exitChanges);
+int CoXlTestStreamFloorStuck(double quietHi, uint32_t leaves, double moveMs);
+int CoXlTestRenderApart(int stampLeave, int step, uint8_t op);
+void CoXlTestStreamTickNear(int stampLeave, int step, uint8_t op);
+void CoXlTestStreamExpiredSet(uint32_t n);
+int CoXlTestStreamDropPush(uint32_t i);
+void CoXlTestStreamFloorStats(uint32_t* held, double* quietHiSum, uint32_t* streamedMoved, uint32_t* streamedQuiet, double* waitMs, double* waitMost);
+void CoXlTestStreamLayerSet(uint32_t i, uint32_t layer);
+void CoXlTestStreamChangeStats(uint32_t* changes, uint32_t* backlogs, uint32_t* drainCuts, uint32_t* spawnCuts, uint32_t* removed, uint32_t drains[5]);
+void CoXlTestStreamNote(void);
+void CoXlTestStreamDue(uint32_t i, uint64_t unit);
+void CoXlTestSlReset(void);
+void CoXlTestSlAsk(int on);
+void CoXlTestSlAskDefault(void);
+void CoXlTestStOrig(int slot, void* fn);
+void* CoXlTestStThunk(int slot);
+void CoXlTestStOn(void);
+long long CoXlTestStCalls(int slot);
+void CoXlTestStFrame(int kind);
+void CoXlTestStNote(void);
+uint64_t CoXlTestStKindCalls(int kind, int slot);
+uint32_t CoXlTestStKindFrames(int kind);
+void CoXlTestSlChain(const uintptr_t* frames, int n, int game, int frame, int window);
+void CoXlTestSlSampleText(char* out, size_t room);
+void CoXlTestSlSampleCall(void);
+/* The step timers' stand-ins: a timed original spinning 50 us, the activation's counted one. */
+static int g_stFakeCalls;
+static uint64_t StFakeTimed(uint64_t a, uint64_t b, uint64_t c, uint64_t d)
+{
+    LARGE_INTEGER f, t0, t1;
+    QueryPerformanceFrequency(&f); QueryPerformanceCounter(&t0);
+    do QueryPerformanceCounter(&t1); while ((t1.QuadPart - t0.QuadPart) * 20000 < f.QuadPart);
+    g_stFakeCalls++;
+    return a * 1000 + b * 100 + c * 10 + d;
+}
+static uint64_t StFakeActivate(uint64_t a, uint64_t b, uint64_t c, uint64_t d) { g_stFakeCalls++; return a * b + c + d; }
+void CoXlTestSlSet(int on, uintptr_t exe, void* count, void* info, void* rule, void* create);
+int CoXlTestSlOn(void);
+const char* CoXlTestSlInstall(uintptr_t exe);
+const char* CoXlTestSlEarly(uintptr_t exe);
+const char* CoXlTestLayersEarly(uintptr_t game, uintptr_t exe);
+int CoXlTestSlLayers(void);
+void CoXlTestStreamSlNote(void);
+void CoXlTestStreamLayersInstall(void);
+int CoXlTestSlCount(void);
+void CoXlTestSlInfo(uint8_t layer, uint8_t* out);
+void CoXlTestSlRule(const uint32_t* ids, int n, const uint8_t* bodies, uint8_t* out);
+void* CoXlTestSlCreate(void* writer, uint32_t* id);
+uint32_t CoXlTestSlLayerOf(uint32_t index);
+void CoXlTestSlFrame(uint32_t layer);
+int CoXlTestSlFlushDue(uint64_t world);
+int CoXlTestSlLeaves(uint32_t leaves[5]);
+void CoXlTestSlPick(const uint32_t leaves[5], const uint32_t queued[5], int due, int* turn, int* drain, uint32_t* spawn);
+void CoXlTestSlCounts(long* created, long* marked, long* routed);
+void CoXlTestSlWindowCounts(long* off, long* ringLeft);
+DWORD CoXlTestSlGameThread(DWORD id);
+void CoXlTestSlFlushWith(void (*flush)(uint64_t world));
+void CoXlTestSlFrameEnd(uint64_t world);
+void CoXlTestStreamLayersPick(int due, int* drain, uint32_t* spawn, uint32_t* rebuilt);
+double CoXlTestStreamBudget(double quietHi, double rebuildMs, double moveMs);
+void CoXlTestStreamCost(double removeMs, double spawnMs, double* removeNow, double* spawnNow, int* kind);
+void CoXlTestStreamCostLayer(uint32_t* layer, uint32_t* leaves);
+uint32_t CoXlTestStreamLayerOf(uint32_t i);
+void CoXlTestStreamSpawnSetup(void* spawn, uint8_t* pass);
+void CoXlTestStreamCostLayerSet(int kind, uint32_t layer, uint32_t leaves);
+void CoXlTestStreamLayerCostNote(void);
+void CoXlTestStreamCostKind(int kind);
+void CoXlTestStreamCostLearn(void);
+uint32_t CoXlTestStreamLeaves(void);
+void CoXlTestFarGrassOut(int out);
+int CoXlTestStreamRemovePick(unsigned long long now, double lastWhole, int spawnsWait);
+void CoXlTestStreamRemoveWait(unsigned long long at, int lastKind);
+void CoXlTestStreamPace(uint32_t* removeFrames, uint32_t* forced, uint32_t* spawnFrames, uint32_t* grassHolds, uint32_t* grassForced);
+int CoXlTestStreamGovern(unsigned long long now, double* last);
+int CoXlTestStreamGovernMay(uint32_t s);
+void CoXlTestStreamGovernSet(int on);
+void CoXlTestStreamGovernStats(uint32_t* onTurns, uint32_t* offTurns, uint32_t* held, uint32_t* drained, uint32_t* nearKept);
+void CoXlTestWindowGovernEvict(void);
+void CoXlTestStreamPlayers(int n, const float* xy);
+uint32_t CoXlTestStreamGovernHeldRespawns(void);
+uint32_t CoXlTestWindowGovernEvictRange(uint32_t base, uint32_t high);
+void co_framecost_grass(int out);
+void co_framecost_apart(void);
+void CoXlTestStreamBudgetStats(double* sum, uint32_t* floors, uint32_t* builds);
+uint32_t CoXlTestStreamNextTick(void);
+void CoXlTestMoveStepMark(double ms);
+void co_framecost_test_reset(int64_t freq);
+void co_framecost_test_begin(int64_t now, int play, long mission);
+void co_framecost_test_world(int enter, int64_t now);
+void co_framecost_bodies(int changed);
+int co_framecost_recent(double* quietHi, double* quietWorld, double* lastWorld);
+int CoXlTestMoveMarks(double* ms);
+void CoXlTestMoveStepAt(uint32_t tick);
+uint32_t CoXlTestStreamStaticTile(void);
+void CoXlTestStreamMakeEstimate(double perLocation);
+uint32_t CoXlTestStreamTicks(void);
+void CoXlTestStreamTicksAdd(void);
+uint32_t CoXlTestStreamTileDefers(void);
+int CoXlTestSlCountFrom(uintptr_t back);
+void CoXlTestStreamFlushCost(double ms, uint32_t locations, uint32_t* frames, double* sum, double* most, double* slope, double* fixed);
+int CoXlTestStreamFlushLater(uint32_t locations);
+int CoXlTestStreamFlushAfter(void);
+int CoXlTestStreamFlushPending(void);
 void co_shim_install(void);
 int co_safe_find(uintptr_t list, size_t count, uint64_t value);
 void CoXlTestMission(uintptr_t level, int complex);
 void CoXlTestStreamOutSince(uint32_t i, unsigned long long since);
+void CoXlTestStreamOut2(uint32_t i, float radius);
 uint32_t CoXlTestWindowEvictFar(uint32_t base, uint32_t high);
 void CoXlTestStreamSlotState(uint32_t i, int* live, int* due, uint64_t* unit);
 void CoXlTestStreamSpawned(uint32_t i, int* spawned, int* due);
@@ -218,9 +356,16 @@ static int ListTake(uint64_t unit)
     return 0;
 }
 static int g_unlisted; /* destroys of a unit the list did not hold: the engine would free it all the same */
+static double g_destroySpin; /* ms each destroy takes: a removal's cost, so a drain's time runs out where a case needs */
+static void Spin(double ms)
+{
+    LARGE_INTEGER hz, t0, t; QueryPerformanceFrequency(&hz); QueryPerformanceCounter(&t0);
+    do QueryPerformanceCounter(&t); while ((double)(t.QuadPart - t0.QuadPart) * 1000.0 / (double)hz.QuadPart < ms);
+}
 static void FakeDestroy(uint64_t world, uint64_t unit, uint64_t a, uint64_t b)
 {
     (void)world; (void)a; (void)b;
+    if (g_destroySpin > 0.0) Spin(g_destroySpin);
     g_destroys++; g_destroyed = unit;
     if (!ListTake(unit)) g_unlisted++;
 }
@@ -240,7 +385,7 @@ static void StreamGame(void)
 }
 
 /* The streamer on the fake game with `count` slots, the level's heightfield kept (40 m but where a case sets it). */
-static uint8_t g_context[0x100], g_array[128 * 0xE0];
+static uint8_t g_context[0x100], g_array[256 * 0xE0];
 static void Stream(uint32_t count)
 {
     if (g_worldMem == NULL)
@@ -288,8 +433,10 @@ static void Flagged(void)
     Slot(2, BX + 400.0f, AY, 20.0f, 0x3000, 0);
     Generator(3);
     const int leaves = Lines("the level left play");
+    CHECK(CoXlTestStreamFlushLater(0) == 1);
     CoXlTestStreamTick(); /* in play, nothing to take out */
     CHECK(g_destroys == 0 && Lines("the level left play") == leaves);
+    CHECK(!CoXlTestStreamFlushPending()); /* a change frame's flush runs in its tick, once the lock is released */
     CHECK(CoXlTestStampsReplace(g_tileOfB, BX, AY) == 2 && CoXlTestStreamFlag(0) && CoXlTestStreamFlag(2));
 }
 
@@ -300,6 +447,108 @@ static int Lines(const char* text)
     return n;
 }
 static void Generator(uint32_t state) { memcpy(g_lg + 0x1E4, &state, 4); }
+/* Broad phase layer 4 of the mission world Budgets sets up: [[W+0x410]+0xA0] the broad phase, its vtable's +0x38 the
+ * body update 0xD40550, layers [bp+0x10] (`layers` of them), layer 4's leaf count +0x50 and capacity +0x54. */
+static void StaticLayer(uint32_t leaves, uint32_t capacity, int32_t layers, uint64_t update)
+{
+    uint8_t* exe = g_fake.exe;
+    uint64_t a = (uint64_t)(uintptr_t)(exe + 0x27E1000u), bp = (uint64_t)(uintptr_t)(exe + 0x27E2000u), vt = (uint64_t)(uintptr_t)(exe + 0x27E3000u);
+    uint64_t array = (uint64_t)(uintptr_t)(exe + 0x27E4000u), l4 = (uint64_t)(uintptr_t)(exe + 0x27E5000u);
+    update += (uint64_t)(uintptr_t)exe;
+    (void)a; memcpy(exe + 0x27E0000u + 0x4C0, &bp, 8); /* the mission world's broad phase, [W+0x4C0] */
+    memcpy(exe + 0x27E2000u, &vt, 8); memcpy(exe + 0x27E3000u + 0x38, &update, 8);
+    memcpy(exe + 0x27E2000u + 0x10, &array, 8); memcpy(exe + 0x27E2000u + 0x18, &layers, 4);
+    memcpy(exe + 0x27E4000u + 4 * 8, &l4, 8);
+    memcpy(exe + 0x27E5000u + 0x50, &leaves, 4); memcpy(exe + 0x27E5000u + 0x54, &capacity, 4);
+}
+
+/* The mission world's broad phase as the streamed layers read it: W = [exe+0x27BA9F0], [W+0x4C0] the broad phase
+ * (vtable +0x38 the update 0xD40550), its `count` layers [bp+0x10] of 0x1C00 bytes, each with its leaves (+0x50), type
+ * (+0x1AE0) and pair mask (+0x1AE4) as 0xDB9DB0 gives them, 6..9 as layer 4; W+0x38 the body array. */
+static uint8_t g_slWorld[0x600], g_slBp[0x40], g_slVt[0x40], g_slBodies[0x100];
+static uint64_t g_slLayers[16];
+static uint8_t* g_slLayer;
+static void BroadPhase(int32_t count, const uint32_t leaves[10])
+{
+    static const uint8_t type[10] = {2, 0xB, 2, 1, 1, 4, 1, 1, 1, 1};
+    static const uint32_t mask[10] = {0x1D, 0, 9, 5, 1, 0, 1, 1, 1, 1};
+    if (g_slLayer == NULL) g_slLayer = (uint8_t*)VirtualAlloc(NULL, 16 * 0x1C00, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    memset(g_slLayer, 0, 16 * 0x1C00);
+    uint8_t* exe = g_fake.exe;
+    const uint64_t w = (uint64_t)(uintptr_t)g_slWorld, bp = (uint64_t)(uintptr_t)g_slBp, vt = (uint64_t)(uintptr_t)g_slVt,
+        layers = (uint64_t)(uintptr_t)g_slLayers, bodies = (uint64_t)(uintptr_t)g_slBodies, update = (uint64_t)(uintptr_t)exe + 0xD40550u;
+    const uint64_t engine = (uint64_t)(uintptr_t)(g_fake.image + 0x3700000u); /* the set-up's engine, inside the fake game */
+    const uint32_t id = 2;                                          /* the main world's physics id: slot 2 */
+    memcpy(g_fake.image + 0x3326340u, &engine, 8); memcpy(g_fake.image + 0x3700000u + 0x10F0u, &id, 4);
+    memcpy(exe + 0x27BA9F0u, &w, 8);
+    memcpy(g_slWorld + 0x4C0, &bp, 8); memcpy(g_slWorld + 0x38, &bodies, 8);
+    memcpy(g_slBp, &vt, 8); memcpy(g_slVt + 0x38, &update, 8);
+    memcpy(g_slBp + 0x10, &layers, 8); memcpy(g_slBp + 0x18, &count, 4);
+    for (int32_t k = 0; k < count && k < 10; k++)
+    {
+        uint8_t* l = g_slLayer + (size_t)k * 0x1C00;
+        g_slLayers[k] = (uint64_t)(uintptr_t)l;
+        memcpy(l + 0x50, &leaves[k], 4); l[0x1AE0] = type[k]; memcpy(l + 0x1AE4, &mask[k], 4);
+    }
+}
+static void* WriterW(void) { return g_slWorld + 0x18; }
+
+/* The streamed layers' originals: the config's count (6), a layer's info (marked 0xEE, to tell it ran), the rule
+ * (layer 4 for every body but those g_ruleOther names, layer 3) and the body maker (the next id). */
+static int g_infoCalls, g_ruleOther;
+static uint32_t g_nextId;
+static int OrigCount6(void* cfg) { return 6; }
+static int OrigCount7(void* cfg) { return 7; }
+static void OrigInfo(void* cfg, uint8_t layer, uint8_t* out) { g_infoCalls++; out[0] = 0xEE; }
+/* The flag as each hook goes in, by target: the count's hook must find it set. */
+static uintptr_t g_flagTarget; static int g_flagAtHook = -1;
+static void FlagAtHook(uintptr_t target) { if (target == g_flagTarget) g_flagAtHook = CoXlTestSlLayers(); }
+/* The game's set-up making the main world on its thread while the count goes in: [engine+0x10E8] stored. */
+static uint8_t* g_layerWorldEngine;
+static void MakeWorldMeanwhile(uintptr_t target)
+{
+    const uint64_t world = 0x5000;
+    (void)target;
+    memcpy(g_layerWorldEngine + 0x10E8, &world, 8);
+}
+static void OrigRule(void* cfg, const uint32_t* ids, int n, const uint8_t* bodies, uint8_t* out)
+{ for (int i = 0; i < n; i++) out[i] = (int)(ids[i] & 0xFFFFFFu) == g_ruleOther ? 3 : 4; }
+static void* OrigCreate(void* writer, uint32_t* id, void* cinfo, void* r9) { *id = g_nextId; return writer; }
+static DWORD WINAPI CreateElsewhere(void* p) { uint32_t id = 0; CoXlTestSlCreate(WriterW(), &id); return 0; }
+/* The spawn flush as the game's (0x12D600): its broadcast makes one body on the caller's thread and one on a worker,
+ * waiting for it (0x7896C2); it takes 512 units of the ring at most (0x12D889), none while g_flushLeaves. */
+static uint64_t g_ringHead, g_ringTail;
+static int g_flushCalls, g_flushLeaves;
+static void FakeFlush(uint64_t world)
+{
+    uint32_t id = 0;
+    (void)world;
+    g_flushCalls++;
+    g_nextId = 11; CoXlTestSlCreate(WriterW(), &id);
+    g_nextId = 12;
+    HANDLE t = CreateThread(NULL, 0, CreateElsewhere, NULL, 0, NULL);
+    WaitForSingleObject(t, INFINITE); CloseHandle(t);
+    if (!g_flushLeaves) g_ringTail += g_ringHead - g_ringTail > 512 ? 512 : g_ringHead - g_ringTail;
+}
+/* SpawnLevelLayers for the change step: every record of the call done, one body made inside the call on this thread
+ * (its forest's, 0x8152DF), and the call's units queued on the spawn ring. */
+static uint8_t g_spawnPass[0x100];
+static int g_spawnCalls, g_spawnShort;
+static uint8_t SpawnBodies(uint8_t* pass, uint8_t* record, uint8_t* context)
+{
+    uint64_t countAt = 0;
+    uint32_t count = 0, id = 0;
+    (void)record; (void)context;
+    memcpy(&countAt, pass + 0x48, 8);
+    memcpy(&count, (void*)(uintptr_t)countAt, 4);
+    if (g_spawnShort && count > 0) count--;                         /* the ring full before the last record (0xF46A76) */
+    memcpy(pass + 0xD8, &count, 4);
+    g_spawnCalls++;
+    g_nextId = 20; CoXlTestSlCreate(WriterW(), &id);
+    g_ringHead = g_ringTail + 0x10;
+    return 1;
+}
+
 /* The game's state as WorldStreamTick asks it: [game+0x3326340]+0xAC21C, 4 in a mission (and through its unload). */
 static void InMission(void)
 {
@@ -578,7 +827,7 @@ int main(void)
     CHECK(g_destroys == 33);
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
 
-    Start("a scan's removals go a few a frame, each asked again");
+    Start("a change frame's removals stop once their time is used, each asked again");
     StreamGame();
     Stream(33);
     b = CoXlTestTileAddAt(BX, AY, g_tileB, 2, SPAN);
@@ -586,15 +835,15 @@ int main(void)
     for (uint32_t k = 0; k < 33; k++) Slot(k, BX, AY + 4.0f * (float)k, 2.0f, 0x1000u * (k + 1), 0);
     CHECK(CoXlTestStampsReplace(b, BX, AY) == 33);
     CoXlTestStreamObserver(1, BX - 900.0f, AY);
-    CHECK(CoXlTestStreamScanFrames(1) == 4 && g_destroys == 4); /* the scan decided 32; one frame took 4 */
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && g_destroys == 0); /* the scan decided 32 */
     uint32_t waiting = 0;
-    CHECK(CoXlTestStreamDrain(1.0e9, &waiting) == 4 && waiting == 24 && g_destroys == 8);
-    CHECK(CoXlTestStreamDrain(0.0, &waiting) == 1 && waiting == 23 && g_destroys == 9); /* past the frame's time: one at least */
+    CHECK(CoXlTestStreamDrain(0.0, &waiting) == 1 && waiting == 31 && g_destroys == 1); /* past its time: one at least */
+    CHECK(CoXlTestStreamDrainMost(4, 1.0e9, &waiting) == 4 && waiting == 27 && g_destroys == 5);
     uint32_t q = 0;
     while (q < 33 && !CoXlTestStreamQueued(q)) q++;
     CHECK(q < 33);
     CoXlTestStreamFlagClear(q);                           /* its ground is the old one again: it stays */
-    for (int f = 0; f < 8 && waiting > 0; f++) CHECK(CoXlTestStreamDrain(1.0e9, &waiting) <= 4);
+    CHECK(CoXlTestStreamDrain(1.0e9, &waiting) == 26 && waiting == 0);
     CHECK(waiting == 0 && g_destroys == 31);
     CoXlTestStreamSlotState(q, &live, &due, &unit);
     CHECK(live && unit == U(0x1000u * (q + 1)));
@@ -610,11 +859,1665 @@ int main(void)
     for (uint32_t k = 0; k < 10; k++) { Slot(k, AX + 1000.0f, AY + 4.0f * (float)k, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
     CoXlTestStreamObserver(1, AX, AY);
     CHECK(CoXlTestStreamScanFrames(0) == 0 && g_destroys == 0);
-    CHECK(CoXlTestStreamDrain(1.0e9, &waiting) == 4 && waiting == 4); /* 8 a scan when the player is near: 4 went */
-    CHECK(CoXlTestStreamScanFrames(0) == 0);                            /* the 2 not asked for yet, and none twice */
-    CHECK(CoXlTestStreamDrain(1.0e9, &waiting) == 4 && waiting == 2 && g_destroys == 8);
-    CHECK(CoXlTestStreamDrain(1.0e9, &waiting) == 2 && waiting == 0 && g_destroys == 10);
+    CHECK(CoXlTestStreamDrainMost(4, 1.0e9, &waiting) == 4 && waiting == 6); /* all 10 queued at once, the player near */
+    CHECK(CoXlTestStreamScanFrames(0) == 0);                                  /* none twice */
+    CHECK(CoXlTestStreamDrain(1.0e9, &waiting) == 6 && waiting == 0 && g_destroys == 10);
     CoXlTestStreamObserver(0, 0.0f, 0.0f);
+
+    /* The window enters 80-170 stamps a second while a player moves (session f8a9e7ce); a removal pace of 8 a scan held
+     * stamps to 2 km. Every expired stamp is queued as the queue has room, the farthest past its radius first. */
+    Start("out-of-reach removals: all of them as the queue has room, the farthest first, room left for put-backs");
+    StreamGame();
+    Stream(200);
+    for (uint32_t k = 0; k < 200; k++)
+    {
+        const uint32_t at = (k * 37u) % 200u; /* not in distance order */
+        Slot(k, AX + 1000.0f + 10.0f * (float)at, AY, 2.0f, 0x1000u * (k + 1), 0);
+        CoXlTestStreamOutSince(k, 1);
+    }
+    CoXlTestStreamObserver(1, AX, AY);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && g_destroys == 0);
+    uint32_t order[256], expiredNow = 0, expiredMost = 0;
+    CHECK(CoXlTestStreamQueue(order, 256) == 160); /* 256 less the 96 kept for put-backs and far evictions */
+    CoXlTestStreamExpired(&expiredNow, &expiredMost);
+    CHECK(expiredNow == 200 && expiredMost == 200);
+    int sorted = 1;
+    for (uint32_t k = 0; k < 160; k++) if ((order[k] * 37u) % 200u != 199u - k) sorted = 0;
+    CHECK(sorted); /* the 160 farthest, farthest first */
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 160); /* full: none twice, none more */
+    CHECK(CoXlTestStreamDrain(1.0e9, &waiting) == 64 && waiting == 96 && g_destroys == 64);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 136); /* the 40 nearest join behind */
+    CoXlTestStreamExpired(&expiredNow, &expiredMost);
+    CHECK(expiredNow == 136 && expiredMost == 200);
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
+
+    Start("out-of-reach removals: a far stamp is ranked by its own removal radius");
+    StreamGame();
+    Stream(2);
+    Slot(0, AX + 2000.0f, AY, 2.0f, 0x1000, 0); /* 2000 m, its radius 1900 m: 1.11 squared */
+    CoXlTestStreamOut2(0, 1900.0f);
+    CoXlTestStreamOutSince(0, 1);
+    Slot(1, AX + 1000.0f, AY, 2.0f, 0x2000, 0); /* 1000 m, the near radius 800 m: 1.56 squared */
+    CoXlTestStreamOutSince(1, 1);
+    CoXlTestStreamObserver(1, AX, AY);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 2 && order[0] == 1 && order[1] == 0);
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
+
+    Start("the streamer adds and removes bodies in one frame each 250 ms at most; a frame with nothing to do leaves the next free");
+    StreamGame();
+    Stream(200);
+    for (uint32_t k = 0; k < 60; k++) { Slot(k, AX + 1000.0f + 4.0f * (float)k, AY, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
+    CoXlTestStreamObserver(1, AX, AY);
+    unsigned long long next = 0;
+    CoXlTestStreamChangeAt(0);
+    CHECK(CoXlTestStreamChange(5000, 0, &next) == 0 && next == 0 && g_destroys == 0); /* nothing queued: no change frame */
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 60);
+    CHECK(CoXlTestStreamChange(5010, 1, &next) == 60 && next == 5260 && g_destroys == 60); /* removals go during a layer fill */
+    CHECK(CoXlTestStreamChange(5011, 0, &next) == 0 && next == 5260 && g_destroys == 60); /* the next frames add and remove nothing */
+    CHECK(CoXlTestStreamChange(5600, 0, &next) == 0 && next == 5260);
+
+    /* Change frames gave 12 ms/s a budget against a peak spawn demand of 11 ms/s (review of 7cdcd4d): a backlog halves
+     * the gap and doubles the time and removals. */
+    Start("a backlog of removals or spawns: a change frame every second frame with 128 removals; a layer fill keeps the short gap");
+    StreamGame();
+    Stream(200);
+    for (uint32_t k = 0; k < 200; k++) { Slot(k, AX + 1000.0f + 4.0f * (float)k, AY, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
+    CoXlTestStreamObserver(1, AX, AY);
+    CoXlTestStreamChangeAt(0);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 160); /* 160 queued, 200 past their radius */
+    CoXlTestStreamTicksAdd();                                        /* a tick in play: never 0 */
+    CHECK(CoXlTestStreamChange(5000, 0, &next) == 128 && next == 5000 && CoXlTestStreamNextTick() == CoXlTestStreamTicks() + 2 && g_destroys == 128);
+    CHECK(CoXlTestStreamChangeTick() == CoXlTestStreamTicks() && CoXlTestSlChangeMark() == 1); /* the makers' sampler's mark */
+    CHECK(CoXlTestStreamChange(5001, 0, &next) == 0 && g_destroys == 128);  /* the same frame */
+    CoXlTestStreamTicksAdd();
+    CHECK(CoXlTestSlChangeMark() == 2);                                      /* the frame after it */
+    CHECK(CoXlTestStreamChange(5002, 0, &next) == 0 && g_destroys == 128);  /* the next frame */
+    CoXlTestStreamTicksAdd();
+    CHECK(CoXlTestStreamChange(5003, 0, &next) == 32 && next == 5003 && g_destroys == 160); /* the scan's 200 still count */
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 40);
+    {
+        uint32_t stuck, dry, least, exits = 0, exitChanges = 0; double rebuiltSum;
+        CoXlTestStreamFloorMore(&stuck, &dry, &rebuiltSum, &least, &exits, &exitChanges);
+        CHECK(exits == 0 && exitChanges == 2);                           /* all 200 ran out before the last scan: none new */
+        CHECK(CoXlTestStreamScanFrames(0) == 0);
+        CoXlTestStreamFloorMore(&stuck, &dry, &rebuiltSum, &least, &exits, &exitChanges);
+        CHECK(exits == 0 && exitChanges == 0);                           /* none new, no change frame since the last scan */
+    }
+    CoXlTestStreamTicksAdd(); CoXlTestStreamTicksAdd();
+    CHECK(CoXlTestStreamChange(5004, 0, &next) == 40 && next == 5254 && CoXlTestStreamNextTick() == 0 && g_destroys == 200); /* no backlog left */
+    uint32_t changes = 0, backlogs = 0, drainCuts = 0, spawnCuts = 0, changeRemoved = 0, drains[5];
+    CoXlTestStreamChangeStats(&changes, &backlogs, &drainCuts, &spawnCuts, &changeRemoved, drains);
+    CHECK(changes == 3 && backlogs == 2 && drainCuts == 0 && spawnCuts == 0 && changeRemoved == 200 && drains[0] == 3);
+    CoXlTestStreamNote();
+    CHECK(fake_host_logged("streaming change frames: 2 of 3 with a backlog (every 2 frames); budget 3.00 ms a frame, 0 at its floor of 0.5 ms (the quiet frames' longest of 32: "
+                           "mean 0.0 ms), 0 of those not caused by the quiet frames, 0 spawning near stamps only, 0 with a due stamp in reach and no layer fill "
+                           "(0 locations spawned in them, 0 of them none), the last removal frame removing 8 at least (exits 0 over 0 removal frames); "
+                           "change frame cost with its after-change frame estimated: removal 3.00 ms (its 0 samples' mean 0.00), spawn 0.50 ms (its 0 samples' mean 0.00)"));
+    CHECK(fake_host_logged("streaming pace: 3 removal frames (0 forced by a 500 ms wait, 100 ms with a backlog), 0 spawn frames; 0 change tries held for a far-grass job, "
+                           "0 let through after 500 ms; the quiet frames' longest of 32: mean 0.0 ms without the far-grass and after-change frames, 0.0 ms with them; "
+                           "a removal's own time "));
+    CHECK(fake_host_logged("streaming keep-up: 40 live stamps past their removal radius at the last scan (+40 since the last note), 0 removals queued (+0); "
+                           "in 10 s 200 new exits and 200 removals (the exits' pace 0 a second); the oldest removal forces a frame after 100 ms now"));
+    CHECK(fake_host_logged("streaming change work: 200 removals, 66.7 a frame; removals "));
+    CHECK(fake_host_logged("0 locations spawned, 0.0 a frame; their units made in 0 flushes, 0.00 ms each (the most 0.00) after an animation wait of 0.00 ms (the most 0.00), 0.000 ms a location and 0.00 ms fixed estimated; "
+                           "cut short by the time limit: removals in 0, spawns in 0; by the location count: 0; deferred for a tile step: 0 frames of 0 a tile built in; "
+                           "0 due not spawned at the last scan; drained layer 4 3, 6..9 0 0 0 0; spawned into layer 4 0, 6..9 0 0 0 0"));
+    CHECK(fake_host_logged("streamed layers off: static leaves layer 4 0, layers 6..9 0 0 0 0 (not read"));
+    CoXlTestStreamChangeStats(&changes, &backlogs, &drainCuts, &spawnCuts, &changeRemoved, drains);
+    CHECK(changes == 0 && backlogs == 0 && changeRemoved == 0);
+    /* a backlog by the queue alone: 100 queued, 100 past their radius */
+    StreamGame();
+    Stream(100);
+    for (uint32_t k = 0; k < 100; k++) { Slot(k, AX + 1000.0f + 4.0f * (float)k, AY, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
+    CoXlTestStreamChangeAt(0);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 100);
+    CHECK(CoXlTestStreamChange(7000, 0, &next) == 100 && next == 7000 && CoXlTestStreamNextTick() == CoXlTestStreamTicks() + 2 && g_destroys == 100);
+    /* a backlog by due spawns alone: 65 due, past kStreamBacklogDue; 64 are not */
+    StreamGame();
+    Stream(100);
+    for (uint32_t k = 0; k < 2; k++) { Slot(k, AX + 1000.0f + 4.0f * (float)k, AY, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
+    CoXlTestStreamChangeAt(0);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 2);
+    for (uint32_t k = 10; k < 75; k++) CoXlTestStreamDue(k, U(0x1000u * (k + 1)));
+    CHECK(CoXlTestStreamChange(8000, 0, &next) == 0);                 /* a spawn frame: the fake game spawns nothing; 2 queued gather */
+    CHECK(CoXlTestStreamChange(8250, 0, &next) == 2 && next == 8250 && CoXlTestStreamNextTick() == CoXlTestStreamTicks() + 2);
+    Stream(100);
+    for (uint32_t k = 0; k < 2; k++) { Slot(k, AX + 1000.0f + 4.0f * (float)k, AY, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
+    CoXlTestStreamChangeAt(0);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 2);
+    for (uint32_t k = 10; k < 74; k++) CoXlTestStreamDue(k, U(0x1000u * (k + 1)));
+    CHECK(CoXlTestStreamChange(9000, 0, &next) == 0);
+    CHECK(CoXlTestStreamChange(9250, 0, &next) == 2 && next == 9500 && CoXlTestStreamNextTick() == 0);  /* 64 due: no backlog */
+    /* a layer fill holds the spawns: the frame that only removed comes back at the short gap */
+    StreamGame();
+    Stream(20);
+    for (uint32_t k = 0; k < 4; k++) { Slot(k, AX + 1000.0f + 4.0f * (float)k, AY, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 4);
+    CoXlTestStreamDue(10, U(0x9000));
+    CoXlTestStreamChangeAt(0);
+    CHECK(CoXlTestStreamChange(6000, 1, &next) == 0 && g_destroys == 0); /* 4 queued gather; no spawn frame in a fill */
+    CHECK(CoXlTestStreamChange(6250, 1, &next) == 4 && next == 6250 && CoXlTestStreamNextTick() == CoXlTestStreamTicks() + 2 && g_destroys == 4);
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
+
+    /* Issue A's tile build steps and B's change frames never share a frame: the change frame waits while a step ran in
+     * this frame or the last (the level update runs before the streamer's tick in the frame, 0xAB519E before 0xAB612D). */
+    Start("a change frame waits while a tile build step ran in this frame or the last");
+    StreamGame();
+    Stream(10);
+    for (uint32_t k = 0; k < 4; k++) { Slot(k, AX + 1000.0f + 4.0f * (float)k, AY, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
+    CoXlTestStreamObserver(1, AX, AY);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 4);
+    CoXlTestStreamChangeAt(0);
+    CoXlTestStreamTicksAdd();
+    CoXlTestMoveStepAt(CoXlTestStreamTicks());       /* a step in this frame */
+    CHECK(CoXlTestStreamChange(4000, 0, &next) == 0 && g_destroys == 0 && next == 0 && CoXlTestStreamTileDefers() == 1);
+    CoXlTestStreamTicksAdd();                        /* the next frame: the step was the last frame's */
+    CHECK(CoXlTestStreamChange(4016, 0, &next) == 0 && g_destroys == 0 && CoXlTestStreamTileDefers() == 2);
+    CoXlTestStreamTicksAdd();
+    CoXlTestStreamRemoveWait(3700, 0);              /* the oldest waited past the gather */
+    CHECK(CoXlTestStreamChange(4032, 0, &next) == 4 && g_destroys == 4 && next == 4282 && CoXlTestStreamTileDefers() == 2);
+    CoXlTestMoveStepAt(CoXlTestStreamTicks());
+    CHECK(CoXlTestStreamChange(4300, 0, &next) == 0 && CoXlTestStreamTileDefers() == 2); /* nothing to do: not counted */
+    CoXlTestMoveStepAt(0);
+    {
+        /* MoveLevelUpdate's mark: a build frame of 1.5 ms or less is a tile building, over it a heavy step */
+        double moveMs = 9; double sum = 0; uint32_t floors = 0, builds = 0;
+        CHECK(CoXlTestMoveMarks(&moveMs) == 0 && moveMs == 0.0);
+        CoXlTestMoveStepMark(1.5);
+        CoXlTestStreamTicksAdd();
+        CHECK(CoXlTestMoveMarks(&moveMs) == 2 && moveMs == 1.5);          /* building, no heavy step */
+        CoXlTestStreamBudgetStats(&sum, &floors, &builds);
+        CHECK(CoXlTestStreamChange(4600, 0, &next) == 0 && CoXlTestStreamTileDefers() == 2); /* nothing queued, not deferred */
+        CoXlTestStreamBudgetStats(&sum, &floors, &builds);
+        CHECK(builds == 1);
+        CoXlTestStreamTicksAdd();
+        CHECK(CoXlTestMoveMarks(&moveMs) == 2 && moveMs == 0.0);          /* the next frame: built in the last */
+        CoXlTestStreamTicksAdd();
+        CHECK(CoXlTestMoveMarks(&moveMs) == 0);
+        CoXlTestMoveStepMark(1.6);
+        CoXlTestStreamTicksAdd();
+        CHECK(CoXlTestMoveMarks(&moveMs) == 3 && moveMs == 1.6);          /* a heavy step */
+        CoXlTestStreamTicksAdd();
+        CHECK(CoXlTestMoveMarks(&moveMs) == 3 && moveMs == 0.0);
+        CoXlTestStreamTicksAdd();
+        CHECK(CoXlTestMoveMarks(&moveMs) == 0);
+        CoXlTestMoveStepAt(0);
+    }
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
+
+    /* The flush makes the change frame's units after the lock is released, and its time a location sizes the next. */
+    Start("the change frame's flush waits for the lock's release; its time a location is the next frames' estimate");
+    StreamGame();
+    Stream(2);
+    {
+        uint32_t flushes = 0; double sum = 0, most = 0, slope = 0, fixed = 0;
+        CoXlTestStreamMakeEstimate(0.0);
+        CoXlTestStreamFlushCost(4.0, 8, &flushes, &sum, &most, &slope, &fixed);
+        CHECK(flushes == 1 && sum == 4.0 && most == 4.0 && slope == 0.5 && fixed == 0.0); /* one flush: its mean a location */
+        CoXlTestStreamFlushCost(2.0, 2, &flushes, &sum, &most, &slope, &fixed);
+        CHECK(flushes == 2 && sum == 6.0 && most == 4.0);                 /* the line through 8: 4 ms and 2: 2 ms */
+        CHECK(slope > 0.3333 && slope < 0.3334 && fixed > 1.3333 && fixed < 1.3334);
+        CoXlTestStreamFlushCost(1.0, 0, &flushes, &sum, &most, &slope, &fixed);
+        CHECK(flushes == 3 && most == 4.0 && slope > 0.3333 && slope < 0.3334); /* no location: nothing to fit */
+        CoXlTestStreamFlushCost(8.0, 2, &flushes, &sum, &most, &slope, &fixed);
+        CHECK(flushes == 4 && most == 8.0 && slope > 0.3333 && slope < 0.3334); /* the game's own entries' burst: the slope stays */
+        CoXlTestStreamFlushCost(6.0, 16, &flushes, &sum, &most, &slope, &fixed);
+        /* the burst flattens the fitted line to 0.052 a location: held at a quarter of the mean a location, 0.698 */
+        CHECK(slope > 0.1746 && slope < 0.1747 && fixed > 3.899 && fixed < 3.9);
+        CoXlTestStreamMakeEstimate(0.0);
+        CoXlTestStreamFlushCost(0.5, 4, &flushes, &sum, &most, &slope, &fixed);
+        CoXlTestStreamFlushCost(0.4, 4, &flushes, &sum, &most, &slope, &fixed);
+        CHECK(slope > 0.1116 && slope < 0.1117 && fixed == 0.0);          /* the same count twice: no line, the mean */
+        CoXlTestStreamMakeEstimate(0.0);
+        CoXlTestStreamFlushCost(0.1, 2, &flushes, &sum, &most, &slope, &fixed);
+        CoXlTestStreamFlushCost(4.0, 8, &flushes, &sum, &most, &slope, &fixed);
+        CHECK(slope == 0.05 && fixed == 0.0);                             /* a line through below 0 ms: not a making, kept */
+        CoXlTestStreamMakeEstimate(0.0);
+        CoXlTestStreamFlushCost(2.0, 4, &flushes, &sum, &most, &slope, &fixed);
+        CoXlTestStreamFlushCost(2.1, 5, &flushes, &sum, &most, &slope, &fixed);
+        CHECK(slope > 0.4529 && slope < 0.4530 && fixed == 0.0);          /* 4 and 5 vary too little to fit: the mean */
+        CoXlTestStreamMakeEstimate(0.0);
+        CoXlTestStreamFlushCost(0.0, 8, &flushes, &sum, &most, &slope, &fixed);
+        CoXlTestStreamFlushCost(1.0, 2, &flushes, &sum, &most, &slope, &fixed);
+        CHECK(slope > 0.1111 && slope < 0.1112);                          /* a falling line with no slope yet: the mean */
+        /* the animation wait spins a while (mov ecx, 1000000; pause; dec ecx; jnz; ret): its time is logged apart */
+        static const uint8_t spinWait[] = {0xB9, 0x40, 0x42, 0x0F, 0x00, 0xF3, 0x90, 0xFF, 0xC9, 0x75, 0xFA, 0xC3};
+        memcpy(g_fake.exe + 0x3340A0u, spinWait, sizeof spinWait);
+        CHECK(CoXlTestStreamFlushLater(8) == 1);
+        CoXlTestStreamFlushCost(0.0, 0, &flushes, &sum, &most, &slope, &fixed);
+        CHECK(flushes == 14);                                                /* pending: not run under the lock (14: this call) */
+        CHECK(CoXlTestStreamFlushAfter() == 0);
+        {
+            uint32_t h, sm, sq; double qs, waitMs = 0, waitMost = 0;
+            CoXlTestStreamFloorStats(&h, &qs, &sm, &sq, &waitMs, &waitMost);
+            CHECK(waitMost > 0.05 && waitMost < 2000.0 && waitMs == waitMost); /* the spin's own time, not the clock's */
+        }
+        g_fake.exe[0x3340A0u] = 0xC3;
+        CoXlTestStreamFlushCost(0.0, 0, &flushes, &sum, &most, &slope, &fixed);
+        CHECK(flushes == 16);                                                /* the flush after the release, and this */
+        CoXlTestStreamMakeEstimate(0.0);
+        memcpy(g_fake.image + TABLE + 0x410, &(uint64_t){0}, 8);             /* the animation wait does not read: no flush */
+        CHECK(CoXlTestStreamFlushLater(8) == 0);
+    }
+
+    /* The governor (run 2c: quiet frames' world update 6.4 ms at 310k bodies, 10.4 at 489k): a second's mean of the
+     * quiet frames turns it on over 7 ms and off under 6; between them it keeps its state. Change frames, far-grass
+     * frames and frames kept apart do not feed it. */
+    Start("the governor: on over 7 ms, off under 6 ms, a second's quiet frames only, 10 of them at least");
+    {
+        int64_t t = 1000000;
+        unsigned long long now = 100000;
+        double last = 0;
+        uint32_t onTurns = 9, offTurns = 9, held = 9, drained = 9, nearKept = 9;
+        int on = 0;
+        co_framecost_test_reset(1000000);
+        StreamGame();
+        Stream(10);
+        CoXlTestStreamGovernSet(0);
+        /* `n` frames of 10 ms with `world` ms of world update; kind 1 a change frame, 2 a far-grass frame, 3 kept apart */
+#define GOV_FRAMES(n, world, kind)                                                                                    \
+        for (int f = 0; f < (n); f++)                                                                                  \
+        {                                                                                                              \
+            co_framecost_test_begin(t, 1, 1);                                                                          \
+            on = CoXlTestStreamGovern(now, &last);                                                                     \
+            co_framecost_test_world(1, t + 100); co_framecost_test_world(0, t + 100 + (int64_t)((world) * 1000.0));      \
+            if ((kind) == 1) co_framecost_bodies(1);                                                                   \
+            if ((kind) == 2) co_framecost_grass(1);                                                                    \
+            if ((kind) == 3) co_framecost_apart();                                                                     \
+            t += 10000; now += 10;                                                                                     \
+        }
+        GOV_FRAMES(101, 7.0, 0);
+        CHECK(!on && last == 7.0);                                       /* 7.0 is not over 7 */
+        GOV_FRAMES(99, 7.1, 0);
+        CHECK(!on);                                                      /* the second not over yet */
+        GOV_FRAMES(1, 7.1, 0);
+        CHECK(on && fabs(last - (7.0 + 99 * 7.1) / 100) < 1e-9);        /* a frame of the second before closes in it */
+        GOV_FRAMES(100, 6.5, 0);
+        CHECK(on && fabs(last - (7.1 + 99 * 6.5) / 100) < 1e-9);        /* between: kept on */
+        GOV_FRAMES(200, 6.0, 0);
+        CHECK(on && last == 6.0);                                        /* 6.0 is not under 6 */
+        GOV_FRAMES(100, 5.9, 0);
+        CHECK(!on && fabs(last - (6.0 + 99 * 5.9) / 100) < 1e-9);
+        GOV_FRAMES(100, 6.5, 0);
+        CHECK(!on);                                                      /* between: kept off */
+        GOV_FRAMES(100, 12.0, 1);
+        CHECK(!on);                                                      /* change frames: no sample, the mean is not taken */
+        GOV_FRAMES(100, 12.0, 2);
+        CHECK(!on);                                                      /* far-grass frames */
+        GOV_FRAMES(100, 12.0, 3);
+        CHECK(!on);                                                      /* frames kept apart */
+        /* change frames every other frame: each frame without one is right after one (run 2c: 2.5-4.8 ms over the change
+         * frames), no quiet frame, and the governor takes none of them */
+        for (int k = 0; k < 300; k++) { GOV_FRAMES(1, 12.0, (k & 1) ? 1 : 0); }
+        CHECK(!on);
+        /* 9 quiet frames in a second (the rest change frames) are too few to judge by; 10 are enough. Each loop's first
+         * frame is right after the last loop's change frame. */
+        for (int k = 0; k < 100; k++) { GOV_FRAMES(1, 9.0, k < 10 ? 0 : 1); }
+        CHECK(!on);
+        for (int k = 0; k < 100; k++) { GOV_FRAMES(1, 9.0, k < 11 ? 0 : 1); }
+        CHECK(on && last == 9.0);
+        /* 3 s at least between turns: a recovery 1 and 2 s after the turn on is held, the one at 3 s turns it off */
+        GOV_FRAMES(100, 5.0, 0);
+        CHECK(on && last < 6.0);
+        GOV_FRAMES(100, 5.0, 0);
+        CHECK(on && last == 5.0);
+        GOV_FRAMES(100, 5.0, 0);
+        CHECK(!on);
+        GOV_FRAMES(200, 9.0, 0);
+        CHECK(!on && last == 9.0);                                       /* 1 and 2 s after the turn off: held off */
+        GOV_FRAMES(100, 9.0, 0);
+        CHECK(on);
+#undef GOV_FRAMES
+        CoXlTestStreamGovernStats(&onTurns, &offTurns, &held, &drained, &nearKept);
+        CHECK(onTurns == 3 && offTurns == 2);
+        CoXlTestStreamGovernSet(0);
+        co_framecost_test_reset(0);
+    }
+
+    /* The governor's floor: no stamp within kStreamOutRadius (800 m) of a player, no mission stamp, no near slot (no far
+     * radius) is ever taken; the farthest far ones go first, WINDOW_FAR_EVICT a scan, and no far respawn past 800 m. */
+    Start("the governor's near guard: the farthest far stamps past 800 m only, never a near or mission one; far respawns held");
+    {
+        const float players[4] = {AX, AY, AX + 10000.0f, AY};
+        StreamGame();
+        Stream(200);
+        for (uint32_t k = 0; k < 120; k++)
+        {
+            /* 0..39 within 800 m of player 1, 40..119 past it, farther with k; 50 a mission stamp; 60 a near slot */
+            const float x = k < 40 ? AX + 20.0f * (float)k : AX + 900.0f + 10.0f * (float)k;
+            Slot(k, x, AY, 2.0f, 0x1000u * (k + 1), k == 50);
+            CoXlTestStreamOut2(k, k == 60 ? 0.0f : 1500.0f);
+        }
+        Slot(120, AX + 10000.0f + 700.0f, AY, 2.0f, 0x1000u * 121, 0); CoXlTestStreamOut2(120, 1500.0f); /* near player 2 */
+        CoXlTestStreamPlayers(2, players);
+        CHECK(CoXlTestStreamGovernMay(10) == 0 && CoXlTestStreamGovernMay(39) == 0); /* 200 and 780 m */
+        CHECK(CoXlTestStreamGovernMay(40) == 1 && CoXlTestStreamGovernMay(119) == 1);
+        CHECK(CoXlTestStreamGovernMay(50) == 0 && CoXlTestStreamGovernMay(60) == 0 && CoXlTestStreamGovernMay(120) == 0);
+        CHECK(CoXlTestStreamGovernMay(121) == 0);                        /* not live */
+        uint32_t onTurns, offTurns, held, drained, nearKept;
+        CoXlTestStreamGovernStats(&onTurns, &offTurns, &held, &drained, &nearKept);
+        CHECK(nearKept == 3);                                            /* 10, 39 and 120: within 800 m of a player */
+        CoXlTestStreamGovernSet(1);
+        CHECK(CoXlTestWindowGovernEvictRange(0, 121) == 64);
+        for (uint32_t k = 0; k < 40; k++) CHECK(!CoXlTestStreamQueued(k));
+        CHECK(!CoXlTestStreamQueued(50) && !CoXlTestStreamQueued(60) && !CoXlTestStreamQueued(120));
+        uint32_t first = 0;
+        for (uint32_t k = 40; k < 120; k++) if (CoXlTestStreamQueued(k)) { first = k; break; }
+        for (uint32_t k = first; k < 120; k++) CHECK(k == 50 || k == 60 || CoXlTestStreamQueued(k)); /* the farthest */
+        CHECK(first > 40);
+        CHECK(CoXlTestWindowGovernEvictRange(0, 121) == 0);              /* the queue holds far ones: none more yet */
+        CoXlTestStreamGovernStats(&onTurns, &offTurns, &held, &drained, &nearKept);
+        CHECK(drained == 64);
+        /* the far ring's scan: held only while on and acting */
+        const uint32_t heldBefore = held;
+        CHECK(CoXlTestWindowGovernHolds() == 0);                         /* on, observing only: scanned */
+        CoXlTestStreamGovernStats(&onTurns, &offTurns, &held, &drained, &nearKept);
+        CHECK(held == heldBefore);
+        CoXlTestStreamGovActs(1);
+        CHECK(CoXlTestWindowGovernHolds() == 1);
+        CoXlTestStreamGovernStats(&onTurns, &offTurns, &held, &drained, &nearKept);
+        CHECK(held == heldBefore + 1 && drained == 64);                  /* the queue still holds far ones: none more */
+        CoXlTestStreamGovActs(0);
+        /* respawns: past 800 m held while on and acting, near ones not; off or only observing, none held by it */
+        CoXlTestRespawnRoom(130, 900.0f * 900.0f);
+        CHECK(CoXlTestStreamGovernHeldRespawns() == 0);                  /* on, observing only: the default */
+        CoXlTestStreamGovActs(1);
+        CHECK(CoXlTestRespawnRoom(130, 900.0f * 900.0f) == 0 && CoXlTestStreamGovernHeldRespawns() == 1);
+        CoXlTestRespawnRoom(131, 700.0f * 700.0f);
+        CHECK(CoXlTestStreamGovernHeldRespawns() == 1);
+        CoXlTestStreamGovernSet(0);
+        CoXlTestRespawnRoom(130, 900.0f * 900.0f);
+        CHECK(CoXlTestStreamGovernHeldRespawns() == 1);
+        CoXlTestStreamGovActs(0);
+        CoXlTestStreamPlayers(0, players);
+    }
+
+    /* A far stamp queued out waits 2-8 s for its removal (64-256 queued), 90-360 m at 45 m/s: asked again at the drain, a
+     * player within 800 m keeps it (the near ring would take it again: a visible pop and a removal and spawn more). */
+    Start("a far removal is not done at the drain once a player came within 800 m; the others go");
+    {
+        const float players[2] = {AX, AY};
+        uint32_t left = 9, nearWindow = 9, nearGov = 9; int cutFar = 0, liveFar = 0, dueFar = 0; uint64_t unitFar = 0;
+        StreamGame();
+        Stream(10);
+        for (uint32_t k = 0; k < 4; k++)
+        {
+            Slot(k, AX + (k == 0 ? 700.0f : k == 1 ? 800.0f : 1000.0f + 100.0f * (float)k), AY, 2.0f, 0x1000u * (k + 1), 0);
+            CoXlTestStreamOut2(k, 1500.0f);
+            CHECK(CoXlTestStreamDropGovPush(k) && CoXlTestStreamDropKind(k) == 4);
+        }
+        CoXlTestStreamPlayers(1, players);
+        uint32_t w0 = 0, g0 = 0;
+        CoXlTestStreamFarNearRemoved(&w0, &g0);
+        const uint32_t before = g_destroys, skipped = CoXlTestStreamFarNearSkipped(), evicted = CoXlTestWindowEvictedFar();
+        CHECK(CoXlTestStreamDrainLayer(64, 1.0e9, -1, &left, &cutFar) == 2 && g_destroys == before + 2 && left == 0);
+        CHECK(CoXlTestStreamFarNearSkipped() == skipped + 2 && CoXlTestWindowEvictedFar() == evicted + 2); /* far slots freed */
+        CoXlTestStreamFarNearRemoved(&nearWindow, &nearGov);
+        CHECK(nearWindow == w0 && nearGov == g0);                        /* the governor's: none within 800 m */
+        CoXlTestStreamSlotState(0, &liveFar, &dueFar, &unitFar); CHECK(liveFar);  /* 700 m: kept */
+        CoXlTestStreamSlotState(1, &liveFar, &dueFar, &unitFar); CHECK(liveFar);  /* 800 m: kept */
+        CoXlTestStreamSlotState(2, &liveFar, &dueFar, &unitFar); CHECK(!liveFar); /* 1200 m: removed */
+        CoXlTestStreamSlotState(3, &liveFar, &dueFar, &unitFar); CHECK(!liveFar);
+        CoXlTestStreamPlayers(0, players);
+    }
+
+    /* The window's own far eviction over the near budget takes far stamps from 550 m: it makes the room the near
+     * stamps need, so the drain removes them however near; the governor's queued past 800 m and met at 700 m stays. */
+    Start("the window's far eviction removes at 600-750 m and counts it; the governor's entry met at 700 m is kept");
+    {
+        float players[2] = {AX, AY};
+        uint32_t left = 9, nearWindow = 9, nearGov = 9; int cutFar = 0, liveFar = 0, dueFar = 0; uint64_t unitFar = 0;
+        StreamGame();
+        Stream(10);
+        for (uint32_t k = 0; k < 4; k++) Slot(k, AX + 600.0f + 50.0f * (float)k, AY, 2.0f, 0x1000u * (k + 1), 0); /* 600-750 m */
+        CoXlTestStreamPlayers(1, players);
+        CHECK(CoXlTestWindowEvictFar(0, 4) == 4);
+        for (uint32_t k = 0; k < 4; k++) CHECK(CoXlTestStreamDropKind(k) == 3); /* the window's kind */
+        uint32_t w0 = 0, g0 = 0;
+        CoXlTestStreamFarNearRemoved(&w0, &g0);
+        const uint32_t before = g_destroys, skipped = CoXlTestStreamFarNearSkipped();
+        CHECK(CoXlTestStreamDrainLayer(64, 1.0e9, -1, &left, &cutFar) == 4 && g_destroys == before + 4 && left == 0);
+        CHECK(CoXlTestStreamFarNearSkipped() == skipped);
+        CoXlTestStreamFarNearRemoved(&nearWindow, &nearGov);
+        CHECK(nearWindow == w0 + 4 && nearGov == g0);
+        for (uint32_t k = 0; k < 4; k++) { CoXlTestStreamSlotState(k, &liveFar, &dueFar, &unitFar); CHECK(!liveFar); }
+        /* the governor queues one at 1000 m; the player comes to 700 m of it before the drain */
+        Slot(5, AX + 1000.0f, AY, 2.0f, 0x6000u, 0);
+        CoXlTestStreamOut2(5, 1500.0f);
+        CoXlTestStreamGovernSet(1);
+        CHECK(CoXlTestWindowGovernEvictRange(5, 6) == 1 && CoXlTestStreamDropKind(5) == 4);
+        CoXlTestStreamGovernSet(0);
+        players[0] = AX + 300.0f;
+        CoXlTestStreamPlayers(1, players);
+        CHECK(CoXlTestStreamDrainLayer(64, 1.0e9, -1, &left, &cutFar) == 0 && g_destroys == before + 4 && left == 0);
+        CHECK(CoXlTestStreamFarNearSkipped() == skipped + 1 && CoXlTestStreamDropKind(5) == 0);
+        CoXlTestStreamSlotState(5, &liveFar, &dueFar, &unitFar); CHECK(liveFar);
+        CoXlTestStreamFarNearRemoved(&nearWindow, &nearGov);
+        CHECK(nearWindow == w0 + 4 && nearGov == g0);
+        CoXlTestStreamNote();
+        CHECK(fake_host_logged("the governor's removals not done at the drain, a player within 800 m: 1; far removals done with a player within it: "
+                               "the governor's 0, the window's near budget's 4; live stamps within 800 m "));
+        CoXlTestStreamPlayers(0, players);
+    }
+
+    /* A spawn frame's budget: the frame target less the longest of the last 32 quiet frames, the learned spawn cost and
+     * this frame's tile step, so a spawn frame stays near the target. */
+    Start("a spawn frame's budget: the target less the quiet frames' longest, the learned spawn cost and the tile step");
+    CHECK(CoXlTestStreamBudget(0.0, 3.1, 0.0) == 3.0);                   /* no quiet frames measured yet */
+    CHECK(fabs(CoXlTestStreamBudget(11.2, 3.1, 0.0) - 2.4) < 1e-9);
+    CHECK(fabs(CoXlTestStreamBudget(11.2, 3.1, 1.0) - 1.4) < 1e-9);       /* a light tile step in the same frame */
+    CHECK(CoXlTestStreamBudget(14.8, 3.1, 0.0) == 0.5);                  /* no room: the floor */
+    CHECK(CoXlTestStreamBudget(8.0, 1.0, 0.0) == 6.0);                   /* the most */
+    /* Removals go in frames of their own (ANALYSIS-r2a §2.3: ~3 ms of step whatever the count): gathered to 8, or the
+     * oldest waiting 250 ms, in a frame whose frame before left 4 ms; any frame once the oldest waited 500 ms. */
+    Start("removal frames: gathered, in a frame with room, forced after 500 ms; their cost learned apart from spawn frames");
+    {
+        int64_t t = 1000000;
+        double hi = 0, qw = 0, lw = 0, sum = 0, rm = 0, sp = 0; uint32_t floors = 0, builds = 0, rf = 0, forced = 0, sf = 0, gh = 0, gf = 0; int kind = 0;
+        co_framecost_test_reset(1000000);
+        for (int k = 0; k < 34; k++) { co_framecost_test_begin(t, 1, 1); co_framecost_test_world(1, t + 100); co_framecost_test_world(0, t + 5100); t += k == 3 ? 16500 : 10000; }
+        CHECK(co_framecost_recent(&hi, &qw, &lw) == 0 && hi == 16.5 && fabs(qw - 5.0) < 1e-9);
+        StreamGame();
+        Stream(10);
+        for (uint32_t k = 0; k < 4; k++) { Slot(k, AX + 1000.0f + 4.0f * (float)k, AY, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
+        CoXlTestStreamObserver(1, AX, AY);
+        CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 4);
+        CoXlTestStreamChangeAt(0);
+        CoXlTestStreamRemoveWait(0, 0);
+        CoXlTestStreamCost(3.0, 0.5, &rm, &sp, &kind);
+        co_framecost_test_begin(t, 1, 1);                                /* the change frame's own: the frame before was 10 ms */
+        CHECK(CoXlTestStreamChange(20000, 0, &next) == 0 && g_destroys == 0);  /* 4 queued, none waited: gathering */
+        CHECK(CoXlTestStreamChange(20249, 0, &next) == 0 && g_destroys == 0);
+        CHECK(CoXlTestStreamChange(20250, 0, &next) == 4 && g_destroys == 4);  /* the oldest waited 250 ms */
+        CoXlTestStreamBudgetStats(&sum, &floors, &builds);
+        CHECK(fabs(sum - 3.7) < 1e-9 && floors == 0);                    /* 16.7 - 10 (the frame before) - 3.0 (removal cost) */
+        CoXlTestStreamPace(&rf, &forced, &sf, &gh, &gf);
+        CHECK(rf == 1 && forced == 0 && sf == 0);
+        co_framecost_test_world(1, t + 100); co_framecost_test_world(0, t + 8100); t += 12000;
+        co_framecost_test_begin(t, 1, 1);                                /* closes it */
+        CHECK(co_framecost_recent(&hi, &qw, &lw) == 1 && fabs(lw - 8.0) < 1e-9);
+        {
+            uint32_t frames[4]; double world[4], grassWorld = 0; uint32_t grass = 0, bodyGrass = 0;
+            (void)frames; (void)world; (void)grassWorld; (void)grass; (void)bodyGrass;
+        }
+        /* the next tick waits for its after-change frame (run 2c: 2.5-4.8 ms over the change frames, taken for quiet) */
+        CoXlTestStreamCost(2.0, 0, &rm, &sp, &kind);
+        CHECK(kind == 1);
+        CoXlTestStreamCostLearn();
+        CoXlTestStreamCost(0, 0, &rm, &sp, &kind);
+        CHECK(rm == 2.0 && kind == 1);
+        co_framecost_test_world(1, t + 100); co_framecost_test_world(0, t + 6100); t += 10000;
+        co_framecost_test_begin(t, 1, 1);                                /* closes the after-change frame */
+        /* the tick after it learns from the pair: (8 + 6) - 2 x 5 = 4 ms, a quarter of the way */
+        CoXlTestStreamCostLearn();
+        CoXlTestStreamCost(0, 0, &rm, &sp, &kind);
+        CHECK(fabs(rm - 2.5) < 1e-9 && fabs(sp - 0.5) < 1e-9 && kind == 0);
+        CoXlTestStreamCostLearn();                                       /* once */
+        CoXlTestStreamCost(0, 0, &rm, &sp, &kind);
+        CHECK(fabs(rm - 2.5) < 1e-9);
+        /* one sample is held to 4 x the estimate, 1 ms at least and 12 at most */
+        CoXlTestStreamCost(0.5, 0, &rm, &sp, &kind); CoXlTestStreamCostKind(1); CoXlTestStreamCostLearn();
+        CoXlTestStreamCost(0, 0, &rm, &sp, &kind);
+        CHECK(fabs(rm - (0.75 * 0.5 + 0.25 * 2.0)) < 1e-9);
+        CoXlTestStreamCost(0.1, 0, &rm, &sp, &kind); CoXlTestStreamCostKind(1); CoXlTestStreamCostLearn();
+        CoXlTestStreamCost(0, 0, &rm, &sp, &kind);
+        CHECK(fabs(rm - (0.75 * 0.1 + 0.25 * 1.0)) < 1e-9);
+        CoXlTestStreamCost(10.0, 0, &rm, &sp, &kind); CoXlTestStreamCostKind(1); CoXlTestStreamCostLearn();
+        CoXlTestStreamCost(0, 0, &rm, &sp, &kind);
+        CHECK(fabs(rm - (0.75 * 10.0 + 0.25 * 4.0)) < 1e-9);
+        /* 12 ms at most whatever the estimate: a 20 ms pair ((25 + 5) - 2 x 5) over an estimate of 10 counts as 12 */
+#define COST_PAIR(changeWorld, removed, spawned, afterWorld, how)                                                             co_framecost_test_world(1, t + 100); co_framecost_bodies(1); co_framecost_change(removed, spawned); how;              co_framecost_test_world(0, t + 100 + (int64_t)((changeWorld) * 1000.0)); t += 30000;                                 co_framecost_test_begin(t, 1, 1);                                                                                     co_framecost_test_world(1, t + 100); co_framecost_test_world(0, t + 100 + (int64_t)((afterWorld) * 1000.0)); t += 10000;         co_framecost_test_begin(t, 1, 1)
+        COST_PAIR(25.0, 1, 0, 5.0, (void)0);
+        CoXlTestStreamCost(10.0, 0, &rm, &sp, &kind); CoXlTestStreamCostKind(1); CoXlTestStreamCostLearn();
+        CoXlTestStreamCost(0, 0, &rm, &sp, &kind);
+        CHECK(fabs(rm - (0.75 * 10.0 + 0.25 * 12.0)) < 1e-9);
+        /* a spawn frame's pair goes to the spawn cost only, a removal frame's pair not: (9 + 6) - 10 = 5, held to 2 */
+        CoXlTestStreamCost(3.0, 0.5, &rm, &sp, &kind); CoXlTestStreamCostKind(2); CoXlTestStreamCostLearn();
+        CoXlTestStreamCost(0, 0, &rm, &sp, &kind);
+        CHECK(fabs(rm - 3.0) < 1e-9 && fabs(sp - 0.5) < 1e-9 && kind == 0); /* the pair just closed was a removal frame's */
+        COST_PAIR(9.0, 0, 1, 6.0, (void)0);
+        CoXlTestStreamCostKind(2); CoXlTestStreamCostLearn();
+        CoXlTestStreamCost(0, 0, &rm, &sp, &kind);
+        CHECK(fabs(rm - 3.0) < 1e-9 && fabs(sp - (0.75 * 0.5 + 0.25 * 2.0)) < 1e-9);
+        /* each clean pair by its kind and the layer its step rebuilt, unclamped, for the note: a removal pair of 20 ms in
+         * layer 7 (80000 leaves), spawn pairs of 5 and 3 ms in layer 4 (300000 and 100000 leaves) */
+        CoXlTestStreamLayerCostNote();                                   /* what came before */
+        COST_PAIR(19.0, 1, 0, 11.0, (void)0);
+        CoXlTestStreamCostLayerSet(1, 2, 80000); CoXlTestStreamCostLearn();
+        COST_PAIR(9.0, 0, 1, 6.0, (void)0);
+        CoXlTestStreamCostLayerSet(2, 0, 300000); CoXlTestStreamCostLearn();
+        COST_PAIR(9.0, 0, 1, 4.0, (void)0);
+        CoXlTestStreamCostLayerSet(2, 0, 100000); CoXlTestStreamCostLearn();
+        CoXlTestStreamCostLayerSet(1, 2, 80000); CoXlTestStreamCostLearn(); /* the pair was a spawn's: not a removal sample */
+        CoXlTestStreamLayerCostNote();
+        CHECK(fake_host_logged("streaming change cost by the layer it rebuilt in 10 s (a change frame's and its after-change frame's world update over two "
+                               "quiet frames'): removal frames: layer 7 1 at 20.00 ms (the most 20.00) over 80000 leaves, 250.0 ns a leaf over 1; "
+                               "spawn frames: layer 4 2 at 4.00 ms (the most 5.00) over 200000 leaves, 20.0 ns a leaf over 2"));
+        CoXlTestStreamLayerCostNote();                                   /* each note starts again */
+        CHECK(fake_host_logged("over two quiet frames'): removal frames: none; spawn frames: none"));
+        COST_PAIR(19.0, 1, 0, 11.0, (void)0);
+        CoXlTestStreamCostLayerSet(1, 2, 80000); CoXlTestStreamCostLearn();
+        Stream(10);                                                      /* a new level: none kept */
+        g_fake.log[0] = 0;
+        CoXlTestStreamLayerCostNote();
+        CHECK(fake_host_logged("over two quiet frames'): removal frames: none; spawn frames: none"));
+        /* a pair a far-grass job was out in, or one kept apart, says nothing of its cost */
+        COST_PAIR(20.0, 1, 0, 5.0, co_framecost_grass(1));
+        CoXlTestStreamCost(3.0, 0.5, &rm, &sp, &kind); CoXlTestStreamCostKind(1); CoXlTestStreamCostLearn();
+        CoXlTestStreamCost(0, 0, &rm, &sp, &kind);
+        CHECK(fabs(rm - 3.0) < 1e-9);
+        COST_PAIR(20.0, 1, 0, 5.0, co_framecost_apart());
+        CoXlTestStreamCostKind(1); CoXlTestStreamCostLearn();
+        CoXlTestStreamCost(0, 0, &rm, &sp, &kind);
+        CHECK(fabs(rm - 3.0) < 1e-9);
+        co_framecost_test_world(1, t + 100); co_framecost_bodies(1); co_framecost_change(1, 0); co_framecost_test_world(0, t + 20100); t += 30000;
+        co_framecost_test_begin(t, 1, 1);
+        co_framecost_test_world(1, t + 100); co_framecost_grass(1); co_framecost_test_world(0, t + 5100); t += 10000;
+        co_framecost_test_begin(t, 1, 1);                                /* a far-grass job out in the after-change frame */
+        CoXlTestStreamCostKind(1); CoXlTestStreamCostLearn();
+        CoXlTestStreamCost(0, 0, &rm, &sp, &kind);
+        CHECK(fabs(rm - 3.0) < 1e-9 && kind == 0);
+        /* the quiet frames not measured yet (fewer than 32 in this play): no sample, though their world update reads */
+        {
+            CoFcRecent r;
+            co_framecost_test_reset(1000000);
+            for (int k = 0; k < 3; k++) { co_framecost_test_begin(t, 1, 1); co_framecost_test_world(1, t + 100); co_framecost_test_world(0, t + 5100); t += 10000; }
+            co_framecost_test_begin(t, 1, 1);
+            COST_PAIR(9.0, 1, 0, 6.0, (void)0);
+            co_framecost_recent_all(&r);
+            CHECK(r.quietHi == 0.0 && r.quietWorld == 5.0 && r.lastAfter && r.lastAfterKind == 1 && r.pairClean);
+            CoXlTestStreamCostKind(1); CoXlTestStreamCostLearn();
+            CoXlTestStreamCost(0, 0, &rm, &sp, &kind);
+            CHECK(fabs(rm - 3.0) < 1e-9 && kind == 0);
+        }
+#undef COST_PAIR
+        /* a removal's own time: the drain's over its removals, a quarter of the way, one sample 2 ms at most; the room a
+         * chosen removal frame needs is the step cost and 8 removals' own time */
+        CHECK(CoXlTestStreamOwn(0.3) == 0.3);
+        CoXlTestStreamOwnLearn(4.0, 10);
+        CHECK(fabs(CoXlTestStreamOwn(0) - (0.75 * 0.3 + 0.25 * 0.4)) < 1e-9);
+        CoXlTestStreamOwn(0.3); CoXlTestStreamOwnLearn(50.0, 10);
+        CHECK(fabs(CoXlTestStreamOwn(0) - (0.75 * 0.3 + 0.25 * 2.0)) < 1e-9);
+        CoXlTestStreamOwn(0.3); CoXlTestStreamOwnLearn(5.0, 0);
+        CHECK(CoXlTestStreamOwn(0) == 0.3);                              /* no removal: nothing learned */
+        CHECK(fabs(CoXlTestStreamRemoveRoom() - 5.4) < 1e-9);           /* 3 + 8 x 0.3 */
+        /* the choice itself: nothing queued, gathering, a frame without room, the spawn frame's turn, the forced wait */
+        CoXlTestStreamRemoveWait(0, 0);
+        StreamGame();
+        Stream(20);
+        for (uint32_t k = 0; k < 12; k++) { Slot(k, AX + 1000.0f + 4.0f * (float)k, AY, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
+        CoXlTestStreamExitRate(0.0);
+        CHECK(CoXlTestStreamRemovePick(1000, 10.0, 0) == 0);             /* none queued */
+        CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 12);
+        CoXlTestStreamRemoveWait(1000, 0);
+        CHECK(CoXlTestStreamRemovePick(1000, 10.0, 0) == 1);             /* 12 queued: past the gather of 8 */
+        CHECK(CoXlTestStreamRemovePick(1000, 0.0, 0) == 1);              /* the frame before not measured yet */
+        CHECK(CoXlTestStreamRemovePick(1000, 11.29, 0) == 1);
+        CHECK(CoXlTestStreamRemovePick(1000, 11.3, 0) == 0);             /* the frame before left under 3 + 8 x 0.3 ms */
+        CoXlTestStreamOwn(0.5);
+        CHECK(CoXlTestStreamRemovePick(1000, 9.69, 0) == 1 && CoXlTestStreamRemovePick(1000, 9.71, 0) == 0); /* 3 + 8 x 0.5 */
+        CoXlTestStreamOwn(0.3);
+        CHECK(CoXlTestStreamRemovePick(1499, 15.0, 0) == 0);
+        CHECK(CoXlTestStreamRemovePick(1500, 15.0, 0) == 2);             /* the oldest waited 500 ms: forced */
+        CoXlTestStreamRemoveWait(1000, 1);
+        CHECK(CoXlTestStreamRemovePick(1000, 10.0, 1) == 0);             /* after a removal frame, spawns waiting: their turn */
+        CHECK(CoXlTestStreamRemovePick(1000, 10.0, 0) == 1);
+        CHECK(CoXlTestStreamRemovePick(1500, 10.0, 1) == 0);             /* forced too: a stalled far-grass job forced every try */
+        CoXlTestStreamRemoveWait(1000, 2);
+        CHECK(CoXlTestStreamRemovePick(1500, 10.0, 1) == 2);             /* after the spawn frame: forced */
+        CoXlTestStreamRemoveWait(0, 0);
+        /* a forced frame: the frame before 15 ms (no room), the oldest 500 ms waiting: at least 8 go whatever the time */
+        CoXlTestStreamChangeAt(0);
+        co_framecost_test_world(1, t + 100); co_framecost_test_world(0, t + 5100); t += 15000;
+        co_framecost_test_begin(t, 1, 1);
+        CHECK(CoXlTestStreamChange(40000, 0, &next) == 0);               /* the wait starts */
+        CHECK(CoXlTestStreamChange(40499, 0, &next) == 0);
+        const uint32_t before = g_destroys;
+        CHECK(CoXlTestStreamChange(40500, 0, &next) >= 8 && g_destroys - before >= 8);
+        CoXlTestStreamPace(&rf, &forced, &sf, &gh, &gf);
+        CHECK(rf == 1 && forced == 1);                                   /* since the level's set-up */
+        /* a forced frame's minimum is the backlog, not the gather's 8, up to 8 ms of own time (24 at 0.3 ms): 24 of 50
+         * taken although each removal costs more than the frame's time; the 26 left keep the busy wait, and the next
+         * change try comes in 2 frames, not kStreamChangeGap */
+        StreamGame();
+        Stream(60);
+        for (uint32_t k = 0; k < 50; k++) { Slot(k, AX + 1000.0f + 4.0f * (float)k, AY, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
+        CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 50);
+        CHECK(CoXlTestStreamFloorLeast(0, 0.3) == 24 && CoXlTestStreamRemoveWaitNow() == 100);
+        CoXlTestStreamExitRate(0.0);
+        CoXlTestStreamChangeAt(0);
+        CoXlTestStreamRemoveWait(1, 0);                                  /* waited since the start of the clock: forced */
+        g_destroySpin = 0.6;
+        CHECK(CoXlTestStreamChange(60000, 0, &next) == 24 && g_destroys == 24 && CoXlTestStreamQueue(order, 256) == 26);
+        g_destroySpin = 0.0;
+        CHECK(CoXlTestStreamOwn(0) > 0.3 && CoXlTestStreamRemoveWaitNow() == 100);
+        CHECK(next == 60000 && CoXlTestStreamNextTick() == CoXlTestStreamTicks() + 2); /* 50 queued: no backlog flag */
+        /* the rest in the next forced frame; the next scan finds 2 past their radius: no busy wait */
+        CoXlTestStreamOwn(0.3);
+        CoXlTestStreamTicksAdd(); CoXlTestStreamTicksAdd();
+        CoXlTestStreamRemoveWait(60000, 2);
+        CHECK(CoXlTestStreamChange(60100, 0, &next) == 24 && CoXlTestStreamQueue(order, 256) == 2);
+        CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamRemoveWaitNow() == 500);
+        co_framecost_test_reset(0);
+        CoXlTestStreamObserver(0, 0.0f, 0.0f);
+    }
+
+    /* A far-grass bake job's frames ran 21 ms against 13 (run 2a): no change frame while one is out, 500 ms at most. */
+    Start("no change frame while a far-grass job is out, at most 500 ms; one each 500 ms while a job stalls");
+    {
+        uint32_t rf = 0, forced = 0, sf = 0, gh = 0, gf = 0;
+        StreamGame();
+        Stream(20);
+        for (uint32_t k = 0; k < 20; k++) { Slot(k, AX + 1000.0f + 4.0f * (float)k, AY, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
+        CoXlTestStreamObserver(1, AX, AY);
+        CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 20);
+        CoXlTestStreamChangeAt(0);
+        CoXlTestStreamRemoveWait(0, 0);
+        CoXlTestFarGrassOut(1);
+        CHECK(CoXlTestStreamChange(50000, 0, &next) == 0 && g_destroys == 0);
+        CHECK(CoXlTestStreamChange(50499, 0, &next) == 0 && g_destroys == 0);
+        CoXlTestStreamPace(&rf, &forced, &sf, &gh, &gf);
+        CHECK(gh == 2 && gf == 0);
+        CHECK(CoXlTestStreamChange(50500, 0, &next) > 0 && g_destroys > 0);    /* held 500 ms: let through */
+        CoXlTestStreamPace(&rf, &forced, &sf, &gh, &gf);
+        CHECK(gf == 1);
+        const uint32_t d = g_destroys;
+        for (uint32_t k = 0; k < 10; k++) { Slot(k, AX + 1000.0f + 4.0f * (float)k, AY, 2.0f, 0x2000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); CHECK(CoXlTestStreamDropPush(k)); }
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(50600, 0, &next) == 0 && g_destroys == d); /* the hold starts again */
+        CoXlTestFarGrassOut(0);
+        CHECK(CoXlTestStreamChange(50601, 0, &next) == 10 && g_destroys == d + 10); /* the job is in: no hold */
+        CoXlTestStreamObserver(0, 0.0f, 0.0f);
+    }
+
+    /* A change frame rebuilds the layers it touched: the removals of one streamed layer only, the others wait their turn. */
+    Start("a drain of one broad phase layer: its stamps alone, the others kept in order; its count limit and its time");
+    StreamGame();
+    Stream(20);
+    for (uint32_t k = 0; k < 20; k++)
+    {
+        Slot(k, AX + 1000.0f + 4.0f * (float)(19 - k), AY, 2.0f, 0x1000u * (k + 1), 0);
+        CoXlTestStreamOutSince(k, 1);
+        CoXlTestStreamLayerSet(k, k < 5 ? 6u : k < 15 ? 7u : 0u);
+    }
+    CoXlTestStreamObserver(1, AX, AY);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 20 && order[0] == 0 && order[19] == 19);
+    int cut = 0;
+    CHECK(CoXlTestStreamDrainLayer(2, 1.0e9, 7, &waiting, &cut) == 2 && waiting == 18 && g_destroys == 2 && cut == 0);
+    CoXlTestStreamSlotState(5, &live, &due, &unit); CHECK(!live);
+    CoXlTestStreamSlotState(6, &live, &due, &unit); CHECK(!live);
+    CoXlTestStreamSlotState(0, &live, &due, &unit); CHECK(live); /* layer 6's: put back, not removed */
+    CHECK(CoXlTestStreamDrainLayer(64, 1.0e9, 7, &waiting, &cut) == 8 && waiting == 10 && g_destroys == 10);
+    CHECK(CoXlTestStreamQueue(order, 256) == 10 && order[0] == 15 && order[4] == 19 && order[5] == 0 && order[9] == 4); /* in turn */
+    CHECK(CoXlTestStreamDrainLayer(64, 1.0e9, 4, &waiting, &cut) == 5 && waiting == 5 && g_destroys == 15); /* layer 4's */
+    CHECK(CoXlTestStreamDrainLayer(64, 0.0, 6, &waiting, &cut) == 1 && waiting == 4 && cut == 1); /* past its time: one */
+    CHECK(CoXlTestStreamDrainLayer(64, 1.0e9, 8, &waiting, &cut) == 0 && waiting == 4);
+    CHECK(CoXlTestStreamDrainLayer(3, 0.0, 6, &waiting, &cut) == 1 && waiting == 3 && cut == 1);
+    CHECK(CoXlTestStreamDrainLeast(64, 0.0, 6, 2, &waiting, &cut) == 2 && waiting == 1 && cut == 1); /* past its time: its floor of 2 */
+    CHECK(CoXlTestStreamDrainLayer(64, 1.0e9, -1, &waiting, &cut) == 1 && waiting == 0 && g_destroys == 20 && cut == 0);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 0);
+    Stream(3);
+    for (uint32_t k = 0; k < 3; k++) { Slot(k, AX + 1000.0f, AY + 4.0f * (float)k, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 3);
+    CHECK(CoXlTestStreamDrainLayer(64, 0.0, 4, &waiting, &cut) == 1 && cut == 1);
+    CHECK(CoXlTestStreamDrainLayer(1, 0.0, 4, &waiting, &cut) == 1 && cut == 0); /* its count, not its time */
+    CHECK(CoXlTestStreamDrainLayer(64, 0.0, 4, &waiting, &cut) == 1 && waiting == 0 && cut == 0); /* the last: nothing left */
+    Stream(3);
+    for (uint32_t k = 0; k < 3; k++) { Slot(k, AX + 1000.0f, AY + 4.0f * (float)k, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
+    CoXlTestStreamLayerSet(1, 7); CoXlTestStreamLayerSet(2, 7);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 3 && order[2] == 0);
+    CHECK(CoXlTestStreamDrainLayer(64, 0.0, 4, &waiting, &cut) == 1 && waiting == 2 && cut == 0); /* the others are layer 7's */
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
+
+    Start("the change frame's layers: the most queued removals drained, the spawns there unless it is well over the smallest");
+    {
+        int drain = 0, turn = 0; uint32_t spawn = 0;
+        const uint32_t even[5] = {300000, 1000, 2000, 500, 3000}, none[5] = {0, 0, 0, 0, 0};
+        CoXlTestSlPick(even, none, 1, &turn, &drain, &spawn);
+        CHECK(drain == 8 && spawn == 8 && turn == 0);                /* nothing queued: the smallest */
+        const uint32_t q7[5] = {0, 5, 9, 0, 0};
+        CoXlTestSlPick(even, q7, 0, &turn, &drain, &spawn);
+        CHECK(drain == 7 && spawn == 0 && turn == 0);                /* 2000 over 500 + 6500 / 8: its removals alone */
+        CoXlTestSlPick(even, q7, 1, &turn, &drain, &spawn);
+        CHECK(drain == 8 && spawn == 8 && turn == 1);                /* spawns due: turns, the smallest's spawns first */
+        CoXlTestSlPick(even, q7, 1, &turn, &drain, &spawn);
+        CHECK(drain == 7 && spawn == 0 && turn == 0);                /* then layer 7's removals */
+        const uint32_t within[5] = {300000, 1000, 1728, 900, 3000};
+        CoXlTestSlPick(within, q7, 1, &turn, &drain, &spawn);
+        CHECK(drain == 7 && spawn == 7 && turn == 0);                /* 1728 within 900 + 6628 / 8: one layer for both */
+        const uint32_t past[5] = {300000, 1000, 1729, 900, 3000};
+        CoXlTestSlPick(past, q7, 0, &turn, &drain, &spawn);
+        CHECK(drain == 7 && spawn == 0);                             /* 1729 past 900 + 6629 / 8 */
+        const uint32_t tie[5] = {9, 5, 9, 0, 0};
+        CoXlTestSlPick(even, tie, 0, &turn, &drain, &spawn);
+        CHECK(drain == 4 && spawn == 0);                             /* a tie to layer 4, which takes no spawns */
+        CoXlTestSlPick(even, tie, 1, &turn, &drain, &spawn);
+        CHECK(drain == 8 && spawn == 8 && turn == 1);
+        CoXlTestSlPick(even, tie, 1, &turn, &drain, &spawn);
+        CHECK(drain == 4 && spawn == 0 && turn == 0);
+        const uint32_t small4[5] = {10, 1000, 2000, 500, 3000}, q4[5] = {3, 0, 0, 0, 0};
+        CoXlTestSlPick(small4, q4, 0, &turn, &drain, &spawn);
+        CHECK(drain == 4 && spawn == 0);
+        const uint32_t last[5] = {0, 0, 0, 0, 1};
+        CoXlTestSlPick(even, last, 0, &turn, &drain, &spawn);
+        CHECK(drain == 9 && spawn == 0);
+        const uint32_t first[5] = {0, 2, 1, 1, 1};
+        CoXlTestSlPick(even, first, 1, &turn, &drain, &spawn);
+        CHECK(drain == 6 && spawn == 6 && turn == 0);                /* 1000 within 500 + 812 */
+    }
+
+    Start("the change frame's layers from the queue and the broad phase; none when the hooks are off or it has 6 layers");
+    StreamGame();
+    Stream(10);
+    for (uint32_t k = 0; k < 6; k++) { Slot(k, AX + 1000.0f, AY + 4.0f * (float)k, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
+    CoXlTestStreamLayerSet(0, 9); CoXlTestStreamLayerSet(1, 9); CoXlTestStreamLayerSet(2, 6); CoXlTestStreamLayerSet(3, 0);
+    CoXlTestStreamLayerSet(4, 9); CoXlTestStreamLayerSet(5, 7);
+    CoXlTestStreamObserver(1, AX, AY);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 6);
+    {
+        const uint32_t leaves[10] = {10, 0, 0, 0, 400000, 0, 4000, 9000, 3000, 9500};
+        int drain = 0; uint32_t spawn = 0, rebuilt = 0;
+        uint32_t read[5] = {0};
+        BroadPhase(10, leaves);
+        CoXlTestSlReset();
+        CoXlTestStreamLayersPick(0, &drain, &spawn, &rebuilt);
+        CHECK(drain == -1 && spawn == 0 && rebuilt == 0 && !CoXlTestSlLeaves(read));   /* off, layer 4 not read */
+        CoXlTestSlSet(1, (uintptr_t)g_fake.exe, NULL, NULL, NULL, NULL);
+        CHECK(CoXlTestSlLeaves(read) && read[0] == 400000 && read[1] == 4000 && read[2] == 9000 && read[3] == 3000 && read[4] == 9500);
+        CoXlTestStreamLayersPick(0, &drain, &spawn, &rebuilt);
+        CHECK(drain == 9 && spawn == 0 && rebuilt == 9500);             /* three of layer 9's; 9500 over 3000 + 25500 / 8 */
+        CoXlTestStreamLayersPick(1, &drain, &spawn, &rebuilt);
+        CHECK(drain == 8 && spawn == 8 && rebuilt == 3000);             /* spawns due: the smallest's turn */
+        CoXlTestStreamLayersPick(1, &drain, &spawn, &rebuilt);
+        CHECK(drain == 9 && spawn == 0 && rebuilt == 9500);
+        unsigned long long at = 0;
+        uint32_t changes = 0, backlogs = 0, drainCuts = 0, spawnCuts = 0, changeRemoved = 0, drains[5], floors = 0, builds = 0;
+        double budget = 0, rm = 0, sp = 0; int kind = 0;
+        int64_t t = 1000000;
+        co_framecost_test_reset(1000000);
+        for (int k = 0; k < 34; k++) { co_framecost_test_begin(t, 1, 1); t += 10000; } /* quiet frames of 10 ms */
+        CoXlTestStreamCost(3.0, 0.5, &rm, &sp, &kind);
+        CoXlTestStreamChangeAt(0);
+        CoXlTestStreamRemoveWait(0, 0);
+        CHECK(CoXlTestStreamChange(10000, 0, &at) == 0 && g_destroys == 0);               /* 6 queued, none waited */
+        CHECK(CoXlTestStreamChange(10250, 0, &at) == 3 && g_destroys == 3 && at == 10500); /* layer 9's three alone */
+        CoXlTestStreamBudgetStats(&budget, &floors, &builds);
+        CHECK(fabs(budget - (16.7 - 10.0 - 3.0)) < 1e-9 && floors == 0);  /* the frame before and the removal cost */
+        CoXlTestStreamCost(0, 0, &rm, &sp, &kind);
+        CHECK(kind == 1 && CoXlTestStreamLeaves() == 9500);             /* for the next tick to learn from */
+        {
+            uint32_t layer = 9, layerLeaves = 0;
+            CoXlTestStreamCostLayer(&layer, &layerLeaves);
+            CHECK(layer == 4 && layerLeaves == 9500);                    /* layer 9's cost, by its leaves */
+        }
+        co_framecost_test_reset(0);
+        CoXlTestStreamSlotState(2, &live, &due, &unit); CHECK(live);
+        CHECK(CoXlTestStreamChange(10500, 0, &at) == 1 && g_destroys == 4);                 /* a tie: layer 4's first */
+        {
+            uint32_t layer = 9, layerLeaves = 0;
+            CoXlTestStreamCostLayer(&layer, &layerLeaves);
+            CHECK(layer == 0 && layerLeaves == 400000);                  /* layer 4 with its leaves */
+        }
+        CoXlTestStreamSlotState(3, &live, &due, &unit); CHECK(!live);
+        CHECK(CoXlTestStreamChange(10750, 0, &at) == 1 && g_destroys == 5);                 /* 6 before 7 */
+        CoXlTestStreamSlotState(2, &live, &due, &unit); CHECK(!live);
+        CoXlTestStreamChangeStats(&changes, &backlogs, &drainCuts, &spawnCuts, &changeRemoved, drains);
+        CHECK(changes == 3 && changeRemoved == 5 && drains[0] == 1 && drains[1] == 1 && drains[2] == 0 && drains[4] == 1);
+        BroadPhase(6, leaves);
+        CoXlTestStreamLayersPick(0, &drain, &spawn, &rebuilt);
+        CHECK(drain == -1 && spawn == 0 && !CoXlTestSlLeaves(read));   /* a broad phase made before the hooks */
+        BroadPhase(10, leaves);
+        memcpy(g_slVt + 0x38, &(uint64_t){(uint64_t)(uintptr_t)g_fake.exe + 0xD40551u}, 8);
+        CHECK(!CoXlTestSlLeaves(read));                                /* not the broad phase */
+        CoXlTestSlReset();
+    }
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
+
+    /* A removal frame takes the layer with the most queued and spawns nothing; forced (the oldest waited 500 ms) it
+     * removes 8 at least whatever its time. A spawn frame goes to the smallest streamed layer and removes nothing. */
+    Start("a removal frame: the most queued layer, 8 at least when forced; a spawn frame: the smallest layer, no removal");
+    StreamGame();
+    Stream(10);
+    for (uint32_t k = 0; k < 6; k++) { Slot(k, AX + 1000.0f, AY + 4.0f * (float)k, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOutSince(k, 1); }
+    CoXlTestStreamLayerSet(0, 9); CoXlTestStreamLayerSet(1, 9); CoXlTestStreamLayerSet(2, 6); CoXlTestStreamLayerSet(3, 0);
+    CoXlTestStreamLayerSet(4, 9); CoXlTestStreamLayerSet(5, 7);
+    CoXlTestStreamObserver(1, AX, AY);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 6);
+    CoXlTestStreamDue(6, 0); CoXlTestStreamDue(7, 0);                  /* spawns due */
+    CoXlTestStreamDistance(6, 100.0f * 100.0f); CoXlTestStreamDistance(7, 100.0f * 100.0f);
+    {
+        uint32_t stuck = 9, dry = 9, least = 9, exits = 9, exitChanges = 9; double rebuiltSum = 9;
+        CoXlTestStreamFloorMore(&stuck, &dry, &rebuiltSum, &least, &exits, &exitChanges);
+        CHECK(exits == 6 && exitChanges == 0 && stuck == 0 && dry == 0 && rebuiltSum == 0.0); /* the scan's 6 new, no change frame before */
+    }
+    {
+        const uint32_t leaves[10] = {10, 0, 0, 0, 1000, 0, 4000, 9000, 3000, 9500};
+        unsigned long long at = 0;
+        uint32_t changes = 0, backlogs = 0, drainCuts = 0, spawnCuts = 0, changeRemoved = 0, drains[5], floors = 0, builds = 0;
+        uint32_t held = 9, sMoved = 9, sQuiet = 9;
+        double budget = 0, quietSum = 0, waitMs = 9, waitMost = 9, rm = 0, sp = 0; int kind = 0;
+        int64_t t = 1000000;
+        BroadPhase(10, leaves);
+        CoXlTestSlReset();
+        CoXlTestSlSet(1, (uintptr_t)g_fake.exe, NULL, NULL, NULL, NULL);
+        co_framecost_test_reset(1000000);
+        for (int k = 0; k < 34; k++) { co_framecost_test_begin(t, 1, 1); t += 16500; } /* quiet frames of 16.5 ms: no room */
+        CoXlTestStreamCost(3.0, 0.5, &rm, &sp, &kind);
+        CoXlTestStreamChangeAt(0);
+        CoXlTestStreamRemoveWait(0, 0);
+        CHECK(CoXlTestStreamChange(10000, 0, &at) == 0 && g_destroys == 0 && CoXlTestStreamSpawnTried() == 9); /* a spawn frame, layer 8 */
+        CHECK(CoXlTestStreamChange(10499, 0, &at) == 0 && g_destroys == 0); /* no room in the frame before, not yet forced */
+        g_destroySpin = 0.6;                                             /* each past the frame's time of 0 */
+        CHECK(CoXlTestStreamChange(10500, 0, &at) == 3 && g_destroys == 3 && at == 10750 && CoXlTestStreamSpawnTried() == 0);
+        g_destroySpin = 0.0;
+        {
+            uint32_t stuck = 9, dry = 9, least = 9, exits = 9, exitChanges = 9; double rebuiltSum = 9;
+            CoXlTestStreamFloorMore(&stuck, &dry, &rebuiltSum, &least, &exits, &exitChanges);
+            CHECK(least == 8 && dry == 0 && stuck == 0 && rebuiltSum == 9500.0); /* forced: the gather's 8 at least */
+        }
+        CoXlTestStreamChangeStats(&changes, &backlogs, &drainCuts, &spawnCuts, &changeRemoved, drains);
+        CHECK(changes == 1 && drains[4] == 1);
+        CoXlTestStreamBudgetStats(&budget, &floors, &builds);
+        CoXlTestStreamFloorStats(&held, &quietSum, &sMoved, &sQuiet, &waitMs, &waitMost);
+        CHECK(budget == 0.0 && floors == 1 && held == 0 && quietSum == 16.5); /* 16.7 - 16.5 - 3: none, counted at the floor */
+        {
+            uint32_t rf = 0, forced = 0, sf = 0, gh = 0, gf = 0;
+            CoXlTestStreamPace(&rf, &forced, &sf, &gh, &gf);
+            CHECK(rf == 1 && forced == 1 && sf == 0);
+        }
+        /* room again (32 quiet frames: the change frame's and the one right after it are none): the spawns' turn first,
+         * then layer 4 by the tie */
+        for (int k = 0; k < 34; k++) { co_framecost_test_begin(t, 1, 1); t += 10100; }
+        CHECK(CoXlTestStreamChange(10750, 0, &at) == 0 && g_destroys == 3 && CoXlTestStreamSpawnTried() == 9);
+        CHECK(CoXlTestStreamChange(10751, 0, &at) == 1 && g_destroys == 4 && CoXlTestStreamSpawnTried() == 0);
+        CoXlTestStreamChangeStats(&changes, &backlogs, &drainCuts, &spawnCuts, &changeRemoved, drains);
+        CHECK(changes == 2 && drains[0] == 1 && drains[4] == 1);
+        CoXlTestStreamBudgetStats(&budget, &floors, &builds);
+        CHECK(fabs(budget - 3.6) < 1e-9 && floors == 1);                 /* 16.7 - 10.1 - 3 */
+        /* a spawn frame making nothing leaves the next try free: no change frame counted */
+        CoXlTestStreamRemoveWait(11001, 2);
+        CHECK(CoXlTestStreamChange(11001, 1, &at) == 0 && g_destroys == 4 && CoXlTestStreamSpawnTried() == 0); /* a layer fill: no spawn frame */
+        /* a spawned one past the cursor is no due stamp: the reach looks on to the next, here out of it */
+        CoXlTestStreamDistance(6, 100.0f * 100.0f); CoXlTestStreamDistance(7, 600.0f * 600.0f);
+        CHECK(CoXlTestStreamDueInReach(500.0f * 500.0f) == 1);
+        CoXlTestStreamSpawnedSet(6, 1);
+        CHECK(CoXlTestStreamDueInReach(500.0f * 500.0f) == 0 && CoXlTestStreamDueInReach(0.0f) == 1);
+        CoXlTestStreamSpawnedSet(6, 0);
+        /* layers 6..9 moving after a frame the streamer changed nothing in (a tile destroying units a change frame's
+         * flush put there): rebuilds out of the budget, counted as layer 4's are */
+        uint32_t sFrames = 0, sLeaves = 0, s4Moved = 0, s4Quiet = 0;
+        const uint32_t more7[10] = {10, 0, 0, 0, 1000, 0, 4000, 9100, 3000, 9500}, less9[10] = {10, 0, 0, 0, 1000, 0, 4000, 9100, 3000, 9400};
+        CoXlTestStreamStatic(0, 0, &sFrames, &s4Moved, &s4Quiet, &sLeaves);   /* the first read */
+        BroadPhase(10, more7);
+        CoXlTestStreamStatic(0, 1, &sFrames, &s4Moved, &s4Quiet, &sLeaves);   /* after a frame with no change */
+        CoXlTestStreamFloorStats(&held, &quietSum, &sMoved, &sQuiet, &waitMs, &waitMost);
+        CHECK(sMoved == 1 && sQuiet == 1);
+        BroadPhase(10, less9);
+        CoXlTestStreamStatic(0, 0, &sFrames, &s4Moved, &s4Quiet, &sLeaves);   /* after the streamer's change frame */
+        CoXlTestStreamFloorStats(&held, &quietSum, &sMoved, &sQuiet, &waitMs, &waitMost);
+        CHECK(sMoved == 2 && sQuiet == 1);
+        CoXlTestStreamStatic(0, 0, &sFrames, &s4Moved, &s4Quiet, &sLeaves);   /* no move */
+        CoXlTestStreamStatic(1, 0, &sFrames, &s4Moved, &s4Quiet, &sLeaves);   /* a frame with no read */
+        BroadPhase(10, more7);
+        CoXlTestStreamStatic(0, 0, &sFrames, &s4Moved, &s4Quiet, &sLeaves);   /* not from one frame to the next */
+        CoXlTestStreamFloorStats(&held, &quietSum, &sMoved, &sQuiet, &waitMs, &waitMost);
+        CHECK(sMoved == 2 && sQuiet == 1 && s4Moved == 0);                     /* layer 4 stayed at 1000 */
+        const uint32_t four[10] = {10, 0, 0, 0, 1100, 0, 4000, 9100, 3000, 9500};
+        BroadPhase(10, four);
+        CoXlTestStreamStatic(0, 0, &sFrames, &s4Moved, &s4Quiet, &sLeaves);   /* layer 4 alone moved */
+        CoXlTestStreamFloorStats(&held, &quietSum, &sMoved, &sQuiet, &waitMs, &waitMost);
+        CHECK(sMoved == 2 && sQuiet == 1);
+        CoXlTestStreamNote();
+        CHECK(fake_host_logged("layers 6..9 changed in 2 frames, 1 of them after a frame the streamer changed nothing in"));
+        CHECK(fake_host_logged("budget 1.80 ms a frame, 1 at its floor of 0.5 ms (the quiet frames' longest of 32: mean 13.3 ms), "
+                               "0 of those not caused by the quiet frames, 0 spawning near stamps only, 0 with a due stamp in reach and no layer fill "
+                               "(0 locations spawned in them, 0 of them none), the last removal frame removing 8 at least (exits 6 over 0 removal frames); "
+                               "change frame cost with its after-change frame estimated: removal 3.00 ms (its 0 samples' mean 0.00), spawn 0.50 ms (its 0 samples' mean 0.00)"));
+        CHECK(fake_host_logged("streaming pace: 2 removal frames (1 forced by a 500 ms wait, 100 ms with a backlog), 0 spawn frames; 0 change tries held for a "
+                               "far-grass job, 0 let through after 500 ms; the quiet frames' longest of 32: mean 13.3 ms without the far-grass and after-change frames, "
+                               "13.3 ms with them; a removal's own time "));
+        {
+            uint32_t floorDue = 9, floorSpawned = 9; double sampleSum = 9; uint32_t samples = 9;
+            CoXlTestStreamFloorDue(&floorDue, &floorSpawned);
+            CoXlTestStreamSamples(&sampleSum, &samples);
+            CHECK(floorDue == 0 && floorSpawned == 0 && samples == 0 && sampleSum == 0.0); /* since the note */
+        }
+        CoXlTestStreamFloorStats(&held, &quietSum, &sMoved, &sQuiet, &waitMs, &waitMost);
+        CHECK(held == 0 && quietSum == 0.0 && sMoved == 0 && sQuiet == 0); /* since the note */
+        co_framecost_test_reset(0);
+        CoXlTestSlReset();
+    }
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
+
+    /* A forced removal frame's minimum is the backlog (queued, or past their radius when more), 8 at least and 8 ms of
+     * learned own time at most (24 at most); its wait is 100 ms while the backlog or the exits' pace is past one such
+     * frame, so forced frames keep up with 240 a second (run 2c needed 60-154). A floor not caused by the quiet frames
+     * is stuck; a moving tile's 0x63 render frame is kept out of the quiet frames. */
+    Start("the forced removal frames' minimum and wait, a stuck floor, and the 0x63 render frame kept apart");
+    StreamGame();
+    Stream(4);
+    CoXlTestStreamExitRate(0.0);
+    CHECK(CoXlTestStreamFloorLeast(0, 0.3) == 8 && CoXlTestStreamFloorLeast(5, 0) == 8);  /* the gather's 8 at least */
+    CHECK(CoXlTestStreamFloorLeast(13, 0) == 13 && CoXlTestStreamFloorLeast(24, 0) == 24); /* the backlog */
+    CHECK(CoXlTestStreamRemoveWaitNow() == 500);
+    CHECK(CoXlTestStreamFloorLeast(200, 0) == 24 && CoXlTestStreamRemoveWaitNow() == 100); /* 8 / 0.3 = 26: 24 at most; busy */
+    CHECK(CoXlTestStreamFloorLeast(200, 0.5) == 16 && CoXlTestStreamFloorLeast(200, 1.6) == 8); /* 8 ms of own time; 8 at least */
+    CHECK(CoXlTestStreamFloorLeast(17, 0.5) == 16 && CoXlTestStreamRemoveWaitNow() == 100);
+    CHECK(CoXlTestStreamFloorLeast(16, 0.5) == 16 && CoXlTestStreamRemoveWaitNow() == 500);
+    CoXlTestStreamFloorLeast(0, 0.3);
+    CoXlTestStreamExitRate(48.0);
+    CHECK(CoXlTestStreamRemoveWaitNow() == 500);                                          /* 24 exits in 500 ms: one forced frame */
+    CoXlTestStreamExitRate(48.5);
+    CHECK(CoXlTestStreamRemoveWaitNow() == 100);                                          /* the exits' pace past it */
+    CoXlTestStreamExitRate(0.0);
+    /* the starting spawn cost (0.5 ms) would have left 1.5 ms: not the quiet frames' doing */
+    CHECK(!CoXlTestStreamFloorStuck(16.5, 9500, 0.0) && CoXlTestStreamFloorStuck(10.0, 100000, 0.0));
+    CHECK(!CoXlTestStreamFloorStuck(14.0, 100000, 0.8) && !CoXlTestStreamFloorStuck(0.0, 0, 0.0));
+    CHECK(CoXlTestStreamFloorStuck(14.69, 100000, 0.0) && !CoXlTestStreamFloorStuck(14.71, 100000, 0.0)); /* 1.5 ms left */
+    CoXlTestStreamFloorLeast(0, 0);
+    {
+        int64_t t = 1000000;
+        double hi = 0, qw = 0, lw = 0;
+        co_framecost_test_reset(1000000);
+        for (int k = 0; k < 34; k++) { co_framecost_test_begin(t, 1, 1); t += 10000; }
+        CHECK(!CoXlTestRenderApart(1, 5, 0x62) && !CoXlTestRenderApart(0, 5, 0x63) && !CoXlTestRenderApart(1, 48, 0x63) && !CoXlTestRenderApart(1, -1, 0x63));
+        co_framecost_test_begin(t, 1, 1);
+        CHECK(CoXlTestRenderApart(1, 5, 0x63));                          /* its push done, the job drains in this frame */
+        t += 185000;
+        co_framecost_test_begin(t, 1, 1);
+        CHECK(co_framecost_recent(&hi, &qw, &lw) == 0 && hi == 10.0);  /* the 185 ms frame is no quiet frame */
+        t += 185000;
+        co_framecost_test_begin(t, 1, 1);
+        CHECK(co_framecost_recent(&hi, &qw, &lw) == 0 && hi == 185.0); /* the same frame not kept apart */
+        for (int k = 0; k < 33; k++) { co_framecost_test_begin(t, 1, 1); t += 10000; }
+        StreamGame();
+        Stream(4);
+        co_framecost_test_begin(t, 1, 1);
+        CoXlTestStreamTickNear(1, 7, 0x63);                              /* the streamer's tick reads it */
+        t += 185000;
+        co_framecost_test_begin(t, 1, 1);
+        CHECK(co_framecost_recent(&hi, &qw, &lw) == 0 && hi == 10.0);
+        co_framecost_test_reset(0);
+    }
+
+    /* The exits are the stamps whose out timer ran out since the last scan, counted whatever the removal queue's room:
+     * with the queue full (160) its new entries would only echo the removals done, and the minimum would lock. */
+    Start("a scan's new exits with the removal queue full; the floor's minimum catches up on the stamps past the design");
+    StreamGame();
+    Stream(200);
+    for (uint32_t k = 0; k < 200; k++)
+    {
+        Slot(k, AX + 1000.0f + 4.0f * (float)k, AY, 2.0f, 0x1000u * (k + 1), 0);
+        CoXlTestStreamOutSince(k, k < 180 ? 1u : 1000u);
+    }
+    CoXlTestStreamObserver(1, AX, AY);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 160);
+    {
+        uint32_t stuck, dry, least, exits = 9, exitChanges = 9, expiredNow = 0, expiredMost = 0; double rebuiltSum;
+        CoXlTestStreamFloorMore(&stuck, &dry, &rebuiltSum, &least, &exits, &exitChanges);
+        CHECK(exits == 200 && exitChanges == 0);                          /* the first scan: all 200 */
+        CoXlTestStreamScanAt(5500);                                       /* the last scan at 5.5 s: the 20 out since 1 s ran out after it */
+        CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamQueue(order, 256) == 160); /* full: nothing new in it */
+        CoXlTestStreamFloorMore(&stuck, &dry, &rebuiltSum, &least, &exits, &exitChanges);
+        CoXlTestStreamExpired(&expiredNow, &expiredMost);
+        CHECK(exits == 20 && exitChanges == 0 && expiredNow == 200);
+        CoXlTestStreamOwn(0.3);
+        CHECK(CoXlTestStreamLeastNow() == 24);                            /* 200 past their radius: 24 at most at 0.3 ms each */
+        CHECK(CoXlTestStreamRemoveWaitNow() == 100);                      /* a backlog: the busy wait */
+        CHECK(CoXlTestStreamScanFrames(0) == 0);
+        CoXlTestStreamFloorMore(&stuck, &dry, &rebuiltSum, &least, &exits, &exitChanges);
+        CHECK(exits == 0);                                                /* none ran out since */
+        /* the exits' pace: 20 ran out in the second since the last scan, a quarter of the way from 0 */
+        const ULONGLONG wall = GetTickCount64();
+        for (uint32_t k = 180; k < 200; k++) CoXlTestStreamOutSince(k, wall - 5500u);
+        CoXlTestStreamExitRate(0.0);
+        CoXlTestStreamScanAt(wall - 1000u);
+        CHECK(CoXlTestStreamScanFrames(0) == 0);
+        CoXlTestStreamFloorMore(&stuck, &dry, &rebuiltSum, &least, &exits, &exitChanges);
+        const double pace = CoXlTestStreamExitRate(-1.0);
+        CHECK(exits == 20 && pace > 4.5 && pace <= 5.0);
+        CoXlTestStreamExitRate(0.0);
+    }
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
+
+    /* A spawn frame fills the emptiest streamed layer, so the four stay near a quarter each; with the split off its
+     * stamps stay in layer 4 (no layer of their own). */
+    Start("a spawn frame goes to the smallest streamed layer, to layer 4 with the split off");
+    StreamGame();
+    Stream(10);
+    CoXlTestStreamObserver(1, AX, AY);
+    CoXlTestStreamDue(6, 0);
+    {
+        const uint32_t leaves[10] = {10, 0, 0, 0, 1000, 0, 130000, 130000, 120000, 130000};
+        const uint32_t small6[10] = {10, 0, 0, 0, 1000, 0, 1200, 130000, 120000, 130000};
+        unsigned long long at = 0;
+        int64_t t = 1000000;
+        BroadPhase(10, leaves);
+        CoXlTestSlReset();
+        co_framecost_test_reset(1000000);
+        for (int k = 0; k < 34; k++) { co_framecost_test_begin(t, 1, 1); t += 13000; }
+        CoXlTestStreamChangeAt(0);
+        CoXlTestStreamRemoveWait(0, 0);
+        CHECK(CoXlTestStreamChange(10000, 0, &at) == 0 && CoXlTestStreamSpawnTried() == 1); /* off: layer 4 */
+        CoXlTestSlSet(1, (uintptr_t)g_fake.exe, NULL, NULL, NULL, NULL);
+        CHECK(CoXlTestStreamChange(10001, 0, &at) == 0 && CoXlTestStreamSpawnTried() == 9); /* layer 8's 120,000 */
+        BroadPhase(10, small6);
+        CHECK(CoXlTestStreamChange(10002, 0, &at) == 0 && CoXlTestStreamSpawnTried() == 7);
+        co_framecost_test_reset(0);
+        CoXlTestSlReset();
+    }
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
+
+    /* Layers 6..9 must be layer 4 to every reader: the count only with all four hooks in, their info layer 4's. */
+    Start("the streamed layers' count and info: 10 layers, 6..9 as layer 4, only while on and over the reviewed 6");
+    CoXlTestSlReset();
+    CoXlTestSlSet(1, (uintptr_t)g_fake.exe, (void*)OrigCount6, (void*)OrigInfo, (void*)OrigRule, (void*)OrigCreate);
+    CHECK(CoXlTestSlCount() == 10);
+    CHECK(CoXlTestSlCountFrom((uintptr_t)g_fake.exe + 0xD3C675u) == 10);
+    CHECK(CoXlTestSlCountFrom((uintptr_t)g_fake.exe + 0xD2DC4Au) == 6);  /* the hybrid broad phase: 8 layers inline */
+    {
+        uint8_t info[12];
+        for (uint8_t layer = 6; layer <= 9; layer++)
+        {
+            uint32_t mask = 0; uint16_t flags = 0xFFFF;
+            memset(info, 0xCC, sizeof info);
+            g_infoCalls = 0;
+            CoXlTestSlInfo(layer, info);
+            memcpy(&mask, info + 4, 4); memcpy(&flags, info + 8, 2);
+            CHECK(info[0] == 1 && mask == 1 && flags == 0 && g_infoCalls == 0);
+        }
+        g_infoCalls = 0;
+        CoXlTestSlInfo(5, info); CHECK(info[0] == 0xEE && g_infoCalls == 1);
+        CoXlTestSlInfo(4, info); CHECK(info[0] == 0xEE && g_infoCalls == 2);
+        CoXlTestSlInfo(10, info); CHECK(info[0] == 0xEE && g_infoCalls == 3);
+        CoXlTestSlSet(1, (uintptr_t)g_fake.exe, (void*)OrigCount7, NULL, NULL, NULL);
+        CHECK(CoXlTestSlCount() == 7);                                 /* not the reviewed config */
+        CoXlTestSlSet(0, (uintptr_t)g_fake.exe, (void*)OrigCount6, NULL, NULL, NULL);
+        CHECK(CoXlTestSlCount() == 6);
+        CoXlTestSlInfo(7, info); CHECK(info[0] == 0xEE && g_infoCalls == 4);
+    }
+    CoXlTestSlReset();
+
+    Start("bodies made in a change frame's spawn window on any thread take its layer; the rule sends them there from layer 4 alone");
+    StreamGame();
+    {
+        const uint32_t leaves[10] = {0, 0, 0, 0, 1000, 0, 10, 10, 10, 10};
+        uint32_t id = 0; long created = 0, marked = 0, routed = 0;
+        uint8_t out[5];
+        BroadPhase(10, leaves);
+        CoXlTestSlReset();
+        CoXlTestSlSet(1, (uintptr_t)g_fake.exe, (void*)OrigCount6, (void*)OrigInfo, (void*)OrigRule, (void*)OrigCreate);
+        g_ruleOther = -1;
+        const uint32_t ids[5] = {5, 8, 0x01000005u, 7, 0xFFFFFFu};
+        g_nextId = 5; CoXlTestSlCreate(WriterW(), &id);              /* outside a frame: none */
+        CoXlTestSlRule(ids, 5, g_slBodies, out);
+        CHECK(id == 5 && CoXlTestSlLayerOf(5) == 0 && out[0] == 4 && out[2] == 4);
+        const DWORD gameWas = CoXlTestSlGameThread(GetCurrentThreadId()); /* this test's thread is the game's */
+        CoXlTestSlFrame(7);
+        g_nextId = 5; CHECK(CoXlTestSlCreate(WriterW(), &id) == WriterW() && CoXlTestSlLayerOf(5) == 7);
+        g_nextId = 6; CoXlTestSlCreate(g_slWorld, &id);               /* another writer: not the mission world's */
+        CHECK(CoXlTestSlLayerOf(6) == 0);
+        g_nextId = 7; CoXlTestSlCreate(WriterW(), &id);
+        g_nextId = 9;
+        /* another thread in the window, as the spawn broadcast's workers (0x788E90): the frame's layer, counted apart */
+        HANDLE t = CreateThread(NULL, 0, CreateElsewhere, NULL, 0, NULL);
+        WaitForSingleObject(t, INFINITE); CloseHandle(t);
+        CHECK(CoXlTestSlLayerOf(9) == 7 && CoXlTestSlLayerOf(7) == 7);
+        CoXlTestSlFrame(0);
+        g_nextId = 8; CoXlTestSlCreate(WriterW(), &id);              /* after the frame: none */
+        CHECK(CoXlTestSlLayerOf(8) == 0);
+        g_nextId = 10;
+        t = CreateThread(NULL, 0, CreateElsewhere, NULL, 0, NULL);  /* another thread after the window: none */
+        WaitForSingleObject(t, INFINITE); CloseHandle(t);
+        CHECK(CoXlTestSlLayerOf(10) == 0);
+        long off = 0, left = 0;
+        CoXlTestSlCounts(&created, &marked, &routed);
+        CoXlTestSlWindowCounts(&off, &left);
+        CHECK(created == 6 && marked == 3 && routed == 0 && off == 1 && left == 0);
+        g_ruleOther = 7;                                             /* not layer 4 by the game's rule: kept */
+        CoXlTestSlRule(ids, 5, g_slBodies, out);
+        CHECK(out[0] == 7 && out[1] == 4 && out[2] == 7 && out[3] == 3 && out[4] == 4);
+        CoXlTestSlCounts(&created, &marked, &routed);
+        CHECK(routed == 2);
+        CoXlTestSlRule(ids, 5, g_slBodies + 0xA0, out);              /* another world's bodies */
+        CHECK(out[0] == 4 && out[2] == 4);
+        CoXlTestSlRule(ids, 0, g_slBodies, out);
+        CoXlTestSlSet(0, (uintptr_t)g_fake.exe, NULL, NULL, NULL, NULL);
+        CoXlTestSlRule(ids, 5, g_slBodies, out);
+        CHECK(out[0] == 4 && out[2] == 4);                           /* off */
+        CoXlTestSlSet(1, (uintptr_t)g_fake.exe, NULL, NULL, NULL, NULL);
+        g_nextId = 5; CoXlTestSlCreate(WriterW(), &id);              /* index 5 made again outside a frame */
+        CoXlTestSlRule(ids, 5, g_slBodies, out);
+        CHECK(out[0] == 4 && out[2] == 4 && CoXlTestSlLayerOf(5) == 0);
+        CoXlTestSlFrame(8);
+        g_nextId = 5; CoXlTestSlCreate(WriterW(), &id);
+        CoXlTestSlFrame(0);
+        CoXlTestSlRule(ids, 5, g_slBodies, out);
+        CHECK(out[0] == 8);
+        CoXlTestSlFrame(5);                                          /* a layer that is not a streamed one: never sent */
+        g_nextId = 5; CoXlTestSlCreate(WriterW(), &id);
+        CoXlTestSlFrame(0);
+        CoXlTestSlRule(ids, 5, g_slBodies, out);
+        CHECK(CoXlTestSlLayerOf(5) == 5 && out[0] == 4);
+        /* the window's end makes the ring's units: every body the flush makes, on either thread, takes the layer */
+        static uint8_t ring[0x20];
+        const uint64_t rv = (uint64_t)(uintptr_t)ring, hv = (uint64_t)(uintptr_t)&g_ringHead, tv = (uint64_t)(uintptr_t)&g_ringTail;
+        uint8_t* wl = (uint8_t*)VirtualAlloc(NULL, 0x171000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE); /* the destroy lists' counts read 0 */
+        const uint64_t wlv = (uint64_t)(uintptr_t)wl;
+        memcpy(wl + 0x20, &rv, 8); memcpy(ring + 8, &hv, 8); memcpy(ring + 0x10, &tv, 8);
+        CoXlTestSlFlushWith(FakeFlush);
+        g_flushCalls = g_flushLeaves = 0;
+        g_ringHead = 0x110; g_ringTail = 0x100;
+        wl[0x170038] = 1;                                            /* a destroy list holds entries: due, not a leftover */
+        CoXlTestSlFrame(9);
+        CoXlTestSlFrameEnd(wlv);
+        wl[0x170038] = 0;
+        CHECK(g_flushCalls == 1 && CoXlTestSlLayerOf(11) == 9 && CoXlTestSlLayerOf(12) == 9);
+        CoXlTestSlWindowCounts(&off, &left);
+        CHECK(off == 2 && left == 0);
+        g_nextId = 13; CoXlTestSlCreate(WriterW(), &id);             /* the window closed with the flush */
+        CHECK(CoXlTestSlLayerOf(13) == 0);
+        /* a ring the flush makes nothing of: 4 more calls at most, then its 16 units counted as left */
+        g_ringHead = g_ringTail + 0x10; g_flushLeaves = 1;
+        CoXlTestSlFrame(6);
+        CoXlTestSlFrameEnd(wlv);
+        CoXlTestSlWindowCounts(&off, &left);
+        CHECK(g_flushCalls == 6 && CoXlTestSlLayerOf(11) == 6 && left == 1);
+        /* 700 units: the first call makes 512, one more the other 188, all inside the window */
+        g_ringHead = g_ringTail + 700; g_flushLeaves = 0;
+        CoXlTestSlFrame(8);
+        CoXlTestSlFrameEnd(wlv);
+        CoXlTestSlWindowCounts(&off, &left);
+        CHECK(g_flushCalls == 8 && g_ringHead == g_ringTail && CoXlTestSlLayerOf(11) == 8 && CoXlTestSlLayerOf(12) == 8 && left == 1);
+        /* 1024 units: 512 left, as many as the world's own flush makes: made in the window too */
+        g_ringHead = g_ringTail + 1024;
+        CoXlTestSlFrame(9);
+        CoXlTestSlFrameEnd(wlv);
+        CoXlTestSlWindowCounts(&off, &left);
+        CHECK(g_flushCalls == 10 && g_ringHead == g_ringTail && CoXlTestSlLayerOf(11) == 9 && left == 1);
+        /* 1500 units: 988 left after the first call, more than the world's own flush makes this frame: held */
+        g_ringHead = g_ringTail + 1500;
+        CoXlTestSlFrame(7);
+        CoXlTestSlFrameEnd(wlv);
+        CoXlTestSlWindowCounts(&off, &left);
+        CHECK(g_flushCalls == 11 && g_ringHead - g_ringTail == 988 && left == 2);
+        g_ringHead = g_ringTail;                                     /* an empty ring and destroy lists: no flush */
+        CoXlTestSlFrame(7);
+        CoXlTestSlFrameEnd(wlv);
+        CoXlTestSlFrameEnd(0);
+        CHECK(g_flushCalls == 11);
+        CoXlTestSlFlushWith(NULL);
+        CoXlTestSlGameThread(gameWas);
+        CoXlTestStreamSlNote();
+        CHECK(fake_host_logged("in 10 s 32 bodies made, 27 of them in a change frame's spawn window (12 of those off the game thread), 4 sent to 6..9 by "
+                               "the rule; 2 window flushes left units on the spawn ring (1004 units, 1 of those windows held with over 512 left), "
+                               "6 extra flush calls made 700 units;"));
+        g_fake.log[0] = 0;
+        CoXlTestStreamSlNote();                                       /* each note starts again */
+        CHECK(fake_host_logged("0 window flushes left units on the spawn ring (0 units, 0 of those windows held with over 512 left), "
+                               "0 extra flush calls made 0 units;"));
+        CoXlTestSlWindowCounts(&off, &left);
+        CHECK(off == 0 && left == 0);                                 /* each note starts again */
+        VirtualFree(wl, 0, MEM_RELEASE);
+    }
+    {
+        const uint32_t leaves[10] = {0, 0, 0, 0, 1000, 0, 10, 10, 10, 10};
+        uint32_t id = 0; uint8_t out[1];
+        const uint32_t ids[1] = {5};
+        BroadPhase(6, leaves);                                       /* made before the hooks */
+        CoXlTestSlReset();
+        CoXlTestSlSet(1, (uintptr_t)g_fake.exe, (void*)OrigCount6, (void*)OrigInfo, (void*)OrigRule, (void*)OrigCreate);
+        g_ruleOther = -1;
+        CoXlTestSlFrame(6); g_nextId = 5; CoXlTestSlCreate(WriterW(), &id); CoXlTestSlFrame(0);
+        CoXlTestSlRule(ids, 1, g_slBodies, out);
+        CHECK(CoXlTestSlLayerOf(5) == 6 && out[0] == 4);
+        BroadPhase(10, leaves);
+        g_slLayer[7 * 0x1C00 + 0x1AE0] = 2;                          /* layer 7 not static */
+        CoXlTestSlRule(ids, 1, g_slBodies, out);
+        CHECK(out[0] == 4);
+        g_slLayer[7 * 0x1C00 + 0x1AE0] = 1; g_slLayer[9 * 0x1C00 + 0x1AE4] = 3; /* layer 9 pairs with layer 1 as well */
+        CoXlTestSlRule(ids, 1, g_slBodies, out);
+        CHECK(out[0] == 4);
+        g_slLayer[9 * 0x1C00 + 0x1AE4] = 1; g_slLayer[4 * 0x1C00 + 0x1AE0] = 2; /* layer 4 not what the info gives */
+        CoXlTestSlRule(ids, 1, g_slBodies, out);
+        CHECK(out[0] == 4);
+        g_slLayer[4 * 0x1C00 + 0x1AE0] = 1;
+        CoXlTestSlRule(ids, 1, g_slBodies, out);
+        CHECK(out[0] == 6);
+        memcpy(g_slVt + 0x38, &(uint64_t){(uint64_t)(uintptr_t)g_fake.exe + 0xD40551u}, 8);
+        CoXlTestSlRule(ids, 1, g_slBodies, out);
+        CHECK(out[0] == 4);                                          /* not the broad phase */
+        CoXlTestSlReset();
+        CoXlTestSlSet(1, (uintptr_t)g_fake.exe, (void*)OrigCount6, (void*)OrigInfo, (void*)OrigRule, (void*)OrigCreate);
+        CoXlTestSlFrame(6); g_nextId = 5; CoXlTestSlCreate(WriterW(), &id); CoXlTestSlFrame(0);
+        CoXlTestSlRule(ids, 1, g_slBodies, out);
+        CHECK(out[0] == 4 && CoXlTestSlLayerOf(5) == 0);             /* no broad phase: none made in a frame either */
+        CoXlTestSlReset();
+    }
+
+    /* Who makes the mission world's bodies outside the change frames (run 2c, ~38k a window): with the layers off the
+     * body maker passes through and samples 1 in 64 calls' callers, the note naming the most frequent chains. */
+    Start("the bodies' makers: counted with the layers off, 1 in 64 sampled, the most frequent chains named, the table bounded");
+    {
+        const uint32_t leaves[10] = {0, 0, 0, 0, 1000, 0, 10, 10, 10, 10};
+        uint32_t id = 0; long created = 0, marked = 0, routed = 0;
+        char text[640];
+        StreamGame();
+        BroadPhase(10, leaves);
+        CoXlTestSlReset();
+        CoXlTestSlSet(0, (uintptr_t)g_fake.exe, (void*)OrigCount6, (void*)OrigInfo, (void*)OrigRule, (void*)OrigCreate);
+        CoXlTestSlSampleText(text, sizeof text);                      /* a fresh table */
+        /* a body made in a change frame (by the streamer's tick: the layers are off), then in the frame after it */
+        CoXlTestSlChangeTickSet(CoXlTestStreamTicks());
+        CHECK(CoXlTestSlChangeMark() == 1);
+        CoXlTestStreamTicksAdd();
+        CHECK(CoXlTestSlChangeMark() == 2);
+        g_nextId = 4; CHECK(CoXlTestSlCreate(WriterW(), &id) == WriterW() && id == 4);
+        CoXlTestStreamTicksAdd();
+        CHECK(CoXlTestSlChangeMark() == 0);                           /* two ticks on: another frame */
+        CoXlTestSlChangeTickSet(CoXlTestStreamTicks());
+        g_nextId = 5; CHECK(CoXlTestSlCreate(WriterW(), &id) == WriterW() && id == 5);
+        g_nextId = 6; CoXlTestSlCreate(g_slWorld, &id);               /* another writer: not counted */
+        CoXlTestSlCounts(&created, &marked, &routed);
+        CHECK(created == 2 && marked == 0 && CoXlTestSlLayerOf(5) == 0);  /* off: counted, never marked */
+        CoXlTestSlChangeTickSet(0);
+        CHECK(CoXlTestSlChangeMark() == 0);                           /* no change frame yet */
+        for (int k = 0; k < 126; k++) CoXlTestSlSampleCall();
+        CoXlTestSlSampleText(text, sizeof text);
+        CHECK(strncmp(text, "128 bodies made (1 in change frames, 1 in the frames after them, 126 in others), 2 sampled (1 in 64), 0 not kept; ", 114) == 0 &&
+              strstr(text, " from ?+0x") != NULL); /* this test's own frames */
+        const uintptr_t exe = (uintptr_t)g_fake.exe;
+        const uintptr_t a[4] = {exe + 0x20BC85u, exe + 0xDBEC9u, 0x1234u, exe + 0x10u}, b[2] = {exe + 0x2354A0u, exe + 0x2351DDu};
+        for (int k = 0; k < 3; k++) CoXlTestSlChain(a, 4, 1, k, k == 1);
+        CoXlTestSlChain(b, 2, 0, 0, 0);
+        CoXlTestSlSampleText(text, sizeof text);
+        CHECK(strcmp(text, "0 bodies made (0 in change frames, 0 in the frames after them, 0 in others), 4 sampled (1 in 64), 0 not kept; 3 from e+0x20BC85 < "
+                           "e+0xDBEC9 < ?+0x1234 < e+0x10 (3 on the game thread, 1 in a change frame, 1 in the frame after, 1 in a spawn window); 1 from e+0x2354A0 < "
+                           "e+0x2351DD (0 on the game thread, 0 in a change frame, 0 in the frame after, 0 in a spawn window)") == 0);
+        CoXlTestSlSampleText(text, sizeof text);
+        CHECK(strcmp(text, "0 bodies made (0 in change frames, 0 in the frames after them, 0 in others), 0 sampled (1 in 64), 0 not kept") == 0); /* each note starts again */
+        for (uintptr_t k = 0; k < 49; k++) { const uintptr_t c[1] = {exe + 0x100u + k}; CoXlTestSlChain(c, 1, 0, 0, 0); }
+        CoXlTestSlSampleText(text, sizeof text);
+        CHECK(strncmp(text, "0 bodies made (0 in change frames, 0 in the frames after them, 0 in others), 49 sampled (1 in 64), 1 not kept; 1 from e+0x100 ", 126) == 0); /* 48 kept */
+        CoXlTestSlReset();
+    }
+
+    /* The step's removal path timed (ANALYSIS-r2a §2.3): each thunk passes its four arguments and the original's result
+     * through, and its time and calls go to the frame's kind at the streamer's next tick. */
+    Start("the step removal timers: the originals' arguments and results passed through, each frame's under its kind");
+    {
+        typedef uint64_t (*Fn4)(uint64_t, uint64_t, uint64_t, uint64_t);
+        for (int slot = 0; slot < 4; slot++) CoXlTestStOrig(slot, slot == 3 ? (void*)StFakeActivate : (void*)StFakeTimed);
+        CoXlTestStOn();
+        g_stFakeCalls = 0;
+        CHECK(((Fn4)CoXlTestStThunk(0))(1, 2, 3, 4) == 1234 && CoXlTestStCalls(0) == 1);
+        CHECK(((Fn4)CoXlTestStThunk(1))(5, 6, 7, 8) == 5678 && CoXlTestStCalls(1) == 1);
+        CHECK(((Fn4)CoXlTestStThunk(1))(9, 0, 1, 2) == 9012 && CoXlTestStCalls(1) == 2);
+        CHECK(((Fn4)CoXlTestStThunk(2))(3, 4, 5, 6) == 3456 && CoXlTestStCalls(2) == 1);
+        const long long acts = CoXlTestStCalls(3);
+        CHECK(((Fn4)CoXlTestStThunk(3))(7, 8, 9, 1) == 7 * 8 + 9 + 1 && CoXlTestStCalls(3) == acts + 1);
+        CHECK(g_stFakeCalls == 5);
+        CoXlTestStFrame(3);                                           /* a frame that removed and spawned: a removal frame's */
+        CHECK(CoXlTestStKindFrames(1) == 1 && CoXlTestStKindCalls(1, 0) == 1 && CoXlTestStKindCalls(1, 1) == 2 && CoXlTestStKindCalls(1, 2) == 1);
+        CHECK(CoXlTestStKindCalls(1, 3) == 1 && CoXlTestStCalls(0) == 0 && CoXlTestStCalls(1) == 0);
+        ((Fn4)CoXlTestStThunk(0))(1, 2, 3, 4);
+        CoXlTestStFrame(2);                                           /* spawns only */
+        CHECK(CoXlTestStKindFrames(2) == 1 && CoXlTestStKindCalls(2, 0) == 1 && CoXlTestStKindCalls(2, 3) == 0);
+        CoXlTestStFrame(0);
+        CoXlTestStFrame(1);
+        CHECK(CoXlTestStKindFrames(0) == 1 && CoXlTestStKindFrames(1) == 2 && CoXlTestStKindCalls(0, 0) == 0);
+        CoXlTestStNote();
+        CHECK(fake_host_logged("step removal timers in 10 s (removeBodies 0xD0F440, its broad phase remove 0xD41AF0, the renumber 0xD42550 a frame; "
+                               "activations 0xDE1690): 2 removal frames: "));
+        CHECK(fake_host_logged("1 spawn frames: ") && fake_host_logged("; 1 other frames: 0.00 ms (the most 0.00, 0 calls)"));
+        CHECK(CoXlTestStKindFrames(1) == 0 && CoXlTestStKindCalls(1, 1) == 0); /* since the note */
+    }
+
+    Start("the change frame makes its spawns' units only when the spawn ring or a destroy list holds any, as DestroyUnit does");
+    {
+        static uint8_t ring[0x20]; static uint64_t head, tail;
+        uint8_t* w = g_worldMem;
+        memset(w, 0, 0x171000);
+        const uint64_t world = (uint64_t)(uintptr_t)w, r = (uint64_t)(uintptr_t)ring, h = (uint64_t)(uintptr_t)&head, t = (uint64_t)(uintptr_t)&tail;
+        memcpy(w + 0x20, &r, 8); memcpy(ring + 8, &h, 8); memcpy(ring + 0x10, &t, 8);
+        head = tail = 0x100;
+        CHECK(!CoXlTestSlFlushDue(world) && !CoXlTestSlFlushDue(0));
+        head = 0x110;
+        CHECK(CoXlTestSlFlushDue(world));
+        head = 0x100; w[0x170038] = 1;
+        CHECK(CoXlTestSlFlushDue(world));
+        w[0x170038] = 0; w[0x10030] = 1;
+        CHECK(CoXlTestSlFlushDue(world));
+        w[0x10030] = 0; memset(ring + 8, 0, 8);
+        CHECK(!CoXlTestSlFlushDue(world));                           /* the ring does not read: left to the world's flush */
+    }
+
+    /* The real change step with the layers on (WorldStreamChangeLocked, then WorldStreamChangeAfter): a spawn frame opens
+     * the window with the smallest streamed layer; the bodies its spawn call and its flush make, on either thread, take
+     * it; the window closes after the flush, when nothing was made, and when the flush cannot be made. */
+    Start("a spawn frame through the change step with the layers on: its window, its bodies' layer, its cost layer, closed on every path");
+    {
+        uint32_t id = 0, costLayer = 9, costLeaves = 0;
+        unsigned long long at = 0;
+        char text[640];
+        StreamGame();
+        Stream(8);
+        const uint32_t small8[10] = {0, 0, 0, 0, 1000, 0, 4000, 9000, 3000, 9500};
+        BroadPhase(10, small8);
+        CoXlTestSlReset();
+        CoXlTestSlSet(1, (uintptr_t)g_fake.exe, (void*)OrigCount6, (void*)OrigInfo, (void*)OrigRule, (void*)OrigCreate);
+        g_ruleOther = -1;
+        const DWORD gameWas = CoXlTestSlGameThread(GetCurrentThreadId());
+        static uint8_t ring[0x20];
+        const uint64_t rv = (uint64_t)(uintptr_t)ring, hv = (uint64_t)(uintptr_t)&g_ringHead, tv = (uint64_t)(uintptr_t)&g_ringTail;
+        memcpy(g_worldMem + 0x20, &rv, 8); memcpy(ring + 8, &hv, 8); memcpy(ring + 0x10, &tv, 8);
+        g_ringHead = g_ringTail = 0x100;
+        const uint64_t array = (uint64_t)(uintptr_t)g_array;
+        memset(g_spawnPass, 0, sizeof g_spawnPass); memcpy(g_spawnPass + 8, &array, 8);
+        CoXlTestStreamSpawnSetup((void*)SpawnBodies, g_spawnPass);
+        CoXlTestSlFlushWith(FakeFlush);
+        g_flushCalls = g_flushLeaves = g_spawnCalls = 0;
+        co_framecost_test_reset(1000000);
+        CoXlTestStreamRemoveWait(0, 0);
+        CoXlTestSlChangeTickSet(0);
+        CoXlTestSlSampleText(text, sizeof text);                      /* a fresh table */
+        /* layer 8 the smallest: the spawn call's body (game thread) and the flush's two (game thread, a worker) */
+        CoXlTestStreamDue(0, U(0x100)); CoXlTestStreamDue(1, U(0x200));
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(10000, 0, &at) == 1 && g_spawnCalls == 1 && g_flushCalls == 1 && CoXlTestStreamSpawnTried() == 9);
+        CHECK(CoXlTestSlLayerOf(20) == 8 && CoXlTestSlLayerOf(11) == 8 && CoXlTestSlLayerOf(12) == 8);
+        CHECK(CoXlTestStreamLayerOf(0) == 8 && CoXlTestStreamLayerOf(1) == 8);
+        CoXlTestStreamCostLayer(&costLayer, &costLeaves);
+        CHECK(costLayer == 3 && costLeaves == 3000);                 /* layer 8's cost, by its leaves */
+        CoXlTestSlSampleText(text, sizeof text);                      /* the spawn call's body is the change frame's too */
+        CHECK(strncmp(text, "3 bodies made (3 in change frames, 0 in the frames after them, 0 in others)", 75) == 0);
+        g_nextId = 13; CoXlTestSlCreate(WriterW(), &id);             /* the window closed with the flush */
+        CHECK(CoXlTestSlLayerOf(13) == 0);
+        /* a spawn frame that made nothing (its only due slot spawned already) closes the window it opened */
+        CoXlTestStreamDue(2, U(0x300)); CoXlTestStreamSpawnedSet(2, 1);
+        CoXlTestStreamChangeAt(0);
+        CoXlTestSlChangeTickSet(0);
+        CHECK(CoXlTestStreamChange(10001, 0, &at) == 0 && g_spawnCalls == 1 && g_flushCalls == 1 && CoXlTestStreamSpawnTried() == 9);
+        g_nextId = 14; CoXlTestSlCreate(WriterW(), &id);
+        CHECK(CoXlTestSlLayerOf(14) == 0 && CoXlTestSlChangeMark() == 0); /* no change frame for the sampler either */
+        /* layer 6 the smallest, and the world not read for the flush: made, not flushed, the window closed */
+        const uint32_t small6[10] = {0, 0, 0, 0, 1000, 0, 1500, 9000, 3000, 9500};
+        BroadPhase(10, small6);
+        uint64_t world = 0, none = 0;
+        memcpy(&world, g_context + 0x40, 8); memcpy(g_context + 0x40, &none, 8);
+        CoXlTestStreamDue(3, U(0x400));
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(10002, 0, &at) == 1 && g_spawnCalls == 2 && g_flushCalls == 1 && CoXlTestStreamSpawnTried() == 7);
+        CHECK(CoXlTestSlLayerOf(20) == 6 && CoXlTestStreamLayerOf(3) == 6);
+        CoXlTestStreamCostLayer(&costLayer, &costLeaves);
+        CHECK(costLayer == 1 && costLeaves == 1500);
+        memcpy(g_context + 0x40, &world, 8);
+        g_nextId = 15; CoXlTestSlCreate(WriterW(), &id);
+        CHECK(CoXlTestSlLayerOf(15) == 0);
+        /* layers 9 and 7: flushed, each its own cost layer */
+        const uint32_t small9[10] = {0, 0, 0, 0, 1000, 0, 4000, 9000, 3000, 2000}, small7[10] = {0, 0, 0, 0, 1000, 0, 4000, 2500, 3000, 9500};
+        const uint32_t layers[2] = {9, 7};
+        for (int k = 0; k < 2; k++)
+        {
+            BroadPhase(10, k == 0 ? small9 : small7);
+            CoXlTestStreamDue(4 + (uint32_t)k, U(0x500 + 0x100 * (uint32_t)k));
+            CoXlTestStreamChangeAt(0);
+            CHECK(CoXlTestStreamChange(10003 + (unsigned long long)k, 0, &at) == 1 && g_flushCalls == 2 + k && CoXlTestStreamSpawnTried() == layers[k] + 1);
+            CHECK(CoXlTestSlLayerOf(20) == layers[k] && CoXlTestSlLayerOf(11) == layers[k] && CoXlTestSlLayerOf(12) == layers[k]);
+            CoXlTestStreamCostLayer(&costLayer, &costLeaves);
+            CHECK(costLayer == layers[k] - 5 && costLeaves == (k == 0 ? 2000u : 2500u));
+            g_nextId = 16; CoXlTestSlCreate(WriterW(), &id);
+            CHECK(CoXlTestSlLayerOf(16) == 0);
+        }
+        long off = 0, left = 0;
+        CoXlTestSlWindowCounts(&off, &left);
+        CHECK(off == 3 && left == 0);                                 /* the workers' bodies of the three flushes */
+        /* a SpawnLevelLayers call stopped by a full ring: its last record stays due, the stop counted for the note */
+        CoXlTestStreamSlNote();
+        CoXlTestStreamDue(6, U(0x700)); CoXlTestStreamDue(7, U(0x800));
+        g_spawnShort = 1;
+        CoXlTestStreamChangeAt(0);
+        CHECK(CoXlTestStreamChange(10010, 0, &at) == 1 && CoXlTestStreamLayerOf(6) == 7 && CoXlTestStreamLayerOf(7) == 0);
+        g_spawnShort = 0;
+        g_fake.log[0] = 0;
+        CoXlTestStreamSlNote();
+        CHECK(fake_host_logged("0 extra flush calls made 0 units; 1 SpawnLevelLayers calls stopped by a full spawn ring"));
+        CoXlTestStreamSlNote();
+        CHECK(fake_host_logged("; 0 SpawnLevelLayers calls stopped by a full spawn ring"));
+        CoXlTestSlFlushWith(NULL);
+        CoXlTestSlGameThread(gameWas);
+        CoXlTestStreamSpawnSetup(NULL, NULL);
+        memset(g_worldMem + 0x20, 0, 8);
+        CoXlTestSlReset();
+    }
+
+    /* The count and info go in before the game's set-up (SlEarly), the rule and body maker with the streamer (SlInstall),
+     * each pair both or none and only over the reviewed code; the second pair never without the first. */
+    Start("the streamed layers' count and info go in first, the rule and body maker after them, only over the reviewed code");
+    {
+        uint8_t* exe = fake_host_exe();
+        const uintptr_t image = (uintptr_t)g_fake.image;
+        CoXlTestSlReset();
+        g_fake.hookCount = 0;
+        /* asked off (a research build's HELLFORGE_XL_STREAM_LAYERS=0): no hook at all */
+        static const char kOff[] = "off as asked (HELLFORGE_XL_STREAM_LAYERS=0)";
+        CoXlTestSlAsk(0);
+        const char* off = CoXlTestSlEarly((uintptr_t)exe);
+        CHECK(off != NULL && strncmp(off, kOff, sizeof kOff - 1) == 0 && !CoXlTestSlLayers() && g_fake.hookCount == 0);
+        off = CoXlTestSlInstall((uintptr_t)exe);
+        CHECK(off != NULL && strncmp(off, kOff, sizeof kOff - 1) == 0 && !CoXlTestSlOn() && g_fake.hookCount == 0);
+        CoXlTestSlAskDefault();                                      /* a package: no switch read, so on */
+        const char* first = CoXlTestSlInstall((uintptr_t)exe);       /* the count not in first */
+        CHECK(first != NULL && strcmp(first, "the layer count was not hooked before the game's set-up made the main world (its broad phase keeps 6 layers)") == 0);
+        CHECK(!CoXlTestSlOn() && g_fake.hookCount == 0);
+        g_fake.noMatchExe[0] = 0xDB9EE0u;
+        CHECK(CoXlTestSlEarly((uintptr_t)exe) != NULL && !CoXlTestSlLayers() && g_fake.hookCount == 0);
+        g_fake.noMatchExe[0] = 0xDB9DB0u;
+        CHECK(CoXlTestSlEarly((uintptr_t)exe) != NULL && !CoXlTestSlLayers() && g_fake.hookCount == 0);
+        g_fake.noMatchExe[0] = 0xD3C66Cu;                             /* the count's call site in the constructor */
+        CHECK(CoXlTestSlEarly((uintptr_t)exe) != NULL && !CoXlTestSlLayers() && g_fake.hookCount == 0);
+        g_fake.noMatchExe[0] = 0;
+        g_fake.noHook = (uintptr_t)exe + 0xDB9EE0u - image;          /* the count refused: the info passes through */
+        CHECK(CoXlTestSlEarly((uintptr_t)exe) != NULL && !CoXlTestSlLayers() && g_fake.hookCount == 1 &&
+            fake_host_detour((uintptr_t)exe + 0xDB9DB0u - image) != NULL);
+        CoXlTestSlReset();
+        g_fake.noHook = 0; g_fake.hookCount = 0;
+        CHECK(CoXlTestSlEarly(0) != NULL && !CoXlTestSlLayers());
+        g_flagTarget = (uintptr_t)exe + 0xDB9EE0u; g_flagAtHook = -1; g_fake.onHook = FlagAtHook;
+        CHECK(CoXlTestSlEarly((uintptr_t)exe) == NULL && CoXlTestSlLayers() && !CoXlTestSlOn() && g_fake.hookCount == 2);
+        g_fake.onHook = NULL;
+        CHECK(g_flagAtHook == 1);                                    /* set before the count's hook is written */
+        CHECK(fake_host_detour((uintptr_t)exe + 0xDB9EE0u - image) != NULL && fake_host_detour((uintptr_t)exe + 0xDB9DB0u - image) != NULL);
+        CHECK(g_fake.hooks[0].target == (uintptr_t)exe + 0xDB9DB0u - image); /* the info first: no 10 layers without it */
+        CHECK(CoXlTestSlEarly((uintptr_t)exe) == NULL && g_fake.hookCount == 2); /* once */
+        /* the main world made with 10 layers, so each refusal below is the pin's or the exe's, not the count's */
+        const uint32_t leaves[10] = {0, 0, 0, 0, 1000, 0, 10, 20, 30, 40};
+        static const char kNotReviewed[] = "the broad phase's layer rule, the body maker or the spawn flush is not the reviewed code";
+        BroadPhase(10, leaves);
+        const uint32_t pins[3] = {0xD09080u, 0x12D600u, 0xDB9E60u};
+        for (int k = 0; k < 3; k++)
+        {
+            g_fake.noMatchExe[0] = pins[k];
+            const char* pin = CoXlTestSlInstall((uintptr_t)exe);
+            CHECK(pin != NULL && strcmp(pin, kNotReviewed) == 0 && !CoXlTestSlOn() && g_fake.hookCount == 2);
+        }
+        g_fake.noMatchExe[0] = 0;
+        const char* other = CoXlTestSlInstall((uintptr_t)exe + 0x1000u); /* another exe than the count's */
+        CHECK(other != NULL && strcmp(other, "the exe is not the one the layer count was hooked in") == 0 && !CoXlTestSlOn() && g_fake.hookCount == 2);
+        /* the main world made with the game's 6 (the count in, but after it): said, and the rule and body maker stay out */
+        BroadPhase(6, leaves);
+        const char* six = CoXlTestSlInstall((uintptr_t)exe);
+        CHECK(six != NULL && strcmp(six, "the main world's broad phase has 6 layers (made before the layer count was hooked)") == 0);
+        CHECK(!CoXlTestSlOn() && g_fake.hookCount == 2);
+        CoXlTestStreamLayersInstall();
+        CHECK(fake_host_logged("streamed broad phase layers off: the main world's broad phase has 6 layers (made before the layer count was hooked); every static body"));
+        CHECK(!CoXlTestSlOn() && g_fake.hookCount == 3 && fake_host_detour((uintptr_t)exe + 0xD09080u - image) != NULL); /* the makers' sampler */
+        CHECK(!fake_host_logged("the bodies' makers are not sampled"));
+        memset(exe + 0x27BA9F0u, 0, 8);                              /* no main world to read: -1, not on, and not a lost race */
+        const char* none = CoXlTestSlInstall((uintptr_t)exe);
+        CHECK(none != NULL && strcmp(none, "no main world to read (its broad phase's layer count is unknown)") == 0);
+        CHECK(!CoXlTestSlOn() && g_fake.hookCount == 3);
+        CoXlTestStreamLayersInstall();
+        CHECK(fake_host_logged("streamed broad phase layers off: no main world to read (its broad phase's layer count is unknown); every static body"));
+        CHECK(!fake_host_logged("has -1 layers"));
+        BroadPhase(10, leaves);
+        CoXlTestStreamLayersInstall();
+        CHECK(CoXlTestSlOn() && CoXlTestSlLayers() && g_fake.hookCount == 4);         /* the rule; the body maker was in */
+        CHECK(fake_host_logged("streamed broad phase layers on: the main world's broad phase has 10 layers, 6..9 as layer 4"));
+        CHECK(fake_host_detour((uintptr_t)exe + 0xDB9E60u - image) != NULL && fake_host_detour((uintptr_t)exe + 0xD09080u - image) != NULL);
+        CHECK(CoXlTestSlInstall((uintptr_t)exe) == NULL && g_fake.hookCount == 4); /* once */
+        CoXlTestSlReset();
+    }
+
+    /* The main world is made once, in the game's set-up, and its broad phase reads the layer count then: the count must
+     * be hooked before that (the game-loaded event), or the world keeps 6 layers for the process (the combined run). */
+    Start("the layer count against the main world's making: in time it has 10 layers, too late it keeps 6 and says so");
+    {
+        uint8_t* exe = fake_host_exe();
+        const uintptr_t image = (uintptr_t)g_fake.image, game = image;
+        const uint32_t leaves[10] = {0, 0, 0, 0, 1000, 0, 10, 20, 30, 40};
+        uint32_t read[5] = {0};
+        uint64_t engineWas = 0;
+        const uint64_t none = 0, world = 0x5000, engineAt = (uint64_t)(uintptr_t)(g_fake.image + 0x3700000u);
+        uint8_t* engine = g_fake.image + 0x3700000u;                  /* an engine object inside the fake game */
+        memcpy(&engineWas, g_fake.image + 0x3326340u, 8);
+        memcpy(g_fake.image + 0x3326340u, &engineAt, 8);
+        memcpy(engine + 0x10E8, &none, 8);                           /* the set-up has not made the main world */
+        g_fake.originals[0].target = (uintptr_t)exe + 0xDB9EE0u; g_fake.originals[0].original = (void*)OrigCount6;
+        g_fake.originals[1].target = (uintptr_t)exe + 0xDB9DB0u; g_fake.originals[1].original = (void*)OrigInfo;
+        /* in time: hooked at the game-loaded event, then the set-up makes the world, then the streamer goes in */
+        CoXlTestSlReset(); g_fake.hookCount = 0;
+        CHECK(CoXlTestLayersEarly(game, (uintptr_t)exe) == NULL && CoXlTestSlLayers());
+        CHECK(fake_host_logged("streamed broad phase layers: the layer count is hooked before the game's set-up makes the main world"));
+        const int made = CoXlTestSlCountFrom((uintptr_t)exe + 0xD3C675u); /* the constructor's read, during the set-up */
+        CHECK(made == 10);
+        {
+            uint8_t info[12] = {0}; uint32_t mask = 0;
+            CoXlTestSlInfo(6, info);                                  /* the constructor's info, before the rule goes in */
+            memcpy(&mask, info + 4, 4);
+            CHECK(!CoXlTestSlOn() && info[0] == 1 && mask == 1);
+        }
+        BroadPhase(made, leaves);
+        memcpy(engine + 0x10E8, &world, 8);
+        CHECK(CoXlTestSlInstall((uintptr_t)exe) == NULL && CoXlTestSlOn());
+        CHECK(CoXlTestSlLeaves(read) && read[0] == 1000 && read[1] == 10 && read[4] == 40);
+        /* too late, as in the run: the world was made before the count was hooked */
+        CoXlTestSlReset(); g_fake.hookCount = 0;
+        BroadPhase(6, leaves);
+        CHECK(CoXlTestLayersEarly(game, (uintptr_t)exe) != NULL && !CoXlTestSlLayers() && g_fake.hookCount == 0);
+        CHECK(fake_host_logged("streamed broad phase layers: the main world was made before the layer count could be hooked; every static body stays in layer 4"));
+        CHECK(CoXlTestSlInstall((uintptr_t)exe) != NULL && !CoXlTestSlOn() && g_fake.hookCount == 0);
+        CHECK(!CoXlTestSlLeaves(read));
+        CoXlTestStreamSlNote();
+        CHECK(fake_host_logged("(not read: the main world's broad phase has 6 layers, made before the layer count was hooked); in 10 s"));
+        BroadPhase(33, leaves);                                      /* 10 or more, but not a count it reads */
+        CoXlTestStreamSlNote();
+        CHECK(fake_host_logged("(not read: the main world's broad phase has 33 layers, but they do not read)"));
+        BroadPhase(10, leaves);                                      /* exactly 10, but the split is off: not "made before" */
+        CoXlTestStreamSlNote();
+        CHECK(fake_host_logged("(not read: the main world's broad phase has 10 layers, but they do not read)"));
+        BroadPhase(6, leaves);
+        /* made while the count was hooked: said, the hooks stay in, the 10 s note tells which */
+        memcpy(engine + 0x10E8, &none, 8);
+        CoXlTestSlReset(); g_fake.hookCount = 0;
+        g_layerWorldEngine = engine;
+        g_fake.onHook = MakeWorldMeanwhile;
+        CHECK(CoXlTestLayersEarly(game, (uintptr_t)exe) != NULL && CoXlTestSlLayers());
+        g_fake.onHook = NULL;
+        CHECK(fake_host_logged("streamed broad phase layers: the main world was made while the layer count was hooked (the 10 s note shows its layers)"));
+        CHECK(!fake_host_logged("hooked (the 10 s note shows its layers); every static body"));
+        /* the main world in another slot: its id's record, not slot 2's */
+        {
+            const uint32_t one = 1, four = 4;
+            uint64_t w2 = 0;
+            CoXlTestSlSet(1, (uintptr_t)exe, (void*)OrigCount6, (void*)OrigInfo, NULL, NULL);
+            BroadPhase(10, leaves);
+            memcpy(&w2, exe + 0x27BA9F0u, 8);
+            memcpy(g_fake.image + 0x3700000u + 0x10F0u, &one, 4);
+            CHECK(!CoXlTestSlLeaves(read));                          /* slot 1 empty */
+            memcpy(exe + 0x27BA870u + 0xB0u + 0x20u, &w2, 8);
+            CHECK(CoXlTestSlLeaves(read) && read[4] == 40);
+            memcpy(exe + 0x27BA870u + 0xB0u + 0x20u, &none, 8);
+            memcpy(g_fake.image + 0x3700000u + 0x10F0u, &four, 4);   /* not a slot */
+            memcpy(exe + 0x27BA870u + 4u * 0xB0u + 0x20u, &w2, 8);
+            CHECK(!CoXlTestSlLeaves(read));
+            memcpy(exe + 0x27BA870u + 4u * 0xB0u + 0x20u, &none, 8);
+            memcpy(g_fake.image + 0x3326340u, &none, 8);             /* no engine yet */
+            CHECK(!CoXlTestSlLeaves(read));
+            BroadPhase(10, leaves);
+            CHECK(CoXlTestSlLeaves(read));
+        }
+        /* no main world to read */
+        CoXlTestSlReset();
+        memcpy(exe + 0x27BA9F0u, &none, 8);
+        CoXlTestStreamSlNote();
+        CHECK(fake_host_logged("(not read: no main world)"));
+        memset(g_fake.originals, 0, sizeof g_fake.originals);
+        memcpy(engine + 0x10E8, &none, 8);
+        memcpy(g_fake.image + 0x3326340u, &engineWas, 8);
+        CoXlTestSlReset(); g_fake.hookCount = 0;
+    }
+
+    /* Any static add or remove makes the next step rebuild the whole static layer (exe 0xD3DAA9): leaf moves after a
+     * frame the streamer changed nothing in are rebuilds the change frames do not hold. */
+    Start("the static layer's leaves: moves counted, apart after a frame with no streamer change; a bad read counts nothing");
+    StreamGame();
+    Stream(1);
+    Budgets(1000, 10);
+    /* the main world is the record of the engine's physics id (0xAB1B31): 2, the slot Budgets fills */
+    uint64_t sEngineWas = 0;
+    const uint64_t sEngine = (uint64_t)(uintptr_t)(g_fake.image + 0x3700000u); const uint32_t sId = 2;
+    memcpy(&sEngineWas, g_fake.image + 0x3326340u, 8);
+    memcpy(g_fake.image + 0x3326340u, &sEngine, 8); memcpy(g_fake.image + 0x3700000u + 0x10F0u, &sId, 4);
+    uint32_t sFrames = 0, sMoved = 0, sQuiet = 0, sLeaves = 0;
+    StaticLayer(1000, 0xC0001000u, 6, 0xD40550u); /* the capacity's top bits are flags */
+    CoXlTestStreamStatic(0, 0, &sFrames, &sMoved, &sQuiet, &sLeaves);
+    CHECK(sFrames == 1 && sMoved == 0 && sQuiet == 0 && sLeaves == 1000);
+    StaticLayer(1010, 0x1000u, 6, 0xD40550u);
+    CoXlTestStreamStatic(0, 1, &sFrames, &sMoved, &sQuiet, &sLeaves); /* after a frame with no change */
+    CHECK(sFrames == 2 && sMoved == 1 && sQuiet == 1 && sLeaves == 1010);
+    StaticLayer(1005, 0x1000u, 6, 0xD40550u);
+    CoXlTestStreamStatic(0, 0, &sFrames, &sMoved, &sQuiet, &sLeaves); /* after the streamer's change frame */
+    CHECK(sFrames == 3 && sMoved == 2 && sQuiet == 1);
+    CoXlTestStreamStatic(0, 0, &sFrames, &sMoved, &sQuiet, &sLeaves);
+    CHECK(sFrames == 4 && sMoved == 2 && sQuiet == 1);
+    CoXlTestStreamStatic(1, 0, &sFrames, &sMoved, &sQuiet, &sLeaves); /* a frame with no read */
+    StaticLayer(1020, 0x1000u, 6, 0xD40550u);
+    CoXlTestStreamStatic(0, 0, &sFrames, &sMoved, &sQuiet, &sLeaves); /* not from one frame to the next: no move */
+    CHECK(sFrames == 5 && sMoved == 2 && sQuiet == 1 && sLeaves == 1020);
+    StaticLayer(1030, 0x1000u, 6, 0xD40551u); /* not the broad phase */
+    CoXlTestStreamStatic(0, 0, &sFrames, &sMoved, &sQuiet, &sLeaves);
+    StaticLayer(1030, 0x1000u, 4, 0xD40550u); /* no layer 4 */
+    CoXlTestStreamStatic(0, 0, &sFrames, &sMoved, &sQuiet, &sLeaves);
+    StaticLayer(0x1001u, 0xC0001000u, 6, 0xD40550u); /* more leaves than room */
+    CoXlTestStreamStatic(0, 0, &sFrames, &sMoved, &sQuiet, &sLeaves);
+    CHECK(sFrames == 5 && sMoved == 2 && sLeaves == 1020);
+    StaticLayer(0x1000u, 0x1000u, 5, 0xD40550u); /* full, and layer 4 the last */
+    CoXlTestStreamStatic(0, 0, &sFrames, &sMoved, &sQuiet, &sLeaves);
+    CHECK(sFrames == 6 && sLeaves == 0x1000u);
+    /* moves in a tile build step's window: the step's frame and the next; outside them the count stays */
+    CoXlTestMoveStepAt(CoXlTestStreamTicks() + 1);
+    StaticLayer(0xF00u, 0x1000u, 5, 0xD40550u);
+    CoXlTestStreamStatic(0, 0, &sFrames, &sMoved, &sQuiet, &sLeaves);
+    CHECK(sMoved == 3 && sQuiet == 2 && CoXlTestStreamStaticTile() == 1);
+    StaticLayer(0xE00u, 0x1000u, 5, 0xD40550u);
+    CoXlTestStreamStatic(0, 0, &sFrames, &sMoved, &sQuiet, &sLeaves);
+    CHECK(sMoved == 4 && sQuiet == 3 && CoXlTestStreamStaticTile() == 2);
+    StaticLayer(0xD00u, 0x1000u, 5, 0xD40550u);
+    CoXlTestStreamStatic(0, 0, &sFrames, &sMoved, &sQuiet, &sLeaves);
+    CHECK(sMoved == 5 && sQuiet == 4 && CoXlTestStreamStaticTile() == 2);
+    CoXlTestMoveStepAt(0);
+    CoXlTestMoveStepMark(0.2);                                       /* a light build frame: a tile builds all the same */
+    StaticLayer(0xC00u, 0x1000u, 5, 0xD40550u);
+    CoXlTestStreamStatic(0, 0, &sFrames, &sMoved, &sQuiet, &sLeaves);
+    CHECK(sMoved == 6 && CoXlTestStreamStaticTile() == 3);
+    CoXlTestMoveStepAt(0);
+    {
+        int d = 0; uint32_t sp = 9, rb = 0;
+        CoXlTestStreamLayersPick(0, &d, &sp, &rb);
+        CHECK(d == -1 && sp == 0 && rb == 0xC00u);                   /* split off: the step rebuilds layer 4, its last read */
+    }
+    memcpy(g_fake.image + 0x3326340u, &sEngineWas, 8);
 
     Start("far stamps evicted over the budget: no more while the last eviction still drains");
     StreamGame();
@@ -622,8 +2525,8 @@ int main(void)
     for (uint32_t k = 0; k < 100; k++) Slot(k, AX + 3000.0f, AY + 4.0f * (float)k, 2.0f, 0x1000u * (k + 1), 0);
     CoXlTestStreamObserver(1, AX, AY);
     CHECK(CoXlTestWindowEvictFar(0, 100) == 64);
-    CHECK(CoXlTestStreamDrain(1.0e9, &waiting) == 4 && waiting == 60 && g_destroys == 4);
-    CHECK(CoXlTestWindowEvictFar(0, 100) == 0); /* a slow frame rate: the next scan finds the bodies over budget again */
+    CHECK(CoXlTestStreamDrainMost(4, 1.0e9, &waiting) == 4 && waiting == 60 && g_destroys == 4);
+    CHECK(CoXlTestWindowEvictFar(0, 100) == 0); /* the next scan finds the bodies over budget again before the next change frame */
     for (int f = 0; f < 20 && waiting > 0; f++) CoXlTestStreamDrain(1.0e9, &waiting);
     CHECK(waiting == 0 && g_destroys == 64);
     CHECK(CoXlTestWindowEvictFar(0, 100) == 36); /* drained: the budget is read again and the rest may go */
@@ -1028,7 +2931,7 @@ int main(void)
     CoXlTestStreamTick();
     CHECK(CoXlTestStampsReplace(g_tileOfB, BX, AY) == 6);
     ListSet(0); /* the engine took them all */
-    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 2);
+    CHECK(CoXlTestStreamScanFrames(0) == 0 && CoXlTestStreamDrainMost(4, 1.0e9, &left) == 0 && left == 2);
     CoXlTestStreamBelt(&gone, &looks, &calls);
     CHECK(gone == 4 && looks == 4 && g_destroys == 0);
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
@@ -1063,13 +2966,36 @@ int main(void)
     const uint32_t farBefore = CoXlTestWindowEvictedFar();
     CHECK(CoXlTestWindowEvictFar(0, 100) == 64);
     ListSet(0); /* the engine took them */
-    CHECK(CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 60 && g_destroys == 0 && CoXlTestWindowEvictedFar() == farBefore + 4);
+    CHECK(CoXlTestStreamDrainMost(4, 1.0e9, &left) == 0 && left == 60 && g_destroys == 0 && CoXlTestWindowEvictedFar() == farBefore + 4);
     memcpy(g_worldMem + 0x230590u, &listBad, 8); ListSet(1); /* a list of one that does not read */
     for (int f = 0; f < 3; f++) CHECK(CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 60);
     memcpy(g_worldMem + 0x230590u, &listGood, 8); ListSet(0);
     for (int f = 0; f < 20 && left > 0; f++) CoXlTestStreamDrain(1.0e9, &left);
     CHECK(left == 0 && CoXlTestWindowEvictedFar() == farBefore + 64);
     CHECK(CoXlTestWindowEvictFar(0, 100) == 36); /* the far count came back to 0 with the queue: the rest may go */
+    CoXlTestStreamObserver(0, 0.0f, 0.0f);
+    CoXlTestHeightKept(NULL, 0, 0, 0.0f);
+    CoXlTestMission(0, 0);
+
+    /* The governor's far removals count as far ones in the queue's far count, put back with their kind too: the
+     * window's eviction is free again once they are gone. */
+    Start("a governor's far removal whose look did not read goes back with its kind; the far count comes back to 0");
+    CoXlTestMission((uintptr_t)g_lg, 1);
+    StreamGame();
+    InMission();
+    Stream(20);
+    for (uint32_t k = 0; k < 20; k++) { Slot(k, AX + 3000.0f, AY + 4.0f * (float)k, 2.0f, 0x1000u * (k + 1), 0); CoXlTestStreamOut2(k, 1500.0f); }
+    Generator(3);
+    CoXlTestStreamObserver(1, AX, AY);
+    for (uint32_t k = 0; k < 10; k++) CHECK(CoXlTestStreamDropGovPush(k));
+    CHECK(CoXlTestWindowEvictFar(10, 20) == 0);                     /* the governor's are queued: none more */
+    ListSet(0);
+    memcpy(g_worldMem + 0x230590u, &listBad, 8); ListSet(1);
+    for (int f = 0; f < 3; f++) CHECK(CoXlTestStreamDrain(1.0e9, &left) == 0 && left == 10);
+    CHECK(CoXlTestStreamDropKind(0) == 4);                           /* back at the head with its kind */
+    memcpy(g_worldMem + 0x230590u, &listGood, 8); ListSet(0);
+    for (int f = 0; f < 20 && left > 0; f++) CoXlTestStreamDrain(1.0e9, &left);
+    CHECK(left == 0 && CoXlTestWindowEvictFar(10, 20) == 10);        /* the far count came back to 0 */
     CoXlTestStreamObserver(0, 0.0f, 0.0f);
     CoXlTestHeightKept(NULL, 0, 0, 0.0f);
     CoXlTestMission(0, 0);

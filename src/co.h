@@ -212,6 +212,7 @@ int co_early_setup_begun(uintptr_t game);
 /* The entity records' move to 16384 (xl/co_xl.c): hooked from `early`, done when the game builds its entity state.
  * 0 not asked, 1 hooked, 2 moved, -1 the game's 2048 stay. */
 void CoXlEarly(uintptr_t game);
+void CoXlLayersEarly(uintptr_t game, uintptr_t exe);
 int CoXlRecords(void);
 /* The main world's culling pools at 2x (4x for pools 0 and 1), from co_capacity_early: the check before the engine's
  * room (nothing written), the jumps after it. Each NULL, or why not; the world is made once, so a refusal keeps the
