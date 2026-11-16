@@ -18,6 +18,8 @@ void CoXlTestStreamFloorDue(uint32_t* due, uint32_t* spawned);
 void CoXlTestStreamSpawnDue(void);
 uint32_t CoXlTestStreamChange(unsigned long long now, int layerBusy, unsigned long long* next);
 void CoXlTestStreamChangeAt(unsigned long long next);
+void CoXlTestStreamRemoveWait(unsigned long long at, int lastKind);
+uint32_t CoXlTestStreamDrain(double ms, uint32_t* waiting);
 void CoXlTestStreamSpawned(uint32_t i, int* spawned, int* due);
 void CoXlTestStreamTrees(uint32_t* holds, uint32_t* most, uint32_t* cursor);
 int CoXlTestWindowTreesOver(float share);
@@ -188,6 +190,19 @@ int main(void)
     CoXlTestStreamSpawned(1, &spawned, &due);
     CHECK(spawned);
 
+    /* Removals and spawns never share a frame: a removal frame (here forced) spawns nothing, the next try spawns. */
+    Start("a removal frame spawns nothing; the spawns go in the next frame");
+    Level(6);
+    CoXlTestStreamDue(0, unit);
+    CoXlTestStreamDue(1, unit);
+    CHECK(CoXlTestStreamDropPush(5));
+    CoXlTestStreamChangeAt(0);
+    CoXlTestStreamRemoveWait(1, 0);                /* the removal waited since the start of the clock: forced */
+    CHECK(CoXlTestStreamChange(3000, 0, &next) == 0 && g_calls == 0); /* slot 5 holds no unit: nothing removed, none spawned */
+    CoXlTestStreamSpawned(0, &spawned, &due);
+    CHECK(!spawned && due);
+    CHECK(CoXlTestStreamChange(3001, 0, &next) == 1 && g_calls == 1); /* the queue is empty now: a spawn frame */
+
     /* A change frame's stamps are rebuilt in one broad phase layer: each slot keeps the layer it went to, for its removal. */
     Start("spawns into a broad phase layer tag their slots; a held call tags none; a pass cut by its time says so");
     Level(3);
@@ -262,11 +277,11 @@ int main(void)
         }
         CoXlTestStreamSpawned(1, &spawned, &due); CHECK(spawned);
         CoXlTestStreamSpawned(2, &spawned, &due); CHECK(!spawned && due);     /* 600 m: it waits */
-        CHECK(CoXlTestStreamDropPush(4));
+        CoXlTestStreamDropPush(4);                                 /* still queued: removals gather */
         CoXlTestStreamChangeAt(0);
         CHECK(CoXlTestStreamChange(2001, 0, &next) == 0 && g_calls == 1);       /* only the far one left: nothing */
         CoXlTestStreamSpawned(2, &spawned, &due); CHECK(!spawned && due);
-        CHECK(CoXlTestStreamDropPush(4));
+        CoXlTestStreamDropPush(4);                                 /* still queued: removals gather */
         CoXlTestStreamExpiredSet(64);                                     /* a frame's removals: the window holds */
         CHECK(CoXlTestStreamChange(2002, 0, &next) == 1 && g_calls == 2);
         CoXlTestStreamSpawned(2, &spawned, &due); CHECK(spawned);
@@ -281,6 +296,7 @@ int main(void)
         CoXlTestStreamSpawned(1, &spawned, &due); CHECK(spawned);
         CoXlTestStreamSpawned(2, &spawned, &due); CHECK(!spawned && due);
         /* nothing queued: the window holds, all go */
+        { uint32_t left = 9; CoXlTestStreamDrain(1.0e9, &left); CHECK(left == 0); }
         CoXlTestStreamChangeAt(0);
         CHECK(CoXlTestStreamChange(2400, 0, &next) == 1 && g_calls == 2);
         CoXlTestStreamSpawned(2, &spawned, &due); CHECK(spawned);

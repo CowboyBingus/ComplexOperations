@@ -474,6 +474,53 @@ static void TestRecent(void)
     CHECK(co_framecost_recent(&hi, &qw, &lw) == 0 && hi == 0 && qw == 0); /* a new play starts over */
 }
 
+/* A far-grass bake job's frames (run 2a: 21 ms whole against 13) are kept out of the quiet frames and their longest
+ * of 32, as a moving tile's render is, and counted apart; the change frames split into removal only, spawn only and
+ * both. The streamer reads the frame just closed: whole time, kind, far-grass flag. */
+static void TestKinds(void)
+{
+    Reset("change frames by kind, far-grass frames kept out of the quiet frames");
+    CoFcRecent r;
+    uint32_t frames[4] = {9, 9, 9, 9}, grass = 9, bodyGrass = 9; double world[4], grassWorld = 9;
+    for (int i = 0; i < 40; i++) Cost(9.0, 0, 0, 0, 5.0, 0);
+    co_framecost_recent_all(&r);
+    CHECK(r.quietHi == 9.0 && r.quietHiGrass == 9.0 && r.lastWhole == 9.0 && r.lastBodies == 0 && !r.lastGrass);
+    for (int i = 0; i < 3; i++) { Cost(20.0, 0, 0, 0, 8.0, 0); co_framecost_bodies(1); co_framecost_change(1, 0); }
+    Cost(30.0, 0, 0, 0, 12.0, 0); co_framecost_bodies(1); co_framecost_change(1, 0); co_framecost_grass(1);
+    Cost(9.0, 0, 0, 0, 5.0, 0);
+    co_framecost_recent_all(&r);
+    CHECK(r.lastWhole == 30.0 && r.lastBodies == 1 && r.lastKind == 1 && r.lastGrass && !r.lastApart && r.lastWorld == 12.0);
+    for (int i = 0; i < 2; i++) { Cost(18.0, 0, 0, 0, 6.0, 0); co_framecost_bodies(2); co_framecost_change(0, 1); }
+    Cost(22.0, 0, 0, 0, 10.0, 0); co_framecost_bodies(1); co_framecost_change(1, 0); co_framecost_change(0, 1);
+    Cost(9.0, 0, 0, 0, 5.0, 0);
+    co_framecost_recent_all(&r);
+    CHECK(r.lastKind == 3 && r.lastBodies == 1 && !r.lastGrass);
+    co_framecost_change(1, 1);                                       /* without co_framecost_bodies: no change frame */
+    for (int i = 0; i < 3; i++) { Cost(21.0, 0, 0, 0, 13.0, 0); co_framecost_grass(1); }
+    Cost(13.0, 0, 0, 0, 9.0, 0); co_framecost_grass(1);
+    Cost(9.0, 0, 0, 0, 5.0, 0);
+    co_framecost_recent_all(&r);
+    CHECK(r.lastGrass && r.lastBodies == 0 && r.lastKind == 0 && r.lastWhole == 13.0);
+    CHECK(r.quietHi == 9.0 && r.quietHiGrass == 21.0 && r.quietWorld == 5.0); /* kept out of the quiet frames' ring and mean */
+    double hi = 0, qw = 0, lw = 0;
+    CHECK(co_framecost_recent(&hi, &qw, &lw) == 0 && hi == 9.0);
+    for (int i = 0; i < 1200; i++) Cost(9.0, 0, 0, 0, 5.0, 0);
+    co_framecost_test_kinds(frames, world, &grass, &grassWorld, &bodyGrass);
+    CHECK(frames[1] == 4 && frames[2] == 2 && frames[3] == 1 && world[1] == 9.0 && world[2] == 6.0 && world[3] == 10.0);
+    CHECK(grass == 4 && grassWorld == 12.0 && bodyGrass == 1);
+    CHECK(fake_host_logged("frame times, change frames by kind: 4 removal only (world update mean 9.0 ms, the longest 12.0 ms; whole mean 22.5 ms), "
+        "2 spawn only (world update mean 6.0 ms, the longest 6.0 ms; whole mean 18.0 ms), 1 both (world update mean 10.0 ms, the longest 10.0 ms; "
+        "whole mean 22.0 ms); 1 of them with a far-grass job out; 4 frame(s) without a change with a far-grass job out (world update mean 12.0 ms, "
+        "the longest 13.0 ms; whole mean 19.0 ms, 3 over 16.7 ms), kept out of the quiet frames and their longest of 32"));
+    for (int i = 0; i < 1200; i++) Cost(9.0, 0, 0, 0, 5.0, 0);
+    co_framecost_test_kinds(frames, world, &grass, &grassWorld, &bodyGrass);
+    CHECK(frames[1] == 0 && grass == 0 && bodyGrass == 0);           /* each window counts its own */
+    g_mission++;
+    Cost(9.0, 0, 0, 0, 5.0, 0);
+    co_framecost_recent_all(&r);
+    CHECK(r.lastWhole == 0 && r.quietHiGrass == 0);                  /* a new play starts over */
+}
+
 int main(void)
 {
     TestLows();
@@ -493,6 +540,7 @@ int main(void)
     TestCauses();
     TestBodies();
     TestRecent();
+    TestKinds();
     if (g_failed) { printf("%d check(s) failed\n", g_failed); return 1; }
     printf("framecost: all checks passed\n");
     return 0;

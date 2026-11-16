@@ -56,6 +56,9 @@ void co_framecost_world(int enter);
  * costs the third slowest frame or one of 17 to 25 ms; these counters hold every such frame. */
 enum { CO_FC_CAUSE_JOIN = CO_FC_PARTS, CO_FC_CAUSE_WORLD, CO_FC_CAUSE_REST, CO_FC_CAUSES };
 #define CO_FC_CAUSE_OTHERS 2             /* parts named in the causes line beside the four it always names */
+/* A far-grass bake job was out in this frame: its slow-frame line says so, and a frame without a streamer change is
+ * kept out of the quiet frames and their longest of 32 (counted apart, with its world update), so a bake's batch does
+ * not hold the change frames' budget at its floor. */
 void co_framecost_grass(int out);
 /* The streamer added or removed stamp bodies in this frame (its change step, run before the world update). Each window
  * then splits the world update's own time between such frames and the others, once a mission had one, and a slow
@@ -73,6 +76,15 @@ void co_framecost_apart(void);
  * CO_FC_RECENT frames without a change (0 until that many in this play), their world update's own time (a running
  * mean, 0 until one), and that frame's own world update time. Its co_framecost_bodies value. */
 int co_framecost_recent(double* quietHi, double* quietWorld, double* lastWorld);
+/* What a change frame did (co_framecost_bodies says it was one): each window splits the change frames into removal
+ * only, spawn only and both. */
+void co_framecost_change(int removed, int spawned);
+/* All of the above at once: quietHi without the frames a far-grass bake job was out in (they are kept out of the quiet
+ * frames, as co_framecost_apart's), quietHiGrass with them (the rule before), and the frame just closed: its whole
+ * time (0 until one closed in this play), co_framecost_bodies value, change kind (1 removal, 2 spawn, 3 both), and
+ * whether a far-grass job was out in it or it was kept apart. */
+typedef struct { double quietHi, quietHiGrass, quietWorld, lastWorld, lastWhole; int lastBodies, lastKind, lastGrass, lastApart; } CoFcRecent;
+void co_framecost_recent_all(CoFcRecent* r);
 
 #ifdef CO_TEST
 /* The same on a given clock (ticks of `freq` a second) and given CPU times (100 ns units). */
@@ -104,6 +116,9 @@ int co_framecost_test_window_lines(void);
  * the frames without, and how many of those were over CO_FC_TARGET_MS. 0 when the window had no split line. */
 int co_framecost_test_bodies(uint32_t* changed, double* changedMean, double* changedMost, uint32_t* quiet, double* quietMean, double* quietMost, uint32_t* quietOver);
 int co_framecost_test_detail_lines(void);
+/* The last closed window: change frames by kind (index 1 removal only, 2 spawn only, 3 both) and their world update
+ * mean; frames without a change with a far-grass job out and their world update mean; change frames with one out. */
+void co_framecost_test_kinds(uint32_t frames[4], double world[4], uint32_t* grass, double* grassWorld, uint32_t* bodyGrass);
 /* The last closed window: 1% and 0.1% lows (fps), frames over 25 ms, 33 ms and 1 s, the CPU verdict. */
 void co_framecost_test_last(double* low1, double* low01, uint32_t* over25, uint32_t* over33, uint32_t* over1s, int* starved);
 #endif
