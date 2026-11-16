@@ -663,7 +663,19 @@ int main(void)
         CHECK(co_cutters_cut(40.0f, -70.0f, 32.0f, &waiting) == 0 && waiting == 0);
         co_cutters_swap((uintptr_t)edge);
         CHECK(co_cutters_cut(40.0f, -70.0f, 32.0f, &waiting) == 1);
+        /* a tick's removes: the AI world's added cutters and its queue as the tick reads them; none with the step out */
+        AiWorld((uint64_t)(uintptr_t)scene);
+        { const uint32_t added = 30000; memcpy((uint8_t*)scene + CO_CUTTERS_ADDED, &added, 4); }
+        block[2] = 10; queue[7] = 0;
+        CHECK(co_cutters_tick(&c, 1, GetTickCount(), 256, &t) == 1 && t.added == 30000 && t.queued == 10 && t.allowed == CO_CUTSET_SCANS / 30000u);
+        CHECK(co_cutters_tick(&c, 1, GetTickCount(), 20, &t) == 1 && t.allowed == 20);
+        block[2] = CO_CUTSET_QUEUE_SHORT - 3; queue[7] = 3;
+        CHECK(co_cutters_tick(&c, 1, GetTickCount(), 256, &t) == 1 && t.queued == CO_CUTSET_QUEUE_SHORT && t.allowed == 0);
+        StepTask(0x1234);
+        CHECK(co_cutters_tick(&c, 1, GetTickCount(), 256, &t) == 1 && t.skipped && t.allowed == 0 && t.queued == -1 && t.added == 0);
+        StepTask(0); block[2] = 0; queue[7] = 0;
         AiWorld(0);
+        CHECK(co_cutters_tick(&c, 1, GetTickCount(), 256, &t) == 1 && !t.bound && t.allowed == 0 && t.queued == -1 && t.added == 0);
         CHECK(co_cutters_cut(40.0f, -70.0f, 32.0f, &waiting) == -1);
         /* the level's end */
         AiWorld((uint64_t)(uintptr_t)scene); co_cutters_live(0);
@@ -702,7 +714,7 @@ int main(void)
     {
         size_t pins = 0;
         co_cutters_test_record_pins(&pins);
-        CHECK(pins == 16);
+        CHECK(pins == 17);
         for (size_t i = 0; i < pins; i++)
         {
             Reset("a changed byte at one of the record's sites: not armed");

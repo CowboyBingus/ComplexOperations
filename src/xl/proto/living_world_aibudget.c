@@ -17,8 +17,9 @@ static struct
     uint32_t applied, appliedFrames; int appliedMost; uintptr_t unknown;
     uint32_t sinceApplied; int runApplied;       /* frames since the run in flight applied a change; its count so far */
     int wasDraining;                             /* the last frame's step ran at the drain's budget: it was the largest */
+    int kind;                                    /* the budget kind written for the next step (co_joinstat.h), -1 none */
     uint32_t drainJoins; double drainJoinSum, drainJoinWorst, runJoinSum, runJoinWorst;
-} g_lwAib = {.on = 1, .lowUs = LW_AIB_LOW_US, .raiseMs = LW_AIB_RAISE_MS, .drain = {CO_AIB_DRAIN_US, CO_AIB_DRAIN_RUN_MS, CO_AIB_DRAIN_QUEUE}};
+} g_lwAib = {.kind = -1, .on = 1, .lowUs = LW_AIB_LOW_US, .raiseMs = LW_AIB_RAISE_MS, .drain = {CO_AIB_DRAIN_US, CO_AIB_DRAIN_RUN_MS, CO_AIB_DRAIN_QUEUE}};
 
 /* H = [exe+0x190D4A0 + 2*0x80] (KB world-update-exe-ai-step); the step reads the budget once at 0xBD198C. */
 static uintptr_t LwAibWorld(void)
@@ -174,14 +175,18 @@ static void LwAibSteer(uintptr_t h, float cur, float lat, float runS, ULONGLONG 
     LwAibDrainNote(was, task != 0, runS, queued);
     LwNavHoldRan(g_lwAib.b.ran == CO_AIB_RAN_MORE);
     g_lwAib.wasDraining = g_lwAib.b.draining && g_lwAib.b.ran == CO_AIB_RAN_DRAIN; /* the drain's value was the one written */
+    g_lwAib.kind = !(want > 0) ? -1 : g_lwAib.b.ran == CO_AIB_RAN_DRAIN ? CO_JS_DRAIN : g_lwAib.b.ran == CO_AIB_RAN_MORE ? CO_JS_RAISE : want >= g_lwAib.b.stock ? CO_JS_STOCK : CO_JS_LOW;
     if (want > 0 && cur != want) { *(volatile float*)(h + 0x47C) = want; co_aibudget_wrote(&g_lwAib.b, want); }
 }
 
 /* The joins since the last frame go to the statistic of the budget the step ran with: the hold's raise or the AI
  * drain's. A frame whose world did not read has no known budget: its joins are dropped, not left for the next
  * frame's sum, which made one "worst" out of many frames. */
+static void LwJoinsFrame(double join, int kind); /* living_world_joins.c */
 static void LwAibJoin(double join, int known)
 {
+    LwJoinsFrame(join, known ? g_lwAib.kind : -1);
+    g_lwAib.kind = -1; /* until this frame's choice: a frame that makes none has no known budget for its step */
     if (!known) { g_lwNavHold.wasRaised = 0; g_lwAib.wasDraining = 0; return; }
     LwNavHoldJoin(join);
     if (!g_lwAib.wasDraining) return;
@@ -192,8 +197,10 @@ static void LwAibJoin(double join, int known)
 
 /* Game thread, once a frame. A new level makes a new AI world, whose stock value is read before the first write.
  * Off, the drain and the nav hold's raise still apply over the game's own budget, and the lever measures for the A/B. */
+static void LwStepFrame(void); /* living_world_step.c */
 static void LwAibFrame(void)
 {
+    LwStepFrame();
     if (g_lwAib.failed || (!g_lwAib.on && !g_lwAib.verbose && g_lwAib.drain.us <= 0 && !g_lwNavHold.worlds)) return;
     uintptr_t h = LwAibWorld(); float cur = 0;
     double join = LwFpJoinTake();

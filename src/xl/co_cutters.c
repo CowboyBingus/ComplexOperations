@@ -53,6 +53,7 @@ static const Pin kRecordPins[] = {
     {0xBB1430u, "40 53 48 83 EC 20 48 8B D9 48 8B 89 A0 04 00 00"},
     {0xAD4740u, "48 8B 01 8B 40 08 03 41 1C C3"},
     {0xBD1190u, "48 83 B9 B0 04 00 00 00 0F 95 C0 C3"},
+    {0xBE8D32u, "48 63 86 30 02 00 00 33 FF 85 C0 7E 24 48 8B D0 8B CF 48 8B 86 28 02 00 00"},
 };
 
 /* The make can run on a thread other than the game's (the forest's spawn has several callers), so the set has its
@@ -131,6 +132,20 @@ static void Recorded(uint32_t handle, int tree, float x, float y, int wanted, in
 
 /* A make is held back only while a tick is due to add it: with the tick gone (a paused mission, a level still
  * loading) the game adds the cutter itself, so no tree is ever left without one for long. */
+/* The AI world's changes queued for its next run, as 0xAD4740 counts them, -1 when they do not read; and its added
+ * cutters, the length every remove scans ([H+0x230], 0xBE8D32), 0 when it does not read. */
+static int Queued(uintptr_t world)
+{
+    uintptr_t q = 0, a = 0; int32_t n = 0, m = 0;
+    if (co_safe_read(world + CO_CUTTERS_QUEUE, &q, 8) || q == 0 || co_safe_read(q, &a, 8) || a == 0 || co_safe_read(a + 8, &n, 4) || co_safe_read(q + 0x1C, &m, 4)) return -1;
+    return n + m;
+}
+static uint32_t Added(uintptr_t world)
+{
+    int32_t n = 0;
+    return co_safe_read(world + CO_CUTTERS_ADDED, &n, 4) || n < 0 ? 0u : (uint32_t)n;
+}
+
 static int Holds(float x, float y)
 {
     if (!g_rec.switching || !g_rec.alive || (uint32_t)GetTickCount() - (uint32_t)g_rec.tickAt > CO_CUTTERS_ALIVE_MS) return 0;
@@ -301,15 +316,22 @@ int co_cutters_tick(const CoCutCentre* centres, uint32_t count, uint32_t nowMs, 
     const CoCutSet* s = &g_rec.set;
     out->hooked = g_cut.make != NULL && g_cut.destroy != NULL;
     out->bound = g_cut.exe != 0 && Bound();
-    out->skipped = skipped;
+    out->skipped = skipped; out->added = out->allowed = 0; out->queued = -1;
     if (skipped) { g_rec.skips++; g_rec.tick.adds = g_rec.tick.removes = g_rec.tick.shed = g_rec.tick.waiting = g_rec.tick.over = 0; g_rec.tick.capped = 0; }
-    else { g_rec.set.epoch = (uint32_t)g_rec.took; co_cutset_tick(&g_rec.set, centres, count, nowMs, removes, &g_rec.tick); }
+    else
+    {
+        /* the removes' share of the tick shrinks as the scans they cost grow, and waits while the queue is long */
+        out->added = out->bound ? Added(g_rec.set.world) : 0; out->queued = out->bound ? Queued(g_rec.set.world) : -1;
+        out->allowed = removes = out->bound ? co_cutset_removes(out->added, out->queued, removes) : 0;
+        g_rec.set.epoch = (uint32_t)g_rec.took; co_cutset_tick(&g_rec.set, centres, count, nowMs, removes, &g_rec.tick);
+    }
     if (g_rec.switching && !skipped)
     {
         /* under the set's lock: a destroy on another thread waits in its hook, so no handle here is stale */
         for (uint32_t k = 0; k < g_rec.tick.adds; k += CO_CUTSET_BATCH)
             g_rec.sw(g_rec.tick.add + k, g_rec.tick.adds - k < CO_CUTSET_BATCH ? g_rec.tick.adds - k : CO_CUTSET_BATCH, 1);
-        if (g_rec.tick.removes != 0) g_rec.sw(g_rec.tick.remove, g_rec.tick.removes, 0);
+        for (uint32_t k = 0; k < g_rec.tick.removes; k += CO_CUTSET_BATCH)
+            g_rec.sw(g_rec.tick.remove + k, g_rec.tick.removes - k < CO_CUTSET_BATCH ? g_rec.tick.removes - k : CO_CUTSET_BATCH, 0);
         g_rec.sentOn += g_rec.tick.adds; g_rec.sentOff += g_rec.tick.removes;
         if (out->bound && out->hooked) { InterlockedExchange(&g_rec.tickAt, (LONG)nowMs); InterlockedExchange(&g_rec.alive, 1); }
     }
