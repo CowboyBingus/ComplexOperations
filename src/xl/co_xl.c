@@ -1506,7 +1506,7 @@ uint32_t CoXlTestMatResPending(void) { return g_matRes.n; }
 void CoXlTestTerrainSplit(void* enter, void* leave, void* copyFree, void* remove, uint64_t slot, int ready)
 {
     memset(g_tail.e, 0, sizeof g_tail.e);
-    g_tail.n = g_tail.max = g_tail.split = g_tail.completed = g_tail.drained = g_tail.fallback = 0; g_tail.fall = NULL; g_tail.last = 0;
+    g_tail.n = g_tail.max = g_tail.split = g_tail.completed = g_tail.drained = g_tail.fallback = g_tail.left = 0; g_tail.fall = NULL; g_tail.last = 0;
     g_tail.fn.enter = (TailLockFn)enter; g_tail.fn.leave = (TailLockFn)leave; g_tail.fn.copyFree = (TailPairFn)copyFree; g_tail.fn.remove = (TailPairFn)remove;
     g_tail.fn.slot[0] = slot; g_tail.fn.slot[1] = 0; g_tail.ready = ready;
 }
@@ -1516,10 +1516,20 @@ void CoXlTestTerrainTailDrain(uint64_t world) { TerrainTailDrain(world, "a test"
 uint32_t CoXlTestTerrainTailPending(void) { return g_tail.n; }
 int CoXlTestTerrainSplitInstall(void) { g_tail.ready = 0; TerrainSplitInstall(); return g_tail.ready; }
 void CoXlTestTerrainSplitLevel(uintptr_t level) { g_worldLevel = level; }
-/* One tile's textures queued for release (queue 1), then `ticks` frames of MoveFreeTick: 1 while still queued. */
-int CoXlTestMoveFreeQueued(int queue, int ticks)
+/* The release's ground check as MoveRelease asks for it (h 0: not split), and a stand-in for it (NULL: the real one). */
+void CoXlTestTerrainTailCheck(uint64_t h, int raised, float cx, float cy, int cellX, int cellY) { TerrainTailCheck(h, raised, cx, cy, cellX, cellY); }
+void CoXlTestTerrainCheckFn(void* fn) { g_tailCheck = fn != NULL ? (void (*)(float, float, int, int))fn : MoveRaiseCheck; }
+/* One tile's textures (tex0) queued for release with its terrain's split destroy `terrain` (queue 1), then `ticks`
+ * frames of MoveFreeTick: 1 while still queued. */
+int CoXlTestMoveFreeTagged(uint64_t terrain)
 {
-    if (queue) { memset(g_move.freeing, 0, sizeof g_move.freeing); MoveFreeLater(0, 0, 0, NULL); }
+    int n = 0;
+    for (int k = 0; k < NEAR_TILES_MAX * 2; k++) n += g_move.freeing[k].used && g_move.freeing[k].terrain == terrain;
+    return n;
+}
+int CoXlTestMoveFreeQueued(int queue, uint64_t tex0, uint64_t terrain, int ticks)
+{
+    if (queue) { memset(g_move.freeing, 0, sizeof g_move.freeing); MoveFreeLater(tex0, 0, 0, NULL, terrain); }
     for (int i = 0; i < ticks; i++) MoveFreeTick(0);
     return g_move.freeing[0].used;
 }

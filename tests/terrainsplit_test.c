@@ -19,7 +19,11 @@ void CoXlTestTerrainTailDrain(uint64_t world);
 uint32_t CoXlTestTerrainTailPending(void);
 int CoXlTestTerrainSplitInstall(void);
 void CoXlTestTerrainSplitLevel(uintptr_t level);
-int CoXlTestMoveFreeQueued(int queue, int ticks);
+int CoXlTestMoveFreeQueued(int queue, uint64_t tex0, uint64_t terrain, int ticks);
+void CoXlTestTerrainTailCheck(uint64_t h, int raised, float cx, float cy, int cellX, int cellY);
+void CoXlTestTerrainCheckFn(void* fn);
+void CoXlTestGame(uintptr_t game);
+void CoXlTestLevelGone(void);
 
 static int g_failed;
 static const char* g_case;
@@ -47,6 +51,10 @@ static uint32_t Fence(uint64_t r, uint8_t flag) { Note1(&g_fence, r, flag); retu
 static uint8_t Wait(uint64_t r, uint32_t id) { Note1(&g_wait, r, id); return 1; }
 static void Destroy(uint64_t world, uint64_t h) { Note1(&g_destroy, world, h); g_destroy.rid = *(uint32_t*)(uintptr_t)(h + 4); }
 static void Teardown(uint64_t world) { (void)world; g_teardowns++; g_destroysAtTeardown = g_destroy.n; }
+static int g_checks; static float g_checkAt[2]; static int g_checkSeq;
+static void Check(float cx, float cy, int a, int b) { (void)a; (void)b; g_checks++; g_checkAt[0] = cx; g_checkAt[1] = cy; g_checkSeq = ++g_seq; }
+static int g_texFreed, g_texSeq;
+static void TexFree(uint64_t tex) { if (tex == 0xBEEF) { g_texFreed++; g_texSeq = ++g_seq; } }
 
 static void Reset(void)
 {
@@ -106,7 +114,7 @@ int main(void)
     CHECK(g_destroy.n == 1 && g_destroy.a == W(g_world) && g_destroy.b == W(g_h) && g_destroy.depth == 1 && g_destroy.at > g_wait.at);
     CHECK(g_destroy.rid == 0xFFFFFFu && g_depth == 0 && g_enters == 2 && CoXlTestTerrainTailPending() == 0);
     CHECK(fake_host_logged("difficulty: moving tiles: a released terrain's destroy split at its fence (exe 0x1ADFA9): the head "));
-    CHECK(fake_host_logged("2 frame kick(s) and 2 poll(s) later; 0 pending, 1 split, 1 completed, 0 drained, 0 by the game's wait (last: none)"));
+    CHECK(fake_host_logged("2 frame kick(s) and 2 poll(s) later; 0 pending, 1 split, 1 completed, 0 drained, 0 left, 0 by the game's wait (last: none)"));
     g_fake.log[0] = 0;
     Kick(50);
     CoXlTestTerrainTailTick();
@@ -177,7 +185,7 @@ int main(void)
     CHECK(g_destroy.n == 1 && fake_host_logged("10 frame kick(s) and 2 poll(s) later"));
     CoXlTestTerrainSplitLevel(0);
 
-    g_case = "the world's teardown (exe 0x1A6E00): its world's rests waited and done before the game's teardown, another world's kept";
+    g_case = "the world's teardown (exe 0x1A6E00): its world's fences waited before the game's teardown, their terrains left in the map; another world's kept";
     Split(1);
     World(g_world, 1, 100);
     Terrain(g_h, 0x88, 0);
@@ -187,22 +195,91 @@ int main(void)
     g_teardowns = 0;
     g_fake.log[0] = 0;
     CoXlTestMatResTeardown(W(g_world));
-    CHECK(g_teardowns == 1 && g_destroysAtTeardown == 1 && g_destroy.b == W(g_h) && g_wait.n == 1 && g_wait.at < g_destroy.at);
-    CHECK(CoXlTestTerrainTailPending() == 1 && fake_host_logged("0 frame kick(s) and 0 poll(s) later, drained at the world's teardown"));
+    CHECK(g_teardowns == 1 && g_destroysAtTeardown == 0 && g_destroy.n == 0 && g_wait.n == 1 && g_wait.b == 7 && g_enters == 2);
+    CHECK(*(uint32_t*)(g_h + 4) == 0x88 && CoXlTestTerrainTailPending() == 1);
+    CHECK(fake_host_logged("0 frame kick(s) and 0 poll(s) later, drained at the world's teardown (fence only: the terrain left in the map); 1 pending, 2 split, 0 completed, 0 drained, 1 left"));
 
-    g_case = "a level's end (NearTilesDestroy) does every rest, whatever its kicks";
+    g_case = "a level's end (NearTilesDestroy) while the generator's job runs leaves the rests; once it has left, does every one, whatever its kicks";
+    job[8] = 1;
+    CoXlTestTerrainSplitLevel((uintptr_t)level);
     CoXlTestNearLevelLeft(0);
-    CHECK(g_destroy.n == 2 && g_destroy.b == W(g_h2) && g_destroy.a == W(g_world2) && CoXlTestTerrainTailPending() == 0);
+    CHECK(g_destroy.n == 0 && g_wait.n == 1 && CoXlTestTerrainTailPending() == 1);
+    job[8] = 0;
+    CoXlTestNearLevelLeft(0);
+    CoXlTestTerrainSplitLevel(0);
+    CHECK(g_destroy.n == 1 && g_destroy.b == W(g_h2) && g_destroy.a == W(g_world2) && CoXlTestTerrainTailPending() == 0);
     CHECK(fake_host_logged("drained at a level init"));
 
-    g_case = "a released tile's textures wait for its terrain's rest";
+    g_case = "a released tile's textures wait for its own terrain's rest, no other";
     Split(1);
     World(g_world, 1, 110);
     Terrain(g_h, 0x99, 0);
     CHECK(CoXlTestTerrainDestroySplit(W(g_world), W(g_h), W(Destroy)) == 1);
-    CHECK(CoXlTestMoveFreeQueued(1, 10) == 1);
+    CHECK(CoXlTestMoveFreeQueued(1, 0, W(g_h), 10) == 1);
+    CHECK(CoXlTestMoveFreeQueued(1, 0, W(g_h2), 3) == 1 && CoXlTestMoveFreeQueued(0, 0, 0, 1) == 0); /* another terrain's: 4 frames */
+    CHECK(CoXlTestMoveFreeQueued(1, 0, 0, 4) == 0);
+    CHECK(CoXlTestMoveFreeQueued(1, 0, W(g_h), 10) == 1);
     CoXlTestTerrainTailDrain(0);
-    CHECK(CoXlTestMoveFreeQueued(0, 3) == 1 && CoXlTestMoveFreeQueued(0, 1) == 0);
+    CHECK(CoXlTestMoveFreeQueued(0, 0, 0, 3) == 1 && CoXlTestMoveFreeQueued(0, 0, 0, 1) == 0);
+
+    g_case = "the release's ground check waits for the rest (the tile's body answers until then); unsplit, it runs at once";
+    Split(1);
+    CoXlTestTerrainCheckFn((void*)Check);
+    g_checks = 0;
+    World(g_world, 1, 120);
+    Terrain(g_h, 0x9A, 0);
+    CHECK(CoXlTestTerrainDestroySplit(W(g_world), W(g_h), W(Destroy)) == 1);
+    CoXlTestTerrainTailCheck(W(g_h), 1, 11.0f, 12.0f, 1, 2);
+    CHECK(g_checks == 0);
+    Kick(122);
+    CoXlTestTerrainTailTick();
+    CHECK(g_checks == 1 && g_checkAt[0] == 11.0f && g_checkAt[1] == 12.0f && g_checkSeq > g_destroy.at);
+    Terrain(g_h, 0x9B, 0);
+    CHECK(CoXlTestTerrainDestroySplit(W(g_world), W(g_h), W(Destroy)) == 1);
+    CoXlTestTerrainTailCheck(W(g_h), 0, 0, 0, 0, 0); /* nothing raised: no check */
+    CoXlTestTerrainTailCheck(0, 1, 5.0f, 6.0f, 0, 0); /* a destroy not split */
+    CHECK(g_checks == 2 && g_checkAt[0] == 5.0f);
+    Kick(124);
+    CoXlTestTerrainTailTick();
+    CHECK(g_checks == 2 && CoXlTestTerrainTailPending() == 0);
+    CoXlTestTerrainCheckFn(NULL);
+
+    g_case = "a bounds tree made in the window: the rest is not run, loudly; the terrain stays";
+    Split(1);
+    World(g_world, 1, 130);
+    Terrain(g_h, 0x9C, 0);
+    CHECK(CoXlTestTerrainDestroySplit(W(g_world), W(g_h), W(Destroy)) == 1);
+    const uint64_t tree = 0x7777;
+    memcpy(g_h + 0x40, &tree, 8);
+    Kick(132);
+    g_fake.log[0] = 0;
+    CoXlTestTerrainTailTick();
+    CHECK(g_destroy.n == 0 && g_wait.n == 1 && g_depth == 0 && *(uint32_t*)(g_h + 4) == 0x9C && CoXlTestTerrainTailPending() == 0);
+    CHECK(fake_host_logged("WARNING: a released terrain (0x") && fake_host_logged("(NOT run: a bounds tree); 0 pending, 1 split, 0 completed, 0 drained, 1 left"));
+
+    g_case = "a level's start (MoveLevelGone): the rests before their textures";
+    {
+        static uint8_t api[0x20], t10[0x200];
+        const uint64_t a = W(api), t = W(t10), f = W(TexFree);
+        memcpy(g_fake.image + 0x3326308u, &a, 8); memcpy(api + 0x10, &t, 8); memcpy(t10 + 0x198, &f, 8);
+        CoXlTestGame((uintptr_t)g_fake.image);
+        Split(1);
+        World(g_world, 1, 140);
+        Terrain(g_h, 0x9D, 0);
+        CHECK(CoXlTestTerrainDestroySplit(W(g_world), W(g_h), W(Destroy)) == 1);
+        job[8] = 1; /* the generator's job runs: no rest now (the terrain lock is its) */
+        CoXlTestTerrainSplitLevel((uintptr_t)level);
+        CoXlTestLevelGone();
+        CHECK(g_destroy.n == 0 && CoXlTestTerrainTailPending() == 1);
+        job[8] = 0;
+        CoXlTestTerrainSplitLevel(0);
+        CHECK(CoXlTestMoveFreeQueued(1, 0xBEEF, W(g_h), 1) == 1);
+        g_texFreed = 0;
+        CoXlTestLevelGone();
+        CHECK(g_destroy.n == 1 && g_texFreed == 1 && g_destroy.at < g_texSeq && CoXlTestTerrainTailPending() == 0);
+        CHECK(fake_host_logged("drained at a level's start"));
+        memset(g_fake.image + 0x3326308u, 0, 8);
+    }
 
     g_case = "the install: every pin of the destroy, its CPU copy free, the remove, the bounds test and the thunk; op 0x41's fence copy first";
     {

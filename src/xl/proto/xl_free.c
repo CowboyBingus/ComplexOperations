@@ -237,7 +237,8 @@ static int MoveReleaseTick(ULONGLONG now)
     MoveKeepSeen(now);
     int k = MoveReleaseDue(now);
     if (k < 0) { g_move.drainWaits = 0; return 0; }
-    int drained = TerrainSplitOn() ? -2 : MoveRenderDrained(MoveWorld()); /* split: no fence wait for a drained queue to shorten */
+    /* a destroy that will be split waits for no fence: nothing for a drained queue to shorten */
+    int drained = TerrainSplitWould(MoveWorld(), g_tiles[k].handle, (uint64_t)NearApi(0x08, 0x1E0)) ? -2 : MoveRenderDrained(MoveWorld());
     if (drained == 0 && g_move.drainWaits < MOVE_DRAIN_FRAMES) { g_move.drainWaits++; return 1; }
     MoveReleaseTimed(k, drained);
     g_move.drainWaits = 0;
@@ -652,15 +653,39 @@ static struct
     struct { TailLockFn enter, leave; TailPairFn copyFree, remove; uint64_t slot[2]; } fn;
     SRWLOCK lock; /* the list: the game thread and a teardown on any thread */
     TerrainTail e[TAIL_PENDING];
-    uint32_t n, max, split, completed, drained, fallback;
+    uint32_t n, max, split, completed, drained, fallback, left;
     int last;     /* the last release's destroy was split */
     const char* fall;
 } g_tail = {.lock = SRWLOCK_INIT};
 
-static int TerrainSplitOn(void) { return g_tail.ready > 0; }
 static int TerrainSplitLast(void) { return g_tail.last && g_move.destroyTicks >= 0; } /* this release's destroy */
 static const char* TerrainSplitWhy(void) { return g_tail.ready > 0 && !g_tail.last && g_move.destroyTicks >= 0 ? (g_tail.fall != NULL ? g_tail.fall : "?") : NULL; }
-static int TerrainTailsPending(void) { return g_tail.n != 0; }
+/* 1 while the split destroy of `h` (0: none) waits for its rest. */
+static int TerrainTailPendingFor(uint64_t h)
+{
+    int pending = 0;
+    if (h == 0 || g_tail.n == 0) return 0;
+    AcquireSRWLockShared(&g_tail.lock);
+    for (uint32_t i = 0; i < g_tail.n && !pending; i++) pending = g_tail.e[i].h == h;
+    ReleaseSRWLockShared(&g_tail.lock);
+    return pending;
+}
+static void (*g_tailCheck)(float cx, float cy, int cellX, int cellY) = MoveRaiseCheck; /* a test counts the calls */
+
+/* Why a destroy of `h` through `destroy` would not be split now (NULL: it would); the renderer and its kick count. The
+ * release's drain hold (MoveReleaseTick) asks too: a destroy that keeps its fence wait keeps the hold. */
+static const char* TerrainSplitRefused(uint64_t world, uint64_t h, uint64_t destroy, uint64_t* r, uint32_t* kick)
+{
+    uint64_t cow = 1;
+    if (g_tail.ready <= 0) return "off";
+    *r = MatResRenderer(world, kick);
+    if (destroy == 0 || (destroy != g_tail.fn.slot[0] && destroy != g_tail.fn.slot[1])) return "another destroy in the game's slot";
+    if (*r == 0) return "no threaded frame-loop renderer";
+    if (SafeRead((uintptr_t)h + 0x40, &cow, 8) || cow != 0) return "its height bounds tree";
+    if (g_tail.n >= TAIL_PENDING) return "the list full";
+    return NULL;
+}
+static int TerrainSplitWould(uint64_t world, uint64_t h, uint64_t destroy) { uint64_t r = 0; uint32_t kick = 0; return TerrainSplitRefused(world, h, destroy, &r, &kick) == NULL; }
 
 /* The head of 0x1ADEA0(world, h) through the game's slot `destroy`: 1 when its rest waits in the list, 0 when the caller
  * destroys as the game does (why in g_tail.fall). A bounds tree ([h+0x40], made by a height edit) is left to the game:
@@ -671,13 +696,9 @@ static int TerrainDestroySplit(uint64_t world, uint64_t h, uint64_t destroy)
     g_tail.last = 0;
     if (g_tail.ready <= 0) return 0;
     uint32_t kick = 0, rid = 0xFFFFFFu, id = 0;
-    uint64_t cow = 1;
-    const uint64_t r = MatResRenderer(world, &kick), rw = MatResU64(world + 0x2301F8u);
-    const char* fall = NULL;
-    if (destroy == 0 || (destroy != g_tail.fn.slot[0] && destroy != g_tail.fn.slot[1])) fall = "another destroy in the game's slot";
-    else if (r == 0) fall = "no threaded frame-loop renderer";
-    else if (SafeRead((uintptr_t)h + 0x40, &cow, 8) || cow != 0) fall = "its height bounds tree";
-    else if (g_tail.n >= TAIL_PENDING) fall = "the list full";
+    uint64_t r = 0;
+    const uint64_t rw = MatResU64(world + 0x2301F8u);
+    const char* fall = TerrainSplitRefused(world, h, destroy, &r, &kick);
     if (fall == NULL)
     {
         g_tail.fn.enter(world + 0x230520u);
@@ -714,28 +735,43 @@ static void TerrainTailCheck(uint64_t h, int raised, float cx, float cy, int cel
             queued = 1;
         }
     ReleaseSRWLockExclusive(&g_tail.lock);
-    if (!queued && raised) MoveRaiseCheck(cx, cy, cellX, cellY);
+    if (!queued && raised) g_tailCheck(cx, cy, cellX, cellY);
 }
 
 /* The rest of 0x1ADEA0 for one entry, in the list's lock: the game's own wait on the fence (set by now, or a drain's
- * real wait, as the game's destroy would have waited), then the game's destroy past its fence. */
-static void TerrainTailRun(TerrainTail* x, const char* drain, uint32_t pending)
+ * real wait, as the game's destroy would have waited), then the game's destroy past its fence. `leave`: the fence only,
+ * the terrain left in the map, which the world's teardown frees whole (0x1A6D40: storage only), as it does the level's
+ * own terrain; whether the physics world is still up at 0x1A6E00's entry is not known. */
+static void TerrainTailRun(TerrainTail* x, const char* drain, uint32_t pending, int leave)
 {
     LARGE_INTEGER a, b, c; QueryPerformanceCounter(&a);
     uint32_t kick = x->kick;
+    uint64_t cow = 0;
     SafeRead((uintptr_t)x->r + 0x1A50, &kick, 4);
     g_matRes.fn.wait(x->r, x->id);
     QueryPerformanceCounter(&b);
-    g_tail.fn.enter(x->world + 0x230520u);
-    *(volatile uint32_t*)(uintptr_t)(x->h + 4) = 0xFFFFFFu; /* removed and fenced above: 0x1ADF89 skips both */
-    ((TailDestroyFn)(uintptr_t)x->destroy)(x->world, x->h);
-    g_tail.fn.leave(x->world + 0x230520u);
+    if (!leave)
+    {
+        g_tail.fn.enter(x->world + 0x230520u);
+        /* an edit in the window made a bounds tree, which 0x2F4D40 would post with the cleared id: the terrain stays */
+        if (SafeRead((uintptr_t)x->h + 0x40, &cow, 8) || cow != 0) leave = 2;
+        else
+        {
+            *(volatile uint32_t*)(uintptr_t)(x->h + 4) = 0xFFFFFFu; /* removed and fenced above: 0x1ADF89 skips both */
+            ((TailDestroyFn)(uintptr_t)x->destroy)(x->world, x->h);
+        }
+        g_tail.fn.leave(x->world + 0x230520u);
+    }
     QueryPerformanceCounter(&c);
-    if (drain != NULL) g_tail.drained++; else g_tail.completed++;
+    if (leave) g_tail.left++; else if (drain != NULL) g_tail.drained++; else g_tail.completed++;
+    if (leave == 2)
+        Note("difficulty: moving tiles: WARNING: a released terrain (0x%llX) got a height bounds tree after its split destroy's head; its rest is not run "
+            "and the terrain stays in the world (its render object is gone, its body and memory stay)", (unsigned long long)x->h);
     Note("difficulty: moving tiles: a released terrain's destroy split at its fence (exe 0x1ADFA9): the head %.1f ms in the release's frame, the rest %.1f ms "
-        "(its fence wait %.2f ms) %u frame kick(s) and %u poll(s) later%s%s; %u pending, %u split, %u completed, %u drained, %u by the game's wait (last: %s)",
+        "(its fence wait %.2f ms) %u frame kick(s) and %u poll(s) later%s%s%s; %u pending, %u split, %u completed, %u drained, %u left, %u by the game's wait (last: %s)",
         MoveTicksMs(x->head), MoveTicksMs(c.QuadPart - a.QuadPart), MoveTicksMs(b.QuadPart - a.QuadPart), kick - x->kick, x->polls, drain != NULL ? ", drained at " : "",
-        drain != NULL ? drain : "", pending, g_tail.split, g_tail.completed, g_tail.drained, g_tail.fallback, g_tail.fall != NULL ? g_tail.fall : "none");
+        drain != NULL ? drain : "", leave == 1 ? " (fence only: the terrain left in the map)" : leave == 2 ? " (NOT run: a bounds tree)" : "", pending, g_tail.split,
+        g_tail.completed, g_tail.drained, g_tail.left, g_tail.fallback, g_tail.fall != NULL ? g_tail.fall : "none");
 }
 
 /* Game thread, every frame (CoXlTick, before the level update): the rests 2 frame kicks old. None while the level
@@ -754,15 +790,16 @@ static void TerrainTailTick(void)
         uint32_t kick = 0;
         x.polls++;
         if (busy || SafeRead((uintptr_t)x.r + 0x1A50, &kick, 4) || kick - x.kick < TAIL_KICKS) { g_tail.e[keep++] = x; continue; }
-        TerrainTailRun(&x, NULL, n - (i - keep) - 1); /* those kept and those not yet looked at */
+        TerrainTailRun(&x, NULL, n - (i - keep) - 1, 0); /* those kept and those not yet looked at */
         if (x.raised) checks[nc++] = x;
     }
     g_tail.n = keep;
     ReleaseSRWLockExclusive(&g_tail.lock);
-    for (uint32_t i = 0; i < nc; i++) MoveRaiseCheck(checks[i].centre[0], checks[i].centre[1], checks[i].cell[0], checks[i].cell[1]);
+    for (uint32_t i = 0; i < nc; i++) g_tailCheck(checks[i].centre[0], checks[i].centre[1], checks[i].cell[0], checks[i].cell[1]);
 }
 
-/* Every rest of `world` (0: all) now, the fence waited as the game's destroy would: a level's end, the world's teardown. */
+/* Every rest of `world` (0: all) now, the fence waited as the game's destroy would: a level's end or start; at the
+ * world's teardown (`world` given) the fence only. */
 static void TerrainTailDrain(uint64_t world, const char* why)
 {
     if (g_tail.n == 0) return;
@@ -773,7 +810,7 @@ static void TerrainTailDrain(uint64_t world, const char* why)
     {
         TerrainTail x = g_tail.e[i];
         if (world != 0 && x.world != world) { g_tail.e[keep++] = x; continue; }
-        TerrainTailRun(&x, why, n - (i - keep) - 1);
+        TerrainTailRun(&x, why, n - (i - keep) - 1, world != 0);
     }
     g_tail.n = keep;
     ReleaseSRWLockExclusive(&g_tail.lock);
@@ -1017,7 +1054,7 @@ static int NearTilesDestroy(int ship)
     const int known = !busy && world != 0 && (g_near.world == 0 || g_near.world == world);
     LARGE_INTEGER t0, t1, hz;
     QueryPerformanceCounter(&t0);
-    if (!busy) TerrainTailDrain(0, why); /* the released tiles' rests: none outlives its level */
+    if (!busy) TerrainTailDrain(0, why); /* the released tiles' rests; while the job runs the tick or a later drain has them */
     for (int i = 0; i < n; i++)
     {
         const uint64_t h = *at[i];

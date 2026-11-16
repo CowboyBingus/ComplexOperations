@@ -104,7 +104,7 @@ static struct
     uint32_t drainWaits; /* frames a due release has waited for the render queue to drain, the build's step with it */
     LONGLONG destroyTicks; /* the last release's destroy alone (QPC ticks), -1 none */
     struct { int a, b; ULONGLONG until; } skip[16];
-    struct { int used; uint64_t tex[2], band; uint32_t* pixels; uint32_t frames; } freeing[NEAR_TILES_MAX * 2];
+    struct { int used; uint64_t tex[2], band, terrain; uint32_t* pixels; uint32_t frames; } freeing[NEAR_TILES_MAX * 2]; /* terrain: its split destroy's h */
     float player[EVT_MAX_PLAYERS + 2][2];
     int players;
 } g_move = {.level = -1};
@@ -137,14 +137,15 @@ static void MoveHold(int on)
     InterlockedExchange64(&g_moveHoldSince, on ? (LONG64)GetTickCount64() : 0);
 }
 
-/* The textures of a tile that went, released once the frames that may still draw it are past. */
-static void MoveFreeLater(uint64_t tex0, uint64_t tex1, uint64_t band, uint32_t* pixels)
+/* The textures of a tile that went, released once the frames that may still draw it are past and its terrain's split
+ * destroy (`terrain`, 0 none) has run its rest. */
+static void MoveFreeLater(uint64_t tex0, uint64_t tex1, uint64_t band, uint32_t* pixels, uint64_t terrain)
 {
     for (int k = 0; k < NEAR_TILES_MAX * 2; k++)
         if (!g_move.freeing[k].used)
         {
             g_move.freeing[k].used = 1; g_move.freeing[k].tex[0] = tex0; g_move.freeing[k].tex[1] = tex1; g_move.freeing[k].band = band;
-            g_move.freeing[k].pixels = pixels; g_move.freeing[k].frames = 0;
+            g_move.freeing[k].pixels = pixels; g_move.freeing[k].frames = 0; g_move.freeing[k].terrain = terrain;
             return;
         }
     Note("difficulty: moving tiles: no room to release a tile's textures; they stay allocated");
@@ -188,7 +189,7 @@ static void MoveFreeTick(int all)
     MovePackageTick(all);
     if (!all) MoveBandPixelsTick(); /* the live tiles' band pixels wait on render frames too */
     for (int k = 0; k < NEAR_TILES_MAX * 2; k++)
-        if (g_move.freeing[k].used && (all || (!TerrainTailsPending() && ++g_move.freeing[k].frames >= 4))) /* after the terrain's rest */
+        if (g_move.freeing[k].used && (all || (!TerrainTailPendingFor(g_move.freeing[k].terrain) && ++g_move.freeing[k].frames >= 4))) /* after its terrain's rest */
         {
             MoveFreeNow(g_move.freeing[k].tex[0], g_move.freeing[k].tex[1], g_move.freeing[k].band, g_move.freeing[k].pixels);
             g_move.freeing[k].used = 0;
@@ -222,6 +223,7 @@ static void MoveLevelGone(void)
         MoveFreeNow(g_move.dropTex[0] == g_near.tex[0] ? 0 : g_move.dropTex[0], g_move.dropTex[1] == g_near.tex[1] ? 0 : g_move.dropTex[1],
             g_move.dropBand == g_matband.tex ? 0 : g_move.dropBand, g_move.dropBand == g_matband.tex ? NULL : g_move.dropBandPixels);
     g_move.stashed = 0;
+    if (!NearGeneratorRuns()) TerrainTailDrain(0, "a level's start"); /* before their textures go (MoveFreeTick's own order) */
     MoveFreeTick(1);
     for (int k = 0; k < NEAR_TILES_MAX; k++)
         if (g_tiles[k].tex[0] != 0 || g_tiles[k].tex[1] != 0 || g_tiles[k].band != 0)
@@ -1212,7 +1214,7 @@ static void MoveFailRest(void)
     if (g_move.stashed)
     {
         MoveFreeLater(g_near.tex[0] != g_move.dropTex[0] ? g_near.tex[0] : 0, g_near.tex[1] != g_move.dropTex[1] ? g_near.tex[1] : 0,
-            g_matband.tex != g_move.dropBand ? g_matband.tex : 0, g_matband.pixels != g_move.dropBandPixels ? g_matband.pixels : NULL);
+            g_matband.tex != g_move.dropBand ? g_matband.tex : 0, g_matband.pixels != g_move.dropBandPixels ? g_matband.pixels : NULL, 0);
     }
     MovePackageLater();
     MoveCellSkip(g_move.cell[0], g_move.cell[1], GetTickCount64());
@@ -1425,7 +1427,7 @@ static void MoveRelease(int slot)
         g_tiles[slot].handle = 0; /* its object is freed, now or by the rest: a later terrain may get the address */
     }
     QueryPerformanceCounter(&at[4]);
-    MoveFreeLater(t.tex[0], t.tex[1], t.band, t.bandPixels);
+    MoveFreeLater(t.tex[0], t.tex[1], t.band, t.bandPixels, split ? t.handle : 0);
     g_move.released++;
     QueryPerformanceCounter(&at[5]);
     TerrainTailCheck(split ? t.handle : 0, raised, t.centre[0], t.centre[1], t.cell[0], t.cell[1]);
