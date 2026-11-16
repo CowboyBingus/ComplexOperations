@@ -1681,8 +1681,18 @@ static void Split63Left(const char* why);
 static void SplitClear(void);
 typedef void (*NearConsumeFn)(uint64_t queue);
 static NearConsumeFn g_nearConsume;
+static void NearConsumeIn(uint64_t queue);
+static void MoveFrameConsumer(int64_t in, int64_t out); /* the slow-frame line's consumer part (difficulty_world_move.c) */
 
 static void NearConsume(uint64_t queue)
+{
+    LARGE_INTEGER in; QueryPerformanceCounter(&in);
+    NearConsumeIn(queue);
+    LARGE_INTEGER out; QueryPerformanceCounter(&out);
+    MoveFrameConsumer(in.QuadPart, out.QuadPart);
+}
+
+static void NearConsumeIn(uint64_t queue)
 {
     uint32_t n = 0;
     int mine = queue != 0 && queue == g_nearNames.queue && !SafeRead(queue + 0x10, &n, 4) && n != 0;
@@ -2451,9 +2461,25 @@ static uint64_t NearJobRun(uint64_t a, uint64_t b, uint64_t c, uint64_t element)
     return 0;
 }
 
+/* The two long tile jobs' queue, r9d + 3 x arg5 (exe 0x6261C9): 10 holds a regular worker the game thread may wait on;
+ * 14 (research, HELLFORGE_XL_NEAR_BGQUEUE=1) is popped only by the two LP workers, woken through [pool+0xE0] (exe
+ * 0x625446), which run the same worker entry (0x625190) and never serve the game thread's queues. */
+static int g_nearBgQueue = -1; /* -1: not read yet */
+static void NearJobQueue(uint32_t* queue, uint32_t* priority)
+{
+    if (g_nearBgQueue < 0)
+    {
+        char v[4] = "";
+        g_nearBgQueue = GetEnvironmentVariableA("HELLFORGE_XL_NEAR_BGQUEUE", v, sizeof v) > 0 && v[0] == '1';
+        if (g_nearBgQueue) Note("difficulty: moving tiles: the composite tile and collision shape jobs go to queue 14, the LP workers' (HELLFORGE_XL_NEAR_BGQUEUE=1, research)");
+    }
+    *queue = g_nearBgQueue ? 2 : 1;
+    *priority = g_nearBgQueue ? 4 : 3;
+}
+
 /* Game thread: the next step's job once its slot is free and no job is in flight. One at a time: a tile job holds a
- * regular worker ~60 ms, and the frame's own job is popped only by the lower half of them (StampRunnerCap). The queue
- * is 1 + 3 x 3 = 10, which the game thread's own waits never pop (exe 0x626900: role 0 takes 15, 0, 3, 16, 1, 4, 17, 2, 5). */
+ * worker ~60 ms, and on queue 10 the frame's own job is popped only by the lower half of the regular workers
+ * (StampRunnerCap). */
 static void NearJobFeed(void)
 {
     static const char name[] = "hellforge moving tile composite tile";
@@ -2465,7 +2491,9 @@ static void NearJobFeed(void)
     g_nearJob.next++; g_nearJob.jobs++;
     InterlockedIncrement(&g_nearJob.inflight);
     NearJobSubmitFn submit = g_nearJobSubmit != NULL ? g_nearJobSubmit : (NearJobSubmitFn)(uintptr_t)g_nearJob.submit;
-    submit((void*)NearJobRun, &g_nearJob.element[i], name, 1, 3, 1, 0);
+    uint32_t queue, priority;
+    NearJobQueue(&queue, &priority);
+    submit((void*)NearJobRun, &g_nearJob.element[i], name, queue, priority, 1, 0);
 }
 
 /* The block a job given up on may still write (NULL: none). With the stop set, a job not yet in the section lock builds
@@ -8898,7 +8926,9 @@ static int NearShapeBegin(uint64_t world, uint64_t handle)
     if (!g_shape.inList) return 1; /* no shape (0x1AC2FF): the quadtree alone, next */
     MoveHold(1);
     InterlockedExchange(&g_shape.running, 1);
-    ((SubmitFn)(uintptr_t)submit)((void*)NearShapeJob, &g_shape.element, name, 1, 3, 1, 0);
+    uint32_t queue, priority;
+    NearJobQueue(&queue, &priority);
+    ((SubmitFn)(uintptr_t)submit)((void*)NearShapeJob, &g_shape.element, name, queue, priority, 1, 0);
     return 1;
 }
 

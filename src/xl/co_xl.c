@@ -224,6 +224,7 @@ __asm__(".text\n.p2align 4\n.globl CoIndexQueryThunk\nCoIndexQueryThunk:\n"
 static void CoXlTick(HfMod* mod, float dt, void* user)
 {
     (void)mod; (void)user;
+    MoveFrameTick(0);
     HitchTick();
     co_framecost_context(CoXlFrameContext);
     co_framecost_begin(CoXlInPlay(), (long)g_world.levels);
@@ -249,6 +250,7 @@ static void CoXlTick(HfMod* mod, float dt, void* user)
     co_framecost_mark(CO_FC_TAC);
     co_density_tick(dt);
     co_framecost_mark(CO_FC_DENSITY);
+    MoveFrameTick(1);
 }
 
 /* As game.dll is loaded: the records' move must be hooked before the game builds its entity state, and a process moves
@@ -1398,6 +1400,24 @@ int CoXlTestNearRunStep(int s, uint64_t context, void* dispatch)
     return NearRunStepIn(0, 0, context, 0, 0);
 }
 void CoXlTestNearJobLevelUpdate(uintptr_t level, uintptr_t moving) { NearJobLevelUpdate(level, moving); }
+/* The slow-frame line, the stall watch's gate, the 0x63 step's frame kinds and the tile jobs' queue (tile-hitch2):
+ * marks at `ms` on the QPC clock (MF_TICK 0, MF_LEVEL 1, MF_T0 2, MF_T1 3), the frame's state, its parts. */
+static int64_t CoXlTestTicks(double ms) { LARGE_INTEGER hz; QueryPerformanceFrequency(&hz); return (int64_t)(ms * (double)hz.QuadPart / 1000.0); }
+void CoXlTestMoveFrameMark(int mark, double ms) { LARGE_INTEGER hz; QueryPerformanceFrequency(&hz); MoveFrameMark(mark, CoXlTestTicks(ms), (double)hz.QuadPart); }
+void CoXlTestMoveFrameState(int building, int mv, int ns, int op, int shape, int tile)
+{ g_moveFrame.f.building = building; g_moveFrame.f.mv = mv; g_moveFrame.f.ns = ns; g_moveFrame.f.op = op; g_moveFrame.f.shape = shape; g_moveFrame.f.tile = tile; }
+void CoXlTestMoveFrameConsumer(double in, double out) { MoveFrameConsumer(CoXlTestTicks(in), CoXlTestTicks(out)); }
+int CoXlTestMoveFrameParts(double next, double* part)
+{ LARGE_INTEGER hz; QueryPerformanceFrequency(&hz); return MoveFrameParts(&g_moveFrame.f, CoXlTestTicks(next), (double)hz.QuadPart, part); }
+uint32_t CoXlTestMoveFrameLines(int reset) { if (reset) g_moveFrame.lines = 0; return g_moveFrame.lines; }
+int CoXlTestMoveStallDue(int phase, double since, double now, LONG seq, LONG sampled, LONG samples, int building)
+{ LARGE_INTEGER hz; QueryPerformanceFrequency(&hz); return MoveStallDue(phase, CoXlTestTicks(since), CoXlTestTicks(now), (double)hz.QuadPart, seq, sampled, samples, building); }
+void CoXlTestMoveStallPhase(int phase, double ms, LONG* seq, int64_t* since) { MoveStallPhase(phase, CoXlTestTicks(ms)); *seq = g_moveStall.seq; *since = g_moveStall.since; }
+LONG CoXlTestMoveStallSamples(LONG set) { if (set >= 0) InterlockedExchange(&g_moveStall.samples, set); return g_moveStall.samples; }
+int CoXlTestSplit63WallKind(int sp0, int sp1) { return Split63WallKind(sp0, sp1); }
+void CoXlTestSplit63WallAdd(double ms, int sp0, int sp1) { Split63WallAdd(ms, sp0, sp1); }
+void CoXlTestSplit63WallNote(void) { Split63WallNote(); }
+void CoXlTestNearBgQueue(int on, uint32_t* queue, uint32_t* priority) { g_nearBgQueue = on; NearJobQueue(queue, priority); }
 void CoXlTestMoveLevelUpdate(uint64_t level, uintptr_t moving, void (*update)(uint64_t))
 { g_move.levelPtr = moving; g_moveUpdate = (MoveUpdateFn)update; MoveLevelUpdate(level); g_moveUpdate = NULL; }
 DWORD CoXlTestNearJobTls(DWORD k) { DWORD old = g_tileRunnerTls; g_tileRunnerTls = k; return old; }

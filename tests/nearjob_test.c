@@ -31,6 +31,7 @@ void CoXlTestTerrainBuildNote(const char* text);
 void CoXlTestNearJobArena(uint64_t context);
 void CoXlTestNearReplayEnd(void);
 void CoXlTestNearLevelLeft(int ship);
+void CoXlTestNearBgQueue(int on, uint32_t* queue, uint32_t* priority);
 
 static int g_failed;
 static const char* g_case;
@@ -53,6 +54,7 @@ static JobFn g_jobFn;
 static uint64_t* g_jobData;
 static volatile LONG g_pending;
 static int g_submits, g_twoAtOnce, g_badQueue;
+static uint32_t g_wantQueue = 1, g_wantPriority = 3; /* queue 10; 14 is (2, 4) */
 static int g_auto; /* each job runs on a worker of its own 20 ms after its submit */
 static HANDLE g_autoThreads[64];
 static int g_autoCount;
@@ -65,7 +67,7 @@ static DWORD WINAPI Worker(LPVOID delay)
 static uint64_t Submit(void* fn, uint64_t* data, const char* name, uint32_t queue, uint32_t priority, uint32_t count, uint64_t zero)
 {
     if (g_pending) g_twoAtOnce++;
-    if (queue != 1 || priority != 3 || count != 1 || zero != 0 || name == NULL) g_badQueue++;
+    if (queue != g_wantQueue || priority != g_wantPriority || count != 1 || zero != 0 || name == NULL) g_badQueue++;
     g_jobFn = (JobFn)fn; g_jobData = data; g_submits++;
     if (g_auto && g_autoCount < 64) { g_autoThreads[g_autoCount++] = CreateThread(NULL, 0, Worker, (LPVOID)(uintptr_t)20, 0, NULL); return 0; }
     InterlockedExchange(&g_pending, 1);
@@ -208,6 +210,17 @@ int main(void)
     CHECK(fake_host_logged("arena peak 9.0 MiB")); /* the most, not the last tile's */
     CHECK(fake_host_logged("(the run is drawn)"));
     CHECK(CoXlTestNearJobTake(7, Context()) == -1 && g_submits == 5); /* a record step after the run */
+
+    Begin("switched to queue 14 (HELLFORGE_XL_NEAR_BGQUEUE=1, research): the same run, each job submitted as (2, 4)", 9, 2, 4);
+    {
+        uint32_t q = 0, pr = 0;
+        CoXlTestNearBgQueue(1, &q, &pr);
+        g_wantQueue = 2; g_wantPriority = 4;
+        CHECK(Steps(2, 4, 1));
+        CHECK(g_builds == 3 && g_submits == 3 && g_badQueue == 0);
+        CoXlTestNearBgQueue(0, &q, &pr);
+        g_wantQueue = 1; g_wantPriority = 3;
+    }
 
     Begin("a failed build reaches its step as failed; the rest go on; jobs run on the game thread are counted", 9, 2, 5);
     g_failTile = 103;

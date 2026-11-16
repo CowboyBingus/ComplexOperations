@@ -36,6 +36,7 @@ void CoXlTestMoveHold(int on);
 LONG64 CoXlTestMoveHoldSince(void);
 void CoXlTestNearJobLevelUpdate(uintptr_t level, uintptr_t moving);
 int CoXlTestReadyTile(uint64_t context, uint64_t handle, int* state);
+void CoXlTestNearBgQueue(int on, uint32_t* queue, uint32_t* priority);
 
 static int g_failed;
 static const char* g_case;
@@ -227,6 +228,19 @@ int main(void)
             if (rows[k] == 4096) CHECK(g_quad.a11 == 7); /* 4096 x 4096 at depth 7 under the default mode */
         }
         CHECK(Leaf(96) == 24 && Leaf(100) == 25 && Leaf(4000) == 125 && Leaf(33) == 33 && Leaf(20) == 20);
+    }
+
+    g_case = "switched to queue 14 (HELLFORGE_XL_NEAR_BGQUEUE=1, research): the shape's job is submitted as (2, 4)";
+    {
+        uint32_t q = 0, pr = 0;
+        CoXlTestNearBgQueue(1, &q, &pr);
+        Entry(4096, 4096);
+        g_submit.calls = 0;
+        CHECK(CoXlTestShapeBegin(g_world, g_handle) == 1 && g_submit.calls == 1 && g_submit.queue == 2 && g_submit.priority == 4 && g_submit.count == 1);
+        RunJob();
+        CoXlTestShapeEnd();
+        CHECK(CoXlTestShapeState() == 0);
+        CoXlTestNearBgQueue(0, &q, &pr);
     }
 
     g_case = "a world not in the physics list: no shape, no job; the quadtree still built (0x1AC2FF)";
