@@ -44,4 +44,7 @@ void co_counts_apply(uintptr_t context, uintptr_t extension);
 void co_counts_undo(void);
 void co_counts_session_init(void);
 
+/* Living world density's guards (co_density.c). Once, with game.dll's base, when game.dll is loaded. */
+void co_density_install(uintptr_t game);
+
 #endif

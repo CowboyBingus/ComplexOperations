@@ -27,6 +27,7 @@ static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
     co_pods_install(game);
     co_counts_install(game);
     co_session_install(game);
+    co_density_install(game);
     co_engine_install(g_coApi->module_base("helldivers2.exe", &size));
 }
 

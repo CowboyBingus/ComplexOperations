@@ -18,6 +18,7 @@ typedef struct FakeHost
     struct { uintptr_t target; void* detour; } hooks[FAKE_HOOKS];
     int hookCount;
     HfEventCallback loaded;
+    HfTickCallback tick;      /* on_game_thread's callback, 0 when none was asked for */
     char log[8192];
 } FakeHost;
 

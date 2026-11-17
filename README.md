@@ -15,6 +15,7 @@ It runs on game build 25480438 only. On any other build it logs the reason and c
 | Launch | The launch cutscene fires pod n + 4 together with pod n. |
 | Briefing camera | Pods 5 to 8 get a briefing camera of their own. |
 | Player managers | Seven per-player component managers hold eight players instead of four (see below). |
+| Enemy guards | Three of the game's unchecked writes refuse instead of crashing when many enemies are alive: a full squad-slot table, more than 64 kinds of enemy in the spawn budget, and a nearly full ray queue. The AI job gate for new spawns rises from 448 to 1024. The 70-enemy room, the breach release and the despawner count native enemies only, so living world squads leave natives their vanilla room. |
 
 The mod needs the bridge with the eight-pod bay: level data that places the four launchers (with the names
 hellpod5 to hellpod8), four briefing cameras and the bay's lamps. Without that data it leaves a normal ship with four
@@ -131,6 +132,8 @@ The recipe is written by the bay's build tools (`bay8_recipe.py hellforge`), whi
 | `src/co_engine.c` | The engine's peer-count readers. |
 | `src/co_session.c` | The session lists: the extension block, code sites and stubs. |
 | `src/co_session_sites.h` | Their code sites. Generated; do not edit. |
+| `src/co_density.c` | The enemy guards: code sites, stubs, the ray guard and the living world's unit count. |
+| `tests/density_test.c` | The enemy guards' sites, stub jumps, unit count, ray refusals and failed writes. |
 | `scripts/gen_session_sites.py` | Writes `co_session_sites.h` from the site list and a dump of the game's code. |
 | `tests/managers_test.c` | The same refusals for the player managers. |
 | `tests/session_test.c` | The same for the session lists, and that sites and stubs lead to the new place. |

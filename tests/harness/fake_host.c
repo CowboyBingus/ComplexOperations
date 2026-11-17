@@ -73,6 +73,12 @@ static int Hook(HfMod* mod, uintptr_t target, void* detour, void** original)
     return 0;
 }
 
+static int OnGameThread(HfMod* mod, HfTickCallback callback, void* user)
+{
+    g_fake.tick = callback;
+    return 1;
+}
+
 const HfApi* fake_host_reset(const char* build)
 {
     uint8_t* image = g_fake.image;
@@ -93,6 +99,7 @@ const HfApi* fake_host_reset(const char* build)
     g_api.write = Write;
     g_api.code_matches = CodeMatches;
     g_api.hook = Hook;
+    g_api.on_game_thread = OnGameThread;
     return &g_api;
 }
 
