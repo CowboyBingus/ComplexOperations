@@ -1810,6 +1810,21 @@ static float NearTileAt(float wx, float wy)
 }
 
 static float NearVisibleAt(float x, float y);
+/* Once a level, at the player's first report: the heights the game enforces against the ground (co_height.h). A flight
+ * mod capped relative to its takeoff meets ground that rises far above the landing zone; this line shows by how much. */
+static void NearReportHeight(const float* at)
+{
+    CoHeightField f = {g_near.global, g_near.columns, g_near.rows, 16384.0f};
+    CoHeightLimits lim = {KILL_FLOOR, 0.0f, g_netPosHalf};
+    float size = 0.0f; /* the broadphase cube's side, [game+0x23C7DF0] (co_early.c) */
+    if (g_world.game == 0 || SafeRead(g_world.game + 0x23C7DF0u, &size, 4) || !isfinite(size)) size = 0.0f;
+    lim.physicsHalf = size * 0.5f;
+    CoHeightScan s;
+    char line[512];
+    if (co_height_scan(&f, at[0], at[1], 2000.0f, 2, 8, &s) && co_height_line(line, sizeof line, (long)g_world.levels, &lim, &s, at[0], at[1], 2000.0f) > 0)
+        Note("%s", line);
+}
+
 /* The first player's position against both heightmaps, every 1.5 s for a minute once the tile is in. */
 static void NearReportPlayer(const float* at)
 {
@@ -1820,6 +1835,7 @@ static void NearReportPlayer(const float* at)
     ULONGLONG now = GetTickCount64();
     if (reports >= 40 || now - last < 1500) return;
     last = now; reports++;
+    if (reports == 1) NearReportHeight(at);
     Note("difficulty: near terrain: player at (%.1f, %.1f, %.2f); the level's heightmap there %.2f, the ground as drawn %.2f", (double)at[0], (double)at[1],
         (double)at[2], (double)NearGlobalAt(at[0], at[1]), (double)NearVisibleAt(at[0], at[1]));
 }

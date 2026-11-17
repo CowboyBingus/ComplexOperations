@@ -140,6 +140,7 @@ static uint32_t WorldScaleFor(float mapScale)
  * +0xC kind (3 = vector3), +0xD bits per component: the writer 0x28C600 sends trunc((v - min) / (max - min) x (2^bits - 1)
  * + 0.5), or the raw float at 32 bits (0x34F4AB..0x34F4D7), so a wider range is a coarser step. */
 static struct { int state; uint32_t type[8]; int count; float low[8], high[8]; uint8_t bits[8]; } g_netPos; /* state 0 unread, 1 ok, -1 not the reviewed layout */
+static float g_netPosHalf = 2000.0f; /* the range last written, for the world height note */
 static void NetPositionRange(float scale)
 {
     uintptr_t exe = (uintptr_t)GetModuleHandleW(NULL), global = 0, cfg = 0, types = 0, descs = 0;
@@ -189,6 +190,7 @@ static void NetPositionRange(float scale)
             len += g_netPos.bits[k] >= 32 ? snprintf(steps + len, sizeof steps - len, "%s32 bits (a float)", k ? ", " : "")
                 : snprintf(steps + len, sizeof steps - len, "%s%u bits %.1f mm", k ? ", " : "", g_netPos.bits[k], 1000.0 * (hi - lo) / (double)((1ull << g_netPos.bits[k]) - 1));
     }
+    g_netPosHalf = scale > 1.0f ? fmaxf(g_netPos.high[0], 1024.0f * (scale + 1.0f)) : g_netPos.high[0];
     Note("difficulty: extra large maps: network positions range +-%.0f m (%s); step per type: %s", (double)(scale > 1.0f ? fmaxf(g_netPos.high[0], 1024.0f * (scale + 1.0f)) : g_netPos.high[0]),
         scale > 1.0f ? "an extra large level" : "vanilla", steps);
 }

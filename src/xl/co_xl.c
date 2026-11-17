@@ -45,6 +45,7 @@
 #include "co_podstart.h"
 #include "co_settle.h"
 #include "co_hitch.h"
+#include "co_height.h"
 #include "../co_watch.h"
 
 /* The mod's work in the game frame under way (co_hitch.h): the timed parts add to it, CoXlTick hands it on. */
