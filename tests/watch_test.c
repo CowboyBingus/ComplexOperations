@@ -145,7 +145,8 @@ int main(void)
     CHECK(fake_host_logged("hit 1 (one of a place's first, suspicious value, outside the widget library)"));
     CHECK(fake_host_logged(thread));
     CHECK(fake_host_logged("W+0xE0 4280000000000000"));
-    CHECK(fake_host_logged("hit 1 frames: kernel32.dll+0x")); /* the writer is the thread's first function */
+    /* the writer is the thread's first function; Wine names its module kernel32.dll, Windows KERNEL32.DLL */
+    CHECK(fake_host_logged("hit 1 frames: kernel32.dll+0x") || fake_host_logged("hit 1 frames: KERNEL32.DLL+0x"));
     Write(w, 0x3F000000u, 4);
     CHECK(co_watch_test_hits() == 2);
     CHECK(fake_host_logged("W+0x0 3f000000"));

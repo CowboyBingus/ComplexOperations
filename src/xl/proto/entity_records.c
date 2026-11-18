@@ -113,35 +113,6 @@ static int g_entityRecordsState; /* 0 not installed, 1 waiting for the construct
 typedef uint64_t (*EntityCtorFn)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 static EntityCtorFn g_entityCtor;
 
-/* Free address space of `size` bytes within 1.75 GB of `near`, above it first. */
-static uintptr_t EntityRecordsAlloc(uintptr_t target, size_t size)
-{
-    const uintptr_t span = 0x70000000u, grain = 0x10000u;
-    for (int up = 1; up >= 0; up--)
-    {
-        uintptr_t at = up ? (target + grain) & ~(grain - 1) : ((target - size) & ~(grain - 1));
-        while (up ? at + size < target + span : at > target - span)
-        {
-            MEMORY_BASIC_INFORMATION m;
-            if (VirtualQuery((void*)at, &m, sizeof m) == 0) break;
-            uintptr_t end = (uintptr_t)m.BaseAddress + m.RegionSize;
-            if (m.State == MEM_FREE && end - at >= size)
-            {
-                void* p = VirtualAlloc((void*)at, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-                if (p) return (uintptr_t)p;
-            }
-            if (up) at = (end + grain - 1) & ~(grain - 1);
-            else
-            {
-                uintptr_t base = (uintptr_t)m.AllocationBase ? (uintptr_t)m.AllocationBase : (uintptr_t)m.BaseAddress;
-                if (base < size + grain) break;
-                at = (base - size) & ~(grain - 1);
-            }
-        }
-    }
-    return 0;
-}
-
 /* A site's value in the reviewed code. */
 static uint32_t EntityRecordOld(size_t i)
 {
@@ -163,7 +134,8 @@ static void EntityRecordsMove(uintptr_t game, uintptr_t state)
     if (SafeRead(game + ER_STATE_GLOBAL, &global, 8) || global != 0 || SafeRead(game + ER_B_GLOBAL, &b, 8) || b + ER_B_STATE != state)
     { Note("entity records: the constructor's state is not the reviewed one; 2048 records as before"); return; }
     const size_t records = (size_t)ER_COUNT * 24u, hash = (size_t)ER_PLACES * 8u, size = 24u + records + 16u + 3u * hash;
-    uintptr_t block = EntityRecordsAlloc(state, size);
+    /* the reservations laid while the game's heaps grew first: nothing near the state is free by now (co_heapnear.c) */
+    uintptr_t block = co_alloc_near(state, size);
     if (block == 0) { Note("entity records: no free memory within 2 GB of the entity state; 2048 records as before"); return; }
     int64_t r = ((int64_t)block - (int64_t)state) % 24;
     if (r < 0) r += 24;
@@ -178,7 +150,7 @@ static void EntityRecordsMove(uintptr_t game, uintptr_t state)
         uint32_t old = EntityRecordOld(i), at4 = kEntityRecordSites[i].at;
         if (SafeRead(game + kEntityRecordSites[i].rva, bytes, at4 + 4u) || memcmp(bytes, kEntityRecordSites[i].pin, at4) != 0 || memcmp(bytes + at4, &old, 4) != 0)
         {
-            VirtualFree((void*)block, 0, MEM_RELEASE);
+            co_free_near(block);
             Note("entity records: the code at game+0x%X is not the reviewed one; 2048 records as before", kEntityRecordSites[i].rva);
             return;
         }
@@ -219,6 +191,7 @@ static void EntityRecordsMove(uintptr_t game, uintptr_t state)
 static uint64_t EntityCtorDetour(uint64_t state, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6)
 {
     static LONG once;
+    co_heap_near_settle((uintptr_t)state);
     if (InterlockedExchange(&once, 1) == 0)
     {
         uintptr_t game = (uintptr_t)GetModuleHandleW(L"game.dll");
@@ -240,6 +213,7 @@ static void EntityRecordsInstall(uintptr_t game)
     { Note("entity records: the entity state's constructor is not the reviewed one; 2048 records as before"); return; }
     if (LoaderHook("entity records (extra large maps)", game + ER_CONSTRUCTOR, (void*)EntityCtorDetour, (void**)&g_entityCtor) != 0)
     { g_entityCtor = NULL; Note("entity records: the constructor could not be hooked; 2048 records as before"); return; }
+    co_heap_near_constructor_hooked();
     g_entityRecordsState = 1;
 }
 

@@ -261,8 +261,8 @@ uintptr_t co_navtrim_armed(uint32_t id)
 #ifdef CO_TEST
 void co_navtrim_test_reset(void)
 {
-    if (g_trim.block != NULL) VirtualFree(g_trim.block, 0, MEM_RELEASE);
-    if (g_reserved != NULL) VirtualFree(g_reserved, 0, MEM_RELEASE);
+    co_free_near((uintptr_t)g_trim.block); /* exe arena blocks are decommitted */
+    if (g_reserved != g_trim.block) co_free_near((uintptr_t)g_reserved);
     memset(&g_trim, 0, sizeof g_trim);
     g_reserved = NULL;
 }

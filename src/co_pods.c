@@ -129,7 +129,8 @@ int co_near_exe_reserve(uintptr_t exe, size_t image)
     const uintptr_t arena = Search(exe, CO_EXE_ARENA, MEM_RESERVE);
     if (arena == 0) return 0;
     AcquireSRWLockExclusive(&g_near.lock);
-    g_near.exe = exe; g_near.end = exe + image; g_near.arena = arena; g_near.used = 0;
+    /* the first page stays unused: no block starts the arena, so a MEM_RELEASE of one cannot release all of it */
+    g_near.exe = exe; g_near.end = exe + image; g_near.arena = arena; g_near.used = 0x1000u;
     ReleaseSRWLockExclusive(&g_near.lock);
     return 1;
 }
@@ -146,6 +147,9 @@ uintptr_t co_alloc_near_as(uintptr_t target, size_t size, uint32_t type)
         g_near.used += pages;
     }
     ReleaseSRWLockExclusive(&g_near.lock);
+    if (block != 0) { co_heap_near_track(block, pages); return block; } /* co_free_near decommits it */
+    /* the game's heaps leave nothing free near their objects: the reservations laid while they grew come first */
+    if (block == 0 && (type & MEM_COMMIT)) block = co_heap_near_take(target, size);
     return block != 0 ? block : Search(target, size, type);
 }
 
@@ -228,7 +232,7 @@ static void Move(uintptr_t state)
             /* The game cannot run on a mix: the sites written so far go back. */
             for (size_t j = 0; j < i; j++)
                 g_coApi->write(g_game + kCoPodSites[j].rva + kCoPodSites[j].at, &kCoPodSites[j].old, SiteSize(&kCoPodSites[j]));
-            VirtualFree((void*)manager, 0, MEM_RELEASE);
+            co_free_near(manager);
             co_log("hellpods: game+0x%X could not be written; four pods as before", s->rva);
             return;
         }
@@ -245,7 +249,7 @@ static void Move(uintptr_t state)
             for (size_t j = 0; j < i; j++) g_coApi->write(g_game + kRewrites[j].rva, kRewrites[j].old, kRewrites[j].size);
             for (size_t j = 0; j < n; j++)
                 g_coApi->write(g_game + kCoPodSites[j].rva + kCoPodSites[j].at, &kCoPodSites[j].old, SiteSize(&kCoPodSites[j]));
-            VirtualFree((void*)manager, 0, MEM_RELEASE);
+            co_free_near(manager);
             co_log("hellpods: game+0x%X could not be written; four pods as before", kRewrites[i].rva);
             return;
         }
@@ -267,7 +271,7 @@ static int Restore(void)
     for (size_t i = 0; i < n; i++)
         failed |= g_coApi->write(g_game + kCoPodSites[i].rva + kCoPodSites[i].at, &kCoPodSites[i].old, SiteSize(&kCoPodSites[i])) != 0;
     if (failed) return 0;
-    VirtualFree((void*)g_manager, 0, MEM_RELEASE);
+    co_free_near(g_manager);
     g_manager = g_block = 0;
     g_state = 0;
     return 1;
@@ -275,6 +279,7 @@ static int Restore(void)
 
 static uint64_t StateCtorDetour(uint64_t state, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6)
 {
+    co_heap_near_settle((uintptr_t)state); /* no more reservations: every object the mod reaches is built by now */
     if (g_state == 1 && (uintptr_t)state + CO_STATE_BLOCK != g_block && !Restore())
         co_log("hellpods: the game rebuilt its state elsewhere and its code could not be set back; restart the game");
     if (g_state == 0)
@@ -485,6 +490,7 @@ void co_pods_install(uintptr_t game)
     { g_podMine = NULL; co_log("hellpods: a lone player in pods 5 to 8 launches without the launch sound (its code could not be hooked)"); }
     if (g_coApi->hook(g_coMod, game + CO_STATE_CTOR, (void*)StateCtorDetour, (void**)&g_stateCtor) != 0)
     { g_state = -1; g_newPods = 0; co_log("hellpods: the constructor could not be hooked; four pods as before"); return; }
+    co_heap_near_constructor_hooked();
     if (g_coApi->read(game + CO_STATE_GLOBAL, &global, 8) == 0 && global != 0 && g_state == 0)
         co_log("hellpods: the game built its state while the mod loaded; four pods until it builds it again");
 }
@@ -504,7 +510,7 @@ void co_pods_test_fill(uint8_t* image)
 
 void co_pods_test_reset(void)
 {
-    if (g_manager) VirtualFree((void*)g_manager, 0, MEM_RELEASE);
+    if (g_manager) co_free_near(g_manager);
     g_manager = g_block = g_game = 0;
     g_state = g_newPods = g_camerasMoved = g_bayWalked = 0;
 }

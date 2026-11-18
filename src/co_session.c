@@ -61,7 +61,7 @@ static void Undo(size_t sites, size_t stubs)
 
 static void Release(void)
 {
-    if (g_extension) VirtualFree((void*)g_extension, 0, MEM_RELEASE);
+    co_free_near(g_extension);
     if (g_stubs) VirtualFree((void*)g_stubs, 0, MEM_RELEASE);
     g_extension = g_stubs = g_context = 0;
 }

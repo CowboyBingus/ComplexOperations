@@ -656,10 +656,12 @@ typedef uint64_t (*RenderFn)(uint64_t, uint64_t, uint64_t);
 typedef uint64_t (*TaskFn)(uint64_t);
 static void* Detour(uint32_t rva) { return fake_host_detour((uintptr_t)(g_exe + rva) - (uintptr_t)g_fake.image); }
 static uintptr_t g_renderHeap;
+static LARGE_INTEGER g_renderStart; /* when the renderer's step began, as the counter has it */
 static DWORD WINAPI RenderOne(void* unused)
 {
     (void)unused;
     SetQ(g_renderHeap, (uint64_t)(uintptr_t)NtCurrentTeb()); /* the heap is this thread's, as the renderer's is */
+    QueryPerformanceCounter(&g_renderStart);
     ((RenderFn)Detour(RENDER_STEP))(9, 8, 7);
     return 0;
 }
@@ -723,13 +725,20 @@ static void Reach(void)
     Holder h;
     HANDLE unmap = Hold(&h, 2); /* an unmap holds the headers: the renderer's take waits, and that wait is its cost */
     HANDLE t = CreateThread(NULL, 0, RenderOne, NULL, 0, NULL);
+    /* A 50 ms timeout follows the scheduler's tick and can end a little early by the counter: what counts is that the
+     * renderer's step was held from its start until this wait ended, which the counter measures on both threads. */
     CHECK(WaitForSingleObject(t, 50) == WAIT_TIMEOUT);
+    LARGE_INTEGER waitTo, qpf;
+    QueryPerformanceCounter(&waitTo);
+    QueryPerformanceFrequency(&qpf);
     LetGo(&h, unmap);
     WaitForSingleObject(t, INFINITE); CloseHandle(t);
     CHECK(g_renders == 1 && g_renderArgs[0] == 9 && Partial(g_renderHeap) == rs && Q(rs + 0x18) == 0);
-    LARGE_INTEGER qpf; QueryPerformanceFrequency(&qpf);
     CoXlTestSrCosts(c);
-    CHECK(c[9] >= qpf.QuadPart / 20 && c[7] == c[9] && c[8] == 0); /* at least the 50 ms it waited, on the render hook alone */
+    /* The renderer's take waited at least from its step's start until this wait ended (less 1 ms for the detour's own
+     * prologue before its clock starts), and the wait is counted on the render hook alone. */
+    const LONG64 held = waitTo.QuadPart - g_renderStart.QuadPart - qpf.QuadPart / 1000;
+    CHECK(g_renderStart.QuadPart != 0 && held > qpf.QuadPart / 100 && c[9] >= held && c[7] == c[9] && c[8] == 0);
     CHECK(CoXlTestSrStep(512, 0, 200002, 1) == 0);
 
     g_case = "a refused reach hook leaves that thread kind untaken; the rescue stays on";

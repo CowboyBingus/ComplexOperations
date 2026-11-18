@@ -361,6 +361,13 @@ In every build, with the part on or off:
 - Five readers of the peer count in the exe read 4 bits, not 3.
 - Every level-11 war-table entry's seed has bit 0 cleared for a normal operation and set for a complex one.
 - Address space: 1 MB near the exe and pages near both modules.
+- Address space near the game's heap: on Windows the game's own allocations fill the 1.75 GB around the game object,
+  the session context and the HUD before the mod's parts install. From game.dll's load the mod hooks the game
+  allocator's map (rpmalloc's `_rpmalloc_mmap_os`) and reserves 32 MB of address space within reach of each of
+  them as they are made, with nothing committed. Its blocks near the heap are committed from those reservations
+  and searched for as before when none is in reach. Nothing runs per frame; after startup the hook reads three
+  globals per map and a worker thread does any search. The log has two `heap reservations` lines as the entity
+  state is built: what was reserved and how long it took, and what served each of the three.
 
 On a PC that passes the early check (the room below, at least 16 GB of RAM):
 

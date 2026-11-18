@@ -774,7 +774,7 @@ static void FigureBack(void)
 
 static void FigureFree(void)
 {
-    if (g_figureRoom) VirtualFree((void*)g_figureRoom, 0, MEM_RELEASE);
+    co_free_near(g_figureRoom); /* its target is inside the game object: the block may be a heap reservation's */
     g_figureRoom = g_figureRecords = g_figureUps = 0;
     g_figureDelta = 0;
 }
