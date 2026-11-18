@@ -171,7 +171,7 @@ static int Switch(unsigned block, int from, int to)
 static void Release(CoUiState* b)
 {
     if (b->room) VirtualFree((void*)b->room, 0, MEM_RELEASE);
-    if (b->memory) VirtualFree((void*)b->memory, 0, MEM_RELEASE);
+    co_free_near(b->memory);
     b->room = b->memory = b->table = b->owner = 0;
 }
 

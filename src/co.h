@@ -33,6 +33,31 @@ uintptr_t co_alloc_near_as(uintptr_t target, size_t size, uint32_t type);
  * heaps fill what lies near the exe before the complex part installs. co_alloc_near_as then answers a target inside
  * the exe's image with committed pages from it, while it has room. 0 when the space could not be had. */
 int co_near_exe_reserve(uintptr_t exe, size_t image);
+/* Reservations within reach of the game's heap objects (co_heapnear.c), from game.dll's load: for every large rpmalloc
+ * map, near the game object, the session context and the HUD as soon as their globals hold them, and beside rpmalloc's
+ * maps until the entity state's constructor, which settles them with the state's address (constructor_hooked: a hook on
+ * it is in, so the trail waits for it). take commits a block from one in reach of a heap `target` (0 when none is, or
+ * the target is in game.dll's or the exe's image); co_alloc_near_as asks it before searching. co_free_near frees a
+ * block co_alloc_near_as gave: a reservation's is decommitted (the newest given back); any other goes to VirtualFree's
+ * MEM_RELEASE, which fails without harm for an exe arena block. Every caller whose target is a heap object frees with
+ * it. */
+int co_heap_near_install(uintptr_t exe, uintptr_t game);
+void co_heap_near_constructor_hooked(void);
+/* An exe arena block (co_pods.c), so co_free_near decommits it. */
+void co_heap_near_track(uintptr_t block, size_t size);
+void co_heap_near_settle(uintptr_t state);
+uintptr_t co_heap_near_take(uintptr_t target, size_t size);
+void co_free_near(uintptr_t block);
+#ifdef CO_TEST
+void co_heap_near_test_reset(void);
+int co_heap_near_test_count(void);
+uintptr_t co_heap_near_test_space(int i);
+void co_heap_near_test_expire(void);
+void co_heap_near_test_sync(void);
+void co_heap_near_test_begin_search(uintptr_t b);
+void co_heap_near_test_finish_search(void);
+uintptr_t co_heap_near_test_reserve_in(uintptr_t center, uintptr_t low, uintptr_t high, int queries);
+#endif
 
 /* Eight slots in the per-player component managers (co_managers.c). `install` once with game.dll's base; `state` in
  * the state constructor's hook with the component block, before the game's constructor runs. */

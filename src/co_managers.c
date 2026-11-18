@@ -78,7 +78,7 @@ static void Undo(size_t sites, size_t caves)
 
 static void Release(void)
 {
-    if (g_memory) VirtualFree((void*)g_memory, 0, MEM_RELEASE);
+    co_free_near(g_memory);
     if (g_caves) VirtualFree((void*)g_caves, 0, MEM_RELEASE);
     g_memory = g_block = g_caves = 0;
 }
